@@ -790,8 +790,8 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
             'registered_session_generation_mismatch',
         )
 
-    def test_full_chain_pre_flush_send_failure_rollbacks_old(self):
-        """CapSwap success then stdin write/flush fail → restore old; send_count 0."""
+    def test_full_chain_pre_flush_send_failure_continues_fallback_send_once(self):
+        """CapSwap success → pre-flush send fail → rollback → cold → send once."""
         uid = _insert(self.db, 'hayana', 'full-flush', '2026-07-27 10:00:00')
         plan = _prepare(self.db, uid)
         src_ctx = int(plan.context_id)
@@ -822,17 +822,30 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
                 self.killed = True
                 self.alive = False
 
-        class _PreFlushFailResident(_DoorResident):
+        class _PreFlushThenOkResident(_DoorResident):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.fail_preflush_once = True
+                self.attempt_count = 0
+
             def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
-                # Mimic cc_resident: kill new proc on BrokenPipe before flush callback.
-                proc = getattr(self, '_proc', None)
-                if proc is not None:
-                    proc.kill()
-                raise BrokenPipeError('stdin broken before flush')
+                self.attempt_count += 1
+                if self.fail_preflush_once:
+                    self.fail_preflush_once = False
+                    proc = getattr(self, '_proc', None)
+                    if proc is not None:
+                        proc.kill()
+                    raise BrokenPipeError('stdin broken before flush')
+                self.send_count += 1
+                self.sent.append(str(content))
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                yield ('text', 'ok-after-fallback')
+                yield ('done', ('ok-after-fallback', '', {'input_tokens': 1, 'output_tokens': 1}, {}))
 
         old_proc = _Proc()
         new_proc = _Proc()
-        resident = _PreFlushFailResident('soft_context', session_id='sid-flush-old')
+        resident = _PreFlushThenOkResident('soft_context', session_id='sid-flush-old')
         resident.cwd = self.tmp
         resident._proc = old_proc
 
@@ -865,39 +878,188 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         )
         setattr(handoff, 'staged_resident', staged)
 
-        def _fake_reprepare(p, **_k):
-            refreshed = dc.get_daily_context_by_id(p.context_id, db_path=self.db) or {}
-            p.resident_generation = int(refreshed.get('resident_generation') or 0)
-            p.context_epoch = int(refreshed.get('context_epoch') or p.context_epoch)
-            p.epoch_token = dict(p.epoch_token)
-            p.epoch_token['resident_generation'] = p.resident_generation
-            p.epoch_token['context_epoch'] = p.context_epoch
-            p.manifest = dict(p.manifest)
-            p.is_cold = False
-            p.is_respawn = False
-            return p
-
         with mock.patch.object(config_store, 'get_bool', return_value=True), \
              mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
-             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff), \
-             mock.patch.object(dr, 'reprepare_after_capacity_swap', side_effect=_fake_reprepare):
-            with self.assertRaises(BrokenPipeError):
+             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff):
+            events = list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC_PERSONA',
+            ))
+
+        self.assertTrue(any(e[0] == 'done' for e in events))
+        self.assertEqual(resident.send_count, 1)
+        self.assertGreaterEqual(resident.attempt_count, 2)
+        self.assertTrue(plan.manifest.get('capacity_swap_pre_flush_rollback'))
+        self.assertTrue(plan.manifest.get('capacity_swap_pre_flush_cold_fallback'))
+        self.assertTrue(new_proc.killed)
+
+        # Identity: CapSwap target Registry may remain as history, but must not be current.
+        cap_reg = get_context_claude_session(src_ctx, src_gen + 1, db_path=self.db)
+        self.assertIsNotNone(cap_reg)
+        self.assertEqual(cap_reg['source'], CAPACITY_SWAP_REGISTRY_SOURCE)
+        self.assertEqual(int(plan.context_id), src_ctx)
+        self.assertEqual(int(plan.context_epoch), src_epoch)
+        self.assertGreater(int(plan.resident_generation), src_gen + 1)
+        self.assertNotEqual(int(plan.resident_generation), src_gen + 1)
+        current_reg = get_context_claude_session(
+            src_ctx, int(plan.resident_generation), db_path=self.db,
+        )
+        # Current cold gen has no CapSwap Registry ghost as the live target.
+        if current_reg is not None:
+            self.assertNotEqual(current_reg.get('source'), CAPACITY_SWAP_REGISTRY_SOURCE)
+        self.assertNotEqual(
+            plan.manifest.get('error_code'),
+            'registered_session_generation_mismatch',
+        )
+
+    def test_post_flush_failure_fail_closed_no_resend(self):
+        """After stdin flush, failure must not rollback/resend CURRENT user."""
+        uid = _insert(self.db, 'hayana', 'post-flush', '2026-07-27 10:00:00')
+        plan = _prepare(self.db, uid)
+        register_context_claude_session(
+            context_id=plan.context_id,
+            context_epoch=plan.context_epoch,
+            resident_generation=plan.resident_generation,
+            chat_id=plan.chat_id,
+            claude_session_id='sid-post',
+            cwd=self.tmp,
+            source='daily_runtime',
+            scan_offset=10,
+            process_generation=1,
+            db_path=self.db,
+        )
+
+        class _PostFlushBoom(_DoorResident):
+            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+                self.send_count += 1
+                self.sent.append(str(content))
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                yield ('text', 'partial')
+                raise RuntimeError('provider boom after flush')
+
+        resident = _PostFlushBoom(None, session_id='sid-post')
+        # Pretend CapSwap installed and awaiting flush commit.
+        old_proc = mock.Mock()
+        old_proc.poll.return_value = None
+        plan._capacity_swap_install_state = {  # type: ignore[attr-defined]
+            'old_proc': old_proc,
+            'old_attrs': {'_proc': old_proc, 'session_id': 'old'},
+        }
+        plan._capacity_swap_deferred_old_proc = old_proc  # type: ignore[attr-defined]
+
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+            with self.assertRaises(RuntimeError):
                 list(dr.stream_daily_resident_turn(
                     plan, resident=resident, env={}, static_system='STATIC_PERSONA',
                 ))
 
-        self.assertEqual(resident.send_count, 0)
-        self.assertFalse(bool(getattr(plan, '_current_user_stdin_flushed', False)))
-        self.assertIs(resident._proc, old_proc)
-        self.assertFalse(old_proc.killed)
-        self.assertTrue(old_proc.alive)
-        self.assertTrue(new_proc.killed)
-        self.assertTrue(plan.manifest.get('capacity_swap_pre_flush_rollback'))
-        # CapSwap Registry was committed before send; still present (flush never happened).
-        # That is OK — rollback restored process; no resend.
-        reg = get_context_claude_session(src_ctx, src_gen + 1, db_path=self.db)
-        self.assertIsNotNone(reg)
-        self.assertEqual(reg['source'], CAPACITY_SWAP_REGISTRY_SOURCE)
+        self.assertEqual(resident.send_count, 1)
+        self.assertTrue(bool(getattr(plan, '_current_user_stdin_flushed', False)))
+        self.assertIsNone(getattr(plan, '_capacity_swap_install_state', 'missing'))
+        old_proc.kill.assert_called()
+        self.assertFalse(plan.manifest.get('capacity_swap_pre_flush_cold_fallback'))
+
+    def test_adoption_does_not_leak_old_generation_metadata(self):
+        """staged→live adoption resets generation-scoped meta via _reset_session_meta."""
+
+        class _Proc:
+            def poll(self):
+                return None
+
+            def kill(self):
+                pass
+
+        class _MetaResident:
+            def __init__(self, sid: str):
+                self.cwd = self.tmp if hasattr(self, 'tmp') else '/tmp'
+                self.session_id = sid
+                self.generation = 1
+                self.tool_profile = cc_resident.TOOL_PROFILE_TEXT_ONLY
+                self._proc = _Proc()
+                self._system_text = 'old-sys'
+                self._session_id = sid
+                self._cold = False
+                self._generation = 1
+                self._tool_profile = cc_resident.TOOL_PROFILE_TEXT_ONLY
+                self._model_identity = 'old-model'
+                self._history_rewrite_epoch = 'old-epoch'
+                self._last_used = 1.0
+                self._last_state_snapshot = {'leak': True}
+                self._last_state_send_snapshot = {'leak': True}
+                self._last_successful_lean_state = True
+                self._last_state_anchor_generation = 7
+                self._last_state_schema_version = 'v-old'
+                self._turns_since_state_anchor = 9
+                self._state_delta_chars_since_anchor = 99
+                self._last_state_anchor_version = 'av-old'
+                self._committed_file_hashes = {'deadbeef'}
+                self._pending_file_hashes = {'cafe'}
+                self._last_group_message_id = 42
+                self._group_cursor_initialized = True
+                self._last_rel_fingerprint = 'rel-old'
+                self._turns_since_rel_sent = 3
+                self._last_rel_mood = 'mood-old'
+                self._keepwarm_lease_expires_at = 12345.0
+                self._tool_surface_snapshot = {'old': True}
+                self._pending_respawn_reason = None
+                self._resident_turn_count = 5
+                self._last_round_context = 1
+                self._max_round_context = 2
+                self._turns_since_respawn = 4
+
+            def _reset_session_meta(self, *, respawn_reason):
+                # Mirror ResidentSession._reset_session_meta contract.
+                self._resident_turn_count = 0
+                self._last_round_context = 0
+                self._max_round_context = 0
+                self._pending_respawn_reason = respawn_reason
+                self._turns_since_respawn = 0
+                self._last_state_snapshot = {}
+                self._last_state_send_snapshot = {}
+                self._last_successful_lean_state = False
+                self._last_state_anchor_generation = -1
+                self._last_state_schema_version = None
+                self._turns_since_state_anchor = 0
+                self._state_delta_chars_since_anchor = 0
+                self._last_state_anchor_version = None
+                self._committed_file_hashes = set()
+                self._pending_file_hashes = set()
+                self._last_group_message_id = 0
+                self._group_cursor_initialized = False
+                self._last_rel_fingerprint = None
+                self._turns_since_rel_sent = 0
+                self._last_rel_mood = None
+                self._keepwarm_lease_expires_at = None
+                self._tool_surface_snapshot = {}
+
+        live = _MetaResident('old-sid')
+        staged = _MetaResident('new-sid')
+        staged.generation = 2
+        staged._generation = 2
+        staged._system_text = 'new-sys'
+        staged._pending_respawn_reason = 'capacity_swap'
+        staged._tool_surface_snapshot = {'staged': True}
+        # staged is clean (as after spawn_resumable)
+        staged._reset_session_meta(respawn_reason='capacity_swap')
+        staged._tool_surface_snapshot = {'staged': True}
+
+        state = dr.install_capacity_swap_into_live_resident(
+            live_resident=live, staged_resident=staged,
+        )
+        self.assertEqual(live.session_id, 'new-sid')
+        self.assertEqual(live._system_text, 'new-sys')
+        self.assertEqual(live._last_state_snapshot, {})
+        self.assertEqual(live._committed_file_hashes, set())
+        self.assertEqual(live._pending_file_hashes, set())
+        self.assertFalse(live._group_cursor_initialized)
+        self.assertIsNone(live._last_rel_fingerprint)
+        self.assertIsNone(live._keepwarm_lease_expires_at)
+        self.assertEqual(live._last_state_anchor_generation, -1)
+        self.assertEqual(live._tool_surface_snapshot, {'staged': True})
+        self.assertEqual(live._pending_respawn_reason, 'capacity_swap')
+        self.assertIsNotNone(state['old_attrs'].get('_committed_file_hashes'))
+        self.assertIn('deadbeef', state['old_attrs']['_committed_file_hashes'])
 
 
 if __name__ == '__main__':

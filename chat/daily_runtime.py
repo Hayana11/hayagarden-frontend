@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import copy
 import hashlib
 import logging
 import os
@@ -36,6 +37,7 @@ from chat.session_registry import (
 )
 from chat.capacity_swap_runtime import (
     CAPACITY_BOUNDARY_REPRESENTATION,
+    CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1,
     CapacitySwapStagedHooks,
     effective_static_system_for_registry,
     is_capacity_swap_reason,
@@ -1430,14 +1432,62 @@ def reprepare_after_capacity_swap(
     )
 
 
-_CAPACITY_SWAP_INSTALL_ATTRS = (
+# Process/session identity transferred from staged (the new Claude process).
+_CAPACITY_SWAP_PROCESS_IDENTITY = (
     '_proc', '_system_text', '_session_id', '_cold', '_generation',
-    '_tool_profile', '_model_identity', '_history_rewrite_epoch',
-    '_pending_respawn_reason', '_tool_surface_snapshot',
-    '_resident_turn_count', '_last_round_context', '_max_round_context',
-    '_turns_since_respawn', '_last_used',
+    '_tool_profile', '_model_identity', '_history_rewrite_epoch', '_last_used',
 )
-_CAPACITY_SWAP_INSTALL_PUBLIC = ('session_id', 'generation', 'tool_profile', 'cwd', '_peek_reason')
+_CAPACITY_SWAP_PUBLIC_MIRRORS = (
+    'session_id', 'generation', 'tool_profile', 'cwd', '_peek_reason',
+)
+# Generation-scoped runtime metadata owned by ResidentSession._reset_session_meta.
+# Adoption must NOT keep the old live values of these across CapSwap.
+_CAPACITY_SWAP_GENERATION_META = (
+    '_resident_turn_count',
+    '_last_round_context',
+    '_max_round_context',
+    '_pending_respawn_reason',
+    '_turns_since_respawn',
+    '_last_state_snapshot',
+    '_last_state_send_snapshot',
+    '_last_successful_lean_state',
+    '_last_state_anchor_generation',
+    '_last_state_schema_version',
+    '_turns_since_state_anchor',
+    '_state_delta_chars_since_anchor',
+    '_last_state_anchor_version',
+    '_committed_file_hashes',
+    '_pending_file_hashes',
+    '_last_group_message_id',
+    '_group_cursor_initialized',
+    '_last_rel_fingerprint',
+    '_turns_since_rel_sent',
+    '_last_rel_mood',
+    '_keepwarm_lease_expires_at',
+    '_tool_surface_snapshot',
+)
+
+
+def _snapshot_resident_attr(value: Any) -> Any:
+    if isinstance(value, (dict, list, set)):
+        return copy.deepcopy(value)
+    return value
+
+
+def _snapshot_capacity_swap_live_resident(live_resident: Any) -> dict[str, Any]:
+    attrs = (
+        _CAPACITY_SWAP_PROCESS_IDENTITY
+        + _CAPACITY_SWAP_PUBLIC_MIRRORS
+        + _CAPACITY_SWAP_GENERATION_META
+    )
+    out: dict[str, Any] = {}
+    for attr in attrs:
+        if hasattr(live_resident, attr):
+            try:
+                out[attr] = _snapshot_resident_attr(getattr(live_resident, attr))
+            except Exception:
+                pass
+    return out
 
 
 def install_capacity_swap_into_live_resident(
@@ -1445,35 +1495,82 @@ def install_capacity_swap_into_live_resident(
     live_resident: Any,
     staged_resident: Any,
 ) -> dict[str, Any]:
-    """Install staged process onto live holder WITHOUT killing the old process.
+    """Adopt staged Claude process into the live holder without killing old proc.
 
-    Returns install state for deferred close / rollback:
-    ``{old_proc, old_attrs}``. Caller must:
-    - on later failure before commit: ``rollback_capacity_swap_install``
-    - on success: keep ``old_proc`` until CURRENT user stdin flush, then
-      ``close_deferred_capacity_swap_old_proc``
+    Single adoption semantic:
+      1) transfer process/session identity from staged
+      2) reset generation-scoped runtime meta via ``_reset_session_meta``
+         (same helper staged spawn uses) so old-generation state/file/group/
+         relationship dedupe cannot leak into the new generation
+      3) copy staged tool-surface after reset
+
+    Returns ``{old_proc, old_attrs}`` for deferred close / pre-flush rollback.
     """
-    old_attrs: dict[str, Any] = {}
-    for attr in _CAPACITY_SWAP_INSTALL_ATTRS + _CAPACITY_SWAP_INSTALL_PUBLIC:
-        if hasattr(live_resident, attr):
-            try:
-                old_attrs[attr] = getattr(live_resident, attr)
-            except Exception:
-                pass
+    old_attrs = _snapshot_capacity_swap_live_resident(live_resident)
     old_proc = old_attrs.get('_proc', getattr(live_resident, '_proc', None))
 
-    for attr in _CAPACITY_SWAP_INSTALL_ATTRS:
+    for attr in _CAPACITY_SWAP_PROCESS_IDENTITY:
         if hasattr(staged_resident, attr) and hasattr(live_resident, attr):
             try:
                 setattr(live_resident, attr, getattr(staged_resident, attr))
             except Exception:
                 pass
-    for attr in _CAPACITY_SWAP_INSTALL_PUBLIC:
+    for attr in _CAPACITY_SWAP_PUBLIC_MIRRORS:
         if hasattr(staged_resident, attr):
             try:
                 setattr(live_resident, attr, getattr(staged_resident, attr))
             except Exception:
                 pass
+
+    reset = getattr(live_resident, '_reset_session_meta', None)
+    if callable(reset):
+        reason = getattr(staged_resident, '_pending_respawn_reason', None) or 'capacity_swap'
+        reset(respawn_reason=reason)
+        if hasattr(staged_resident, '_tool_surface_snapshot'):
+            try:
+                live_resident._tool_surface_snapshot = copy.deepcopy(
+                    getattr(staged_resident, '_tool_surface_snapshot') or {},
+                )
+            except Exception:
+                live_resident._tool_surface_snapshot = {}
+    else:
+        # Test fakes: prefer staged generation meta; otherwise clear old-gen values.
+        for attr in _CAPACITY_SWAP_GENERATION_META:
+            if hasattr(staged_resident, attr):
+                try:
+                    setattr(
+                        live_resident,
+                        attr,
+                        _snapshot_resident_attr(getattr(staged_resident, attr)),
+                    )
+                except Exception:
+                    pass
+            elif hasattr(live_resident, attr):
+                try:
+                    if attr.endswith('_hashes'):
+                        setattr(live_resident, attr, set())
+                    elif attr.endswith('_snapshot') or attr == '_tool_surface_snapshot':
+                        setattr(live_resident, attr, {})
+                    elif attr == '_last_state_anchor_generation':
+                        setattr(live_resident, attr, -1)
+                    elif attr in {
+                        '_last_group_message_id',
+                        '_turns_since_respawn',
+                        '_turns_since_state_anchor',
+                        '_state_delta_chars_since_anchor',
+                        '_turns_since_rel_sent',
+                        '_resident_turn_count',
+                        '_last_round_context',
+                        '_max_round_context',
+                    }:
+                        setattr(live_resident, attr, 0)
+                    elif attr in {'_group_cursor_initialized', '_last_successful_lean_state'}:
+                        setattr(live_resident, attr, False)
+                    else:
+                        setattr(live_resident, attr, None)
+                except Exception:
+                    pass
+
     try:
         staged_resident._proc = None
     except Exception:
@@ -1494,7 +1591,7 @@ def rollback_capacity_swap_install(
     old_attrs = dict(install_state.get('old_attrs') or {})
     for attr, value in old_attrs.items():
         try:
-            setattr(live_resident, attr, value)
+            setattr(live_resident, attr, _snapshot_resident_attr(value))
         except Exception:
             pass
     if old_proc is not None:
@@ -2421,10 +2518,72 @@ def ensure_resident_and_stream(
                     if getattr(plan, '_capacity_swap_install_state', None) is not None:
                         _commit_capacity_swap_after_stdin_flush(plan)
                 yield evt, payload
-        except Exception:
-            # Pre-flush CapSwap failure: CURRENT user never sent → restore old live.
-            _rollback_capacity_swap_if_unflushed(plan, resident=resident)
-            raise
+        except Exception as exc:
+            # Post-flush: CURRENT user already sent → fail closed, never resend.
+            if bool(getattr(plan, '_current_user_stdin_flushed', False)):
+                raise
+            # Pre-flush CapSwap failure: restore old live, then continue frozen
+            # fallback (last-good → cold) so CURRENT user can still send once.
+            rolled = _rollback_capacity_swap_if_unflushed(plan, resident=resident)
+            if not rolled:
+                raise
+            logger.info(
+                'capacity swap pre-flush send failed (%s); continuing last-good→cold fallback',
+                type(exc).__name__,
+            )
+            pre_flush_meta = {
+                'capacity_swap_pre_flush_rollback': True,
+                'capacity_swap_pre_flush_send_error': type(exc).__name__,
+            }
+            heartbeat.stop()
+
+            flushed = bool(getattr(plan, '_current_user_stdin_flushed', False))
+            lg = try_restore_same_context_last_good(
+                plan=plan,
+                live_resident=resident,
+                current_user_stdin_flushed=flushed,
+            )
+            pre_flush_meta['capacity_swap_last_good'] = dict(lg)
+            if lg.get('ok'):
+                plan.manifest.update(pre_flush_meta)
+                yield from ensure_resident_and_stream(
+                    plan,
+                    resident=resident,
+                    env=env,
+                    static_system=static_system,
+                    _reprep_depth=_reprep_depth,
+                    _registry_reprep_depth=_registry_reprep_depth + 1,
+                )
+                return
+
+            # Demote CapSwap target generation to non-current history via cold
+            # reprepare (existing path). No second CapSwap; CURRENT user once.
+            # Strip capacity suffix — cold is a new non-capacity_swap generation.
+            cold_system = str(static_system or '')
+            if CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1 in cold_system:
+                cold_system = cold_system.replace(CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1, '')
+            replacement = reprepare_after_registered_session_change(
+                plan,
+                resident=resident,
+                static_system=cold_system,
+                static_system_sha256=_sha256_text(cold_system),
+                persona_sha256=plan.manifest.get('persona_sha256') or '',
+                provider=str(plan.manifest.get('provider') or 'claude_code'),
+                model=str(plan.manifest.get('model') or ''),
+            )
+            _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
+            # Re-apply after adopt — replacement.manifest would otherwise wipe flags.
+            plan.manifest.update(pre_flush_meta)
+            plan.manifest['capacity_swap_pre_flush_cold_fallback'] = True
+            yield from ensure_resident_and_stream(
+                plan,
+                resident=resident,
+                env=env,
+                static_system=cold_system,
+                _reprep_depth=_reprep_depth,
+                _registry_reprep_depth=_registry_reprep_depth + 1,
+            )
+            return
 
         if heartbeat.stop():
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)
