@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { canCommitSearchResults } from '../src/lib/memoryColdStart.ts';
 
 const screenPath = new URL('../src/screens/MemoryScreen.tsx', import.meta.url);
 const apiPath = new URL('../src/lib/api.ts', import.meta.url);
@@ -51,12 +52,26 @@ const types = fs.readFileSync(typesPath, 'utf8');
   assert.match(api, /\/api\/memories\/library\/search/);
 }
 
-// F. Search debounce + stale response guard
+// F. Search debounce + stale response guard (simulated races)
 {
   assert.match(coldStart, /MEMORY_SEARCH_DEBOUNCE_MS = 200/);
   assert.match(screen, /MEMORY_SEARCH_DEBOUNCE_MS/);
   assert.match(screen, /searchGenRef/);
-  assert.match(screen, /searchGenRef\.current !== gen/);
+  assert.match(screen, /searchResultQuery/);
+  assert.match(screen, /canCommitSearchResults/);
+  assert.match(screen, /setSearchResults\(\[\]\)/);
+  assert.match(screen, /setSearchResultQuery\(''\)/);
+  assert.match(screen, /activeSearchResults/);
+  assert.match(screen, /key=\{drawerFrame\.id\}/);
+
+  // stale generation after clear
+  assert.equal(canCommitSearchResults(1, 2, '猫', ''), false);
+  // stale generation after query change
+  assert.equal(canCommitSearchResults(1, 2, '猫', '猫'), false);
+  // query drift while same generation (A → AB before response)
+  assert.equal(canCommitSearchResults(2, 2, '猫', '猫猫'), false);
+  // valid commit
+  assert.equal(canCommitSearchResults(3, 3, '猫猫', '猫猫'), true);
 }
 
 // G. Module cache: second mount can render from cache immediately
@@ -105,10 +120,11 @@ const types = fs.readFileSync(typesPath, 'utf8');
   assert.match(screen, /markMemoryPerf\('memory_search_ready'\)/);
 }
 
-// In-flight dedupe
+// In-flight dedupe (detail: no module-level full-content cache)
 {
   assert.match(hook, /memoryIndexInflight/);
   assert.match(detailHook, /inflight\.get\(id\)/);
+  assert.doesNotMatch(detailHook, /contentCache/);
 }
 
 console.log('test:memory-cold-start — all checks passed');

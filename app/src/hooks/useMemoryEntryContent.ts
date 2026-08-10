@@ -1,14 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { fetchMemoryEntryContent } from '../lib/api';
 import { markMemoryPerf } from '../lib/memoryColdStart';
 
-const contentCache = new Map<number, string>();
 const inflight = new Map<number, Promise<string>>();
 
 function loadContent(id: number): Promise<string> {
-  const cached = contentCache.get(id);
-  if (cached !== undefined) return Promise.resolve(cached);
-
   const existing = inflight.get(id);
   if (existing) return existing;
 
@@ -16,7 +12,6 @@ function loadContent(id: number): Promise<string> {
   const promise = fetchMemoryEntryContent(id)
     .then((detail) => {
       if (!detail) throw new Error('memory entry not found');
-      contentCache.set(id, detail.content);
       markMemoryPerf('memory_detail_ready');
       return detail.content;
     })
@@ -27,31 +22,29 @@ function loadContent(id: number): Promise<string> {
   return promise;
 }
 
-/** Test-only: reset per-mount detail cache. */
+/** Test-only: reset in-flight detail requests between contract simulations. */
 export function __resetMemoryEntryContentForTests(): void {
-  contentCache.clear();
   inflight.clear();
 }
 
 export function useMemoryEntryContent(entryId: number | null) {
-  const [content, setContent] = useState<string | null>(() =>
-    entryId != null ? contentCache.get(entryId) ?? null : null,
-  );
-  const [loading, setLoading] = useState(
-    () => entryId != null && !contentCache.has(entryId),
-  );
+  const [content, setContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(() => entryId != null);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
 
-  const reload = useCallback(() => {
-    if (entryId == null) return;
-    const gen = ++generationRef.current;
-    const cached = contentCache.get(entryId);
-    if (cached !== undefined) {
-      setContent(cached);
+  useEffect(() => {
+    mountedRef.current = true;
+    if (entryId == null) {
+      setContent(null);
       setLoading(false);
-      return;
+      return () => {
+        mountedRef.current = false;
+      };
     }
+
+    const gen = ++generationRef.current;
+    setContent(null);
     setLoading(true);
     loadContent(entryId)
       .then((text) => {
@@ -64,22 +57,11 @@ export function useMemoryEntryContent(entryId: number | null) {
         setContent(null);
         setLoading(false);
       });
-  }, [entryId]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    if (entryId == null) {
-      setContent(null);
-      setLoading(false);
-      return () => {
-        mountedRef.current = false;
-      };
-    }
-    reload();
     return () => {
       mountedRef.current = false;
     };
-  }, [entryId, reload]);
+  }, [entryId]);
 
   return { content, loading };
 }

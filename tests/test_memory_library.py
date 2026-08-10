@@ -156,6 +156,26 @@ class MemoryLibraryIndexContractTests(unittest.TestCase):
         long_entry = next(e for e in full["entries"] if e["summaryTitle"] == "长尾记忆")
         self.assertGreater(len(long_entry["content"]), memory_library.CONTENT_HEAD_LEN)
 
+    def test_legacy_entry_shape_has_no_excerpt(self):
+        full = memory_library.build_memory_library(self.conn)
+        for entry in full["entries"]:
+            self.assertNotIn("excerpt", entry)
+
+    def test_index_title_fallback_uses_full_content_when_summary_title_blank(self):
+        pad = "。" * 850
+        body = f"普通开头{pad}《真正标题》"
+        self.db_path, self.conn = _make_posts_db([
+            ("MEMORY", body, "haya", "2026-07-20 10:00:00", "日常", "recent", 3, 0, ""),
+        ])
+        index = memory_library.build_memory_library_index(self.conn)
+        full = memory_library.build_memory_library(self.conn)
+        idx_entry = index["entries"][0]
+        legacy_entry = full["entries"][0]
+        self.assertEqual(legacy_entry["summaryTitle"], "真正标题")
+        self.assertEqual(idx_entry["summaryTitle"], legacy_entry["summaryTitle"])
+        self.assertEqual(idx_entry["title"], legacy_entry["title"])
+        self.assertEqual(idx_entry["preview"], legacy_entry["preview"])
+
     def test_inverted_links_match_pair_scan(self):
         rows = memory_library._fetch_library_rows(self.conn, 500, content_mode='head')
         entries = []

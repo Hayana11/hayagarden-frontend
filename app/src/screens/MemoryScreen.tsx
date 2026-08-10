@@ -7,7 +7,7 @@ import { useMemoryEntryContent } from '../hooks/useMemoryEntryContent';
 import { useMemoryLibrary } from '../hooks/useMemoryLibrary';
 import { searchMemoryEntries } from '../lib/api';
 import { dateKey, seeded } from '../lib/format';
-import { MEMORY_SEARCH_DEBOUNCE_MS, markMemoryPerf } from '../lib/memoryColdStart';
+import { canCommitSearchResults, MEMORY_SEARCH_DEBOUNCE_MS, markMemoryPerf } from '../lib/memoryColdStart';
 import {
   constellationColor,
   formatDateDot,
@@ -75,6 +75,7 @@ export function MemoryScreen() {
   const { library } = useMemoryLibrary();
   const now = new Date();
   const [searchResults, setSearchResults] = useState<MemorySearchResult[]>([]);
+  const [searchResultQuery, setSearchResultQuery] = useState('');
   const searchGenRef = useRef(0);
 
   const [view, setView] = useState<ViewMode>('time');
@@ -120,17 +121,21 @@ export function MemoryScreen() {
 
   useEffect(() => {
     const q = query.trim();
-    if (!q) {
-      setSearchResults([]);
-      return;
-    }
     const gen = ++searchGenRef.current;
+    setSearchResults([]);
+    setSearchResultQuery('');
+
+    if (!q) return;
+
     const timer = window.setTimeout(() => {
+      const requestQuery = q;
+      const requestGen = gen;
       markMemoryPerf('memory_search_start');
-      searchMemoryEntries(q, 4).then((results) => {
-        if (searchGenRef.current !== gen) return;
+      searchMemoryEntries(requestQuery, 4).then((results) => {
+        if (!canCommitSearchResults(requestGen, searchGenRef.current, requestQuery, query)) return;
         markMemoryPerf('memory_search_ready');
         setSearchResults(results);
+        setSearchResultQuery(requestQuery);
       });
     }, MEMORY_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
@@ -205,7 +210,8 @@ export function MemoryScreen() {
       const i = t.toLowerCase().indexOf(ql);
       return i < 0 ? { pre: t, hit: '', post: '' } : { pre: t.slice(0, i), hit: t.slice(i, i + q.length), post: t.slice(i + q.length) };
     };
-    const memHits: Suggest[] = searchResults.map((m) => ({
+    const activeSearchResults = searchResultQuery === q ? searchResults : [];
+    const memHits: Suggest[] = activeSearchResults.map((m) => ({
       icon: '●',
       iconColor: '#D9C6C0',
       meta: formatDateDot(m.date),
@@ -1230,7 +1236,13 @@ export function MemoryScreen() {
             {drawerFrame.type === 'day' && renderDayDetail(drawerFrame.date)}
             {drawerFrame.type === 'topic' && renderTopicDetail(drawerFrame.key)}
             {drawerFrame.type === 'mem' && (
-              <MemDetailPanel id={drawerFrame.id} entries={entries} topicByKey={topicByKey} pushFrame={pushFrame} />
+              <MemDetailPanel
+                key={drawerFrame.id}
+                id={drawerFrame.id}
+                entries={entries}
+                topicByKey={topicByKey}
+                pushFrame={pushFrame}
+              />
             )}
           </div>
         </div>

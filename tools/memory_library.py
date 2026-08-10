@@ -136,7 +136,7 @@ def _fetch_library_rows(conn, limit=500, *, content_mode='full'):
     return conn.execute(sql, (*LIBRARY_TYPES, limit)).fetchall()
 
 
-def _entry_base_from_row(row, *, include_content=False):
+def _entry_base_from_row(row, *, include_content=False, title_content=None):
     tags, assocs = _parse_tags(row['tags'])
     created = (row['created_at'] or '').strip()
     date_part, _, time_part = created.partition(' ')
@@ -148,7 +148,8 @@ def _entry_base_from_row(row, *, include_content=False):
     else:
         content_source = (row['content_head'] if 'content_head' in row.keys() else row['content'] or '').strip()
 
-    titles = summary_title.entry_titles(content_source, row['summary_title'])
+    title_src = title_content if title_content is not None else content_source
+    titles = summary_title.entry_titles(title_src, row['summary_title'])
     entry = {
         'id': int(row['id']),
         'date': date_part or created[:10],
@@ -157,7 +158,6 @@ def _entry_base_from_row(row, *, include_content=False):
         'title': titles['title'],
         'summaryTitle': titles['summaryTitle'],
         'preview': titles['preview'],
-        'excerpt': _make_excerpt(content_source),
         'who': _author_who(row['author']),
         'topics': [topic_key],
         'tags': tags[:8],
@@ -165,6 +165,8 @@ def _entry_base_from_row(row, *, include_content=False):
     }
     if include_content:
         entry['content'] = (row['content'] or '').strip()
+    else:
+        entry['excerpt'] = _make_excerpt(content_source)
     return entry, assocs, topic_key, tags, ptype
 
 
@@ -249,13 +251,33 @@ def _assemble_library(entries, topic_labels, topic_types, assoc_by_id, *, use_in
 
 def build_memory_library_index(conn, limit=500):
     rows = _fetch_library_rows(conn, limit, content_mode='head')
+    blank_title_ids = [
+        int(row['id'])
+        for row in rows
+        if not (row['summary_title'] or '').strip()
+    ]
+    full_content_by_id = {}
+    if blank_title_ids:
+        placeholders = ','.join('?' * len(blank_title_ids))
+        for row in conn.execute(
+            f'SELECT id, content FROM posts WHERE id IN ({placeholders})',
+            blank_title_ids,
+        ):
+            full_content_by_id[int(row['id'])] = (row['content'] or '').strip()
+
     entries = []
     topic_labels = {}
     topic_types = {}
     assoc_by_id = {}
 
     for row in rows:
-        entry, assocs, topic_key, tags, ptype = _entry_base_from_row(row, include_content=False)
+        pid = int(row['id'])
+        title_content = full_content_by_id.get(pid)
+        entry, assocs, topic_key, tags, ptype = _entry_base_from_row(
+            row,
+            include_content=False,
+            title_content=title_content,
+        )
         if tags:
             topic_labels.setdefault(topic_key, tags[0])
         else:
