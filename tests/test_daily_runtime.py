@@ -2518,7 +2518,14 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         with mock.patch.object(config_store, 'get_bool', return_value=True), \
              mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
              mock.patch.object(
-                 dr, '_registered_generation_requires_respawn', return_value=True,
+                 dr, 'peek_registered_respawn_decision',
+                 return_value={
+                     'requires_respawn': True,
+                     'reason': 'process_dead',
+                     'registry': {'source': 'daily_runtime'},
+                     'effective_system': 'STATIC',
+                     'capacity_swap': False,
+                 },
              ):
             with self.assertRaises(dr.DailyRuntimeError) as ctx:
                 list(dr.stream_daily_resident_turn(
