@@ -1437,7 +1437,7 @@ _CAPACITY_SWAP_INSTALL_ATTRS = (
     '_resident_turn_count', '_last_round_context', '_max_round_context',
     '_turns_since_respawn', '_last_used',
 )
-_CAPACITY_SWAP_INSTALL_PUBLIC = ('session_id', 'generation', 'tool_profile', 'cwd')
+_CAPACITY_SWAP_INSTALL_PUBLIC = ('session_id', 'generation', 'tool_profile', 'cwd', '_peek_reason')
 
 
 def install_capacity_swap_into_live_resident(
@@ -1987,10 +1987,11 @@ def _attempt_capacity_swap_before_stdin(
 ) -> dict[str, Any]:
     """Run Capacity Swap handoff before CURRENT user stdin. Never sends the user.
 
-    On success: bumps generation, registers source=capacity_swap, installs staged
-    into live resident (old proc deferred), adopts capacity-swap reprepare plan.
-    Old last-good process is NOT killed until CURRENT user stdin flush.
-    On failure after install: rollback live to old proc, then return ok=False.
+    Commit order (frozen for failure safety):
+      generation +1 → install staged (keep old) → cursor/reprepare → identity
+      → register Registry source=capacity_swap → success
+    Registry is the pre-stdin commit flag; failures before it leave no target
+    Registry row. Old last-good proc stays until CURRENT user stdin flush.
     """
     if not is_capacity_swap_reason(trigger_reason):
         return {'ok': False, 'error_code': 'trigger_not_capacity'}
@@ -2032,7 +2033,7 @@ def _attempt_capacity_swap_before_stdin(
         out.update(extra)
         return out
 
-    # Generation bump (same context_id / epoch).
+    # Generation bump (same context_id / epoch). Registry not yet published.
     if is_epoch_token_current(plan):
         dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
     refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
@@ -2049,24 +2050,11 @@ def _attempt_capacity_swap_before_stdin(
         return _fail_kill_staged('context_epoch_drift')
 
     cwd = str(getattr(resident, 'cwd', '') or plan.transcript_cwd or '')
-    try:
-        register_capacity_swap_generation(
-            plan=plan,
-            candidate=handoff.candidate,
-            process_generation=int(getattr(staged, 'generation', 0) or 0),
-            scan_offset=int(Path(str(handoff.jsonl_path)).stat().st_size) if handoff.jsonl_path else 0,
-            cwd=cwd,
-            claude_home=claude_home,
-        )
-    except Exception as exc:
-        logger.info('capacity swap registry failed: %s', type(exc).__name__)
-        return _fail_kill_staged('registry_register_failed', detail=str(exc))
 
     # Transfer staged → live WITHOUT killing old last-good process.
     install_state = install_capacity_swap_into_live_resident(
         live_resident=resident, staged_resident=staged,
     )
-    deferred_old = install_state.get('old_proc')
 
     try:
         effective = str(handoff.effective_system or with_capacity_boundary_suffix(static_system))
@@ -2096,6 +2084,19 @@ def _attempt_capacity_swap_before_stdin(
                 'generation drift after capacity swap reprepare',
                 error_code='generation_drift_after_reprepare',
             )
+
+        # Registry publication is the pre-stdin commit point (after seed/identity).
+        register_capacity_swap_generation(
+            plan=plan,
+            candidate=handoff.candidate,
+            process_generation=int(getattr(resident, 'generation', 0) or 0),
+            scan_offset=(
+                int(Path(str(handoff.jsonl_path)).stat().st_size)
+                if handoff.jsonl_path else 0
+            ),
+            cwd=cwd,
+            claude_home=claude_home,
+        )
     except Exception as exc:
         logger.info(
             'capacity swap post-install failed code=%s; rolling back to old resident',
@@ -2104,23 +2105,81 @@ def _attempt_capacity_swap_before_stdin(
         rollback_capacity_swap_install(
             live_resident=resident, install_state=install_state,
         )
+        err = str(getattr(exc, 'error_code', None) or '')
+        if not err and 'registry' in type(exc).__name__.lower():
+            err = 'registry_register_failed'
+        if not err:
+            err = 'capacity_swap_post_install_failed'
+        # SessionRegistryError carries error_code.
+        if hasattr(exc, 'error_code') and getattr(exc, 'error_code', None):
+            # Prefer capacity_swap_cursor_seed_failed / identity_* over generic.
+            err = str(exc.error_code)
+            if err in {'registry_identity_conflict', 'session_bound_elsewhere',
+                       'registry_integrity', 'source_required', 'cwd_required',
+                       'session_id_required', 'path_derive_failed',
+                       'invalid_identity', 'scan_offset_required',
+                       'scan_offset_invalid', 'transcript_path_mismatch',
+                       'chat_id_required'}:
+                err = 'registry_register_failed'
         return {
             'ok': False,
-            'error_code': str(getattr(exc, 'error_code', None) or 'capacity_swap_post_install_failed'),
+            'error_code': err,
             'detail': str(exc),
             'rolled_back_to_last_good': True,
+            'target_generation_unregistered': True,
+            'target_generation': target_gen,
         }
 
-    # Success: keep old proc until CURRENT user stdin flush (exactly-once gate).
-    plan._capacity_swap_deferred_old_proc = deferred_old  # type: ignore[attr-defined]
+    # Success: retain full install_state until CURRENT user stdin flush.
+    plan._capacity_swap_install_state = install_state  # type: ignore[attr-defined]
+    plan._capacity_swap_deferred_old_proc = install_state.get('old_proc')  # type: ignore[attr-defined]
     return {
         'ok': True,
         'effective_system': effective,
         'candidate_session_id': handoff.candidate_session_id,
         'target_generation': target_gen,
         'source_generation': source_gen,
-        'deferred_old_proc': deferred_old,
+        'deferred_old_proc': install_state.get('old_proc'),
+        'install_state': install_state,
     }
+
+
+def _rollback_capacity_swap_if_unflushed(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+) -> bool:
+    """If CapSwap installed but CURRENT user not yet flushed, restore old live.
+
+    Returns True when a rollback was performed.
+    """
+    if bool(getattr(plan, '_current_user_stdin_flushed', False)):
+        return False
+    install_state = getattr(plan, '_capacity_swap_install_state', None)
+    if not install_state:
+        return False
+    logger.info('capacity swap pre-flush failure; rolling back install to old resident')
+    rollback_capacity_swap_install(
+        live_resident=resident, install_state=install_state,
+    )
+    plan._capacity_swap_install_state = None  # type: ignore[attr-defined]
+    plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
+    plan.manifest['capacity_swap_pre_flush_rollback'] = True
+    return True
+
+
+def _commit_capacity_swap_after_stdin_flush(plan: DailyTurnPlan) -> None:
+    """After successful stdin flush: lock exactly-once and close deferred old proc."""
+    plan._current_user_stdin_flushed = True  # type: ignore[attr-defined]
+    install_state = getattr(plan, '_capacity_swap_install_state', None)
+    old_proc = None
+    if install_state:
+        old_proc = install_state.get('old_proc')
+    if old_proc is None:
+        old_proc = getattr(plan, '_capacity_swap_deferred_old_proc', None)
+    close_deferred_capacity_swap_old_proc(old_proc)
+    plan._capacity_swap_install_state = None  # type: ignore[attr-defined]
+    plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
 
 
 def ensure_resident_and_stream(
@@ -2336,12 +2395,7 @@ def ensure_resident_and_stream(
         _capture_transcript_start(plan, resident)
 
         def _mark_stdin_flushed() -> None:
-            plan._current_user_stdin_flushed = True  # type: ignore[attr-defined]
-            # Exactly-once locked: old last-good process may now be closed.
-            deferred = getattr(plan, '_capacity_swap_deferred_old_proc', None)
-            if deferred is not None:
-                close_deferred_capacity_swap_old_proc(deferred)
-                plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
+            _commit_capacity_swap_after_stdin_flush(plan)
 
         send_kwargs: dict[str, Any] = {'commit_meta': commit_meta}
         try:
@@ -2354,22 +2408,23 @@ def ensure_resident_and_stream(
         except (TypeError, ValueError):
             pass
 
-        for evt, payload in resident.send_turn(content, **send_kwargs):
-            if heartbeat.failed:
-                close_local_resident_if_bound(resident, expected_key=plan.resident_key)
-                raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
-            if evt == 'tool_use':
-                raise DailyWindowToolFencePending()
-            if evt == 'done':
-                _capture_transcript_end(plan, resident)
-                # Safety net if send_turn lacked on_stdin_flushed (test fakes).
-                if getattr(plan, '_capacity_swap_deferred_old_proc', None) is not None:
-                    if getattr(plan, '_current_user_stdin_flushed', False):
-                        close_deferred_capacity_swap_old_proc(
-                            getattr(plan, '_capacity_swap_deferred_old_proc', None),
-                        )
-                        plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
-            yield evt, payload
+        try:
+            for evt, payload in resident.send_turn(content, **send_kwargs):
+                if heartbeat.failed:
+                    close_local_resident_if_bound(resident, expected_key=plan.resident_key)
+                    raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
+                if evt == 'tool_use':
+                    raise DailyWindowToolFencePending()
+                if evt == 'done':
+                    _capture_transcript_end(plan, resident)
+                    # Safety net: stream completed without on_stdin_flushed hook.
+                    if getattr(plan, '_capacity_swap_install_state', None) is not None:
+                        _commit_capacity_swap_after_stdin_flush(plan)
+                yield evt, payload
+        except Exception:
+            # Pre-flush CapSwap failure: CURRENT user never sent → restore old live.
+            _rollback_capacity_swap_if_unflushed(plan, resident=resident)
+            raise
 
         if heartbeat.stop():
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)

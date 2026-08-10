@@ -608,9 +608,15 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         self.assertFalse(out.get('ok'), out)
         self.assertEqual(out.get('error_code'), 'capacity_swap_cursor_seed_failed')
         self.assertTrue(out.get('rolled_back_to_last_good'))
+        self.assertTrue(out.get('target_generation_unregistered'))
         self.assertIs(resident._proc, old_proc)
         self.assertFalse(old_proc.killed)
         self.assertTrue(new_proc.killed)
+        # Registry must not exist for the bumped target generation.
+        target_gen = int(out.get('target_generation') or (src_gen + 1))
+        self.assertIsNone(
+            get_context_claude_session(src_ctx, target_gen, db_path=self.db),
+        )
 
     def test_install_defers_old_proc_kill_until_explicit_close(self):
         """Old last-good proc must survive install; only deferred close kills it."""
@@ -677,7 +683,7 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         )
         self.assertTrue(path.exists())
         mode = path.stat().st_mode & 0o777
-        self.assertEqual(mode & ~0o600, 0, oct(mode))
+        self.assertEqual(mode, 0o600, oct(mode))
         self.assertTrue(digest)
 
         # Path fence: refuse escape outside allowed claude home.
@@ -690,6 +696,208 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
                     cand, cwd=cwd, claude_home=str(home),
                 )
         self.assertEqual(ctx.exception.error_code, 'publish_path_fence_failed')
+
+    def test_full_chain_seed_fail_cold_fallback_sends_once(self):
+        """soft_context → staged ok → seed fail → rollback → cold → send once."""
+        uid = _insert(self.db, 'hayana', 'full-seed', '2026-07-27 10:00:00')
+        plan = _prepare(self.db, uid)
+        src_ctx = int(plan.context_id)
+        src_epoch = int(plan.context_epoch)
+        src_gen = int(plan.resident_generation)
+        register_context_claude_session(
+            context_id=src_ctx,
+            context_epoch=src_epoch,
+            resident_generation=src_gen,
+            chat_id=plan.chat_id,
+            claude_session_id='sid-full-old',
+            cwd=self.tmp,
+            source='daily_runtime',
+            scan_offset=10,
+            process_generation=1,
+            db_path=self.db,
+        )
+
+        class _Proc:
+            def __init__(self):
+                self.alive = True
+                self.killed = False
+
+            def poll(self):
+                return None if self.alive else 0
+
+            def kill(self):
+                self.killed = True
+                self.alive = False
+
+        old_proc = _Proc()
+        new_proc = _Proc()
+        resident = _DoorResident('soft_context', session_id='sid-full-old')
+        resident.cwd = self.tmp
+        resident._proc = old_proc
+        resident.generation = 1
+
+        new_sid = '55555555-5555-5555-5555-555555555555'
+        staged = _DoorResident(None, session_id=new_sid)
+        staged.generation = 2
+        staged._proc = new_proc
+        cand = _candidate(
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+        )
+        jsonl_path = session_jsonl_path(self.tmp, new_sid)
+        assert jsonl_path is not None
+        Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(jsonl_path).write_text(cand.serialized_jsonl, encoding='utf-8')
+        handoff = CapacitySwapRuntimeResult(
+            ok=True,
+            candidate=cand,
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+            jsonl_path=str(jsonl_path),
+            jsonl_sha256='deadbeef',
+            effective_system=with_capacity_boundary_suffix('STATIC_PERSONA'),
+        )
+        setattr(handoff, 'staged_resident', staged)
+
+        def _seed_boom(*_a, **_k):
+            raise dr.DailyRuntimeError(
+                'seed fail', error_code='capacity_swap_cursor_seed_failed',
+            )
+
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
+             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff), \
+             mock.patch.object(dr, 'reprepare_after_capacity_swap', side_effect=_seed_boom):
+            events = list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC_PERSONA',
+            ))
+
+        self.assertTrue(any(e[0] == 'done' for e in events))
+        self.assertEqual(resident.send_count, 1)
+        # Bumped target generation must not carry a capacity_swap Registry ghost.
+        self.assertIsNone(
+            get_context_claude_session(src_ctx, src_gen + 1, db_path=self.db),
+        )
+        # No second-door mismatch blow-up.
+        self.assertNotEqual(
+            plan.manifest.get('error_code'),
+            'registered_session_generation_mismatch',
+        )
+
+    def test_full_chain_pre_flush_send_failure_rollbacks_old(self):
+        """CapSwap success then stdin write/flush fail → restore old; send_count 0."""
+        uid = _insert(self.db, 'hayana', 'full-flush', '2026-07-27 10:00:00')
+        plan = _prepare(self.db, uid)
+        src_ctx = int(plan.context_id)
+        src_epoch = int(plan.context_epoch)
+        src_gen = int(plan.resident_generation)
+        register_context_claude_session(
+            context_id=src_ctx,
+            context_epoch=src_epoch,
+            resident_generation=src_gen,
+            chat_id=plan.chat_id,
+            claude_session_id='sid-flush-old',
+            cwd=self.tmp,
+            source='daily_runtime',
+            scan_offset=10,
+            process_generation=1,
+            db_path=self.db,
+        )
+
+        class _Proc:
+            def __init__(self):
+                self.alive = True
+                self.killed = False
+
+            def poll(self):
+                return None if self.alive else 0
+
+            def kill(self):
+                self.killed = True
+                self.alive = False
+
+        class _PreFlushFailResident(_DoorResident):
+            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+                # Mimic cc_resident: kill new proc on BrokenPipe before flush callback.
+                proc = getattr(self, '_proc', None)
+                if proc is not None:
+                    proc.kill()
+                raise BrokenPipeError('stdin broken before flush')
+
+        old_proc = _Proc()
+        new_proc = _Proc()
+        resident = _PreFlushFailResident('soft_context', session_id='sid-flush-old')
+        resident.cwd = self.tmp
+        resident._proc = old_proc
+
+        new_sid = '66666666-6666-6666-6666-666666666666'
+        staged = _DoorResident(None, session_id=new_sid)
+        staged.generation = 2
+        staged._proc = new_proc
+        cand = _candidate(
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+        )
+        jsonl_path = session_jsonl_path(self.tmp, new_sid)
+        assert jsonl_path is not None
+        Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(jsonl_path).write_text(cand.serialized_jsonl, encoding='utf-8')
+        handoff = CapacitySwapRuntimeResult(
+            ok=True,
+            candidate=cand,
+            source_context_id=src_ctx,
+            source_context_epoch=src_epoch,
+            source_resident_generation=src_gen,
+            target_resident_generation=src_gen + 1,
+            candidate_session_id=new_sid,
+            jsonl_path=str(jsonl_path),
+            jsonl_sha256='deadbeef',
+            effective_system=with_capacity_boundary_suffix('STATIC_PERSONA'),
+        )
+        setattr(handoff, 'staged_resident', staged)
+
+        def _fake_reprepare(p, **_k):
+            refreshed = dc.get_daily_context_by_id(p.context_id, db_path=self.db) or {}
+            p.resident_generation = int(refreshed.get('resident_generation') or 0)
+            p.context_epoch = int(refreshed.get('context_epoch') or p.context_epoch)
+            p.epoch_token = dict(p.epoch_token)
+            p.epoch_token['resident_generation'] = p.resident_generation
+            p.epoch_token['context_epoch'] = p.context_epoch
+            p.manifest = dict(p.manifest)
+            p.is_cold = False
+            p.is_respawn = False
+            return p
+
+        with mock.patch.object(config_store, 'get_bool', return_value=True), \
+             mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
+             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff), \
+             mock.patch.object(dr, 'reprepare_after_capacity_swap', side_effect=_fake_reprepare):
+            with self.assertRaises(BrokenPipeError):
+                list(dr.stream_daily_resident_turn(
+                    plan, resident=resident, env={}, static_system='STATIC_PERSONA',
+                ))
+
+        self.assertEqual(resident.send_count, 0)
+        self.assertFalse(bool(getattr(plan, '_current_user_stdin_flushed', False)))
+        self.assertIs(resident._proc, old_proc)
+        self.assertFalse(old_proc.killed)
+        self.assertTrue(old_proc.alive)
+        self.assertTrue(new_proc.killed)
+        self.assertTrue(plan.manifest.get('capacity_swap_pre_flush_rollback'))
+        # CapSwap Registry was committed before send; still present (flush never happened).
+        # That is OK — rollback restored process; no resend.
+        reg = get_context_claude_session(src_ctx, src_gen + 1, db_path=self.db)
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg['source'], CAPACITY_SWAP_REGISTRY_SOURCE)
 
 
 if __name__ == '__main__':
