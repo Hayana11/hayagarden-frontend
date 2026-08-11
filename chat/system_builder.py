@@ -613,14 +613,6 @@ _CC_TOOLS_CAPABILITY = (
 )
 
 
-def build_time_bucket(now=None):
-    """半小时时间桶：23:01 与 23:29 → 23:00；23:30 与 23:59 → 23:30。"""
-    if now is None:
-        now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    minute = '00' if now.minute < 30 else '30'
-    return now.strftime('%Y-%m-%d %H:') + minute
-
-
 def build_stable_note():
     """固定说明书：不得依赖时间、随机数、DB 当前态或无序集合。"""
     note = (
@@ -929,11 +921,6 @@ def lean_system_field_is_facts_only(text: str) -> bool:
 
 def _cc_collect_state(get_db_fn, *, lean=False):
     state = {
-        'time_bucket': (
-            f'bucket={build_time_bucket()}'
-            if lean else
-            f'当前时间段：{build_time_bucket()} 左右'
-        ),
         'emotion': '',
         'drive': '',
         'lights': '',
@@ -1504,7 +1491,6 @@ def format_state_diff(old_state, new_state):
         if before == after:
             continue
         label = {
-            'time_bucket': '当前时间段',
             'emotion': '情绪',
             'drive': '驱动',
             'lights': '灯',
@@ -1519,8 +1505,8 @@ def format_state_diff(old_state, new_state):
         elif not before and after:
             lines.append(f'- {label}：{after}')
         else:
-            # 短字段（时间/灯）用 before → after；长字段只报 after
-            if key in ('time_bucket', 'lights', 'pocket') and len(before) < 80 and len(after) < 80:
+            # 短字段（灯/Pocket）用 before → after；长字段只报 after
+            if key in ('lights', 'pocket') and len(before) < 80 and len(after) < 80:
                 lines.append(f'- {label}：{before} → {after}')
             else:
                 lines.append(f'- {label}：{after}')

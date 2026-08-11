@@ -11,7 +11,7 @@ import { useMemorySummary } from '../hooks/useMemorySummary';
 import { useUsage } from '../hooks/useUsage';
 import { useLedger } from '../hooks/useLedger';
 import { usePeriod } from '../hooks/usePeriod';
-import { weatherDesc } from '../lib/weather';
+import { weatherIcon } from '../lib/weather';
 import { pad, smoothPath, WEEK_CN_MON_FIRST, WEEK_CN_SUN_FIRST } from '../lib/format';
 import { buildHeatmapCells, heatmapStats } from '../lib/heatmapCells';
 import { formatCurrency, formatTokens } from '../lib/formatDisplay';
@@ -49,11 +49,17 @@ export function DashScreen() {
 
   let weatherLine = '☁ 天气加载中 · 吉林市';
   if (weather) {
-    if (weather.unavailable || weather.temp == null || weather.code == null) {
+    if (
+      weather.unavailable
+      || weather.temp == null
+      || weather.hum == null
+      || weather.code == null
+      || !(weather.weather_text || '').trim()
+    ) {
       weatherLine = '天气暂不可用 · 吉林市';
     } else {
-      const [icon, desc] = weatherDesc(weather.code, weather.weather_text);
-      weatherLine = `${icon} ${weather.temp}°C ${desc} · 湿度${weather.hum}% · 吉林市`;
+      const icon = weatherIcon(weather.code);
+      weatherLine = `${icon} ${weather.temp}°C ${weather.weather_text} · 湿度${weather.hum}% · 吉林市`;
     }
   }
 

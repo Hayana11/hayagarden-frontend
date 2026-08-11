@@ -27,7 +27,6 @@ from cc_resident import ResidentSession
 
 # Frozen legacy fixture (representative production-shaped strings).
 LEGACY_RAW = normalize_state_dict({
-    'time_bucket': '当前时间段：上午 左右',
     'emotion': '## 此刻的情绪与欲望\n情绪：V0.60/A0.30 — 平静\nPA 0.50 | NA 0.20 | 混合张力',
     'drive': '驱动：想她 中等（0.55）',
     'lights': '（灯·当前状态：主灯 关，床头灯 关）',
@@ -35,7 +34,6 @@ LEGACY_RAW = normalize_state_dict({
 })
 
 RAW_V1 = normalize_state_dict({
-    'time_bucket': '当前时间段：上午 左右',
     'emotion': 'valence=0.60 arousal=0.30 mood=平静 pa=0.50 na=0.20 longing=0.35 desire_p=0.10 desire_i=0.30 desire_c=0.70',
     'drive': 'attachment=0.55 curiosity=0.20',
     'lights': '（灯·当前状态：主灯 关）',
@@ -568,21 +566,21 @@ class GatewayFallbackTests(unittest.TestCase):
 
 class LeanFactsOnlyCollectionTests(unittest.TestCase):
     _SYSTEM_FIELD_KEYS = (
-        'time_bucket', 'emotion', 'drive', 'lights', 'pocket', 'ledger', 'recent_activity',
+        'emotion', 'drive', 'lights', 'pocket', 'ledger', 'recent_activity',
     )
 
     def test_lean_system_generated_fields_are_facts_only(self):
         def get_db():
             raise AssertionError('db should not be queried in this unit test')
 
-        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
-             mock.patch('chat.system_builder._format_structured_emotion_snippet', return_value='valence=0.60 arousal=0.30'), \
+        with mock.patch('chat.system_builder._format_structured_emotion_snippet', return_value='valence=0.60 arousal=0.30'), \
              mock.patch('chat.system_builder._format_structured_drive_snippet', return_value='attachment=0.55'), \
              mock.patch('urllib.request.urlopen') as urlopen_mock, \
              mock.patch('config_store.get_bool', return_value=False):
             state = _cc_collect_state(get_db, lean=True)
 
         urlopen_mock.assert_not_called()
+        self.assertNotIn('time_bucket', state)
         for key in self._SYSTEM_FIELD_KEYS:
             value = state.get(key) or ''
             if value:
@@ -615,14 +613,13 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
             c.row_factory = sqlite3.Row
             return c
 
-        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
-             mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
+        with mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
              mock.patch('config_store.get_bool', return_value=False):
             state = _cc_collect_state(get_db, lean=True)
 
+        self.assertNotIn('time_bucket', state)
         self.assertIn('user_record:', state['todos'])
         self.assertIn('修改 AI 的语气，让表达更克制', state['todos'])
-        self.assertTrue(lean_system_field_is_facts_only(state['time_bucket']))
         self.assertTrue(lean_system_field_is_facts_only(state['lights']))
 
     def test_lean_reminder_user_records_wrap_due_todos_and_countdowns(self):
@@ -661,11 +658,11 @@ class LeanFactsOnlyCollectionTests(unittest.TestCase):
             c.row_factory = sqlite3.Row
             return c
 
-        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
-             mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
+        with mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
              mock.patch('config_store.get_bool', return_value=False):
             state = _cc_collect_state(get_db, lean=True)
 
+        self.assertNotIn('time_bucket', state)
         reminders = state['reminders']
         self.assertIn('reminders_data:', reminders)
         self.assertIn('user_record: type=todo', reminders)
@@ -705,7 +702,6 @@ class PersonaSemanticContractTests(unittest.TestCase):
         from chat.persona_state_semantic import translate_raw_state_to_persona_semantic
 
         raw = {
-            'time_bucket': 'bucket=2026-08-02 23:30',
             'emotion': (
                 'valence=0.52 arousal=0.30 mood=慵懒 pa=0.50 na=0.20 '
                 'longing=0.35 desire_p=0.80 desire_i=0.30 desire_c=0.70'

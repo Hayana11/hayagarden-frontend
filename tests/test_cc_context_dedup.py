@@ -48,7 +48,6 @@ from chat.system_builder import (
     build_cc_static_parts,
     build_cc_static_system,
     build_stable_note,
-    build_time_bucket,
     format_one_shot,
     format_state_diff,
     format_state_snapshot,
@@ -90,24 +89,19 @@ def _import_gateway():
     return gateway
 
 
-class TimeBucketTests(unittest.TestCase):
-    def test_half_hour_buckets(self):
-        self.assertEqual(
-            build_time_bucket(datetime.datetime(2026, 7, 18, 23, 1)),
-            '2026-07-18 23:00',
-        )
-        self.assertEqual(
-            build_time_bucket(datetime.datetime(2026, 7, 18, 23, 29)),
-            '2026-07-18 23:00',
-        )
-        self.assertEqual(
-            build_time_bucket(datetime.datetime(2026, 7, 18, 23, 30)),
-            '2026-07-18 23:30',
-        )
-        self.assertEqual(
-            build_time_bucket(datetime.datetime(2026, 7, 18, 23, 59)),
-            '2026-07-18 23:30',
-        )
+class NoTimeBucketRuntimeTests(unittest.TestCase):
+    def test_build_time_bucket_removed(self):
+        import chat.system_builder as sb
+        self.assertFalse(hasattr(sb, 'build_time_bucket'))
+
+    def test_collect_state_omits_time_bucket(self):
+        def get_db():
+            raise AssertionError('db not needed')
+
+        with mock.patch('urllib.request.urlopen', side_effect=OSError('no')), \
+             mock.patch('config_store.get_bool', return_value=False):
+            state = _cc_collect_state(get_db, lean=True)
+        self.assertNotIn('time_bucket', state)
 
 
 class StableSystemTests(unittest.TestCase):
@@ -137,7 +131,7 @@ class StableSystemTests(unittest.TestCase):
 
 class StateDiffTests(unittest.TestCase):
     def test_unchanged_returns_empty(self):
-        state = {'lights': '关', 'todos': '待办 A', 'time_bucket': '当前时间段：23:00 左右'}
+        state = {'lights': '关', 'todos': '待办 A'}
         self.assertEqual(format_state_diff(state, state), '')
 
     def test_single_component_change(self):
@@ -623,13 +617,13 @@ class ResidentCumulativeStateTests(unittest.TestCase):
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
         sess._last_state_send_snapshot = merge_cumulative_state_send(
             {},
-            {'lights': '关', 'time_bucket': '12:00'},
+            {'lights': '关', 'emotion': '平静'},
         )
         sess._commit_sent_context({'state_send_snapshot': {}})
         self.assertIn('lights', sess.last_state_send_snapshot)
         sess._commit_sent_context({'state_send_snapshot': {'lights': ''}})
         self.assertNotIn('lights', sess.last_state_send_snapshot)
-        self.assertIn('time_bucket', sess.last_state_send_snapshot)
+        self.assertIn('emotion', sess.last_state_send_snapshot)
 
 
 class ResidentFileRefTests(unittest.TestCase):
@@ -1155,7 +1149,7 @@ class HotTurnContentTests(unittest.TestCase):
             def __init__(self):
                 self.last_state_snapshot = {
                     'lights': 'main=关 bedside=关',
-                    'time_bucket': '当前时间段：23:00 左右',
+                    'emotion': '平静',
                 }
                 self.last_state_send_snapshot = dict(self.last_state_snapshot)
                 self.committed_file_hashes = set()
@@ -1185,7 +1179,7 @@ class HotTurnContentTests(unittest.TestCase):
              mock.patch.object(gateway, '_recall_memories', return_value=('', [])), \
              mock.patch('chat.system_builder.build_cc_state', return_value={
                  'lights': 'main=开 bedside=关',
-                 'time_bucket': '当前时间段：23:00 左右',
+                 'emotion': '平静',
              }), \
              mock.patch('chat.system_builder.build_cc_one_shot', return_value={
                  'wake_nonmessage_background': '', 'wake_message_background': '',

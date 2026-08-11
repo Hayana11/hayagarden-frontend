@@ -8,6 +8,3 @@ export const CONFIG = {
   /** used only if /api/ledger/budget is unreachable */
   fallbackBudget: 3000,
 };
-
-// Jilin City, per the design brief (吉林省吉林市)
-export const WEATHER_COORDS = { latitude: 43.8378, longitude: 126.5494 };

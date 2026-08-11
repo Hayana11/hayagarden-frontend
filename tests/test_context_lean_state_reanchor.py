@@ -17,7 +17,6 @@ from cc_resident import ResidentSession
 class LeanStateReanchorTests(unittest.TestCase):
     def setUp(self):
         self.raw = normalize_state_dict({
-            'time_bucket': '当前时间段：上午 左右',
             'lights': '（灯·当前状态：主灯 关）',
             'emotion': '平静',
         })

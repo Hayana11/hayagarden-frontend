@@ -45,8 +45,7 @@ class CrownChatZeroInjectionTests(unittest.TestCase):
         def get_db():
             raise AssertionError('db not needed for empty emotion/drive')
 
-        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
-             mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
+        with mock.patch('urllib.request.urlopen', side_effect=OSError('no light')), \
              mock.patch('config_store.get_bool', return_value=True), \
              mock.patch('chat.system_builder._format_structured_emotion_snippet') as emo, \
              mock.patch('chat.system_builder._format_structured_drive_snippet') as drv:

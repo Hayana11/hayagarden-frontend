@@ -236,8 +236,10 @@ class RealityContextContractTests(unittest.TestCase):
         self.assertEqual(out['weather_anchor_reason'], WEATHER_REASON_FIRST_USER)
 
     def test_time_bucket_not_in_persona_semantic(self) -> None:
+        from chat import persona_state_semantic as pss
         from chat.persona_state_semantic import translate_raw_state_to_persona_semantic
 
+        self.assertFalse(hasattr(pss, '_time_of_day_sentence'))
         semantic = translate_raw_state_to_persona_semantic({
             'time_bucket': 'bucket=2026-08-12 23:30',
             'lights': '',

@@ -57,7 +57,7 @@ _INNER_KEY_ORDER = (
     'social_openness',
     'mental_direction',
 )
-_ENV_KEY_ORDER = ('time_of_day', 'lighting')
+_ENV_KEY_ORDER = ('lighting',)
 _EXT_KEY_ORDER = ('pocket_relay',)
 
 
@@ -130,41 +130,6 @@ def _mental_direction_sentence(drive_pairs: dict[str, float]) -> Optional[str]:
     if reflection >= 0.30:
         return reflection_line
     return None
-
-
-def _time_of_day_sentence(time_bucket_text: str) -> Optional[str]:
-    text = str(time_bucket_text or '').strip()
-    if not text:
-        return None
-    if text.startswith('bucket='):
-        stamp = text.split('=', 1)[1].strip()
-        try:
-            hour = int(stamp.split(' ')[1].split(':')[0])
-        except (IndexError, ValueError):
-            return None
-    else:
-        for label, phrase in (
-            ('清晨', '清晨'), ('上午', '上午'), ('中午', '中午'),
-            ('下午', '下午'), ('傍晚', '傍晚'), ('晚上', '晚上'), ('深夜', '深夜'),
-        ):
-            if label in text:
-                return f'现在是{phrase}。'
-        return None
-    if 5 <= hour < 8:
-        phrase = '清晨'
-    elif 8 <= hour < 11:
-        phrase = '上午'
-    elif 11 <= hour < 13:
-        phrase = '中午'
-    elif 13 <= hour < 17:
-        phrase = '下午'
-    elif 17 <= hour < 19:
-        phrase = '傍晚'
-    elif 19 <= hour < 23:
-        phrase = '晚上'
-    else:
-        phrase = '深夜'
-    return f'现在是{phrase}。'
 
 
 def _light_phrase(token: str) -> str:
@@ -270,8 +235,6 @@ def translate_raw_state_to_persona_semantic(
         inner['mental_direction'] = mental_line
 
     environment: dict[str, str] = {}
-    # P-CONTEXT-LEAN-H1A: time_bucket no longer broadcasts via Chat State semantic.
-    # Reality time is injected by chat.reality_context.build_reality_context instead.
     lighting_line = _lighting_sentence(raw.get('lights', ''))
     if lighting_line:
         environment['lighting'] = lighting_line

@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
-# Jilin City — same coords as app/src/config.ts WEATHER_COORDS.
+# Jilin City coordinates — Dash consumes GET /api/weather/now; no FE coords copy.
 WEATHER_LATITUDE = 43.8378
 WEATHER_LONGITUDE = 126.5494
 WEATHER_LOCATION_NAME = '吉林市'
