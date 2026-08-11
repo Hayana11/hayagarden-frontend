@@ -4535,6 +4535,16 @@ def _complete_rewrite_finalize(
         except Exception:
             pass
 
+    if mode != 'done':
+        try:
+            rw_mod.finalize_rewrite_daily_continuity(
+                result, staging, db_path=DB_PATH,
+            )
+        except Exception:
+            base['effects_pending'] = True
+            base['code'] = 'effects_pending'
+            return base
+
     # Durable epoch is part of the resume contract — never only on first
     # activate. But mint/eager-kill at most once per rewrite_id: skip
     # entirely once a prior attempt already recorded the handoff.

@@ -5372,6 +5372,9 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     cc_cache_read, cc_cache_create = 0, 0
     cc_usage = None
     unexpected_save = False
+    text_acc: list[str] = []
+    think_acc: list[str] = []
+    assistant_persisted = False
     try:
         _static_parts = build_cc_daily_static_parts()
         _full_system = _static_parts['full_system']
@@ -5406,8 +5409,10 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
             static_system=_full_system,
         ):
             if evt == 'text':
+                text_acc.append(str(payload or ''))
                 yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
             elif evt == 'think':
+                think_acc.append(str(payload or ''))
                 yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
             elif evt == 'tool_use':
                 cc_tool_calls.append({
@@ -5475,6 +5480,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 cache_info=_cache_info_json,
                 choices=json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '',
             )
+            assistant_persisted = True
         except _daily_ctx.ConflictError as exc:
             _daily_rt.abort_daily_turn(
                 _daily_plan,
@@ -5682,6 +5688,35 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
+            if not assistant_persisted:
+                partial_raw = ''.join(text_acc).strip()
+                if partial_raw:
+                    partial_text, _partial_unexpected = _daily_rt.strip_daily_save_markers(
+                        partial_raw,
+                    )
+                    partial_text = str(partial_text or '').strip()
+                    if partial_text:
+                        _partial_tool_calls = ''
+                        if cc_tool_calls:
+                            _partial_tool_calls = json.dumps(
+                                [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
+                                ensure_ascii=False,
+                            )
+                        try:
+                            _daily_rt.persist_partial_daily_stream_rescue(
+                                _daily_plan,
+                                content=partial_text,
+                                thinking=''.join(think_acc),
+                                tool_calls=_partial_tool_calls,
+                            )
+                            assistant_persisted = True
+                            _turn_data['_daily_partial_rescued'] = True
+                            if _partial_unexpected:
+                                _daily_plan.manifest['unexpected_save_marker'] = True
+                        except Exception:
+                            logging.getLogger(__name__).exception(
+                                'daily_window partial stream rescue failed',
+                            )
             try:
                 _daily_rt.abort_daily_turn(
                     _daily_plan,
@@ -5761,6 +5796,9 @@ def chat_stream():
                         if _daily_out:
                             _persisted[0] = True
                             _gen_release((_daily_out[1], _daily_out[2]))
+                        elif _turn_data.get('_daily_partial_rescued'):
+                            _persisted[0] = True
+                            _gen_release(None)
                         else:
                             _gen_release(None)
                     return

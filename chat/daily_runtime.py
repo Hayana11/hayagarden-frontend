@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import copy
 import hashlib
+import json
 import logging
 import os
 import re
@@ -2707,6 +2708,45 @@ def abort_daily_turn(
     plan.manifest['error_code'] = error_code
     plan.manifest['abort_epoch_current'] = current
     return dict(plan.manifest)
+
+
+def persist_partial_daily_stream_rescue(
+    plan: DailyTurnPlan,
+    *,
+    content: str,
+    thinking: str = '',
+    tool_calls: str = '',
+) -> int:
+    """Classic-aligned interrupt rescue: persist visible assistant text only.
+
+    Does not complete the turn, advance cursor, map transcript, or note
+    same-context last-good. Caller must still abort the interrupted turn.
+    """
+    text = str(content or '').strip()
+    if not text:
+        raise DailyRuntimeError(
+            'empty partial rescue content',
+            error_code='empty_partial_rescue',
+        )
+    cache_info = json.dumps(
+        {
+            'stream_interrupted': True,
+            'turn_incomplete': True,
+            'partial_rescue': True,
+        },
+        ensure_ascii=False,
+    )
+    aid = persist_daily_assistant_for_plan(
+        plan,
+        content=text,
+        thinking=thinking or '',
+        tool_calls=tool_calls or '',
+        cache_info=cache_info,
+        choices='',
+    )
+    plan.manifest['partial_rescue'] = True
+    plan.manifest['partial_rescue_assistant_id'] = int(aid)
+    return int(aid)
 
 
 def persist_daily_assistant_for_plan(

@@ -305,6 +305,202 @@ def clear_staged_moments_pending(staging: Mapping[str, Any], db_path: str) -> No
         pass
 
 
+def finalize_rewrite_daily_continuity(
+    result: Mapping[str, Any],
+    staging: Mapping[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> None:
+    """After authoritative edit/regen activate: durable daily membership + cursor.
+
+    Rewrites insert formal chat_messages directly (no resident turn). Without
+    daily_message_contexts and a resident history cursor advance, cold bootstrap
+    can replay only through the pre-rewrite cursor even though the UI shows the
+    new authoritative rows.
+    """
+    from chat import daily_context as dc
+
+    if not dc.enabled():
+        return
+
+    operation = str(staging.get('operation') or '')
+    if operation not in (OP_EDIT, OP_REGEN):
+        return
+
+    source_id = int(staging.get('source_message_id') or 0)
+    assistant_id = result.get('assistant_message_id')
+    if assistant_id is None:
+        return
+    assistant_id = int(assistant_id)
+    user_id = result.get('message_id') or result.get('user_message_id')
+    if user_id is not None:
+        user_id = int(user_id)
+
+    ctx_row = _resolve_rewrite_daily_context(source_id, db_path=db_path)
+    if ctx_row is None:
+        return
+    context_id, context_epoch, resident_generation = ctx_row
+
+    if operation == OP_EDIT and user_id is not None:
+        dc.record_daily_message_context(
+            int(user_id),
+            context_id=context_id,
+            context_epoch=context_epoch,
+            resident_generation=resident_generation,
+            role='user',
+            db_path=db_path,
+        )
+        dc.record_daily_message_context(
+            assistant_id,
+            context_id=context_id,
+            context_epoch=context_epoch,
+            resident_generation=resident_generation,
+            role='assistant',
+            db_path=db_path,
+        )
+        _purge_stale_rewrite_daily_mappings(
+            context_id=context_id,
+            from_message_id=source_id,
+            keep_message_ids=[int(user_id), assistant_id],
+            db_path=db_path,
+        )
+    elif operation == OP_REGEN:
+        dc.record_daily_message_context(
+            assistant_id,
+            context_id=context_id,
+            context_epoch=context_epoch,
+            resident_generation=resident_generation,
+            role='assistant',
+            db_path=db_path,
+        )
+
+    dc.advance_resident_history_cursor(
+        context_id,
+        resident_generation,
+        assistant_id,
+        db_path=db_path,
+    )
+
+
+def _mapping_tuple(row: Any) -> tuple[int, int, int]:
+    d = dict(row)
+    return (
+        int(d['context_id']),
+        int(d['context_epoch']),
+        int(d['resident_generation']),
+    )
+
+
+def _authoritative_daily_context_tuple(
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[tuple[int, int, int]]:
+    """Current formal / authoritative daily context identity."""
+    from chat import daily_context as dc
+
+    try:
+        from chat.context_window import get_current_context_window
+        current = get_current_context_window(db_path=db_path)
+    except Exception:
+        current = None
+    if current is not None:
+        daily = dc.get_daily_context_by_id(int(current['id']), db_path=db_path)
+        if daily is not None:
+            return (
+                int(daily['id']),
+                int(daily['context_epoch']),
+                int(daily['resident_generation']),
+            )
+    active = dc.get_latest_active_context(db_path=db_path)
+    if active is not None:
+        return (
+            int(active['id']),
+            int(active['context_epoch']),
+            int(active['resident_generation']),
+        )
+    return None
+
+
+def _resolve_rewrite_daily_context(
+    source_message_id: int,
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[tuple[int, int, int]]:
+    """Resolve daily context for rewrite finalize.
+
+    Priority:
+    1. Exact ``daily_message_contexts`` row for ``source_message_id``.
+    2. Unmapped source: authoritative formal context; predecessor only when it
+       matches authoritative — never bind to a stale predecessor context.
+    """
+    from chat import daily_context as dc
+
+    sid = int(source_message_id or 0)
+    if sid <= 0:
+        return None
+    conn = dc._connect(db_path)
+    try:
+        row = conn.execute(
+            'SELECT context_id, context_epoch, resident_generation '
+            'FROM daily_message_contexts WHERE message_id=?',
+            (sid,),
+        ).fetchone()
+        if row is not None:
+            return _mapping_tuple(row)
+
+        pred_row = conn.execute(
+            'SELECT context_id, context_epoch, resident_generation '
+            'FROM daily_message_contexts WHERE message_id < ? '
+            'ORDER BY message_id DESC LIMIT 1',
+            (sid,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    auth = _authoritative_daily_context_tuple(db_path=db_path)
+    if auth is None:
+        return None
+    if pred_row is None:
+        return auth
+    pred = _mapping_tuple(pred_row)
+    if pred == auth:
+        return pred
+    return auth
+
+
+def _purge_stale_rewrite_daily_mappings(
+    *,
+    context_id: int,
+    from_message_id: int,
+    keep_message_ids: list[int],
+    db_path: Optional[str] = None,
+) -> None:
+    from chat import daily_context as dc
+
+    keep = {int(x) for x in keep_message_ids if int(x) > 0}
+    conn = dc._connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT message_id FROM daily_message_contexts '
+            'WHERE context_id=? AND message_id >= ?',
+            (int(context_id), int(from_message_id)),
+        ).fetchall()
+        stale = [
+            int(dict(r)['message_id'])
+            for r in rows
+            if int(dict(r)['message_id']) not in keep
+        ]
+        for mid in stale:
+            conn.execute(
+                'DELETE FROM daily_message_contexts WHERE message_id=?',
+                (mid,),
+            )
+        if stale:
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def replay_side_effects_after_activate(
     staging: Mapping[str, Any],
     result: Mapping[str, Any],

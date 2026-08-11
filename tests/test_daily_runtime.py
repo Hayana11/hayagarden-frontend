@@ -1536,6 +1536,9 @@ class GatewayClientDisconnectTests(unittest.TestCase):
 
             ctx = dc.get_context_for_local_day('default', '2026-07-27', db_path=db)
             conn = sqlite3.connect(db)
+            assistant_row = conn.execute(
+                "SELECT id, content, cache_info FROM chat_messages WHERE author='assistant'"
+            ).fetchone()
             assistant_count = conn.execute(
                 "SELECT COUNT(*) FROM chat_messages WHERE author='assistant'"
             ).fetchone()[0]
@@ -1546,8 +1549,10 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             ).fetchone()[0]
             conn.close()
             self.assertIsNotNone(ctx)
-            self.assertEqual(int(assistant_count), 0)
-            self.assertEqual(int(mapping_count), 0)
+            self.assertEqual(int(assistant_count), 1)
+            self.assertEqual(assistant_row[1], 'partial')
+            self.assertIn('stream_interrupted', str(assistant_row[2] or ''))
+            self.assertEqual(int(mapping_count), 1)
             self.assertFalse(dc.is_resident_turn_active(
                 int(ctx['id']), 1, db_path=db, now=_FIXED_NOW,
             ))
@@ -1555,10 +1560,14 @@ class GatewayClientDisconnectTests(unittest.TestCase):
             self.assertGreater(int(ctx['resident_generation']), 1)
             self.assertEqual(gen_release_calls, [None])
             self.assertTrue(release_turn_calls)
-            self.assertFalse(any(c.get('persisted') for c in release_turn_calls))
+            self.assertTrue(all(c.get('persisted') for c in release_turn_calls))
             memo_mock.assert_not_called()
             moments_mock.assert_not_called()
             scoring_mock.assert_not_called()
+            cursor_after = dc.get_resident_history_cursor(
+                int(ctx['id']), int(ctx['resident_generation']), db_path=db,
+            )
+            self.assertIsNone(cursor_after)
         finally:
             os.unlink(db)
 
