@@ -1,0 +1,292 @@
+"""P-CONTEXT-LEAN-C1: Manual Forge selected rounds exact-once vs Daily carryover.
+
+Cases A–D only. No new CASE matrix beyond ownership / fail-safe / legacy keep.
+"""
+from __future__ import annotations
+
+import datetime
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = str(Path(__file__).resolve().parents[1])
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+os.environ.setdefault(
+    'HAYAGARDEN_CONFIG_DB_PATH',
+    str(Path(tempfile.gettempdir()) / 'hayagarden-test-c1-forge-carryover.db'),
+)
+
+from chat import daily_context as dc
+from chat import daily_history as dh
+
+
+def _tmp_db() -> str:
+    fd, path = tempfile.mkstemp(suffix='.db')
+    os.close(fd)
+    return path
+
+
+def _init_chat_messages(db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        '''CREATE TABLE chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            thinking TEXT DEFAULT '',
+            tool_calls TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            source_kind TEXT NOT NULL DEFAULT 'chat',
+            created_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
+        )'''
+    )
+    conn.commit()
+    conn.close()
+    dc.ensure_schema(db_path)
+
+
+def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute(
+        'INSERT INTO chat_messages (author, content, created_at) VALUES (?,?,?)',
+        (author, content, created_at),
+    )
+    conn.commit()
+    mid = int(cur.lastrowid)
+    conn.close()
+    return mid
+
+
+_FIXED_NOW = datetime.datetime(2026, 8, 11, 12, 0, 0)
+_real_current_chat_day = dc._current_chat_day
+
+
+def _pinned_current_chat_day(now=None):
+    return _real_current_chat_day(now or _FIXED_NOW)
+
+
+dc._current_chat_day = _pinned_current_chat_day
+
+
+def _seed_three_rounds(db: str) -> list[int]:
+    ids = []
+    base = datetime.datetime(2026, 8, 11, 5, 0, 0)
+    for i in range(3):
+        ts_u = (base + datetime.timedelta(minutes=i * 2)).strftime('%Y-%m-%d %H:%M:%S')
+        ts_a = (base + datetime.timedelta(minutes=i * 2 + 1)).strftime('%Y-%m-%d %H:%M:%S')
+        ids.append(_insert(db, 'hayana', f'U{i}', ts_u))
+        ids.append(_insert(db, 'fyodor', f'A{i}', ts_a))
+    return ids
+
+
+def _legacy_ctx(db: str) -> dict:
+    return dc.get_or_create_daily_context(
+        chat_id='c1-legacy',
+        local_day='2026-08-11',
+        db_path=db,
+        now=_FIXED_NOW,
+    )
+
+
+def _forge_target_ctx(
+    db: str,
+    *,
+    selected_ids: list[int],
+    complete_identity: bool = True,
+) -> dict:
+    """Create a Manual Forge target with selected carryover rows + identity evidence."""
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    now_s = _FIXED_NOW.strftime('%Y-%m-%d %H:%M:%S')
+    source_id = 1 if complete_identity else 0
+    switch_rid = 'sw-c1-req-1' if complete_identity else ''
+    session_id = 'claude-forge-session-c1' if complete_identity else ''
+    cur = conn.execute(
+        '''INSERT INTO daily_contexts (
+            chat_id, local_day, timezone, boundary_hour, context_epoch,
+            boundary_message_id, status, carryover_count, carryover_requested_count,
+            selection_finalized_at, is_backfill, resident_generation, version,
+            created_at, updated_at, window_mode, opened_at,
+            source_context_id, switch_request_id, claude_session_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 1, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            'c1-forge', '2026-08-11', 'Asia/Shanghai', 4, 2,
+            0, 'active', 3, 3, now_s,
+            now_s, now_s, 'manual', now_s,
+            source_id if source_id else None,
+            switch_rid or None,
+            session_id or None,
+        ),
+    )
+    target_id = int(cur.lastrowid)
+    for ordinal, mid in enumerate(selected_ids):
+        conn.execute(
+            'INSERT INTO daily_carryover_messages (context_id, ordinal, message_id) '
+            'VALUES (?,?,?)',
+            (target_id, ordinal, int(mid)),
+        )
+    conn.commit()
+    row = dict(conn.execute(
+        'SELECT * FROM daily_contexts WHERE id=?', (target_id,),
+    ).fetchone())
+    conn.close()
+    return row
+
+
+def _assert_no_carryover_layer(built: dict) -> None:
+    kinds = [layer.get('kind') for layer in built.get('layers') or []]
+    self_msg = 'provider layers must not include carryover'
+    assert 'carryover' not in kinds, self_msg
+    assert built.get('carryover_messages') == []
+
+
+class ForgeCarryoverOwnershipUnitTests(unittest.TestCase):
+    def test_requires_full_identity(self):
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover({
+            'window_mode': 'manual',
+        }))
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover({
+            'window_mode': 'manual',
+            'source_context_id': 9,
+            'switch_request_id': 'r1',
+        }))
+        self.assertTrue(dh.forge_transcript_owns_selected_carryover({
+            'window_mode': 'manual',
+            'source_context_id': 9,
+            'switch_request_id': 'r1',
+            'claude_session_id': 'sess',
+        }))
+        self.assertTrue(dh.forge_transcript_owns_selected_carryover({
+            'window_mode': 'manual_staged',
+            'source_context_id': 9,
+            'switch_request_id': 'r1',
+            'claude_session_id': 'sess',
+        }))
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover({
+            'window_mode': 'legacy_daily',
+            'source_context_id': 9,
+            'switch_request_id': 'r1',
+            'claude_session_id': 'sess',
+        }))
+
+
+class ColdForgeCarryoverDedupTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+
+    def tearDown(self):
+        os.unlink(self.db)
+
+    def _build(self, ctx, *, is_cold=True, is_respawn=False, inject_carryover=True):
+        with mock.patch(
+            'chat.daily_history._build_state_text',
+            return_value=('', 'none', {}),
+        ):
+            return dh.build_daily_window_context(
+                chat_id=str(ctx.get('chat_id') or 'default'),
+                daily_context=ctx,
+                static_system='STATIC',
+                is_cold=is_cold,
+                is_respawn=is_respawn,
+                inject_handoff=False,
+                inject_carryover=inject_carryover,
+                db_path=self.db,
+            )
+
+    def test_case_a_manual_forge_selected_3_cold_no_provider_carryover(self):
+        selected = _seed_three_rounds(self.db)
+        ctx = _forge_target_ctx(self.db, selected_ids=selected, complete_identity=True)
+        # DB rows remain
+        rows = dc.get_selected_carryover_messages(int(ctx['id']), db_path=self.db)
+        self.assertEqual(len(rows), 6)
+
+        built = self._build(ctx, is_cold=True, is_respawn=False)
+        m = built['manifest']
+        self.assertFalse(m['carryover_injected_this_turn'])
+        self.assertEqual(built['carryover_messages'], [])
+        self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_FORGE)
+        self.assertEqual(
+            m['carryover_suppressed_reason'],
+            dh.CARRYOVER_SUPPRESSED_FORGE_OWNS,
+        )
+        self.assertEqual(m['carryover_message_ids'], selected)
+        _assert_no_carryover_layer(built)
+
+    def test_case_b_manual_forge_resident_respawn_same_suppression(self):
+        selected = _seed_three_rounds(self.db)
+        ctx = _forge_target_ctx(self.db, selected_ids=selected, complete_identity=True)
+        built = self._build(ctx, is_cold=False, is_respawn=True)
+        m = built['manifest']
+        self.assertFalse(m['carryover_injected_this_turn'])
+        self.assertEqual(built['carryover_messages'], [])
+        self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_FORGE)
+        self.assertEqual(
+            m['carryover_suppressed_reason'],
+            dh.CARRYOVER_SUPPRESSED_FORGE_OWNS,
+        )
+        _assert_no_carryover_layer(built)
+        # selection evidence still present
+        self.assertEqual(
+            len(dc.get_selected_carryover_messages(int(ctx['id']), db_path=self.db)),
+            6,
+        )
+
+    def test_case_c_legacy_daily_carryover_still_injects(self):
+        # Previous-day rounds become carryover candidates for today's context.
+        base = datetime.datetime(2026, 8, 10, 11, 0, 0)
+        for i in range(3):
+            ts_u = (base + datetime.timedelta(minutes=i * 2)).strftime('%Y-%m-%d %H:%M:%S')
+            ts_a = (base + datetime.timedelta(minutes=i * 2 + 1)).strftime('%Y-%m-%d %H:%M:%S')
+            _insert(self.db, 'hayana', f'prev-U{i}', ts_u)
+            _insert(self.db, 'fyodor', f'prev-A{i}', ts_a)
+        ctx = _legacy_ctx(self.db)
+        dc.select_carryover(int(ctx['id']), 3, db_path=self.db)
+        refreshed = dc.get_daily_context_by_id(int(ctx['id']), db_path=self.db)
+        self.assertIsNotNone(refreshed)
+        built = self._build(refreshed, is_cold=True)
+        m = built['manifest']
+        self.assertTrue(m['carryover_injected_this_turn'])
+        self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_CARRYOVER)
+        self.assertEqual(m['carryover_suppressed_reason'], dh.CARRYOVER_SUPPRESSED_NONE)
+        self.assertTrue(built['carryover_messages'])
+        kinds = [layer.get('kind') for layer in built['layers']]
+        self.assertIn('carryover', kinds)
+
+    def test_case_d_incomplete_identity_keeps_carryover(self):
+        selected = _seed_three_rounds(self.db)
+        ctx = _forge_target_ctx(
+            self.db, selected_ids=selected, complete_identity=False,
+        )
+        # window_mode alone is not enough
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover(ctx))
+        built = self._build(ctx, is_cold=True)
+        m = built['manifest']
+        self.assertTrue(m['carryover_injected_this_turn'])
+        self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_CARRYOVER)
+        self.assertEqual(m['carryover_suppressed_reason'], dh.CARRYOVER_SUPPRESSED_NONE)
+        kinds = [layer.get('kind') for layer in built['layers']]
+        self.assertIn('carryover', kinds)
+
+    def test_capacity_swap_hot_like_still_skips_carryover(self):
+        """Regression lock: C1 must not invent carryover when inject_carryover=False."""
+        selected = _seed_three_rounds(self.db)
+        ctx = _forge_target_ctx(self.db, selected_ids=selected, complete_identity=True)
+        # Mimic Capacity Swap hot-like reprepare: cold_like assembly path flags
+        # with inject_carryover=False (existing Swap dedup).
+        built = self._build(
+            ctx, is_cold=True, is_respawn=False, inject_carryover=False,
+        )
+        self.assertFalse(built['manifest']['carryover_injected_this_turn'])
+        self.assertEqual(built['manifest']['cold_recent_owner'], dh.COLD_RECENT_OWNER_NONE)
+        _assert_no_carryover_layer(built)
+
+
+if __name__ == '__main__':
+    unittest.main()
