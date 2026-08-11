@@ -1,6 +1,8 @@
 """P-CONTEXT-LEAN-C1: Manual Forge selected rounds exact-once vs Daily carryover.
 
-Cases A–D only. No new CASE matrix beyond ownership / fail-safe / legacy keep.
+COLD_EXACT_ONCE_RULE:
+  suppress only when live provider still holds the Forge transcript;
+  fresh spawn / unproven ownership → KEEP carryover.
 """
 from __future__ import annotations
 
@@ -65,6 +67,7 @@ def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
 
 _FIXED_NOW = datetime.datetime(2026, 8, 11, 12, 0, 0)
 _real_current_chat_day = dc._current_chat_day
+FORGE_SESSION = 'claude-forge-session-c1'
 
 
 def _pinned_current_chat_day(now=None):
@@ -99,6 +102,7 @@ def _forge_target_ctx(
     *,
     selected_ids: list[int],
     complete_identity: bool = True,
+    forge_session_id: str = FORGE_SESSION,
 ) -> dict:
     """Create a Manual Forge target with selected carryover rows + identity evidence."""
     conn = sqlite3.connect(db)
@@ -106,7 +110,7 @@ def _forge_target_ctx(
     now_s = _FIXED_NOW.strftime('%Y-%m-%d %H:%M:%S')
     source_id = 1 if complete_identity else 0
     switch_rid = 'sw-c1-req-1' if complete_identity else ''
-    session_id = 'claude-forge-session-c1' if complete_identity else ''
+    session_id = forge_session_id if complete_identity else ''
     cur = conn.execute(
         '''INSERT INTO daily_contexts (
             chat_id, local_day, timezone, boundary_hour, context_epoch,
@@ -141,39 +145,46 @@ def _forge_target_ctx(
 
 def _assert_no_carryover_layer(built: dict) -> None:
     kinds = [layer.get('kind') for layer in built.get('layers') or []]
-    self_msg = 'provider layers must not include carryover'
-    assert 'carryover' not in kinds, self_msg
+    assert 'carryover' not in kinds, 'provider layers must not include carryover'
     assert built.get('carryover_messages') == []
 
 
+def _assert_has_carryover_layer(built: dict) -> None:
+    kinds = [layer.get('kind') for layer in built.get('layers') or []]
+    assert 'carryover' in kinds
+    assert built.get('carryover_messages')
+
+
 class ForgeCarryoverOwnershipUnitTests(unittest.TestCase):
-    def test_requires_full_identity(self):
-        self.assertFalse(dh.forge_transcript_owns_selected_carryover({
-            'window_mode': 'manual',
-        }))
-        self.assertFalse(dh.forge_transcript_owns_selected_carryover({
+    def test_requires_live_provider_session_match(self):
+        base = {
             'window_mode': 'manual',
             'source_context_id': 9,
             'switch_request_id': 'r1',
-        }))
-        self.assertTrue(dh.forge_transcript_owns_selected_carryover({
-            'window_mode': 'manual',
-            'source_context_id': 9,
-            'switch_request_id': 'r1',
-            'claude_session_id': 'sess',
-        }))
-        self.assertTrue(dh.forge_transcript_owns_selected_carryover({
-            'window_mode': 'manual_staged',
-            'source_context_id': 9,
-            'switch_request_id': 'r1',
-            'claude_session_id': 'sess',
-        }))
+            'claude_session_id': FORGE_SESSION,
+        }
+        # Forge-created alone is NOT enough
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover(base))
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover(
+            base, provider_claude_session_id='',
+        ))
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover(
+            base, provider_claude_session_id='fresh-other-session',
+        ))
+        # Live provider still on forge transcript → suppress allowed
+        self.assertTrue(dh.forge_transcript_owns_selected_carryover(
+            base, provider_claude_session_id=FORGE_SESSION,
+        ))
+        self.assertTrue(dh.forge_transcript_owns_selected_carryover(
+            {**base, 'window_mode': 'manual_staged'},
+            provider_claude_session_id=FORGE_SESSION,
+        ))
         self.assertFalse(dh.forge_transcript_owns_selected_carryover({
             'window_mode': 'legacy_daily',
             'source_context_id': 9,
             'switch_request_id': 'r1',
-            'claude_session_id': 'sess',
-        }))
+            'claude_session_id': FORGE_SESSION,
+        }, provider_claude_session_id=FORGE_SESSION))
 
 
 class ColdForgeCarryoverDedupTests(unittest.TestCase):
@@ -184,7 +195,15 @@ class ColdForgeCarryoverDedupTests(unittest.TestCase):
     def tearDown(self):
         os.unlink(self.db)
 
-    def _build(self, ctx, *, is_cold=True, is_respawn=False, inject_carryover=True):
+    def _build(
+        self,
+        ctx,
+        *,
+        is_cold=True,
+        is_respawn=False,
+        inject_carryover=True,
+        provider_claude_session_id=None,
+    ):
         with mock.patch(
             'chat.daily_history._build_state_text',
             return_value=('', 'none', {}),
@@ -198,16 +217,21 @@ class ColdForgeCarryoverDedupTests(unittest.TestCase):
                 inject_handoff=False,
                 inject_carryover=inject_carryover,
                 db_path=self.db,
+                provider_claude_session_id=provider_claude_session_id,
             )
 
-    def test_case_a_manual_forge_selected_3_cold_no_provider_carryover(self):
+    def test_case_a_live_forge_session_suppresses_carryover(self):
+        """Provider still holds Forge transcript (--resume same session)."""
         selected = _seed_three_rounds(self.db)
         ctx = _forge_target_ctx(self.db, selected_ids=selected, complete_identity=True)
-        # DB rows remain
         rows = dc.get_selected_carryover_messages(int(ctx['id']), db_path=self.db)
         self.assertEqual(len(rows), 6)
 
-        built = self._build(ctx, is_cold=True, is_respawn=False)
+        built = self._build(
+            ctx,
+            is_cold=True,
+            provider_claude_session_id=FORGE_SESSION,
+        )
         m = built['manifest']
         self.assertFalse(m['carryover_injected_this_turn'])
         self.assertEqual(built['carryover_messages'], [])
@@ -219,27 +243,55 @@ class ColdForgeCarryoverDedupTests(unittest.TestCase):
         self.assertEqual(m['carryover_message_ids'], selected)
         _assert_no_carryover_layer(built)
 
-    def test_case_b_manual_forge_resident_respawn_same_suppression(self):
+    def test_case_b_real_fresh_respawn_keeps_carryover(self):
+        """Forge resident dead → fresh _spawn: provider no longer owns Forge transcript."""
         selected = _seed_three_rounds(self.db)
         ctx = _forge_target_ctx(self.db, selected_ids=selected, complete_identity=True)
-        built = self._build(ctx, is_cold=False, is_respawn=True)
-        m = built['manifest']
-        self.assertFalse(m['carryover_injected_this_turn'])
-        self.assertEqual(built['carryover_messages'], [])
-        self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_FORGE)
-        self.assertEqual(
-            m['carryover_suppressed_reason'],
-            dh.CARRYOVER_SUPPRESSED_FORGE_OWNS,
+
+        # No live provider session (dead resident / not yet spawned)
+        built_dead = self._build(ctx, is_cold=False, is_respawn=True)
+        m = built_dead['manifest']
+        self.assertTrue(m['carryover_injected_this_turn'])
+        self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_CARRYOVER)
+        self.assertEqual(m['carryover_suppressed_reason'], dh.CARRYOVER_SUPPRESSED_NONE)
+        _assert_has_carryover_layer(built_dead)
+
+        # Fresh spawn session ≠ forge session
+        built_fresh = self._build(
+            ctx,
+            is_cold=False,
+            is_respawn=True,
+            provider_claude_session_id='fresh-spawn-session-xyz',
         )
-        _assert_no_carryover_layer(built)
-        # selection evidence still present
+        m2 = built_fresh['manifest']
+        self.assertTrue(m2['carryover_injected_this_turn'])
+        self.assertEqual(m2['cold_recent_owner'], dh.COLD_RECENT_OWNER_CARRYOVER)
+        self.assertEqual(m2['carryover_suppressed_reason'], dh.CARRYOVER_SUPPRESSED_NONE)
+        _assert_has_carryover_layer(built_fresh)
+        # selected_round_provider_copy_count = 1 (carryover only; forge transcript gone)
+        self.assertEqual(len(built_fresh['carryover_messages']), 6)
+        # DB selection evidence still present
         self.assertEqual(
             len(dc.get_selected_carryover_messages(int(ctx['id']), db_path=self.db)),
             6,
         )
 
+    def test_case_b_resumable_same_forge_session_still_suppresses(self):
+        """spawn_resumable(--resume forge session): still Exact-Once suppress."""
+        selected = _seed_three_rounds(self.db)
+        ctx = _forge_target_ctx(self.db, selected_ids=selected, complete_identity=True)
+        built = self._build(
+            ctx,
+            is_cold=False,
+            is_respawn=True,
+            provider_claude_session_id=FORGE_SESSION,
+        )
+        m = built['manifest']
+        self.assertFalse(m['carryover_injected_this_turn'])
+        self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_FORGE)
+        _assert_no_carryover_layer(built)
+
     def test_case_c_legacy_daily_carryover_still_injects(self):
-        # Previous-day rounds become carryover candidates for today's context.
         base = datetime.datetime(2026, 8, 10, 11, 0, 0)
         for i in range(3):
             ts_u = (base + datetime.timedelta(minutes=i * 2)).strftime('%Y-%m-%d %H:%M:%S')
@@ -255,33 +307,35 @@ class ColdForgeCarryoverDedupTests(unittest.TestCase):
         self.assertTrue(m['carryover_injected_this_turn'])
         self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_CARRYOVER)
         self.assertEqual(m['carryover_suppressed_reason'], dh.CARRYOVER_SUPPRESSED_NONE)
-        self.assertTrue(built['carryover_messages'])
-        kinds = [layer.get('kind') for layer in built['layers']]
-        self.assertIn('carryover', kinds)
+        _assert_has_carryover_layer(built)
 
     def test_case_d_incomplete_identity_keeps_carryover(self):
         selected = _seed_three_rounds(self.db)
         ctx = _forge_target_ctx(
             self.db, selected_ids=selected, complete_identity=False,
         )
-        # window_mode alone is not enough
-        self.assertFalse(dh.forge_transcript_owns_selected_carryover(ctx))
-        built = self._build(ctx, is_cold=True)
+        self.assertFalse(dh.forge_transcript_owns_selected_carryover(
+            ctx, provider_claude_session_id=FORGE_SESSION,
+        ))
+        built = self._build(
+            ctx, is_cold=True, provider_claude_session_id=FORGE_SESSION,
+        )
         m = built['manifest']
         self.assertTrue(m['carryover_injected_this_turn'])
         self.assertEqual(m['cold_recent_owner'], dh.COLD_RECENT_OWNER_CARRYOVER)
         self.assertEqual(m['carryover_suppressed_reason'], dh.CARRYOVER_SUPPRESSED_NONE)
-        kinds = [layer.get('kind') for layer in built['layers']]
-        self.assertIn('carryover', kinds)
+        _assert_has_carryover_layer(built)
 
     def test_capacity_swap_hot_like_still_skips_carryover(self):
         """Regression lock: C1 must not invent carryover when inject_carryover=False."""
         selected = _seed_three_rounds(self.db)
         ctx = _forge_target_ctx(self.db, selected_ids=selected, complete_identity=True)
-        # Mimic Capacity Swap hot-like reprepare: cold_like assembly path flags
-        # with inject_carryover=False (existing Swap dedup).
         built = self._build(
-            ctx, is_cold=True, is_respawn=False, inject_carryover=False,
+            ctx,
+            is_cold=True,
+            is_respawn=False,
+            inject_carryover=False,
+            provider_claude_session_id=FORGE_SESSION,
         )
         self.assertFalse(built['manifest']['carryover_injected_this_turn'])
         self.assertEqual(built['manifest']['cold_recent_owner'], dh.COLD_RECENT_OWNER_NONE)

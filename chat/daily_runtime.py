@@ -985,6 +985,9 @@ def _assemble_plan(
         raw = getattr(resident, 'last_state_snapshot', None) or {}
         if isinstance(raw, dict):
             last_state = {str(k): str(v) for k, v in raw.items()}
+    provider_sid = None
+    if resident is not None and _resident_is_alive(resident):
+        provider_sid = str(getattr(resident, 'session_id', None) or '').strip() or None
     assembly = dh.build_daily_window_context(
         chat_id=chat_id,
         daily_context=refreshed,
@@ -997,6 +1000,7 @@ def _assemble_plan(
         inject_carryover=cold_like,
         db_path=db_path,
         history_token_budget=history_token_budget,
+        provider_claude_session_id=provider_sid,
     )
     manifest = _build_manifest_base(
         plan_fields={
@@ -1973,6 +1977,9 @@ def _rebuild_daily_assembly_with_history_budget(
         )
     last_state: Optional[dict[str, str]] = None
     cold_like = bool(is_cold or is_respawn)
+    provider_sid = None
+    if resident is not None and _resident_is_alive(resident):
+        provider_sid = str(getattr(resident, 'session_id', None) or '').strip() or None
     assembly = dh.build_daily_window_context(
         chat_id=plan.chat_id,
         daily_context=refreshed,
@@ -1985,6 +1992,7 @@ def _rebuild_daily_assembly_with_history_budget(
         inject_carryover=cold_like,
         db_path=plan.db_path,
         history_token_budget=history_token_budget,
+        provider_claude_session_id=provider_sid,
     )
     return assembly
 

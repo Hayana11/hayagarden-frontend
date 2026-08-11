@@ -36,16 +36,21 @@ CARRYOVER_SUPPRESSED_FORGE_OWNS = 'forge_transcript_owns_selected_rounds'
 CARRYOVER_SUPPRESSED_NONE = 'none'
 
 
-def forge_transcript_owns_selected_carryover(daily_context: dict[str, Any]) -> bool:
-    """True only when identity proves Manual Forge transcript already owns selected rounds.
+def forge_transcript_owns_selected_carryover(
+    daily_context: dict[str, Any],
+    *,
+    provider_claude_session_id: Optional[str] = None,
+) -> bool:
+    """True only when the *current provider* still holds the Forge transcript.
 
-    Evidence (all required — fail closed if any missing):
-    - window_mode is a Manual Forge target mode
-    - source_context_id is set
-    - switch_request_id is set
-    - claude_session_id is set (forged Claude session bound)
+    Target-window Forge identity alone is not enough. Suppress carryover only when:
 
-    Does not guess from ``window_mode == manual`` alone. Continuity over token savings.
+    1. context is a Manual Forge target (mode + source + switch + forge session), AND
+    2. ``provider_claude_session_id`` equals the bound forge ``claude_session_id``
+       (i.e. live process is still on that transcript, typically via ``--resume``).
+
+    Fresh ``_spawn`` / missing live session / mismatched session → False (KEEP carryover).
+    Continuity over token savings when ownership cannot be proved.
     """
     ctx = daily_context or {}
     mode = str(ctx.get('window_mode') or '').strip()
@@ -59,7 +64,11 @@ def forge_transcript_owns_selected_carryover(daily_context: dict[str, Any]) -> b
         return False
     if not str(ctx.get('switch_request_id') or '').strip():
         return False
-    if not str(ctx.get('claude_session_id') or '').strip():
+    forge_sid = str(ctx.get('claude_session_id') or '').strip()
+    if not forge_sid:
+        return False
+    live_sid = str(provider_claude_session_id or '').strip()
+    if not live_sid or live_sid != forge_sid:
         return False
     return True
 
@@ -206,6 +215,7 @@ def build_daily_window_context(
     inject_carryover: bool = True,
     db_path: Optional[str] = None,
     history_token_budget: Optional[int] = None,
+    provider_claude_session_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Assemble provider context layers for one daily epoch turn.
 
@@ -220,6 +230,10 @@ def build_daily_window_context(
 
     Does not persist resident cursor — caller must invoke
     advance_resident_history_cursor() after assistant message lands.
+
+    ``provider_claude_session_id``: live Claude session id when the provider
+    process is already holding a transcript (e.g. Forge ``--resume``). Required
+    to suppress Manual Forge carryover replay (C1 Exact-Once).
     """
     _ = TZ_OFFSET_HOURS
     ctx = dict(daily_context)
@@ -243,10 +257,13 @@ def build_daily_window_context(
     from chat.daily_context import get_selected_carryover_messages
     carryover_messages = get_selected_carryover_messages(context_id, db_path=db_path)
     carryover_ids = [int(m['message_id']) for m in carryover_messages]
-    forge_owns_recent = forge_transcript_owns_selected_carryover(ctx)
+    forge_owns_recent = forge_transcript_owns_selected_carryover(
+        ctx,
+        provider_claude_session_id=provider_claude_session_id,
+    )
     would_inject_carryover = bool(inject_carryover and cold_like and carryover_messages)
-    # C1: when Forge transcript already owns selected rounds, keep DB rows for
-    # audit/UI but do not replay them as a provider-visible carryover layer.
+    # C1: suppress only when live provider still holds the Forge transcript.
+    # Fresh spawn / unproven ownership → KEEP carryover (exact-once for selected rounds).
     carryover_injected = bool(would_inject_carryover and not forge_owns_recent)
     if would_inject_carryover and forge_owns_recent:
         cold_recent_owner = COLD_RECENT_OWNER_FORGE
