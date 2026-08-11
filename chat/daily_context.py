@@ -97,6 +97,24 @@ HANDOFF_CONTENT_KEYS = (
     'last_topic',
 )
 
+# C2 provider projection field groups (storage schema unchanged).
+HANDOFF_PROVIDER_DURABLE_FIELDS = (
+    'source_day',
+    'confirmed_facts',
+    'decisions',
+    'open_loops',
+    'explicit_user_requests',
+)
+HANDOFF_PROVIDER_SCENE_FIELDS = (
+    'topics',
+    'last_topic',
+)
+# Storage-only identity — never provider-visible under C2 projection.
+HANDOFF_PROVIDER_IDENTITY_OMIT = (
+    'source_epoch',
+    'boundary_message_id',
+)
+
 _SCHEMA_READY: set[str] = set()
 
 
@@ -1973,9 +1991,24 @@ def validate_formal_handoff_content(
     return errors
 
 
-def format_formal_handoff_prompt(data: dict[str, Any]) -> str:
-    lines = ['【昨日交接·事实记录】', '以下字段记录昨日已经确认的信息，用于保持话题连续性。', '']
-    for key in HANDOFF_CONTENT_KEYS:
+def format_formal_handoff_prompt(
+    data: dict[str, Any],
+    *,
+    fields: Optional[tuple[str, ...] | list[str]] = None,
+) -> str:
+    """Format Handoff content for provider injection.
+
+    ``fields=None`` keeps the historical full-key dump (compat for non-assembly
+    callers). Provider Cold assembly passes an explicit projection field list so
+    omitted keys never appear (including empty ``topics:`` / ``last_topic:``).
+    """
+    lines = [
+        '【昨日交接·事实记录】',
+        '以下内容记录已确认事实、决定和未完成事项，用于保持连续性。',
+        '',
+    ]
+    keys = tuple(fields) if fields is not None else HANDOFF_CONTENT_KEYS
+    for key in keys:
         val = data.get(key)
         if isinstance(val, list):
             lines.append('%s:' % key)

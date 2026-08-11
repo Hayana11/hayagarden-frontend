@@ -11,6 +11,8 @@ from typing import Any, Optional
 from chat.daily_context import (
     DEFAULT_CHAT_ID,
     HANDOFF_READY,
+    HANDOFF_PROVIDER_DURABLE_FIELDS,
+    HANDOFF_PROVIDER_SCENE_FIELDS,
     HotTurnCursorError,
     _USER_AUTHORS,
     _message_display_content,
@@ -34,6 +36,22 @@ COLD_RECENT_OWNER_CARRYOVER = 'daily_carryover'
 COLD_RECENT_OWNER_NONE = 'none'
 CARRYOVER_SUPPRESSED_FORGE_OWNS = 'forge_transcript_owns_selected_rounds'
 CARRYOVER_SUPPRESSED_NONE = 'none'
+
+HANDOFF_PROJECTION_DURABLE_ONLY = 'durable_only'
+HANDOFF_PROJECTION_DURABLE_PLUS_SCENE = 'durable_plus_scene'
+HANDOFF_PROJECTION_NONE = 'none'
+
+HANDOFF_SCENE_OWNER_FORGE = 'forge_transcript'
+HANDOFF_SCENE_OWNER_CARRYOVER = 'daily_carryover'
+HANDOFF_SCENE_OWNER_HANDOFF = 'handoff'
+HANDOFF_SCENE_OWNER_NONE = 'none'
+
+
+def provider_handoff_fields_for_recent_owner(cold_recent_owner: str) -> tuple[str, ...]:
+    """C2: durable always; scene only when no recent-conversation owner."""
+    if cold_recent_owner in (COLD_RECENT_OWNER_FORGE, COLD_RECENT_OWNER_CARRYOVER):
+        return tuple(HANDOFF_PROVIDER_DURABLE_FIELDS)
+    return tuple(HANDOFF_PROVIDER_DURABLE_FIELDS) + tuple(HANDOFF_PROVIDER_SCENE_FIELDS)
 
 
 def forge_transcript_owns_selected_carryover(
@@ -248,11 +266,6 @@ def build_daily_window_context(
             ctx = refreshed
 
     handoff_content, handoff_status = resolve_bound_handoff(ctx, db_path=db_path)
-    handoff_prompt = (
-        format_formal_handoff_prompt(handoff_content)
-        if handoff_status == HANDOFF_READY and handoff_content else ''
-    )
-    handoff_injected = bool(inject_handoff and cold_like and handoff_prompt)
 
     from chat.daily_context import get_selected_carryover_messages
     carryover_messages = get_selected_carryover_messages(context_id, db_path=db_path)
@@ -274,6 +287,29 @@ def build_daily_window_context(
     else:
         cold_recent_owner = COLD_RECENT_OWNER_NONE
         carryover_suppressed_reason = CARRYOVER_SUPPRESSED_NONE
+
+    # C2: project Handoff after C1 recent-scene ownership is known.
+    handoff_ready = bool(handoff_status == HANDOFF_READY and handoff_content)
+    if handoff_ready and inject_handoff and cold_like:
+        projection_fields = provider_handoff_fields_for_recent_owner(cold_recent_owner)
+        handoff_prompt = format_formal_handoff_prompt(
+            handoff_content, fields=projection_fields,
+        )
+        handoff_injected = bool(handoff_prompt)
+        if cold_recent_owner == COLD_RECENT_OWNER_FORGE:
+            handoff_projection = HANDOFF_PROJECTION_DURABLE_ONLY
+            handoff_scene_owner = HANDOFF_SCENE_OWNER_FORGE
+        elif cold_recent_owner == COLD_RECENT_OWNER_CARRYOVER:
+            handoff_projection = HANDOFF_PROJECTION_DURABLE_ONLY
+            handoff_scene_owner = HANDOFF_SCENE_OWNER_CARRYOVER
+        else:
+            handoff_projection = HANDOFF_PROJECTION_DURABLE_PLUS_SCENE
+            handoff_scene_owner = HANDOFF_SCENE_OWNER_HANDOFF
+    else:
+        handoff_prompt = ''
+        handoff_injected = False
+        handoff_projection = HANDOFF_PROJECTION_NONE
+        handoff_scene_owner = HANDOFF_SCENE_OWNER_NONE
 
     state_text, state_mode, state_snapshot = _build_state_text(
         is_cold=cold_like, last_snapshot=last_state_snapshot,
@@ -359,6 +395,8 @@ def build_daily_window_context(
         'resident_history_cursor_id': cursor_before,
         'handoff_status': handoff_status,
         'handoff_injected_this_turn': handoff_injected,
+        'handoff_projection': handoff_projection,
+        'handoff_scene_owner': handoff_scene_owner,
         'carryover_unit': 'round',
         'carryover_count': carryover_round_count,
         'carryover_round_count': carryover_round_count,
