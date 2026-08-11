@@ -30,6 +30,12 @@ from chat.cold_bootstrap_budget import (
     estimate_text_tokens,
 )
 from chat.context_window_forge import atomic_write_jsonl_fsync
+from chat.claude_event_mapping import (
+    ERROR_MAPPING_LAG,
+    attempt_mapping_catchup_through,
+    latest_complete_assistant_watermark,
+    registry_mapping_lags_watermark,
+)
 from chat.session_registry import (
     SCAN_STATUS_BLOCKED,
     derive_transcript_path,
@@ -431,6 +437,47 @@ def prepare_capacity_swap_for_plan(
             source_context_epoch=source_epoch,
             source_resident_generation=source_gen,
         )
+    # Stale reliable-prefix guard (Step 10 Defect B): never build a candidate
+    # from a READY-but-lagging mapped prefix. Attempt synchronous catch-up
+    # first; if still behind the authoritative formal watermark, fail closed.
+    from chat import daily_context as dc
+
+    watermark = latest_complete_assistant_watermark(
+        context_id=source_ctx,
+        context_epoch=source_epoch,
+        resident_generation=source_gen,
+        before_message_id=int(plan.user_message_id),
+        db_path=plan.db_path,
+    )
+    if registry_mapping_lags_watermark(registry, watermark):
+        catchup = attempt_mapping_catchup_through(
+            context_id=source_ctx,
+            context_epoch=source_epoch,
+            resident_generation=source_gen,
+            chat_id=str(getattr(plan, 'chat_id', '') or 'default'),
+            through_assistant_id=int(watermark),
+            db_path=plan.db_path,
+        )
+        registry = get_context_claude_session(
+            source_ctx, source_gen, db_path=plan.db_path,
+        ) or registry
+        if (
+            not catchup.ok
+            or registry_mapping_lags_watermark(registry, watermark)
+        ):
+            return CapacitySwapRuntimeResult(
+                ok=False,
+                error_code=ERROR_MAPPING_LAG,
+                source_context_id=source_ctx,
+                source_context_epoch=source_epoch,
+                source_resident_generation=source_gen,
+                warnings=[
+                    str(catchup.error_code or ERROR_MAPPING_LAG),
+                    f'watermark={watermark}',
+                    f"last_mapped={registry.get('last_mapped_message_id')}",
+                ],
+            )
+
     if str(registry.get('scan_status') or '') == SCAN_STATUS_BLOCKED:
         return CapacitySwapRuntimeResult(
             ok=False,
@@ -468,8 +515,6 @@ def prepare_capacity_swap_for_plan(
             source_resident_generation=source_gen,
             warnings=[type(exc).__name__],
         )
-
-    from chat import daily_context as dc
 
     conn = dc._connect(plan.db_path)
     try:

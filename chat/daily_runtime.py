@@ -1830,19 +1830,31 @@ def finalize_transcript_mapping_after_success(
             int(plan.resident_generation),
             db_path=plan.db_path,
         )
+        # BLOCKED at/after current turn start stays fail-closed. BLOCKED with a
+        # true backlog (scan_offset behind this turn start) must still attempt
+        # synchronous catch-up — otherwise one missed map permanently poisons
+        # every later successful turn.
         if existing is not None and str(existing.get('scan_status') or '') == SCAN_STATUS_BLOCKED:
-            _set_transcript_mapping_manifest(
-                plan,
-                status='BLOCKED',
-                error_code=str(existing.get('scan_error_code') or 'registry_blocked'),
-                event_count=0,
-                scan_offset=(
-                    int(existing['scan_offset'])
-                    if existing.get('scan_offset') is not None
-                    else None
-                ),
+            turn_start = plan.transcript_start_offset
+            reg_off = existing.get('scan_offset')
+            has_backlog = (
+                turn_start is not None
+                and reg_off is not None
+                and int(reg_off) < int(turn_start)
             )
-            return dict(plan.manifest)
+            if not has_backlog:
+                _set_transcript_mapping_manifest(
+                    plan,
+                    status='BLOCKED',
+                    error_code=str(existing.get('scan_error_code') or 'registry_blocked'),
+                    event_count=0,
+                    scan_offset=(
+                        int(existing['scan_offset'])
+                        if existing.get('scan_offset') is not None
+                        else None
+                    ),
+                )
+                return dict(plan.manifest)
 
         if plan.transcript_observation_error_code:
             _set_transcript_mapping_manifest(
