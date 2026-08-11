@@ -28,6 +28,8 @@ import {
   cacheLabel,
   chatFilePreviewUrl,
   chatPlaceholder,
+  findLatestRoundContext,
+  formatCapacityLabel,
   fmtArtifactSize,
   fmtCostUsd,
   fmtTokens,
@@ -347,6 +349,11 @@ export function ChatScreen() {
   msgsRef.current = msgs;
 
   const placeholder = useMemo(() => chatPlaceholder(new Date()), []);
+  const capacityLabel = useMemo(
+    () => formatCapacityLabel(findLatestRoundContext(msgs)),
+    [msgs],
+  );
+  const capacityTitle = '上下文容量；90k 为 soft Swap 门槛，另有 30 轮触发';
   const dateLabel = useMemo(() => {
     const now = new Date();
     const dows = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -1500,7 +1507,12 @@ export function ChatScreen() {
             </div>
             <div className="vstack vstack-1" style={{ minWidth: 0, flexShrink: 1 }}>
               <span style={{ fontFamily: FONT_DISPLAY, fontSize: 17, fontWeight: 600, letterSpacing: 1, color: 'var(--ink)' }}>Fyodor</span>
-              <div className="hstack hstack-5" style={{ minWidth: 0 }}>
+              <div
+                className="hstack hstack-5"
+                style={{ minWidth: 0 }}
+                title={capacityTitle}
+                aria-label={capacityTitle}
+              >
                 <span
                   style={{
                     width: 6,
@@ -1508,14 +1520,27 @@ export function ChatScreen() {
                     borderRadius: '50%',
                     flexShrink: 0,
                     background: endpointOnline === false ? 'var(--err)' : endpointOnline ? 'var(--ok)' : 'var(--ghost)',
-                    animation: endpointOnline ? 'chatBreathe 2.2s ease-in-out infinite' : undefined,
+                    animation: endpointOnline === false
+                      ? undefined
+                      : endpointOnline
+                        ? 'chatBreathe 2.2s ease-in-out infinite'
+                        : 'chatBreathe 3s ease-in-out infinite',
                   }}
                 />
-                {endpointOnline !== null && !compactToolbar && (
-                  <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 10.5, letterSpacing: 1, color: 'var(--faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {endpointOnline ? 'always here' : 'away for now'}
-                  </span>
-                )}
+                <span
+                  style={{
+                    fontFamily: FONT_DISPLAY,
+                    fontStyle: 'italic',
+                    fontSize: 10.5,
+                    letterSpacing: 0.5,
+                    color: 'var(--faint)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}
+                >
+                  {capacityLabel}
+                </span>
               </div>
             </div>
             <div className="hstack hstack-1" style={{ marginLeft: 'auto', flexShrink: 0 }}>
