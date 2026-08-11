@@ -37,6 +37,9 @@ export interface ChatUsage {
   cacheSupported: boolean | null;
   costUsd?: number;
   costEstimated?: boolean;
+  lastRoundContext?: number;
+  residentTurnCount?: number;
+  respawnReason?: string;
 }
 
 export interface ChatMsg {
@@ -190,6 +193,34 @@ export function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 }
 
+/** Capacity Swap soft limit display denominator (CC_CONTEXT_SOFT_LIMIT). */
+export const CAPACITY_SOFT_LIMIT = 90000;
+
+/** Format resident context size for Fyodor header (lowercase k). */
+export function fmtCapacityK(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1000) return String(Math.round(n));
+  if (n % 1000 === 0) return `${n / 1000}k`;
+  return `${(n / 1000).toFixed(1)}k`;
+}
+
+export function formatCapacityLabel(lastRoundContext: number | null | undefined): string {
+  const denom = fmtCapacityK(CAPACITY_SOFT_LIMIT);
+  if (lastRoundContext == null || lastRoundContext <= 0) return `— / ${denom}`;
+  return `${fmtCapacityK(lastRoundContext)} / ${denom}`;
+}
+
+/** Latest assistant with positive last_round_context (skips partial rescue rows). */
+export function findLatestRoundContext(messages: ChatMsg[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role !== 'assistant') continue;
+    const lrc = m.cacheInfo?.lastRoundContext;
+    if (typeof lrc === 'number' && lrc > 0) return lrc;
+  }
+  return null;
+}
+
 export function fmtCostUsd(usd?: number, estimated?: boolean): string {
   const n = Number(usd || 0);
   if (!Number.isFinite(n) || n <= 0) return '';
@@ -222,6 +253,9 @@ export function normalizeCacheInfo(raw: Record<string, unknown> | null | undefin
     cacheSupported: (raw.cache_supported ?? raw.cacheSupported ?? null) as boolean | null,
     costUsd: Number(raw.cost_usd ?? raw.costUsd ?? 0) || undefined,
     costEstimated: Boolean(raw.cost_estimated ?? raw.costEstimated),
+    lastRoundContext: Number(raw.last_round_context ?? raw.lastRoundContext ?? 0) || undefined,
+    residentTurnCount: Number(raw.resident_turn_count ?? raw.residentTurnCount ?? 0) || undefined,
+    respawnReason: String(raw.respawn_reason ?? raw.respawnReason ?? '').trim() || undefined,
   };
 }
 
@@ -256,6 +290,9 @@ interface SseEvent {
   cache_supported?: boolean | null;
   cost_usd?: number;
   cost_estimated?: boolean;
+  last_round_context?: number;
+  resident_turn_count?: number;
+  respawn_reason?: string;
 }
 
 /**
@@ -333,6 +370,9 @@ export async function streamChatReply(
               cacheSupported: ev.cache_supported ?? null,
               costUsd: Number(ev.cost_usd || 0) || undefined,
               costEstimated: Boolean(ev.cost_estimated),
+              lastRoundContext: Number(ev.last_round_context || 0) || undefined,
+              residentTurnCount: Number(ev.resident_turn_count || 0) || undefined,
+              respawnReason: String(ev.respawn_reason || '').trim() || undefined,
             });
             break;
           case 'notice':
