@@ -4,16 +4,25 @@ Flag-off data layer. No background threads. Runtime may call
 ``run_mapping_pass`` later; this module never starts processes or models.
 
 Write-lock scope: file I/O and Transcript Reader run *before* BEGIN IMMEDIATE.
+
+Also owns synchronous backlog catch-up when Registry ``scan_offset`` lags
+behind a later successful turn's transcript start (Step 10 Defect A).
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
 from chat import daily_context as dc
-from chat.claude_transcript_model import EventRole, TranscriptEvent, TranscriptGraph
+from chat.claude_transcript_model import (
+    CandidateConversationRound,
+    EventRole,
+    TranscriptEvent,
+    TranscriptGraph,
+)
 from chat.claude_transcript_reader import (
     ReaderErrorCode,
     TranscriptReaderError,
@@ -33,6 +42,12 @@ ROLE_USER = 'user'
 ROLE_ASSISTANT = 'assistant'
 ROLE_TOOL_USE = 'tool_use'
 ROLE_TOOL_RESULT_USER = 'tool_result_user'
+
+ERROR_MAPPING_LAG = 'mapping_lag'
+ERROR_CATCHUP_REQUIRED = 'catchup_required'
+ERROR_CATCHUP_INCOMPLETE_UNALIGNED = 'catchup_incomplete_unaligned'
+ERROR_CATCHUP_AUTH_MISMATCH = 'catchup_auth_mismatch'
+ERROR_CATCHUP_FAILED = 'catchup_failed'
 
 
 class MappingError(Exception):
@@ -69,6 +84,131 @@ class MappingPassResult:
     mapped_event_uuids: list[str] = field(default_factory=list)
     scan_offset: Optional[int] = None
     registry: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class _AuthRound:
+    user_message_id: int
+    assistant_message_id: int
+    incomplete: bool = False
+
+
+def _assistant_row_incomplete(cache_info: Any) -> bool:
+    raw = str(cache_info or '').strip()
+    if not raw:
+        return False
+    try:
+        info = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(info, dict):
+        return False
+    return bool(
+        info.get('partial_rescue')
+        or info.get('turn_incomplete')
+        or info.get('stream_interrupted')
+    )
+
+
+def _load_auth_rounds_after(
+    conn: sqlite3.Connection,
+    *,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    after_message_id: Optional[int],
+    through_assistant_id: int,
+) -> list[_AuthRound]:
+    """Authoritative complete/incomplete formal rounds after Registry watermark.
+
+    Order is message_id ASC within the same context/epoch/generation.
+    Incomplete (partial_rescue) assistants are included so catch-up can skip
+    them in lockstep with incomplete transcript segments — never mapped as
+    complete rounds.
+    """
+    after = int(after_message_id or 0)
+    through = int(through_assistant_id)
+    cols = {
+        str(r[1]) for r in conn.execute('PRAGMA table_info(chat_messages)').fetchall()
+    }
+    cache_sel = 'm.cache_info' if 'cache_info' in cols else "'' AS cache_info"
+    rows = conn.execute(
+        f'''SELECT m.id AS id, dmc.role AS role, {cache_sel}
+            FROM daily_message_contexts dmc
+            JOIN chat_messages m ON m.id = dmc.message_id
+            WHERE dmc.context_id=? AND dmc.context_epoch=?
+              AND dmc.resident_generation=?
+              AND m.id > ? AND m.id <= ?
+            ORDER BY m.id ASC''',
+        (
+            int(context_id), int(context_epoch), int(resident_generation),
+            after, through,
+        ),
+    ).fetchall()
+
+    rounds: list[_AuthRound] = []
+    pending_user: Optional[int] = None
+    for row in rows:
+        mid = int(row['id'])
+        role = str(row['role'] or '')
+        if role == ROLE_USER:
+            if pending_user is not None:
+                raise MappingRejected(
+                    f'auth user {pending_user} missing assistant before {mid}',
+                    error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+                )
+            pending_user = mid
+            continue
+        if role == ROLE_ASSISTANT:
+            if pending_user is None:
+                raise MappingRejected(
+                    f'auth assistant {mid} without preceding user',
+                    error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+                )
+            rounds.append(_AuthRound(
+                user_message_id=int(pending_user),
+                assistant_message_id=mid,
+                incomplete=_assistant_row_incomplete(row['cache_info']),
+            ))
+            pending_user = None
+            continue
+        raise MappingRejected(
+            f'auth unexpected role={role!r} message_id={mid}',
+            error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+        )
+    if pending_user is not None:
+        raise MappingRejected(
+            f'auth trailing user {pending_user} without assistant',
+            error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+        )
+    return rounds
+
+
+def _round_byte_end(
+    graph: TranscriptGraph,
+    rounds: Sequence[CandidateConversationRound],
+    index: int,
+    range_end: int,
+) -> int:
+    """Exclusive end offset for rounds[index] within [.., range_end]."""
+    if index + 1 < len(rounds):
+        next_uid = rounds[index + 1].candidate_user_event_uuid
+        next_evt = graph.by_uuid.get(next_uid)
+        if next_evt is None or next_evt.byte_offset is None:
+            raise MappingRejected(
+                'next candidate missing byte_offset',
+                error_code=ERROR_CATCHUP_INCOMPLETE_UNALIGNED,
+            )
+        return int(next_evt.byte_offset)
+    return int(range_end)
+
+
+def _is_complete_terminal_round(graph: TranscriptGraph, rnd: CandidateConversationRound) -> bool:
+    try:
+        _assert_complete_terminal_round(graph, rnd)
+        return True
+    except MappingRejected:
+        return False
 
 
 def _content_has_tool_use(event: TranscriptEvent) -> bool:
@@ -370,9 +510,16 @@ def _verify_registry_identity(
         )
     if str(registry['chat_id']) != str(req.chat_id).strip():
         raise MappingRejected('chat_id mismatch', error_code='chat_id_mismatch')
-    if int(registry['scan_offset']) != int(expected_start):
+    reg_off = int(registry['scan_offset'])
+    want = int(expected_start)
+    if reg_off < want:
         raise MappingRejected(
-            'scan_offset != expected_start_offset',
+            'scan_offset behind expected_start_offset',
+            error_code=ERROR_MAPPING_LAG,
+        )
+    if reg_off > want:
+        raise MappingRejected(
+            'scan_offset ahead of expected_start_offset',
             error_code='scan_offset_cas_conflict',
         )
 
@@ -385,13 +532,37 @@ def _persist_blocked(
     expected_offset: int,
     db_path: Optional[str],
 ) -> Optional[dict[str, Any]]:
-    """CAS-blocked write; on stale race return current snapshot without overwrite."""
+    """CAS-blocked write; on stale race return current snapshot without overwrite.
+
+    When the failure is a true backlog (registry.scan_offset behind the turn
+    start), mark BLOCKED at the *actual* registry offset so callers never see
+    READY + stale prefix after a confirmed lag.
+    """
+    code = str(error_code)
+    cas_offset = int(expected_offset)
+    if code in {
+        ERROR_MAPPING_LAG,
+        ERROR_CATCHUP_REQUIRED,
+        ERROR_CATCHUP_FAILED,
+        ERROR_CATCHUP_INCOMPLETE_UNALIGNED,
+        ERROR_CATCHUP_AUTH_MISMATCH,
+        'scan_offset_cas_conflict',
+    }:
+        current = get_context_claude_session(
+            int(context_id), int(resident_generation), db_path=db_path,
+        )
+        if current is not None:
+            reg_off = int(current['scan_offset'])
+            if reg_off < int(expected_offset):
+                cas_offset = reg_off
+                if code == 'scan_offset_cas_conflict':
+                    code = ERROR_MAPPING_LAG
     try:
         return mark_scan_blocked(
             context_id=int(context_id),
             resident_generation=int(resident_generation),
-            error_code=error_code,
-            expected_offset=int(expected_offset),
+            error_code=code,
+            expected_offset=int(cas_offset),
             db_path=db_path,
         )
     except SessionRegistryConflict:
@@ -402,6 +573,52 @@ def _persist_blocked(
         return get_context_claude_session(
             int(context_id), int(resident_generation), db_path=db_path,
         )
+
+
+def _plan_one_round_from_graph(
+    graph: TranscriptGraph,
+    rnd: CandidateConversationRound,
+    *,
+    user_message_id: int,
+    assistant_message_id: int,
+    claude_session_id: str,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+) -> list[dict[str, Any]]:
+    """Plan mappings for one already-selected candidate round."""
+    _assert_complete_terminal_round(graph, rnd)
+    user_uid = rnd.candidate_user_event_uuid
+    planned: list[dict[str, Any]] = []
+    planned_events: list[TranscriptEvent] = []
+    for uid in rnd.event_uuids:
+        event = graph.by_uuid[uid]
+        is_user = uid == user_uid
+        role = mapping_role_for_event(event, is_canonical_user=is_user)
+        if role is None:
+            continue
+        message_id = int(user_message_id) if role == ROLE_USER else int(assistant_message_id)
+        event_sid = str(event.session_id or '').strip()
+        planned.append({
+            'event_uuid': uid,
+            'message_id': message_id,
+            'role': role,
+            'claude_session_id': event_sid,
+            'context_id': int(context_id),
+            'context_epoch': int(context_epoch),
+            'resident_generation': int(resident_generation),
+            'jsonl_byte_offset': event.byte_offset,
+        })
+        planned_events.append(event)
+
+    if not any(p['role'] == ROLE_USER for p in planned):
+        raise MappingRejected(
+            'canonical user mapping not planned', error_code='canonical_user_unplanned',
+        )
+    _assert_planned_event_sessions(
+        planned_events, registry_session_id=claude_session_id,
+    )
+    return planned
 
 
 def _phase1_plan(
@@ -456,6 +673,305 @@ def _phase1_plan(
     return dict(registry), planned
 
 
+def _phase1_plan_catchup(
+    req: MappingPassRequest,
+    *,
+    db_path: Optional[str],
+    registry: dict[str, Any],
+    require_reach_end: bool = True,
+) -> tuple[dict[str, Any], list[tuple[int, int, list[dict[str, Any]]]]]:
+    """Plan multi-round catch-up from registry.scan_offset → observed_end.
+
+    Returns (registry, work_items) where each work item is
+    ``(cas_expected_offset, new_offset, planned_rows)``.
+    Incomplete transcript/auth pairs are skipped only when their exclusive
+    end boundary is proven by a following candidate_user (or range end with
+    a matching incomplete auth round).
+
+    When ``require_reach_end`` is False (Forge/Swap watermark catch-up), stop
+    after authoritative rounds are satisfied even if the file has newer bytes.
+    """
+    start = int(registry['scan_offset'])
+    end = int(req.observed_end_offset)
+    if end < start:
+        raise MappingRejected(
+            'catch-up end before registry scan_offset',
+            error_code='offset_invalid',
+        )
+
+    transcript_path = str(registry['transcript_path'])
+    sid = str(registry['claude_session_id'])
+    try:
+        size = os.path.getsize(transcript_path)
+    except OSError as exc:
+        raise MappingRejected(
+            f'transcript unreadable: {exc}', error_code='transcript_unreadable',
+        ) from exc
+    if size < start or size < end:
+        raise MappingRejected(
+            'transcript truncated/short for catch-up',
+            error_code='transcript_short',
+        )
+
+    try:
+        graph = read_transcript_range(transcript_path, start, end)
+    except TranscriptReaderError as exc:
+        code = exc.code.value if isinstance(exc.code, ReaderErrorCode) else 'reader_error'
+        raise MappingRejected(str(exc), error_code=code) from exc
+
+    conn = dc._connect(db_path)
+    try:
+        auth_rounds = _load_auth_rounds_after(
+            conn,
+            context_id=int(req.context_id),
+            context_epoch=int(req.context_epoch),
+            resident_generation=int(req.resident_generation),
+            after_message_id=(
+                int(registry['last_mapped_message_id'])
+                if registry.get('last_mapped_message_id') is not None
+                else None
+            ),
+            through_assistant_id=int(req.assistant_message_id),
+        )
+    finally:
+        conn.close()
+
+    if not auth_rounds:
+        raise MappingRejected(
+            'catch-up has no authoritative rounds',
+            error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+        )
+    last = auth_rounds[-1]
+    if (
+        int(last.user_message_id) != int(req.user_message_id)
+        or int(last.assistant_message_id) != int(req.assistant_message_id)
+        or last.incomplete
+    ):
+        raise MappingRejected(
+            'catch-up final auth round != current complete turn',
+            error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+        )
+
+    rounds = list(graph.candidate_rounds)
+    work: list[tuple[int, int, list[dict[str, Any]]]] = []
+    auth_i = 0
+    cursor = start
+
+    for idx, rnd in enumerate(rounds):
+        if auth_i >= len(auth_rounds):
+            if require_reach_end:
+                raise MappingRejected(
+                    'extra complete transcript round without auth',
+                    error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+                )
+            break
+
+        round_end = _round_byte_end(graph, rounds, idx, end)
+        if round_end < cursor:
+            raise MappingRejected(
+                'catch-up round end before cursor',
+                error_code=ERROR_CATCHUP_FAILED,
+            )
+        complete = _is_complete_terminal_round(graph, rnd)
+        if not complete:
+            boundary_clear = (idx + 1 < len(rounds)) or (round_end == end)
+            if not boundary_clear:
+                raise MappingRejected(
+                    'incomplete backlog segment boundary unknown',
+                    error_code=ERROR_CATCHUP_INCOMPLETE_UNALIGNED,
+                )
+            auth = auth_rounds[auth_i]
+            if not auth.incomplete:
+                raise MappingRejected(
+                    'incomplete transcript vs complete auth round',
+                    error_code=ERROR_CATCHUP_INCOMPLETE_UNALIGNED,
+                )
+            if round_end > cursor:
+                work.append((cursor, round_end, []))
+            cursor = round_end
+            auth_i += 1
+            continue
+
+        auth = auth_rounds[auth_i]
+        if auth.incomplete:
+            raise MappingRejected(
+                'complete transcript vs incomplete auth round',
+                error_code=ERROR_CATCHUP_INCOMPLETE_UNALIGNED,
+            )
+        planned = _plan_one_round_from_graph(
+            graph,
+            rnd,
+            user_message_id=int(auth.user_message_id),
+            assistant_message_id=int(auth.assistant_message_id),
+            claude_session_id=sid,
+            context_id=int(req.context_id),
+            context_epoch=int(req.context_epoch),
+            resident_generation=int(req.resident_generation),
+        )
+        work.append((cursor, round_end, planned))
+        cursor = round_end
+        auth_i += 1
+
+    if auth_i != len(auth_rounds):
+        raise MappingRejected(
+            'authoritative rounds remain after transcript catch-up',
+            error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+        )
+    if require_reach_end and cursor != end:
+        if cursor < end and not any(
+            e.byte_offset is not None and int(e.byte_offset) >= cursor
+            and e.event_role == EventRole.CANDIDATE_USER and not e.is_sidechain
+            for e in graph.events
+        ):
+            work.append((cursor, end, []))
+            cursor = end
+        else:
+            raise MappingRejected(
+                'catch-up did not reach observed_end_offset',
+                error_code=ERROR_CATCHUP_FAILED,
+            )
+    return dict(registry), work
+
+
+def _commit_mapping_work(
+    req: MappingPassRequest,
+    *,
+    db_path: Optional[str],
+    phase1_registry: dict[str, Any],
+    work: Sequence[tuple[int, int, list[dict[str, Any]]]],
+) -> MappingPassResult:
+    """Phase-2 write: apply planned rows + CAS advances in order."""
+    conn = dc._connect(db_path)
+    registry_snapshot: Optional[dict[str, Any]] = None
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        registry = get_context_claude_session(
+            int(req.context_id), int(req.resident_generation), conn=conn,
+        )
+        if registry is None:
+            raise MappingRejected('registry missing', error_code='registry_missing')
+        registry_snapshot = dict(registry)
+
+        if str(registry['transcript_path']) != str(phase1_registry['transcript_path']):
+            raise MappingRejected('transcript_path changed', error_code='registry_changed')
+        if str(registry['claude_session_id']) != str(phase1_registry['claude_session_id']):
+            raise MappingRejected(
+                'registry session changed between phases',
+                error_code='registry_changed',
+            )
+        if int(registry['context_epoch']) != int(req.context_epoch):
+            raise MappingRejected('context_epoch mismatch', error_code='epoch_mismatch')
+        if int(registry['resident_generation']) != int(req.resident_generation):
+            raise MappingRejected(
+                'resident_generation mismatch', error_code='generation_mismatch',
+            )
+        if str(registry['chat_id']) != str(req.chat_id).strip():
+            raise MappingRejected('chat_id mismatch', error_code='chat_id_mismatch')
+
+        mapped: list[str] = []
+        final_offset = int(registry['scan_offset'])
+        last_mapped_asst: Optional[int] = (
+            int(registry['last_mapped_message_id'])
+            if registry.get('last_mapped_message_id') is not None
+            else None
+        )
+
+        for expected_off, new_off, planned in work:
+            if int(registry['scan_offset']) != int(expected_off):
+                raise MappingRejected(
+                    'scan_offset moved during catch-up',
+                    error_code='scan_offset_cas_conflict',
+                )
+            for row in planned:
+                if str(row['claude_session_id']) != str(registry['claude_session_id']):
+                    raise MappingRejected(
+                        'planned event session != registry',
+                        error_code='event_session_mismatch',
+                    )
+                if str(row['role']) == ROLE_USER:
+                    _assert_message_window(
+                        conn, int(row['message_id']),
+                        context_id=int(req.context_id),
+                        context_epoch=int(req.context_epoch),
+                        resident_generation=int(req.resident_generation),
+                        expected_role=ROLE_USER,
+                    )
+                elif str(row['role']) == ROLE_ASSISTANT:
+                    _assert_message_window(
+                        conn, int(row['message_id']),
+                        context_id=int(req.context_id),
+                        context_epoch=int(req.context_epoch),
+                        resident_generation=int(req.resident_generation),
+                        expected_role=ROLE_ASSISTANT,
+                    )
+                mapped.append(_insert_mapping_row(conn, row))
+                if str(row['role']) == ROLE_ASSISTANT:
+                    last_mapped_asst = int(row['message_id'])
+
+            cas_advance_scan_offset(
+                context_id=int(req.context_id),
+                resident_generation=int(req.resident_generation),
+                expected_offset=int(expected_off),
+                new_offset=int(new_off),
+                last_mapped_message_id=last_mapped_asst,
+                scan_status=SCAN_STATUS_READY,
+                scan_error_code=None,
+                conn=conn,
+            )
+            registry = get_context_claude_session(
+                int(req.context_id), int(req.resident_generation), conn=conn,
+            )
+            if registry is None:
+                raise MappingRejected('registry missing', error_code='registry_missing')
+            final_offset = int(new_off)
+
+        conn.commit()
+        final_reg = get_context_claude_session(
+            int(req.context_id), int(req.resident_generation), db_path=db_path,
+        )
+        return MappingPassResult(
+            ok=True,
+            mapped_event_uuids=mapped,
+            scan_offset=final_offset,
+            registry=final_reg,
+        )
+    except (MappingRejected, MappingConflict, SessionRegistryConflict, SessionRegistryNotFound) as exc:
+        conn.rollback()
+        code = getattr(exc, 'error_code', 'mapping_rejected')
+        reg = _persist_blocked(
+            context_id=req.context_id,
+            resident_generation=req.resident_generation,
+            error_code=str(code),
+            expected_offset=int(req.expected_start_offset),
+            db_path=db_path,
+        )
+        return MappingPassResult(
+            ok=False,
+            error_code=str(code),
+            registry=reg or registry_snapshot,
+        )
+    except SessionRegistryError as exc:
+        conn.rollback()
+        code = exc.error_code
+        reg = _persist_blocked(
+            context_id=req.context_id,
+            resident_generation=req.resident_generation,
+            error_code=str(code),
+            expected_offset=int(req.expected_start_offset),
+            db_path=db_path,
+        )
+        return MappingPassResult(
+            ok=False,
+            error_code=str(code),
+            registry=reg or registry_snapshot,
+        )
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def run_mapping_pass(
     request: MappingPassRequest,
     *,
@@ -465,6 +981,10 @@ def run_mapping_pass(
 
     Phase 1 (no write lock): Registry snapshot, file size, Reader, plan.
     Phase 2 (BEGIN IMMEDIATE): re-check identity/offset/roles, write, CAS.
+
+    When ``registry.scan_offset < expected_start_offset``, attempts synchronous
+    multi-round catch-up from the Registry watermark through
+    ``observed_end_offset`` instead of permanently poisoning later turns.
     """
     dc.ensure_schema(db_path)
     req = request
@@ -482,7 +1002,70 @@ def run_mapping_pass(
         )
         return MappingPassResult(ok=False, error_code='offset_invalid', registry=reg)
 
-    # ----- Phase 1: no SQLite write lock -----
+    # ----- Detect backlog vs fast path -----
+    pre_reg = get_context_claude_session(
+        int(req.context_id), int(req.resident_generation), db_path=db_path,
+    )
+    if pre_reg is None:
+        reg = _persist_blocked(
+            context_id=req.context_id,
+            resident_generation=req.resident_generation,
+            error_code='registry_missing',
+            expected_offset=start,
+            db_path=db_path,
+        )
+        return MappingPassResult(ok=False, error_code='registry_missing', registry=reg)
+
+    registry_snapshot = dict(pre_reg)
+    reg_off = int(pre_reg['scan_offset'])
+
+    if reg_off < start:
+        # DEFECT A: backlog catch-up (authoritative start = registry watermark)
+        try:
+            phase1_registry, work = _phase1_plan_catchup(
+                req,
+                db_path=db_path,
+                registry=dict(pre_reg),
+                require_reach_end=True,
+            )
+        except (MappingRejected, MappingConflict) as exc:
+            code = getattr(exc, 'error_code', ERROR_CATCHUP_FAILED)
+            if str(code) == ERROR_MAPPING_LAG:
+                code = ERROR_CATCHUP_FAILED
+            reg = _persist_blocked(
+                context_id=req.context_id,
+                resident_generation=req.resident_generation,
+                error_code=str(code),
+                expected_offset=start,
+                db_path=db_path,
+            )
+            return MappingPassResult(
+                ok=False,
+                error_code=str(code),
+                registry=reg or registry_snapshot,
+            )
+        return _commit_mapping_work(
+            req,
+            db_path=db_path,
+            phase1_registry=phase1_registry,
+            work=work,
+        )
+
+    if reg_off > start:
+        reg = _persist_blocked(
+            context_id=req.context_id,
+            resident_generation=req.resident_generation,
+            error_code='scan_offset_cas_conflict',
+            expected_offset=start,
+            db_path=db_path,
+        )
+        return MappingPassResult(
+            ok=False,
+            error_code='scan_offset_cas_conflict',
+            registry=reg or registry_snapshot,
+        )
+
+    # ----- Fast path: registry.scan_offset == turn start -----
     phase1_registry: Optional[dict[str, Any]] = None
     try:
         phase1_registry, planned = _phase1_plan(
@@ -504,108 +1087,200 @@ def run_mapping_pass(
             registry=reg or registry_snapshot,
         )
 
-    # ----- Phase 2: short write transaction -----
+    return _commit_mapping_work(
+        req,
+        db_path=db_path,
+        phase1_registry=phase1_registry,
+        work=[(start, end, planned)],
+    )
+
+
+def latest_complete_assistant_watermark(
+    *,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    before_message_id: Optional[int] = None,
+    db_path: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[int]:
+    """Latest complete/formal assistant id in-window (excludes partial_rescue)."""
+    own = conn is None
+    c = conn or dc._connect(db_path)
+    try:
+        cols = {
+            str(r[1]) for r in c.execute('PRAGMA table_info(chat_messages)').fetchall()
+        }
+        cache_sel = 'm.cache_info' if 'cache_info' in cols else "'' AS cache_info"
+        params: list[Any] = [
+            int(context_id), int(context_epoch), int(resident_generation),
+        ]
+        before_sql = ''
+        if before_message_id is not None:
+            before_sql = ' AND m.id < ?'
+            params.append(int(before_message_id))
+        rows = c.execute(
+            f'''SELECT m.id AS id, {cache_sel}
+                FROM daily_message_contexts dmc
+                JOIN chat_messages m ON m.id = dmc.message_id
+                WHERE dmc.context_id=? AND dmc.context_epoch=?
+                  AND dmc.resident_generation=?
+                  AND dmc.role='assistant'{before_sql}
+                ORDER BY m.id DESC''',
+            tuple(params),
+        ).fetchall()
+        for row in rows:
+            if _assistant_row_incomplete(row['cache_info']):
+                continue
+            return int(row['id'])
+        return None
+    finally:
+        if own:
+            c.close()
+
+
+def registry_mapping_lags_watermark(
+    registry: Optional[Mapping[str, Any]],
+    watermark_assistant_id: Optional[int],
+) -> bool:
+    """True when Registry last_mapped is behind authoritative complete watermark."""
+    if watermark_assistant_id is None:
+        return False
+    if registry is None:
+        return True
+    mapped = registry.get('last_mapped_message_id')
+    if mapped is None:
+        return True
+    return int(mapped) < int(watermark_assistant_id)
+
+
+def attempt_mapping_catchup_through(
+    *,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    chat_id: str,
+    through_assistant_id: int,
+    through_user_message_id: Optional[int] = None,
+    db_path: Optional[str] = None,
+) -> MappingPassResult:
+    """Best-effort catch-up through an authoritative assistant watermark.
+
+    Used by Capacity Swap / Manual Forge before consuming mapped prefix.
+    Does not invent provider results; fail-closed on unalignable backlog.
+    """
+    dc.ensure_schema(db_path)
+    registry = get_context_claude_session(
+        int(context_id), int(resident_generation), db_path=db_path,
+    )
+    if registry is None:
+        return MappingPassResult(ok=False, error_code='registry_missing')
+
     conn = dc._connect(db_path)
     try:
-        conn.execute('BEGIN IMMEDIATE')
-        registry = get_context_claude_session(
-            int(req.context_id), int(req.resident_generation), conn=conn,
-        )
-        if registry is None:
-            raise MappingRejected('registry missing', error_code='registry_missing')
-        registry_snapshot = dict(registry)
-        _verify_registry_identity(registry, req, expected_start=start)
-
-        # Path/session must still match what phase-1 planned against.
-        assert phase1_registry is not None
-        if str(registry['transcript_path']) != str(phase1_registry['transcript_path']):
-            raise MappingRejected('transcript_path changed', error_code='registry_changed')
-        if str(registry['claude_session_id']) != str(phase1_registry['claude_session_id']):
-            raise MappingRejected(
-                'registry session changed between phases',
-                error_code='registry_changed',
-            )
-        for row in planned:
-            if str(row['claude_session_id']) != str(registry['claude_session_id']):
-                raise MappingRejected(
-                    'planned event session != registry',
-                    error_code='event_session_mismatch',
+        if through_user_message_id is None:
+            row = conn.execute(
+                '''SELECT message_id FROM daily_message_contexts
+                   WHERE context_id=? AND context_epoch=? AND resident_generation=?
+                     AND role='user' AND message_id < ?
+                   ORDER BY message_id DESC LIMIT 1''',
+                (
+                    int(context_id), int(context_epoch), int(resident_generation),
+                    int(through_assistant_id),
+                ),
+            ).fetchone()
+            if row is None:
+                return MappingPassResult(
+                    ok=False,
+                    error_code=ERROR_CATCHUP_AUTH_MISMATCH,
+                    registry=dict(registry),
                 )
-
-        _assert_message_window(
-            conn, int(req.user_message_id),
-            context_id=int(req.context_id),
-            context_epoch=int(req.context_epoch),
-            resident_generation=int(req.resident_generation),
-            expected_role=ROLE_USER,
-        )
-        _assert_message_window(
-            conn, int(req.assistant_message_id),
-            context_id=int(req.context_id),
-            context_epoch=int(req.context_epoch),
-            resident_generation=int(req.resident_generation),
-            expected_role=ROLE_ASSISTANT,
-        )
-
-        mapped: list[str] = []
-        for row in planned:
-            mapped.append(_insert_mapping_row(conn, row))
-
-        cas_advance_scan_offset(
-            context_id=int(req.context_id),
-            resident_generation=int(req.resident_generation),
-            expected_offset=start,
-            new_offset=end,
-            last_mapped_message_id=int(req.assistant_message_id),
-            scan_status=SCAN_STATUS_READY,
-            scan_error_code=None,
-            conn=conn,
-        )
-        conn.commit()
-        final_reg = get_context_claude_session(
-            int(req.context_id), int(req.resident_generation), db_path=db_path,
-        )
-        return MappingPassResult(
-            ok=True,
-            mapped_event_uuids=mapped,
-            scan_offset=end,
-            registry=final_reg,
-        )
-    except (MappingRejected, MappingConflict, SessionRegistryConflict, SessionRegistryNotFound) as exc:
-        conn.rollback()
-        code = getattr(exc, 'error_code', 'mapping_rejected')
-        reg = _persist_blocked(
-            context_id=req.context_id,
-            resident_generation=req.resident_generation,
-            error_code=str(code),
-            expected_offset=start,
-            db_path=db_path,
-        )
-        return MappingPassResult(
-            ok=False,
-            error_code=str(code),
-            registry=reg or registry_snapshot,
-        )
-    except SessionRegistryError as exc:
-        conn.rollback()
-        code = exc.error_code
-        reg = _persist_blocked(
-            context_id=req.context_id,
-            resident_generation=req.resident_generation,
-            error_code=str(code),
-            expected_offset=start,
-            db_path=db_path,
-        )
-        return MappingPassResult(
-            ok=False,
-            error_code=str(code),
-            registry=reg or registry_snapshot,
-        )
-    except Exception:
-        conn.rollback()
-        raise
+            user_mid = int(row['message_id'])
+        else:
+            user_mid = int(through_user_message_id)
     finally:
         conn.close()
+
+    path = str(registry.get('transcript_path') or '')
+    try:
+        end = os.path.getsize(path) if path else 0
+    except OSError:
+        return MappingPassResult(
+            ok=False,
+            error_code='transcript_unreadable',
+            registry=dict(registry),
+        )
+
+    if (
+        registry.get('last_mapped_message_id') is not None
+        and int(registry['last_mapped_message_id']) >= int(through_assistant_id)
+    ):
+        return MappingPassResult(
+            ok=True,
+            scan_offset=int(registry['scan_offset']),
+            registry=dict(registry),
+        )
+
+    # Force lag path when registry is behind file end; catch-up starts at
+    # registry.scan_offset and may stop once the watermark auth rounds are done.
+    if end > int(registry['scan_offset']):
+        req = MappingPassRequest(
+            context_id=int(context_id),
+            context_epoch=int(context_epoch),
+            resident_generation=int(resident_generation),
+            chat_id=str(chat_id),
+            user_message_id=int(user_mid),
+            assistant_message_id=int(through_assistant_id),
+            expected_start_offset=int(end),
+            observed_end_offset=int(end),
+        )
+        try:
+            phase1_registry, work = _phase1_plan_catchup(
+                req,
+                db_path=db_path,
+                registry=dict(registry),
+                require_reach_end=False,
+            )
+        except (MappingRejected, MappingConflict) as exc:
+            code = getattr(exc, 'error_code', ERROR_CATCHUP_FAILED)
+            reg = _persist_blocked(
+                context_id=int(context_id),
+                resident_generation=int(resident_generation),
+                error_code=str(code),
+                expected_offset=int(end),
+                db_path=db_path,
+            )
+            return MappingPassResult(
+                ok=False,
+                error_code=str(code),
+                registry=reg or dict(registry),
+            )
+        if not work:
+            return MappingPassResult(
+                ok=True,
+                scan_offset=int(registry['scan_offset']),
+                registry=dict(registry),
+            )
+        return _commit_mapping_work(
+            req,
+            db_path=db_path,
+            phase1_registry=phase1_registry,
+            work=work,
+        )
+
+    # File has no unmapped bytes but watermark still lags — fail closed.
+    reg = _persist_blocked(
+        context_id=int(context_id),
+        resident_generation=int(resident_generation),
+        error_code=ERROR_MAPPING_LAG,
+        expected_offset=int(end) + 1,
+        db_path=db_path,
+    )
+    return MappingPassResult(
+        ok=False,
+        error_code=ERROR_MAPPING_LAG,
+        registry=reg or dict(registry),
+    )
 
 
 def get_user_canonical_by_event_uuid(
