@@ -382,12 +382,57 @@ def finalize_rewrite_daily_continuity(
     )
 
 
+def _mapping_tuple(row: Any) -> tuple[int, int, int]:
+    d = dict(row)
+    return (
+        int(d['context_id']),
+        int(d['context_epoch']),
+        int(d['resident_generation']),
+    )
+
+
+def _authoritative_daily_context_tuple(
+    *,
+    db_path: Optional[str] = None,
+) -> Optional[tuple[int, int, int]]:
+    """Current formal / authoritative daily context identity."""
+    from chat import daily_context as dc
+
+    try:
+        from chat.context_window import get_current_context_window
+        current = get_current_context_window(db_path=db_path)
+    except Exception:
+        current = None
+    if current is not None:
+        daily = dc.get_daily_context_by_id(int(current['id']), db_path=db_path)
+        if daily is not None:
+            return (
+                int(daily['id']),
+                int(daily['context_epoch']),
+                int(daily['resident_generation']),
+            )
+    active = dc.get_latest_active_context(db_path=db_path)
+    if active is not None:
+        return (
+            int(active['id']),
+            int(active['context_epoch']),
+            int(active['resident_generation']),
+        )
+    return None
+
+
 def _resolve_rewrite_daily_context(
     source_message_id: int,
     *,
     db_path: Optional[str] = None,
 ) -> Optional[tuple[int, int, int]]:
-    """Best-effort context for rewrite finalize from pre-source membership."""
+    """Resolve daily context for rewrite finalize.
+
+    Priority:
+    1. Exact ``daily_message_contexts`` row for ``source_message_id``.
+    2. Unmapped source: authoritative formal context; predecessor only when it
+       matches authoritative — never bind to a stale predecessor context.
+    """
     from chat import daily_context as dc
 
     sid = int(source_message_id or 0)
@@ -397,47 +442,30 @@ def _resolve_rewrite_daily_context(
     try:
         row = conn.execute(
             'SELECT context_id, context_epoch, resident_generation '
-            'FROM daily_message_contexts WHERE message_id < ? '
-            'ORDER BY message_id DESC LIMIT 1',
-            (sid,),
-        ).fetchone()
-        if row is not None:
-            d = dict(row)
-            return (
-                int(d['context_id']),
-                int(d['context_epoch']),
-                int(d['resident_generation']),
-            )
-        row = conn.execute(
-            'SELECT context_id, context_epoch, resident_generation '
             'FROM daily_message_contexts WHERE message_id=?',
             (sid,),
         ).fetchone()
         if row is not None:
-            d = dict(row)
-            return (
-                int(d['context_id']),
-                int(d['context_epoch']),
-                int(d['resident_generation']),
-            )
+            return _mapping_tuple(row)
+
+        pred_row = conn.execute(
+            'SELECT context_id, context_epoch, resident_generation '
+            'FROM daily_message_contexts WHERE message_id < ? '
+            'ORDER BY message_id DESC LIMIT 1',
+            (sid,),
+        ).fetchone()
     finally:
         conn.close()
 
-    try:
-        from chat.context_window import get_current_context_window
-        current = get_current_context_window(db_path=db_path)
-    except Exception:
-        current = None
-    if current is None:
+    auth = _authoritative_daily_context_tuple(db_path=db_path)
+    if auth is None:
         return None
-    daily = dc.get_daily_context_by_id(int(current['id']), db_path=db_path)
-    if daily is None:
-        return None
-    return (
-        int(daily['id']),
-        int(daily['context_epoch']),
-        int(daily['resident_generation']),
-    )
+    if pred_row is None:
+        return auth
+    pred = _mapping_tuple(pred_row)
+    if pred == auth:
+        return pred
+    return auth
 
 
 def _purge_stale_rewrite_daily_mappings(

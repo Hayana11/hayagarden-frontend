@@ -219,6 +219,129 @@ class RewriteColdReplayTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_edit_finalize_uses_source_mapping_not_predecessor_context(self):
+        """Cross-context boundary: source exact dmc wins over predecessor old context."""
+        db = _tmp_db()
+        try:
+            with mock.patch.object(config_store, 'get_bool', return_value=True):
+                _init_chat_messages(db)
+                start = datetime.datetime(2026, 7, 27, 3, 0, 0)
+                finish = datetime.datetime(2026, 7, 27, 10, 0, 0)
+                old_ctx = dc.get_or_create_daily_context(
+                    chat_id='boundary',
+                    local_day='2026-07-26',
+                    db_path=db,
+                    now=start,
+                    allow_backfill=True,
+                )
+                old_id = int(old_ctx['id'])
+                old_epoch = int(old_ctx['context_epoch'])
+                prev_id = _insert(
+                    db, 'hayana', 'prev in old',
+                    start.strftime('%Y-%m-%d %H:%M:%S'),
+                )
+                dc.record_daily_message_context(
+                    prev_id,
+                    context_id=old_id,
+                    context_epoch=old_epoch,
+                    resident_generation=1,
+                    role='user',
+                    db_path=db,
+                )
+                dc.advance_resident_history_cursor(old_id, 1, prev_id, db_path=db)
+
+                new_ctx = dc.get_or_create_daily_context(
+                    chat_id='boundary',
+                    local_day='2026-07-27',
+                    db_path=db,
+                    now=finish,
+                )
+                new_id = int(new_ctx['id'])
+                new_epoch = int(new_ctx['context_epoch'])
+                new_gen = int(new_ctx['resident_generation'])
+                source_id = _insert(
+                    db, 'hayana', 'source in new',
+                    finish.strftime('%Y-%m-%d %H:%M:%S'),
+                )
+                dc.record_daily_message_context(
+                    source_id,
+                    context_id=new_id,
+                    context_epoch=new_epoch,
+                    resident_generation=new_gen,
+                    role='user',
+                    db_path=db,
+                )
+
+                conn = sqlite3.connect(db)
+                conn.row_factory = sqlite3.Row
+                prep = rw.prepare_edit(
+                    conn,
+                    source_message_id=source_id,
+                    edited_content='edited user',
+                )
+                rw.store_candidate(
+                    conn, prep['rewrite_id'], content='edited assistant',
+                )
+                result = rw.activate_edit(conn, prep['rewrite_id'])
+                conn.close()
+
+                staging = result.get('staging') or {}
+                rw.finalize_rewrite_daily_continuity(result, staging, db_path=db)
+
+                new_uid = int(result['message_id'])
+                new_aid = int(result['assistant_message_id'])
+
+                conn = sqlite3.connect(db)
+                old_new_rows = conn.execute(
+                    'SELECT message_id FROM daily_message_contexts '
+                    'WHERE context_id=? AND message_id IN (?, ?)',
+                    (old_id, new_uid, new_aid),
+                ).fetchall()
+                new_uid_row = conn.execute(
+                    'SELECT context_id, context_epoch, resident_generation '
+                    'FROM daily_message_contexts WHERE message_id=?',
+                    (new_uid,),
+                ).fetchone()
+                new_aid_row = conn.execute(
+                    'SELECT context_id, context_epoch, resident_generation '
+                    'FROM daily_message_contexts WHERE message_id=?',
+                    (new_aid,),
+                ).fetchone()
+                conn.close()
+
+                self.assertEqual(len(old_new_rows), 0)
+                self.assertIsNotNone(new_uid_row)
+                self.assertIsNotNone(new_aid_row)
+                self.assertEqual(int(new_uid_row[0]), new_id)
+                self.assertEqual(int(new_uid_row[1]), new_epoch)
+                self.assertEqual(int(new_uid_row[2]), new_gen)
+                self.assertEqual(int(new_aid_row[0]), new_id)
+                self.assertEqual(int(new_aid_row[1]), new_epoch)
+                self.assertEqual(int(new_aid_row[2]), new_gen)
+
+                new_cursor = dc.get_resident_history_cursor(new_id, new_gen, db_path=db)
+                old_cursor = dc.get_resident_history_cursor(old_id, 1, db_path=db)
+                self.assertEqual(int(new_cursor), new_aid)
+                self.assertEqual(int(old_cursor), prev_id)
+
+                built = dh.build_daily_window_context(
+                    chat_id='boundary',
+                    daily_context=dc.get_daily_context_by_id(new_id, db_path=db),
+                    is_cold=True,
+                    db_path=db,
+                )
+                history_ids = [
+                    int(m['message_id']) for m in built.get('current_day_history') or []
+                ]
+                self.assertIn(new_uid, history_ids)
+                self.assertIn(new_aid, history_ids)
+                self.assertEqual(
+                    int((built.get('manifest') or {}).get('replayed_through_message_id') or 0),
+                    new_aid,
+                )
+        finally:
+            os.unlink(db)
+
 
 if __name__ == '__main__':
     unittest.main()
