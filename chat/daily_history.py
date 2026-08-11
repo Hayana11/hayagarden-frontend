@@ -26,6 +26,52 @@ from chat.daily_context import (
 from chat.daily_schema import META_SOURCE_KIND_CUTOVER, get_meta_int
 from chat.day_handoff import TZ_OFFSET_HOURS
 
+# Manual Forge targets only — never decide from window_mode alone.
+_FORGE_TARGET_WINDOW_MODES = frozenset({'manual', 'manual_staged'})
+
+COLD_RECENT_OWNER_FORGE = 'forge_transcript'
+COLD_RECENT_OWNER_CARRYOVER = 'daily_carryover'
+COLD_RECENT_OWNER_NONE = 'none'
+CARRYOVER_SUPPRESSED_FORGE_OWNS = 'forge_transcript_owns_selected_rounds'
+CARRYOVER_SUPPRESSED_NONE = 'none'
+
+
+def forge_transcript_owns_selected_carryover(
+    daily_context: dict[str, Any],
+    *,
+    provider_claude_session_id: Optional[str] = None,
+) -> bool:
+    """True only when the *current provider* still holds the Forge transcript.
+
+    Target-window Forge identity alone is not enough. Suppress carryover only when:
+
+    1. context is a Manual Forge target (mode + source + switch + forge session), AND
+    2. ``provider_claude_session_id`` equals the bound forge ``claude_session_id``
+       (i.e. live process is still on that transcript, typically via ``--resume``).
+
+    Fresh ``_spawn`` / missing live session / mismatched session → False (KEEP carryover).
+    Continuity over token savings when ownership cannot be proved.
+    """
+    ctx = daily_context or {}
+    mode = str(ctx.get('window_mode') or '').strip()
+    if mode not in _FORGE_TARGET_WINDOW_MODES:
+        return False
+    try:
+        source_id = int(ctx.get('source_context_id') or 0)
+    except (TypeError, ValueError):
+        return False
+    if source_id <= 0:
+        return False
+    if not str(ctx.get('switch_request_id') or '').strip():
+        return False
+    forge_sid = str(ctx.get('claude_session_id') or '').strip()
+    if not forge_sid:
+        return False
+    live_sid = str(provider_claude_session_id or '').strip()
+    if not live_sid or live_sid != forge_sid:
+        return False
+    return True
+
 
 def _connect(db_path: Optional[str]):
     from chat.daily_context import _connect as dc_connect
@@ -169,6 +215,7 @@ def build_daily_window_context(
     inject_carryover: bool = True,
     db_path: Optional[str] = None,
     history_token_budget: Optional[int] = None,
+    provider_claude_session_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Assemble provider context layers for one daily epoch turn.
 
@@ -183,6 +230,10 @@ def build_daily_window_context(
 
     Does not persist resident cursor — caller must invoke
     advance_resident_history_cursor() after assistant message lands.
+
+    ``provider_claude_session_id``: live Claude session id when the provider
+    process is already holding a transcript (e.g. Forge ``--resume``). Required
+    to suppress Manual Forge carryover replay (C1 Exact-Once).
     """
     _ = TZ_OFFSET_HOURS
     ctx = dict(daily_context)
@@ -206,7 +257,23 @@ def build_daily_window_context(
     from chat.daily_context import get_selected_carryover_messages
     carryover_messages = get_selected_carryover_messages(context_id, db_path=db_path)
     carryover_ids = [int(m['message_id']) for m in carryover_messages]
-    carryover_injected = bool(inject_carryover and cold_like and carryover_messages)
+    forge_owns_recent = forge_transcript_owns_selected_carryover(
+        ctx,
+        provider_claude_session_id=provider_claude_session_id,
+    )
+    would_inject_carryover = bool(inject_carryover and cold_like and carryover_messages)
+    # C1: suppress only when live provider still holds the Forge transcript.
+    # Fresh spawn / unproven ownership → KEEP carryover (exact-once for selected rounds).
+    carryover_injected = bool(would_inject_carryover and not forge_owns_recent)
+    if would_inject_carryover and forge_owns_recent:
+        cold_recent_owner = COLD_RECENT_OWNER_FORGE
+        carryover_suppressed_reason = CARRYOVER_SUPPRESSED_FORGE_OWNS
+    elif carryover_injected:
+        cold_recent_owner = COLD_RECENT_OWNER_CARRYOVER
+        carryover_suppressed_reason = CARRYOVER_SUPPRESSED_NONE
+    else:
+        cold_recent_owner = COLD_RECENT_OWNER_NONE
+        carryover_suppressed_reason = CARRYOVER_SUPPRESSED_NONE
 
     state_text, state_mode, state_snapshot = _build_state_text(
         is_cold=cold_like, last_snapshot=last_state_snapshot,
@@ -298,6 +365,8 @@ def build_daily_window_context(
         'carryover_message_count': carryover_message_count,
         'carryover_message_ids': carryover_ids,
         'carryover_injected_this_turn': carryover_injected,
+        'cold_recent_owner': cold_recent_owner,
+        'carryover_suppressed_reason': carryover_suppressed_reason,
         'selection_finalized': bool(ctx.get('selection_finalized_at')),
         'state_injected_this_turn': state_injected,
         'state_mode': state_mode,
