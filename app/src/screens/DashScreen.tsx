@@ -49,8 +49,12 @@ export function DashScreen() {
 
   let weatherLine = '☁ 天气加载中 · 吉林市';
   if (weather) {
-    const [icon, desc] = weatherDesc(weather.code);
-    weatherLine = `${icon} ${weather.temp}°C ${desc} · 湿度${weather.hum}% · 吉林市${weather.mock ? ' (mock)' : ''}`;
+    if (weather.unavailable || weather.temp == null || weather.code == null) {
+      weatherLine = '天气暂不可用 · 吉林市';
+    } else {
+      const [icon, desc] = weatherDesc(weather.code, weather.weather_text);
+      weatherLine = `${icon} ${weather.temp}°C ${desc} · 湿度${weather.hum}% · 吉林市`;
+    }
   }
 
   const emotionPathSm = smoothPath(EMOTION_VALS, 120, 26);

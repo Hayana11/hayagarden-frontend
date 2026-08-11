@@ -355,6 +355,22 @@ def get_countdowns():
         result.append(d)
     return jsonify({"countdowns":result})
 
+
+@app.route('/api/weather/now', methods=['GET'])
+def get_weather_now():
+    """Shared weather authority for Dash (and observability). Fail-closed — never mock."""
+    from chat.weather_authority import try_fetch_weather_now
+    snap = try_fetch_weather_now()
+    if snap is None:
+        return jsonify({
+            'ok': False,
+            'unavailable': True,
+            'location': '吉林市',
+            'source': 'open-meteo',
+        }), 200
+    return jsonify(snap.as_api_dict())
+
+
 @app.route('/api/countdowns', methods=['POST'])
 def add_countdown():
     data = request.get_json()

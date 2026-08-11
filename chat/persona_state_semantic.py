@@ -270,9 +270,8 @@ def translate_raw_state_to_persona_semantic(
         inner['mental_direction'] = mental_line
 
     environment: dict[str, str] = {}
-    time_line = _time_of_day_sentence(raw.get('time_bucket', ''))
-    if time_line:
-        environment['time_of_day'] = time_line
+    # P-CONTEXT-LEAN-H1A: time_bucket no longer broadcasts via Chat State semantic.
+    # Reality time is injected by chat.reality_context.build_reality_context instead.
     lighting_line = _lighting_sentence(raw.get('lights', ''))
     if lighting_line:
         environment['lighting'] = lighting_line

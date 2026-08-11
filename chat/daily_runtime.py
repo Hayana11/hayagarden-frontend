@@ -2498,6 +2498,33 @@ def ensure_resident_and_stream(
                 is_cold=plan.is_cold or actual_cold,
                 is_respawn=plan.is_respawn,
             )
+
+        # Reality Context after cold fence rebuild so history trim cannot drop it.
+        # Capacity Swap reprepare sets is_cold=is_respawn=False — Swap alone
+        # is not a new time-semantic context.
+        try:
+            from chat.reality_context import (
+                build_reality_context,
+                prepend_reality_to_provider_content,
+            )
+            reality = build_reality_context(
+                current_user_message_id=int(plan.user_message_id),
+                is_new_model_context=bool(
+                    plan.is_cold or plan.is_respawn or actual_cold
+                ),
+                db_path=plan.db_path,
+            )
+            plan.manifest['reality_context'] = {
+                'time_anchor_reason': reality.get('time_anchor_reason'),
+                'weather_anchor_reason': reality.get('weather_anchor_reason'),
+                'weather_status': reality.get('weather_status'),
+                'has_time_anchor': bool(str(reality.get('time_anchor') or '').strip()),
+                'has_weather_anchor': bool(str(reality.get('weather_anchor') or '').strip()),
+            }
+            content = prepend_reality_to_provider_content(content, reality)
+        except Exception:
+            logger.warning('reality_context injection failed; continuing without', exc_info=True)
+
         db_cursor = dc.get_resident_history_cursor(
             plan.context_id, plan.resident_generation, db_path=plan.db_path,
         )

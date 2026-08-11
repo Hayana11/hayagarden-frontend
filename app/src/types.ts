@@ -188,10 +188,14 @@ export interface PeriodSettings {
 }
 
 export interface WeatherNow {
-  temp: number;
-  hum: number;
-  code: number;
-  mock?: boolean;
+  temp?: number;
+  hum?: number;
+  code?: number;
+  weather_text?: string;
+  observed_at?: string;
+  location?: string;
+  /** True when server weather authority is unavailable (never mock numbers). */
+  unavailable?: boolean;
 }
 
 /** 1 = 新月 (passing mention) .. 5 = 满月 (core memory). */
