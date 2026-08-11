@@ -637,7 +637,6 @@ class DailyCandidateShadowTests(unittest.TestCase):
     def test_daily_candidate_requires_valid_file_path(self):
         resident = _FakeResident(cold_turns=2)
         fake_state = {
-            'time_bucket': 'bucket=2026-07-27 12:00',
             'emotion': 'valence=0.5',
             'lights': 'main=关 bedside=关',
         }
@@ -676,7 +675,7 @@ class DailyCandidateShadowTests(unittest.TestCase):
 
     def test_daily_candidate_reinjects_on_cold_respawn(self):
         resident = _RespawnResident(cold_turns=99)
-        fake_state = {'time_bucket': 'bucket=1', 'emotion': 'valence=0.5', 'lights': 'main=关 bedside=关'}
+        fake_state = {'emotion': 'valence=0.5', 'lights': 'main=关 bedside=关'}
         handoff_path = self._write_handoff_file()
         with self._run_with_patches(resident) as (stack, mgr, *_):
             with mock.patch('chat.clean_window_shadow._build_daily_state_text') as build_state:

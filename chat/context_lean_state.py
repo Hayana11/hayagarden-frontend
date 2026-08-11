@@ -102,7 +102,7 @@ def format_structured_state_anchor(
         f'schema_version={STATE_SCHEMA_VERSION} state_version={state_version}',
     ]
     order = (
-        'time_bucket', 'emotion', 'drive', 'lights', 'pocket',
+        'emotion', 'drive', 'lights', 'pocket',
         'todos', 'ledger', 'reminders', 'recent_activity',
     )
     seen: set[str] = set()

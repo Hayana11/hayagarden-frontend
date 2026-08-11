@@ -19,7 +19,6 @@ _STATE_RELEVANCE = {
     'ledger': re.compile(r'账|预算|花钱|收入|支出|记账|结余', re.I),
     'todos': re.compile(r'待办|活儿|留言板|board|给活儿', re.I),
     'reminders': re.compile(r'提醒|倒计时|待办事项|todo', re.I),
-    'time_bucket': re.compile(r'几点|现在几点|什么时间|什么时候|时间|几点了|现在.*几点', re.I),
 }
 
 _VOLATILE_STATE_KEYS = frozenset({'lights', 'pocket', 'ledger', 'todos', 'reminders'})
@@ -74,8 +73,6 @@ def build_state_send_payload(
     send: dict[str, str] = {}
     keys = list(dict.fromkeys(list(last_raw.keys()) + list(raw.keys())))
     for key in keys:
-        if key == 'time_bucket':
-            continue
         before = last_raw.get(key, '')
         after = raw.get(key, '')
         if after:
@@ -86,11 +83,6 @@ def build_state_send_payload(
         elif before:
             send[key] = ''
 
-    tb = raw.get('time_bucket', '')
-    if tb:
-        meaningful = any(k != 'time_bucket' for k in send)
-        if meaningful or state_key_relevant('time_bucket', user_text):
-            send['time_bucket'] = tb
     return send
 
 
@@ -109,7 +101,6 @@ def format_state_for_send(
     cumulative = normalize_state_dict(cumulative_before)
     lines = []
     labels = {
-        'time_bucket': '当前时间段',
         'emotion': '情绪',
         'drive': '驱动',
         'lights': '灯',
@@ -127,7 +118,7 @@ def format_state_for_send(
         elif not before and after:
             lines.append(f'- {label}：{after}')
         elif before != after:
-            if key in ('time_bucket', 'lights', 'pocket') and len(before) < 80 and len(after) < 80:
+            if key in ('lights', 'pocket') and len(before) < 80 and len(after) < 80:
                 lines.append(f'- {label}：{before} → {after}')
             else:
                 lines.append(f'- {label}：{after}')

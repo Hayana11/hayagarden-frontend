@@ -5086,8 +5086,29 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
             stdin_flushed = True
             mark_first_turn_stdin_sent(session)
 
+        # Reality Context for Manual Forge first-turn (same builder as Daily).
+        first_turn_content = session.user_content
+        try:
+            from chat.reality_context import (
+                build_reality_context,
+                prepend_reality_to_provider_content,
+            )
+            reality = build_reality_context(
+                current_user_message_id=int(user_message_id),
+                is_new_model_context=True,
+                db_path=DB_PATH,
+            )
+            first_turn_content = prepend_reality_to_provider_content(
+                first_turn_content, reality,
+            )
+        except Exception:
+            app.logger.warning(
+                'first-turn reality_context injection failed; continuing without',
+                exc_info=True,
+            )
+
         event_iter = iter(session.staged.send_turn(
-            session.user_content,
+            first_turn_content,
             on_stdin_flushed=on_stdin_flushed,
             idle_heartbeat_sec=10.0,
         ))

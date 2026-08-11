@@ -102,12 +102,12 @@ class NoAutoLightInjectionTests(unittest.TestCase):
     def test_cc_collect_state_does_not_query_lights(self):
         from chat.system_builder import _cc_collect_state
 
-        with mock.patch('chat.system_builder.build_time_bucket', return_value='上午'), \
-             mock.patch('urllib.request.urlopen') as urlopen_mock, \
+        with mock.patch('urllib.request.urlopen') as urlopen_mock, \
              mock.patch('config_store.get_bool', return_value=False):
             state = _cc_collect_state(lambda: mock.MagicMock(), lean=True)
         urlopen_mock.assert_not_called()
         self.assertEqual(state.get('lights'), '')
+        self.assertNotIn('time_bucket', state)
 
 
 class PowerOnlyStatusTests(unittest.TestCase):

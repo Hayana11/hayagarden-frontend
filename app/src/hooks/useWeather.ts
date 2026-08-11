@@ -6,9 +6,13 @@ export function useWeather(): WeatherNow | null {
   const [weather, setWeather] = useState<WeatherNow | null>(null);
   useEffect(() => {
     let alive = true;
-    fetchWeatherNow().then((w) => {
-      if (alive) setWeather(w);
-    });
+    fetchWeatherNow()
+      .then((w) => {
+        if (alive) setWeather(w);
+      })
+      .catch(() => {
+        if (alive) setWeather({ unavailable: true });
+      });
     return () => {
       alive = false;
     };
