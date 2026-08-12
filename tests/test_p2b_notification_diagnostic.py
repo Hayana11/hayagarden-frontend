@@ -55,6 +55,7 @@ class P2BNotificationDiagnosticTests(unittest.TestCase):
         self.assertIn('通知桥', self.html)
         self.assertIn('通知能力', self.html)
         self.assertIn('测试通知仅在本机显示，不访问消息服务器。', self.html)
+        self.assertRegex(self.html, r'id="notification-diag-result"></div>')
 
     def test_bridge_contract_and_browser_fallback(self):
         self.assertIn('window.ElpisNotifications', self.js)

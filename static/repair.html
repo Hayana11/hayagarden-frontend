@@ -206,7 +206,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <button class="native-diag-action" id="notification-diag-request" type="button" onclick="requestNotificationAccess()" disabled>申请通知权限</button>
       <button class="native-diag-action" id="notification-diag-test" type="button" onclick="sendNotificationDiagnosticTest()" disabled>发送测试通知</button>
     </div>
-    <div class="notification-diag-result" id="notification-diag-result">测试通知仅在本机显示，不访问消息服务器。</div>
+    <div class="notification-diag-hint">测试通知仅在本机显示，不访问消息服务器。</div>
+    <div class="notification-diag-result" id="notification-diag-result"></div>
   </div>
   <!-- P2B_NOTIFICATION_DIAG_END -->
   <!-- 生成锁急救 -->
