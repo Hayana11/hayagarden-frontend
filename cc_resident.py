@@ -1243,16 +1243,10 @@ class ResidentSession:
                                     if fence.get('approval_id'):
                                         tool_payload['approval_id'] = fence['approval_id']
                                     if fence.get('lease_decision') == 'CAPABILITY_ASK_REQUIRED':
-                                        tool_payload.update({
-                                            'deferred_tool_use': True,
-                                            'status': 'waiting_for_confirmation',
-                                        })
-                                        from tools.execution_fence import approval_prompt
-                                        prompt = approval_prompt(
-                                            tool_payload['name'], tool_payload['args'],
-                                        )
-                                        if prompt is not None:
-                                            tool_payload['approval_prompt'] = prompt
+                                        # Claude Code's authoritative pending identity arrives
+                                        # only on result.stop_reason=tool_deferred. Do not expose
+                                        # an actionable confirmation from this assistant echo.
+                                        continue
                                 yield ('tool_use', tool_payload)
                     elif t == 'user':
                         for b in ((d.get('message') or {}).get('content') or []):
@@ -1267,8 +1261,21 @@ class ResidentSession:
                                 })
                     elif t == 'result':
                         saw_result = True
-                        if d.get('stop_reason') == 'tool_deferred':
+                        if (
+                            uh_a0_runtime is not None
+                            and d.get('stop_reason') == 'tool_deferred'
+                        ):
+                            # The result is the sole authoritative source for
+                            # pending identity; capture it before exposing state.
                             pending = self._capture_authoritative_deferred(d)
+                            uh_a0_runtime.end_turn(turn_id=uh_a0_turn_id)
+                            from tools.execution_fence import (
+                                approval_prompt,
+                                read_current_turn_lease,
+                            )
+                            if read_current_turn_lease(uh_a0_runtime.path)[0] is not None:
+                                self._pending_deferred = None
+                                raise ResidentError('tool_deferred_lease_not_cleared')
                             deferred_payload = {
                                 'id': pending['tool_use_id'],
                                 'name': pending['tool_name'],
@@ -1278,16 +1285,11 @@ class ResidentSession:
                                 'deferred_tool_use': True,
                                 'status': 'waiting_for_confirmation',
                             }
-                            from tools.execution_fence import approval_prompt
                             prompt = approval_prompt(
                                 pending['tool_name'], pending['tool_input'],
                             )
                             if prompt is not None:
                                 deferred_payload['approval_prompt'] = prompt
-                            # The default lease must be gone before exposing
-                            # the waiting state to the upper stream.
-                            if uh_a0_runtime is not None:
-                                uh_a0_runtime.end_turn(turn_id=uh_a0_turn_id)
                             self._kill(quiet=True)
                             yield ('tool_use', deferred_payload)
                         if d.get('is_error'):
