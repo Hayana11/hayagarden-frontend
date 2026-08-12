@@ -69,6 +69,26 @@ NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
 
 DEFAULT_HOME_MCP_URL = "http://127.0.0.1:3100/mcp"
 UH_A0_MCP_CONFIG_FILENAME = "cc-tools-uh-a0.json"
+UH_A0_SETTINGS_FILENAME = "cc-settings-uh-a0.json"
+DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
+
+
+def resolve_uh_a0_turn_lease_path(cwd=None, *, env=None):
+    environ = env or os.environ
+    configured = str(environ.get("UH_A0_TURN_LEASE_PATH") or "").strip()
+    if configured:
+        return configured
+    return str(Path(cwd or Path.cwd()) / DEFAULT_TURN_LEASE_FILENAME)
+
+
+def build_uh_a0_settings():
+    return {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": "python3 -m tools.execution_fence pretooluse"}]}]}}
+
+
+def write_uh_a0_settings(cwd):
+    out = Path(cwd) / UH_A0_SETTINGS_FILENAME
+    out.write_text(json.dumps(build_uh_a0_settings(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(out)
 
 
 def _claude_binding(capability_id: str) -> str:
@@ -277,15 +297,12 @@ def build_uh_a0_spawn_plan(
         home_loading_mode = "preload_fallback"
 
     mcp_config = build_uh_a0_mcp_config(legacy_mcp_config_path=legacy_mcp_config_path)
+    target_cwd = Path(cwd or (Path(legacy_mcp_config_path).parent if legacy_mcp_config_path else Path.cwd()))
     mcp_path = ""
     if write_mcp_config:
-        target_cwd = cwd or (
-            Path(legacy_mcp_config_path).parent if legacy_mcp_config_path else Path.cwd()
-        )
-        mcp_path = write_uh_a0_mcp_config(
-            target_cwd,
-            legacy_mcp_config_path=legacy_mcp_config_path,
-        )
+        mcp_path = write_uh_a0_mcp_config(target_cwd, legacy_mcp_config_path=legacy_mcp_config_path)
+    settings_path = write_uh_a0_settings(target_cwd)
+    turn_lease_path = resolve_uh_a0_turn_lease_path(target_cwd, env=env)
 
     allowlist = list(UH_A0_BUILTIN_TOOLS) + list(home_tools)
     disallowed = list(FORBIDDEN_BUILTIN_TOOLS) + list(NON_P3_HOME_MCP_TOOLS)
@@ -294,6 +311,8 @@ def build_uh_a0_spawn_plan(
     disallowed_csv = ",".join(disallowed)
 
     spawn_extra_args = [
+        "--settings",
+        settings_path,
         "--mcp-config",
         mcp_path or json.dumps(mcp_config, ensure_ascii=False, separators=(",", ":")),
         "--strict-mcp-config",
@@ -315,6 +334,8 @@ def build_uh_a0_spawn_plan(
         "disallowed_tools_csv": disallowed_csv,
         "mcp_config": mcp_config,
         "mcp_config_path": mcp_path,
+        "settings_path": settings_path,
+        "turn_lease_path": turn_lease_path,
         "spawn_extra_args": spawn_extra_args,
         "physical_surface_fingerprint": physical_surface_fingerprint(),
         "loading_plan": loading,
