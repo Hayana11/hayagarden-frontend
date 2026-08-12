@@ -231,11 +231,90 @@ def clear_current_turn_lease(path=None):
         pass
 
 
+class UH_A0TurnRuntime:
+    """Trusted per-turn lease owner for the existing resident stream."""
+
+    def __init__(self, path=None, *, session_id=None):
+        self.path = str(path or default_turn_lease_path())
+        self.session_id = None if session_id is None else str(session_id)
+        self.active_turn_id = None
+
+    def start_turn(self, turn_lease, *, session_id=None):
+        """Atomically install exactly this turn's lease before tool use."""
+        if session_id is not None:
+            self.session_id = str(session_id)
+        write_current_turn_lease(
+            self.path,
+            turn_lease,
+            session_id=self.session_id,
+        )
+        self.active_turn_id = str(turn_lease["turn_id"])
+        return self.active_turn_id
+
+    def _record_matches_active_turn(self, record):
+        return (
+            self.active_turn_id is not None
+            and str(record.get("turn_id") or "") == str(self.active_turn_id)
+        )
+
+    def end_turn(self, *, turn_id=None):
+        """Clear only the lease installed by this runtime turn."""
+        lease, record = read_current_turn_lease(self.path)
+        expected = self.active_turn_id if turn_id is None else str(turn_id)
+        cleared = bool(
+            expected
+            and str(record.get("turn_id") or "") == str(expected)
+            and (
+                self.active_turn_id is None
+                or str(self.active_turn_id) == str(expected)
+            )
+        )
+        if cleared:
+            clear_current_turn_lease(self.path)
+        self.active_turn_id = None
+        return cleared
+
+    def abort_turn(self, *, turn_id=None):
+        return self.end_turn(turn_id=turn_id)
+
+    def evaluate(self, tool_name, tool_input):
+        lease, record = read_current_turn_lease(self.path)
+        if (
+            self.session_id is not None
+            and record.get("session_id") is not None
+            and str(record.get("session_id")) != str(self.session_id)
+        ):
+            result = _decision(
+                capability_id=capability_for_tool(tool_name),
+                turn_mode=str(lease.get("turn_mode") or "") if lease else None,
+                lease_decision="LEASE_MISMATCH",
+                diagnostic="session_id mismatch",
+            )
+            return result
+        return evaluate_tool_call(
+            tool_name,
+            tool_input,
+            lease,
+            expected_turn_id=record.get("turn_id"),
+        )
+
+    def deferred_tool_use(self, tool_name, tool_input):
+        """Return the existing stream payload for a concrete deferred action."""
+        result = self.evaluate(tool_name, tool_input)
+        payload = dict(result)
+        payload.update({
+            "event": "deferred_tool_use",
+            "tool_name": str(tool_name),
+            "tool_input": dict(tool_input or {}),
+        })
+        return payload
+
+
 def pretooluse_payload(result):
     decision = str(result.get("lease_decision") or "LEASE_MISMATCH")
     provider_decision = (
         "allow" if decision == "ALLOW"
-        else "ask" if decision == "CAPABILITY_ASK_REQUIRED"
+        else "defer" if decision == "CAPABILITY_ASK_REQUIRED"
         else "deny"
     )
     return {
