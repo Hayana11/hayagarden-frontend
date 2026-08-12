@@ -356,6 +356,8 @@ class ResidentSession:
                 legacy_mcp_config_path=self._mcp_config_path,
                 env=env,
             )
+            if isinstance(env, dict):
+                env.setdefault("UH_A0_TURN_LEASE_PATH", plan["turn_lease_path"])
             return {
                 'tools': plan['built_in_tools_csv'],
                 'extra': list(plan['spawn_extra_args']),
