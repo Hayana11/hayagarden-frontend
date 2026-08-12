@@ -139,6 +139,7 @@ def build_uh_a0_mcp_config(
             "home": {
                 "type": "http",
                 "url": resolve_home_mcp_url(legacy_mcp_config_path),
+                "headers": {"X-UH-A0-Profile": "uh_a0"},
             }
         }
     }
