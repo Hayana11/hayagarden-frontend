@@ -186,6 +186,29 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     </div>
   </div>
 
+  <!-- P2B_NOTIFICATION_DIAG_BEGIN -->
+  <div class="native-diag-card" id="notification-diag-card">
+    <div class="native-diag-hd">
+      <div>
+        <div class="native-diag-title">原生通知诊断</div>
+        <div class="native-diag-sub">Elpis Canary · P2B Native Notifications</div>
+      </div>
+    </div>
+    <div class="native-diag-row">
+      <span class="native-diag-label">通知桥</span>
+      <span class="native-diag-value" id="notification-diag-bridge"><span class="badge badge-warn">检查中</span></span>
+    </div>
+    <div class="native-diag-row">
+      <span class="native-diag-label">通知能力</span>
+      <span class="native-diag-value" id="notification-diag-capability"><span class="badge badge-warn">检查中</span></span>
+    </div>
+    <div class="native-diag-actions">
+      <button class="native-diag-action" id="notification-diag-request" type="button" onclick="requestNotificationAccess()" disabled>申请通知权限</button>
+      <button class="native-diag-action" id="notification-diag-test" type="button" onclick="sendNotificationDiagnosticTest()" disabled>发送测试通知</button>
+    </div>
+    <div class="notification-diag-result" id="notification-diag-result">测试通知仅在本机显示，不访问消息服务器。</div>
+  </div>
+  <!-- P2B_NOTIFICATION_DIAG_END -->
   <!-- 生成锁急救 -->
   <div class="fix-card">
     <div class="fix-title"><i class="ti ti-lock-open"></i> 聊天卡在「仍在生成」？</div>
@@ -486,6 +509,99 @@ async function send() {
 
 checkStatus();
 
+// P2B_NOTIFICATION_DIAG_JS_BEGIN
+function getNotificationBridge() {
+  try {
+    var bridge = window.ElpisNotifications;
+    if (bridge &&
+        typeof bridge.hasNotificationPermission === 'function' &&
+        typeof bridge.requestNotificationPermission === 'function' &&
+        typeof bridge.showTestNotification === 'function') {
+      return bridge;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function setNotificationDiagBadge(id, text, className) {
+  var element = document.getElementById(id);
+  if (element) {
+    element.innerHTML = '<span class="badge ' + className + '">' + text + '</span>';
+  }
+}
+
+function setNotificationDiagAction(id, enabled, text) {
+  var element = document.getElementById(id);
+  if (element) {
+    element.disabled = !enabled;
+    if (text) { element.textContent = text; }
+  }
+}
+
+function setNotificationDiagResult(text) {
+  var element = document.getElementById('notification-diag-result');
+  if (element) { element.textContent = text; }
+}
+
+function refreshNotificationDiagnostic() {
+  var bridge = getNotificationBridge();
+  if (!bridge) {
+    setNotificationDiagBadge('notification-diag-bridge', '仅 App 可用', 'badge-warn');
+    setNotificationDiagBadge('notification-diag-capability', '—', 'badge-warn');
+    setNotificationDiagAction('notification-diag-request', false, '申请通知权限');
+    setNotificationDiagAction('notification-diag-test', false, '发送测试通知');
+    return;
+  }
+  setNotificationDiagBadge('notification-diag-bridge', '已连接', 'badge-ok');
+  try {
+    var allowed = !!bridge.hasNotificationPermission();
+    if (allowed) {
+      setNotificationDiagBadge('notification-diag-capability', '可用', 'badge-ok');
+      setNotificationDiagAction('notification-diag-request', false, '已可用');
+      setNotificationDiagAction('notification-diag-test', true, '发送测试通知');
+    } else {
+      setNotificationDiagBadge('notification-diag-capability', '未开启', 'badge-warn');
+      setNotificationDiagAction('notification-diag-request', true, '申请通知权限');
+      setNotificationDiagAction('notification-diag-test', false, '发送测试通知');
+    }
+  } catch (e) {
+    setNotificationDiagBadge('notification-diag-capability', '不可用', 'badge-warn');
+    setNotificationDiagAction('notification-diag-request', true, '申请通知权限');
+    setNotificationDiagAction('notification-diag-test', false, '发送测试通知');
+  }
+}
+
+function requestNotificationAccess() {
+  var bridge = getNotificationBridge();
+  if (!bridge) { return; }
+  try {
+    bridge.requestNotificationPermission();
+    setNotificationDiagResult('已请求，正在重新检查…');
+    setTimeout(function () { refreshNotificationDiagnostic(); }, 180);
+  } catch (e) {
+    setNotificationDiagResult('调用失败');
+  }
+}
+
+function sendNotificationDiagnosticTest() {
+  var bridge = getNotificationBridge();
+  if (!bridge) { return; }
+  try {
+    var sent = !!bridge.showTestNotification();
+    setNotificationDiagResult(sent ? '已发送，请查看通知栏' : '当前无法发送通知');
+    refreshNotificationDiagnostic();
+  } catch (e) {
+    setNotificationDiagResult('调用失败');
+    refreshNotificationDiagnostic();
+  }
+}
+
+refreshNotificationDiagnostic();
+window.addEventListener('focus', function () { refreshNotificationDiagnostic(); });
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') { refreshNotificationDiagnostic(); }
+});
+// P2B_NOTIFICATION_DIAG_JS_END
 /* ===== P2A NativeBridge Lite diagnostic (local display only) ===== */
 function getElpisNative() {
   try {
