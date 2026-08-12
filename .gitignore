@@ -15,6 +15,8 @@ mcp-http.log
 # Deploy-managed pinned Claude Code install (see scripts/ensure-claude-runtime.sh)
 .claude-runtime/
 private/
+cc-tools-uh-a0.json
+
 
 # Playwright artifacts
 app/test-results/

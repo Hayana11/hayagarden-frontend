@@ -23,6 +23,7 @@ CC_STREAM_HARD_TIMEOUT = 1800  # absolute per-turn ceiling (runtime-tunable)
 IDLE_REAP_SECONDS = 3 * 60 * 60
 TOOL_PROFILE_LEGACY = 'legacy'
 TOOL_PROFILE_TEXT_ONLY = 'text_only'
+TOOL_PROFILE_UH_A0 = 'uh_a0'
 
 # Claude stdout events that refresh the stall / inactivity deadline.
 # Gateway/SSE heartbeats are synthetic and must NOT be listed here.
@@ -334,6 +335,57 @@ class ResidentSession:
         self._keepwarm_lease_expires_at = None
         self._tool_surface_snapshot = {}
 
+    def _build_spawn_tool_flags(self, *, env=None):
+        """Split built-in availability (--tools) from MCP permission args.
+
+        UH-A0 uses a fixed physical surface from ``cc_capability_adapter``.
+        Legacy keeps ``--tools ''`` and the constructor allowlist. text_only
+        keeps both built-ins and MCP executable surfaces empty.
+        """
+        if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
+            return {
+                'tools': '',
+                'extra': ['--allowedTools', ''],
+                'surface_allowed': '',
+                'mcp_path': None,
+            }
+        if self._tool_profile == TOOL_PROFILE_UH_A0:
+            from tools.cc_capability_adapter import build_uh_a0_spawn_plan
+            plan = build_uh_a0_spawn_plan(
+                cwd=self._cwd,
+                legacy_mcp_config_path=self._mcp_config_path,
+                env=env,
+            )
+            return {
+                'tools': plan['built_in_tools_csv'],
+                'extra': list(plan['spawn_extra_args']),
+                'surface_allowed': plan['surface_allowlist_csv'],
+                'mcp_path': plan['mcp_config_path'],
+            }
+        return {
+            'tools': '',
+            'extra': [
+                '--mcp-config', self._mcp_config_path,
+                '--strict-mcp-config',
+                '--allowedTools', self._allowed_tools,
+            ],
+            'surface_allowed': self._allowed_tools,
+            'mcp_path': self._mcp_config_path,
+        }
+
+    def _capture_tool_surface(self, tool_flags):
+        if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
+            self._tool_surface_snapshot = {}
+            return
+        try:
+            from tools.cc_tool_surface import capture_tool_surface_snapshot
+            self._tool_surface_snapshot = capture_tool_surface_snapshot(
+                tool_flags.get('surface_allowed') or '',
+                mcp_config_path=tool_flags.get('mcp_path') or self._mcp_config_path,
+            )
+        except Exception:
+            self._tool_surface_snapshot = {}
+
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot
         from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
@@ -344,6 +396,7 @@ class ResidentSession:
         except ClaudeRuntimeError as exc:
             raise ResidentError('claude_runtime:%s' % exc) from exc
         _model, model_identity, model_args = cc_model_snapshot()
+        tool_flags = self._build_spawn_tool_flags(env=env)
         base_args = claude_cmd(
             '-p',
             '--input-format', 'stream-json',
@@ -352,18 +405,11 @@ class ResidentSession:
             '--include-partial-messages',
             '--system-prompt', system_text,
             '--max-turns', '5',
-            '--tools', '',
+            '--tools', tool_flags['tools'],
             '--thinking-display', 'summarized',
             '--exclude-dynamic-system-prompt-sections',
         ) + model_args
-        if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-            args = base_args + ['--allowedTools', '']
-        else:
-            args = base_args + [
-                '--mcp-config', self._mcp_config_path,
-                '--strict-mcp-config',
-                '--allowedTools', self._allowed_tools,
-            ]
+        args = base_args + list(tool_flags['extra'])
         self._proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, cwd=self._cwd, env=env,
@@ -386,17 +432,7 @@ class ResidentSession:
         self._generation += 1
         self._next_spawn_reason = None
         self._reset_session_meta(respawn_reason=reason)
-        if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-            self._tool_surface_snapshot = {}
-        else:
-            try:
-                from tools.cc_tool_surface import capture_tool_surface_snapshot
-                self._tool_surface_snapshot = capture_tool_surface_snapshot(
-                    self._allowed_tools,
-                    mcp_config_path=self._mcp_config_path,
-                )
-            except Exception:
-                self._tool_surface_snapshot = {}
+        self._capture_tool_surface(tool_flags)
 
     def _kill(self, quiet=False):
         proc, self._proc = self._proc, None
@@ -530,6 +566,7 @@ class ResidentSession:
             except ClaudeRuntimeError as exc:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
+            tool_flags = self._build_spawn_tool_flags(env=env)
             base_args = claude_cmd(
                 '-p',
                 '--input-format', 'stream-json',
@@ -538,19 +575,12 @@ class ResidentSession:
                 '--include-partial-messages',
                 '--system-prompt', system_text,
                 '--max-turns', '5',
-                '--tools', '',
+                '--tools', tool_flags['tools'],
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--resume', resume_session_id,
             ) + model_args
-            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-                args = base_args + ['--allowedTools', '']
-            else:
-                args = base_args + [
-                    '--mcp-config', self._mcp_config_path,
-                    '--strict-mcp-config',
-                    '--allowedTools', self._allowed_tools,
-                ]
+            args = base_args + list(tool_flags['extra'])
             try:
                 self._proc = subprocess.Popen(
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -575,17 +605,7 @@ class ResidentSession:
             self._cold = False
             self._generation += 1
             self._reset_session_meta(respawn_reason=reason)
-            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-                self._tool_surface_snapshot = {}
-            else:
-                try:
-                    from tools.cc_tool_surface import capture_tool_surface_snapshot
-                    self._tool_surface_snapshot = capture_tool_surface_snapshot(
-                        self._allowed_tools,
-                        mcp_config_path=self._mcp_config_path,
-                    )
-                except Exception:
-                    self._tool_surface_snapshot = {}
+            self._capture_tool_surface(tool_flags)
             return self
 
     def spawn_fresh_named(
@@ -624,6 +644,7 @@ class ResidentSession:
             except ClaudeRuntimeError as exc:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
+            tool_flags = self._build_spawn_tool_flags(env=env)
             base_args = claude_cmd(
                 '-p',
                 '--input-format', 'stream-json',
@@ -632,21 +653,14 @@ class ResidentSession:
                 '--include-partial-messages',
                 '--system-prompt', system_text,
                 '--max-turns', '5',
-                '--tools', '',
+                '--tools', tool_flags['tools'],
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--session-id', session_id,
             ) + model_args
             if '--resume' in base_args:
                 raise ResidentError('fresh_named must not carry --resume')
-            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-                args = base_args + ['--allowedTools', '']
-            else:
-                args = base_args + [
-                    '--mcp-config', self._mcp_config_path,
-                    '--strict-mcp-config',
-                    '--allowedTools', self._allowed_tools,
-                ]
+            args = base_args + list(tool_flags['extra'])
             if '--resume' in args:
                 raise ResidentError('fresh_named must not carry --resume')
             try:
@@ -663,17 +677,7 @@ class ResidentSession:
             self._cold = True
             self._generation += 1
             self._reset_session_meta(respawn_reason=reason)
-            if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-                self._tool_surface_snapshot = {}
-            else:
-                try:
-                    from tools.cc_tool_surface import capture_tool_surface_snapshot
-                    self._tool_surface_snapshot = capture_tool_surface_snapshot(
-                        self._allowed_tools,
-                        mcp_config_path=self._mcp_config_path,
-                    )
-                except Exception:
-                    self._tool_surface_snapshot = {}
+            self._capture_tool_surface(tool_flags)
             return self
 
     def wait_staged_health(
