@@ -85,6 +85,13 @@ class EpochMismatchError(DailyRuntimeError):
         super().__init__(message, error_code='epoch_mismatch', retryable=False)
 
 
+class DailyWindowToolFencePending(DailyRuntimeError):
+    """Legacy Gateway catch target; Daily no longer raises this for tool_use."""
+
+    def __init__(self, message: str = 'legacy daily tool fence pending'):
+        super().__init__(message, error_code='DailyWindowToolFencePending', retryable=False)
+
+
 class DuplicateTurnInProgress(DailyRuntimeError):
     def __init__(self, message: str = 'duplicate turn already in progress'):
         super().__init__(message, error_code='duplicate_turn_in_progress', retryable=True)
