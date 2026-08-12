@@ -375,6 +375,11 @@ class DailyColdFenceTests(unittest.TestCase):
             manifest=dict(assembly.get('manifest') or {}),
             user_content=user_text,
             db_path=self.db,
+            turn_lease=issue_turn_lease(
+                turn_id='req',
+                turn_mode='chat',
+                issued_from='default_policy',
+            ),
         )
         return plan, ids
 
