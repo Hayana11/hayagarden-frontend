@@ -30,7 +30,7 @@ class P2BNotificationDiagnosticTests(unittest.TestCase):
 
     @staticmethod
     def _function_body(source, name):
-        match = re.search(r'function\\s+' + re.escape(name) + r'\\s*\\([^)]*\\)\\s*\\{', source)
+        match = re.search(r'function\s+' + re.escape(name) + r'\s*\([^)]*\)\s*\{', source)
         if not match:
             raise AssertionError('missing function: ' + name)
         depth = 1
