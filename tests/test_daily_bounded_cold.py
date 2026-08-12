@@ -34,6 +34,7 @@ os.environ.setdefault(
 from chat import daily_context as dc
 from chat import daily_history as dh
 from chat import daily_runtime as dr
+from tools.lease_signer import issue_turn_lease
 from chat.cold_bootstrap_budget import ColdBootstrapOverflow, NoBenefitRespawnError
 from chat.daily_cold_history import (
     group_formal_history_rounds,
