@@ -39,6 +39,25 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .refresh-btn{border:none;background:none;color:var(--muted);font-size:13px;cursor:pointer;padding:2px 6px;border-radius:6px;}
 .refresh-btn:hover{color:var(--primary);}
 
+/* 原生能力诊断（P2A NativeBridge Lite） */
+.native-diag-card{background:var(--card);border-radius:14px;border:.5px solid var(--border);padding:14px 16px;margin-bottom:12px;}
+.native-diag-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+.native-diag-title{font-size:13px;font-weight:600;color:var(--text);}
+.native-diag-sub{font-size:11px;color:var(--muted);margin-top:2px;}
+.native-diag-row{display:flex;align-items:flex-start;justify-content:space-between;padding:7px 0;border-bottom:.5px solid var(--border);}
+.native-diag-row:last-child{border-bottom:none;}
+.native-diag-label{font-size:13px;color:var(--text);flex-shrink:0;}
+.native-diag-right{text-align:right;margin-left:12px;min-width:0;}
+.native-diag-value{font-size:12px;color:var(--muted);line-height:1.45;word-break:break-all;}
+.native-diag-action{display:inline-block;margin-top:6px;margin-left:0;font-size:11px;padding:5px 10px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;}
+.native-diag-action:hover{border-color:var(--primary);color:var(--primary);}
+.native-diag-action:disabled{opacity:.45;cursor:not-allowed;}
+.native-diag-apps{margin-top:6px;text-align:left;}
+.native-diag-app{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);line-height:1.5;margin-top:2px;}
+.native-diag-app-name{margin-right:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px;}
+.native-diag-app-min{flex-shrink:0;}
+.native-diag-charge{font-size:10px;color:var(--muted);margin-top:2px;}
+
 /* 生成锁急救 */
 .fix-card{background:linear-gradient(135deg,#fff9f0,#fff);border:1px solid #f0dfc8;border-radius:14px;padding:14px 16px;margin-bottom:12px;}
 .fix-title{font-size:13px;font-weight:600;color:#8a5a18;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
@@ -119,6 +138,51 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
       <div class="status-row"><span class="status-name">codebase-mcp (5056)</span><span class="status-badge badge-checking" id="s-5056">检查中</span></div>
       <div class="status-row"><span class="status-name">ombre-brain (8000)</span><span class="status-badge badge-checking" id="s-8000">检查中</span></div>
       <div class="status-row"><span class="status-name">聊天生成锁</span><span class="status-badge badge-checking" id="s-genlock">检查中</span></div>
+    </div>
+  </div>
+
+  <!-- 原生能力诊断 -->
+  <div class="native-diag-card" id="native-diag-card">
+    <div class="native-diag-hd">
+      <div>
+        <div class="native-diag-title">原生能力诊断</div>
+        <div class="native-diag-sub">Elpis Canary · NativeBridge Lite</div>
+      </div>
+      <button class="refresh-btn" type="button" onclick="refreshNativeDiagnostic()" title="刷新"><i class="ti ti-refresh"></i> 刷新</button>
+    </div>
+    <div class="native-diag-row">
+      <span class="native-diag-label">原生桥</span>
+      <div class="native-diag-right">
+        <span class="status-badge badge-checking" id="nd-bridge">检查中</span>
+      </div>
+    </div>
+    <div class="native-diag-row">
+      <span class="native-diag-label">电量</span>
+      <div class="native-diag-right">
+        <div class="native-diag-value" id="nd-battery">—</div>
+        <div class="native-diag-charge" id="nd-battery-type"></div>
+      </div>
+    </div>
+    <div class="native-diag-row">
+      <span class="native-diag-label">屏幕时间权限</span>
+      <div class="native-diag-right">
+        <div class="native-diag-value" id="nd-usage">—</div>
+        <button class="native-diag-action" type="button" id="nd-usage-btn" onclick="requestUsageAccess()" disabled>去授权</button>
+      </div>
+    </div>
+    <div class="native-diag-row">
+      <span class="native-diag-label">今日屏幕时间</span>
+      <div class="native-diag-right">
+        <div class="native-diag-value" id="nd-screentime">—</div>
+        <div class="native-diag-apps" id="nd-apps"></div>
+      </div>
+    </div>
+    <div class="native-diag-row">
+      <span class="native-diag-label">电池优化</span>
+      <div class="native-diag-right">
+        <span class="status-badge badge-checking" id="nd-doze">—</span>
+        <button class="native-diag-action" type="button" id="nd-doze-btn" onclick="requestBatteryOptimizationExemption()" disabled>去设置</button>
+      </div>
     </div>
   </div>
 
@@ -421,6 +485,218 @@ async function send() {
 }
 
 checkStatus();
+
+/* ===== P2A NativeBridge Lite diagnostic (local display only) ===== */
+function getElpisNative() {
+  try {
+    if (window.ElpisNative) return window.ElpisNative;
+  } catch (e) {}
+  return null;
+}
+
+function hasNativeMethod(name) {
+  var bridge = getElpisNative();
+  return !!(bridge && typeof bridge[name] === 'function');
+}
+
+function setNativeText(id, text) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function setNativeBadge(id, text, cls) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'status-badge ' + cls;
+}
+
+function setNativeActionEnabled(id, enabled) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.disabled = !enabled;
+}
+
+function formatScreenMinutes(totalMinutes) {
+  var m = Math.floor(Number(totalMinutes) || 0);
+  if (m < 0) m = 0;
+  if (m < 60) return m + ' 分钟';
+  var h = Math.floor(m / 60);
+  var rem = m % 60;
+  if (rem === 0) return h + '小时';
+  return h + '小时 ' + rem + '分';
+}
+
+function chargeTypeLabel(t) {
+  if (t === 'ac') return 'AC';
+  if (t === 'usb') return 'USB';
+  if (t === 'wireless') return '无线';
+  return '';
+}
+
+function refreshNativeBattery() {
+  setNativeText('nd-battery-type', '');
+  if (!hasNativeMethod('getBattery')) {
+    setNativeText('nd-battery', '—');
+    return;
+  }
+  try {
+    var raw = window.ElpisNative.getBattery();
+    var data = JSON.parse(raw);
+    if (data && data.error) {
+      setNativeText('nd-battery', data.error === 'unavailable' ? '暂不可用' : '读取失败');
+      return;
+    }
+    var percent = (data && typeof data.percent === 'number') ? data.percent : -1;
+    var charging = !!(data && data.charging);
+    var tempC = (data && typeof data.tempC === 'number') ? data.tempC : -1;
+    var parts = [];
+    parts.push((percent >= 0 ? percent : '?') + '%');
+    parts.push(charging ? '充电中' : '未充电');
+    if (tempC >= 0) parts.push(tempC + '℃');
+    setNativeText('nd-battery', parts.join(' · '));
+    var ctype = chargeTypeLabel(data && data.chargeType);
+    setNativeText('nd-battery-type', ctype);
+  } catch (e) {
+    setNativeText('nd-battery', '读取失败');
+  }
+}
+
+function refreshNativeUsageAndScreenTime() {
+  var appsEl = document.getElementById('nd-apps');
+  if (appsEl) appsEl.innerHTML = '';
+
+  if (!hasNativeMethod('hasUsageAccess')) {
+    setNativeText('nd-usage', '—');
+    setNativeText('nd-screentime', '—');
+    setNativeActionEnabled('nd-usage-btn', false);
+    return;
+  }
+
+  var allowed = false;
+  try {
+    allowed = !!window.ElpisNative.hasUsageAccess();
+  } catch (e) {
+    setNativeText('nd-usage', '读取失败');
+    setNativeText('nd-screentime', '—');
+    setNativeActionEnabled('nd-usage-btn', hasNativeMethod('openUsageAccessSettings'));
+    return;
+  }
+
+  if (allowed) {
+    setNativeText('nd-usage', '已授权');
+    setNativeActionEnabled('nd-usage-btn', false);
+  } else {
+    setNativeText('nd-usage', '未授权');
+    setNativeActionEnabled('nd-usage-btn', hasNativeMethod('openUsageAccessSettings'));
+    setNativeText('nd-screentime', '等待授权');
+    return;
+  }
+
+  if (!hasNativeMethod('getScreenTime')) {
+    setNativeText('nd-screentime', '—');
+    return;
+  }
+  try {
+    var raw = window.ElpisNative.getScreenTime();
+    var data = JSON.parse(raw);
+    if (data && data.error === 'no_permission') {
+      setNativeText('nd-screentime', '未授权');
+      return;
+    }
+    if (data && data.error === 'unavailable') {
+      setNativeText('nd-screentime', '暂不可用');
+      return;
+    }
+    if (data && data.error) {
+      setNativeText('nd-screentime', '读取失败');
+      return;
+    }
+    var total = (data && typeof data.totalMinutes === 'number') ? data.totalMinutes : 0;
+    setNativeText('nd-screentime', formatScreenMinutes(total));
+    var apps = (data && Array.isArray(data.apps)) ? data.apps : [];
+    var html = '';
+    var i;
+    var limit = Math.min(5, apps.length);
+    for (i = 0; i < limit; i++) {
+      var app = apps[i] || {};
+      var name = app.name || app.pkg || '应用';
+      var minutes = (typeof app.minutes === 'number') ? app.minutes : 0;
+      html += '<div class="native-diag-app"><span class="native-diag-app-name">' +
+        esc(String(name)) + '</span><span class="native-diag-app-min">' +
+        minutes + ' 分钟</span></div>';
+    }
+    if (appsEl) appsEl.innerHTML = html;
+  } catch (e) {
+    setNativeText('nd-screentime', '读取失败');
+  }
+}
+
+function refreshNativeDoze() {
+  if (!hasNativeMethod('isIgnoringBatteryOptimizations')) {
+    setNativeBadge('nd-doze', '—', 'badge-checking');
+    setNativeActionEnabled('nd-doze-btn', false);
+    return;
+  }
+  try {
+    var ignoring = !!window.ElpisNative.isIgnoringBatteryOptimizations();
+    if (ignoring) {
+      setNativeBadge('nd-doze', '已豁免', 'badge-ok');
+      setNativeActionEnabled('nd-doze-btn', false);
+    } else {
+      setNativeBadge('nd-doze', '未豁免', 'badge-warn');
+      setNativeActionEnabled('nd-doze-btn', hasNativeMethod('requestIgnoreBatteryOptimizations'));
+    }
+  } catch (e) {
+    setNativeBadge('nd-doze', '读取失败', 'badge-err');
+    setNativeActionEnabled('nd-doze-btn', hasNativeMethod('requestIgnoreBatteryOptimizations'));
+  }
+}
+
+function refreshNativeDiagnostic() {
+  var bridge = getElpisNative();
+  var connected = !!(
+    bridge &&
+    typeof bridge.getBattery === 'function' &&
+    typeof bridge.hasUsageAccess === 'function' &&
+    typeof bridge.getScreenTime === 'function' &&
+    typeof bridge.isIgnoringBatteryOptimizations === 'function'
+  );
+  if (connected) {
+    setNativeBadge('nd-bridge', '已连接', 'badge-ok');
+  } else {
+    setNativeBadge('nd-bridge', '仅 App 可用', 'badge-warn');
+  }
+
+  // Safe reads only — never open settings Intents here.
+  refreshNativeBattery();
+  refreshNativeUsageAndScreenTime();
+  refreshNativeDoze();
+}
+
+function requestUsageAccess() {
+  if (!hasNativeMethod('openUsageAccessSettings')) return;
+  try {
+    window.ElpisNative.openUsageAccessSettings();
+  } catch (e) {}
+}
+
+function requestBatteryOptimizationExemption() {
+  if (!hasNativeMethod('requestIgnoreBatteryOptimizations')) return;
+  try {
+    window.ElpisNative.requestIgnoreBatteryOptimizations();
+  } catch (e) {}
+}
+
+refreshNativeDiagnostic();
+window.addEventListener('focus', function () {
+  refreshNativeDiagnostic();
+});
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') {
+    refreshNativeDiagnostic();
+  }
+});
 </script>
 </body>
 </html>
