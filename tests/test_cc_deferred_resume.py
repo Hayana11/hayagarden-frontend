@@ -52,6 +52,17 @@ class DeferredResumeContractTests(unittest.TestCase):
 
     def test_authoritative_defer_then_confirmation_resumes_same_pending_call(self):
         action = {"content": "明天寄快递"}
+        assistant_tool_use = {
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu-1",
+                    "name": "mcp__home__add_todo",
+                    "input": action,
+                }],
+            },
+        }
         deferred_result = {
             "type": "result",
             "stop_reason": "tool_deferred",
@@ -101,7 +112,7 @@ class DeferredResumeContractTests(unittest.TestCase):
             session._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
             session._system_text = "UH-A0 test system"
             session._uh_a0_turn_lease_path = str(lease_path)
-            session._proc = FakeProcess([deferred_result], pid=100)
+            session._proc = FakeProcess([assistant_tool_use, deferred_result], pid=100)
             runtime = UH_A0TurnRuntime(lease_path)
 
             with mock.patch.dict(
@@ -117,23 +128,20 @@ class DeferredResumeContractTests(unittest.TestCase):
                 "cc_resident.subprocess.Popen",
                 return_value=FakeProcess(resumed_events, pid=101),
             ) as popen:
-                first_events = list(session.send_turn(
+                first_stream = session.send_turn(
                     "请判断是否记入待办",
                     turn_lease=self.lease(),
                     turn_runtime=runtime,
-                ))
-
-                waiting = [
-                    payload for event, payload in first_events
-                    if event == "tool_use"
-                    and isinstance(payload, dict)
-                    and payload.get("deferred_tool_use")
-                ]
-                self.assertEqual(len(waiting), 1)
-                self.assertEqual(waiting[0]["id"], "toolu-1")
-                self.assertEqual(waiting[0]["name"], "mcp__home__add_todo")
-                self.assertEqual(waiting[0]["args"], action)
-                self.assertEqual(waiting[0]["status"], "waiting_for_confirmation")
+                )
+                first_event, first_payload = next(first_stream)
+                self.assertEqual(first_event, "tool_use")
+                self.assertTrue(first_payload["deferred_tool_use"])
+                self.assertEqual(first_payload["status"], "waiting_for_confirmation")
+                self.assertEqual(first_payload["id"], "toolu-1")
+                self.assertEqual(first_payload["name"], "mcp__home__add_todo")
+                self.assertEqual(first_payload["args"], action)
+                # The first externally visible waiting event is authoritative:
+                # pending state exists and the default lease is already gone.
                 self.assertIsNone(read_current_turn_lease(lease_path)[0])
                 self.assertEqual(
                     session.pending_deferred,
@@ -142,15 +150,24 @@ class DeferredResumeContractTests(unittest.TestCase):
                         "tool_use_id": "toolu-1",
                         "tool_name": "mcp__home__add_todo",
                         "tool_input": action,
-                        "approval_id": waiting[0]["approval_id"],
+                        "approval_id": first_payload["approval_id"],
                     },
                 )
+                first_events = [(first_event, first_payload)] + list(first_stream)
+                waiting = [
+                    payload for event, payload in first_events
+                    if event == "tool_use"
+                    and isinstance(payload, dict)
+                    and payload.get("deferred_tool_use")
+                    and payload.get("status") == "waiting_for_confirmation"
+                ]
+                self.assertEqual(len(waiting), 1)
                 self.assertFalse(any(event == "tool_result" for event, _ in first_events))
 
                 confirmation = self.lease(
                     source="user_confirmation",
                     requested=("todo.write",),
-                    approvals=(waiting[0]["approval_id"],),
+                    approvals=(first_payload["approval_id"],),
                     turn_id="101",
                 )
                 confirmation_leases = []
