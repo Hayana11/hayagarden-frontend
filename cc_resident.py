@@ -930,6 +930,8 @@ class ResidentSession:
             )
             assert_claude_user_content_safe(content)
         except VisionBridgeError as exc:
+            if uh_a0_runtime is not None:
+                uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
             raise ResidentError('vision input rejected: ' + str(exc)) from exc
         payload = json.dumps(
             {'type': 'user', 'message': {'role': 'user', 'content': content}},
@@ -955,7 +957,12 @@ class ResidentSession:
                 raise
 
         # 信已塞进门缝：立刻提交 resident 游标（即使后续流中断也不重复塞）
-        self._commit_sent_context(commit_meta)
+        try:
+            self._commit_sent_context(commit_meta)
+        except BaseException:
+            if uh_a0_runtime is not None:
+                uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
+            raise
 
         timeout_reason = [None]  # 'stall' | 'hard'
         # Stall = inactivity; hard = absolute ceiling. Defaults stay 360 / 1800.
@@ -1133,6 +1140,12 @@ class ResidentSession:
                                             'deferred_tool_use': True,
                                             'status': 'waiting_for_confirmation',
                                         })
+                                        from tools.execution_fence import approval_prompt
+                                        prompt = approval_prompt(
+                                            tool_payload['name'], tool_payload['args'],
+                                        )
+                                        if prompt is not None:
+                                            tool_payload['approval_prompt'] = prompt
                                 yield ('tool_use', tool_payload)
                     elif t == 'user':
                         for b in ((d.get('message') or {}).get('content') or []):
