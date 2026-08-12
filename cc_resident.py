@@ -357,6 +357,7 @@ class ResidentSession:
                 legacy_mcp_config_path=self._mcp_config_path,
                 env=env,
             )
+            self._uh_a0_turn_lease_path = plan["turn_lease_path"]
             if isinstance(env, dict):
                 env.setdefault("UH_A0_TURN_LEASE_PATH", plan["turn_lease_path"])
             return {
@@ -898,7 +899,10 @@ class ResidentSession:
             uh_a0_runtime = turn_runtime
             if uh_a0_runtime is None:
                 uh_a0_runtime = UH_A0TurnRuntime(
-                    default_turn_lease_path(cwd=self._cwd),
+                    getattr(
+                        self, '_uh_a0_turn_lease_path',
+                        default_turn_lease_path(cwd=self._cwd),
+                    ),
                     session_id=self._session_id,
                 )
             uh_a0_runtime.start_turn(turn_lease, session_id=self._session_id)
