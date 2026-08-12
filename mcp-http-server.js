@@ -3,7 +3,7 @@
 const express                            = require('express');
 const { McpServer }                      = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport }  = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
-const { execSync }                       = require('child_process');
+const { execSync, execFileSync }       = require('child_process');
 const { randomUUID }                     = require('crypto');
 const { readFileSync }                    = require('fs');
 const { z }                              = require('zod');
@@ -105,6 +105,21 @@ function buildServer() {
       return { content: [{ type: 'text', text: 'Error: ' + e.message }] };
     }
   }
+  function verifyCurrentHomeAction(toolName, toolInput) {
+    try {
+      const raw = execFileSync(process.env.PYTHON || 'python3', ['-m', 'tools.execution_fence', 'verify-json'], {
+        cwd: process.env.UH_A0_REPO_ROOT || '/opt/frontend', env: process.env,
+        input: JSON.stringify({ tool_name: toolName, tool_input: toolInput }),
+        encoding: 'utf8', timeout: 3000,
+      });
+      const decision = JSON.parse(raw || '{}');
+      if (decision.lease_decision === 'ALLOW') return { ok: true, decision };
+      return { ok: false, decision, result: { content: [{ type: 'text', text: 'UH-A0 ' + (decision.lease_decision || 'LEASE_MISMATCH') }] } };
+    } catch (_error) {
+      return { ok: false, decision: { lease_decision: 'LEASE_MISMATCH' }, result: { content: [{ type: 'text', text: 'UH-A0 LEASE_MISMATCH' }] } };
+    }
+  }
+
   async function postFrontend(path, bodyObj, extraHeaders = {}) {
     try {
       const r   = await fetch(FRONTEND + path, {
@@ -136,9 +151,15 @@ function buildServer() {
       note:     z.string().optional().describe('备注'),
       date:     z.string().optional().describe('YYYY-MM-DD，默认今天'),
     },
-    ({ amount, category, note, date }) => {
+    async ({ amount, category, note, date }) => {
+      const input = { amount };
+      if (category !== undefined) input.category = category;
+      if (note !== undefined) input.note = note;
+      if (date !== undefined) input.date = date;
+      const gate = verifyCurrentHomeAction('mcp__home__add_ledger', input);
+      if (!gate.ok) return gate.result;
       const d = date || new Date().toISOString().slice(0, 10);
-      return postFrontend('/api/ledger', { amount, category: category||'其他', note: note||null, date: d, author: 'fyodor_api' });
+      return postFrontend('/api/ledger', { amount, category:category||'其他', note:note||null, date:d, author:'fyodor_api' });
     }
   );
   server.tool(
@@ -162,8 +183,13 @@ function buildServer() {
       content:  z.string().describe('待办内容'),
       due_date: z.string().optional().describe('YYYY-MM-DD'),
     },
-    ({ content, due_date }) =>
-      postFrontend('/api/todos', { content, due_date: due_date||null, author: 'fyodor_api' })
+    async ({ content, due_date }) => {
+      const input = { content };
+      if (due_date !== undefined) input.due_date = due_date;
+      const gate = verifyCurrentHomeAction('mcp__home__add_todo', input);
+      if (!gate.ok) return gate.result;
+      return postFrontend('/api/todos', { content, due_date:due_date||null, author:'fyodor_api' });
+    }
   );
 
   // ── Calendar: Countdowns 倒计时 ──────────────────────────
@@ -258,9 +284,12 @@ app.all('/mcp', async (req, res) => {
   }
 });
 
-app.listen(3100, '127.0.0.1', () => {
-  console.log('MCP streamable-http server listening on 127.0.0.1:3100/mcp');
-});
+if (require.main === module) {
+  app.listen(3100, '127.0.0.1', () => {
+    console.log('MCP streamable-http server listening on 127.0.0.1:3100/mcp');
+  });
+  process.on('SIGTERM', () => process.exit(0));
+  process.on('SIGINT',  () => process.exit(0));
+}
 
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT',  () => process.exit(0));
+module.exports = { buildServer };
