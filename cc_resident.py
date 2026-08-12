@@ -885,6 +885,10 @@ class ResidentSession:
         stdout read. Not called if write/flush fails. If the callback raises,
         the resident is killed and the exception is re-raised (message already sent).
         """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            raise ResidentError('resident 进程不存在，需要先 ensure_alive')
+
         uh_a0_runtime = None
         uh_a0_turn_id = None
         if self._tool_profile == TOOL_PROFILE_UH_A0:
@@ -899,9 +903,6 @@ class ResidentSession:
                 )
             uh_a0_runtime.start_turn(turn_lease, session_id=self._session_id)
             uh_a0_turn_id = str(turn_lease['turn_id'])
-
-        proc = self._proc        if proc is None or proc.poll() is not None:
-            raise ResidentError('resident 进程不存在，需要先 ensure_alive')
 
         # 热 resident 从当前 EOF 开始；冷启动拿到 session_id 后从文件头回放。
         jsonl_cursor = None
