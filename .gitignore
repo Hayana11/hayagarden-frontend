@@ -16,6 +16,8 @@ mcp-http.log
 .claude-runtime/
 private/
 cc-tools-uh-a0.json
+cc-settings-uh-a0.json
+.uh-a0-current-turn-lease.json
 
 
 # Playwright artifacts

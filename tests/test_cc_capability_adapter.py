@@ -81,6 +81,10 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertNotIn(name, home)
         cfg = build_uh_a0_mcp_config()
         self.assertEqual(set(cfg["mcpServers"]), {"home"})
+        self.assertEqual(
+            cfg["mcpServers"]["home"]["headers"],
+            {"X-UH-A0-Profile": "uh_a0"},
+        )
         self.assertNotIn("brain", cfg["mcpServers"])
         self.assertNotIn("codebase", cfg["mcpServers"])
         self.assertNotIn("workspace", cfg["mcpServers"])
