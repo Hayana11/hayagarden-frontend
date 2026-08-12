@@ -12,6 +12,7 @@ from tools.execution_fence import (
     evaluate_tool_call,
     pretooluse_payload,
     read_current_turn_lease,
+    UH_A0TurnRuntime,
     write_current_turn_lease,
 )
 from tools.lease_signer import issue_turn_lease
@@ -166,12 +167,77 @@ class ExecutionFenceTests(unittest.TestCase):
             self.assertEqual(record["session_id"], "cc")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_n_runtime_turn_100_rotates_and_clears_before_turn_101(self):
+        action = {"content": "runtime-only todo"}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "lease.json"
+            runtime = UH_A0TurnRuntime(path, session_id="cc-runtime")
+
+            turn100 = self.lease(
+                source="explicit_user_intent",
+                requested=("todo.write",),
+                turn_id="100",
+            )
+            runtime.start_turn(turn100)
+            self.assertEqual(
+                runtime.evaluate("mcp__home__add_todo", action)["lease_decision"],
+                "ALLOW",
+            )
+            self.assertTrue(runtime.end_turn(turn_id="100"))
+            self.assertIsNone(read_current_turn_lease(path)[0])
+
+            turn101 = self.lease(turn_id="101")
+            runtime.start_turn(turn101)
+            denied = runtime.evaluate("mcp__home__add_todo", action)
+            self.assertEqual(denied["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+            self.assertEqual(
+                runtime.deferred_tool_use("mcp__home__add_todo", action),
+                {
+                    **denied,
+                    "event": "deferred_tool_use",
+                    "tool_name": "mcp__home__add_todo",
+                    "tool_input": action,
+                },
+            )
+            self.assertTrue(runtime.abort_turn(turn_id="101"))
+            self.assertIsNone(read_current_turn_lease(path)[0])
+
+    def test_o_confirmation_is_new_runtime_lease_and_exact_action_only(self):
+        action = {"content": "68元晚饭", "amount": -68}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "lease.json"
+            runtime = UH_A0TurnRuntime(path, session_id="cc-runtime")
+            turn100 = self.lease(turn_id="100")
+            runtime.start_turn(turn100)
+            asked = runtime.evaluate("mcp__home__add_ledger", action)
+            self.assertEqual(asked["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+            runtime.end_turn(turn_id="100")
+
+            confirmed = self.lease(
+                source="user_confirmation",
+                requested=("ledger.write",),
+                approvals=(asked["approval_id"],),
+                turn_id="101",
+            )
+            runtime.start_turn(confirmed)
+            self.assertEqual(
+                runtime.evaluate("mcp__home__add_ledger", action)["lease_decision"],
+                "ALLOW",
+            )
+            changed = dict(action)
+            changed["amount"] = -69
+            self.assertEqual(
+                runtime.evaluate("mcp__home__add_ledger", changed)["lease_decision"],
+                "LEASE_MISMATCH",
+            )
+            runtime.end_turn(turn_id="101")
+
     def test_n_provider_mapping(self):
         for status, expected in (
             ("ALLOW", "allow"),
             ("DENIED_CAPABILITY", "deny"),
             ("LEASE_MISMATCH", "deny"),
-            ("CAPABILITY_ASK_REQUIRED", "ask"),
+            ("CAPABILITY_ASK_REQUIRED", "defer"),
         ):
             payload = pretooluse_payload(
                 {"capability_id": "todo.write", "lease_decision": status}
