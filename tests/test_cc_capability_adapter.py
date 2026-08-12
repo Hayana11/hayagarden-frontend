@@ -167,14 +167,10 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertNotIn("Bash", plan["surface_allowlist"])
         self.assertIn("Bash", plan["disallowed_tools"])
 
-    def test_i_daily_live_gate_remains_flag_off(self):
+    def test_i_daily_live_profile_is_uh_a0(self):
         self.assertEqual(cc_resident.TOOL_PROFILE_UH_A0, "uh_a0")
         self.assertEqual(TOOL_PROFILE_UH_A0, "uh_a0")
         self.assertEqual(
-            daily_runtime.DAILY_TOOL_PROFILE,
-            cc_resident.TOOL_PROFILE_TEXT_ONLY,
-        )
-        self.assertNotEqual(
             daily_runtime.DAILY_TOOL_PROFILE,
             cc_resident.TOOL_PROFILE_UH_A0,
         )
