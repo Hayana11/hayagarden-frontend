@@ -29,7 +29,25 @@ function momentsOwnerToken() {
   return '';
 }
 
-function buildServer() {
+async function runGatedHomeWrite({
+  uhA0Profile,
+  toolName,
+  toolInput,
+  verify,
+  post,
+}) {
+  // Legacy /mcp Wake calls deliberately retain their historical write path.
+  if (!uhA0Profile) return post();
+  const gate = verify(toolName, toolInput);
+  if (!gate || !gate.ok) {
+    return gate && gate.result
+      ? gate.result
+      : { content: [{ type: 'text', text: 'UH-A0 LEASE_MISMATCH' }] };
+  }
+  return post();
+}
+
+function buildServer({ uhA0Profile = false } = {}) {
   const server = new McpServer({ name: 'home-mcp', version: '1.0.0' });
 
   server.tool(
@@ -156,10 +174,16 @@ function buildServer() {
       if (category !== undefined) input.category = category;
       if (note !== undefined) input.note = note;
       if (date !== undefined) input.date = date;
-      const gate = verifyCurrentHomeAction('mcp__home__add_ledger', input);
-      if (!gate.ok) return gate.result;
       const d = date || new Date().toISOString().slice(0, 10);
-      return postFrontend('/api/ledger', { amount, category:category||'其他', note:note||null, date:d, author:'fyodor_api' });
+      return runGatedHomeWrite({
+        uhA0Profile,
+        toolName: 'mcp__home__add_ledger',
+        toolInput: input,
+        verify: verifyCurrentHomeAction,
+        post: () => postFrontend('/api/ledger', {
+          amount, category:category||'其他', note:note||null, date:d, author:'fyodor_api',
+        }),
+      });
     }
   );
   server.tool(
@@ -186,9 +210,15 @@ function buildServer() {
     async ({ content, due_date }) => {
       const input = { content };
       if (due_date !== undefined) input.due_date = due_date;
-      const gate = verifyCurrentHomeAction('mcp__home__add_todo', input);
-      if (!gate.ok) return gate.result;
-      return postFrontend('/api/todos', { content, due_date:due_date||null, author:'fyodor_api' });
+      return runGatedHomeWrite({
+        uhA0Profile,
+        toolName: 'mcp__home__add_todo',
+        toolInput: input,
+        verify: verifyCurrentHomeAction,
+        post: () => postFrontend('/api/todos', {
+          content, due_date:due_date||null, author:'fyodor_api',
+        }),
+      });
     }
   );
 
@@ -250,7 +280,8 @@ app.all('/mcp', async (req, res) => {
       (Array.isArray(req.body) && req.body.some(m => m && m.method === 'initialize'))
     );
     if (isInit) {
-      const server = buildServer();
+      const uhA0Profile = String(req.headers['x-uh-a0-profile'] || '').trim() === 'uh_a0';
+      const server = buildServer({ uhA0Profile });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => { sessions[id] = { server, transport }; },
@@ -292,4 +323,4 @@ if (require.main === module) {
   process.on('SIGINT',  () => process.exit(0));
 }
 
-module.exports = { buildServer };
+module.exports = { buildServer, runGatedHomeWrite };
