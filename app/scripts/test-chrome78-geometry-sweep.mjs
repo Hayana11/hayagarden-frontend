@@ -111,7 +111,7 @@ function filterConsoleBlock(memory) {
   const chat = readStatic('chat.html');
 
   assert.match(chat, /\.bnav\{[^}]*background:rgba\(245,243,238/);
-  assert.match(navCss, /background:\s*rgba\(245,\s*243,\s*238,\s*0\.97\)/);
+  assert.match(navCss, /background:\s*#fef4f5/);
   assert.match(navCss, /border-top:\s*0\.5px solid/);
   assert.match(navCss, /padding:\s*8px 0 calc\(8px \+ env\(safe-area-inset-bottom/);
   assert.match(navCss, /\.ni\s*\{[\s\S]*?color:\s*#b8b0b8/);

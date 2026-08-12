@@ -1104,7 +1104,7 @@ button {
   margin: 0 auto;
   width: 100%;
   display: flex;
-  background: rgba(245, 243, 238, 0.97);
+  background: #fef4f5;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border-top: 0.5px solid rgba(210, 185, 155, 0.2);
@@ -1139,7 +1139,23 @@ button {
 
 .ni.act,
 .global-bottom-nav__item.act {
-  color: #7c6a8a;
+  color: #d27790;
+}
+
+/* Legacy native WebView: body zoom 0.8 — compensate nav metrics (not a second scale layer) */
+body[data-legacy-native-compat='true'] .global-bottom-nav__inner {
+  padding: 10px 0 calc(10px + env(safe-area-inset-bottom, 0px));
+  border-top-width: 0.625px;
+}
+
+body[data-legacy-native-compat='true'] .global-bottom-nav__item {
+  font-size: 12.5px;
+  padding: 2.5px 0;
+}
+
+body[data-legacy-native-compat='true'] .global-bottom-nav__icon {
+  font-size: 26.25px;
+  margin-bottom: 3.75px;
 }
 
 html[data-theme='dark'] .global-bottom-nav__inner {

@@ -8,7 +8,7 @@
   max-width: 480px;
   z-index: 50;
   display: flex;
-  background: rgba(245, 243, 238, 0.97);
+  background: #fef4f5;
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border-top: 0.5px solid rgba(210, 185, 155, 0.2);
@@ -40,7 +40,7 @@
 }
 
 .ni.act {
-  color: #7c6a8a;
+  color: #d27790;
 }
 
 html[data-theme=dark] .bnav {
