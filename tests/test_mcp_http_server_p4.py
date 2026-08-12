@@ -16,8 +16,8 @@ SERVER = ROOT / "mcp-http-server.js"
 class HomeMcpP4Tests(unittest.TestCase):
     def test_profile_marker_and_gate_are_narrow(self):
         source = SERVER.read_text(encoding="utf-8")
-        self.assertIn("X-UH-A0-Profile", source)
         self.assertIn("x-uh-a0-profile", source)
+        self.assertIn("uh_a0", source)
         self.assertIn("runGatedHomeWrite", source)
         self.assertIn("buildServer({ uhA0Profile })", source)
 
