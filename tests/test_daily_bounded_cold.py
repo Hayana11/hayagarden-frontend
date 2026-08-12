@@ -324,7 +324,7 @@ class DailyColdFenceTests(unittest.TestCase):
         def clear_hard_context_pre_spawn_turns():
             r.hard_context_pre_spawn_turns = None
 
-        def send_turn(content, commit_meta=None):
+        def send_turn(content, commit_meta=None, turn_lease=None):
             calls.append(content)
             yield ('done', ('ok', '', {'v': 2, 'provider': 'claude_code'}, {}))
 
