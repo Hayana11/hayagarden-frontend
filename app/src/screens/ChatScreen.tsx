@@ -49,6 +49,11 @@ import { ThemePerfRows } from '../components/ThemePerfRows';
 import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
 import { getLegacyNativeCompatDetails } from '../lib/legacyNativeCompat';
 import {
+  readChatWarmReturn,
+  reconcileChatWarmReturn,
+  writeChatWarmReturn,
+} from '../lib/chatWarmReturn';
+import {
   bumpHistoryGenState,
   cancelInFlightWarmUpState,
   CHAT_AUTHORITATIVE_LIMIT,
@@ -272,12 +277,14 @@ function CopyIcon({ size = 15 }: { size?: number }) {
 
 export function ChatScreen() {
   const [settings, setSettings] = useState<ChatPrefs>(loadChatPrefs);
+  const legacyCompat = useMemo(() => getLegacyNativeCompatDetails().legacyNativeCompat, []);
+  const [warmSnapshot] = useState(() => readChatWarmReturn(legacyCompat));
   const [wide, setWide] = useState(() => window.innerWidth >= 900);
   const [compactToolbar, setCompactToolbar] = useState(() => window.innerWidth <= 360);
   const [genLockBusy, setGenLockBusy] = useState(false);
 
-  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
-  const [hasMoreBefore, setHasMoreBefore] = useState(false);
+  const [msgs, setMsgs] = useState<ChatMsg[]>(() => warmSnapshot ? warmSnapshot.messages : []);
+  const [hasMoreBefore, setHasMoreBefore] = useState(() => warmSnapshot ? warmSnapshot.hasMoreBefore : false);
   const [loadingMore, setLoadingMore] = useState(false);
 
   const [input, setInput] = useState('');
@@ -306,20 +313,22 @@ export function ChatScreen() {
   const [flashId, setFlashId] = useState<number | null>(null);
   const [liked, setLiked] = useState<Record<number, 1 | -1>>({});
   const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
-  const [initialHistoryReady, setInitialHistoryReady] = useState(false);
+  const [initialHistoryReady, setInitialHistoryReady] = useState(() => warmSnapshot !== null);
   const [refreshing, setRefreshing] = useState(false);
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
   const [layoutDiag, setLayoutDiag] = useState<LayoutDiagRow[] | null>(null);
-  const [txWin, setTxWin] = useState<TranscriptWindow>({ start: 0, end: 0 });
+  const [txWin, setTxWin] = useState<TranscriptWindow>(() => warmSnapshot ? { ...warmSnapshot.txWin } : { start: 0, end: 0 });
 
   const manualWindow = useManualContextWindow();
   const switchBlocked =
     sending || live !== null || genLockBusy || manualWindow.submitting;
 
-  const legacyCompat = useMemo(() => getLegacyNativeCompatDetails().legacyNativeCompat, []);
-  const followLatestRef = useRef(true);
+  const followLatestRef = useRef(warmSnapshot ? warmSnapshot.followLatest : true);
   const msgsRef = useRef<ChatMsg[]>([]);
+  const hasMoreBeforeRef = useRef(false);
+  const txWinRef = useRef<TranscriptWindow>({ start: 0, end: 0 });
+  const warmRestoreRef = useRef(warmSnapshot);
   const pendingAnchorIdRef = useRef<number | null>(null);
   const pendingJumpIdRef = useRef<number | null>(null);
 
@@ -347,6 +356,8 @@ export function ChatScreen() {
   const effThinkMode = settings.thinkMode === 'auto' ? (wide ? 'inline' : 'drawer') : settings.thinkMode;
 
   msgsRef.current = msgs;
+  hasMoreBeforeRef.current = hasMoreBefore;
+  txWinRef.current = txWin;
 
   const placeholder = useMemo(() => chatPlaceholder(new Date()), []);
   const capacityLabel = useMemo(
@@ -538,6 +549,30 @@ export function ChatScreen() {
     if (toBottom) scrollBottom();
   }, [scrollBottom, bumpHistoryGen, cancelInFlightWarmUp, ensureDeferredColdStartInit]);
 
+  const revalidateWarmReturn = useCallback(async () => {
+    const gen = bumpHistoryGen();
+    cancelInFlightWarmUp();
+    try {
+      const page = await fetchChatMessages({ limit: CHAT_AUTHORITATIVE_LIMIT });
+      if (gen !== coldStartRaceRef.current.historyGen) return;
+      if (!mountedRef.current) return;
+      onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
+      const reconciled = reconcileChatWarmReturn(
+        { messages: msgsRef.current, hasMoreBefore: hasMoreBeforeRef.current },
+        page,
+      );
+      setMsgs(reconciled.messages);
+      setHasMoreBefore(reconciled.hasMoreBefore);
+      if (followLatestRef.current) scrollBottom();
+      scheduleAfterFirstPaint(() => {
+        if (!mountedRef.current) return;
+        ensureDeferredColdStartInit({ loadedCount: page.messages.length });
+      });
+    } catch {
+      // Keep the already-painted snapshot when silent revalidation fails.
+    }
+  }, [scrollBottom, bumpHistoryGen, cancelInFlightWarmUp, ensureDeferredColdStartInit]);
+
   const flushLegacyWarmUp = useCallback(async () => {
     const race = coldStartRaceRef.current;
     if (!legacyCompat || race.warmUpSatisfied || hasAuthoritativeCoverage(msgs.length)) return;
@@ -586,9 +621,18 @@ export function ChatScreen() {
     }
   }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest]);
 
-  // Cold start: history first; catalog + gateway probes deferred until first batch ready.
+  // Cold start: history first; a valid warm snapshot skips only the visible cold path.
   useEffect(() => {
     let cancelled = false;
+    if (warmSnapshot) {
+      scheduleAfterFirstPaint(() => {
+        if (cancelled || !mountedRef.current) return;
+        ensureDeferredColdStartInit({ loadedCount: msgsRef.current.length });
+        void revalidateWarmReturn();
+      });
+      return () => { cancelled = true; };
+    }
+
     const gen = bumpHistoryGen();
     cancelInFlightWarmUp();
     markChatColdStart('chat_mount');
@@ -598,7 +642,6 @@ export function ChatScreen() {
       const limit = legacyCompat ? CHAT_LEGACY_INITIAL_LIMIT : CHAT_AUTHORITATIVE_LIMIT;
       const page = await fetchChatMessages({ limit });
       if (cancelled || !mountedRef.current) return;
-
       const superseded = gen !== coldStartRaceRef.current.historyGen;
       if (!superseded) {
         if (hasAuthoritativeCoverage(page.messages.length)) {
@@ -609,7 +652,6 @@ export function ChatScreen() {
         setHasMoreBefore(page.hasMoreBefore);
         scrollBottom();
         markChatColdStart('initial_history_ready');
-
         scheduleAfterFirstPaint(() => {
           if (cancelled || !mountedRef.current) return;
           ensureDeferredColdStartInit({
@@ -620,10 +662,12 @@ export function ChatScreen() {
         });
       }
     };
-
     void loadInitial();
     return () => { cancelled = true; };
-  }, [legacyCompat, scrollBottom, bumpHistoryGen, cancelInFlightWarmUp, ensureDeferredColdStartInit]);
+  }, [
+    warmSnapshot, legacyCompat, scrollBottom, bumpHistoryGen, cancelInFlightWarmUp,
+    ensureDeferredColdStartInit, revalidateWarmReturn,
+  ]);
 
   // media listeners (layout only — theme uses DOM data-chat-theme, not parent state)
   useEffect(() => {
@@ -680,6 +724,16 @@ export function ChatScreen() {
     const c = scrollRef.current;
     if (el && c) c.scrollTop = Math.max(0, el.offsetTop - 80);
   }, [txWin, msgs, legacyCompat]);
+
+  useLayoutEffect(() => {
+    const snapshot = warmRestoreRef.current;
+    if (!snapshot) return;
+    warmRestoreRef.current = null;
+    const container = scrollRef.current;
+    if (!container) return;
+    if (snapshot.followLatest) container.scrollTop = container.scrollHeight;
+    else container.scrollTop = snapshot.scrollTop;
+  }, []);
 
   useEffect(() => {
     if (!initialHistoryReady) return;
@@ -743,6 +797,16 @@ export function ChatScreen() {
     mountedRef.current = true;
 
     return () => {
+      if (msgsRef.current.length) {
+        writeChatWarmReturn({
+          legacyCompat,
+          messages: msgsRef.current,
+          hasMoreBefore: hasMoreBeforeRef.current,
+          txWin: txWinRef.current,
+          followLatest: followLatestRef.current,
+          scrollTop: scrollRef.current?.scrollTop ?? 0,
+        });
+      }
       mountedRef.current = false;
       cancelInFlightWarmUpState(coldStartRaceRef.current);
       bumpHistoryGenState(coldStartRaceRef.current);
