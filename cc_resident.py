@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import select
 import subprocess
 import threading
@@ -869,6 +870,8 @@ class ResidentSession:
         commit_meta=None,
         on_stdin_flushed=None,
         idle_heartbeat_sec=None,
+        turn_lease=None,
+        turn_runtime=None,
     ):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
@@ -882,8 +885,22 @@ class ResidentSession:
         stdout read. Not called if write/flush fails. If the callback raises,
         the resident is killed and the exception is re-raised (message already sent).
         """
-        proc = self._proc
-        if proc is None or proc.poll() is not None:
+        uh_a0_runtime = None
+        uh_a0_turn_id = None
+        if self._tool_profile == TOOL_PROFILE_UH_A0:
+            if turn_lease is None:
+                raise ResidentError('uh_a0_turn_lease_required')
+            from tools.execution_fence import UH_A0TurnRuntime, default_turn_lease_path
+            uh_a0_runtime = turn_runtime
+            if uh_a0_runtime is None:
+                uh_a0_runtime = UH_A0TurnRuntime(
+                    default_turn_lease_path(cwd=self._cwd),
+                    session_id=self._session_id,
+                )
+            uh_a0_runtime.start_turn(turn_lease, session_id=self._session_id)
+            uh_a0_turn_id = str(turn_lease['turn_id'])
+
+        proc = self._proc        if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
 
         # 热 resident 从当前 EOF 开始；冷启动拿到 session_id 后从文件头回放。
@@ -917,6 +934,8 @@ class ResidentSession:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
         except (BrokenPipeError, OSError) as e:
+            if uh_a0_runtime is not None:
+                uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
             self._kill(quiet=True)
             raise ResidentError('resident 进程管道已断: ' + str(e))
 
@@ -925,6 +944,8 @@ class ResidentSession:
                 on_stdin_flushed()
             except BaseException:
                 # Message already entered the pipe; fail closed — kill and re-raise.
+                if uh_a0_runtime is not None:
+                    uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
                 self._kill(quiet=True)
                 raise
 
@@ -1087,11 +1108,27 @@ class ResidentSession:
                                     current_round['complete'] = True
                                     rounds.append(current_round)
                                     current_round = None
-                                yield ('tool_use', {
+                                tool_payload = {
                                     'id': b.get('id'),
                                     'name': b.get('name', ''),
                                     'args': b.get('input') or {},
-                                })
+                                }
+                                if uh_a0_runtime is not None:
+                                    fence = uh_a0_runtime.evaluate(
+                                        tool_payload['name'], tool_payload['args'],
+                                    )
+                                    tool_payload.update({
+                                        'capability_id': fence.get('capability_id'),
+                                        'lease_decision': fence.get('lease_decision'),
+                                    })
+                                    if fence.get('approval_id'):
+                                        tool_payload['approval_id'] = fence['approval_id']
+                                    if fence.get('lease_decision') == 'CAPABILITY_ASK_REQUIRED':
+                                        tool_payload.update({
+                                            'deferred_tool_use': True,
+                                            'status': 'waiting_for_confirmation',
+                                        })
+                                yield ('tool_use', tool_payload)
                     elif t == 'user':
                         for b in ((d.get('message') or {}).get('content') or []):
                             if isinstance(b, dict) and b.get('type') == 'tool_result':
@@ -1132,6 +1169,8 @@ class ResidentSession:
                     raise
         finally:
             watchdog.stop()
+            if uh_a0_runtime is not None:
+                uh_a0_runtime.end_turn(turn_id=uh_a0_turn_id)
 
         if current_round is not None:
             current_round['context_tokens'] = (
