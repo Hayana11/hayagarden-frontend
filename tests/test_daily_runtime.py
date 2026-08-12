@@ -36,6 +36,7 @@ from chat.session_registry import (
 )
 from chat.system_builder import build_cc_daily_static_parts, build_cc_static_parts
 from tools.cc_jsonl_usage import session_jsonl_path
+from tools.execution_fence import evaluate_tool_call
 
 
 def _tmp_db() -> str:
@@ -97,7 +98,7 @@ def _prepare_turn(db, uid, *, now=None, wall_now=None, **kwargs):
 
 class _FakeResident:
     generation = 1
-    tool_profile = cc_resident.TOOL_PROFILE_TEXT_ONLY
+    tool_profile = cc_resident.TOOL_PROFILE_UH_A0
 
     def __init__(self):
         self._alive = False
@@ -106,6 +107,7 @@ class _FakeResident:
         self.sent: list[str] = []
         self.killed = 0
         self._spawn_args: list[tuple] = []
+        self.turn_leases: list[dict[str, Any]] = []
 
     def ensure_alive(self, system_text, env, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
         self._spawn_args.append((system_text, tool_profile))
@@ -122,20 +124,37 @@ class _FakeResident:
         self._alive = False
         self.killed += 1
 
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
+        self.turn_leases.append(turn_lease)
         yield ('text', 'daily reply')
         yield ('done', ('daily reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
 
 
-class _ToolResident(_FakeResident):
-    def send_turn(self, content, commit_meta=None):
-        yield ('tool_use', {'id': 't1', 'name': 'mcp__home__light_on', 'args': {}})
-        yield ('done', ('', '', {}, {}))
+class _ReadToolResident(_FakeResident):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
+        self.sent.append(str(content))
+        self.turn_leases.append(turn_lease)
+        decision = evaluate_tool_call(
+            'mcp__home__get_light_status', {}, turn_lease,
+        )
+        yield ('tool_use', {
+            'id': 't1',
+            'name': 'mcp__home__get_light_status',
+            'args': {},
+            **decision,
+        })
+        yield ('tool_result', {
+            'tool_use_id': 't1',
+            'content': '{"ok":true,"result":{"power":false}}',
+            'is_error': False,
+        })
+        yield ('text', '根据刚才读取到的结果回答。')
+        yield ('done', ('根据刚才读取到的结果回答。', '', {}, {}))
 
 
 class _FailingResident(_FakeResident):
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         raise RuntimeError('provider exploded')
 
@@ -285,7 +304,12 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             uid = _insert(db, 'hayana', 'hello', '2026-07-27 10:00:00')
             plan = self._prepare(db, uid)
             resident = _FakeResident()
-            list(dr.stream_daily_resident_turn(plan, resident=resident, env={}, static_system='STATIC'))
+            events = list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC',
+            ))
+            self.assertEqual(resident.turn_leases, [plan.turn_lease])
+            self.assertFalse(any(evt == 'tool_use' for evt, _payload in events))
+            self.assertTrue(any(evt == 'done' for evt, _payload in events))
             aid = dr.persist_daily_assistant_for_plan(
                 plan, content='reply', thinking='', tool_calls='', cache_info='', choices='',
             )
@@ -295,7 +319,7 @@ class DailyRuntimeTurnTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
-    def test_text_only_spawn_args(self):
+    def test_uh_a0_spawn_args(self):
         db = _tmp_db()
         try:
             _init_chat_messages(db)
@@ -303,7 +327,7 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             plan = self._prepare(db, uid)
             resident = _FakeResident()
             list(dr.stream_daily_resident_turn(plan, resident=resident, env={}, static_system='STATIC'))
-            self.assertEqual(resident._spawn_args[-1][1], cc_resident.TOOL_PROFILE_TEXT_ONLY)
+            self.assertEqual(resident._spawn_args[-1][1], cc_resident.TOOL_PROFILE_UH_A0)
         finally:
             os.unlink(db)
 
@@ -363,18 +387,58 @@ class DailyRuntimeTurnTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
-    def test_tool_call_fail_closed(self):
+    def test_default_chat_leases_are_fresh_and_write_stays_ask(self):
         db = _tmp_db()
         try:
             _init_chat_messages(db)
-            uid = _insert(db, 'hayana', 'tool?', '2026-07-27 10:00:00')
+            uid1 = _insert(db, 'hayana', 'first', '2026-07-27 10:00:00')
+            first = self._prepare(db, uid1)
+            self.assertEqual(first.turn_lease['turn_mode'], 'chat')
+            self.assertEqual(first.turn_lease['issued_from'], 'default_policy')
+            self.assertIn('home.light.status', first.turn_lease['allowed_capabilities'])
+            self.assertNotIn('todo.write', first.turn_lease['allowed_capabilities'])
+            dr._release_lease(first)
+
+            uid2 = _insert(db, 'hayana', 'second', '2026-07-27 10:01:00')
+            second = self._prepare(db, uid2)
+            self.assertIsNot(first.turn_lease, second.turn_lease)
+            self.assertNotEqual(first.turn_lease['turn_id'], second.turn_lease['turn_id'])
+            decision = evaluate_tool_call(
+                'mcp__home__add_todo',
+                {'content': 'must not execute'},
+                second.turn_lease,
+            )
+            self.assertEqual(
+                decision['lease_decision'],
+                'CAPABILITY_ASK_REQUIRED',
+            )
+            dr._release_lease(second)
+        finally:
+            os.unlink(db)
+
+    def test_read_tool_use_and_result_flow_through_daily(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', '灯现在是什么状态？', '2026-07-27 10:00:00')
             plan = self._prepare(db, uid)
-            resident = _ToolResident()
-            with self.assertRaises(dr.DailyWindowToolFencePending):
-                list(dr.stream_daily_resident_turn(
-                    plan, resident=resident, env={}, static_system='STATIC',
-                ))
-            dr.abort_daily_turn(plan, error_code='DailyWindowToolFencePending', resident=resident)
+            resident = _ReadToolResident()
+            events = list(dr.stream_daily_resident_turn(
+                plan, resident=resident, env={}, static_system='STATIC',
+            ))
+            self.assertEqual(resident.turn_leases, [plan.turn_lease])
+            tool_use = [payload for evt, payload in events if evt == 'tool_use']
+            tool_result = [payload for evt, payload in events if evt == 'tool_result']
+            self.assertEqual(len(tool_use), 1)
+            self.assertEqual(tool_use[0]['name'], 'mcp__home__get_light_status')
+            self.assertEqual(tool_use[0]['capability_id'], 'home.light.status')
+            self.assertEqual(tool_use[0]['lease_decision'], 'ALLOW')
+            self.assertEqual(len(tool_result), 1)
+            self.assertEqual(tool_result[0]['tool_use_id'], 't1')
+            self.assertFalse(tool_result[0]['is_error'])
+            self.assertTrue(any(evt == 'text' for evt, _payload in events))
+            self.assertTrue(any(evt == 'done' for evt, _payload in events))
+            dr._release_lease(plan)
         finally:
             os.unlink(db)
 
@@ -575,7 +639,7 @@ class DailyRuntimeLeaseTtlTests(unittest.TestCase):
             uid = _insert(db, 'hayana', 'hb-fail', '2026-07-27 10:00:00')
 
             class _SlowResident(_FakeResident):
-                def send_turn(self, content, commit_meta=None):
+                def send_turn(self, content, commit_meta=None, turn_lease=None):
                     time.sleep(0.08)
                     yield from super().send_turn(content, commit_meta=commit_meta)
 
@@ -1375,7 +1439,7 @@ class DailyRuntimeHeartbeatKillTests(unittest.TestCase):
             uid = _insert(db, 'hayana', 'block', now.strftime('%Y-%m-%d %H:%M:%S'))
 
             class _BlockingResident(_FakeResident):
-                def send_turn(self, content, commit_meta=None):
+                def send_turn(self, content, commit_meta=None, turn_lease=None):
                     deadline = time.time() + 0.5
                     while time.time() < deadline:
                         if not self._alive:
@@ -1399,7 +1463,7 @@ class DailyRuntimeHeartbeatKillTests(unittest.TestCase):
 
 
 class _BlockingAfterTextResident(_FakeResident):
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         yield ('text', 'partial')
         deadline = time.time() + 30
@@ -1409,7 +1473,7 @@ class _BlockingAfterTextResident(_FakeResident):
 
 
 class _BlockBeforeYieldResident(_FakeResident):
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         deadline = time.time() + 30
         while time.time() < deadline and self._alive:
             time.sleep(0.01)
@@ -2188,7 +2252,7 @@ class _TranscriptHotResident(_FakeResident):
     def peek_respawn_reason(self, system_text, *, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
         return None
 
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         self.sent_generations.append(int(self.generation))
         _append_jsonl(self._jsonl_path, [
@@ -2216,7 +2280,7 @@ class _TranscriptColdResident(_FakeResident):
     def peek_respawn_reason(self, system_text, *, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
         return None
 
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         yield ('text', 'cold reply')
         self.session_id = self._new_session_id
@@ -2261,7 +2325,7 @@ class _RegisteredRespawnResident(_FakeResident):
         self._cold = False
         return cold
 
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         self.sent_gens.append(int(self.generation))
         yield ('text', 'after-respawn')
@@ -2279,7 +2343,7 @@ class _RegisteredRespawnResident(_FakeResident):
 class _MappingBlockedResident(_TranscriptColdResident):
     """Writes JSONL with no candidate_user → Mapping BLOCKED after chat success."""
 
-    def send_turn(self, content, commit_meta=None):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
         yield ('text', 'blocked-map reply')
         self.session_id = self._new_session_id
