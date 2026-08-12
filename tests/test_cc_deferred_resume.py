@@ -153,12 +153,25 @@ class DeferredResumeContractTests(unittest.TestCase):
                     approvals=(waiting[0]["approval_id"],),
                     turn_id="101",
                 )
+                confirmation_leases = []
+
+                def on_confirmation_stdin_flushed():
+                    lease, _record = read_current_turn_lease(lease_path)
+                    confirmation_leases.append(lease)
+
                 resumed = list(session.resume_pending_deferred_turn(
                     "好，记上吧",
                     dict(os.environ),
                     confirmation,
+                    on_stdin_flushed=on_confirmation_stdin_flushed,
                     turn_runtime=runtime,
                 ))
+                self.assertEqual(len(confirmation_leases), 1)
+                self.assertEqual(confirmation_leases[0]["turn_id"], "101")
+                self.assertEqual(
+                    confirmation_leases[0]["issued_from"],
+                    "user_confirmation",
+                )
 
                 args = popen.call_args[0][0]
                 self.assertIn("-p", args)
