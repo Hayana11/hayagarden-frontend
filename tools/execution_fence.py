@@ -307,7 +307,25 @@ class UH_A0TurnRuntime:
             "tool_name": str(tool_name),
             "tool_input": dict(tool_input or {}),
         })
+        prompt = approval_prompt(tool_name, tool_input)
+        if prompt is not None:
+            payload["approval_prompt"] = prompt
         return payload
+
+
+def approval_prompt(tool_name, tool_input):
+    """Concrete Chinese confirmation copy for the two UH-A0 write actions."""
+    name = str(tool_name or "")
+    values = dict(tool_input or {})
+    if name == "mcp__home__add_todo":
+        return "我顺手给你记进待办里？"
+    if name == "mcp__home__add_ledger":
+        amount = values.get("amount")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            amount_text = str(abs(amount)).rstrip("0").rstrip(".") if isinstance(amount, float) else str(abs(amount))
+            return f"这笔 {amount_text} 元要我一起记账吗？"
+        return "这笔账要我一起记账吗？"
+    return None
 
 
 def pretooluse_payload(result):
