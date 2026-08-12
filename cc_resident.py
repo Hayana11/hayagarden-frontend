@@ -294,6 +294,9 @@ class ResidentSession:
         self._lock = threading.Lock()
         self._next_spawn_reason = None
         self._tool_profile = TOOL_PROFILE_LEGACY
+        # Provider-authoritative deferred tool call awaiting user confirmation.
+        # In-memory only; no approval/database/state-machine persistence.
+        self._pending_deferred = None
         # MODEL-1B: identity of the model argv this process was started with.
         self._model_identity = None
         # Durable history-rewrite epoch bound at last successful spawn.
@@ -611,6 +614,110 @@ class ResidentSession:
             self._reset_session_meta(respawn_reason=reason)
             self._capture_tool_surface(tool_flags)
             return self
+
+    def _capture_authoritative_deferred(self, result):
+        """Capture only Claude's result.deferred_tool_use identity."""
+        from tools.execution_fence import build_approval_id, capability_for_tool
+
+        session_id = str(result.get('session_id') or '').strip()
+        raw = result.get('deferred_tool_use')
+        if not session_id or not isinstance(raw, dict):
+            raise ResidentError('tool_deferred_missing_authoritative_payload')
+        tool_use_id = str(raw.get('id') or '').strip()
+        tool_name = str(raw.get('name') or '').strip()
+        tool_input = raw.get('input')
+        if not tool_use_id or not tool_name or not isinstance(tool_input, dict):
+            raise ResidentError('tool_deferred_malformed_authoritative_payload')
+        capability_id = capability_for_tool(tool_name)
+        if not capability_id:
+            raise ResidentError('tool_deferred_unknown_tool')
+        pending = {
+            'session_id': session_id,
+            'tool_use_id': tool_use_id,
+            'tool_name': tool_name,
+            'tool_input': copy.deepcopy(tool_input),
+            'approval_id': build_approval_id(
+                capability_id, tool_name, tool_input,
+            ),
+        }
+        self._session_id = session_id
+        self._pending_deferred = pending
+        return pending
+
+    def resume_pending_deferred_turn(
+        self,
+        content,
+        env,
+        turn_lease,
+        *,
+        commit_meta=None,
+        on_stdin_flushed=None,
+        idle_heartbeat_sec=None,
+        turn_runtime=None,
+    ):
+        """Resume one provider-deferred action with a new confirmation lease."""
+        from tools.execution_fence import (
+            UH_A0TurnRuntime,
+            evaluate_tool_call,
+        )
+
+        pending = copy.deepcopy(self._pending_deferred)
+        if not pending:
+            raise ResidentError('deferred_resume:no_pending_tool')
+        if self._tool_profile != TOOL_PROFILE_UH_A0:
+            raise ResidentError('deferred_resume:tool_profile_not_uh_a0')
+        if not isinstance(turn_lease, dict):
+            raise ResidentError('deferred_resume:LEASE_MISMATCH')
+        if turn_lease.get('issued_from') != 'user_confirmation':
+            raise ResidentError('deferred_resume:LEASE_MISMATCH')
+        if pending['approval_id'] not in tuple(turn_lease.get('approval_ids') or ()):
+            raise ResidentError('deferred_resume:LEASE_MISMATCH')
+        decision = evaluate_tool_call(
+            pending['tool_name'],
+            pending['tool_input'],
+            turn_lease,
+        )
+        if decision.get('lease_decision') != 'ALLOW':
+            raise ResidentError(
+                'deferred_resume:' + str(decision.get('lease_decision') or 'LEASE_MISMATCH')
+            )
+        if self._alive():
+            raise ResidentError('deferred_resume:process_still_alive')
+        if not self._system_text:
+            raise ResidentError('deferred_resume:missing_system_prompt')
+
+        resume_env = dict(env or os.environ)
+        self.spawn_resumable(
+            self._system_text,
+            resume_env,
+            resume_session_id=pending['session_id'],
+            tool_profile=TOOL_PROFILE_UH_A0,
+            reason='deferred_resume',
+        )
+        runtime = turn_runtime
+        if runtime is None:
+            runtime = UH_A0TurnRuntime(
+                getattr(
+                    self, '_uh_a0_turn_lease_path',
+                    '/opt/frontend/.uh-a0-current-turn-lease.json',
+                ),
+                session_id=pending['session_id'],
+            )
+        try:
+            yield from self.send_turn(
+                content,
+                commit_meta=commit_meta,
+                on_stdin_flushed=on_stdin_flushed,
+                idle_heartbeat_sec=idle_heartbeat_sec,
+                turn_lease=turn_lease,
+                turn_runtime=runtime,
+            )
+        except BaseException:
+            self._kill(quiet=True)
+            raise
+        else:
+            if self._pending_deferred == pending:
+                self._pending_deferred = None
 
     def spawn_fresh_named(
         self,
@@ -1160,6 +1267,29 @@ class ResidentSession:
                                 })
                     elif t == 'result':
                         saw_result = True
+                        if d.get('stop_reason') == 'tool_deferred':
+                            pending = self._capture_authoritative_deferred(d)
+                            deferred_payload = {
+                                'id': pending['tool_use_id'],
+                                'name': pending['tool_name'],
+                                'args': copy.deepcopy(pending['tool_input']),
+                                'tool_input': copy.deepcopy(pending['tool_input']),
+                                'approval_id': pending['approval_id'],
+                                'deferred_tool_use': True,
+                                'status': 'waiting_for_confirmation',
+                            }
+                            from tools.execution_fence import approval_prompt
+                            prompt = approval_prompt(
+                                pending['tool_name'], pending['tool_input'],
+                            )
+                            if prompt is not None:
+                                deferred_payload['approval_prompt'] = prompt
+                            # The default lease must be gone before exposing
+                            # the waiting state to the upper stream.
+                            if uh_a0_runtime is not None:
+                                uh_a0_runtime.end_turn(turn_id=uh_a0_turn_id)
+                            self._kill(quiet=True)
+                            yield ('tool_use', deferred_payload)
                         if d.get('is_error'):
                             is_err = str(d.get('result', ''))[:300]
                         # result.usage 只做校验/fallback，不覆盖已解析的 rounds
@@ -1358,6 +1488,10 @@ class ResidentSession:
 
     def clear_hard_context_pre_spawn_turns(self):
         self._hard_context_pre_spawn_turns = None
+
+    @property
+    def pending_deferred(self):
+        return copy.deepcopy(self._pending_deferred)
 
     @property
     def tool_profile(self):
