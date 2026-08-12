@@ -50,6 +50,7 @@ from chat.capacity_swap_runtime import (
     with_capacity_boundary_suffix,
 )
 from tools.cc_jsonl_usage import snapshot_session_jsonl
+from tools.lease_signer import issue_turn_lease
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ DEFAULT_LEASE_TTL = 480
 LEASE_HEARTBEAT_INTERVAL = 50
 WORKER_ID = '%s:%s' % (socket.gethostname(), os.getpid())
 SAVE_RE = re.compile(r'\[\[SAVE(?::[^\]]+)?\]\]', re.IGNORECASE)
-DAILY_TOOL_PROFILE = cc_resident.TOOL_PROFILE_TEXT_ONLY
+DAILY_TOOL_PROFILE = cc_resident.TOOL_PROFILE_UH_A0
 
 
 class DailyRuntimeError(Exception):
@@ -82,11 +83,6 @@ class LeaseHeartbeatTerminalFailure(DailyRuntimeError):
 class EpochMismatchError(DailyRuntimeError):
     def __init__(self, message: str = 'epoch token mismatch'):
         super().__init__(message, error_code='epoch_mismatch', retryable=False)
-
-
-class DailyWindowToolFencePending(DailyRuntimeError):
-    def __init__(self, message: str = 'tool fencing not implemented for daily window'):
-        super().__init__(message, error_code='DailyWindowToolFencePending', retryable=False)
 
 
 class DuplicateTurnInProgress(DailyRuntimeError):
@@ -157,6 +153,7 @@ class DailyTurnPlan:
     db_path: Optional[str] = None
     worker_id: str = WORKER_ID
     tool_profile: str = DAILY_TOOL_PROFILE
+    turn_lease: dict[str, Any] = field(default_factory=dict)
     user_created_at: Optional[datetime.datetime] = None
     origin_local_day: str = ''
     turn_started_at: Optional[datetime.datetime] = None
@@ -961,6 +958,7 @@ def _assemble_plan(
     model: str,
     db_path: Optional[str],
     lease_acquired: bool,
+    turn_lease: dict[str, Any],
     user_created_at: Optional[datetime.datetime] = None,
     origin_local_day: str = '',
     turn_started_at: Optional[datetime.datetime] = None,
@@ -1043,6 +1041,7 @@ def _assemble_plan(
         user_image_url=str(user_image_url or ''),
         lease_acquired=lease_acquired,
         db_path=db_path,
+        turn_lease=copy.deepcopy(turn_lease),
         user_created_at=user_created_at,
         origin_local_day=origin_local_day or local_day,
         turn_started_at=turn_started_at or user_created_at,
@@ -1065,6 +1064,7 @@ def prepare_daily_turn(
     persona_sha256: str = '',
     provider: str = 'claude_code',
     model: str = '',
+    _turn_lease: Optional[dict[str, Any]] = None,
     _cold_reprepare: bool = False,
     _capacity_swap_reprepare: bool = False,
 ) -> DailyTurnPlan:
@@ -1073,6 +1073,15 @@ def prepare_daily_turn(
 
     req_id = str(request_id or uuid.uuid4())
     owner = str(lease_owner or req_id)
+    turn_lease = (
+        copy.deepcopy(_turn_lease)
+        if _turn_lease is not None
+        else issue_turn_lease(
+            turn_id=req_id,
+            turn_mode='chat',
+            issued_from='default_policy',
+        )
+    )
     user_row = _fetch_user_message(user_message_id, db_path=db_path)
     user_created_at = _parse_message_created_at(user_row.get('created_at') or '')
     if now is not None:
@@ -1264,6 +1273,7 @@ def prepare_daily_turn(
             model=model,
             db_path=db_path,
             lease_acquired=lease_acquired,
+            turn_lease=turn_lease,
             user_created_at=user_created_at,
             origin_local_day=origin_day,
             turn_started_at=turn_started_at,
@@ -1433,6 +1443,7 @@ def reprepare_after_capacity_swap(
         origin_local_day=plan.origin_local_day or plan.local_day,
         lease_owner=plan.lease_owner,
         resident=resident,
+        _turn_lease=plan.turn_lease,
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,
@@ -1703,6 +1714,7 @@ def reprepare_after_registered_session_change(
         origin_local_day=plan.origin_local_day or plan.local_day,
         lease_owner=plan.lease_owner,
         resident=resident,
+        _turn_lease=plan.turn_lease,
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,
@@ -2573,20 +2585,35 @@ def ensure_resident_and_stream(
         try:
             import inspect
             params = inspect.signature(resident.send_turn).parameters
-            if 'on_stdin_flushed' in params or any(
+            accepts_kwargs = any(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-            ):
+            )
+            if 'on_stdin_flushed' in params or accepts_kwargs:
                 send_kwargs['on_stdin_flushed'] = _mark_stdin_flushed
+            if plan.tool_profile == cc_resident.TOOL_PROFILE_UH_A0:
+                if not isinstance(plan.turn_lease, dict) or not plan.turn_lease:
+                    raise DailyRuntimeError(
+                        'UH-A0 daily turn lease missing',
+                        error_code='uh_a0_turn_lease_missing',
+                    )
+                if 'turn_lease' not in params and not accepts_kwargs:
+                    raise DailyRuntimeError(
+                        'resident send_turn cannot accept UH-A0 turn lease',
+                        error_code='uh_a0_turn_lease_unsupported',
+                    )
+                send_kwargs['turn_lease'] = copy.deepcopy(plan.turn_lease)
         except (TypeError, ValueError):
-            pass
+            if plan.tool_profile == cc_resident.TOOL_PROFILE_UH_A0:
+                raise DailyRuntimeError(
+                    'resident send_turn signature unavailable for UH-A0',
+                    error_code='uh_a0_turn_lease_unsupported',
+                )
 
         try:
             for evt, payload in resident.send_turn(content, **send_kwargs):
                 if heartbeat.failed:
                     close_local_resident_if_bound(resident, expected_key=plan.resident_key)
                     raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
-                if evt == 'tool_use':
-                    raise DailyWindowToolFencePending()
                 if evt == 'done':
                     _capture_transcript_end(plan, resident)
                     # Safety net: stream completed without on_stdin_flushed hook.
@@ -2905,6 +2932,7 @@ def reprepare_after_hot_cold_mismatch(
         origin_local_day=plan.origin_local_day or plan.local_day,
         lease_owner=plan.lease_owner,
         resident=resident,
+        _turn_lease=plan.turn_lease,
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,
