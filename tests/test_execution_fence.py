@@ -13,6 +13,7 @@ from tools.execution_fence import (
     pretooluse_payload,
     read_current_turn_lease,
     UH_A0TurnRuntime,
+    approval_prompt,
     write_current_turn_lease,
 )
 from tools.lease_signer import issue_turn_lease
@@ -190,17 +191,31 @@ class ExecutionFenceTests(unittest.TestCase):
             runtime.start_turn(turn101)
             denied = runtime.evaluate("mcp__home__add_todo", action)
             self.assertEqual(denied["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+            deferred = runtime.deferred_tool_use("mcp__home__add_todo", action)
+            self.assertEqual(deferred["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+            self.assertEqual(deferred["event"], "deferred_tool_use")
+            self.assertEqual(deferred["tool_name"], "mcp__home__add_todo")
+            self.assertEqual(deferred["tool_input"], action)
             self.assertEqual(
-                runtime.deferred_tool_use("mcp__home__add_todo", action),
-                {
-                    **denied,
-                    "event": "deferred_tool_use",
-                    "tool_name": "mcp__home__add_todo",
-                    "tool_input": action,
-                },
+                deferred["approval_id"], denied["approval_id"],
             )
+            self.assertEqual(
+                deferred["approval_prompt"], "我顺手给你记进待办里？",
+            )
+            self.assertNotIn("是否授权", deferred["approval_prompt"])
             self.assertTrue(runtime.abort_turn(turn_id="101"))
             self.assertIsNone(read_current_turn_lease(path)[0])
+
+    def test_p_ledger_confirmation_copy_is_concrete(self):
+        self.assertEqual(
+            approval_prompt("mcp__home__add_ledger", {"amount": -68}),
+            "这笔 68 元要我一起记账吗？",
+        )
+        for forbidden in ("可以关心你吗？", "是否允许我帮助你？", "是否授权 todo.write？"):
+            self.assertNotIn(
+                forbidden,
+                approval_prompt("mcp__home__add_todo", {"content": "x"}),
+            )
 
     def test_o_confirmation_is_new_runtime_lease_and_exact_action_only(self):
         action = {"content": "68元晚饭", "amount": -68}
