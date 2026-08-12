@@ -30,7 +30,7 @@ jobs:
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
       - name: Compile context paths
-        run: python -m py_compile app.py gateway.py cc_resident.py chat/system_builder.py chat/context_continuity.py chat/context_budget.py chat/context_lean.py chat/context_lean_state.py chat/clean_window_shadow.py chat/day_handoff.py chat/daily_context.py chat/context_window.py chat/daily_history.py chat/daily_runtime.py chat/history_assembly.py chat/history_boundary.py chat/history_legacy.py chat/rolling_summary_store.py tools/rolling_summary.py scripts/measure_production_context.py scripts/generate_day_handoff.py scripts/daily_candidate_shadow_chat.py context_usage_routes.py context_usage_store.py daily_context_routes.py daily_context_bff.py context_window_routes.py context_window_bff.py tools/context_usage_collector.py tools/cc_usage_observability.py tools/cc_jsonl_usage.py tools/cc_tool_surface.py tools/capability_manifest.py scripts/report_cc_usage.py scripts/replay_cc_jsonl_usage.py wake/usage.py wake/concern_resolution.py
+        run: python -m py_compile app.py gateway.py cc_resident.py chat/system_builder.py chat/context_continuity.py chat/context_budget.py chat/context_lean.py chat/context_lean_state.py chat/clean_window_shadow.py chat/day_handoff.py chat/daily_context.py chat/context_window.py chat/daily_history.py chat/daily_runtime.py chat/history_assembly.py chat/history_boundary.py chat/history_legacy.py chat/rolling_summary_store.py tools/rolling_summary.py scripts/measure_production_context.py scripts/generate_day_handoff.py scripts/daily_candidate_shadow_chat.py context_usage_routes.py context_usage_store.py daily_context_routes.py daily_context_bff.py context_window_routes.py context_window_bff.py tools/context_usage_collector.py tools/cc_usage_observability.py tools/cc_jsonl_usage.py tools/cc_tool_surface.py tools/capability_manifest.py tools/lease_signer.py scripts/report_cc_usage.py scripts/replay_cc_jsonl_usage.py wake/usage.py wake/concern_resolution.py
       - name: Compile FILE+CHOICES contract
         run: python -m py_compile artifact_store.py chat/attachment_contract.py chat/choices_contract.py chat/document_library.py tools/artifact_cleaner.py tools/file_cleaner.py
       - name: Run Context Lean regressions
@@ -106,6 +106,8 @@ jobs:
             -v
       - name: Run UH-A0 capability manifest contract
         run: python -m unittest tests.test_capability_manifest -v
+      - name: Run UH-A0 turn lease signer contract
+        run: python -m unittest tests.test_lease_signer -v
       - name: Validate deploy guard
         run: bash -n scripts/deploy-frontend.sh
       - name: Run production git drift regressions
