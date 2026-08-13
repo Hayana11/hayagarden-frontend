@@ -91,7 +91,7 @@ class DeferredConfirmationBridgeTests(unittest.TestCase):
             (self.pending["approval_id"],),
         )
         self.assertEqual([event["t"] for event in events], [
-            "tool_use", "tool_result", "text", "done",
+            "tool_use", "tool_result", "text", "usage", "done",
         ])
         self.assertEqual(events[0]["d"]["id"], "toolu-1")
         self.assertEqual(events[1]["d"]["result"], "mock post result")
