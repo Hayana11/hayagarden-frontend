@@ -5988,7 +5988,14 @@ def chat_stream():
                     _request_data.get('approval_id') is not None
                     or _request_data.get('confirmation_decision') is not None
                 ):
-                    yield from _stream_cc_deferred_confirmation(_request_data)
+                    mode, _reused = _gen_acquire_or_wait()
+                    if mode != 'own':
+                        yield from _confirmation_error('上一轮回复仍在生成中，请稍候再试')
+                        return
+                    try:
+                        yield from _stream_cc_deferred_confirmation(_request_data)
+                    finally:
+                        _gen_release(None)
                     return
                 _turn_data = prepare_turn(
                     _request_data,
