@@ -3682,7 +3682,10 @@ def _cc_resident_stream_gen(
         rel_context_status,
         should_send_relationship,
     )
-    from chat.display_thinking import append_authored_thinking_instruction
+    from chat.display_thinking import (
+        append_authored_thinking_instruction,
+        authored_thinking_instruction_suffix,
+    )
     from tools import cc_usage_observability as _cc_obs
 
     if not CC_TOKEN:
@@ -3810,9 +3813,18 @@ def _cc_resident_stream_gen(
 
         def _assemble_cold_content(msgs):
             # Cold content assembly: one messages_to_text per message plan version.
-            convo = messages_to_text(
-                _messages_with_display_instruction(msgs)
-            )
+            prepared_msgs = _messages_with_display_instruction(msgs)
+            convo = messages_to_text(prepared_msgs)
+            display_suffix_text = ''
+            if prepared_msgs:
+                last_content = prepared_msgs[-1].get('content')
+                if (
+                    isinstance(last_content, (str, list))
+                    and authored_thinking_instruction_suffix(display_thinking_mode)
+                ):
+                    display_suffix_text = authored_thinking_instruction_suffix(
+                        display_thinking_mode
+                    )
             hb_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
             if relationship_text:
                 hb_text += NL + NL + relationship_text
@@ -3820,7 +3832,7 @@ def _cc_resident_stream_gen(
             if wake_reply_bridge:
                 hb_text += NL + NL + wake_reply_bridge
             hb_text += NL + NL + '请回复最后一条消息。'
-            return prefix + hb_text, hb_text, convo
+            return prefix + hb_text, hb_text, convo, display_suffix_text
 
         from chat.cold_bootstrap_budget import (
             ColdBootstrapOverflow,
@@ -3833,7 +3845,9 @@ def _cc_resident_stream_gen(
         )
         from chat.context_lean import cc_history_token_budget
 
-        content, history_bootstrap_text, convo_text = _assemble_cold_content(messages)
+        (
+            content, history_bootstrap_text, convo_text, display_suffix_text
+        ) = _assemble_cold_content(messages)
         cold_prompt_target_val = cold_prompt_target()
         cold_budget_mode_val = 'token_budget'
         cold_history_budget_val = cc_history_token_budget()
@@ -3845,6 +3859,16 @@ def _cc_resident_stream_gen(
         # history assembly — never a model retry, never a raw string slice.
         if cold_prompt_estimate > cold_prompt_target_val and rebuild_messages_fn is not None:
             history_tokens_est = estimate_text_tokens(convo_text)
+            display_suffix_tokens_est = (
+                estimate_text_tokens(display_suffix_text)
+                if display_suffix_text else 0
+            )
+            # The authored display suffix is fixed provider overhead: it is
+            # present again after rebuild and must not be treated as trim-able
+            # conversation history.
+            history_tokens_est = max(
+                0, history_tokens_est - display_suffix_tokens_est
+            )
             non_history_est = max(0, cold_prompt_estimate - history_tokens_est)
             new_budget = effective_history_budget(
                 default_history_budget=cold_history_budget_val,
@@ -3852,9 +3876,10 @@ def _cc_resident_stream_gen(
                 cold_target=cold_prompt_target_val,
             )
             rebuilt_messages, rebuilt_stats = rebuild_messages_fn(new_budget)
-            rebuilt_content, rebuilt_history_bootstrap_text, _rebuilt_convo = (
-                _assemble_cold_content(rebuilt_messages)
-            )
+            (
+                rebuilt_content, rebuilt_history_bootstrap_text, _rebuilt_convo,
+                _rebuilt_display_suffix_text,
+            ) = _assemble_cold_content(rebuilt_messages)
             rebuilt_estimate = estimate_whole_prompt(full_system, rebuilt_content)
             messages = rebuilt_messages
             content, history_bootstrap_text = rebuilt_content, rebuilt_history_bootstrap_text

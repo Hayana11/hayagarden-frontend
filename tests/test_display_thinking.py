@@ -427,7 +427,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
                         is_cold=True,
                         is_respawn=False,
                     )
-            self.assertTrue(rebuild.called_once)
+            rebuild.assert_called_once()
             self.assertIs(plan.assembly, rebuilt)
             self.assertEqual('REBUILT_STATE', plan.assembly['state'])
             self.assertNotIn(AUTHORED_THINKING_INSTRUCTION, plan.assembly['state'])
