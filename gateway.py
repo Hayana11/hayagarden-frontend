@@ -4886,6 +4886,7 @@ def _stream_cc_deferred_confirmation(request_data):
     think_acc = []
     tool_calls = []
     usage = {}
+    done_text = ''
     try:
         resume_content = '用户已确认执行刚才等待确认的具体动作，请继续完成并回复。'
         for evt, payload in _CC_RESIDENT.resume_pending_deferred_turn(
@@ -4931,13 +4932,11 @@ def _stream_cc_deferred_confirmation(request_data):
                     yield _sse_json({'t': 'tool_result', 'd': item, 'idx': idx})
             elif evt == 'done':
                 if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
-                    raw_text, _thinking, usage = payload[0], payload[1], payload[2]
+                    done_text, _thinking, usage = payload[0], payload[1], payload[2]
                 else:
-                    raw_text, _thinking = payload[0], payload[1]
-                if raw_text:
-                    text_acc.append(str(raw_text))
+                    done_text, _thinking = payload[0], payload[1]
 
-        final_text = ''.join(text_acc).strip()
+        final_text = str(done_text or ''.join(text_acc)).strip()
         if final_text:
             _persist_turn_assistant(
                 {},
