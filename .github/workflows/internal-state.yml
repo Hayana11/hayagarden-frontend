@@ -21,7 +21,7 @@ jobs:
           fi
           sudo mkdir -p /var/lib/hayagarden
           sudo chown "$(id -u):$(id -g)" /var/lib/hayagarden
-          python - <<'PY
+          python - <<'PY'
           import sqlite3
           for name in ("memories.db", "commands.db"):
               sqlite3.connect(f"/opt/frontend/{name}").close()
