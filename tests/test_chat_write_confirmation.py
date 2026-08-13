@@ -96,7 +96,7 @@ class DeferredConfirmationBridgeTests(unittest.TestCase):
         self.assertEqual(events[0]["d"]["id"], "toolu-1")
         self.assertEqual(events[1]["d"]["result"], "mock post result")
         self.assertEqual(events[2]["d"], "已记好")
-        self.assertTrue(events[3]["ok"])
+        self.assertTrue(events[4]["ok"])
 
         replay = self.run_bridge(resident, "approve")
         self.assertEqual(resident.write_count, 1)
