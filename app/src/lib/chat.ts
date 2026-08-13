@@ -20,12 +20,19 @@ export interface ChatArtifact {
 
 export interface ChatToolCall {
   name: string;
+  id?: string;
   args?: unknown;
+  tool_input?: unknown;
   result?: unknown;
   success?: boolean;
   caption?: string;
   running?: boolean;
   artifact?: ChatArtifact;
+  approval_id?: string;
+  deferred_tool_use?: boolean;
+  status?: string;
+  approval_prompt?: string;
+  confirmation_state?: 'pending' | 'processing' | 'rejected';
 }
 
 export interface ChatUsage {
@@ -274,6 +281,7 @@ export interface StreamHandlers {
 export interface StreamResult {
   ok: boolean;
   error?: string;
+  deferredTool?: ChatToolCall;
 }
 
 interface SseEvent {
@@ -303,7 +311,11 @@ export async function streamChatReply(
   userMessageId: number | null,
   handlers: StreamHandlers,
   ctrl: AbortController,
-  extra: { rewriteId?: string | null } = {},
+  extra: {
+    rewriteId?: string | null;
+    approvalId?: string | null;
+    confirmationDecision?: 'approve' | 'reject';
+  } = {},
 ): Promise<StreamResult> {
   let safety: ReturnType<typeof setTimeout> | undefined;
   const armSafety = () => {
@@ -315,6 +327,8 @@ export async function streamChatReply(
     const body: Record<string, unknown> = {};
     if (userMessageId) body.user_message_id = userMessageId;
     if (extra.rewriteId) body.rewrite_id = extra.rewriteId;
+    if (extra.approvalId) body.approval_id = extra.approvalId;
+    if (extra.confirmationDecision) body.confirmation_decision = extra.confirmationDecision;
     const resp = await fetch(sseUrl('/api/gw/chat/stream'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -326,6 +340,7 @@ export async function streamChatReply(
     const decoder = new TextDecoder();
     let buf = '';
     let result: StreamResult | null = null;
+    let deferredTool: ChatToolCall | undefined;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -351,9 +366,12 @@ export async function streamChatReply(
           case 'text':
             handlers.onText(String(ev.d ?? ''));
             break;
-          case 'tool_use':
-            handlers.onToolUse(ev.idx ?? 0, { running: true, ...(ev.d as ChatToolCall) });
+          case 'tool_use': {
+            const tool = { running: true, ...(ev.d as ChatToolCall) };
+            if (tool.deferred_tool_use) deferredTool = tool;
+            handlers.onToolUse(ev.idx ?? 0, tool);
             break;
+          }
           case 'tool_result':
             handlers.onToolResult(ev.idx ?? 0, { running: false, ...(ev.d as ChatToolCall) });
             break;
@@ -379,7 +397,7 @@ export async function streamChatReply(
             handlers.onNotice?.(String(ev.d ?? ''));
             break;
           case 'done':
-            result = { ok: ev.ok !== false };
+            result = { ok: ev.ok !== false, deferredTool };
             break;
           case 'err':
             result = { ok: false, error: String(ev.d ?? '未知错误') };

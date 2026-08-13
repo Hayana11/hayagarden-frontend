@@ -291,6 +291,7 @@ export function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<ChatToolCall | null>(null);
   const [pendingFile, setPendingFile] = useState<{ fileUrl: string; fileName: string } | null>(null);
   const [pendingImage, setPendingImage] = useState<File | null>(null);
 
@@ -824,7 +825,10 @@ export function ChatScreen() {
   const runStream = useCallback(
     async (
       userMessageId: number | null,
-      opts: { rewriteId?: string | null } = {},
+      opts: {
+        rewriteId?: string | null;
+        confirmation?: { approvalId: string; decision: 'approve' | 'reject' };
+      } = {},
     ): Promise<boolean> => {
       // Invariant: any path entering live streaming pins the DOM window to latest
       // so live replies never render under an old browsing window.
@@ -856,8 +860,19 @@ export function ChatScreen() {
           onNotice: (s) => showToast(s),
         },
         ctrl,
-        { rewriteId: opts.rewriteId },
+        {
+          rewriteId: opts.rewriteId,
+          approvalId: opts.confirmation?.approvalId,
+          confirmationDecision: opts.confirmation?.decision,
+        },
       );
+      if (res.deferredTool) {
+        setPendingConfirmation({
+          ...res.deferredTool,
+          running: false,
+          confirmation_state: 'pending',
+        });
+      }
       liveRef.current = null;
       setLive(null);
       if (!res.ok && res.error) {
@@ -870,6 +885,27 @@ export function ChatScreen() {
     },
     [scrollBottom, showToast, updateLive, pinTranscriptToLatest],
   );
+
+  const confirmDeferred = useCallback(async (decision: 'approve' | 'reject') => {
+    const pending = pendingConfirmation;
+    const approvalId = pending?.approval_id;
+    if (!pending || !approvalId || sending || pending.confirmation_state === 'processing') return;
+    setPendingConfirmation({ ...pending, confirmation_state: 'processing', running: false });
+    setSending(true);
+    setChatError(null);
+    const ok = await runStream(null, {
+      confirmation: { approvalId, decision },
+    });
+    if (decision === 'reject') {
+      setPendingConfirmation({ ...pending, confirmation_state: 'rejected', running: false });
+    } else if (ok) {
+      await refetchLatest();
+      setPendingConfirmation(null);
+    } else {
+      setPendingConfirmation({ ...pending, confirmation_state: 'pending', running: false });
+    }
+    setSending(false);
+  }, [pendingConfirmation, sending, runStream, refetchLatest]);
 
   const send = useCallback(async () => {
     const attempt = {
@@ -1262,6 +1298,9 @@ export function ChatScreen() {
 
   function renderToolCard(key: string, tc: ChatToolCall) {
     const open = Boolean(openTools[key]);
+    const waiting = tc.deferred_tool_use === true && tc.status === 'waiting_for_confirmation';
+    const processing = tc.confirmation_state === 'processing';
+    const rejected = tc.confirmation_state === 'rejected';
     const outStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result ?? '', null, 2);
     const inStr = typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}, null, 2);
     return (
@@ -1279,6 +1318,32 @@ export function ChatScreen() {
             <path d="M6 9l6 6 6-6" />
           </svg>
         </div>
+        {waiting && (
+          <div className="vstack vstack-9" style={{ padding: '0 14px 14px', animation: 'chatFadeIn .2s ease' }}>
+            <div style={{ height: 1, background: 'var(--line)' }} />
+            <div style={{ fontSize: 13.5, lineHeight: 1.7, color: 'var(--ink2)' }}>{rejected ? '已取消' : tc.approval_prompt}</div>
+            {!rejected && (
+              <div className="hstack hstack-8">
+                <button
+                  type="button"
+                  disabled={processing || sending}
+                  onClick={(e) => { e.stopPropagation(); void confirmDeferred('approve'); }}
+                  style={{ border: 'none', borderRadius: 999, padding: '8px 18px', background: 'var(--deep)', color: '#FBF3F0', cursor: processing || sending ? 'default' : 'pointer', opacity: processing || sending ? 0.55 : 1 }}
+                >
+                  {processing ? '处理中…' : '确认'}
+                </button>
+                <button
+                  type="button"
+                  disabled={processing || sending}
+                  onClick={(e) => { e.stopPropagation(); void confirmDeferred('reject'); }}
+                  style={{ border: '1px solid var(--line)', borderRadius: 999, padding: '8px 18px', background: 'transparent', color: 'var(--mut)', cursor: processing || sending ? 'default' : 'pointer', opacity: processing || sending ? 0.55 : 1 }}
+                >
+                  不要
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         {open && (
           <div className="vstack vstack-9" style={{ padding: '0 14px 14px', animation: 'chatFadeIn .2s ease' }}>
             <div style={{ height: 1, background: 'var(--line)' }} />
@@ -1774,6 +1839,7 @@ export function ChatScreen() {
           )}
           {rendered}
           {live && renderLive(live)}
+          {pendingConfirmation && renderToolCard('pending-confirmation', pendingConfirmation)}
           {canShowNewerLoaded && (
             <div className="vstack vstack-8" style={{ padding: '4px 0 2px' }}>
               <div

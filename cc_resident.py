@@ -704,14 +704,24 @@ class ResidentSession:
                 session_id=pending['session_id'],
             )
         try:
-            yield from self.send_turn(
+            for event, payload in self.send_turn(
                 content,
                 commit_meta=commit_meta,
                 on_stdin_flushed=on_stdin_flushed,
                 idle_heartbeat_sec=idle_heartbeat_sec,
                 turn_lease=turn_lease,
                 turn_runtime=runtime,
-            )
+            ):
+                yield event, payload
+                if (
+                    event == 'tool_result'
+                    and isinstance(payload, dict)
+                    and payload.get('tool_use_id') == pending['tool_use_id']
+                    and self._pending_deferred == pending
+                ):
+                    # The concrete write has been consumed; replaying the same
+                    # approval must fail closed even if later text streaming fails.
+                    self._pending_deferred = None
         except BaseException:
             self._kill(quiet=True)
             raise
