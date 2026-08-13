@@ -5618,6 +5618,7 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         prepare_daily_display_thinking_plan(_daily_plan, _display_thinking_mode)
 
         cc_tool_calls = []
+        deferred_payload = None
         _daily_events = _daily_rt.stream_daily_resident_turn(
             _daily_plan,
             resident=_CC_RESIDENT,
@@ -5638,11 +5639,30 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                     'id': payload.get('id'), 'name': payload.get('name'),
                     'args': payload.get('args'), 'result': '', 'success': True,
                 })
+                event_data = {
+                    'id': payload.get('id'),
+                    'name': payload.get('name'),
+                    'args': _slim_args(payload.get('args')),
+                }
+                if payload.get('deferred_tool_use'):
+                    deferred_payload = dict(payload)
+                    event_data.update({
+                        'tool_input': copy.deepcopy(payload.get('tool_input') or payload.get('args') or {}),
+                        'approval_id': payload.get('approval_id'),
+                        'deferred_tool_use': True,
+                        'status': payload.get('status'),
+                        'approval_prompt': payload.get('approval_prompt'),
+                    })
                 yield 'data: ' + json.dumps({
                     't': 'tool_use',
-                    'd': {'name': payload.get('name'), 'args': _slim_args(payload.get('args'))},
+                    'd': event_data,
                     'idx': len(cc_tool_calls) - 1,
                 }, ensure_ascii=False) + SSE_END
+                if deferred_payload is not None:
+                    _daily_rt._release_lease(_daily_plan)
+                    turn_terminal = True
+                    yield _sse_json({'t': 'done', 'ok': True})
+                    return
             elif evt == 'tool_result':
                 _ti = next(
                     (i for i in range(len(cc_tool_calls) - 1, -1, -1)
@@ -5663,6 +5683,8 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                     }
                 text, unexpected_save = _daily_rt.strip_daily_save_markers(raw_text)
 
+        if deferred_payload is not None:
+            return
         if not str(text or '').strip():
             _daily_rt.handle_provider_failure(
                 _daily_plan,
@@ -5961,7 +5983,18 @@ def chat_stream():
             _persisted = [False]
             _turn_data: dict = {}
             try:
-                _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
+                _request_data = request.get_json(silent=True) or {}
+                if (
+                    _request_data.get('approval_id') is not None
+                    or _request_data.get('confirmation_decision') is not None
+                ):
+                    yield from _stream_cc_deferred_confirmation(_request_data)
+                    return
+                _turn_data = prepare_turn(
+                    _request_data,
+                    conversation_id=_conv,
+                    memories_db_path=DB_PATH,
+                )
                 _uc = (_turn_data.get('content') or '').strip()
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
@@ -6088,6 +6121,7 @@ def chat_stream():
                         return _rebuilt_msgs, _rebuilt_stats
 
                     cc_tool_calls = []
+                    deferred_payload = None
                     # Regression ordering anchor: for evt, payload in _cc_resident_stream_gen
                     # Persistence and one-shot consumption remain below this stream.
                     _resident_events = _cc_resident_stream_gen(
@@ -6109,7 +6143,26 @@ def chat_stream():
                         elif evt == 'tool_use':
                             cc_tool_calls.append({'id': payload.get('id'), 'name': payload.get('name'),
                                                   'args': payload.get('args'), 'result': '', 'success': True})
-                            yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': payload.get('name'), 'args': _slim_args(payload.get('args'))}, 'idx': len(cc_tool_calls) - 1}, ensure_ascii=False) + SSE_END
+                            event_data = {
+                                'id': payload.get('id'),
+                                'name': payload.get('name'),
+                                'args': _slim_args(payload.get('args')),
+                            }
+                            if payload.get('deferred_tool_use'):
+                                deferred_payload = dict(payload)
+                                event_data.update({
+                                    'tool_input': copy.deepcopy(payload.get('tool_input') or payload.get('args') or {}),
+                                    'approval_id': payload.get('approval_id'),
+                                    'deferred_tool_use': True,
+                                    'status': payload.get('status'),
+                                    'approval_prompt': payload.get('approval_prompt'),
+                                })
+                            yield 'data: ' + json.dumps({'t': 'tool_use', 'd': event_data, 'idx': len(cc_tool_calls) - 1}, ensure_ascii=False) + SSE_END
+                            if deferred_payload is not None:
+                                _gen_release(None)
+                                _released[0] = True
+                                yield _sse_json({'t': 'done', 'ok': True})
+                                return
                         elif evt == 'tool_result':
                             _ti = next((i for i in range(len(cc_tool_calls) - 1, -1, -1)
                                         if cc_tool_calls[i].get('id') == payload.get('tool_use_id')), len(cc_tool_calls) - 1)
