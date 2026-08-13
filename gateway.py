@@ -4819,6 +4819,149 @@ def _sse_json(payload: dict) -> str:
     return 'data: ' + json.dumps(payload, ensure_ascii=False) + SSE_END
 
 
+
+def _confirmation_error(message='LEASE_MISMATCH'):
+    yield _sse_json({'t': 'err', 'd': message, 'code': message})
+    yield _sse_json({'t': 'done', 'ok': False})
+
+
+def _stream_cc_deferred_confirmation(request_data):
+    """Bridge one exact provider-deferred action through the existing lease/fence."""
+    import uuid
+    from tools.execution_fence import (
+        UH_A0TurnRuntime,
+        approval_prompt,
+        capability_for_tool,
+        clear_current_turn_lease,
+    )
+    from tools.lease_signer import issue_turn_lease
+
+    decision = str((request_data or {}).get('confirmation_decision') or '').strip()
+    approval_id = str((request_data or {}).get('approval_id') or '').strip()
+    pending = _CC_RESIDENT.pending_deferred
+    if decision not in {'approve', 'reject'} or not approval_id or not pending:
+        yield from _confirmation_error()
+        return
+    if approval_id != str(pending.get('approval_id') or ''):
+        yield from _confirmation_error()
+        return
+
+    lease_path = getattr(
+        _CC_RESIDENT,
+        '_uh_a0_turn_lease_path',
+        '/opt/frontend/.uh-a0-current-turn-lease.json',
+    )
+    runtime = UH_A0TurnRuntime(
+        lease_path,
+        session_id=pending.get('session_id'),
+    )
+    if decision == 'reject':
+        _CC_RESIDENT._pending_deferred = None
+        try:
+            _CC_RESIDENT._kill(quiet=True)
+        except Exception:
+            pass
+        runtime.end_turn()
+        clear_current_turn_lease(lease_path)
+        yield _sse_json({'t': 'text', 'd': '已取消'})
+        yield _sse_json({'t': 'done', 'ok': True})
+        return
+
+    capability_id = capability_for_tool(pending.get('tool_name'))
+    if not capability_id:
+        yield from _confirmation_error()
+        return
+    confirmation_lease = issue_turn_lease(
+        turn_id='confirmation-' + uuid.uuid4().hex,
+        turn_mode='chat',
+        issued_from='user_confirmation',
+        requested_capabilities=(capability_id,),
+        approval_ids=(approval_id,),
+    )
+    resume_env = dict(os.environ)
+    resume_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
+    resume_env.pop('ANTHROPIC_API_KEY', None)
+
+    text_acc = []
+    think_acc = []
+    tool_calls = []
+    usage = {}
+    try:
+        resume_content = '用户已确认执行刚才等待确认的具体动作，请继续完成并回复。'
+        for evt, payload in _CC_RESIDENT.resume_pending_deferred_turn(
+            resume_content,
+            resume_env,
+            confirmation_lease,
+            turn_runtime=runtime,
+        ):
+            if evt == 'text':
+                text_acc.append(str(payload or ''))
+                yield _sse_json({'t': 'text', 'd': payload})
+            elif evt == 'think':
+                think_acc.append(str(payload or ''))
+                yield _sse_json({'t': 'think', 'd': payload})
+            elif evt == 'tool_use':
+                item = {
+                    'id': payload.get('id'),
+                    'name': payload.get('name'),
+                    'args': _slim_args(payload.get('args')),
+                }
+                tool_calls.append({
+                    'id': payload.get('id'),
+                    'name': payload.get('name'),
+                    'args': payload.get('args'),
+                    'result': '',
+                    'success': True,
+                })
+                yield _sse_json({'t': 'tool_use', 'd': item, 'idx': len(tool_calls) - 1})
+            elif evt == 'tool_result':
+                idx = next(
+                    (i for i in range(len(tool_calls) - 1, -1, -1)
+                     if tool_calls[i].get('id') == payload.get('tool_use_id')),
+                    len(tool_calls) - 1,
+                )
+                if idx >= 0:
+                    tool_calls[idx]['result'] = payload.get('result', '')
+                    tool_calls[idx]['success'] = not payload.get('is_error')
+                    item = {
+                        **tool_calls[idx],
+                        'args': _slim_args(tool_calls[idx].get('args')),
+                        'result': str(tool_calls[idx].get('result') or '')[:2000],
+                    }
+                    yield _sse_json({'t': 'tool_result', 'd': item, 'idx': idx})
+            elif evt == 'done':
+                if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
+                    raw_text, _thinking, usage = payload[0], payload[1], payload[2]
+                else:
+                    raw_text, _thinking = payload[0], payload[1]
+                if raw_text:
+                    text_acc.append(str(raw_text))
+
+        final_text = ''.join(text_acc).strip()
+        if final_text:
+            _persist_turn_assistant(
+                {},
+                content=final_text,
+                thinking=''.join(think_acc),
+                tool_calls_json=json.dumps(
+                    [{k: v for k, v in tc.items() if k != 'id'} for tc in tool_calls],
+                    ensure_ascii=False,
+                ) if tool_calls else '',
+                cache_info_json=json.dumps(usage, ensure_ascii=False) if usage else '',
+            )
+        if usage:
+            yield _sse_json({'t': 'usage', **{
+                k: usage.get(k) for k in (
+                    'v', 'provider', 'input_tokens', 'output_tokens',
+                    'cache_read', 'cache_creation', 'last_round_context',
+                    'resident_turn_count', 'respawn_reason',
+                ) if k in usage
+            }})
+        yield _sse_json({'t': 'done', 'ok': True})
+    except Exception as exc:
+        yield _sse_json({'t': 'err', 'd': str(exc), 'code': str(exc)})
+        yield _sse_json({'t': 'done', 'ok': False})
+
 def _gw_first_turn_jsonl_grew(session) -> bool:
     """True when candidate JSONL grew past claim-time start_offset."""
     try:
