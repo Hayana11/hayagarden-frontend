@@ -899,12 +899,13 @@ export function ChatScreen() {
     if (decision === 'reject') {
       setPendingConfirmation({ ...pending, confirmation_state: 'rejected', running: false });
     } else if (ok) {
+      await refetchLatest();
       setPendingConfirmation(null);
     } else {
       setPendingConfirmation({ ...pending, confirmation_state: 'pending', running: false });
     }
     setSending(false);
-  }, [pendingConfirmation, sending, runStream]);
+  }, [pendingConfirmation, sending, runStream, refetchLatest]);
 
   const send = useCallback(async () => {
     const attempt = {
