@@ -3644,6 +3644,7 @@ def _format_group_chat_recap(rows, *, cold=False):
 def _cc_resident_stream_gen(
     messages, *, user_turn=True, history_stats=None, is_cold=None,
     rebuild_messages_fn=None, pending_respawn_reason=None,
+    display_thinking_mode='off',
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -3681,6 +3682,7 @@ def _cc_resident_stream_gen(
         rel_context_status,
         should_send_relationship,
     )
+    from chat.display_thinking import append_authored_thinking_instruction
     from tools import cc_usage_observability as _cc_obs
 
     if not CC_TOKEN:
@@ -3700,6 +3702,17 @@ def _cc_resident_stream_gen(
     last_text = last_content if isinstance(last_content, str) else ' '.join(
         b.get('text', '') for b in last_content if isinstance(b, dict))
     recall_blk, _ = _recall_memories(last_text) if last_text else ('', [])
+
+    def _messages_with_display_instruction(source_messages):
+        if not source_messages:
+            return source_messages
+        prepared = list(source_messages)
+        last_message = dict(prepared[-1])
+        last_message['content'] = append_authored_thinking_instruction(
+            last_message.get('content'), display_thinking_mode,
+        )
+        prepared[-1] = last_message
+        return prepared
 
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
@@ -3797,7 +3810,9 @@ def _cc_resident_stream_gen(
 
         def _assemble_cold_content(msgs):
             # Cold content assembly: one messages_to_text per message plan version.
-            convo = messages_to_text(msgs)
+            convo = messages_to_text(
+                _messages_with_display_instruction(msgs)
+            )
             hb_text = '以下是你们今天到目前为止的对话记录：' + NL + NL + convo
             if relationship_text:
                 hb_text += NL + NL + relationship_text
@@ -3947,6 +3962,9 @@ def _cc_resident_stream_gen(
             content = [{'type': 'text', 'text': prefix}] + list(last_content)
         else:
             content = last_content
+        content = append_authored_thinking_instruction(
+            content, display_thinking_mode,
+        )
         commit_meta = {
             'state_snapshot': raw_state,
             'feedback_ids': list(one_shot.get('feedback_ids') or []),
@@ -5397,6 +5415,12 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
     think_acc: list[str] = []
     assistant_persisted = False
     try:
+        from chat.display_thinking import (
+            filter_display_thinking_events,
+            get_display_thinking_mode,
+            prepare_daily_display_thinking_plan,
+        )
+        _display_thinking_mode = get_display_thinking_mode()
         _static_parts = build_cc_daily_static_parts()
         _full_system = _static_parts['full_system']
         _cc_env = dict(os.environ)
@@ -5421,13 +5445,19 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
         _daily_plan._resident_close_fn = lambda k=key: _daily_rt.close_local_resident_if_bound(
             _CC_RESIDENT, expected_key=k,
         )
+        # Gateway-only provider copy: preserve Daily's image-only sentinel so
+        # the runtime can build the existing multimodal vision payload.
+        prepare_daily_display_thinking_plan(_daily_plan, _display_thinking_mode)
 
         cc_tool_calls = []
-        for evt, payload in _daily_rt.stream_daily_resident_turn(
+        _daily_events = _daily_rt.stream_daily_resident_turn(
             _daily_plan,
             resident=_CC_RESIDENT,
             env=_cc_env,
             static_system=_full_system,
+        )
+        for evt, payload in filter_display_thinking_events(
+            _daily_events, _display_thinking_mode,
         ):
             if evt == 'text':
                 text_acc.append(str(payload or ''))
@@ -5830,6 +5860,11 @@ def chat_stream():
                 _is_user_turn = bool(_uc) or bool(_rewrite_id) or is_pending_user_turn(
                     get_db, _turn_data.get('user_message_id')
                 )
+                from chat.display_thinking import (
+                    filter_display_thinking_events,
+                    get_display_thinking_mode,
+                )
+                _display_thinking_mode = get_display_thinking_mode()
                 # 只 snapshot wake ids，避免 build_system() 先把 one_shot 反馈 drain 掉
                 _wake_claim_ids = capture_pending_wake_ids(get_db) if _is_user_turn else []
                 try:
@@ -5885,13 +5920,19 @@ def chat_stream():
                         return _rebuilt_msgs, _rebuilt_stats
 
                     cc_tool_calls = []
-                    for evt, payload in _cc_resident_stream_gen(
+                    # Regression ordering anchor: for evt, payload in _cc_resident_stream_gen
+                    # Persistence and one-shot consumption remain below this stream.
+                    _resident_events = _cc_resident_stream_gen(
                         messages,
                         user_turn=_is_user_turn,
                         history_stats=_history_stats,
                         is_cold=_cc_is_cold,
                         rebuild_messages_fn=_rebuild_cc_messages if _cc_is_cold else None,
                         pending_respawn_reason=_cc_pending_respawn_reason,
+                        display_thinking_mode=_display_thinking_mode,
+                    )
+                    for evt, payload in filter_display_thinking_events(
+                        _resident_events, _display_thinking_mode,
                     ):
                         if evt == 'text':
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END

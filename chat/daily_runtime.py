@@ -155,6 +155,7 @@ class DailyTurnPlan:
     manifest: dict[str, Any]
     user_content: str = ''
     user_image_url: str = ''
+    provider_display_thinking_suffix: str = field(default='', repr=False)
     lease_acquired: bool = False
     lease_released: bool = False
     db_path: Optional[str] = None
@@ -285,6 +286,7 @@ def format_resident_turn_content(
     is_cold: bool,
     is_respawn: bool,
     user_image_url: str = '',
+    provider_display_thinking_suffix: str = '',
 ) -> Any:
     """Assemble resident turn content.
 
@@ -336,9 +338,14 @@ def format_resident_turn_content(
         text = turn_user_text
 
     if not image_url:
-        return text
-    from chat.cc_vision_bridge import build_claude_user_content
-    return build_claude_user_content(text=text, image_refs=[image_url])
+        content = text
+    else:
+        from chat.cc_vision_bridge import build_claude_user_content
+        content = build_claude_user_content(text=text, image_refs=[image_url])
+    from chat.display_thinking import append_display_thinking_suffix
+    return append_display_thinking_suffix(
+        content, provider_display_thinking_suffix,
+    )
 
 
 def _binding_matches_plan(binding: Optional[LocalResidentBinding], plan: DailyTurnPlan) -> bool:
@@ -1742,8 +1749,10 @@ def _adopt_reprepared_plan_in_place(
     Gateway keeps the original DailyTurnPlan reference across stream → persist →
     cursor CAS → Mapping. Reprepare must therefore mutate that same object.
     """
+    provider_suffix = getattr(current, 'provider_display_thinking_suffix', '')
     for f in fields(DailyTurnPlan):
         setattr(current, f.name, getattr(replacement, f.name))
+    current.provider_display_thinking_suffix = provider_suffix
     if resident is not None:
         key = current.resident_key
         current._resident_close_fn = (
@@ -2071,6 +2080,9 @@ def _apply_daily_cold_prompt_fence(
             is_cold=is_cold,
             is_respawn=is_respawn,
             user_image_url=plan.user_image_url,
+            provider_display_thinking_suffix=(
+                plan.provider_display_thinking_suffix
+            ),
         )
         cold_prompt_estimate = estimate_whole_prompt(static_system, content)
         cold_history_budget_val = new_budget
@@ -2506,6 +2518,9 @@ def ensure_resident_and_stream(
                 is_cold=plan.is_cold or actual_cold,
                 is_respawn=plan.is_respawn,
                 user_image_url=plan.user_image_url,
+                provider_display_thinking_suffix=(
+                    plan.provider_display_thinking_suffix
+                ),
             )
         except Exception as exc:
             from chat.cc_vision_bridge import VisionBridgeError

@@ -72,6 +72,8 @@ _DEFAULTS = {
     'CC_CHAT_MODEL': '',
     # R0：staged rewrite 机会型 native session fork（默认关闭；缺 mapping/SDK 时 cold fallback）。
     'CC_REWRITE_NATIVE_FORK_ENABLED': '0',
+    # Fyodor solo chat authored/display thinking compatibility.
+    'DISPLAY_THINKING_MODE': 'auto',
 }
 
 
