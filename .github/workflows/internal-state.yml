@@ -19,6 +19,8 @@ jobs:
           if [ ! -e /opt/frontend ]; then
             sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
           fi
+          sudo mkdir -p /var/lib/hayagarden
+          sudo chown "$(id -u):$(id -g)" /var/lib/hayagarden
           python - <<'PY'
           import sqlite3
           for name in ("memories.db", "commands.db"):
