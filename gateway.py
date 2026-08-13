@@ -5671,6 +5671,16 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 if _ti >= 0:
                     cc_tool_calls[_ti]['result'] = payload.get('result', '')
                     cc_tool_calls[_ti]['success'] = not payload.get('is_error')
+                    _slim = {
+                        **cc_tool_calls[_ti],
+                        'args': _slim_args(cc_tool_calls[_ti].get('args')),
+                        'result': str(cc_tool_calls[_ti].get('result') or '')[:2000],
+                    }
+                    yield 'data: ' + json.dumps({
+                        't': 'tool_result',
+                        'd': _slim,
+                        'idx': _ti,
+                    }, ensure_ascii=False) + SSE_END
             elif evt == 'done':
                 if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
                     raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
