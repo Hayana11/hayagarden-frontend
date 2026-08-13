@@ -391,6 +391,92 @@ class ColdPreflightFenceTests(unittest.TestCase):
         self.assertLessEqual(breakdown['cold_prompt_estimate'], breakdown['cold_prompt_target'])
         self.assertTrue(breakdown['cold_history_trimmed'])
 
+    def test_classic_cold_display_suffix_is_fixed_budget_overhead(self):
+        big_messages = _history_messages(40, row_chars=100, last_user_text='hi')
+        small_messages = _history_messages(2, row_chars=10, last_user_text='hi')
+        suffix_marker = '正式回复不能为空。'
+        suffix_start = '正式回复之前，先写一小段只用于界面展示的内心独白，并严格包在：'
+
+        def run_case(mode):
+            resident = _FenceFakeResident()
+            rebuild = mock.Mock(return_value=(
+                small_messages, {'conversation_content_trimmed': True},
+            ))
+            budget_calls = []
+            estimate_calls = []
+            token_calls = []
+
+            def fake_text_tokens(value):
+                token_calls.append(value)
+                return 20 if str(value).strip().startswith(suffix_start) else 80
+
+            def fake_effective_budget(*, default_history_budget, non_history_estimate, cold_target):
+                budget_calls.append(non_history_estimate)
+                if mode in ('auto', 'authored'):
+                    return 1 if non_history_estimate >= 50 else 999
+                return 1
+
+            def fake_whole_prompt(_system, _content):
+                estimate_calls.append(_content)
+                return 110 if len(estimate_calls) == 1 else (
+                    95 if mode in ('off', 'native') or (
+                        budget_calls and budget_calls[-1] >= 50
+                    ) else 105
+                )
+
+            with contextlib.ExitStack() as stack:
+                for p in self._fence_patches(
+                    resident,
+                    int_overrides={'CC_CONTEXT_HARD_LIMIT': 1000,
+                                   'CC_CONTEXT_SOFT_LIMIT': 700,
+                                   'CC_COLD_BOOTSTRAP_SAFETY_MARGIN': 100,
+                                   'HISTORY_TOKEN_BUDGET': 5000},
+                ):
+                    stack.enter_context(p)
+                stack.enter_context(mock.patch(
+                    'chat.cold_bootstrap_budget.cold_prompt_target',
+                    return_value=100,
+                ))
+                stack.enter_context(mock.patch(
+                    'chat.cold_bootstrap_budget.estimate_text_tokens',
+                    side_effect=fake_text_tokens,
+                ))
+                stack.enter_context(mock.patch(
+                    'chat.cold_bootstrap_budget.effective_history_budget',
+                    side_effect=fake_effective_budget,
+                ))
+                stack.enter_context(mock.patch(
+                    'chat.cold_bootstrap_budget.estimate_whole_prompt',
+                    side_effect=fake_whole_prompt,
+                ))
+                messages_to_text_mock = stack.enter_context(mock.patch.object(
+                    self.gateway, 'messages_to_text',
+                    wraps=self.gateway.messages_to_text,
+                ))
+                events = list(self.gateway._cc_resident_stream_gen(
+                    big_messages,
+                    user_turn=True,
+                    is_cold=True,
+                    history_stats={},
+                    rebuild_messages_fn=rebuild,
+                    display_thinking_mode=mode,
+                ))
+
+            rebuild.assert_called_once()
+            expected_non_history = 50 if mode in ('auto', 'authored') else 30
+            self.assertEqual(budget_calls, [expected_non_history])
+            self.assertEqual(len(estimate_calls), 2)
+            self.assertEqual(messages_to_text_mock.call_count, 2)
+            self.assertEqual(len(resident.send_turn_calls), 1)
+            sent = resident.send_turn_calls[0]
+            expected_suffix_count = 1 if mode in ('auto', 'authored') else 0
+            self.assertEqual(sent.count(suffix_marker), expected_suffix_count)
+            self.assertTrue(any(event == 'done' for event, _ in events))
+
+        for mode in ('auto', 'authored', 'off', 'native'):
+            with self.subTest(mode=mode):
+                run_case(mode)
+
     def test_t5_latest_user_survives_rebuild(self):
         resident = _FenceFakeResident()
         big_messages = _history_messages(40, row_chars=100, last_user_text='LATEST_USER_MESSAGE')
