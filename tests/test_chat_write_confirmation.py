@@ -85,8 +85,11 @@ class DeferredConfirmationBridgeTests(unittest.TestCase):
         self.assertIn("已确认", content)
         self.assertEqual(lease["issued_from"], "user_confirmation")
         self.assertEqual(lease["turn_mode"], "chat")
-        self.assertEqual(lease["requested_capabilities"], ["todo.write"])
-        self.assertEqual(lease["approval_ids"], [self.pending["approval_id"]])
+        self.assertIn("todo.write", lease["allowed_capabilities"])
+        self.assertEqual(
+            lease["approval_ids"],
+            (self.pending["approval_id"],),
+        )
         self.assertEqual([event["t"] for event in events], [
             "tool_use", "tool_result", "text", "done",
         ])
