@@ -34,6 +34,7 @@ os.environ.setdefault(
 from chat import daily_context as dc
 from chat import daily_history as dh
 from chat import daily_runtime as dr
+from tools.lease_signer import issue_turn_lease
 from chat.cold_bootstrap_budget import ColdBootstrapOverflow, NoBenefitRespawnError
 from chat.daily_cold_history import (
     group_formal_history_rounds,
@@ -323,7 +324,7 @@ class DailyColdFenceTests(unittest.TestCase):
         def clear_hard_context_pre_spawn_turns():
             r.hard_context_pre_spawn_turns = None
 
-        def send_turn(content, commit_meta=None):
+        def send_turn(content, commit_meta=None, turn_lease=None):
             calls.append(content)
             yield ('done', ('ok', '', {'v': 2, 'provider': 'claude_code'}, {}))
 
@@ -375,6 +376,11 @@ class DailyColdFenceTests(unittest.TestCase):
             manifest=dict(assembly.get('manifest') or {}),
             user_content=user_text,
             db_path=self.db,
+            turn_lease=issue_turn_lease(
+                turn_id='req',
+                turn_mode='chat',
+                issued_from='default_policy',
+            ),
         )
         return plan, ids
 

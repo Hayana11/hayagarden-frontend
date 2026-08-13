@@ -149,7 +149,7 @@ class _DoorResident:
         self._alive = True
         return False
 
-    def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+    def send_turn(self, content, commit_meta=None, on_stdin_flushed=None, turn_lease=None):
         self.send_count += 1
         self.sent.append(str(content))
         if on_stdin_flushed is not None:
@@ -961,7 +961,7 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
                 self.attempt_count = 0
                 self.binding_at_first_send = None
 
-            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None, turn_lease=None):
                 self.attempt_count += 1
                 if self.fail_preflush_once:
                     self.fail_preflush_once = False
@@ -1095,7 +1095,7 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         )
 
         class _PostFlushBoom(_DoorResident):
-            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None):
+            def send_turn(self, content, commit_meta=None, on_stdin_flushed=None, turn_lease=None):
                 self.send_count += 1
                 self.sent.append(str(content))
                 if on_stdin_flushed is not None:
