@@ -1991,6 +1991,94 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
 
 
 class GatewayDailyCasSseTests(unittest.TestCase):
+    def test_daily_tool_visibility_emits_and_persists_result(self):
+        import gateway
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', '读取一下待办', '2026-07-27 10:00:00')
+            plan = mock.MagicMock()
+            plan.resident_key = 'daily:default:1:1'
+            plan.manifest = {}
+            persisted = {}
+
+            def _fake_stream(plan_arg, *, resident, env, static_system):
+                yield ('tool_use', {
+                    'id': 't-visible-1',
+                    'name': 'mcp__home__get_todos',
+                    'args': {},
+                })
+                yield ('tool_result', {
+                    'tool_use_id': 't-visible-1',
+                    'result': '{"ok":true}',
+                    'is_error': False,
+                })
+                yield ('text', '工具读取完成')
+                yield ('done', ('工具读取完成', '', {}, {}))
+
+            def _persist(*_args, **kwargs):
+                persisted['tool_calls'] = kwargs['tool_calls']
+                return 4242
+
+            patches = [
+                mock.patch.object(config_store, 'get_bool', return_value=True),
+                mock.patch('chat.daily_context.enabled', return_value=True),
+                mock.patch.object(gateway, 'DB_PATH', db),
+                mock.patch(
+                    'chat.system_builder.build_cc_daily_static_parts',
+                    return_value={'persona': 'P', 'full_system': 'STATIC'},
+                ),
+                mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
+                mock.patch.object(
+                    dr,
+                    'stream_daily_resident_turn',
+                    side_effect=_fake_stream,
+                ),
+                mock.patch.object(
+                    dr,
+                    'persist_daily_assistant_for_plan',
+                    side_effect=_persist,
+                ),
+                mock.patch.object(
+                    dr,
+                    'handle_provider_success',
+                    return_value={'cursor_cas_success': True},
+                ),
+                mock.patch.object(gateway, '_CC_RESIDENT', mock.MagicMock()),
+                mock.patch.object(gateway, '_write_session_memo'),
+                mock.patch('moments_persistence.after_assistant_persisted'),
+                mock.patch('chat.scoring_identity.trigger_turn_scoring'),
+            ]
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                chunks = list(
+                    gateway._stream_cc_daily_soft_window(
+                        {'user_message_id': uid},
+                        {'content': '读取一下待办'},
+                    )
+                )
+
+            events = _sse_events_from_chunks(chunks)
+            tool_use = next(e for e in events if e.get('t') == 'tool_use')
+            tool_result = next(e for e in events if e.get('t') == 'tool_result')
+            self.assertEqual(tool_use['idx'], 0)
+            self.assertEqual(tool_result['idx'], tool_use['idx'])
+            self.assertEqual(tool_result['d']['name'], 'mcp__home__get_todos')
+            self.assertEqual(tool_result['d']['args'], {})
+            self.assertEqual(tool_result['d']['result'], '{"ok":true}')
+            self.assertTrue(tool_result['d']['success'])
+
+            persisted_calls = json.loads(persisted['tool_calls'])
+            self.assertEqual(len(persisted_calls), 1)
+            self.assertEqual(persisted_calls[0]['name'], 'mcp__home__get_todos')
+            self.assertEqual(persisted_calls[0]['result'], '{"ok":true}')
+            self.assertTrue(persisted_calls[0]['success'])
+        finally:
+            os.unlink(db)
+
+
     def test_cursor_cas_conflict_sse_fail_closed(self):
         import json
         import gateway
