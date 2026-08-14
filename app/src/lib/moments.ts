@@ -1,5 +1,5 @@
 // Data layer for the Moments page (Fyodor Moments.dc.html), wired to the
-// real ombre-brain / gallery / Tool Drawer v2 endpoints. Unlike the dashboard
+// real ombre-brain / gallery / Gateway tool inventory endpoints. Unlike the dashboard
 // screens, Moments never falls back to fictional mock content on failure —
 // a failed fetch surfaces an honest error state instead of fake data.
 import { http } from './http';

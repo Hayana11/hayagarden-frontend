@@ -1,6 +1,6 @@
 // Fyodor Moments — implements Fyodor Moments.dc.html against real backend
 // data (念头/日摘要/梦境 from posts, mood from emotion_state, per-memory V/A
-// points from ombre-brain frontmatter, gallery photos, Tool Drawer v2).
+// points from ombre-brain frontmatter, gallery photos, Gateway tool inventory).
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { smoothPath } from '../lib/format';
