@@ -123,7 +123,12 @@ class StableSystemTests(unittest.TestCase):
         self.assertEqual(
             parts['full_system'],
             '\n\n'.join(
-                p for p in (parts['persona'], parts['stable_note'], parts['save_instr'])
+                p for p in (
+                    parts['persona'],
+                    parts['stable_note'],
+                    parts['tool_companion_intuition'],
+                    parts['save_instr'],
+                )
                 if p and str(p).strip()
             ),
         )

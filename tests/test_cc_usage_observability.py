@@ -1242,13 +1242,15 @@ class CanonicalStaticBuilderTests(unittest.TestCase):
         from chat.system_builder import build_cc_static_parts, build_cc_static_system
         with mock.patch("chat.system_builder.read_persona", return_value="P"), \
              mock.patch("chat.system_builder.build_stable_note", return_value="N"), \
+             mock.patch("chat.system_builder._build_tool_companion_intuition", return_value="T"), \
              mock.patch("chat.system_builder._CC_SAVE_INSTR", "S"):
             parts = build_cc_static_parts()
             full = build_cc_static_system()
         self.assertEqual(parts["full_system"], full)
-        self.assertEqual(parts["full_system"], "P\n\nN\n\nS")
+        self.assertEqual(parts["full_system"], "P\n\nN\n\nT\n\nS")
         self.assertEqual(parts["persona"], "P")
         self.assertEqual(parts["stable_note"], "N")
+        self.assertEqual(parts["tool_companion_intuition"], "T")
         self.assertEqual(parts["save_instr"], "S")
 
 
