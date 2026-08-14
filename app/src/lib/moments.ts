@@ -88,7 +88,7 @@ interface GalleryPhotoRow {
   importance: number;
 }
 
-import type { ToolCompanionGroup, ToolCompanionHints } from './toolCompanionHints';
+import type { ToolInventoryGroup, ToolInventoryResponse } from './toolInventory';
 
 interface RepostWireMessage {
   message_id: number;
@@ -239,7 +239,9 @@ export interface MomentsData {
   gallery: GalleryPhoto[];
   mood: MoodState | null;
   emotionMemories: EmotionMemoryPoint[];
-  toolGroups: ToolCompanionGroup[];
+  toolGroups: ToolInventoryGroup[];
+  toolInventoryTotal: number;
+  toolInventoryAvailable: number;
   failedSources: string[];
 }
 
@@ -416,12 +418,12 @@ export async function fetchMomentsFeed(
 export async function fetchMomentsData(): Promise<MomentsData> {
   const failed: string[] = [];
 
-  const [dreamsPage, moodRes, emoMemRes, galleryRes, companionRes] = await Promise.all([
+  const [dreamsPage, moodRes, emoMemRes, galleryRes, inventoryRes] = await Promise.all([
     safe('dreams', () => fetchDreamsPage(undefined, 20), failed),
     safe('mood', () => http.get<EmotionStateResponse>('/api/brain/emotion_state'), failed),
     safe('emotion memories', () => http.get<BrainItemsResponse<EmotionMemoryRow>>('/api/brain/emotions'), failed),
     safe('gallery', () => http.get<{ photos: GalleryPhotoRow[] }>('/api/gallery/photos'), failed),
-    safe('tool companion hints', () => http.get<ToolCompanionHints>('/api/tools/companion-hints'), failed),
+    safe('tool inventory', () => http.get<ToolInventoryResponse>('/api/tools/inventory'), failed),
   ]);
 
   const dreamEntries: DreamEntry[] = dreamsPage?.items || [];
@@ -462,22 +464,8 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     keywords: p.keywords || [],
   }));
 
-  const toolGroups: ToolCompanionGroup[] = companionRes?.ok
-    ? (companionRes.groups || []).map((group) => ({
-        id: group.id,
-        label: group.label,
-        tools: (group.tools || []).map((tool) => ({
-          capability_id: tool.capability_id,
-          display_label: tool.display_label,
-          companion_hint: tool.companion_hint,
-          default_display_label: tool.default_display_label,
-          default_companion_hint: tool.default_companion_hint,
-          physical_boundary: tool.physical_boundary,
-          status_label: tool.status_label,
-        })),
-      }))
-    : [];
-  if (companionRes && !companionRes.ok) failed.push('tool companion hints');
+  const toolGroups: ToolInventoryGroup[] = inventoryRes?.ok ? inventoryRes.groups || [] : [];
+  if (inventoryRes && !inventoryRes.ok) failed.push('tool inventory');
 
   return {
     dreams: dreamEntries,
@@ -487,6 +475,8 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     mood,
     emotionMemories,
     toolGroups,
+    toolInventoryTotal: inventoryRes?.ok ? inventoryRes.total : 0,
+    toolInventoryAvailable: inventoryRes?.ok ? inventoryRes.available_count : 0,
     failedSources: failed,
   };
 }
