@@ -2675,6 +2675,16 @@ def tool_companion_hints():
         return jsonify({'ok': False, 'error': str(exc)}), 500
 
 
+@app.route('/api/tools/inventory', methods=['GET'])
+def tool_inventory():
+    """Read-only historical Gateway tool inventory; never dispatches a tool."""
+    from tools.tool_inventory import payload
+    try:
+        return jsonify(payload())
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
 @app.route('/api/config/relay', methods=['POST'])
 def config_relay():
     """直接指定一个不在预设列表里的 url/key（老接口，保留兼容）。

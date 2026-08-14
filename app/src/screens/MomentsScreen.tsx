@@ -1,6 +1,6 @@
 // Fyodor Moments — implements Fyodor Moments.dc.html against real backend
 // data (念头/日摘要/梦境 from posts, mood from emotion_state, per-memory V/A
-// points from ombre-brain frontmatter, gallery photos, Tool Drawer v2).
+// points from ombre-brain frontmatter, gallery photos, Gateway tool inventory).
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { smoothPath } from '../lib/format';
@@ -33,6 +33,22 @@ import {
 } from '../lib/moments';
 import { HttpError } from '../lib/http';
 import { FONT_CN, FONT_DISPLAY, fontFamilyForText, hasCJK } from '../lib/typography';
+
+function inventoryReasonText(reasonCode: string): string {
+  const labels: Record<string, string> = {
+    active: '当前主聊天有真实执行路径，并且产品合同允许',
+    legacy_only: '历史工具登记仍在，但当前主聊天没有对应执行入口',
+    provider_not_bound: '当前主聊天没有 provider binding',
+    reserved: '当前为预留能力，尚未开放',
+    retired: '当前合同已主动收窄或退役；代码存在不代表可用',
+    safety_gap: '当前存在执行路径，但统一安全合同尚未完成',
+    contract_disabled: '当前产品合同禁止使用',
+    prerequisite_unproven: '必要前置条件尚未得到可靠证明',
+  };
+  return labels[reasonCode] || `状态原因：${reasonCode}`;
+}
+
+
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 
@@ -1353,9 +1369,13 @@ export function MomentsScreen() {
               {tab === 'tools' && (
                 <div className="vstack vstack-14">
                   <div style={{ padding: '16px 17px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(183,110,121,0.10),rgba(217,164,65,0.10))', color: 'var(--ink2)', fontSize: 13, lineHeight: 1.8 }}>
-                    <div style={{ color: 'var(--deep)', fontSize: 15, letterSpacing: 1 }}>Tool Drawer v2 · 48 小时试用</div>
-                    <div style={{ marginTop: 6 }}>固定工具墙，不再按关键词替换每轮工具。这里看费佳现在真正拥有的能力和边界；工具直觉说明放在费佳档案里编辑。</div>
-                    <button type="button" onClick={() => navigate('/profile')} style={{ marginTop: 10, padding: 0, border: 0, background: 'transparent', color: 'var(--deep)', fontSize: 12.5, cursor: 'pointer' }}>去费佳档案改工具说明 ›</button>
+                    <div style={{ color: 'var(--deep)', fontSize: 15, letterSpacing: 1 }}>工具总账</div>
+                    <div style={{ marginTop: 6 }}>这里展示哈娅花园历史登记过的完整 Gateway 工具家底。绿色表示当前主聊天可用；灰色表示当前不可用，不代表工具已被删除。</div>
+                    <div style={{ marginTop: 7, fontSize: 12, color: 'var(--mut)' }}>
+                      {data?.toolInventoryTotal ?? 0} 个已登记工具 · 当前可用 {data?.toolInventoryAvailable ?? 0} 个
+                    </div>
+                    <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--ghost)' }}>绿色 = 当前可用 · 灰色 = 当前不可用</div>
+                    <button type="button" onClick={() => navigate('/profile')} style={{ marginTop: 10, padding: 0, border: 0, background: 'transparent', color: 'var(--deep)', fontSize: 12.5, cursor: 'pointer' }}>去费佳档案改已启用工具的工具直觉 ›</button>
                   </div>
                   {(data?.toolGroups || []).length === 0 ? (
                     <EmptyState title="工具列表暂时读不到" hint="" />
@@ -1363,15 +1383,21 @@ export function MomentsScreen() {
                     (data?.toolGroups || []).map((group) => {
                       return (
                         <div key={group.id} style={{ background: 'var(--card)', borderRadius: 16, boxShadow: '0 6px 16px var(--shadow)', overflow: 'hidden' }}>
-                          <div style={{ padding: '13px 15px', color: 'var(--deep)', fontSize: 13.5, letterSpacing: 1 }}>{group.label}</div>
-                          <div className="vstack vstack-8" style={{ padding: '0 15px 15px', display: 'flex', flexDirection: 'column' }}>
+                          <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', padding: '13px 15px' }}>
+                            <span style={{ color: 'var(--deep)', fontSize: 13.5, letterSpacing: 1 }}>{group.label}</span>
+                            <span style={{ fontSize: 11, color: 'var(--ghost)' }}>{group.available} / {group.total} 可用</span>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(145px,1fr))', gap: 8, padding: '0 15px 15px' }}>
                             {group.tools.map((tool) => (
-                              <div key={tool.capability_id} style={{ padding: '11px 12px', borderRadius: 12, background: 'var(--card2)' }}>
-                                <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'center' }}>
-                                  <span style={{ fontSize: 13, color: 'var(--ink)', flex: 1 }}>{tool.display_label}</span>
-                                  <span style={{ fontSize: 10.5, color: 'var(--ok)' }}>{tool.status_label}</span>
+                              <div key={tool.tool_name} style={{ minWidth: 0, padding: '11px 12px', borderRadius: 12, background: tool.available ? 'rgba(122,155,109,0.10)' : 'var(--card2)', border: '1px solid ' + (tool.available ? 'rgba(122,155,109,0.24)' : 'var(--line)') }}>
+                                <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'flex-start' }}>
+                                  <span style={{ fontSize: 13, color: tool.available ? 'var(--ink)' : 'var(--mut)', flex: 1, minWidth: 0, lineHeight: 1.45 }}>{tool.display_label}</span>
+                                  <span style={{ fontSize: 10.5, color: tool.available ? 'var(--ok)' : 'var(--ghost)', flexShrink: 0 }}>{tool.status_label}</span>
                                 </div>
-                                <div style={{ marginTop: 6, fontSize: 12, lineHeight: 1.7, color: 'var(--mut)' }}>{tool.physical_boundary}</div>
+                                <code style={{ display: 'block', marginTop: 6, fontSize: 10.5, color: tool.available ? 'var(--mut)' : 'var(--ghost)', overflowWrap: 'anywhere' }}>{tool.tool_name}</code>
+                                {!tool.available && (
+                                  <div style={{ marginTop: 6, fontSize: 10.5, lineHeight: 1.55, color: 'var(--faint)' }}>{inventoryReasonText(tool.reason_code)}</div>
+                                )}
                               </div>
                             ))}
                           </div>
