@@ -80,6 +80,7 @@ export function ProfileScreen() {
   const [savedHints, setSavedHints] = useState<ToolCompanionHints | null>(null);
   const [draftHints, setDraftHints] = useState<ToolCompanionHints | null>(null);
   const [toolHintsLoadError, setToolHintsLoadError] = useState('');
+  const [resetCapabilities, setResetCapabilities] = useState<Record<string, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
 
   const personaDirty = personaLoaded && draftPersona !== savedPersona;
@@ -88,7 +89,8 @@ export function ProfileScreen() {
       && JSON.stringify(draftHints?.groups || []) !== JSON.stringify(savedHints?.groups || []),
     [draftHints, savedHints],
   );
-  const dirty = personaDirty || toolDirty;
+  const hasResetIntent = Object.values(resetCapabilities).some(Boolean);
+  const dirty = personaDirty || toolDirty || hasResetIntent;
   const characterCount = useMemo(() => Array.from(draftPersona).length, [draftPersona]);
   const lineCount = useMemo(() => draftPersona ? draftPersona.split(/\r?\n/).length : 0, [draftPersona]);
 
@@ -101,6 +103,7 @@ export function ProfileScreen() {
     setLoading(true);
     setPersonaLoadError('');
     setToolHintsLoadError('');
+    setResetCapabilities({});
     const [personaResult, hintsResult] = await Promise.allSettled([
       http.get<PersonaResponse>('/api/persona'),
       fetchToolCompanionHints(),
@@ -174,12 +177,19 @@ export function ProfileScreen() {
         setSavedPersona(draftPersona);
       }
       let latest = savedHints ? cloneHints(savedHints) : null;
-      if (draftHints && savedHints && toolDirty) {
+      if (draftHints && savedHints && (toolDirty || hasResetIntent)) {
         latest = cloneHints(savedHints);
         for (const group of draftHints.groups) {
           for (const tool of group.tools) {
             const original = findTool(savedHints.groups, tool.capability_id);
             if (!original) continue;
+            if (resetCapabilities[tool.capability_id]) {
+              latest = await patchToolCompanionHint({
+                capability_id: tool.capability_id,
+                reset: true,
+              });
+              continue;
+            }
             if (original.display_label === tool.display_label && original.companion_hint === tool.companion_hint) continue;
             latest = await patchToolCompanionHint({
               capability_id: tool.capability_id,
@@ -193,9 +203,10 @@ export function ProfileScreen() {
         setSavedHints(cloneHints(latest));
         setDraftHints(cloneHints(latest));
       }
+      setResetCapabilities({});
       const messages = [];
       if (personaDirty) messages.push('费佳人设已保存，聊天网关正在重启');
-      if (toolDirty) messages.push('工具直觉已保存；下一次 resident 启动时生效，未重启聊天网关');
+      if (toolDirty || hasResetIntent) messages.push('工具直觉已保存；下一次 resident 启动时生效，未重启聊天网关');
       showToast(messages.join('；'));
     } catch (error) {
       const detail = error instanceof HttpError && error.detail
@@ -205,10 +216,16 @@ export function ProfileScreen() {
     } finally {
       setSaving(false);
     }
-  }, [dirty, draftHints, draftPersona, personaDirty, savedHints, saving, showToast, toolDirty]);
+  }, [dirty, draftHints, draftPersona, hasResetIntent, personaDirty, resetCapabilities, savedHints, saving, showToast, toolDirty]);
 
   const editTool = useCallback((capabilityId: string, field: 'display_label' | 'companion_hint', value: string) => {
     setDraftHints((current) => current ? updateTool(current, capabilityId, { [field]: value }) : current);
+    setResetCapabilities((current) => {
+      if (!current[capabilityId]) return current;
+      const next = { ...current };
+      delete next[capabilityId];
+      return next;
+    });
   }, []);
 
   const resetTool = useCallback((tool: ToolCompanionTool) => {
@@ -216,6 +233,7 @@ export function ProfileScreen() {
       display_label: tool.default_display_label,
       companion_hint: tool.default_companion_hint,
     }) : current);
+    setResetCapabilities((current) => ({ ...current, [tool.capability_id]: true }));
   }, []);
 
   return (

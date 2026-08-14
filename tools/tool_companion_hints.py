@@ -109,27 +109,43 @@ def validate_catalog() -> None:
 validate_catalog()
 
 
-def _stored() -> dict[str, dict[str, str]]:
-    raw = config_store.get(CONFIG_KEY, "")
+def _parse_overrides(raw: str | None) -> dict[str, dict[str, str]]:
     if not raw:
-        return deepcopy(_DEFAULTS)
+        return {}
     try:
         value = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
-        return deepcopy(_DEFAULTS)
+        return {}
     if not isinstance(value, dict):
-        return deepcopy(_DEFAULTS)
-    result = deepcopy(_DEFAULTS)
-    for capability_id in P1_ENABLED_CAPABILITY_IDS:
-        row = value.get(capability_id)
-        if not isinstance(row, dict):
+        return {}
+    overrides: dict[str, dict[str, str]] = {}
+    for capability_id, row in value.items():
+        if capability_id not in P1_ENABLED_CAPABILITY_IDS or not isinstance(row, dict):
             continue
+        editable: dict[str, str] = {}
         for field in ("display_label", "companion_hint"):
             if isinstance(row.get(field), str) and row[field].strip():
                 # Deliberately do not strip: user-authored whitespace and line
                 # breaks are part of the companion hint contract.
+                editable[field] = row[field]
+        if editable:
+            overrides[capability_id] = editable
+    return overrides
+
+
+def _build_current(overrides: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    result = deepcopy(_DEFAULTS)
+    for capability_id, row in overrides.items():
+        if capability_id not in result:
+            continue
+        for field in ("display_label", "companion_hint"):
+            if field in row:
                 result[capability_id][field] = row[field]
     return result
+
+
+def _stored() -> dict[str, dict[str, str]]:
+    return _build_current(_parse_overrides(config_store.get(CONFIG_KEY, "")))
 
 
 def _status_label(capability_id: str) -> str:
@@ -144,23 +160,6 @@ def _status_label(capability_id: str) -> str:
         ) from exc
 
 
-def _editable_payload(value: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
-    return {
-        capability_id: {
-            "display_label": value[capability_id]["display_label"],
-            "companion_hint": value[capability_id]["companion_hint"],
-        }
-        for capability_id in P1_ENABLED_CAPABILITY_IDS
-    }
-
-
-def _save(value: dict[str, dict[str, str]]) -> None:
-    config_store.set(
-        CONFIG_KEY,
-        json.dumps(_editable_payload(value), ensure_ascii=False, separators=(",", ":")),
-    )
-
-
 def update_hint(
     capability_id: str,
     *,
@@ -172,17 +171,21 @@ def update_hint(
     capability_id = str(capability_id or "")
     if capability_id not in P1_ENABLED_CAPABILITY_IDS:
         raise ValueError("unknown capability")
-    current = _stored()
-    if reset:
-        current[capability_id]["display_label"] = _DEFAULTS[capability_id]["display_label"]
-        current[capability_id]["companion_hint"] = _DEFAULTS[capability_id]["companion_hint"]
-    else:
-        if display_label is not None:
-            current[capability_id]["display_label"] = display_label
-        if companion_hint is not None:
-            current[capability_id]["companion_hint"] = companion_hint
-    _save(current)
-    return deepcopy(current[capability_id])
+
+    def mutator(raw: str) -> str:
+        overrides = _parse_overrides(raw)
+        if reset:
+            overrides.pop(capability_id, None)
+        else:
+            row = overrides.setdefault(capability_id, {})
+            if display_label is not None:
+                row["display_label"] = display_label
+            if companion_hint is not None:
+                row["companion_hint"] = companion_hint
+        return json.dumps(overrides, ensure_ascii=False, separators=(",", ":"))
+
+    raw = config_store.mutate(CONFIG_KEY, "{}", mutator)
+    return deepcopy(_build_current(_parse_overrides(raw))[capability_id])
 
 
 def _model_preview(current: dict[str, dict[str, str]]) -> str:

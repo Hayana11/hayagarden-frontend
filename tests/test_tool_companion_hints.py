@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import json
 import sqlite3
 import tempfile
@@ -81,17 +82,38 @@ class ToolCompanionHintsTest(unittest.TestCase):
 
     def test_reset_restores_both_default_human_fields(self):
         hints.update_hint('todo.write', display_label='自定义', companion_hint='自定义说明')
+        self.assertIn('todo.write', json.loads(config_store.get(hints.CONFIG_KEY)))
         hints.update_hint('todo.write', reset=True)
         row = hints.payload()['groups'][2]['tools'][1]
         self.assertEqual(row['display_label'], hints._DEFAULTS['todo.write']['display_label'])
         self.assertEqual(row['companion_hint'], hints._DEFAULTS['todo.write']['companion_hint'])
+        self.assertNotIn('todo.write', json.loads(config_store.get(hints.CONFIG_KEY)))
 
     def test_runtime_config_persists_only_human_fields(self):
         hints.update_hint('home.light.status', display_label='自定义灯', companion_hint='自定义说明')
         raw = json.loads(config_store.get(hints.CONFIG_KEY))
+        self.assertEqual(set(raw), {'home.light.status'})
         self.assertEqual(set(raw['home.light.status']), {'display_label', 'companion_hint'})
         for row in raw.values():
             self.assertEqual(set(row), {'display_label', 'companion_hint'})
+
+    def test_update_path_uses_atomic_config_store_mutate(self):
+        self.assertIn('config_store.mutate', inspect.getsource(hints.update_hint))
+
+    def test_partial_update_preserves_existing_human_field(self):
+        hints.update_hint('home.light.status', display_label='A', companion_hint='B')
+        hints.update_hint('home.light.status', display_label='C')
+        row = hints.payload()['groups'][1]['tools'][0]
+        self.assertEqual(row['display_label'], 'C')
+        self.assertEqual(row['companion_hint'], 'B')
+
+    def test_untouched_defaults_remain_unpersisted(self):
+        hints.update_hint('home.light.status', companion_hint='只改这一项')
+        raw = json.loads(config_store.get(hints.CONFIG_KEY))
+        self.assertEqual(set(raw), {'home.light.status'})
+        self.assertNotIn('memory.search', raw)
+        self.assertNotIn('todo.write', raw)
+        self.assertNotIn('files.read', raw)
 
     def test_reset_restores_default_human_copy_in_model_preview(self):
         default_hint = hints._DEFAULTS['todo.write']['companion_hint']
