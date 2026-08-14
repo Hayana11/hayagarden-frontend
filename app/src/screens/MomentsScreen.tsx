@@ -1,6 +1,6 @@
 // Fyodor Moments — implements Fyodor Moments.dc.html against real backend
 // data (念头/日摘要/梦境 from posts, mood from emotion_state, per-memory V/A
-// points from ombre-brain frontmatter, gallery photos, tool drawers).
+// points from ombre-brain frontmatter, gallery photos, Tool Drawer v2).
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { smoothPath } from '../lib/format';
@@ -15,7 +15,6 @@ import {
   fetchMomentsOwnerStatus,
   galleryPhotoUrl,
   moodWordTone,
-  patchToolDrawer,
   postMomentComment,
   reactToMoment,
   updateEmotionMemory,
@@ -33,7 +32,7 @@ import {
   type MoodState,
 } from '../lib/moments';
 import { HttpError } from '../lib/http';
-import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText, hasCJK } from '../lib/typography';
+import { FONT_CN, FONT_DISPLAY, fontFamilyForText, hasCJK } from '../lib/typography';
 
 const SETTINGS_KEY = 'fyodor-chat-settings';
 
@@ -506,14 +505,6 @@ function SocialRow({
   );
 }
 
-function LockToggle({ on, disabled = false, onClick }: { on: boolean; disabled?: boolean; onClick: () => void }) {
-  return (
-    <div onClick={disabled ? undefined : onClick} style={{ cursor: disabled ? 'not-allowed' : 'pointer', width: 30, height: 18, borderRadius: 999, padding: 2, background: on ? 'var(--rose)' : 'var(--line)', opacity: disabled ? 0.55 : 1, transition: 'background .2s', flexShrink: 0 }}>
-      <div style={{ width: 14, height: 14, borderRadius: '50%', background: '#fff', boxShadow: '0 2px 5px rgba(0,0,0,0.2)', transition: 'transform .2s', transform: `translateX(${on ? 12 : 0}px)` }} />
-    </div>
-  );
-}
-
 export function MomentsScreen() {
   const navigate = useNavigate();
   const [theme, setTheme] = useState(loadTheme);
@@ -550,8 +541,6 @@ export function MomentsScreen() {
   const [historyError, setHistoryError] = useState(false);
   const [historyReloadKey, setHistoryReloadKey] = useState(0);
   const [savingMood, setSavingMood] = useState(false);
-  const [toolBusy, setToolBusy] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState('');
   const [coverUrl, setCoverUrl] = useState<string | null>(null);
   const [coverUploading, setCoverUploading] = useState(false);
@@ -702,7 +691,7 @@ export function MomentsScreen() {
     const aux = auxResult.status === 'fulfilled' ? auxResult.value : null;
     const feedOk = feedResult.status === 'fulfilled';
     const totallyEmpty = !feedOk
-      && (!aux || (aux.dreams.length === 0 && aux.gallery.length === 0 && !aux.mood && aux.drawers.length === 0));
+      && (!aux || (aux.dreams.length === 0 && aux.gallery.length === 0 && !aux.mood && aux.toolGroups.length === 0));
     setPhase(totallyEmpty ? 'failed' : 'ready');
   }, []);
 
@@ -928,40 +917,6 @@ export function MomentsScreen() {
     if (!moodSel) return;
     setMoodDraft({ valence: moodSel.valence, arousal: moodSel.arousal });
   }, [moodSel]);
-
-  const toggleDrawerEnabled = useCallback(async (drawerId: string, enabled: boolean) => {
-    if (toolBusy) return;
-    if (!ensureOwner()) return;
-    const key = `drawer:${drawerId}`;
-    setToolBusy(key);
-    try {
-      const result = await patchToolDrawer({ drawerId, enabled });
-      setData((prev) => (prev ? { ...prev, drawers: result.drawers, drawersEnabled: result.drawersEnabled } : prev));
-      flashToast(enabled ? '抽屉已启用' : '抽屉已关闭');
-    } catch (err) {
-      if (err instanceof HttpError && err.status === 401) requestOwnerUnlock();
-      flashToast('更新失败');
-    } finally {
-      setToolBusy(null);
-    }
-  }, [ensureOwner, flashToast, requestOwnerUnlock, toolBusy]);
-
-  const toggleToolEnabled = useCallback(async (tool: string, enabled: boolean) => {
-    if (toolBusy) return;
-    if (!ensureOwner()) return;
-    const key = `tool:${tool}`;
-    setToolBusy(key);
-    try {
-      const result = await patchToolDrawer({ tool, enabled });
-      setData((prev) => (prev ? { ...prev, drawers: result.drawers, drawersEnabled: result.drawersEnabled } : prev));
-      flashToast(enabled ? '工具已启用' : '工具已关闭');
-    } catch (err) {
-      if (err instanceof HttpError && err.status === 401) requestOwnerUnlock();
-      flashToast('更新失败');
-    } finally {
-      setToolBusy(null);
-    }
-  }, [ensureOwner, flashToast, requestOwnerUnlock, toolBusy]);
 
   const moodColor = data?.mood
     ? moodWordTone(data.mood.valence) === 'up' ? 'var(--rose)' : moodWordTone(data.mood.valence) === 'down' ? 'var(--err)' : 'var(--gold)'
@@ -1397,50 +1352,33 @@ export function MomentsScreen() {
               {/* ── 工具 ── */}
               {tab === 'tools' && (
                 <div className="vstack vstack-14">
-                  <div style={{ padding: '10px 13px', borderRadius: 14, background: data?.drawersEnabled ? 'rgba(122,155,109,0.10)' : 'var(--card2)', color: data?.drawersEnabled ? 'var(--ok)' : 'var(--faint)', fontSize: 12, letterSpacing: 1 }}>
-                    抽屉模式：{data?.drawersEnabled ? '已启用（按上下文关键词只给相关工具）' : '未启用（每轮给全量工具）'}
+                  <div style={{ padding: '16px 17px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(183,110,121,0.10),rgba(217,164,65,0.10))', color: 'var(--ink2)', fontSize: 13, lineHeight: 1.8 }}>
+                    <div style={{ color: 'var(--deep)', fontSize: 15, letterSpacing: 1 }}>Tool Drawer v2 · 48 小时试用</div>
+                    <div style={{ marginTop: 6 }}>固定工具墙，不再按关键词替换每轮工具。这里看费佳现在真正拥有的能力和边界；工具直觉说明放在费佳档案里编辑。</div>
+                    <button type="button" onClick={() => navigate('/profile')} style={{ marginTop: 10, padding: 0, border: 0, background: 'transparent', color: 'var(--deep)', fontSize: 12.5, cursor: 'pointer' }}>去费佳档案改工具说明 ›</button>
                   </div>
-                  {(data?.drawers || []).length === 0 ? (
+                  {(data?.toolGroups || []).length === 0 ? (
                     <EmptyState title="工具列表暂时读不到" hint="" />
                   ) : (
-                    (data?.drawers || []).map((tg) => {
-                      const open = Boolean(drawerOpen[tg.id]);
+                    (data?.toolGroups || []).map((group) => {
                       return (
-                        <div key={tg.id} style={{ background: 'var(--card)', borderRadius: 16, boxShadow: '0 6px 16px var(--shadow)', overflow: 'hidden' }}>
-                          <div className="hstack hstack-10" style={{ display: 'flex', alignItems: 'center', padding: '13px 15px' }}>
-                            <div onClick={() => setDrawerOpen((o) => ({ ...o, [tg.id]: !o[tg.id] }))} className="hstack hstack-10" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', flex: 1, minWidth: 0 }}>
-                              <span style={{ fontSize: 13.5, color: 'var(--ink)', letterSpacing: 1 }}>{tg.label}</span>
-                              <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: 'var(--ghost)' }}>{tg.tools.length}</span>
-                              <svg viewBox="0 0 24 24" width={12} height={12} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--ghost)', transition: 'transform .2s', transform: `rotate(${open ? 180 : 0}deg)` }}>
-                                <path d="M6 9l6 6 6-6" />
-                              </svg>
-                            </div>
-                            <span style={{ fontSize: 10.5, color: 'var(--ghost)' }}>全部启用</span>
-                            <LockToggle
-                              on={tg.enabled}
-                              disabled={Boolean(toolBusy)}
-                              onClick={() => void toggleDrawerEnabled(tg.id, !tg.enabled)}
-                            />
-                          </div>
-                          {open && (
-                            <div className="vstack vstack-8" style={{ padding: '0 15px 14px', display: 'flex', flexDirection: 'column' }}>
-                              {tg.tools.map((t) => (
-                                <div key={t.name} className="hstack hstack-10" style={{ display: 'flex', alignItems: 'center', padding: '7px 10px', borderRadius: 10, background: 'var(--card2)' }}>
-                                  <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: t.enabled ? 'var(--ink2)' : 'var(--ghost)', flex: 1, minWidth: 0, wordBreak: 'break-all' }}>{t.name}</span>
-                                  <LockToggle
-                                    on={t.enabled}
-                                    disabled={Boolean(toolBusy)}
-                                    onClick={() => void toggleToolEnabled(t.name, !t.enabled)}
-                                  />
+                        <div key={group.id} style={{ background: 'var(--card)', borderRadius: 16, boxShadow: '0 6px 16px var(--shadow)', overflow: 'hidden' }}>
+                          <div style={{ padding: '13px 15px', color: 'var(--deep)', fontSize: 13.5, letterSpacing: 1 }}>{group.label}</div>
+                          <div className="vstack vstack-8" style={{ padding: '0 15px 15px', display: 'flex', flexDirection: 'column' }}>
+                            {group.tools.map((tool) => (
+                              <div key={tool.capability_id} style={{ padding: '11px 12px', borderRadius: 12, background: 'var(--card2)' }}>
+                                <div className="hstack hstack-8" style={{ display: 'flex', alignItems: 'center' }}>
+                                  <span style={{ fontSize: 13, color: 'var(--ink)', flex: 1 }}>{tool.display_label}</span>
+                                  <span style={{ fontSize: 10.5, color: 'var(--ok)' }}>{tool.status_label}</span>
                                 </div>
-                              ))}
-                            </div>
-                          )}
+                                <div style={{ marginTop: 6, fontSize: 12, lineHeight: 1.7, color: 'var(--mut)' }}>{tool.physical_boundary}</div>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       );
                     })
                   )}
-                  <span style={{ fontSize: 11, color: 'var(--ghost)', padding: '2px 4px', lineHeight: 1.8 }}>关闭的工具不会进入抽屉路由；需要主人授权后修改。</span>
                 </div>
               )}
             </>

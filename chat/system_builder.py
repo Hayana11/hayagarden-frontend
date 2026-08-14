@@ -639,14 +639,17 @@ def build_cc_static_parts():
     gateway 观测与 spawn 必须共用此结果，禁止在别处重拼。
     """
     persona = read_persona()
+    tool_companion_intuition = _build_tool_companion_intuition()
     stable_note = build_stable_note()
     save_instr = _CC_SAVE_INSTR
     full_system = '\n\n'.join(
-        p for p in (persona, stable_note, save_instr) if p and str(p).strip()
+        p for p in (persona, stable_note, tool_companion_intuition, save_instr)
+        if p and str(p).strip()
     )
     return {
         'persona': persona,
         'stable_note': stable_note,
+        'tool_companion_intuition': tool_companion_intuition,
         'save_instr': save_instr,
         'full_system': full_system,
     }
@@ -665,16 +668,32 @@ _CC_DAILY_CHOICES_NOTE = (
 )
 
 
+def _build_tool_companion_intuition():
+    """Build the single Tool Drawer v2 model-visible static block."""
+    try:
+        from tools.tool_companion_hints import payload
+        preview = payload().get('prompt_preview', '')
+        if not isinstance(preview, str) or not preview.strip():
+            return ''
+        return '## 工具直觉（Tool Drawer v2）\n' + preview
+    except Exception:
+        # A malformed optional runtime config must not prevent resident boot.
+        return ''
+
+
 def build_cc_daily_static_parts():
     """Daily Soft Window text-only static system — same persona, no tools/SAVE."""
     persona = read_persona()
+    tool_companion_intuition = _build_tool_companion_intuition()
     identity = _CC_REPLY_IDENTITY + _CC_DAILY_CHOICES_NOTE
     full_system = '\n\n'.join(
-        p for p in (persona, identity) if p and str(p).strip()
+        p for p in (persona, identity, tool_companion_intuition)
+        if p and str(p).strip()
     )
     return {
         'persona': persona,
         'identity': identity,
+        'tool_companion_intuition': tool_companion_intuition,
         'save_instr': '',
         'full_system': full_system,
     }

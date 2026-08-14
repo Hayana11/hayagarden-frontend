@@ -2635,6 +2635,46 @@ def tools_drawers():
     return jsonify({'ok': True, 'enabled': enabled, 'drawers': tool_drawers.serialize_drawers()})
 
 
+@app.route('/api/tools/companion-hints', methods=['GET', 'PATCH'])
+def tool_companion_hints():
+    """Tool Drawer v2 human-readable layer; physical tool routing stays legacy."""
+    import tools.tool_companion_hints as companion_hints
+
+    if request.method == 'GET':
+        try:
+            return jsonify(companion_hints.payload())
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 500
+
+    payload = request.get_json(silent=True) or {}
+    allowed = {'capability_id', 'display_label', 'companion_hint', 'reset'}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        return jsonify({'ok': False, 'error': 'unsupported field'}), 400
+    capability_id = payload.get('capability_id')
+    if not isinstance(capability_id, str) or not capability_id:
+        return jsonify({'ok': False, 'error': 'capability_id required'}), 400
+    reset = payload.get('reset', False)
+    if not isinstance(reset, bool):
+        return jsonify({'ok': False, 'error': 'reset must be boolean'}), 400
+    for field in ('display_label', 'companion_hint'):
+        if field in payload:
+            value = payload[field]
+            if not isinstance(value, str) or not value.strip():
+                return jsonify({'ok': False, 'error': f'{field} must be non-empty'}), 400
+    try:
+        companion_hints.update_hint(
+            capability_id,
+            display_label=payload.get('display_label'),
+            companion_hint=payload.get('companion_hint'),
+            reset=reset,
+        )
+        return jsonify(companion_hints.payload())
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
 @app.route('/api/config/relay', methods=['POST'])
 def config_relay():
     """直接指定一个不在预设列表里的 url/key（老接口，保留兼容）。

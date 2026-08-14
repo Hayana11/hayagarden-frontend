@@ -1,5 +1,5 @@
 // Data layer for the Moments page (Fyodor Moments.dc.html), wired to the
-// real ombre-brain / gallery / tool-drawer endpoints. Unlike the dashboard
+// real ombre-brain / gallery / Tool Drawer v2 endpoints. Unlike the dashboard
 // screens, Moments never falls back to fictional mock content on failure —
 // a failed fetch surfaces an honest error state instead of fake data.
 import { http } from './http';
@@ -88,24 +88,7 @@ interface GalleryPhotoRow {
   importance: number;
 }
 
-interface ToolDrawerToolRow {
-  name: string;
-  enabled: boolean;
-}
-
-interface ToolDrawerRow {
-  id: string;
-  label: string;
-  enabled: boolean;
-  tools: ToolDrawerToolRow[];
-}
-
-interface ToolDrawersResponse {
-  ok: boolean;
-  enabled: boolean;
-  drawers: ToolDrawerRow[];
-  error?: string;
-}
+import type { ToolCompanionGroup, ToolCompanionHints } from './toolCompanionHints';
 
 interface RepostWireMessage {
   message_id: number;
@@ -249,18 +232,6 @@ export interface GalleryPhoto {
   keywords: string[];
 }
 
-export interface ToolDrawerTool {
-  name: string;
-  enabled: boolean;
-}
-
-export interface ToolDrawer {
-  id: string;
-  label: string;
-  enabled: boolean;
-  tools: ToolDrawerTool[];
-}
-
 export interface MomentsData {
   dreams: DreamEntry[];
   dreamsHasMore: boolean;
@@ -268,8 +239,7 @@ export interface MomentsData {
   gallery: GalleryPhoto[];
   mood: MoodState | null;
   emotionMemories: EmotionMemoryPoint[];
-  drawers: ToolDrawer[];
-  drawersEnabled: boolean;
+  toolGroups: ToolCompanionGroup[];
   failedSources: string[];
 }
 
@@ -446,12 +416,12 @@ export async function fetchMomentsFeed(
 export async function fetchMomentsData(): Promise<MomentsData> {
   const failed: string[] = [];
 
-  const [dreamsPage, moodRes, emoMemRes, galleryRes, drawersRes] = await Promise.all([
+  const [dreamsPage, moodRes, emoMemRes, galleryRes, companionRes] = await Promise.all([
     safe('dreams', () => fetchDreamsPage(undefined, 20), failed),
     safe('mood', () => http.get<EmotionStateResponse>('/api/brain/emotion_state'), failed),
     safe('emotion memories', () => http.get<BrainItemsResponse<EmotionMemoryRow>>('/api/brain/emotions'), failed),
     safe('gallery', () => http.get<{ photos: GalleryPhotoRow[] }>('/api/gallery/photos'), failed),
-    safe('tool drawers', () => http.get<ToolDrawersResponse>('/api/tools/drawers'), failed),
+    safe('tool companion hints', () => http.get<ToolCompanionHints>('/api/tools/companion-hints'), failed),
   ]);
 
   const dreamEntries: DreamEntry[] = dreamsPage?.items || [];
@@ -492,18 +462,22 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     keywords: p.keywords || [],
   }));
 
-  const drawers: ToolDrawer[] = drawersRes?.ok
-    ? (drawersRes.drawers || []).map((d) => ({
-        id: d.id,
-        label: d.label,
-        enabled: Boolean(d.enabled),
-        tools: (d.tools || []).map((t) => ({
-          name: t.name,
-          enabled: Boolean(t.enabled),
+  const toolGroups: ToolCompanionGroup[] = companionRes?.ok
+    ? (companionRes.groups || []).map((group) => ({
+        id: group.id,
+        label: group.label,
+        tools: (group.tools || []).map((tool) => ({
+          capability_id: tool.capability_id,
+          display_label: tool.display_label,
+          companion_hint: tool.companion_hint,
+          default_display_label: tool.default_display_label,
+          default_companion_hint: tool.default_companion_hint,
+          physical_boundary: tool.physical_boundary,
+          status_label: tool.status_label,
         })),
       }))
     : [];
-  if (drawersRes && !drawersRes.ok) failed.push('tool drawers');
+  if (companionRes && !companionRes.ok) failed.push('tool companion hints');
 
   return {
     dreams: dreamEntries,
@@ -512,8 +486,7 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     gallery,
     mood,
     emotionMemories,
-    drawers,
-    drawersEnabled: Boolean(drawersRes?.enabled),
+    toolGroups,
     failedSources: failed,
   };
 }
@@ -557,29 +530,6 @@ export async function updateEmotionMemory(
   };
 }
 
-export async function patchToolDrawer(
-  payload: { drawerId: string; enabled: boolean } | { tool: string; enabled: boolean },
-): Promise<{ drawers: ToolDrawer[]; drawersEnabled: boolean }> {
-  const body = 'drawerId' in payload
-    ? { drawer_id: payload.drawerId, enabled: payload.enabled }
-    : { tool: payload.tool, enabled: payload.enabled };
-  const response = await http.patch<ToolDrawersResponse>('/api/tools/drawers', body);
-  if (!response.ok) {
-    throw new Error(response.error || 'tool drawer update failed');
-  }
-  return {
-    drawersEnabled: Boolean(response.enabled),
-    drawers: (response.drawers || []).map((d) => ({
-      id: d.id,
-      label: d.label,
-      enabled: Boolean(d.enabled),
-      tools: (d.tools || []).map((t) => ({
-        name: t.name,
-        enabled: Boolean(t.enabled),
-      })),
-    })),
-  };
-}
 
 export function galleryPhotoUrl(pid: string): string {
   return `/api/gallery/photo/${encodeURIComponent(pid)}`;

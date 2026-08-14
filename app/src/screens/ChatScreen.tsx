@@ -2102,7 +2102,7 @@ export function ChatScreen() {
               <Link to="/profile" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(183,110,121,.12),rgba(232,220,245,.45))' }}>
                 <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>费佳档案</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>身份 · 关系 · 语言风格</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>身份 · 关系 · 工具直觉</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
