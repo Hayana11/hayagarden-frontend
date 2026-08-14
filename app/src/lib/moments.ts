@@ -3,6 +3,7 @@
 // screens, Moments never falls back to fictional mock content on failure —
 // a failed fetch surfaces an honest error state instead of fake data.
 import { http } from './http';
+import { fetchToolCompanionHints, type ToolCompanionHints } from './toolCompanion';
 
 const SHANGHAI_TZ = 'Asia/Shanghai';
 
@@ -86,25 +87,6 @@ interface GalleryPhotoRow {
   emotion: string;
   keywords: string[];
   importance: number;
-}
-
-interface ToolDrawerToolRow {
-  name: string;
-  enabled: boolean;
-}
-
-interface ToolDrawerRow {
-  id: string;
-  label: string;
-  enabled: boolean;
-  tools: ToolDrawerToolRow[];
-}
-
-interface ToolDrawersResponse {
-  ok: boolean;
-  enabled: boolean;
-  drawers: ToolDrawerRow[];
-  error?: string;
 }
 
 interface RepostWireMessage {
@@ -249,18 +231,6 @@ export interface GalleryPhoto {
   keywords: string[];
 }
 
-export interface ToolDrawerTool {
-  name: string;
-  enabled: boolean;
-}
-
-export interface ToolDrawer {
-  id: string;
-  label: string;
-  enabled: boolean;
-  tools: ToolDrawerTool[];
-}
-
 export interface MomentsData {
   dreams: DreamEntry[];
   dreamsHasMore: boolean;
@@ -268,8 +238,7 @@ export interface MomentsData {
   gallery: GalleryPhoto[];
   mood: MoodState | null;
   emotionMemories: EmotionMemoryPoint[];
-  drawers: ToolDrawer[];
-  drawersEnabled: boolean;
+  companionHints: ToolCompanionHints | null;
   failedSources: string[];
 }
 
@@ -446,12 +415,12 @@ export async function fetchMomentsFeed(
 export async function fetchMomentsData(): Promise<MomentsData> {
   const failed: string[] = [];
 
-  const [dreamsPage, moodRes, emoMemRes, galleryRes, drawersRes] = await Promise.all([
+  const [dreamsPage, moodRes, emoMemRes, galleryRes, hintsRes] = await Promise.all([
     safe('dreams', () => fetchDreamsPage(undefined, 20), failed),
     safe('mood', () => http.get<EmotionStateResponse>('/api/brain/emotion_state'), failed),
     safe('emotion memories', () => http.get<BrainItemsResponse<EmotionMemoryRow>>('/api/brain/emotions'), failed),
     safe('gallery', () => http.get<{ photos: GalleryPhotoRow[] }>('/api/gallery/photos'), failed),
-    safe('tool drawers', () => http.get<ToolDrawersResponse>('/api/tools/drawers'), failed),
+    safe('tool companion hints', () => fetchToolCompanionHints(), failed),
   ]);
 
   const dreamEntries: DreamEntry[] = dreamsPage?.items || [];
@@ -492,18 +461,8 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     keywords: p.keywords || [],
   }));
 
-  const drawers: ToolDrawer[] = drawersRes?.ok
-    ? (drawersRes.drawers || []).map((d) => ({
-        id: d.id,
-        label: d.label,
-        enabled: Boolean(d.enabled),
-        tools: (d.tools || []).map((t) => ({
-          name: t.name,
-          enabled: Boolean(t.enabled),
-        })),
-      }))
-    : [];
-  if (drawersRes && !drawersRes.ok) failed.push('tool drawers');
+  const companionHints = hintsRes?.ok ? hintsRes : null;
+  if (hintsRes && !hintsRes.ok) failed.push('tool companion hints');
 
   return {
     dreams: dreamEntries,
@@ -512,8 +471,7 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     gallery,
     mood,
     emotionMemories,
-    drawers,
-    drawersEnabled: Boolean(drawersRes?.enabled),
+    companionHints,
     failedSources: failed,
   };
 }
@@ -554,30 +512,6 @@ export async function updateEmotionMemory(
     emotion: item.emotion,
     note: item.note,
     domain: item.domain,
-  };
-}
-
-export async function patchToolDrawer(
-  payload: { drawerId: string; enabled: boolean } | { tool: string; enabled: boolean },
-): Promise<{ drawers: ToolDrawer[]; drawersEnabled: boolean }> {
-  const body = 'drawerId' in payload
-    ? { drawer_id: payload.drawerId, enabled: payload.enabled }
-    : { tool: payload.tool, enabled: payload.enabled };
-  const response = await http.patch<ToolDrawersResponse>('/api/tools/drawers', body);
-  if (!response.ok) {
-    throw new Error(response.error || 'tool drawer update failed');
-  }
-  return {
-    drawersEnabled: Boolean(response.enabled),
-    drawers: (response.drawers || []).map((d) => ({
-      id: d.id,
-      label: d.label,
-      enabled: Boolean(d.enabled),
-      tools: (d.tools || []).map((t) => ({
-        name: t.name,
-        enabled: Boolean(t.enabled),
-      })),
-    })),
   };
 }
 
