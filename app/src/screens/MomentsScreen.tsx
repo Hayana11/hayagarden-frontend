@@ -1375,7 +1375,7 @@ export function MomentsScreen() {
                       {data?.toolInventoryTotal ?? 0} 个已登记工具 · 当前可用 {data?.toolInventoryAvailable ?? 0} 个
                     </div>
                     <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--ghost)' }}>绿色 = 当前可用 · 灰色 = 当前不可用</div>
-                    <button type="button" onClick={() => navigate('/profile')} style={{ marginTop: 10, padding: 0, border: 0, background: 'transparent', color: 'var(--deep)', fontSize: 12.5, cursor: 'pointer' }}>去费佳档案改工具说明 ›</button>
+                    <button type="button" onClick={() => navigate('/profile')} style={{ marginTop: 10, padding: 0, border: 0, background: 'transparent', color: 'var(--deep)', fontSize: 12.5, cursor: 'pointer' }}>去费佳档案改已启用工具的工具直觉 ›</button>
                   </div>
                   {(data?.toolGroups || []).length === 0 ? (
                     <EmptyState title="工具列表暂时读不到" hint="" />
