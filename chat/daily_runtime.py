@@ -287,10 +287,11 @@ def format_resident_turn_content(
     is_respawn: bool,
     user_image_url: str = '',
     provider_display_thinking_suffix: str = '',
+    reality_time_anchor: str = '',
 ) -> Any:
     """Assemble resident turn content.
 
-    text-only → ``str`` (unchanged contract)
+    text-only → str (unchanged contract)
     with image → multimodal list accepted by Claude Code stream-json
     """
     cold_like = bool(is_cold or is_respawn)
@@ -300,6 +301,7 @@ def format_resident_turn_content(
     if image_url and turn_user_text.strip() == '[image]':
         turn_user_text = ''
 
+    time_anchor = str(reality_time_anchor or '').strip()
     prefix_parts: list[str] = []
     if cold_like:
         handoff = str(assembly.get('day_handoff') or '').strip()
@@ -318,13 +320,15 @@ def format_resident_turn_content(
         history_text = _format_history_messages(history)
         body = (
             '以下是本聊天日内的正式对话记录：' + NL + NL
-            + history_text + NL + NL
-            + '请回复最后一条用户消息。'
+            + history_text
         )
+        if time_anchor:
+            body += NL + NL + time_anchor
+        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + turn_user_text
         if prefix:
-            text = prefix + NL + NL + body + NL + NL + turn_user_text
+            text = prefix + NL + NL + body
         else:
-            text = body + NL + NL + turn_user_text
+            text = body
     elif history:
         history_text = _format_history_messages(history)
         replay = '【新增正式对话】' + NL + history_text + NL + NL
@@ -333,7 +337,12 @@ def format_resident_turn_content(
         else:
             text = replay + turn_user_text
     elif prefix:
-        text = prefix + NL + NL + turn_user_text
+        if cold_like and time_anchor:
+            text = prefix + NL + NL + time_anchor + NL + NL + turn_user_text
+        else:
+            text = prefix + NL + NL + turn_user_text
+    elif cold_like and time_anchor:
+        text = time_anchor + NL + NL + turn_user_text
     else:
         text = turn_user_text
 
@@ -2033,6 +2042,7 @@ def _apply_daily_cold_prompt_fence(
     content: Any,
     is_cold: bool,
     is_respawn: bool,
+    reality_time_anchor: str = '',
 ) -> Any:
     """Whole-prompt Fence B/C for Daily cold/respawn — reuses #218 helpers."""
     from chat.cold_bootstrap_budget import (
@@ -2083,6 +2093,7 @@ def _apply_daily_cold_prompt_fence(
             provider_display_thinking_suffix=(
                 plan.provider_display_thinking_suffix
             ),
+            reality_time_anchor=reality_time_anchor,
         )
         cold_prompt_estimate = estimate_whole_prompt(static_system, content)
         cold_history_budget_val = new_budget
@@ -2511,6 +2522,27 @@ def ensure_resident_and_stream(
             )
             return
 
+        cold_like = bool(plan.is_cold or plan.is_respawn or actual_cold)
+        reality: Optional[dict[str, Any]] = None
+        reality_time_anchor = ''
+        try:
+            from chat.reality_context import build_reality_context
+            reality = build_reality_context(
+                current_user_message_id=int(plan.user_message_id),
+                is_new_model_context=bool(cold_like),
+                db_path=plan.db_path,
+            )
+            reality_time_anchor = str(reality.get('time_anchor') or '').strip()
+            plan.manifest['reality_context'] = {
+                'time_anchor_reason': reality.get('time_anchor_reason'),
+                'weather_anchor_reason': reality.get('weather_anchor_reason'),
+                'weather_status': reality.get('weather_status'),
+                'has_time_anchor': bool(reality_time_anchor),
+                'has_weather_anchor': bool(str(reality.get('weather_anchor') or '').strip()),
+            }
+        except Exception:
+            logger.warning('reality_context build failed; continuing without', exc_info=True)
+
         try:
             content = format_resident_turn_content(
                 assembly=plan.assembly,
@@ -2521,6 +2553,7 @@ def ensure_resident_and_stream(
                 provider_display_thinking_suffix=(
                     plan.provider_display_thinking_suffix
                 ),
+                reality_time_anchor=reality_time_anchor if cold_like else '',
             )
         except Exception as exc:
             from chat.cc_vision_bridge import VisionBridgeError
@@ -2531,7 +2564,7 @@ def ensure_resident_and_stream(
                     str(exc), error_code=getattr(exc, 'code', 'vision_bridge_error'),
                 ) from exc
             raise
-        if plan.is_cold or plan.is_respawn or actual_cold:
+        if cold_like:
             content = _apply_daily_cold_prompt_fence(
                 plan,
                 resident=resident,
@@ -2539,33 +2572,20 @@ def ensure_resident_and_stream(
                 content=content,
                 is_cold=plan.is_cold or actual_cold,
                 is_respawn=plan.is_respawn,
+                reality_time_anchor=reality_time_anchor,
             )
 
-        # Reality Context after cold fence rebuild so history trim cannot drop it.
-        # Capacity Swap reprepare sets is_cold=is_respawn=False — Swap alone
-        # is not a new time-semantic context.
-        try:
-            from chat.reality_context import (
-                build_reality_context,
-                prepend_reality_to_provider_content,
-            )
-            reality = build_reality_context(
-                current_user_message_id=int(plan.user_message_id),
-                is_new_model_context=bool(
-                    plan.is_cold or plan.is_respawn or actual_cold
-                ),
-                db_path=plan.db_path,
-            )
-            plan.manifest['reality_context'] = {
-                'time_anchor_reason': reality.get('time_anchor_reason'),
-                'weather_anchor_reason': reality.get('weather_anchor_reason'),
-                'weather_status': reality.get('weather_status'),
-                'has_time_anchor': bool(str(reality.get('time_anchor') or '').strip()),
-                'has_weather_anchor': bool(str(reality.get('weather_anchor') or '').strip()),
-            }
-            content = prepend_reality_to_provider_content(content, reality)
-        except Exception:
-            logger.warning('reality_context injection failed; continuing without', exc_info=True)
+        # Weather remains a prefix; the cold time anchor was inserted above
+        # while history and current user were still separate assembly fields.
+        if reality is not None:
+            try:
+                from chat.reality_context import prepend_reality_to_provider_content
+                prefix_reality = dict(reality)
+                if cold_like:
+                    prefix_reality['time_anchor'] = ''
+                content = prepend_reality_to_provider_content(content, prefix_reality)
+            except Exception:
+                logger.warning('reality_context prefix injection failed; continuing without', exc_info=True)
 
         db_cursor = dc.get_resident_history_cursor(
             plan.context_id, plan.resident_generation, db_path=plan.db_path,
