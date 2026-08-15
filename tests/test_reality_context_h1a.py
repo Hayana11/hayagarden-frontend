@@ -163,6 +163,32 @@ class RealityContextContractTests(unittest.TestCase):
         self.assertTrue(str(prefixed).startswith('【现实时间锚】'))
         self.assertIn('你好', str(prefixed))
 
+    def test_provider_content_places_time_anchor_after_cold_history(self) -> None:
+        content = (
+            '状态摘要\n\n'
+            '以下是本聊天日内的正式对话记录：\n\n'
+            '历史轮次\n\n'
+            '请回复最后一条用户消息。\n\n'
+            '当前用户'
+        )
+        reality = {
+            'time_anchor': '【现实时间锚】\n现在：2026-08-12 09:00（Asia/Shanghai）',
+            'weather_anchor': '【今日天气】\n地点：吉林市',
+        }
+
+        out = str(prepend_reality_to_provider_content(content, reality))
+        history_end = out.index('历史轮次') + len('历史轮次')
+        anchor_start = out.index('【现实时间锚】')
+        reply_start = out.index('请回复最后一条用户消息。')
+        current_start = out.index('当前用户')
+
+        self.assertEqual(out.count('【现实时间锚】'), 1)
+        self.assertEqual(out.count('当前用户'), 1)
+        self.assertTrue(out.startswith('【今日天气】'))
+        self.assertLess(history_end, anchor_start)
+        self.assertLess(anchor_start, reply_start)
+        self.assertLess(reply_start, current_start)
+
     # ---- Case E ----
     def test_case_e_daily_weather_once_per_natural_day(self) -> None:
         first = _insert(self.db, 'hayana', 'day-first', '2026-08-12 00:05:00')

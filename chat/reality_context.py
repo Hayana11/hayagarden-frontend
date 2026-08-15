@@ -376,35 +376,51 @@ def prepend_reality_to_provider_content(
     content: Any,
     reality: Mapping[str, Any] | RealityContextResult | None,
 ) -> Any:
-    """Prefix Reality Context onto provider-visible user turn content."""
+    """Inject Reality Context while keeping the time anchor beside the current user."""
     if isinstance(reality, RealityContextResult):
-        prefix = reality.provider_prefix()
+        time_anchor = str(reality.time_anchor or '').strip()
+        weather_anchor = str(reality.weather_anchor or '').strip()
     elif isinstance(reality, Mapping):
-        parts = [
-            str(reality.get('time_anchor') or '').strip(),
-            str(reality.get('weather_anchor') or '').strip(),
-        ]
-        prefix = '\n\n'.join(p for p in parts if p)
+        time_anchor = str(reality.get('time_anchor') or '').strip()
+        weather_anchor = str(reality.get('weather_anchor') or '').strip()
     else:
-        prefix = ''
-    if not prefix:
-        return content
+        time_anchor = ''
+        weather_anchor = ''
+
+    def _inject_text(body: str) -> str:
+        if time_anchor:
+            reply_marker = '\n\n请回复最后一条用户消息。\n\n'
+            if reply_marker in body:
+                history, current_user = body.rsplit(reply_marker, 1)
+                body = history + '\n\n' + time_anchor + reply_marker + current_user
+            elif body:
+                # Forge first-turn and hot payloads without the cold-history marker
+                # retain the existing prefix behavior.
+                body = time_anchor + '\n\n' + body
+            else:
+                body = time_anchor
+        if weather_anchor:
+            body = weather_anchor + ('\n\n' + body if body else '')
+        return body
 
     if isinstance(content, str):
-        body = content
-        if not body:
-            return prefix
-        return prefix + '\n\n' + body
+        return _inject_text(content) if (time_anchor or weather_anchor) else content
 
     if isinstance(content, list):
-        # Multimodal Claude content: prepend into the first text block, or insert one.
+        # Multimodal Claude content: adjust the first text block, or insert one.
         out = [dict(block) if isinstance(block, dict) else block for block in content]
         for block in out:
             if isinstance(block, dict) and block.get('type') == 'text':
-                existing = str(block.get('text') or '')
-                block['text'] = prefix + ('\n\n' + existing if existing else '')
+                block['text'] = _inject_text(str(block.get('text') or ''))
                 return out
-        out.insert(0, {'type': 'text', 'text': prefix})
+        prefix = RealityContextResult(
+            time_anchor=time_anchor,
+            weather_anchor=weather_anchor,
+            time_anchor_reason=None,
+            weather_anchor_reason=None,
+        ).provider_prefix()
+        if prefix:
+            out.insert(0, {'type': 'text', 'text': prefix})
         return out
 
     return content
