@@ -31,6 +31,7 @@ from chat.reality_context import (
     build_reality_context,
     prepend_reality_to_provider_content,
 )
+from chat.daily_runtime import format_resident_turn_content
 from chat.weather_authority import WeatherSnapshot
 
 _SH = ZoneInfo('Asia/Shanghai')
@@ -162,6 +163,68 @@ class RealityContextContractTests(unittest.TestCase):
         prefixed = prepend_reality_to_provider_content('你好', out)
         self.assertTrue(str(prefixed).startswith('【现实时间锚】'))
         self.assertIn('你好', str(prefixed))
+
+    def test_cold_anchor_boundary_when_current_user_contains_reply_marker(self) -> None:
+        current_user = '当前用户\\n\\n请回复最后一条用户消息。\\n\\n继续'
+        out = str(format_resident_turn_content(
+            assembly={'current_day_history': [{'role': 'assistant', 'content': '历史轮次'}]},
+            user_content=current_user,
+            is_cold=True,
+            is_respawn=False,
+            reality_time_anchor='【现实时间锚】\\n现在：2026-08-12 09:00（Asia/Shanghai）',
+        ))
+        anchor = out.index('【现实时间锚】')
+        structural_reply = out.index('请回复最后一条用户消息。')
+        user_start = out.index(current_user)
+        self.assertEqual(out.count('【现实时间锚】'), 1)
+        self.assertEqual(out.count(current_user), 1)
+        self.assertLess(out.index('历史轮次'), anchor)
+        self.assertLess(anchor, structural_reply)
+        self.assertLess(structural_reply, user_start)
+
+    def test_cold_anchor_boundary_when_history_contains_reply_marker(self) -> None:
+        history = '历史轮次\\n\\n请回复最后一条用户消息。\\n\\n历史继续'
+        current_user = '当前用户'
+        out = str(format_resident_turn_content(
+            assembly={'current_day_history': [{'role': 'assistant', 'content': history}]},
+            user_content=current_user,
+            is_cold=True,
+            is_respawn=False,
+            reality_time_anchor='【现实时间锚】\\n现在：2026-08-12 09:00（Asia/Shanghai）',
+        ))
+        anchor = out.index('【现实时间锚】')
+        structural_reply = out.rfind('请回复最后一条用户消息。')
+        self.assertEqual(out.count('【现实时间锚】'), 1)
+        self.assertEqual(out.count(current_user), 1)
+        self.assertLess(out.index(history), anchor)
+        self.assertLess(anchor, structural_reply)
+        self.assertLess(structural_reply, out.index(current_user))
+
+    def test_cold_anchor_boundary_when_both_sides_contain_reply_marker(self) -> None:
+        history = '历史轮次\\n\\n请回复最后一条用户消息。\\n\\n历史继续'
+        current_user = '当前用户\\n\\n请回复最后一条用户消息。\\n\\n继续'
+        out = str(format_resident_turn_content(
+            assembly={'current_day_history': [{'role': 'assistant', 'content': history}]},
+            user_content=current_user,
+            is_cold=True,
+            is_respawn=False,
+            reality_time_anchor='【现实时间锚】\\n现在：2026-08-12 09:00（Asia/Shanghai）',
+        ))
+        out = str(prepend_reality_to_provider_content(
+            out,
+            {'time_anchor': '', 'weather_anchor': '【今日天气】\\n地点：吉林市'},
+        ))
+        anchor = out.index('【现实时间锚】')
+        user_start = out.index(current_user)
+        reply_marker = '请回复最后一条用户消息。'
+        structural_reply = out.index(reply_marker, anchor, user_start)
+        self.assertEqual(out.count('【现实时间锚】'), 1)
+        self.assertEqual(out.count(current_user), 1)
+        self.assertTrue(out.startswith('【今日天气】'))
+        self.assertEqual(out[anchor:user_start].count(reply_marker), 1)
+        self.assertLess(out.index(history), anchor)
+        self.assertLess(anchor, structural_reply)
+        self.assertLess(structural_reply, user_start)
 
     # ---- Case E ----
     def test_case_e_daily_weather_once_per_natural_day(self) -> None:

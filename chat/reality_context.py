@@ -376,7 +376,12 @@ def prepend_reality_to_provider_content(
     content: Any,
     reality: Mapping[str, Any] | RealityContextResult | None,
 ) -> Any:
-    """Prefix Reality Context onto provider-visible user turn content."""
+    """Prefix Reality Context without parsing user-controlled text.
+
+    Daily cold time anchors are inserted structurally by
+    format_resident_turn_content; this helper remains the prefix path for
+    Forge and non-cold payloads.
+    """
     if isinstance(reality, RealityContextResult):
         prefix = reality.provider_prefix()
     elif isinstance(reality, Mapping):
