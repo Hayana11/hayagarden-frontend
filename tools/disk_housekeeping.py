@@ -180,7 +180,7 @@ def load_worktree_paths(repo_root: Path = REPO_ROOT) -> list[Path] | None:
             capture_output=True,
             text=True,
         )
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     if proc.returncode != 0:
         return None
@@ -234,7 +234,7 @@ def load_mount_points(mountinfo_path: Path = Path('/proc/self/mountinfo')) -> se
     """Read Linux mount points; None means the boundary evidence is uncertain."""
     try:
         text = mountinfo_path.read_text(encoding='utf-8')
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     points: set[Path] = set()
     for line in text.splitlines():

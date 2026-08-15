@@ -195,6 +195,15 @@ class DiskHousekeepingTests(unittest.TestCase):
         self.assertEqual(result[1], 0)
         self.assertTrue(any('mountinfo' in line for line in lines))
 
+    def test_mountinfo_fixture_parser_returns_mount_points(self):
+        fixture = self.root / 'mountinfo'
+        fixture.write_text(
+            '42 1 0:40 / /tmp/forge-post-mounted rw,relatime - tmpfs tmpfs rw\n',
+            encoding='utf-8',
+        )
+        points = dh.load_mount_points(fixture)
+        self.assertEqual(points, {Path('/tmp/forge-post-mounted')})
+
     def test_deploy_lock_busy_skips_execute(self):
         lines: list[str] = []
         locks = FakeLocks({dh.DEPLOY_LOCK})
