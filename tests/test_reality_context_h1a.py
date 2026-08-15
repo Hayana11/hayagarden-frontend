@@ -29,9 +29,9 @@ from chat.reality_context import (
     WEATHER_REASON_FIRST_USER,
     WEATHER_REASON_NONE,
     build_reality_context,
-    format_resident_turn_content,
     prepend_reality_to_provider_content,
 )
+from chat.daily_runtime import format_resident_turn_content
 from chat.weather_authority import WeatherSnapshot
 
 _SH = ZoneInfo('Asia/Shanghai')
@@ -215,11 +215,13 @@ class RealityContextContractTests(unittest.TestCase):
             {'time_anchor': '', 'weather_anchor': '【今日天气】\\n地点：吉林市'},
         ))
         anchor = out.index('【现实时间锚】')
-        structural_reply = out.rfind('请回复最后一条用户消息。')
         user_start = out.index(current_user)
+        reply_marker = '请回复最后一条用户消息。'
+        structural_reply = out.index(reply_marker, anchor, user_start)
         self.assertEqual(out.count('【现实时间锚】'), 1)
         self.assertEqual(out.count(current_user), 1)
         self.assertTrue(out.startswith('【今日天气】'))
+        self.assertEqual(out[anchor:user_start].count(reply_marker), 1)
         self.assertLess(out.index(history), anchor)
         self.assertLess(anchor, structural_reply)
         self.assertLess(structural_reply, user_start)
