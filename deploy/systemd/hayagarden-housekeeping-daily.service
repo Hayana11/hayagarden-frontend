@@ -1,0 +1,13 @@
+[Unit]
+Description=HayaGarden daily whitelist housekeeping
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/frontend
+ExecStart=/usr/bin/python3.11 /opt/frontend/tools/disk_housekeeping.py --daily --execute
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true

@@ -1,0 +1,13 @@
+# Repository template only; do not copy to /etc without a separate approval.
+# app.py opens, appends, and closes client_errors.log for every write, so no
+# persistent descriptor needs copytruncate. Rename/create is safe for this
+# writer and preserves a clean next-open boundary.
+/opt/frontend/client_errors.log {
+    maxsize 50M
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}
