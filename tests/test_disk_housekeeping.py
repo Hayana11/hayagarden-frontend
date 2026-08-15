@@ -120,17 +120,27 @@ class DiskHousekeepingTests(unittest.TestCase):
         self.assertTrue(any('git-worktree' in line for line in lines))
 
     def test_socket_candidate_is_rejected(self):
-        path = self.root / 'forge-switch-socket'
+        path = self._old_dir('forge-switch-socket')
+        socket_path = path / 'socket'
+        sock = None
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.bind(str(path))
+            sock.bind(str(socket_path))
         except (OSError, AttributeError):
+            if sock is not None:
+                sock.close()
             self.skipTest('Unix sockets unavailable')
-        result, lines = self._clean(execute=True)
-        sock.close()
-        path.unlink(missing_ok=True)
-        self.assertEqual(result[1], 0)
-        self.assertTrue(any('special-object' in line for line in lines))
+        try:
+            # Creating the socket updates the directory mtime; restore the
+            # old age so the candidate reaches subtree validation.
+            os.utime(path, (self.now - 2 * 86400, self.now - 2 * 86400))
+            result, lines = self._clean(execute=True)
+            self.assertTrue(path.exists())
+            self.assertEqual(result[1], 0)
+            self.assertTrue(any('special-object' in line for line in lines))
+        finally:
+            sock.close()
+            socket_path.unlink(missing_ok=True)
 
     def test_younger_than_24_hours_is_rejected(self):
         path = self.root / 'forge-switch-young'
