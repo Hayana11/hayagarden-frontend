@@ -1,0 +1,11 @@
+[Unit]
+Description=Run HayaGarden daily whitelist housekeeping
+
+[Timer]
+OnCalendar=*-*-* 20:30:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=hayagarden-housekeeping-daily.service
+
+[Install]
+WantedBy=timers.target

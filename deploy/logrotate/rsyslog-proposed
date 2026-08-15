@@ -1,0 +1,29 @@
+# Repository proposal only; do not install into /etc in this PR.
+# Production was observed with this file set and weekly cadence. maxsize is
+# evaluated only when logrotate runs; consider a separate hourly timer policy.
+/var/log/syslog
+/var/log/mail.info
+/var/log/mail.warn
+/var/log/mail.err
+/var/log/mail.log
+/var/log/daemon.log
+/var/log/kern.log
+/var/log/auth.log
+/var/log/user.log
+/var/log/lpr.log
+/var/log/cron.log
+/var/log/debug
+/var/log/messages
+{
+    maxsize 50M
+    rotate 3
+    weekly
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}
