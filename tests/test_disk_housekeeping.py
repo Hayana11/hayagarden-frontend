@@ -54,6 +54,7 @@ class DiskHousekeepingTests(unittest.TestCase):
         lines: list[str] = []
         kwargs.setdefault('worktree_paths', [])
         kwargs.setdefault('proc_checker', lambda _path: (False, False))
+        kwargs.setdefault('mountinfo_loader', lambda: set())
         kwargs.setdefault('now', self.now)
         result = dh.clean_tmp(
             execute=execute,
@@ -80,6 +81,15 @@ class DiskHousekeepingTests(unittest.TestCase):
         result, _lines = self._clean(execute=True)
         self.assertTrue(path.exists())
         self.assertEqual(result[1], 0)
+
+    def test_allowlisted_regular_file_is_never_deleted(self):
+        path = self.root / 'forge-switch-file'
+        path.write_bytes(b'not a temp directory')
+        os.utime(path, (self.now - 2 * 86400, self.now - 2 * 86400))
+        result, lines = self._clean(execute=True)
+        self.assertTrue(path.exists())
+        self.assertEqual(result[1], 0)
+        self.assertTrue(any('SKIP_NON_DIRECTORY' in line for line in lines))
 
     def test_symlink_candidate_is_rejected(self):
         target = self.root / 'target'
@@ -163,6 +173,28 @@ class DiskHousekeepingTests(unittest.TestCase):
         self.assertEqual(result[1], 0)
         self.assertTrue(any('active-proc-reference' in line for line in lines))
 
+    def test_mountpoint_inside_candidate_is_rejected(self):
+        path = self._old_dir('forge-post-mounted')
+        mountpoint = path / 'mounted'
+        mountpoint.mkdir()
+        result, lines = self._clean(
+            execute=True,
+            mountinfo_loader=lambda: {mountpoint},
+        )
+        self.assertTrue(path.exists())
+        self.assertEqual(result[1], 0)
+        self.assertTrue(any('mount-boundary' in line for line in lines))
+
+    def test_mountinfo_uncertain_fails_closed(self):
+        path = self._old_dir('forge-post-mountinfo-unknown')
+        result, lines = self._clean(
+            execute=True,
+            mountinfo_loader=lambda: None,
+        )
+        self.assertTrue(path.exists())
+        self.assertEqual(result[1], 0)
+        self.assertTrue(any('mountinfo' in line for line in lines))
+
     def test_deploy_lock_busy_skips_execute(self):
         lines: list[str] = []
         locks = FakeLocks({dh.DEPLOY_LOCK})
@@ -190,20 +222,75 @@ class DiskHousekeepingTests(unittest.TestCase):
         self.assertIn('SKIP_ACTIVE_LOCK', lines)
 
     def test_pip_cache_path_mismatch_fails_closed(self):
+        expected_npm = self.root / 'npm'
+        expected_pip = self.root / 'pip'
+
         def runner(command, **_kwargs):
             if command[:3] == ['npm', 'config', 'get']:
-                return _completed(command, stdout=f'{dh.NPM_CACHE}\n')
+                return _completed(command, stdout=f'{expected_npm}\n')
             return _completed(command, stdout='/tmp/not-pip\n')
 
         lines: list[str] = []
         reclaimed, errors = dh.weekly_cache_actions(
             execute=False,
+            npm_cache_path=expected_npm,
+            pip_cache_path=expected_pip,
+            runner=runner,
+            emit=lines.append,
+        )
+        self.assertEqual(reclaimed, 0)
+        self.assertTrue(errors)
+        self.assertTrue(any('REFUSE_UNEXPECTED_PIP_CACHE_PATH' in line for line in lines))
+
+    def test_npm_cache_path_mismatch_fails_closed(self):
+        expected_npm = self.root / 'npm'
+        expected_pip = self.root / 'pip'
+
+        def runner(command, **_kwargs):
+            if command[:3] == ['npm', 'config', 'get']:
+                return _completed(command, stdout='/tmp/not-npm\n')
+            return _completed(command, stdout=f'{expected_pip}\n')
+
+        lines: list[str] = []
+        reclaimed, errors = dh.weekly_cache_actions(
+            execute=False,
+            npm_cache_path=expected_npm,
+            pip_cache_path=expected_pip,
             runner=runner,
             emit=lines.append,
         )
         self.assertEqual(reclaimed, 0)
         self.assertTrue(errors)
         self.assertTrue(any('REFUSE_UNEXPECTED_NPM_CACHE_PATH' in line for line in lines))
+
+    def test_supported_npx_uses_rm_command(self):
+        npm_cache = self.root / 'npm'
+        pip_cache = self.root / 'pip'
+        npm_cache.mkdir()
+        pip_cache.mkdir()
+        commands: list[list[str]] = []
+
+        def runner(command, **_kwargs):
+            commands.append(list(command))
+            if command[:3] == ['npm', 'config', 'get']:
+                return _completed(command, stdout=f'{npm_cache}\n')
+            if command[:4] == [dh.PYTHON, '-m', 'pip', 'cache']:
+                return _completed(command, stdout=f'{pip_cache}\n')
+            if command[:3] == ['npm', 'cache', '--help']:
+                return _completed(command, stdout='cache npx rm\n')
+            return _completed(command)
+
+        reclaimed, errors = dh.weekly_cache_actions(
+            execute=True,
+            npm_cache_path=npm_cache,
+            pip_cache_path=pip_cache,
+            runner=runner,
+            emit=lambda _line: None,
+        )
+        self.assertEqual(reclaimed, 0)
+        self.assertEqual(errors, [])
+        self.assertIn(['npm', 'cache', 'npx', 'rm', '--cache', str(npm_cache)], commands)
+        self.assertNotIn('clean', [part for command in commands for part in command])
 
     def test_backup_disk_alert_is_not_fatal(self):
         def runner(command, **_kwargs):
@@ -272,7 +359,7 @@ class DiskHousekeepingTests(unittest.TestCase):
             if command[:4] == [dh.PYTHON, '-m', 'pip', 'cache']:
                 return _completed(command, stdout=f'{pip_cache}\n')
             if command[:3] == ['npm', 'cache', '--help']:
-                return _completed(command, stdout='cache npx clean\n')
+                return _completed(command, stdout='cache npx rm\n')
             return _completed(command)
 
         lines: list[str] = []
@@ -290,7 +377,7 @@ class DiskHousekeepingTests(unittest.TestCase):
         for field in ('HOUSEKEEPING_START', 'HOUSEKEEPING_END', 'tmp_candidates=',
                       'tmp_deleted=', 'cache_reclaimed_bytes=', 'result=PASS'):
             self.assertTrue(any(line.startswith(field) for line in lines), field)
-        self.assertIn('WOULD_NPX_CLEAN', lines)
+        self.assertIn('WOULD_NPX_RM', lines)
         self.assertIn('WOULD_NPM_VERIFY', lines)
         self.assertTrue(any(line.startswith('WOULD_PIP_PURGE') for line in lines))
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -218,6 +219,42 @@ def _proc_target_references(path: Path, proc_root: Path = Path('/proc')) -> tupl
     return False, False
 
 
+def _decode_mountinfo_path(value: str) -> str | None:
+    if re.search(r'\\(?!040|011|012|134)', value):
+        return None
+    return (
+        value.replace('\\040', ' ')
+        .replace('\\011', '\t')
+        .replace('\\012', '\n')
+        .replace('\\134', '\\')
+    )
+
+
+def load_mount_points(mountinfo_path: Path = Path('/proc/self/mountinfo')) -> set[Path] | None:
+    """Read Linux mount points; None means the boundary evidence is uncertain."""
+    try:
+        text = mountinfo_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    points: set[Path] = set()
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        sections = line.split(' - ', 1)
+        if len(sections) != 2:
+            return None
+        left, right = sections
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) < 6 or len(right_fields) < 3:
+            return None
+        decoded = _decode_mountinfo_path(left_fields[4])
+        if not decoded or not decoded.startswith('/'):
+            return None
+        points.add(Path(os.path.normpath(decoded)))
+    return points or None
+
+
 def _validate_subtree(path: Path, tmp_root: Path) -> str | None:
     try:
         root_info = os.lstat(tmp_root)
@@ -255,6 +292,7 @@ def evaluate_candidate(
     tmp_root: Path = TMP_ROOT,
     worktree_paths: Sequence[Path] | None = None,
     proc_checker: Callable[[Path], tuple[bool, bool]] = _proc_target_references,
+    mountinfo_loader: Callable[[], set[Path] | None] = load_mount_points,
     now: float | None = None,
     min_age_seconds: int = 24 * 60 * 60,
 ) -> Decision:
@@ -267,8 +305,8 @@ def evaluate_candidate(
         return Decision(None, 'SKIP_UNCERTAIN:lstat')
     if stat.S_ISLNK(info.st_mode):
         return Decision(None, 'SKIP_UNCERTAIN:symlink')
-    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
-        return Decision(None, 'SKIP_UNCERTAIN:special-object')
+    if not stat.S_ISDIR(info.st_mode):
+        return Decision(None, 'SKIP_NON_DIRECTORY')
     if info.st_dev != os.lstat(tmp_root).st_dev:
         return Decision(None, 'SKIP_UNCERTAIN:cross-mount')
     age = int(max(0, now - info.st_mtime))
@@ -278,6 +316,11 @@ def evaluate_candidate(
         return Decision(None, 'SKIP_UNCERTAIN:worktree-list')
     if any(_same_or_below(path, worktree) for worktree in worktree_paths):
         return Decision(None, 'SKIP_UNCERTAIN:git-worktree')
+    mount_points = mountinfo_loader()
+    if mount_points is None:
+        return Decision(None, 'SKIP_UNCERTAIN:mountinfo')
+    if any(_same_or_below(mount_point, path) for mount_point in mount_points):
+        return Decision(None, 'SKIP_UNCERTAIN:mount-boundary')
     reason = _validate_subtree(path, tmp_root)
     if reason:
         return Decision(None, f'SKIP_UNCERTAIN:{reason}')
@@ -299,6 +342,7 @@ def discover_tmp_candidates(
     tmp_root: Path = TMP_ROOT,
     worktree_paths: Sequence[Path] | None = None,
     proc_checker: Callable[[Path], tuple[bool, bool]] = _proc_target_references,
+    mountinfo_loader: Callable[[], set[Path] | None] = load_mount_points,
     now: float | None = None,
     emit: Callable[[str], None] = print,
 ) -> tuple[list[Decision], int]:
@@ -317,11 +361,15 @@ def discover_tmp_candidates(
             tmp_root=tmp_root,
             worktree_paths=worktree_paths,
             proc_checker=proc_checker,
+            mountinfo_loader=mountinfo_loader,
             now=now,
         )
         decisions.append(decision)
-        if decision.candidate is None and decision.reason.startswith('SKIP_UNCERTAIN'):
-            emit(f'SKIP_UNCERTAIN path={child} reason={decision.reason.split(":", 1)[1]}')
+        if decision.candidate is None:
+            if decision.reason.startswith('SKIP_UNCERTAIN'):
+                emit(f'SKIP_UNCERTAIN path={child} reason={decision.reason.split(":", 1)[1]}')
+            elif decision.reason == 'SKIP_NON_DIRECTORY':
+                emit(f'SKIP_NON_DIRECTORY path={child}')
     return decisions, count
 
 
@@ -345,6 +393,7 @@ def clean_tmp(
     tmp_root: Path = TMP_ROOT,
     worktree_paths: Sequence[Path] | None = None,
     proc_checker: Callable[[Path], tuple[bool, bool]] = _proc_target_references,
+    mountinfo_loader: Callable[[], set[Path] | None] = load_mount_points,
     now: float | None = None,
     emit: Callable[[str], None] = print,
 ) -> tuple[int, int, int, list[str]]:
@@ -352,6 +401,7 @@ def clean_tmp(
         tmp_root=tmp_root,
         worktree_paths=worktree_paths,
         proc_checker=proc_checker,
+        mountinfo_loader=mountinfo_loader,
         now=now,
         emit=emit,
     )
@@ -373,6 +423,7 @@ def clean_tmp(
             tmp_root=tmp_root,
             worktree_paths=worktree_paths,
             proc_checker=proc_checker,
+            mountinfo_loader=mountinfo_loader,
             now=now,
         )
         if second.candidate is None:
@@ -380,10 +431,11 @@ def clean_tmp(
             continue
         try:
             info = os.lstat(candidate.path)
+            if not stat.S_ISDIR(info.st_mode):
+                emit(f'SKIP_NON_DIRECTORY path={candidate.path}')
+                continue
             if stat.S_ISDIR(info.st_mode):
                 shutil.rmtree(candidate.path)
-            else:
-                candidate.path.unlink()
         except OSError as exc:
             errors.append(f'{candidate.path}: {exc}')
             emit(f'ERROR_DELETE_TMP path={candidate.path} error={exc}')
@@ -432,7 +484,7 @@ def _pip_cache_path(runner: Callable[..., subprocess.CompletedProcess[str]]) -> 
 def _npx_cache_supported(runner: Callable[..., subprocess.CompletedProcess[str]]) -> bool:
     result = _run_command(['npm', 'cache', '--help'], runner=runner)
     text = _command_text(result).lower()
-    return result.returncode == 0 and 'cache npx' in text
+    return result.returncode == 0 and re.search(r'\bcache\s+npx\s+rm\b', text) is not None
 
 
 def weekly_cache_actions(
@@ -456,12 +508,14 @@ def weekly_cache_actions(
     if not _npx_cache_supported(runner):
         emit('SKIP_NPX_UNSUPPORTED')
     elif execute:
-        result = _run_command(['npm', 'cache', 'npx', 'clean', '--cache', str(npm_cache_path)], runner=runner)
+        result = _run_command(['npm', 'cache', 'npx', 'rm', '--cache', str(npm_cache_path)], runner=runner)
         if result.returncode != 0:
-            errors.append('npx cache clean failed')
-            emit(f'ERROR_NPX_CLEAN {_command_text(result)}')
+            errors.append('npx cache rm failed')
+            emit(f'ERROR_NPX_RM {_command_text(result)}')
+        else:
+            emit('NPX_REMOVED')
     else:
-        emit('WOULD_NPX_CLEAN')
+        emit('WOULD_NPX_RM')
     if execute:
         result = _run_command(['npm', 'cache', 'verify', '--cache', str(npm_cache_path)], runner=runner)
         if result.returncode != 0:
@@ -534,6 +588,7 @@ def run_housekeeping(
     tmp_root: Path = TMP_ROOT,
     worktree_paths: Sequence[Path] | None = None,
     proc_checker: Callable[[Path], tuple[bool, bool]] = _proc_target_references,
+    mountinfo_loader: Callable[[], set[Path] | None] = load_mount_points,
     lock_backend: LockBackend | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     stats_provider: Callable[[], DiskStats] = disk_stats,
@@ -574,6 +629,7 @@ def run_housekeeping(
                 tmp_root=tmp_root,
                 worktree_paths=worktrees,
                 proc_checker=proc_checker,
+                mountinfo_loader=mountinfo_loader,
                 emit=emit,
             )
             outcome.tmp_candidates = count

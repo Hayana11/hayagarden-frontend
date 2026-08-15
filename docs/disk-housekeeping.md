@@ -54,14 +54,17 @@ without source ownership evidence, including `haya-runtime-parity-*`,
 `hayagarden-qa.*`, `daily-replica-*`, `diag-replica-*`, `cc-r0-*`,
 `ombre-v2-venv`, and `pr*-memories.db`, remain report-only.
 
-A candidate must be a direct `/tmp` child, match a frozen prefix, be at least
-24 hours old, be on the same device, and not be a symlink. Its complete
-subtree must contain only regular files/directories, no `.git` marker, no
-socket/device/FIFO, and no systemd-private or snap-private path. The path
-must not be listed by `git worktree list`. A best-effort `/proc` scan checks
-process cwd, root, and file descriptors; permission or race uncertainty skips
-the candidate. The candidate is lstat-validated again immediately before
-execute deletion.
+A candidate must be a direct `/tmp` child, match a frozen prefix, be a
+directory, be at least 24 hours old, be on the same device, and not be a
+symlink. Regular files with an allowlisted-looking name are never deleted.
+Its complete subtree must contain only regular files/directories, no `.git`
+marker, no socket/device/FIFO, and no systemd-private or snap-private path.
+The path must not be listed by `git worktree list`, and Linux
+`/proc/self/mountinfo` must prove that neither the candidate nor a descendant
+is an extra mountpoint. Unreadable or malformed mountinfo fails closed. A
+best-effort `/proc` scan checks process cwd, root, and file descriptors;
+permission or race uncertainty skips the candidate. The candidate is
+lstat-validated again immediately before execute deletion.
 
 Dry-run emits `WOULD_DELETE_TMP`; execute emits `DELETED_TMP`. The command
 never calls `find -delete`, `rm -rf`, or `systemd-tmpfiles --clean`.
@@ -86,8 +89,8 @@ non-fatal alert only when the retention command otherwise completed normally.
 
 The production build/deploy identity is root and npm's expected cache is
 `/root/.npm`. The command refuses an unexpected npm cache path. It checks for
-an explicit npm npx-cache subcommand before attempting it; unsupported npm
-versions emit `SKIP_NPX_UNSUPPORTED` and do not hand-delete `_npx`.
+an explicit `npm cache npx rm` capability before attempting it; unsupported
+npm versions emit `SKIP_NPX_UNSUPPORTED` and do not hand-delete `_npx`.
 
 `npm cache verify --cache /root/.npm` is allowed only in weekly execute mode.
 The pip cache path must normalize exactly to `/root/.cache/pip`; otherwise the
