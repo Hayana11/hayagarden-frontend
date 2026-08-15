@@ -7,6 +7,7 @@ does not call tmpfiles, and never treats an unknown path as disposable.
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import re
 import shutil
@@ -203,17 +204,20 @@ def _proc_target_references(path: Path, proc_root: Path = Path('/proc')) -> tupl
         links = [process / 'cwd', process / 'root']
         try:
             links.extend((process / 'fd').iterdir())
-        except OSError:
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ESRCH):
+                continue
             return False, True
         for link in links:
             try:
                 target = os.readlink(link)
-            except OSError:
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ESRCH):
+                    continue
                 return False, True
             if not target.startswith('/'):
                 continue
-            if target.endswith(' (deleted)'):
-                return False, True
+            target = target.removesuffix(' (deleted)')
             if _same_or_below(Path(target), path):
                 return True, False
     return False, False

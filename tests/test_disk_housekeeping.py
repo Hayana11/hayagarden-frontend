@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import subprocess
@@ -31,6 +32,42 @@ class FakeLocks:
 
 def _completed(command, *, stdout='', returncode=0, stderr=''):
     return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+
+class FakeProcLink:
+    def __init__(self, label: str):
+        self.label = label
+
+
+class FakeProcFd:
+    def __init__(self, entries=(), error: OSError | None = None):
+        self.entries = list(entries)
+        self.error = error
+
+    def iterdir(self):
+        if self.error is not None:
+            raise self.error
+        return iter(self.entries)
+
+
+class FakeProcProcess:
+    name = '123'
+
+    def __init__(self, fd_entries=(), fd_error: OSError | None = None):
+        self.fd = FakeProcFd(fd_entries, fd_error)
+
+    def __truediv__(self, part: str):
+        if part == 'fd':
+            return self.fd
+        return FakeProcLink(part)
+
+
+class FakeProcRoot:
+    def __init__(self, process: FakeProcProcess):
+        self.process = process
+
+    def iterdir(self):
+        return iter([self.process])
 
 
 class DiskHousekeepingTests(unittest.TestCase):
@@ -182,6 +219,93 @@ class DiskHousekeepingTests(unittest.TestCase):
         self.assertTrue(path.exists())
         self.assertEqual(result[1], 0)
         self.assertTrue(any('active-proc-reference' in line for line in lines))
+
+    def test_proc_vanished_pid_is_ignored(self):
+        root = FakeProcRoot(
+            FakeProcProcess(fd_error=FileNotFoundError(errno.ENOENT, 'vanished pid')),
+        )
+        self.assertEqual(dh._proc_target_references(self.root / 'candidate', root), (False, False))
+
+    def test_proc_vanished_fd_is_ignored(self):
+        vanished = FakeProcLink('vanished-fd')
+        stable = FakeProcLink('stable-fd')
+        root = FakeProcRoot(FakeProcProcess(fd_entries=[vanished, stable]))
+
+        def readlink(link):
+            if link is vanished:
+                raise FileNotFoundError(errno.ENOENT, 'vanished fd')
+            return '/var/log/example.log'
+
+        with mock.patch.object(dh.os, 'readlink', side_effect=readlink):
+            self.assertEqual(
+                dh._proc_target_references(self.root / 'candidate', root),
+                (False, False),
+            )
+
+    def test_proc_permission_denied_is_uncertain(self):
+        root = FakeProcRoot(FakeProcProcess())
+        with mock.patch.object(
+            dh.os,
+            'readlink',
+            side_effect=PermissionError(errno.EACCES, 'permission denied'),
+        ):
+            self.assertEqual(
+                dh._proc_target_references(self.root / 'candidate', root),
+                (False, True),
+            )
+
+    def test_proc_other_oserror_is_uncertain(self):
+        root = FakeProcRoot(FakeProcProcess())
+        with mock.patch.object(
+            dh.os,
+            'readlink',
+            side_effect=OSError(errno.EIO, 'unexpected proc error'),
+        ):
+            self.assertEqual(
+                dh._proc_target_references(self.root / 'candidate', root),
+                (False, True),
+            )
+
+    def test_unrelated_deleted_target_is_ignored(self):
+        root = FakeProcRoot(FakeProcProcess())
+        with mock.patch.object(
+            dh.os,
+            'readlink',
+            return_value='/var/log/example.log (deleted)',
+        ):
+            self.assertEqual(
+                dh._proc_target_references(self.root / 'forge-switch-x', root),
+                (False, False),
+            )
+
+    def test_candidate_deleted_target_is_referenced(self):
+        candidate = Path('/tmp/forge-switch-x')
+        root = FakeProcRoot(FakeProcProcess())
+        with mock.patch.object(
+            dh.os,
+            'readlink',
+            return_value='/tmp/forge-switch-x/file (deleted)',
+        ):
+            self.assertEqual(
+                dh._proc_target_references(candidate, root),
+                (True, False),
+            )
+
+    def test_active_candidate_fd_is_referenced(self):
+        candidate = Path('/tmp/forge-switch-x')
+        fd_link = FakeProcLink('candidate-fd')
+        root = FakeProcRoot(FakeProcProcess(fd_entries=[fd_link]))
+
+        def readlink(link):
+            if link is fd_link:
+                return '/tmp/forge-switch-x/file'
+            return '/var/log/example.log'
+
+        with mock.patch.object(dh.os, 'readlink', side_effect=readlink):
+            self.assertEqual(
+                dh._proc_target_references(candidate, root),
+                (True, False),
+            )
 
     def test_mountpoint_inside_candidate_is_rejected(self):
         path = self._old_dir('forge-post-mounted')
