@@ -1,21 +1,24 @@
-"""UH-A1 shared-resident transcript watermark guard.
+"""UH-A1 shared-resident transcript and delivery guards.
 
 A normal Wake Renderer turn is intentionally part of the same Claude session,
 but it is not a formal application Chat round and therefore has no
-``daily_message_contexts`` user/assistant pair.  The Session Registry scan
+``daily_message_contexts`` user/assistant pair. The Session Registry scan
 watermark must explicitly skip that provider-only range, otherwise the next
 formal Chat mapping pass sees an extra complete transcript round and blocks.
 
-This module only advances an already-READY registry row from the exact JSONL
-size observed immediately before the shared Wake turn to the exact size after
-that turn.  It never creates sessions, takes ownership, respawns residents, or
-invents mappings.
+If the application executor later cannot deliver/settle that generated Wake,
+the hot resident must not keep an undelivered assistant turn as conversational
+truth. In that failure case we retire only the resident that still belongs to
+the same frozen window identity; a newer window/generation is never touched.
+
+No function here creates sessions, takes ownership, respawns a resident,
+creates a second cursor, or invents message mappings.
 """
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from chat import daily_runtime as dr
 from chat.session_registry import (
@@ -151,3 +154,64 @@ def commit_shared_transcript_watermark(
         'end_offset': end_offset,
         'skipped_provider_round': True,
     }
+
+
+def _is_shared_b3_cache_info(cache_info: Any) -> bool:
+    if not isinstance(cache_info, Mapping):
+        return False
+    return (
+        str(cache_info.get('provider') or '').strip() == 'claude_code'
+        and str(cache_info.get('source') or '').strip() == 'wake'
+        and bool(cache_info.get('b3_authority'))
+    )
+
+
+def retire_shared_resident_after_failed_delivery(
+    *,
+    cache_info: Any,
+    window_identity: Any,
+) -> bool:
+    """Retire only the still-bound shared resident after undelivered B3 output.
+
+    The identity check is intentionally strict. If Manual Forge/Swap/another
+    generation already replaced the binding, return False and leave it alone.
+    """
+    if not _is_shared_b3_cache_info(cache_info):
+        return False
+    try:
+        import config_store
+        if not config_store.get_bool('UNIFIED_NORMAL_WAKE_ENABLED', default=False):
+            return False
+    except Exception:
+        return False
+
+    if not isinstance(window_identity, Mapping):
+        return False
+    try:
+        want_context = int(window_identity.get('context_id'))
+        want_epoch = int(window_identity.get('context_epoch'))
+        want_generation = int(window_identity.get('resident_generation'))
+    except (TypeError, ValueError):
+        return False
+
+    binding = dr.get_local_binding()
+    if binding is None:
+        return False
+    if int(binding.context_id) != want_context:
+        return False
+    if int(binding.context_epoch) != want_epoch:
+        return False
+    if int(binding.resident_generation) != want_generation:
+        return False
+
+    try:
+        import gateway
+        resident = getattr(gateway, '_CC_RESIDENT', None)
+        if resident is None:
+            return False
+        return bool(dr.close_local_resident_if_bound(
+            resident,
+            expected_key=str(binding.resident_key),
+        ))
+    except Exception:
+        return False
