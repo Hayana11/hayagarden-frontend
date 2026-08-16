@@ -470,6 +470,14 @@ def _try_invoke_shared_renderer(
             turn_lease=lease,
         )
 
+        # Do not keep malformed Renderer output in the hot Chat lineage. The
+        # caller validates again, but this pre-watermark check protects the
+        # shared resident before we declare the provider-only range consumed.
+        try:
+            validate_rendered_content(str(result.get('text') or ''))
+        except Exception as exc:
+            raise RuntimeError('uh_a1_shared_renderer_invalid_output') from exc
+
         # This provider-only Wake round is deliberately not a formal Chat
         # mapping pair. Advance the exact Registry scan watermark past it so
         # the next Chat mapping starts at the next formal user turn.
@@ -480,14 +488,6 @@ def _try_invoke_shared_renderer(
                 db_path=db_path,
             )
         except Exception as exc:
-            binding = dr.get_local_binding()
-            expected_key = (
-                str(binding.resident_key) if binding is not None else None
-            )
-            dr.close_local_resident_if_bound(
-                resident,
-                expected_key=expected_key,
-            )
             raise RuntimeError(
                 'uh_a1_transcript_watermark_commit_failed'
             ) from exc
@@ -499,17 +499,12 @@ def _try_invoke_shared_renderer(
             _LOG.info('UH-A1 shared renderer busy; using existing fallback')
             return None
         if shared_started and watermark is not None:
-            # Any post-start failure may have advanced JSONL without a safe
-            # Registry commit. Drop the local hot resident rather than poison
-            # the next formal Chat mapping/cursor path.
+            # Freeze the key from the pre-turn watermark. If another operation
+            # already replaced the binding, do not kill the new resident.
             try:
-                binding = dr.get_local_binding()
-                expected_key = (
-                    str(binding.resident_key) if binding is not None else None
-                )
                 dr.close_local_resident_if_bound(
                     resident,
-                    expected_key=expected_key,
+                    expected_key=str(watermark.resident_key),
                 )
             except Exception:
                 _LOG.warning(
