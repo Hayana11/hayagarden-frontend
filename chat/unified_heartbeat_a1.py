@@ -18,6 +18,7 @@ creates a second cursor, or invents message mappings.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -75,6 +76,51 @@ def begin_shared_wake_delivery_fence(*, gateway: Any, resident: Any) -> SharedWa
     fence = SharedWakeDeliveryFence(gateway=gateway, resident=resident)
     gateway._gen_mark_pending_delivery(fence.token)
     return fence
+
+
+def _read_complete_shared_transcript_end_offset(
+    watermark: SharedTranscriptWatermark,
+) -> int:
+    """Return EOF only after Reader proves one canonical terminal round."""
+    from chat.claude_event_mapping import _assert_complete_terminal_round
+    from chat.claude_transcript_reader import read_transcript_range
+
+    last_error = 'uh_a1_watermark_transcript_not_final'
+    for delay in (0.0, 0.05, 0.15, 0.35):
+        if delay:
+            time.sleep(delay)
+        try:
+            end_offset = int(os.path.getsize(watermark.transcript_path))
+        except OSError as exc:
+            last_error = 'uh_a1_watermark_transcript_unreadable'
+            continue
+        if end_offset <= int(watermark.expected_offset):
+            last_error = 'uh_a1_watermark_transcript_not_grown'
+            continue
+        try:
+            graph = read_transcript_range(
+                watermark.transcript_path,
+                int(watermark.expected_offset),
+                end_offset,
+            )
+            session_ids = {
+                str(event.session_id or '').strip()
+                for event in graph.events
+            }
+            if session_ids != {str(watermark.claude_session_id)}:
+                last_error = 'uh_a1_watermark_transcript_session_mismatch'
+                continue
+            if len(graph.candidate_rounds) != 1:
+                last_error = 'uh_a1_watermark_transcript_round_shape'
+                continue
+            _assert_complete_terminal_round(graph, graph.candidate_rounds[0])
+        except Exception:
+            # The reader/mapping standard is deliberately fail-closed while
+            # Claude may still be appending the canonical assistant row.
+            last_error = 'uh_a1_watermark_transcript_round_incomplete'
+            continue
+        return end_offset
+    raise RuntimeError(last_error)
 
 
 def prepare_shared_transcript_watermark(
@@ -174,12 +220,7 @@ def commit_shared_transcript_watermark(
         # never advance the mapping cursor to a guessed file size.
         raise RuntimeError('uh_a1_watermark_jsonl_not_final')
 
-    try:
-        end_offset = int(os.path.getsize(watermark.transcript_path))
-    except OSError as exc:
-        raise RuntimeError('uh_a1_watermark_transcript_unreadable') from exc
-    if end_offset <= int(watermark.expected_offset):
-        raise RuntimeError('uh_a1_watermark_transcript_not_grown')
+    end_offset = _read_complete_shared_transcript_end_offset(watermark)
 
     updated = cas_advance_scan_offset(
         context_id=int(watermark.context_id),

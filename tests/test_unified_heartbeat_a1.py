@@ -1,5 +1,7 @@
 import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -229,7 +231,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         resident = _FakeResident()
         updated = {'scan_offset': 180, 'last_mapped_message_id': 77}
         with mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
-             mock.patch.object(uh.os.path, 'getsize', return_value=180), \
+             mock.patch.object(uh, '_read_complete_shared_transcript_end_offset', return_value=180), \
              mock.patch.object(uh, 'cas_advance_scan_offset', return_value=updated) as cas:
             result = uh.commit_shared_transcript_watermark(
                 self.watermark(), resident, db_path='/tmp/fake.db',
@@ -243,6 +245,79 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertEqual(kwargs['new_offset'], 180)
         self.assertIsNone(kwargs['last_mapped_message_id'])
         self.assertEqual(kwargs['scan_status'], 'READY')
+
+    def test_watermark_reader_rejects_usage_only_tail_until_canonical_assistant_arrives(self):
+        user = {
+            'type': 'user',
+            'uuid': 'wake-user-1',
+            'sessionId': 'sid-1',
+            'message': {'role': 'user', 'content': 'wake'},
+        }
+        usage_observation = {
+            'type': 'assistant',
+            'requestId': 'request-1',
+            'sessionId': 'sid-1',
+            'message': {
+                'role': 'assistant',
+                'usage': {
+                    'input_tokens': 1,
+                    'output_tokens': 1,
+                    'cache_read_input_tokens': 0,
+                    'cache_creation_input_tokens': 0,
+                },
+            },
+        }
+        canonical_assistant = {
+            'type': 'assistant',
+            'uuid': 'wake-assistant-1',
+            'parentUuid': 'wake-user-1',
+            'sessionId': 'sid-1',
+            'message': {
+                'role': 'assistant',
+                'content': [{'type': 'text', 'text': '我在。'}],
+            },
+        }
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False) as handle:
+            path = handle.name
+            handle.write((json.dumps(user, ensure_ascii=False) + '\n').encode('utf-8'))
+            handle.write((json.dumps(usage_observation, ensure_ascii=False) + '\n').encode('utf-8'))
+        try:
+            watermark = uh.SharedTranscriptWatermark(
+                context_id=12,
+                context_epoch=3,
+                resident_generation=2,
+                resident_key='chat:12:3:2',
+                claude_session_id='sid-1',
+                transcript_path=path,
+                expected_offset=0,
+                process_generation=4,
+            )
+            updated = {'scan_offset': 0, 'last_mapped_message_id': 77}
+            with mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
+                 mock.patch.object(uh, 'cas_advance_scan_offset', return_value=updated) as cas, \
+                 mock.patch.object(uh.time, 'sleep'):
+                with self.assertRaisesRegex(RuntimeError, 'round_incomplete'):
+                    uh.commit_shared_transcript_watermark(
+                        watermark,
+                        _FakeResident(),
+                        db_path='/tmp/fake.db',
+                        jsonl_finality={'stream_totals_match': True},
+                    )
+                cas.assert_not_called()
+
+                with open(path, 'ab') as handle:
+                    handle.write((json.dumps(canonical_assistant, ensure_ascii=False) + '\n').encode('utf-8'))
+                updated['scan_offset'] = os.path.getsize(path)
+                result = uh.commit_shared_transcript_watermark(
+                    watermark,
+                    _FakeResident(),
+                    db_path='/tmp/fake.db',
+                    jsonl_finality={'stream_totals_match': True},
+                )
+            self.assertEqual(result['end_offset'], os.path.getsize(path))
+            self.assertEqual(cas.call_count, 1)
+        finally:
+            os.unlink(path)
 
     def test_watermark_commit_rejects_missing_jsonl_finality_before_getsize(self):
         resident = _FakeResident()
