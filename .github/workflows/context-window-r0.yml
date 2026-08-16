@@ -29,6 +29,10 @@ on:
       - 'docs/context-window-manual-r0.md'
       - '.github/workflows/context-window-r0.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   context-window-r0:
     runs-on: ubuntu-latest
