@@ -9,7 +9,8 @@ formal Chat mapping pass sees an extra complete transcript round and blocks.
 If the application executor later cannot deliver/settle that generated Wake,
 the hot resident must not keep an undelivered assistant turn as conversational
 truth. In that failure case we retire only the resident that still belongs to
-the same frozen window identity; a newer window/generation is never touched.
+the same frozen window identity, and only while no real Chat generation owns
+the shared generation lock. A newer/busy resident is never killed.
 
 No function here creates sessions, takes ownership, respawns a resident,
 creates a second cursor, or invents message mappings.
@@ -171,11 +172,7 @@ def retire_shared_resident_after_failed_delivery(
     cache_info: Any,
     window_identity: Any,
 ) -> bool:
-    """Retire only the still-bound shared resident after undelivered B3 output.
-
-    The identity check is intentionally strict. If Manual Forge/Swap/another
-    generation already replaced the binding, return False and leave it alone.
-    """
+    """Retire only an idle, still-bound resident after undelivered B3 output."""
     if not _is_shared_b3_cache_info(cache_info):
         return False
     try:
@@ -207,11 +204,21 @@ def retire_shared_resident_after_failed_delivery(
     try:
         import gateway
         resident = getattr(gateway, '_CC_RESIDENT', None)
-        if resident is None:
+        gen_cond = getattr(gateway, '_gen_cond', None)
+        if resident is None or gen_cond is None:
             return False
-        return bool(dr.close_local_resident_if_bound(
-            resident,
-            expected_key=str(binding.resident_key),
-        ))
+        # Atomic with the same condition lock used by Chat generation acquire:
+        # never kill a resident already serving a real Chat, and prevent a new
+        # Chat from grabbing it between our busy check and close.
+        with gen_cond:
+            if bool(getattr(gateway, '_gen_busy', False)):
+                return False
+            current = dr.get_local_binding()
+            if current is None or str(current.resident_key) != str(binding.resident_key):
+                return False
+            return bool(dr.close_local_resident_if_bound(
+                resident,
+                expected_key=str(binding.resident_key),
+            ))
     except Exception:
         return False
