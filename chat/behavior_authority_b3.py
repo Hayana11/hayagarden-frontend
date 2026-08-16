@@ -2,6 +2,10 @@
 
 Default OFF. Effective only when B2 consumer is also ON.
 Owned ``message`` bypasses legacy Wake runner after Gate ALLOW.
+
+UH-A1 adds a flag-off shared-resident Renderer path for ``normal`` Wake only.
+It reuses an already-hot formal Chat resident and never changes system/tool
+profile. Planner/Gate/Settlement contracts remain unchanged.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import config_store
 _LOG = logging.getLogger('behavior_authority_b3')
 
 _CONFIG_KEY = 'BEHAVIOR_AUTHORITY_B3_CONSUMER_ENABLED'
+_UNIFIED_NORMAL_WAKE_CONFIG_KEY = 'UNIFIED_NORMAL_WAKE_ENABLED'
 _OWNED_ACTIONS = frozenset({'message'})
 _CONTENT_TARGET = 'wake_message'
 
@@ -72,6 +77,15 @@ _RENDERER_SYSTEM = (
     '只输出一个 JSON object：{"rendered_content": "..."}。\n'
 )
 
+_SHARED_RENDERER_INSTRUCTIONS = (
+    '【内部 normal Wake 表达轮｜不是用户消息】\n'
+    '后台 Planner 与 Action Gate 已经完成决定；你只负责用当前这段主聊天里'
+    '一直在使用的人格和上下文，把既定意图写成一条自然消息。\n'
+    '不要重新决定要不要行动，不要改变 Action，不要调用工具，不要解释后台状态，'
+    '不要输出 THOUGHTS/ACTION/Gate/Settlement。\n'
+    '只输出一个 JSON object：{"rendered_content": "..."}。'
+)
+
 
 @dataclass(frozen=True)
 class RendererInput:
@@ -97,6 +111,14 @@ def consumer_enabled() -> bool:
     """Fail-safe: missing / bad config → OFF."""
     try:
         return config_store.get_bool(_CONFIG_KEY, default=False)
+    except Exception:
+        return False
+
+
+def unified_normal_wake_enabled() -> bool:
+    """UH-A1 transport flag. Missing / invalid config fails OFF."""
+    try:
+        return config_store.get_bool(_UNIFIED_NORMAL_WAKE_CONFIG_KEY, default=False)
     except Exception:
         return False
 
@@ -231,6 +253,216 @@ def build_renderer_user_payload(renderer_input: RendererInput) -> str:
     )
 
 
+def build_shared_renderer_user_payload(renderer_input: RendererInput) -> str:
+    """Minimal dynamic turn for the already-hot Chat resident.
+
+    Persona, relationship dump, PlannerStateView, Drive/Affect/Thought and tool
+    brochure are intentionally absent: the hot Chat resident already owns
+    persona/conversation context, and raw private state must not become durable
+    ordinary-chat transcript.
+    """
+    return _SHARED_RENDERER_INSTRUCTIONS + '\n\n' + json.dumps(
+        {
+            'selected_intent': renderer_input.selected_intent,
+            'selected_action': renderer_input.selected_action,
+            'content_target': renderer_input.content_target,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _current_request_is_normal_wake() -> bool:
+    """Only HTTP normal Wake is eligible in UH-A1 first cut."""
+    try:
+        from flask import has_request_context, request
+        if not has_request_context():
+            return False
+        data = request.get_json(silent=True) or {}
+        return str(data.get('mode') or 'normal').strip() == 'normal'
+    except Exception:
+        return False
+
+
+def _hot_chat_resident_ready(resident: Any, *, db_path: str) -> tuple[bool, str]:
+    """Read-only same-worker door lock. Never takes ownership or respawns."""
+    try:
+        import cc_resident
+        from chat import daily_context as dc
+        from chat import daily_runtime as dr
+
+        binding = dr.get_local_binding()
+        if binding is None:
+            return False, 'no_local_binding'
+
+        alive = getattr(resident, '_alive', None)
+        if not callable(alive) or not bool(alive()):
+            return False, 'resident_not_hot'
+
+        live_profile = str(getattr(resident, 'tool_profile', '') or '')
+        if live_profile != cc_resident.TOOL_PROFILE_UH_A0:
+            return False, 'tool_profile_not_uh_a0'
+        if str(binding.tool_profile or '') != cc_resident.TOOL_PROFILE_UH_A0:
+            return False, 'binding_tool_profile_not_uh_a0'
+
+        live_generation = int(getattr(resident, 'generation', 0) or 0)
+        if int(binding.process_generation or 0) != live_generation:
+            return False, 'process_generation_mismatch'
+
+        ctx = dc.get_daily_context_by_id(
+            int(binding.context_id), db_path=db_path,
+        )
+        if not ctx:
+            return False, 'context_missing'
+        if ctx.get('closed_at') is not None:
+            return False, 'context_closed'
+        if int(ctx.get('context_epoch') or -1) != int(binding.context_epoch):
+            return False, 'context_epoch_mismatch'
+        if int(ctx.get('resident_generation') or -1) != int(binding.resident_generation):
+            return False, 'resident_generation_mismatch'
+
+        owner = dc.get_resident_owner(
+            int(binding.context_id),
+            int(binding.resident_generation),
+            db_path=db_path,
+        )
+        if not owner:
+            return False, 'owner_missing'
+        if str(owner.get('worker_id') or '') != str(dr.WORKER_ID):
+            return False, 'owner_other_worker'
+        if str(owner.get('resident_key') or '') != str(binding.resident_key):
+            return False, 'owner_key_mismatch'
+        owner_generation = owner.get('process_generation')
+        if (
+            owner_generation is not None
+            and int(owner_generation or 0) != live_generation
+        ):
+            return False, 'owner_process_generation_mismatch'
+        return True, 'ok'
+    except Exception as exc:
+        _LOG.warning('UH-A1 hot resident check failed: %s', exc)
+        return False, 'eligibility_error'
+
+
+def invoke_renderer_cc_hot(
+    *,
+    renderer_input: RendererInput,
+    resident: Any,
+    turn_lease: Mapping[str, Any],
+) -> dict:
+    """Run one Renderer turn on an already-hot UH-A0 resident.
+
+    This function deliberately never calls ``ensure_alive`` and never mutates
+    system text, allowed tools or tool profile. Tool events are drained to keep
+    the resident stream coherent, then rejected for this Renderer contract.
+    """
+    text = ''
+    usage: dict[str, Any] = {}
+    saw_done = False
+    saw_tool = False
+    payload = build_shared_renderer_user_payload(renderer_input)
+    for evt, raw in resident.send_turn(
+        payload,
+        turn_lease=dict(turn_lease),
+    ):
+        if evt in ('tool_use', 'tool_result'):
+            saw_tool = True
+        if evt != 'done':
+            continue
+        saw_done = True
+        if isinstance(raw, tuple) and len(raw) >= 3:
+            text = str(raw[0] or '')
+            if isinstance(raw[2], dict):
+                usage = dict(raw[2])
+        else:
+            text = str(raw or '')
+    if not saw_done:
+        raise RuntimeError('uh_a1_shared_renderer_missing_done')
+    if saw_tool:
+        raise RuntimeError('uh_a1_shared_renderer_tool_use')
+    return {
+        'text': text,
+        'provider': 'claude_code',
+        'model_identity': str(
+            getattr(resident, '_model_identity', None)
+            or 'claude-code:shared-resident'
+        ),
+        'cache_info': usage,
+        'shared_resident': True,
+    }
+
+
+def _try_invoke_shared_renderer(
+    *,
+    renderer_input: RendererInput,
+) -> Optional[dict]:
+    """Return shared result, or None only when no safe hot route exists.
+
+    Once the shared turn starts, errors propagate. We never auto-render a
+    second answer after a possibly-partial shared resident turn.
+    """
+    if not unified_normal_wake_enabled() or not _current_request_is_normal_wake():
+        return None
+    try:
+        import gateway
+        from tools.lease_signer import issue_turn_lease
+    except Exception as exc:
+        _LOG.warning('UH-A1 shared renderer import unavailable: %s', exc)
+        return None
+
+    resident = getattr(gateway, '_CC_RESIDENT', None)
+    db_path = str(getattr(gateway, 'DB_PATH', '') or '')
+    if resident is None or not db_path:
+        return None
+
+    ready, reason = _hot_chat_resident_ready(resident, db_path=db_path)
+    if not ready:
+        _LOG.info('UH-A1 shared renderer fallback before turn: %s', reason)
+        return None
+
+    acquired = False
+    try:
+        mode, _ = gateway._gen_acquire_or_wait(wait_timeout=0)
+        if mode != 'own':
+            return None
+        acquired = True
+
+        # Close the race between the first check and generation lock.
+        ready, reason = _hot_chat_resident_ready(resident, db_path=db_path)
+        if not ready:
+            _LOG.info('UH-A1 shared renderer fallback after lock: %s', reason)
+            return None
+
+        identity = dict(renderer_input.decision_identity)
+        turn_id = (
+            'uh-a1-render:'
+            + str(
+                identity.get('decision_attempt_id')
+                or identity.get('wake_run_id')
+                or 'normal'
+            ).strip()
+        )
+        lease = issue_turn_lease(
+            turn_id=turn_id,
+            turn_mode='wake',
+            issued_from='default_policy',
+        )
+        return invoke_renderer_cc_hot(
+            renderer_input=renderer_input,
+            resident=resident,
+            turn_lease=lease,
+        )
+    except RuntimeError as exc:
+        # Zero-wait busy is pre-turn unavailability; all other RuntimeErrors
+        # after acquisition/stream start must propagate to avoid double render.
+        if not acquired and '上一轮回复仍在生成中' in str(exc):
+            _LOG.info('UH-A1 shared renderer busy; using existing fallback')
+            return None
+        raise
+    finally:
+        if acquired:
+            gateway._gen_release(None)
+
+
 def _extract_json_object(text: str) -> Optional[dict]:
     """Parse Renderer reply as exactly one JSON object.
 
@@ -312,7 +544,11 @@ def invoke_renderer(
     timeout_sec: float = _RENDERER_TIMEOUT_SEC,
     invoke_fn: Optional[Callable] = None,
 ) -> dict:
-    """Invoke Renderer and return {text, provider, model_identity}."""
+    """Invoke Renderer and return {text, provider, model_identity, ...}."""
+    if invoke_fn is None:
+        shared = _try_invoke_shared_renderer(renderer_input=renderer_input)
+        if shared is not None:
+            return shared
     invoker = invoke_fn or invoke_renderer_relay
     result = invoker(renderer_input=renderer_input, timeout_sec=timeout_sec)
     if isinstance(result, dict):
