@@ -47,6 +47,18 @@ class ExecutionFenceTests(unittest.TestCase):
             self.assertEqual(result["capability_id"], capability)
             self.assertEqual(result["lease_decision"], "ALLOW")
 
+    def test_b_external_read_is_chat_auto_allowed_without_approval(self):
+        for tool, capability in (("WebSearch", "web.search"), ("WebFetch", "web.read")):
+            result = evaluate_tool_call(tool, {"query": "x"}, self.lease())
+            self.assertEqual(result["capability_id"], capability)
+            self.assertEqual(result["lease_decision"], "ALLOW")
+            self.assertNotIn("approval_id", result)
+
+    def test_b_external_read_is_not_auto_enabled_for_wake(self):
+        for tool in ("WebSearch", "WebFetch"):
+            result = evaluate_tool_call(tool, {"query": "x"}, self.lease(mode="wake"))
+            self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
+
     def test_c_chat_native_read_denied(self):
         self.assertEqual(
             evaluate_tool_call("Read", {"file_path": "x"}, self.lease())["lease_decision"],
@@ -130,7 +142,7 @@ class ExecutionFenceTests(unittest.TestCase):
     def test_j_unknown_and_reserved_denied(self):
         lease = self.lease()
         self.assertEqual(
-            evaluate_tool_call("WebSearch", {}, lease)["lease_decision"],
+            evaluate_tool_call("mcp__unknown__read", {}, lease)["lease_decision"],
             "DENIED_CAPABILITY",
         )
         self.assertEqual(
@@ -274,7 +286,7 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(
             set(physical_surface_names()),
             {
-                "Read", "Glob", "Grep",
+                "Read", "Glob", "Grep", "WebSearch", "WebFetch",
                 "mcp__home__search_memories", "mcp__home__get_light_status",
                 "mcp__home__get_todos", "mcp__home__add_todo",
                 "mcp__home__get_countdowns", "mcp__home__get_ledger",
@@ -285,3 +297,4 @@ class ExecutionFenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

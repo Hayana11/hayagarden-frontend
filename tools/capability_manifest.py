@@ -190,7 +190,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "autonomy_mode": "read_auto",
         "trigger": "回答依赖当前外部事实，且本地上下文无法可靠确认时。",
         "purpose": "取得可核验的当前信息，而不是依赖可能过时的记忆。",
-        "deny_when": "P1 尚未启用该能力，或当前回答不需要外部实时事实时。",
+        "deny_when": "当前回答不需要外部实时事实时。",
         "failure_behavior": "说明搜索不可用或失败，不得假装已联网核验。",
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "WebSearch"},
@@ -203,7 +203,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "autonomy_mode": "read_auto",
         "trigger": "回答依赖某个已知网页或在线文档的具体内容时。",
         "purpose": "读取来源原文，避免只根据搜索摘要或记忆回答。",
-        "deny_when": "P1 尚未启用该能力，或没有需要读取的具体在线来源时。",
+        "deny_when": "没有需要读取的具体在线来源时。",
         "failure_behavior": "说明网页读取失败，不得声称看过未取得的页面。",
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "WebFetch"},
@@ -276,13 +276,13 @@ P1_ENABLED_CAPABILITY_IDS = frozenset(
         "files.read",
         "files.find",
         "code.search",
+        "web.search",
+        "web.read",
     }
 )
 
 P1_RESERVED_CAPABILITY_IDS = frozenset(
     {
-        "web.search",
-        "web.read",
         "github.read",
         "home.light.control",
         "code.write",
@@ -304,3 +304,4 @@ def p1_enabled_capabilities() -> tuple[dict[str, Any], ...]:
         item for item in CAPABILITY_MANIFEST
         if item["capability_id"] in P1_ENABLED_CAPABILITY_IDS
     )
+

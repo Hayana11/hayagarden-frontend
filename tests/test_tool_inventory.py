@@ -20,8 +20,8 @@ class ToolInventoryTest(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(sum(g["total"] for g in self.p["groups"]), 83)
         self.assertEqual(sum(g["available"] for g in self.p["groups"]), self.p["available_count"])
-        self.assertEqual(self.p["available_count"], 13)
-        self.assertEqual(self.p["unavailable_count"], 70)
+        self.assertEqual(self.p["available_count"], 15)
+        self.assertEqual(self.p["unavailable_count"], 68)
 
     def test_workspace_not_duplicated(self):
         gs = {g["id"]: g for g in self.p["groups"]}
@@ -54,6 +54,14 @@ class ToolInventoryTest(unittest.TestCase):
             self.assertTrue(self.t[n]["available"])
             self.assertEqual(self.t[n]["provider"], "mcp__codebase")
 
+    def test_external_read_green_and_github_stays_gray(self):
+        self.assertTrue(self.t["web_search"]["available"])
+        self.assertEqual(self.t["web_search"]["provider"], "Claude Code WebSearch")
+        self.assertTrue(self.t["read_webpage"]["available"])
+        self.assertEqual(self.t["read_webpage"]["provider"], "Claude Code WebFetch")
+        self.assertFalse(self.t["browse_github"]["available"])
+        self.assertEqual(self.t["browse_github"]["reason_code"], "provider_blocked")
+
     def test_all_display_labels_are_readable(self):
         names = tool_inventory.inventory_names()
         labels = {row["tool_name"]: row["display_label"] for group in self.p["groups"] for row in group["tools"]}
@@ -68,12 +76,14 @@ class ToolInventoryTest(unittest.TestCase):
             for _, _, ids in tool_companion_hints._EXPECTED_GROUPS
             for capability_id in ids
         ]
-        self.assertEqual(len(capability_ids), 11)
-        self.assertEqual(len(set(capability_ids)), 11)
+        self.assertEqual(len(capability_ids), 13)
+        self.assertEqual(len(set(capability_ids)), 13)
         self.assertEqual(set(capability_ids), set(P1_ENABLED_CAPABILITY_IDS))
         with mock.patch.object(tool_companion_hints.config_store, "get", return_value=""):
             preview = tool_companion_hints.payload()["prompt_preview"]
-        for inventory_only_name in ("web_search", "pocket_status", "shop_browse", "codebase_patch"):
+        self.assertIn("网络搜索", preview)
+        self.assertIn("读取网页", preview)
+        for inventory_only_name in ("pocket_status", "shop_browse", "codebase_patch"):
             self.assertNotIn(inventory_only_name, preview)
 
     def test_endpoint_contracts_and_read_only_inventory(self):
@@ -89,3 +99,4 @@ class ToolInventoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
