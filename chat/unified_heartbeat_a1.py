@@ -41,6 +41,42 @@ class SharedTranscriptWatermark:
     process_generation: int
 
 
+class SharedWakeDeliveryFence:
+    """Keep the Chat generation owner until Wake delivery is final."""
+
+    def __init__(self, *, gateway: Any, resident: Any):
+        self.gateway = gateway
+        self.resident = resident
+        self.token = object()
+        self._finished = False
+
+    def finish(
+        self,
+        delivered: bool,
+        *,
+        cache_info: Any = None,
+        window_identity: Any = None,
+    ) -> None:
+        if self._finished:
+            return
+        try:
+            if not delivered:
+                retire_shared_resident_after_failed_delivery(
+                    cache_info=cache_info,
+                    window_identity=window_identity,
+                    delivery_token=self.token,
+                )
+        finally:
+            self.gateway._gen_release(None)
+            self._finished = True
+
+
+def begin_shared_wake_delivery_fence(*, gateway: Any, resident: Any) -> SharedWakeDeliveryFence:
+    fence = SharedWakeDeliveryFence(gateway=gateway, resident=resident)
+    gateway._gen_mark_pending_delivery(fence.token)
+    return fence
+
+
 def prepare_shared_transcript_watermark(
     resident: Any,
     *,
@@ -107,6 +143,7 @@ def commit_shared_transcript_watermark(
     resident: Any,
     *,
     db_path: str,
+    jsonl_finality: Any,
 ) -> dict[str, Any]:
     """CAS-skip exactly one completed provider-only Wake transcript range."""
     binding = dr.get_local_binding()
@@ -128,6 +165,14 @@ def commit_shared_transcript_watermark(
         watermark.process_generation
     ):
         raise RuntimeError('uh_a1_watermark_process_generation_changed')
+
+    if not isinstance(jsonl_finality, Mapping):
+        raise RuntimeError('uh_a1_watermark_jsonl_finality_missing')
+    if jsonl_finality.get('stream_totals_match') is not True:
+        # cc_resident already performs the bounded JSONL replay retry. A
+        # non-matching proof means the provider tail is still incomplete, so
+        # never advance the mapping cursor to a guessed file size.
+        raise RuntimeError('uh_a1_watermark_jsonl_not_final')
 
     try:
         end_offset = int(os.path.getsize(watermark.transcript_path))
@@ -171,6 +216,7 @@ def retire_shared_resident_after_failed_delivery(
     *,
     cache_info: Any,
     window_identity: Any,
+    delivery_token: Any = None,
 ) -> bool:
     """Retire only an idle, still-bound resident after undelivered B3 output."""
     if not _is_shared_b3_cache_info(cache_info):
@@ -211,7 +257,10 @@ def retire_shared_resident_after_failed_delivery(
         # never kill a resident already serving a real Chat, and prevent a new
         # Chat from grabbing it between our busy check and close.
         with gen_cond:
-            if bool(getattr(gateway, '_gen_busy', False)):
+            pending_token = getattr(gateway, '_gen_pending_delivery', None)
+            if bool(getattr(gateway, '_gen_busy', False)) and (
+                delivery_token is None or pending_token is not delivery_token
+            ):
                 return False
             current = dr.get_local_binding()
             if current is None or str(current.resident_key) != str(binding.resident_key):

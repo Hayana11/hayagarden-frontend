@@ -17,6 +17,7 @@ class _FakeResident:
                 'resident_turn_count': 7,
                 'respawn_reason': '',
                 'cache_read': 123,
+                'jsonl_usage': {'stream_totals_match': True},
             }, {})),
         ])
         self.sent = []
@@ -130,6 +131,19 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             )
         self.assertEqual(len(resident.sent), 1)
 
+    def test_shared_renderer_rejects_unfinalized_jsonl_tail(self):
+        resident = _FakeResident(events=[
+            ('done', ('{"rendered_content":"我在。"}', '', {
+                'jsonl_usage': {'stream_totals_match': False},
+            }, {})),
+        ])
+        with self.assertRaisesRegex(RuntimeError, 'jsonl_not_final'):
+            b3.invoke_renderer_cc_hot(
+                renderer_input=self.renderer_input(),
+                resident=resident,
+                turn_lease={'turn_id': 'delayed-tail'},
+            )
+
     def test_flag_defaults_off_and_preserves_existing_invoker(self):
         with mock.patch.object(b3.config_store, 'get_bool', return_value=False):
             self.assertFalse(b3.unified_normal_wake_enabled())
@@ -159,6 +173,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             DB_PATH='/tmp/fake.db',
             _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
             _gen_release=lambda result: released.append(result),
+            _gen_mark_pending_delivery=lambda token: None,
         )
         with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
@@ -175,6 +190,8 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertTrue(out['shared_resident'])
         self.assertTrue(out['transcript_skip']['skipped_provider_round'])
         self.assertEqual(len(resident.sent), 1)
+        self.assertEqual(released, [])
+        out['_shared_delivery_fence'].finish(True)
         self.assertEqual(released, [None])
         turn_lease = resident.sent[0][1]['turn_lease']
         self.assertEqual(turn_lease['turn_mode'], 'wake')
@@ -216,6 +233,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
              mock.patch.object(uh, 'cas_advance_scan_offset', return_value=updated) as cas:
             result = uh.commit_shared_transcript_watermark(
                 self.watermark(), resident, db_path='/tmp/fake.db',
+                jsonl_finality={'stream_totals_match': True},
             )
         self.assertEqual(result['start_offset'], 100)
         self.assertEqual(result['end_offset'], 180)
@@ -226,6 +244,68 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertIsNone(kwargs['last_mapped_message_id'])
         self.assertEqual(kwargs['scan_status'], 'READY')
 
+    def test_watermark_commit_rejects_missing_jsonl_finality_before_getsize(self):
+        resident = _FakeResident()
+        with mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
+             mock.patch.object(uh.os.path, 'getsize') as getsize:
+            with self.assertRaisesRegex(RuntimeError, 'jsonl_finality_missing'):
+                uh.commit_shared_transcript_watermark(
+                    self.watermark(), resident, db_path='/tmp/fake.db',
+                    jsonl_finality=None,
+                )
+        getsize.assert_not_called()
+
+    def test_delivery_fence_retires_failed_shared_wake_before_release(self):
+        import threading
+
+        resident = _FakeResident()
+        released = []
+        fake_gateway = types.SimpleNamespace(
+            _CC_RESIDENT=resident,
+            _gen_busy=True,
+            _gen_pending_delivery=None,
+            _gen_cond=threading.Condition(),
+            _gen_release=lambda result: released.append(result),
+        )
+
+        def mark(token):
+            fake_gateway._gen_pending_delivery = token
+
+        fake_gateway._gen_mark_pending_delivery = mark
+        with mock.patch('config_store.get_bool', return_value=True), \
+             mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
+             mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \
+             mock.patch.dict(sys.modules, {'gateway': fake_gateway}):
+            fence = uh.begin_shared_wake_delivery_fence(
+                gateway=fake_gateway,
+                resident=resident,
+            )
+            fence.finish(
+                False,
+                cache_info={
+                    'provider': 'claude_code',
+                    'source': 'wake',
+                    'b3_authority': True,
+                },
+                window_identity={
+                    'context_id': 12,
+                    'context_epoch': 3,
+                    'resident_generation': 2,
+                },
+            )
+        self.assertTrue(close.called)
+        self.assertEqual(released, [None])
+
+    def test_executor_cleanup_wrapper_is_called_for_undelivered_shared_wake(self):
+        from wake import executor
+
+        with mock.patch.object(uh, 'retire_shared_resident_after_failed_delivery') as retire:
+            executor._retire_uh_a1_after_failed_delivery(
+                cache_info={'provider': 'claude_code', 'source': 'wake', 'b3_authority': True},
+                window_identity=self.watermark().__dict__,
+            )
+        self.assertTrue(retire.called)
+
     def test_watermark_commit_failure_closes_hot_resident_and_never_falls_back(self):
         app = Flask(__name__)
         resident = _FakeResident()
@@ -235,6 +315,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             DB_PATH='/tmp/fake.db',
             _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
             _gen_release=lambda result: released.append(result),
+            _gen_mark_pending_delivery=lambda token: None,
         )
         with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \

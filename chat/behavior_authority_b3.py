@@ -379,6 +379,11 @@ def invoke_renderer_cc_hot(
         raise RuntimeError('uh_a1_shared_renderer_missing_done')
     if saw_tool:
         raise RuntimeError('uh_a1_shared_renderer_tool_use')
+    jsonl_finality = usage.get('jsonl_usage')
+    if not isinstance(jsonl_finality, Mapping):
+        raise RuntimeError('uh_a1_shared_renderer_jsonl_finality_missing')
+    if jsonl_finality.get('stream_totals_match') is not True:
+        raise RuntimeError('uh_a1_shared_renderer_jsonl_not_final')
     return {
         'text': text,
         'provider': 'claude_code',
@@ -387,6 +392,7 @@ def invoke_renderer_cc_hot(
             or 'claude-code:shared-resident'
         ),
         'cache_info': usage,
+        'transcript_finality': dict(jsonl_finality),
         'shared_resident': True,
     }
 
@@ -406,6 +412,7 @@ def _try_invoke_shared_renderer(
         import gateway
         from chat import daily_runtime as dr
         from chat.unified_heartbeat_a1 import (
+            begin_shared_wake_delivery_fence,
             commit_shared_transcript_watermark,
             prepare_shared_transcript_watermark,
         )
@@ -427,6 +434,8 @@ def _try_invoke_shared_renderer(
     acquired = False
     shared_started = False
     watermark = None
+    delivery_fence = None
+    result = None
     try:
         mode, _ = gateway._gen_acquire_or_wait(wait_timeout=0)
         if mode != 'own':
@@ -486,11 +495,17 @@ def _try_invoke_shared_renderer(
                 watermark,
                 resident,
                 db_path=db_path,
+                jsonl_finality=result.get('transcript_finality'),
             )
         except Exception as exc:
             raise RuntimeError(
                 'uh_a1_transcript_watermark_commit_failed'
             ) from exc
+        delivery_fence = begin_shared_wake_delivery_fence(
+            gateway=gateway,
+            resident=resident,
+        )
+        result['_shared_delivery_fence'] = delivery_fence
         return result
     except RuntimeError as exc:
         # Zero-wait busy is pre-turn unavailability. Once shared stdin may have
@@ -498,7 +513,7 @@ def _try_invoke_shared_renderer(
         if not acquired and '上一轮回复仍在生成中' in str(exc):
             _LOG.info('UH-A1 shared renderer busy; using existing fallback')
             return None
-        if shared_started and watermark is not None:
+        if shared_started and watermark is not None and delivery_fence is None:
             # Freeze the key from the pre-turn watermark. If another operation
             # already replaced the binding, do not kill the new resident.
             try:
@@ -513,7 +528,7 @@ def _try_invoke_shared_renderer(
                 )
         raise
     finally:
-        if acquired:
+        if acquired and delivery_fence is None:
             gateway._gen_release(None)
 
 
