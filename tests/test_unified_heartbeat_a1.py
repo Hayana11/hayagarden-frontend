@@ -7,6 +7,7 @@ from unittest import mock
 from flask import Flask
 
 from chat import behavior_authority_b3 as b3
+from chat import unified_heartbeat_a1 as uh
 
 
 class _FakeResident:
@@ -21,6 +22,9 @@ class _FakeResident:
         self.sent = []
         self.ensure_calls = 0
         self._model_identity = 'model:frozen'
+        self.session_id = 'sid-1'
+        self.generation = 4
+        self.tool_profile = 'uh_a0'
 
     def ensure_alive(self, *args, **kwargs):
         self.ensure_calls += 1
@@ -44,6 +48,28 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 'decision_attempt_id': 'attempt-1',
                 'primary_drive': 'attachment',
             },
+        )
+
+    def binding(self):
+        return types.SimpleNamespace(
+            context_id=12,
+            context_epoch=3,
+            resident_generation=2,
+            resident_key='chat:12:3:2',
+            process_generation=4,
+            tool_profile='uh_a0',
+        )
+
+    def watermark(self):
+        return uh.SharedTranscriptWatermark(
+            context_id=12,
+            context_epoch=3,
+            resident_generation=2,
+            resident_key='chat:12:3:2',
+            claude_session_id='sid-1',
+            transcript_path='/tmp/sid-1.jsonl',
+            expected_offset=100,
+            process_generation=4,
         )
 
     def test_shared_payload_is_minimal_and_does_not_reinject_private_state(self):
@@ -137,12 +163,17 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
                  mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
+                 mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
+                 mock.patch.object(uh, 'commit_shared_transcript_watermark', return_value={
+                     'start_offset': 100, 'end_offset': 180, 'skipped_provider_round': True,
+                 }), \
                  mock.patch.dict(sys.modules, {'gateway': fake_gateway}):
                 out = b3._try_invoke_shared_renderer(
                     renderer_input=self.renderer_input(),
                 )
         self.assertIsNotNone(out)
         self.assertTrue(out['shared_resident'])
+        self.assertTrue(out['transcript_skip']['skipped_provider_round'])
         self.assertEqual(len(resident.sent), 1)
         self.assertEqual(released, [None])
         turn_lease = resident.sent[0][1]['turn_lease']
@@ -158,6 +189,68 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                         renderer_input=self.renderer_input(),
                     )
                 )
+
+    def test_watermark_prepare_refuses_to_hide_existing_mapping_backlog(self):
+        resident = _FakeResident()
+        registry = {
+            'scan_status': 'READY',
+            'claude_session_id': 'sid-1',
+            'process_generation': 4,
+            'transcript_path': '/tmp/sid-1.jsonl',
+            'scan_offset': 90,
+        }
+        with mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
+             mock.patch.object(uh, 'get_context_claude_session', return_value=registry), \
+             mock.patch.object(uh.os.path, 'getsize', return_value=100):
+            watermark, reason = uh.prepare_shared_transcript_watermark(
+                resident, db_path='/tmp/fake.db',
+            )
+        self.assertIsNone(watermark)
+        self.assertEqual(reason, 'registry_not_caught_up')
+
+    def test_watermark_commit_cas_skips_only_shared_provider_range(self):
+        resident = _FakeResident()
+        updated = {'scan_offset': 180, 'last_mapped_message_id': 77}
+        with mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
+             mock.patch.object(uh.os.path, 'getsize', return_value=180), \
+             mock.patch.object(uh, 'cas_advance_scan_offset', return_value=updated) as cas:
+            result = uh.commit_shared_transcript_watermark(
+                self.watermark(), resident, db_path='/tmp/fake.db',
+            )
+        self.assertEqual(result['start_offset'], 100)
+        self.assertEqual(result['end_offset'], 180)
+        self.assertTrue(result['skipped_provider_round'])
+        kwargs = cas.call_args.kwargs
+        self.assertEqual(kwargs['expected_offset'], 100)
+        self.assertEqual(kwargs['new_offset'], 180)
+        self.assertIsNone(kwargs['last_mapped_message_id'])
+        self.assertEqual(kwargs['scan_status'], 'READY')
+
+    def test_watermark_commit_failure_closes_hot_resident_and_never_falls_back(self):
+        app = Flask(__name__)
+        resident = _FakeResident()
+        released = []
+        fake_gateway = types.SimpleNamespace(
+            _CC_RESIDENT=resident,
+            DB_PATH='/tmp/fake.db',
+            _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
+            _gen_release=lambda result: released.append(result),
+        )
+        with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
+            with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
+                 mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
+                 mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
+                 mock.patch.object(uh, 'commit_shared_transcript_watermark', side_effect=RuntimeError('cas')), \
+                 mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
+                 mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \
+                 mock.patch.dict(sys.modules, {'gateway': fake_gateway}):
+                with self.assertRaisesRegex(RuntimeError, 'uh_a1_transcript_watermark_commit_failed'):
+                    b3._try_invoke_shared_renderer(
+                        renderer_input=self.renderer_input(),
+                    )
+        self.assertEqual(len(resident.sent), 1)
+        self.assertTrue(close.called)
+        self.assertEqual(released, [None])
 
 
 if __name__ == '__main__':
