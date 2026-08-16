@@ -23,6 +23,20 @@ def _now_beijing_str() -> str:
     ).strftime('%Y-%m-%d %H:%M:%S')
 
 
+def _retire_uh_a1_after_failed_delivery(*, cache_info, window_identity) -> None:
+    """Best-effort cleanup; never masks the authoritative executor outcome."""
+    try:
+        from chat.unified_heartbeat_a1 import (
+            retire_shared_resident_after_failed_delivery,
+        )
+        retire_shared_resident_after_failed_delivery(
+            cache_info=cache_info,
+            window_identity=window_identity,
+        )
+    except Exception:
+        logger.warning('UH-A1 shared resident cleanup failed', exc_info=True)
+
+
 def execute(action: str, thoughts: str, content: str,
             mode: str, get_db_fn,
             desire_driven: bool = False,
@@ -270,6 +284,14 @@ def execute(action: str, thoughts: str, content: str,
             conn.rollback()
         except Exception:
             pass
+        # If this was a shared-resident B3 Wake, the provider transcript now
+        # contains a message that application state did not commit. Retire only
+        # the still-bound frozen-window resident so the next Chat rebuilds from
+        # DB authority instead of believing an undelivered turn.
+        _retire_uh_a1_after_failed_delivery(
+            cache_info=cache_info,
+            window_identity=window_identity,
+        )
         raise
     finally:
         try:
@@ -285,6 +307,10 @@ def execute(action: str, thoughts: str, content: str,
     }
 
     if not deliver_chat:
+        _retire_uh_a1_after_failed_delivery(
+            cache_info=cache_info,
+            window_identity=window_identity,
+        )
         return result
 
     if desire_ledger_enabled and mode in ('normal', 'nightwatch') and surfaced_desire_ids:
