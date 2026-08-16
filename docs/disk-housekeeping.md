@@ -168,4 +168,3 @@ Playwright, Codex, snapd, `/var/tmp`, systemd-private directories, snap-private
 directories, Unix sockets, Git worktrees, unknown `/tmp` names, and all
 production runtime/data paths are excluded because age alone cannot prove they
 are disposable.
-
