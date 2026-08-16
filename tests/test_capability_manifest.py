@@ -45,13 +45,13 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "files.read",
                 "files.find",
                 "code.search",
+                "web.search",
+                "web.read",
             },
         )
         self.assertEqual(
             P1_RESERVED_CAPABILITY_IDS,
             {
-                "web.search",
-                "web.read",
                 "github.read",
                 "home.light.control",
                 "code.write",
@@ -133,6 +133,8 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "files.read": "Read",
             "files.find": "Glob",
             "code.search": "Grep",
+            "web.search": "WebSearch",
+            "web.read": "WebFetch",
         }
         for capability_id, binding in expected_cc_bindings.items():
             self.assertEqual(
@@ -151,6 +153,12 @@ class CapabilityManifestContractTests(unittest.TestCase):
             all(item["capability_id"] not in P1_RESERVED_CAPABILITY_IDS for item in enabled)
         )
 
+    def test_github_read_stays_reserved_without_provider_proof(self):
+        self.assertIn("github.read", P1_RESERVED_CAPABILITY_IDS)
+        self.assertNotIn("github.read", P1_ENABLED_CAPABILITY_IDS)
+        self.assertEqual(get_capability("github.read")["provider_bindings"], {})
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -28,6 +28,7 @@ from tools.cc_capability_adapter import (
     physical_surface_fingerprint,
     physical_surface_names,
     uh_a0_home_mcp_tools,
+    uh_a0_external_read_tools,
     uh_a0_native_bindings,
 )
 from tools.lease_signer import issue_turn_lease
@@ -43,6 +44,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(native["files.read"], "Read")
         self.assertEqual(native["files.find"], "Glob")
         self.assertEqual(native["code.search"], "Grep")
+        self.assertEqual(uh_a0_external_read_tools(), ("WebSearch", "WebFetch"))
         # No second product dictionary: every surface MCP name resolves via manifest.
         for name in home:
             matches = [
@@ -53,10 +55,13 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertEqual(len(matches), 1, name)
 
     def test_b_exact_builtin_surface(self):
-        self.assertEqual(UH_A0_BUILTIN_TOOLS, ("Read", "Glob", "Grep"))
+        self.assertEqual(
+            UH_A0_BUILTIN_TOOLS,
+            ("Read", "Glob", "Grep", "WebSearch", "WebFetch"),
+        )
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
         self.assertEqual(plan["built_in_tools"], UH_A0_BUILTIN_TOOLS)
-        self.assertEqual(plan["built_in_tools_csv"], "Read,Glob,Grep")
+        self.assertEqual(plan["built_in_tools_csv"], "Read,Glob,Grep,WebSearch,WebFetch")
         for bad in FORBIDDEN_BUILTIN_TOOLS:
             self.assertNotIn(bad, plan["built_in_tools"])
             self.assertIn(bad, plan["disallowed_tools"])
@@ -99,8 +104,10 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             if isinstance(binding, (list, tuple)):
                 for item in binding:
                     self.assertNotIn(item, surface)
-        for bad in ("WebSearch", "WebFetch", "Bash", "Edit", "Write", "Agent"):
+        for bad in ("Bash", "Edit", "Write", "Agent"):
             self.assertNotIn(bad, surface)
+        for good in ("WebSearch", "WebFetch"):
+            self.assertIn(good, surface)
 
     def test_e_physical_surface_stable_across_leases(self):
         chat_lease = issue_turn_lease(
@@ -243,7 +250,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             )
             session._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
             flags = session._build_spawn_tool_flags(env={})
-            self.assertEqual(flags["tools"], "Read,Glob,Grep")
+            self.assertEqual(flags["tools"], "Read,Glob,Grep,WebSearch,WebFetch")
             self.assertIn("--strict-mcp-config", flags["extra"])
             self.assertIn("--disallowedTools", flags["extra"])
             allowed_idx = flags["extra"].index("--allowedTools") + 1
@@ -272,3 +279,4 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

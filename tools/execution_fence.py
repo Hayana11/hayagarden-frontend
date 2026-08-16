@@ -21,6 +21,7 @@ from tools.lease_signer import ISSUED_FROM_VALUES, TURN_LEASE_FIELDS, TURN_MODES
 LEASE_DECISIONS = frozenset(
     {"ALLOW", "DENIED_CAPABILITY", "CAPABILITY_ASK_REQUIRED", "LEASE_MISMATCH"}
 )
+EXTERNAL_READ_AUTO_CAPABILITY_IDS = frozenset({"web.search", "web.read"})
 DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
 DEFAULT_REPO_ROOT = "/opt/frontend"
 
@@ -154,6 +155,20 @@ def evaluate_tool_call(
     approvals = tuple(turn_lease["approval_ids"])
     is_write = entry.get("side_effect") == "external_state"
 
+    # Enabled External Read is part of an ordinary Chat turn's read surface.
+    # It is side-effect free, needs no approval id, and remains unavailable in
+    # Wake unless that turn explicitly grants it through the normal lease path.
+    if (
+        capability_id in EXTERNAL_READ_AUTO_CAPABILITY_IDS
+        and turn_mode == "chat"
+        and not is_write
+    ):
+        return _decision(
+            capability_id=capability_id,
+            turn_mode=turn_mode,
+            lease_decision="ALLOW",
+        )
+
     if capability_id in allowed:
         if is_write and turn_lease["issued_from"] == "user_confirmation":
             if action_id not in approvals:
@@ -162,10 +177,14 @@ def evaluate_tool_call(
                     lease_decision="LEASE_MISMATCH", approval_id=action_id,
                     diagnostic="confirmation action mismatch",
                 )
-        return _decision(
-            capability_id=capability_id, turn_mode=turn_mode,
-            lease_decision="ALLOW", approval_id=action_id if is_write else None,
+        result = _decision(
+            capability_id=capability_id,
+            turn_mode=turn_mode,
+            lease_decision="ALLOW",
         )
+        if is_write:
+            result["approval_id"] = action_id
+        return result
     if entry.get("autonomy_mode") == "explicit_or_ask":
         return _decision(
             capability_id=capability_id, turn_mode=turn_mode,
@@ -404,3 +423,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

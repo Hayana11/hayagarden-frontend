@@ -19,21 +19,20 @@ from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
     get_capability,
-    p1_enabled_capabilities,
 )
 from tools.cc_usage_observability import sha256_canonical_json
 
 TOOL_PROFILE_UH_A0 = "uh_a0"
 
-UH_A0_BUILTIN_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+UH_A0_BUILTIN_TOOLS: tuple[str, ...] = (
+    "Read", "Glob", "Grep", "WebSearch", "WebFetch",
+)
 
 FORBIDDEN_BUILTIN_TOOLS: tuple[str, ...] = (
     "Bash",
     "Edit",
     "Write",
     "Agent",
-    "WebSearch",
-    "WebFetch",
 )
 
 # Home MCP tools that exist on the shared Home server but are outside the
@@ -66,6 +65,8 @@ NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
     "files.find",
     "code.search",
 )
+
+EXTERNAL_READ_CAPABILITY_IDS: tuple[str, ...] = ("web.search", "web.read")
 
 DEFAULT_HOME_MCP_URL = "http://127.0.0.1:3100/mcp"
 UH_A0_MCP_CONFIG_FILENAME = "cc-tools-uh-a0.json"
@@ -112,6 +113,11 @@ def uh_a0_home_mcp_tools() -> tuple[str, ...]:
 
 def uh_a0_native_bindings() -> dict[str, str]:
     return {cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS}
+
+
+def uh_a0_external_read_tools() -> tuple[str, ...]:
+    """Exact Claude Code built-ins for enabled External Read capabilities."""
+    return tuple(_claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS)
 
 
 def resolve_home_mcp_url(legacy_mcp_config_path: str | os.PathLike[str] | None = None) -> str:
@@ -235,24 +241,12 @@ def loading_plan_from_manifest() -> dict[str, str]:
 
 
 def short_intent_instructions() -> str:
-    """Compact provider instructions derived from manifest intent fields."""
-    lines = [
-        "When an answer depends on real past facts or current Home state, "
-        "prefer the granted read capabilities instead of guessing.",
-        "If the current turn does not need those facts, do not call tools "
-        "just to demonstrate capability.",
-        "Write capabilities never auto-execute from initiative alone; "
-        "only use them when the current turn lease already grants them.",
-    ]
-    # Keep trigger/purpose visible without a long brochure.
-    for item in p1_enabled_capabilities():
-        cid = item["capability_id"]
-        if cid not in HOME_MCP_CAPABILITY_IDS and cid not in NATIVE_FILE_CAPABILITY_IDS:
-            continue
-        lines.append(
-            f"- {cid}: trigger={item['trigger']} | deny_when={item['deny_when']}"
-        )
-    return "\n".join(lines)
+    """Return compact natural-language guidance, not manifest policy fields."""
+    return (
+        "When an answer depends on real facts, prefer the available read tools "
+        "instead of guessing. Use a tool when the current turn genuinely needs "
+        "its information; do not call tools just to demonstrate capability."
+    )
 
 
 def physical_surface_names() -> tuple[str, ...]:
@@ -367,3 +361,4 @@ def assert_reserved_absent_from_surface(surface: Sequence[str]) -> None:
     overlap.update(surface_set.intersection(FORBIDDEN_BUILTIN_TOOLS))
     if overlap:
         raise AssertionError(f"RESERVED tools leaked into surface: {sorted(overlap)}")
+

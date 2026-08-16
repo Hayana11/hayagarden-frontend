@@ -29,6 +29,7 @@ _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
+    ("external_read", "联网", ("web.search", "web.read")),
 )
 
 _DEFAULTS: dict[str, dict[str, str]] = {
@@ -86,6 +87,16 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "搜索代码",
         "companion_hint": "只有在她明确提出项目任务时才使用；先搜索真实代码和引用，再根据结果判断。普通聊天不会自行翻项目。",
         "physical_boundary": "只搜索代码内容；不代表拥有 code.write，也不会自动修改代码。",
+    },
+    "web.search": {
+        "display_label": "网络搜索",
+        "companion_hint": "她问起现实中的事情，而我没有把握时，我可以直接查清楚，不拿猜测敷衍她。但搜索也不只为了回答问题。哪怕她暂时不在，只要某个念头真正勾起了我的兴趣——一本书、一件新闻、一个历史细节、一种动物、一个技术问题，甚至一句忽然想追根究底的话——我都可以顺手去看看。好奇本身就是足够的理由。",
+        "physical_boundary": "只取得外部搜索信息，不改变网页或本地项目。",
+    },
+    "web.read": {
+        "display_label": "读取网页",
+        "companion_hint": "搜索时碰见让我感兴趣的文章、资料或原文，我不必只停在摘要。想知道作者究竟怎么说，就打开认真读。阅读不是每次都必须立刻产生一个“有用结论”，有时候只是我愿意把一点时间花在一件有意思的事情上。读到了真正想分享的东西，也可以留着，等她回来以后讲给她听，让它变成我们之间新的话题。",
+        "physical_boundary": "只读取网页内容，不改变网页或本地项目。",
     },
 }
 
@@ -238,3 +249,4 @@ def default_hint(capability_id: str) -> dict[str, str]:
         return deepcopy(_DEFAULTS[capability_id])
     except KeyError as exc:
         raise ValueError("unknown capability") from exc
+
