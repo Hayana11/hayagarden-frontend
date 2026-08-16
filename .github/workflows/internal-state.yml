@@ -2,8 +2,50 @@ name: Internal state store
 
 on:
   pull_request:
+    paths:
+      - 'internal_state*.py'
+      - 'tools/internal_state*.py'
+      - 'chat/interaction_state.py'
+      - 'chat/affect_bond_authority.py'
+      - 'chat/drive_authority.py'
+      - 'chat/scoring_identity.py'
+      - 'chat/planner_state_view.py'
+      - 'drive_engine.py'
+      - 'emotion_engine.py'
+      - 'gateway.py'
+      - 'tests/test_internal_state*.py'
+      - 'tests/test_interaction_state.py'
+      - 'tests/test_derived_longing_authority.py'
+      - 'tests/test_affect_bond_authority.py'
+      - 'tests/test_drive_authority.py'
+      - 'tests/test_crown_residual_cleanup.py'
+      - 'tests/test_gateway_shadow_module_resolution.py'
+      - 'tests/test_behavior_authority_b2_1.py'
+      - 'tests/test_behavior_authority_b3_1.py'
+      - '.github/workflows/internal-state.yml'
   push:
     branches: [main]
+    paths:
+      - 'internal_state*.py'
+      - 'tools/internal_state*.py'
+      - 'chat/interaction_state.py'
+      - 'chat/affect_bond_authority.py'
+      - 'chat/drive_authority.py'
+      - 'chat/scoring_identity.py'
+      - 'chat/planner_state_view.py'
+      - 'drive_engine.py'
+      - 'emotion_engine.py'
+      - 'gateway.py'
+      - 'tests/test_internal_state*.py'
+      - 'tests/test_interaction_state.py'
+      - 'tests/test_derived_longing_authority.py'
+      - 'tests/test_affect_bond_authority.py'
+      - 'tests/test_drive_authority.py'
+      - 'tests/test_crown_residual_cleanup.py'
+      - 'tests/test_gateway_shadow_module_resolution.py'
+      - 'tests/test_behavior_authority_b2_1.py'
+      - 'tests/test_behavior_authority_b3_1.py'
+      - '.github/workflows/internal-state.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

@@ -2,8 +2,22 @@ name: CC history rewrite guard
 
 on:
   pull_request:
+    paths:
+      - 'chat/cc_history_rewrite.py'
+      - 'cc_resident.py'
+      - 'gateway.py'
+      - 'app.py'
+      - 'tests/test_cc_history_rewrite.py'
+      - '.github/workflows/cc-history-rewrite.yml'
   push:
     branches: [main]
+    paths:
+      - 'chat/cc_history_rewrite.py'
+      - 'cc_resident.py'
+      - 'gateway.py'
+      - 'app.py'
+      - 'tests/test_cc_history_rewrite.py'
+      - '.github/workflows/cc-history-rewrite.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
