@@ -773,20 +773,26 @@ _gen_cond = threading.Condition()
 _gen_busy = False
 _gen_busy_since = 0.0   # epoch seconds when lock was last acquired
 _gen_last_result = None
+_gen_pending_delivery = None
 _GEN_ZOMBIE_TTL = 320   # 对齐 relay 超时(300s)。原 90s 比正常长生成还短，
                         # 慢模型跑到一半锁被当僵尸踢掉→双生成并行→"还没回复完"怪象
 
 def _gen_acquire_or_wait(wait_timeout=15):
     """返回 ('own', None) 表示本次调用应自己生成；
     返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
-    global _gen_busy, _gen_busy_since, _gen_last_result
+    global _gen_busy, _gen_busy_since, _gen_last_result, _gen_pending_delivery
     deadline = time.time() + wait_timeout
     with _gen_cond:
         while True:
-            # 每次循环都检查TTL，主动踢掉僵尸锁
-            if _gen_busy and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL:
+            # 每次循环都检查 TTL；共享 Wake 只豁免正常时长内的恢复，
+            # 超过既有僵尸上限仍保留逃生门。
+            if (
+                _gen_busy
+                and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL
+            ):
                 _gen_busy = False
                 _gen_last_result = None
+                _gen_pending_delivery = None
             if not _gen_busy:
                 _gen_busy = True
                 _gen_busy_since = time.time()
@@ -800,12 +806,30 @@ def _gen_acquire_or_wait(wait_timeout=15):
             if _gen_last_result is not None:
                 return ('reused', _gen_last_result)
 
-def _gen_release(result):
-    global _gen_busy, _gen_last_result
+def _gen_release(result, *, expected_pending_token=None):
+    global _gen_busy, _gen_last_result, _gen_pending_delivery
     with _gen_cond:
+        if (
+            expected_pending_token is not None
+            and _gen_pending_delivery is not expected_pending_token
+        ):
+            # A shared Wake that outlived the zombie TTL must not release a
+            # newer Chat owner when its old stream finally returns.
+            return False
         _gen_last_result = result
         _gen_busy = False
+        _gen_pending_delivery = None
         _gen_cond.notify_all()
+        return True
+
+
+def _gen_mark_pending_delivery(token):
+    """Fence a shared Wake against Chat acquisition and normal recovery."""
+    global _gen_pending_delivery
+    with _gen_cond:
+        if not _gen_busy or _gen_pending_delivery is not None:
+            raise RuntimeError('shared Wake generation fence unavailable')
+        _gen_pending_delivery = token
 
 
 def _chat_is_generating() -> bool:
@@ -836,9 +860,16 @@ def chat_cancel():
     data = request.get_json(silent=True) or {}
     force = bool(data.get('force'))
     with _gen_cond:
-        if _gen_busy and not force:
+        if _gen_busy:
             age = time.time() - _gen_busy_since
-            if age < 8.0:
+            if _gen_pending_delivery is not None and age <= _GEN_ZOMBIE_TTL:
+                return jsonify({
+                    'ok': True,
+                    'skipped': True,
+                    'shared_wake': True,
+                    'age_sec': round(age, 1),
+                })
+            if not force and age < 8.0:
                 return jsonify({'ok': True, 'skipped': True, 'age_sec': round(age, 1)})
     _gen_release(None)
     return jsonify({'ok': True})
@@ -7866,6 +7897,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         planner_provenance = _b2_plan.planner_provenance or {}
         planner_decision = _b2_plan.planner_decision or {}
         thoughts = str(planner_decision.get('intent') or '').strip()
+        render_out = None
         try:
             renderer_input = build_renderer_input(
                 planner_decision=planner_decision,
@@ -7878,6 +7910,19 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 str(render_out.get('text') or ''),
             )
         except Exception as _b3_render_exc:
+            if isinstance(render_out, dict):
+                _fence = render_out.get('_shared_delivery_fence')
+                if _fence is not None:
+                    _fence.finish(
+                        False,
+                        cache_info={
+                            **dict(render_out.get('cache_info') or {}),
+                            'provider': 'claude_code',
+                            'source': 'wake',
+                            'b3_authority': True,
+                        },
+                        window_identity=_wake_window_identity,
+                    )
             _mark_production_attempt(
                 'failed',
                 action='message',
@@ -7893,14 +7938,17 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         renderer_provider = str(render_out.get('provider') or '').strip()
         renderer_model = str(render_out.get('model_identity') or '').strip()
         # Record the Renderer that actually produced language, not a silent provider.
-        wake_cache_info = {
+        wake_cache_info = dict(render_out.get('cache_info') or {})
+        wake_cache_info.update({
             'provider': renderer_provider or wake_provider,
             'source': 'wake',
             'wake_run_id': wake_run_id,
             'b3_authority': True,
-        }
+        })
         if renderer_model:
             wake_cache_info['model'] = renderer_model
+        delivery_fence = render_out.get('_shared_delivery_fence')
+        delivery_succeeded = False
         from wake.executor import execute as _wake_exec
         try:
             exec_out = _wake_exec(
@@ -7920,6 +7968,12 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 settle_user_idle_hours=t2_hours,
             )
         except Exception as _b3_exec_exc:
+            if delivery_fence is not None:
+                delivery_fence.finish(
+                    False,
+                    cache_info=wake_cache_info,
+                    window_identity=_wake_window_identity,
+                )
             _mark_production_attempt(
                 'failed', action='message', reason=str(_b3_exec_exc),
             )
@@ -7930,9 +7984,18 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             _prod_status, _prod_reason = classify_production_outcome(exec_out)
         except Exception:
             _prod_status, _prod_reason = 'failed', 'classify_production_outcome_error'
-        _mark_production_attempt(
-            _prod_status, action='message', reason=_prod_reason or None,
-        )
+        try:
+            _mark_production_attempt(
+                _prod_status, action='message', reason=_prod_reason or None,
+            )
+        finally:
+            delivery_succeeded = _prod_status == 'success'
+            if delivery_fence is not None:
+                delivery_fence.finish(
+                    delivery_succeeded,
+                    cache_info=wake_cache_info,
+                    window_identity=_wake_window_identity,
+                )
         # Rendered ≠ Delivered: only delivered∧settled may expose message/content.
         # Soft-window stale/unavailable returns normally with delivered=False —
         # treat as terminal stop; never fall through to legacy.
