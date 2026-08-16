@@ -404,6 +404,11 @@ def _try_invoke_shared_renderer(
         return None
     try:
         import gateway
+        from chat import daily_runtime as dr
+        from chat.unified_heartbeat_a1 import (
+            commit_shared_transcript_watermark,
+            prepare_shared_transcript_watermark,
+        )
         from tools.lease_signer import issue_turn_lease
     except Exception as exc:
         _LOG.warning('UH-A1 shared renderer import unavailable: %s', exc)
@@ -420,6 +425,8 @@ def _try_invoke_shared_renderer(
         return None
 
     acquired = False
+    shared_started = False
+    watermark = None
     try:
         mode, _ = gateway._gen_acquire_or_wait(wait_timeout=0)
         if mode != 'own':
@@ -430,6 +437,16 @@ def _try_invoke_shared_renderer(
         ready, reason = _hot_chat_resident_ready(resident, db_path=db_path)
         if not ready:
             _LOG.info('UH-A1 shared renderer fallback after lock: %s', reason)
+            return None
+
+        # The formal Chat mapping Registry must already be exactly at EOF.
+        # Otherwise a shared Wake turn would hide an older mapping backlog.
+        watermark, reason = prepare_shared_transcript_watermark(
+            resident,
+            db_path=db_path,
+        )
+        if watermark is None:
+            _LOG.info('UH-A1 shared renderer fallback before turn: %s', reason)
             return None
 
         identity = dict(renderer_input.decision_identity)
@@ -446,17 +463,59 @@ def _try_invoke_shared_renderer(
             turn_mode='wake',
             issued_from='default_policy',
         )
-        return invoke_renderer_cc_hot(
+        shared_started = True
+        result = invoke_renderer_cc_hot(
             renderer_input=renderer_input,
             resident=resident,
             turn_lease=lease,
         )
+
+        # This provider-only Wake round is deliberately not a formal Chat
+        # mapping pair. Advance the exact Registry scan watermark past it so
+        # the next Chat mapping starts at the next formal user turn.
+        try:
+            result['transcript_skip'] = commit_shared_transcript_watermark(
+                watermark,
+                resident,
+                db_path=db_path,
+            )
+        except Exception as exc:
+            binding = dr.get_local_binding()
+            expected_key = (
+                str(binding.resident_key) if binding is not None else None
+            )
+            dr.close_local_resident_if_bound(
+                resident,
+                expected_key=expected_key,
+            )
+            raise RuntimeError(
+                'uh_a1_transcript_watermark_commit_failed'
+            ) from exc
+        return result
     except RuntimeError as exc:
-        # Zero-wait busy is pre-turn unavailability; all other RuntimeErrors
-        # after acquisition/stream start must propagate to avoid double render.
+        # Zero-wait busy is pre-turn unavailability. Once shared stdin may have
+        # started, never auto-render a second answer.
         if not acquired and '上一轮回复仍在生成中' in str(exc):
             _LOG.info('UH-A1 shared renderer busy; using existing fallback')
             return None
+        if shared_started and watermark is not None:
+            # Any post-start failure may have advanced JSONL without a safe
+            # Registry commit. Drop the local hot resident rather than poison
+            # the next formal Chat mapping/cursor path.
+            try:
+                binding = dr.get_local_binding()
+                expected_key = (
+                    str(binding.resident_key) if binding is not None else None
+                )
+                dr.close_local_resident_if_bound(
+                    resident,
+                    expected_key=expected_key,
+                )
+            except Exception:
+                _LOG.warning(
+                    'UH-A1 failed to close resident after shared turn error',
+                    exc_info=True,
+                )
         raise
     finally:
         if acquired:
