@@ -122,12 +122,26 @@ report-only until their writer/reopen semantics are proven.
 Production currently has nginx and rsyslog logrotate entries. This PR does not
 edit `/etc/logrotate.d` or the logrotate timer.
 
-The repo-side `deploy/logrotate/rsyslog-proposed` records a future proposal:
-retain the observed rsyslog file set and `weekly` cadence, add `maxsize 50M`,
-keep compression/delaycompression, and use `rotate 3`. The observed production
-file is currently weekly, so this PR does not silently change it to daily.
-Because `maxsize` is checked only when logrotate runs, a separate follow-up
-should evaluate an hourly logrotate check before installation.
+Production audit found Shop restart loops producing approximately
+106–107 MB/day before remediation. After runtime retirement and disablement of
+the two broken Shop services, the usable post-fix measurement was approximately
+2.36 MB/day, with an estimated 50 MiB growth time of approximately 22 days.
+
+Therefore the final rsyslog policy is:
+
+- existing weekly rotation;
+- existing system daily logrotate evaluation;
+- `rotate 4`;
+- `maxsize 50M` safety net;
+- compression and delayed compression;
+- the existing rsyslog HUP hook;
+- no dedicated hourly timer.
+
+The repository template is `deploy/logrotate/rsyslog`. Its complete observed
+production file set is preserved. The existing historical `/var/log/syslog.1`
+is pre-fix debt and must not be manually deleted or truncated as part of policy
+rollout. Installation remains a separate approved operation; this PR does not
+edit `/etc/logrotate.d` or the logrotate timer.
 
 ## Installing or rolling back the templates later
 
@@ -154,3 +168,4 @@ Playwright, Codex, snapd, `/var/tmp`, systemd-private directories, snap-private
 directories, Unix sockets, Git worktrees, unknown `/tmp` names, and all
 production runtime/data paths are excluded because age alone cannot prove they
 are disposable.
+

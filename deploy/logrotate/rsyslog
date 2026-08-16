@@ -1,6 +1,7 @@
-# Repository proposal only; do not install into /etc in this PR.
-# Production was observed with this file set and weekly cadence. maxsize is
-# evaluated only when logrotate runs; consider a separate hourly timer policy.
+# Validated after Shop log-spam source removal.
+# Global logrotate evaluation remains daily.
+# Rsyslog rotation remains weekly.
+# maxsize 50M is a safety net; no dedicated hourly timer.
 /var/log/syslog
 /var/log/mail.info
 /var/log/mail.warn
@@ -16,7 +17,7 @@
 /var/log/messages
 {
     maxsize 50M
-    rotate 3
+    rotate 4
     weekly
     missingok
     notifempty
@@ -27,3 +28,4 @@
         /usr/lib/rsyslog/rsyslog-rotate
     endscript
 }
+
