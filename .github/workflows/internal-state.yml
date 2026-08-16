@@ -23,6 +23,16 @@ on:
       - 'tests/test_behavior_authority_b2_1.py'
       - 'tests/test_behavior_authority_b3_1.py'
       - '.github/workflows/internal-state.yml'
+      - 'desire.py'
+      - 'chat/behavior_authority_b2.py'
+      - 'chat/behavior_authority_b3.py'
+      - 'chat/capability_skill_view.py'
+      - 'chat/system_builder.py'
+      - 'wake/executor.py'
+      - 'wake/builder.py'
+      - 'app.py'
+      - 'tools/embedding_tool.py'
+      - 'tools/memory_tool.py'
   push:
     branches: [main]
     paths:
@@ -46,6 +56,16 @@ on:
       - 'tests/test_behavior_authority_b2_1.py'
       - 'tests/test_behavior_authority_b3_1.py'
       - '.github/workflows/internal-state.yml'
+      - 'desire.py'
+      - 'chat/behavior_authority_b2.py'
+      - 'chat/behavior_authority_b3.py'
+      - 'chat/capability_skill_view.py'
+      - 'chat/system_builder.py'
+      - 'wake/executor.py'
+      - 'wake/builder.py'
+      - 'app.py'
+      - 'tools/embedding_tool.py'
+      - 'tools/memory_tool.py'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
