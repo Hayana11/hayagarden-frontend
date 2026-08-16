@@ -68,7 +68,10 @@ class SharedWakeDeliveryFence:
                     delivery_token=self.token,
                 )
         finally:
-            self.gateway._gen_release(None)
+            self.gateway._gen_release(
+                None,
+                expected_pending_token=self.token,
+            )
             self._finished = True
 
 

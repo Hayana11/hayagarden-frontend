@@ -1,9 +1,12 @@
+import ast
 import json
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from flask import Flask
@@ -13,7 +16,7 @@ from chat import unified_heartbeat_a1 as uh
 
 
 class _FakeResident:
-    def __init__(self, events=None):
+    def __init__(self, events=None, on_send=None):
         self.events = list(events or [
             ('done', ('{"rendered_content":"我在。"}', '', {
                 'resident_turn_count': 7,
@@ -28,6 +31,7 @@ class _FakeResident:
         self.session_id = 'sid-1'
         self.generation = 4
         self.tool_profile = 'uh_a0'
+        self.on_send = on_send
 
     def ensure_alive(self, *args, **kwargs):
         self.ensure_calls += 1
@@ -35,7 +39,42 @@ class _FakeResident:
 
     def send_turn(self, content, **kwargs):
         self.sent.append((content, kwargs))
+        if self.on_send is not None:
+            self.on_send()
         yield from self.events
+
+
+def _load_generation_lock_functions():
+    """Load only gateway's lock functions for cross-platform unit tests."""
+    source = (Path(__file__).resolve().parents[1] / 'gateway.py').read_text(
+        encoding='utf-8',
+    )
+    tree = ast.parse(source)
+    wanted = {
+        '_gen_acquire_or_wait',
+        '_gen_release',
+        '_gen_mark_pending_delivery',
+        'chat_cancel',
+    }
+    namespace = {
+        'time': time,
+        'jsonify': lambda value=None, **kwargs: value if value is not None else kwargs,
+        'request': types.SimpleNamespace(
+            get_json=lambda silent=False: namespace['request_data'],
+        ),
+        'request_data': {},
+        '_gen_cond': __import__('threading').Condition(),
+        '_gen_busy': False,
+        '_gen_busy_since': 0.0,
+        '_gen_last_result': None,
+        '_gen_pending_delivery': None,
+        '_GEN_ZOMBIE_TTL': 320,
+    }
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            node.decorator_list = []
+            exec(compile(ast.Module(body=[node], type_ignores=[]), '<gateway-locks>', 'exec'), namespace)
+    return namespace
 
 
 class UnifiedHeartbeatA1Tests(unittest.TestCase):
@@ -168,15 +207,31 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
 
     def test_normal_request_can_use_shared_hot_route_with_zero_wait_lock(self):
         app = Flask(__name__)
-        resident = _FakeResident()
+        marker_seen_during_send = []
+        resident = _FakeResident(
+            on_send=lambda: marker_seen_during_send.append(
+                fake_gateway._gen_pending_delivery is not None
+            ),
+        )
         released = []
         fake_gateway = types.SimpleNamespace(
             _CC_RESIDENT=resident,
             DB_PATH='/tmp/fake.db',
             _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
-            _gen_release=lambda result: released.append(result),
-            _gen_mark_pending_delivery=lambda token: None,
+            _gen_pending_delivery=None,
         )
+        def mark(token):
+            fake_gateway._gen_pending_delivery = token
+        def release(result, *, expected_pending_token=None):
+            if expected_pending_token is not None and (
+                fake_gateway._gen_pending_delivery is not expected_pending_token
+            ):
+                return False
+            fake_gateway._gen_pending_delivery = None
+            released.append(result)
+            return True
+        fake_gateway._gen_release = release
+        fake_gateway._gen_mark_pending_delivery = mark
         with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
                  mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
@@ -192,12 +247,66 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertTrue(out['shared_resident'])
         self.assertTrue(out['transcript_skip']['skipped_provider_round'])
         self.assertEqual(len(resident.sent), 1)
+        self.assertEqual(marker_seen_during_send, [True])
         self.assertEqual(released, [])
         out['_shared_delivery_fence'].finish(True)
         self.assertEqual(released, [None])
+        self.assertIsNone(fake_gateway._gen_pending_delivery)
         turn_lease = resident.sent[0][1]['turn_lease']
         self.assertEqual(turn_lease['turn_mode'], 'wake')
         self.assertEqual(turn_lease['issued_from'], 'default_policy')
+
+    def test_force_cancel_preserves_live_shared_wake_under_zombie_ttl(self):
+        locks = _load_generation_lock_functions()
+        token = object()
+        locks.update({
+            '_gen_busy': True,
+            '_gen_busy_since': time.time() - 30,
+            '_gen_pending_delivery': token,
+            'request_data': {'force': True},
+        })
+        result = locks['chat_cancel']()
+        self.assertTrue(result['skipped'])
+        self.assertTrue(result['shared_wake'])
+        self.assertTrue(locks['_gen_busy'])
+        self.assertIs(locks['_gen_pending_delivery'], token)
+
+    def test_shared_wake_zombie_escape_releases_and_stale_finish_cannot_kill_new_chat(self):
+        locks = _load_generation_lock_functions()
+        old_token = object()
+        locks.update({
+            '_gen_busy': True,
+            '_gen_busy_since': time.time() - 321,
+            '_gen_pending_delivery': old_token,
+            'request_data': {'force': True},
+        })
+        result = locks['chat_cancel']()
+        self.assertTrue(result['ok'])
+        self.assertFalse(locks['_gen_busy'])
+        self.assertIsNone(locks['_gen_pending_delivery'])
+
+        mode, _ = locks['_gen_acquire_or_wait'](wait_timeout=0)
+        self.assertEqual(mode, 'own')
+        self.assertFalse(
+            locks['_gen_release'](
+                None,
+                expected_pending_token=old_token,
+            )
+        )
+        self.assertTrue(locks['_gen_busy'])
+
+    def test_force_cancel_non_shared_generation_keeps_original_behavior(self):
+        locks = _load_generation_lock_functions()
+        locks.update({
+            '_gen_busy': True,
+            '_gen_busy_since': time.time() - 30,
+            '_gen_pending_delivery': None,
+            'request_data': {'force': True},
+        })
+        result = locks['chat_cancel']()
+        self.assertTrue(result['ok'])
+        self.assertFalse(result.get('skipped', False))
+        self.assertFalse(locks['_gen_busy'])
 
     def test_other_wake_modes_never_enter_shared_route_in_a1(self):
         app = Flask(__name__)
@@ -340,7 +449,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             _gen_busy=True,
             _gen_pending_delivery=None,
             _gen_cond=threading.Condition(),
-            _gen_release=lambda result: released.append(result),
+            _gen_release=lambda result, **kwargs: released.append(result),
         )
 
         def mark(token):
@@ -382,6 +491,8 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertTrue(retire.called)
 
     def test_watermark_commit_failure_closes_hot_resident_and_never_falls_back(self):
+        import threading
+
         app = Flask(__name__)
         resident = _FakeResident()
         released = []
@@ -389,14 +500,28 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             _CC_RESIDENT=resident,
             DB_PATH='/tmp/fake.db',
             _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
-            _gen_release=lambda result: released.append(result),
-            _gen_mark_pending_delivery=lambda token: None,
+            _gen_pending_delivery=None,
+            _gen_busy=True,
+            _gen_cond=threading.Condition(),
         )
+        def mark(token):
+            fake_gateway._gen_pending_delivery = token
+        def release(result, *, expected_pending_token=None):
+            if expected_pending_token is not None and (
+                fake_gateway._gen_pending_delivery is not expected_pending_token
+            ):
+                return False
+            fake_gateway._gen_pending_delivery = None
+            released.append(result)
+            return True
+        fake_gateway._gen_mark_pending_delivery = mark
+        fake_gateway._gen_release = release
         with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
             with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
                  mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
                  mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
                  mock.patch.object(uh, 'commit_shared_transcript_watermark', side_effect=RuntimeError('cas')), \
+                 mock.patch('config_store.get_bool', return_value=True), \
                  mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
                  mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \
                  mock.patch.dict(sys.modules, {'gateway': fake_gateway}):

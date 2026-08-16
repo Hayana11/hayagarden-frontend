@@ -780,18 +780,19 @@ _GEN_ZOMBIE_TTL = 320   # 对齐 relay 超时(300s)。原 90s 比正常长生成
 def _gen_acquire_or_wait(wait_timeout=15):
     """返回 ('own', None) 表示本次调用应自己生成；
     返回 ('reused', (text, thinking)) 表示应直接复用刚结束的另一次生成结果。"""
-    global _gen_busy, _gen_busy_since, _gen_last_result
+    global _gen_busy, _gen_busy_since, _gen_last_result, _gen_pending_delivery
     deadline = time.time() + wait_timeout
     with _gen_cond:
         while True:
-            # 每次循环都检查TTL，主动踢掉僵尸锁
+            # 每次循环都检查 TTL；共享 Wake 只豁免正常时长内的恢复，
+            # 超过既有僵尸上限仍保留逃生门。
             if (
                 _gen_busy
-                and _gen_pending_delivery is None
                 and (time.time() - _gen_busy_since) > _GEN_ZOMBIE_TTL
             ):
                 _gen_busy = False
                 _gen_last_result = None
+                _gen_pending_delivery = None
             if not _gen_busy:
                 _gen_busy = True
                 _gen_busy_since = time.time()
@@ -805,17 +806,25 @@ def _gen_acquire_or_wait(wait_timeout=15):
             if _gen_last_result is not None:
                 return ('reused', _gen_last_result)
 
-def _gen_release(result):
+def _gen_release(result, *, expected_pending_token=None):
     global _gen_busy, _gen_last_result, _gen_pending_delivery
     with _gen_cond:
+        if (
+            expected_pending_token is not None
+            and _gen_pending_delivery is not expected_pending_token
+        ):
+            # A shared Wake that outlived the zombie TTL must not release a
+            # newer Chat owner when its old stream finally returns.
+            return False
         _gen_last_result = result
         _gen_busy = False
         _gen_pending_delivery = None
         _gen_cond.notify_all()
+        return True
 
 
 def _gen_mark_pending_delivery(token):
-    """Fence shared Wake delivery against both Chat acquisition and TTL expiry."""
+    """Fence a shared Wake against Chat acquisition and normal recovery."""
     global _gen_pending_delivery
     with _gen_cond:
         if not _gen_busy or _gen_pending_delivery is not None:
@@ -851,9 +860,16 @@ def chat_cancel():
     data = request.get_json(silent=True) or {}
     force = bool(data.get('force'))
     with _gen_cond:
-        if _gen_busy and not force:
+        if _gen_busy:
             age = time.time() - _gen_busy_since
-            if age < 8.0:
+            if _gen_pending_delivery is not None and age <= _GEN_ZOMBIE_TTL:
+                return jsonify({
+                    'ok': True,
+                    'skipped': True,
+                    'shared_wake': True,
+                    'age_sec': round(age, 1),
+                })
+            if not force and age < 8.0:
                 return jsonify({'ok': True, 'skipped': True, 'age_sec': round(age, 1)})
     _gen_release(None)
     return jsonify({'ok': True})

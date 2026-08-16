@@ -410,7 +410,6 @@ def _try_invoke_shared_renderer(
         return None
     try:
         import gateway
-        from chat import daily_runtime as dr
         from chat.unified_heartbeat_a1 import (
             begin_shared_wake_delivery_fence,
             commit_shared_transcript_watermark,
@@ -472,6 +471,12 @@ def _try_invoke_shared_renderer(
             turn_mode='wake',
             issued_from='default_policy',
         )
+        # Establish the shared owner before stdin is sent. The same generation
+        # lock must remain protected while normal Wake is still rendering.
+        delivery_fence = begin_shared_wake_delivery_fence(
+            gateway=gateway,
+            resident=resident,
+        )
         shared_started = True
         result = invoke_renderer_cc_hot(
             renderer_input=renderer_input,
@@ -501,31 +506,33 @@ def _try_invoke_shared_renderer(
             raise RuntimeError(
                 'uh_a1_transcript_watermark_commit_failed'
             ) from exc
-        delivery_fence = begin_shared_wake_delivery_fence(
-            gateway=gateway,
-            resident=resident,
-        )
         result['_shared_delivery_fence'] = delivery_fence
         return result
-    except RuntimeError as exc:
+    except Exception as exc:
         # Zero-wait busy is pre-turn unavailability. Once shared stdin may have
         # started, never auto-render a second answer.
         if not acquired and '上一轮回复仍在生成中' in str(exc):
             _LOG.info('UH-A1 shared renderer busy; using existing fallback')
             return None
-        if shared_started and watermark is not None and delivery_fence is None:
-            # Freeze the key from the pre-turn watermark. If another operation
-            # already replaced the binding, do not kill the new resident.
-            try:
-                dr.close_local_resident_if_bound(
-                    resident,
-                    expected_key=str(watermark.resident_key),
-                )
-            except Exception:
-                _LOG.warning(
-                    'UH-A1 failed to close resident after shared turn error',
-                    exc_info=True,
-                )
+        if shared_started and delivery_fence is not None:
+            # Retire the matching resident while the same generation condition
+            # is held, then release the shared owner token. An old Wake stream
+            # cannot release a newer Chat owner after TTL escape.
+            delivery_fence.finish(
+                False,
+                cache_info={
+                    'provider': 'claude_code',
+                    'source': 'wake',
+                    'b3_authority': True,
+                },
+                window_identity={
+                    'context_id': watermark.context_id if watermark else None,
+                    'context_epoch': watermark.context_epoch if watermark else None,
+                    'resident_generation': (
+                        watermark.resident_generation if watermark else None
+                    ),
+                },
+            )
         raise
     finally:
         if acquired and delivery_fence is None:
