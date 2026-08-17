@@ -1472,6 +1472,27 @@ def is_canonical_conversation_message(
         return False
     if _row_source_kind(row) != SOURCE_KIND_WAKE:
         return False
+
+    # Wake rows share one source_kind across modes. Only an explicit,
+    # transactionally committed normal-Wake provenance marker is canonical.
+    if not hasattr(row, 'keys') or 'cache_info' not in row.keys():
+        return False
+    raw_cache_info = row['cache_info']
+    try:
+        cache_info = (
+            json.loads(raw_cache_info)
+            if isinstance(raw_cache_info, str)
+            else raw_cache_info
+        )
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(cache_info, dict):
+        return False
+    if cache_info.get('wake_mode') != 'normal':
+        return False
+    if cache_info.get('canonical_chat_history') is not True:
+        return False
+
     author = str(row['author'] or '').strip().lower()
     if author not in _ASSISTANT_AUTHORS:
         return False
