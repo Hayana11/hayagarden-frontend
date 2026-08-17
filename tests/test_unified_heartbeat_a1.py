@@ -199,6 +199,67 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertEqual(resident.ensure_calls, 0)
         self.assertEqual(resident.peek_calls, [('bound-system', 'uh_a0')])
 
+    def test_final_guarded_probe_closes_probe_to_stdin_race_without_retirement(self):
+        import threading
+
+        app = Flask(__name__)
+        resident = _FakeResident()
+        released = []
+        fake_gateway = types.SimpleNamespace(
+            _CC_RESIDENT=resident,
+            DB_PATH='/tmp/fake.db',
+            _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
+            _gen_pending_delivery=None,
+            _gen_busy=True,
+            _gen_cond=threading.Condition(),
+        )
+        def mark(token):
+            fake_gateway._gen_pending_delivery = token
+        def release(result, *, expected_pending_token=None):
+            if expected_pending_token is not None and (
+                fake_gateway._gen_pending_delivery is not expected_pending_token
+            ):
+                return False
+            fake_gateway._gen_pending_delivery = None
+            released.append(result)
+            return True
+        fake_gateway._gen_mark_pending_delivery = mark
+        fake_gateway._gen_release = release
+        fallback = {
+            'text': '{"rendered_content":"旧路"}',
+            'provider': 'api_relay',
+            'model_identity': 'relay:test',
+        }
+        with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
+            with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
+                 mock.patch.object(
+                     b3,
+                     '_hot_chat_resident_ready',
+                     side_effect=[
+                         (True, 'ok'),
+                         (True, 'ok'),
+                         (False, 'resident_stale:history_rewrite'),
+                     ],
+                 ), \
+                 mock.patch.object(
+                     uh,
+                     'prepare_shared_transcript_watermark',
+                     return_value=(self.watermark(), 'ok'),
+                 ), \
+                 mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \
+                 mock.patch('config_store.get_bool', return_value=True), \
+                 mock.patch.dict(sys.modules, {'gateway': fake_gateway}), \
+                 mock.patch.object(b3, 'invoke_renderer_relay', return_value=fallback) as relay:
+                result = b3.invoke_renderer(renderer_input=self.renderer_input())
+
+        self.assertEqual(result['provider'], 'api_relay')
+        self.assertEqual(len(resident.sent), 0)
+        self.assertEqual(resident.ensure_calls, 0)
+        close.assert_not_called()
+        relay.assert_called_once()
+        self.assertFalse(fake_gateway._gen_busy)
+        self.assertEqual(released, [None])
+
     def test_shared_send_turn_is_wrapped_by_history_rewrite_guard(self):
         from chat import cc_history_rewrite
 

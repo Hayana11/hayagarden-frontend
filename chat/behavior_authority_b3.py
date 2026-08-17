@@ -361,11 +361,17 @@ def _hot_chat_resident_ready(resident: Any, *, db_path: str) -> tuple[bool, str]
         return False, 'eligibility_error'
 
 
+class _SharedPreTurnUnavailable(RuntimeError):
+    """Shared route became unavailable before stdin was sent."""
+
+
 def invoke_renderer_cc_hot(
     *,
     renderer_input: RendererInput,
     resident: Any,
     turn_lease: Mapping[str, Any],
+    final_probe: Optional[Callable[[], tuple[bool, str]]] = None,
+    on_guarded_probe_pass: Optional[Callable[[], None]] = None,
 ) -> dict:
     """Run one Renderer turn on an already-hot UH-A0 resident.
 
@@ -380,13 +386,25 @@ def invoke_renderer_cc_hot(
     saw_done = False
     saw_tool = False
     payload = build_shared_renderer_user_payload(renderer_input)
-    events = resident.send_turn(
-        payload,
-        turn_lease=dict(turn_lease),
-    )
-    # Hold the existing cross-process shared lock for the entire stream
-    # consumption so an authoritative rewrite cannot overlap this turn.
-    for evt, raw in guard_cc_generation(events):
+
+    def guarded_events():
+        # The guard is acquired before this generator is first advanced.
+        # Therefore the final stale probe and the following stdin write share
+        # one history-rewrite lock lifetime.
+        if final_probe is not None:
+            ready, reason = final_probe()
+            if not ready:
+                raise _SharedPreTurnUnavailable(reason)
+        if on_guarded_probe_pass is not None:
+            on_guarded_probe_pass()
+        yield from resident.send_turn(
+            payload,
+            turn_lease=dict(turn_lease),
+        )
+
+    # Hold the existing cross-process shared lock for the final probe and the
+    # complete stream consumption so no rewrite can land in between.
+    for evt, raw in guard_cc_generation(guarded_events()):
         if evt in ('tool_use', 'tool_result'):
             saw_tool = True
         if evt != 'done':
@@ -506,10 +524,23 @@ def _try_invoke_shared_renderer(
             resident=resident,
         )
         shared_started = True
+        def final_shared_probe():
+            return _hot_chat_resident_ready(resident, db_path=db_path)
+
+        def establish_shared_delivery_fence():
+            nonlocal delivery_fence, shared_started
+            delivery_fence = begin_shared_wake_delivery_fence(
+                gateway=gateway,
+                resident=resident,
+            )
+            shared_started = True
+
         result = invoke_renderer_cc_hot(
             renderer_input=renderer_input,
             resident=resident,
             turn_lease=lease,
+            final_probe=final_shared_probe,
+            on_guarded_probe_pass=establish_shared_delivery_fence,
         )
 
         # Do not keep malformed Renderer output in the hot Chat lineage. The
@@ -536,6 +567,11 @@ def _try_invoke_shared_renderer(
             ) from exc
         result['_shared_delivery_fence'] = delivery_fence
         return result
+    except _SharedPreTurnUnavailable as exc:
+        # This is still pre-turn: no delivery fence was created and no stdin
+        # was sent. Let the existing caller invoke the normal Relay fallback.
+        _LOG.info('UH-A1 final guarded stale probe rejected shared route: %s', exc)
+        return None
     except Exception as exc:
         # Zero-wait busy is pre-turn unavailability. Once shared stdin may have
         # started, never auto-render a second answer.
