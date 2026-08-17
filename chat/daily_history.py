@@ -22,7 +22,7 @@ from chat.daily_context import (
     format_formal_handoff_prompt,
     get_daily_context_by_id,
     get_resident_history_cursor,
-    is_formal_chat_message,
+    is_canonical_conversation_message,
     resolve_bound_handoff,
 )
 from chat.daily_schema import META_SOURCE_KIND_CUTOVER, get_meta_int
@@ -111,20 +111,24 @@ def _fetch_current_day_history(
     up_to_message_id: Optional[int] = None,
     context_id: Optional[int] = None,
     context_epoch: Optional[int] = None,
+    include_assistant_wake: bool = False,
 ) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
         cols = _table_columns(conn, 'chat_messages')
         select_cols = ['id', 'author', 'content', 'created_at']
-        for optional in ('tool_calls', 'source_kind', 'image_url'):
+        for optional in ('tool_calls', 'source_kind', 'image_url', 'cache_info'):
             if optional in cols:
                 select_cols.append(optional)
         wake_contents = _wake_content_set(conn)
         cutover = get_meta_int(conn, META_SOURCE_KIND_CUTOVER)
 
         def _to_item(r: Any) -> Optional[dict[str, Any]]:
-            if not is_formal_chat_message(
-                r, wake_contents=wake_contents, cutover_id=cutover,
+            if not is_canonical_conversation_message(
+                r,
+                include_assistant_wake=include_assistant_wake,
+                wake_contents=wake_contents,
+                cutover_id=cutover,
             ):
                 return None
             mid = int(r['id'])
@@ -334,6 +338,7 @@ def build_daily_window_context(
         up_to_message_id=current_user_message_id,
         context_id=context_id,
         context_epoch=int(ctx.get('context_epoch') or 0),
+        include_assistant_wake=cold_like,
     )
 
     cold_history_stats: dict[str, Any] = {}
@@ -342,6 +347,7 @@ def build_daily_window_context(
         current_day_history, cold_history_stats = select_newest_complete_rounds_under_budget(
             current_day_history,
             history_token_budget=history_token_budget,
+            allow_assistant_only=cold_like,
         )
 
     if current_day_history:

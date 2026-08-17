@@ -80,7 +80,27 @@ def execute(action: str, thoughts: str, content: str,
     )
 
     conn = get_db_fn()
-    if isinstance(cache_info, str):
+
+    # Durable message provenance is additive to the existing cache/usage object.
+    # Non-object or malformed input is preserved, but cannot become canonical
+    # history because the reader fails closed without these fields.
+    wake_cache_info = None
+    if isinstance(cache_info, dict):
+        wake_cache_info = dict(cache_info)
+    elif isinstance(cache_info, str):
+        try:
+            parsed_cache_info = json.loads(cache_info)
+        except (TypeError, ValueError):
+            parsed_cache_info = None
+        if isinstance(parsed_cache_info, dict):
+            wake_cache_info = parsed_cache_info
+
+    if wake_cache_info is not None and action == 'message' and mode not in ('dream', 'summarize'):
+        wake_mode = str(mode or '').strip()
+        wake_cache_info['wake_mode'] = wake_mode
+        wake_cache_info['canonical_chat_history'] = (wake_mode == 'normal')
+        cache_info_json = json.dumps(wake_cache_info, ensure_ascii=False)
+    elif isinstance(cache_info, str):
         cache_info_json = cache_info
     elif cache_info:
         cache_info_json = json.dumps(cache_info, ensure_ascii=False)

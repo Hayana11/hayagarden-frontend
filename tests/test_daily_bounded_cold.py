@@ -14,6 +14,7 @@ T10 Daily path does not pollute classic #218 history-rewrite fence
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import sqlite3
 import sys
@@ -59,6 +60,7 @@ def _init_chat_messages(db_path: str):
             tool_calls TEXT DEFAULT '',
             image_url TEXT DEFAULT '',
             source_kind TEXT NOT NULL DEFAULT 'chat',
+            cache_info TEXT DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
         )'''
     )
@@ -74,17 +76,32 @@ def _init_chat_messages(db_path: str):
     dc.ensure_schema(db_path)
 
 
-def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
+def _insert(
+    db_path: str,
+    author: str,
+    content: str,
+    created_at: str,
+    *,
+    source_kind: str = 'chat',
+    cache_info=None,
+) -> int:
     conn = sqlite3.connect(db_path)
+    if isinstance(cache_info, dict):
+        cache_info = json.dumps(cache_info, ensure_ascii=False)
     cur = conn.execute(
-        'INSERT INTO chat_messages (author, content, created_at) VALUES (?,?,?)',
-        (author, content, created_at),
+        'INSERT INTO chat_messages (author, content, source_kind, cache_info, created_at) VALUES (?,?,?,?,?)',
+        (author, content, source_kind, cache_info or '', created_at),
     )
     conn.commit()
     mid = int(cur.lastrowid)
     conn.close()
     return mid
 
+
+_NORMAL_WAKE_CACHE_INFO = {
+    'wake_mode': 'normal',
+    'canonical_chat_history': True,
+}
 
 _FIXED_NOW = datetime.datetime(2026, 7, 27, 10, 0, 0)
 _real_current_chat_day = dc._current_chat_day
@@ -519,6 +536,142 @@ class IsolationFromClassicPathTests(unittest.TestCase):
             last_cold_bootstrap_generation=1,
             current_generation=12,
         ))
+
+
+class CanonicalWakeHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.db = _tmp_db()
+        _init_chat_messages(self.db)
+        self.ctx = _ctx(self.db, chat_id='canonical-wake')
+
+    def tearDown(self):
+        os.unlink(self.db)
+
+    def _build(self, *, cold: bool):
+        return dh.build_daily_window_context(
+            chat_id='canonical-wake',
+            daily_context=self.ctx,
+            static_system='STATIC',
+            is_cold=cold,
+            db_path=self.db,
+            history_token_budget=24_000,
+        )
+
+    def test_cold_rebuild_restores_wake_in_id_order_once_as_assistant(self):
+        _insert(self.db, 'hayana', 'chat-user-1', '2026-07-27 05:00:00')
+        _insert(self.db, 'fyodor', 'chat-asst-1', '2026-07-27 05:01:00')
+        wake_id = _insert(
+            self.db, 'fyodor', 'wake-one', '2026-07-27 05:02:00',
+            source_kind='wake',
+            cache_info=_NORMAL_WAKE_CACHE_INFO,
+        )
+        _insert(self.db, 'hayana', 'chat-user-2', '2026-07-27 05:03:00')
+        _insert(self.db, 'fyodor', 'chat-asst-2', '2026-07-27 05:04:00')
+
+        history = self._build(cold=True)['current_day_history']
+
+        self.assertEqual(
+            [(m['message_id'], m['role'], m['content']) for m in history],
+            [
+                (1, 'user', 'chat-user-1'),
+                (2, 'assistant', 'chat-asst-1'),
+                (wake_id, 'assistant', 'wake-one'),
+                (4, 'user', 'chat-user-2'),
+                (5, 'assistant', 'chat-asst-2'),
+            ],
+        )
+        self.assertEqual(sum(m['content'] == 'wake-one' for m in history), 1)
+
+    def test_hot_path_does_not_replay_durable_wake(self):
+        _insert(self.db, 'hayana', 'chat-user-1', '2026-07-27 05:00:00')
+        cursor_id = _insert(self.db, 'fyodor', 'chat-asst-1', '2026-07-27 05:01:00')
+        _insert(
+            self.db, 'fyodor', 'wake-one', '2026-07-27 05:02:00',
+            source_kind='wake',
+            cache_info=_NORMAL_WAKE_CACHE_INFO,
+        )
+        _insert(self.db, 'hayana', 'chat-user-2', '2026-07-27 05:03:00')
+        _insert(self.db, 'fyodor', 'chat-asst-2', '2026-07-27 05:04:00')
+        dc.advance_resident_history_cursor(
+            int(self.ctx['id']), int(self.ctx['resident_generation']),
+            cursor_id, db_path=self.db,
+        )
+
+        history = self._build(cold=False)['current_day_history']
+
+        self.assertEqual([m['content'] for m in history], ['chat-user-2', 'chat-asst-2'])
+        self.assertNotIn('wake-one', [m['content'] for m in history])
+
+    def test_failed_wake_has_no_canonical_row(self):
+        _insert(self.db, 'hayana', 'chat-user-1', '2026-07-27 05:00:00')
+        _insert(self.db, 'fyodor', 'chat-asst-1', '2026-07-27 05:01:00')
+
+        history = self._build(cold=True)['current_day_history']
+
+        self.assertEqual([m['content'] for m in history], ['chat-user-1', 'chat-asst-1'])
+        self.assertFalse(any(m['role'] == 'assistant' and m['content'].startswith('wake-') for m in history))
+
+    def test_consecutive_wakes_keep_order_without_fake_user(self):
+        _insert(self.db, 'hayana', 'chat-user-1', '2026-07-27 05:00:00')
+        _insert(self.db, 'fyodor', 'chat-asst-1', '2026-07-27 05:01:00')
+        wake_one = _insert(
+            self.db, 'fyodor', 'wake-one', '2026-07-27 05:02:00',
+            source_kind='wake',
+            cache_info=_NORMAL_WAKE_CACHE_INFO,
+        )
+        wake_two = _insert(
+            self.db, 'fyodor', 'wake-two', '2026-07-27 05:03:00',
+            source_kind='wake',
+            cache_info=_NORMAL_WAKE_CACHE_INFO,
+        )
+
+        history = self._build(cold=True)['current_day_history']
+
+        self.assertEqual([m['content'] for m in history], ['chat-user-1', 'chat-asst-1', 'wake-one', 'wake-two'])
+        self.assertEqual([m['role'] for m in history[-2:]], ['assistant', 'assistant'])
+        self.assertEqual([m['message_id'] for m in history[-2:]], [wake_one, wake_two])
+
+    def test_control_rows_never_enter_canonical_history(self):
+        _insert(
+            self.db, 'system', 'selected_intent Planner Gate Settlement',
+            '2026-07-27 05:00:00', source_kind='system',
+        )
+        _insert(
+            self.db, 'fyodor', 'wake-rendered-final',
+            '2026-07-27 05:01:00',
+            source_kind='wake',
+            cache_info=_NORMAL_WAKE_CACHE_INFO,
+        )
+        _insert(
+            self.db, 'fyodor', 'wake-nightwatch',
+            '2026-07-27 05:02:00',
+            source_kind='wake',
+            cache_info={
+                'wake_mode': 'nightwatch',
+                'canonical_chat_history': True,
+            },
+        )
+        _insert(
+            self.db, 'fyodor', 'wake-malformed',
+            '2026-07-27 05:03:00',
+            source_kind='wake',
+            cache_info='{not-json',
+        )
+        _insert(
+            self.db, 'fyodor', 'wake-missing-provenance',
+            '2026-07-27 05:04:00',
+            source_kind='wake',
+        )
+
+        history = self._build(cold=True)['current_day_history']
+        contents = '\n'.join(m['content'] for m in history)
+
+        self.assertEqual(contents, 'wake-rendered-final')
+        for marker in (
+            'selected_intent', 'Planner', 'Gate', 'Settlement',
+            'wake-nightwatch', 'wake-malformed', 'wake-missing-provenance',
+        ):
+            self.assertNotIn(marker, contents)
 
 
 if __name__ == '__main__':

@@ -11,13 +11,17 @@ from chat.cold_bootstrap_budget import estimate_text_tokens
 from chat.context_lean import cc_history_token_budget
 
 
-def group_formal_history_rounds(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+def group_formal_history_rounds(
+    messages: list[dict[str, Any]],
+    *,
+    allow_assistant_only: bool = False,
+) -> list[list[dict[str, Any]]]:
     """Group assembled formal history into complete conversation rounds.
 
     Round = one formal user + following assistants until the next user.
-    Leading orphan assistants are dropped. Trailing user-only rounds are kept
-    (same semantic as ``group_carryover_rounds``, but on assembled dicts with
-    full ``content`` — not truncated previews).
+    By default leading orphan assistants are dropped. Canonical cold history
+    may set allow_assistant_only so assistant-initiated Wake messages remain
+    ordered without inventing a user turn.
     """
     rounds: list[list[dict[str, Any]]] = []
     current: Optional[list[dict[str, Any]]] = None
@@ -27,7 +31,11 @@ def group_formal_history_rounds(messages: list[dict[str, Any]]) -> list[list[dic
             if current is not None:
                 rounds.append(current)
             current = [msg]
-        elif role == 'assistant' and current is not None:
+        elif role == 'assistant':
+            if current is None:
+                if allow_assistant_only:
+                    current = [msg]
+                continue
             current.append(msg)
     if current is not None:
         rounds.append(current)
@@ -57,6 +65,7 @@ def select_newest_complete_rounds_under_budget(
     *,
     history_token_budget: Optional[int] = None,
     estimate_fn: Optional[Callable[[str], int]] = None,
+    allow_assistant_only: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep newest complete rounds whose rendered estimate fits the budget.
 
@@ -72,7 +81,10 @@ def select_newest_complete_rounds_under_budget(
         else max(1, int(history_token_budget))
     )
     before_count = len(messages)
-    rounds_before = group_formal_history_rounds(messages)
+    rounds_before = group_formal_history_rounds(
+        messages,
+        allow_assistant_only=allow_assistant_only,
+    )
     rounds_before_n = len(rounds_before)
     full_tokens = estimate_history_tokens(messages, estimate_fn=fn)
 
