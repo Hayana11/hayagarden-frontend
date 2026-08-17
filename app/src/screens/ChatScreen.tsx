@@ -91,12 +91,15 @@ import {
   subscribeThemePerf,
 } from '../lib/themePerfProbe';
 import type { ReactElement } from 'react';
+import { installObjectHasOwnCompat } from '../lib/objectHasOwnCompat';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import './ChatMarkdown.css';
 import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
+
+installObjectHasOwnCompat();
 
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
 const INPUT_FONT_SIZE = FONT_SIZES[0];
