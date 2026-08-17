@@ -221,6 +221,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             ):
                 return False
             fake_gateway._gen_pending_delivery = None
+            fake_gateway._gen_busy = False
             released.append(result)
             return True
         fake_gateway._gen_mark_pending_delivery = mark

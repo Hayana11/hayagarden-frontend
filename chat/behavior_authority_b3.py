@@ -517,13 +517,6 @@ def _try_invoke_shared_renderer(
             turn_mode='wake',
             issued_from='default_policy',
         )
-        # Establish the shared owner before stdin is sent. The same generation
-        # lock must remain protected while normal Wake is still rendering.
-        delivery_fence = begin_shared_wake_delivery_fence(
-            gateway=gateway,
-            resident=resident,
-        )
-        shared_started = True
         def final_shared_probe():
             return _hot_chat_resident_ready(resident, db_path=db_path)
 
