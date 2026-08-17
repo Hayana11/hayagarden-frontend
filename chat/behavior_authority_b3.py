@@ -304,6 +304,24 @@ def _hot_chat_resident_ready(resident: Any, *, db_path: str) -> tuple[bool, str]
         if str(binding.tool_profile or '') != cc_resident.TOOL_PROFILE_UH_A0:
             return False, 'binding_tool_profile_not_uh_a0'
 
+        # Read-only Chat contract probe. A resident can still be alive and
+        # structurally bound while its durable rewrite epoch or another Chat
+        # respawn condition already makes shared Wake unsafe.
+        peek_respawn_reason = getattr(resident, 'peek_respawn_reason', None)
+        if not callable(peek_respawn_reason):
+            return False, 'stale_probe_unavailable'
+        bound_system_text = getattr(resident, '_system_text', None)
+        try:
+            respawn_reason = peek_respawn_reason(
+                bound_system_text,
+                tool_profile=cc_resident.TOOL_PROFILE_UH_A0,
+            )
+        except Exception:
+            return False, 'stale_probe_error'
+        respawn_reason = str(respawn_reason or '').strip()
+        if respawn_reason:
+            return False, f'resident_stale:{respawn_reason}'
+
         live_generation = int(getattr(resident, 'generation', 0) or 0)
         if int(binding.process_generation or 0) != live_generation:
             return False, 'process_generation_mismatch'
@@ -355,15 +373,20 @@ def invoke_renderer_cc_hot(
     system text, allowed tools or tool profile. Tool events are drained to keep
     the resident stream coherent, then rejected for this Renderer contract.
     """
+    from chat.cc_history_rewrite import guard_cc_generation
+
     text = ''
     usage: dict[str, Any] = {}
     saw_done = False
     saw_tool = False
     payload = build_shared_renderer_user_payload(renderer_input)
-    for evt, raw in resident.send_turn(
+    events = resident.send_turn(
         payload,
         turn_lease=dict(turn_lease),
-    ):
+    )
+    # Hold the existing cross-process shared lock for the entire stream
+    # consumption so an authoritative rewrite cannot overlap this turn.
+    for evt, raw in guard_cc_generation(events):
         if evt in ('tool_use', 'tool_result'):
             saw_tool = True
         if evt != 'done':
@@ -379,6 +402,11 @@ def invoke_renderer_cc_hot(
         raise RuntimeError('uh_a1_shared_renderer_missing_done')
     if saw_tool:
         raise RuntimeError('uh_a1_shared_renderer_tool_use')
+    respawn_reason = str(usage.get('respawn_reason') or '').strip()
+    if respawn_reason:
+        raise RuntimeError(
+            f'uh_a1_shared_renderer_respawn_reason:{respawn_reason}'
+        )
     jsonl_finality = usage.get('jsonl_usage')
     if not isinstance(jsonl_finality, Mapping):
         raise RuntimeError('uh_a1_shared_renderer_jsonl_finality_missing')

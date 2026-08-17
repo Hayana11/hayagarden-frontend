@@ -29,9 +29,19 @@ class _FakeResident:
         self.ensure_calls = 0
         self._model_identity = 'model:frozen'
         self.session_id = 'sid-1'
+        self._system_text = 'bound-system'
         self.generation = 4
         self.tool_profile = 'uh_a0'
+        self._peek_reason = None
+        self.peek_calls = []
         self.on_send = on_send
+
+    def _alive(self):
+        return True
+
+    def peek_respawn_reason(self, system_text, *, tool_profile):
+        self.peek_calls.append((system_text, tool_profile))
+        return self._peek_reason
 
     def ensure_alive(self, *args, **kwargs):
         self.ensure_calls += 1
@@ -157,6 +167,103 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             b3.validate_rendered_content(result['text']),
             '我在。',
         )
+
+    def test_hot_ready_rejects_stale_history_rewrite_without_send_or_ensure(self):
+        from chat import daily_context as dc
+        from chat import daily_runtime as dr
+
+        resident = _FakeResident()
+        resident._peek_reason = 'history_rewrite'
+        binding = self.binding()
+        owner = {
+            'worker_id': dr.WORKER_ID,
+            'resident_key': binding.resident_key,
+            'process_generation': resident.generation,
+        }
+        context = {
+            'closed_at': None,
+            'context_epoch': binding.context_epoch,
+            'resident_generation': binding.resident_generation,
+        }
+        with mock.patch.object(dr, 'get_local_binding', return_value=binding), \\
+             mock.patch.object(dc, 'get_daily_context_by_id', return_value=context), \\
+             mock.patch.object(dc, 'get_resident_owner', return_value=owner):
+            ready, reason = b3._hot_chat_resident_ready(
+                resident,
+                db_path='/tmp/fake.db',
+            )
+
+        self.assertFalse(ready)
+        self.assertEqual(reason, 'resident_stale:history_rewrite')
+        self.assertEqual(resident.sent, [])
+        self.assertEqual(resident.ensure_calls, 0)
+        self.assertEqual(resident.peek_calls, [('bound-system', 'uh_a0')])
+
+    def test_shared_send_turn_is_wrapped_by_history_rewrite_guard(self):
+        from chat import cc_history_rewrite
+
+        resident = _FakeResident()
+        with mock.patch.object(
+            cc_history_rewrite,
+            'guard_cc_generation',
+            wraps=cc_history_rewrite.guard_cc_generation,
+        ) as guard:
+            b3.invoke_renderer_cc_hot(
+                renderer_input=self.renderer_input(),
+                resident=resident,
+                turn_lease={'turn_id': 'guarded'},
+            )
+        guard.assert_called_once()
+
+    def test_shared_renderer_respawn_reason_fails_closed_and_never_falls_back(self):
+        import threading
+
+        app = Flask(__name__)
+        resident = _FakeResident(events=[
+            ('done', ('{"rendered_content":"我在。"}', '', {
+                'respawn_reason': 'history_rewrite',
+                'jsonl_usage': {'stream_totals_match': True},
+            }, {})),
+        ])
+        released = []
+        fake_gateway = types.SimpleNamespace(
+            _CC_RESIDENT=resident,
+            DB_PATH='/tmp/fake.db',
+            _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
+            _gen_pending_delivery=None,
+            _gen_busy=True,
+            _gen_cond=threading.Condition(),
+        )
+        def mark(token):
+            fake_gateway._gen_pending_delivery = token
+        def release(result, *, expected_pending_token=None):
+            if expected_pending_token is not None and (
+                fake_gateway._gen_pending_delivery is not expected_pending_token
+            ):
+                return False
+            fake_gateway._gen_pending_delivery = None
+            released.append(result)
+            return True
+        fake_gateway._gen_mark_pending_delivery = mark
+        fake_gateway._gen_release = release
+        with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
+            with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \\
+                 mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \\
+                 mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \\
+                 mock.patch('config_store.get_bool', return_value=True), \\
+                 mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \\
+                 mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \\
+                 mock.patch.dict(sys.modules, {'gateway': fake_gateway}), \\
+                 mock.patch.object(b3, 'invoke_renderer_relay') as relay:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    'uh_a1_shared_renderer_respawn_reason:history_rewrite',
+                ):
+                    b3.invoke_renderer(renderer_input=self.renderer_input())
+        self.assertEqual(len(resident.sent), 1)
+        self.assertTrue(close.called)
+        self.assertEqual(released, [None])
+        relay.assert_not_called()
 
     def test_shared_renderer_drains_then_rejects_tool_use(self):
         resident = _FakeResident(events=[
