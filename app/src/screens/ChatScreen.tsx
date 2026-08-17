@@ -91,6 +91,9 @@ import {
   subscribeThemePerf,
 } from '../lib/themePerfProbe';
 import type { ReactElement } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import './ChatMarkdown.css';
 import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
 
@@ -1357,32 +1360,16 @@ export function ChatScreen() {
     );
   }
 
-  function renderParas(text: string, caret = false) {
-    const paras = text.split('\n').filter((p, i, arr) => p.trim() || (i < arr.length - 1 && arr[i + 1]?.trim()));
+  function renderMarkdown(text: string, caret = false) {
     return (
-      <div className="vstack vstack-10" style={{ maxWidth: 640, padding: '0 2px' }}>
-        {paras.map((p, i) => {
-          const bullet = /^[-·•]\s+/.test(p.trim());
-          const last = i === paras.length - 1;
-          if (bullet) {
-            return (
-              <div key={i} className="hstack-10" style={{ display: 'flex', paddingLeft: 6 }}>
-                <span style={{ color: 'var(--rose)', flexShrink: 0, lineHeight: 1.85, fontSize: '1em' }}>·</span>
-                <span style={{ fontSize: '1em', lineHeight: 1.85, letterSpacing: 0.3, color: 'var(--ink)' }}>{p.trim().replace(/^[-·•]\s+/, '')}</span>
-              </div>
-            );
-          }
-          return (
-            <div key={i} style={{ fontSize: '1em', lineHeight: 1.9, letterSpacing: 0.3, color: 'var(--ink)', textWrap: 'pretty' as CSSProperties['textWrap'] }}>
-              {p}
-              {caret && last && <span style={{ display: 'inline-block', width: 2, height: '1em', background: 'var(--rose)', verticalAlign: -2, marginLeft: 2, animation: 'chatBlink 1s step-end infinite' }} />}
-            </div>
-          );
-        })}
+      <div className="chat-markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+          {text}
+        </ReactMarkdown>
+        {caret && <span className="chat-markdown-caret" />}
       </div>
     );
   }
-
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
     const filePreview = chatFilePreviewUrl(m.fileUrl);
@@ -1459,7 +1446,7 @@ export function ChatScreen() {
         {renderThinkBlock(m)}
         {renderToolItems(String(m.id), m.toolCalls)}
         {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
-        {m.text && renderParas(m.text)}
+        {m.text && renderMarkdown(m.text)}
         {renderChoices(m)}
         <div className="vstack vstack-7">
           <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
@@ -1570,7 +1557,7 @@ export function ChatScreen() {
           </>
         )}
         {renderToolItems('live', l.tools)}
-        {l.phase === 'text' ? renderParas(l.text, true) : !l.thinking && !l.tools.length ? (
+        {l.phase === 'text' ? renderMarkdown(l.text, true) : !l.thinking && !l.tools.length ? (
           <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
             <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
             正在连接回复…
