@@ -1449,6 +1449,38 @@ def is_formal_chat_message(
     return True
 
 
+def is_canonical_conversation_message(
+    row: Any,
+    *,
+    include_assistant_wake: bool = False,
+    wake_contents: Optional[frozenset[str]] = None,
+    cutover_id: Optional[int] = None,
+) -> bool:
+    """Return whether a durable row belongs in reconstructed Chat history.
+
+    Formal Chat rows keep the existing mapped-round predicate. A successfully
+    delivered assistant-initiated Wake is canonical conversation material for
+    cold/respawn reconstruction, but remains outside formal transcript mapping.
+    """
+    if is_formal_chat_message(
+        row,
+        wake_contents=wake_contents,
+        cutover_id=cutover_id,
+    ):
+        return True
+    if not include_assistant_wake:
+        return False
+    if _row_source_kind(row) != SOURCE_KIND_WAKE:
+        return False
+    author = str(row['author'] or '').strip().lower()
+    if author not in _ASSISTANT_AUTHORS:
+        return False
+    content = str(row['content'] or '')
+    image_url = ''
+    if hasattr(row, 'keys') and 'image_url' in row.keys():
+        image_url = str(row['image_url'] or '').strip()
+    return bool(content.strip() or image_url)
+
 def _message_display_content(row: Any) -> str:
     content = str(row['content'] or '').strip()
     if content:
