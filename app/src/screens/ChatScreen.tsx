@@ -100,6 +100,44 @@ import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typo
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
 const INPUT_FONT_SIZE = FONT_SIZES[0];
 
+function isSafeMarkdownHref(href: string): boolean {
+  const value = href.trim();
+  if (!value) return false;
+  try {
+    const url = new URL(value, window.location.href);
+    return ['http:', 'https:', 'mailto:', 'tel:'].includes(url.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function isExternalMarkdownHref(href: string): boolean {
+  try {
+    const url = new URL(href, window.location.href);
+    return url.protocol === 'mailto:' || url.protocol === 'tel:' || url.origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+const markdownComponents: Components = {
+  a({ href, children, node: _node, ...props }) {
+    const safeHref = typeof href === 'string' && isSafeMarkdownHref(href) ? href : null;
+    if (!safeHref) return <span className="chat-markdown-link-blocked">{children}</span>;
+    const external = isExternalMarkdownHref(safeHref);
+    return (
+      <a
+        {...props}
+        href={safeHref}
+        {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+      >
+        {children}
+      </a>
+    );
+  },
+};
+
+
 interface ChatPrefs {
   fontStep: number;
   thinkMode: 'auto' | 'drawer' | 'inline';
