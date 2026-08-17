@@ -95,7 +95,7 @@ def execute(action: str, thoughts: str, content: str,
         if isinstance(parsed_cache_info, dict):
             wake_cache_info = parsed_cache_info
 
-    if wake_cache_info is not None and mode not in ('dream', 'summarize'):
+    if wake_cache_info is not None and action == 'message' and mode not in ('dream', 'summarize'):
         wake_mode = str(mode or '').strip()
         wake_cache_info['wake_mode'] = wake_mode
         wake_cache_info['canonical_chat_history'] = (wake_mode == 'normal')
