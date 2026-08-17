@@ -93,6 +93,7 @@ import {
 import type { ReactElement } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import './ChatMarkdown.css';
 import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
@@ -1400,11 +1401,10 @@ export function ChatScreen() {
 
   function renderMarkdown(text: string, caret = false) {
     return (
-      <div className="chat-markdown">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      <div className={`chat-markdown${caret ? ' chat-markdown-streaming' : ''}`}>
+        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} disallowedElements={['img']} components={markdownComponents}>
           {text}
         </ReactMarkdown>
-        {caret && <span className="chat-markdown-caret" />}
       </div>
     );
   }

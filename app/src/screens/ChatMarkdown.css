@@ -8,11 +8,11 @@
   overflow-wrap: anywhere;
 }
 
-.chat-markdown > div > :first-child {
+.chat-markdown > :first-child {
   margin-top: 0;
 }
 
-.chat-markdown > div > :last-child {
+.chat-markdown > :last-child {
   margin-bottom: 0;
 }
 
@@ -154,7 +154,8 @@
   color: inherit;
 }
 
-.chat-markdown-caret {
+.chat-markdown-streaming > :last-child::after {
+  content: '';
   display: inline-block;
   width: 2px;
   height: 1em;

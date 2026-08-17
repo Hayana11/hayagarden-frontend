@@ -14,6 +14,7 @@
     "test:period-cycle": "vite-node scripts/test-period-cycle.mjs",
     "test:model-1a-provider-switch": "vite-node scripts/test-model-1a-provider-switch.mjs",
     "test:file-choices-contract": "vite-node scripts/test-file-choices-contract.mjs",
+    "test:chat-markdown": "vite-node scripts/test-chat-markdown.mjs",
     "test:legacy-transcript-window": "vite-node scripts/test-legacy-transcript-window.mjs",
     "test:react-shell-architecture": "vite-node scripts/test-react-shell-architecture.mjs",
     "test:typography-semantics": "vite-node scripts/test-typography-semantics.mjs",
@@ -33,6 +34,7 @@
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.18.1",
+    "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
