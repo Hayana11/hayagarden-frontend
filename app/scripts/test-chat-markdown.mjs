@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
+import { installObjectHasOwnCompat } from '../src/lib/objectHasOwnCompat.ts';
 
 function isSafeHref(href) {
   const value = href.trim();
@@ -41,6 +42,49 @@ function render(source) {
 }
 
 const fence = String.fromCharCode(96).repeat(3);
+const originalObjectHasOwn = Object.getOwnPropertyDescriptor(Object, 'hasOwn');
+try {
+  Object.defineProperty(Object, 'hasOwn', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: undefined,
+  });
+  installObjectHasOwnCompat();
+  assert.equal(typeof Object.hasOwn, 'function');
+  assert.equal(Object.hasOwn({ a: 1 }, 'a'), true);
+  assert.equal(Object.hasOwn({ a: 1 }, 'b'), false);
+  const proto = { inherited: 1 };
+  const obj = Object.create(proto);
+  obj.own = 1;
+  assert.equal(Object.hasOwn(obj, 'own'), true);
+  assert.equal(Object.hasOwn(obj, 'inherited'), false);
+  assert.doesNotThrow(() => render('测试消息'));
+  const chrome78Rich = render([
+    '**bold**',
+    '',
+    fence + 'js',
+    'const answer = 42',
+    fence,
+    '',
+    '[link](https://example.com)',
+    '',
+    '| A | B |',
+    '| - | - |',
+    '| 1 | 2 |',
+  ].join('\n'));
+  assert.match(chrome78Rich, /<strong>bold<\/strong>/);
+  assert.match(chrome78Rich, /<pre><code class="language-js">/);
+  assert.match(chrome78Rich, /<a href="https:\/\/example.com">link<\/a>/);
+  assert.match(chrome78Rich, /<table>/);
+} finally {
+  if (originalObjectHasOwn) {
+    Object.defineProperty(Object, 'hasOwn', originalObjectHasOwn);
+  } else {
+    delete Object.hasOwn;
+  }
+}
+
 const rich = render([
   '**bold** *italic* ~~strike~~ `const x = 1`',
   '',
@@ -86,7 +130,14 @@ assert.ok(userStart >= 0 && assistantStart > userStart);
 const userRenderer = chatSource.slice(userStart, assistantStart);
 assert.match(userRenderer, /whiteSpace: ['"]pre-wrap['"]/);
 assert.doesNotMatch(userRenderer, /renderMarkdown\(/);
+assert.match(chatSource, /installObjectHasOwnCompat\(\)/);
 assert.doesNotMatch(chatSource, /dangerouslySetInnerHTML|innerHTML/);
+const compatSource = readFileSync(
+  fileURLToPath(new URL('../src/lib/objectHasOwnCompat.ts', import.meta.url)),
+  'utf8',
+);
+assert.doesNotMatch(compatSource, /Object\.hasOwn\s*=/);
+assert.doesNotMatch(compatSource, /\?\?=|\|\|=|&&=|replaceAll|\.at\(|Promise\.any|structuredClone|crypto\.randomUUID/);
 
 console.log('chat markdown focused checks: PASS');
 
