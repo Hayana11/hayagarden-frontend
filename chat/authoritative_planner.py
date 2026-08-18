@@ -22,6 +22,20 @@ from chat.cc_runtime import (
 )
 
 _PLANNER_TIMEOUT_SEC = 25.0
+
+
+def _main_chat_oauth_token() -> str:
+    """Read the live OAuth token used by the main gateway chat."""
+    try:
+        from gateway import CC_TOKEN
+    except Exception as exc:
+        raise RuntimeError('main_chat_oauth_token_unavailable') from exc
+    token = str(CC_TOKEN or '').strip()
+    if not token:
+        raise RuntimeError('main_chat_oauth_token_missing')
+    return token
+
+
 _SYSTEM_PROMPT = (
     'You are the authoritative basic Unified Wake Planner. '
     'Return exactly one JSON object and do not use tools. '
@@ -151,6 +165,8 @@ def invoke_cc_planner(
 ) -> dict[str, str]:
     root = repo_root()
     env = os.environ.copy()
+    env.pop('ANTHROPIC_API_KEY', None)
+    env['CLAUDE_CODE_OAUTH_TOKEN'] = _main_chat_oauth_token()
     runtime_version = require_pinned_claude_version(
         env=env,
         cwd=str(root),
