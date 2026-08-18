@@ -48,7 +48,8 @@ def execute(action: str, thoughts: str, content: str,
             settle_fired_drive=None,
             settle_provenance_present: Optional[bool] = None,
             settle_user_idle_hours: float = 0.0,
-            settle_outcome_at: Optional[str] = None):
+            settle_outcome_at: Optional[str] = None,
+            settlement_required: bool = True):
     """
     action: 'none' | 'message' | 'diary' | 'explore'
     get_db_fn: callable，返回 sqlite3 connection（来自 gateway.get_db）
@@ -60,6 +61,9 @@ def execute(action: str, thoughts: str, content: str,
     ``settle_provenance_present`` distinguishes a frozen Decision provenance
     object (even when ``primary_drive`` is None for Action=none) from a total
     freeze failure. Production gateway must pass this explicitly.
+
+    ``settlement_required=False`` is the explicit basic Unified normal Wake
+    no-state path; it commits the Action transaction without V3 Settlement.
 
     Returns:
       dict with keys:
@@ -127,7 +131,14 @@ def execute(action: str, thoughts: str, content: str,
     settled = False
     settle_status = None
     rid = str(wake_run_id or '').strip()
-    want_settle = bool(rid) and mode not in ('dream', 'summarize')
+    # Basic Unified normal Wake has no Internal State provenance. Its Action
+    # transaction is still authoritative, but V3 wake_outcome Settlement is
+    # explicitly optional and skipped when the caller passes False.
+    want_settle = (
+        bool(settlement_required)
+        and bool(rid)
+        and mode not in ('dream', 'summarize')
+    )
     if settle_provenance_present is None:
         # Compat for direct executor tests that only pass fired_drive.
         # Production gateway always passes an explicit bool.
@@ -330,6 +341,7 @@ def execute(action: str, thoughts: str, content: str,
     result = {
         'delivered': bool(deliver_chat),
         'settled': bool(settled),
+        'settlement_required': bool(settlement_required),
         'settle_status': settle_status,
         'gate_reason': gate_reason,
     }

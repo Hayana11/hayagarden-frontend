@@ -7647,10 +7647,13 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         decision_hours_from_view,
         freeze_planner_state_view,
     )
+    from chat.behavior_authority_b3 import unified_normal_wake_enabled
+    unified_normal_on = bool(unified_normal_wake_enabled())
     basic_normal = bool(
         live
         and not dry_run
         and str(mode or 'normal').strip() == 'normal'
+        and unified_normal_on
     )
     planner_view = None
     if b1_1a_v_plumbing_eligible(mode=mode, live=live):
@@ -7822,6 +7825,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         and not dry_run
         and (planner_view is not None or basic_planner_input is not None)
         and _skill_view is not None
+        and (
+            str(mode or 'normal').strip() != 'normal'
+            or unified_normal_on
+        )
         and decision_attempt_id
         and wake_run_id
     ):
@@ -7888,9 +7895,14 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 cache_info=wake_cache_info,
                 wake_run_id=wake_run_id,
                 window_identity=_wake_window_identity,
-                settle_fired_drive=planner_provenance.get('primary_drive'),
-                settle_provenance_present=True,
+                settle_fired_drive=(
+                    None
+                    if basic_normal
+                    else planner_provenance.get('primary_drive')
+                ),
+                settle_provenance_present=(False if basic_normal else True),
                 settle_user_idle_hours=t2_hours,
+                settlement_required=(not basic_normal),
             )
         except Exception as _b2_exec_exc:
             _mark_production_attempt(
@@ -8018,9 +8030,14 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 cache_info=wake_cache_info,
                 wake_run_id=wake_run_id,
                 window_identity=_wake_window_identity,
-                settle_fired_drive=planner_provenance.get('primary_drive'),
-                settle_provenance_present=True,
+                settle_fired_drive=(
+                    None
+                    if basic_normal
+                    else planner_provenance.get('primary_drive')
+                ),
+                settle_provenance_present=(False if basic_normal else True),
                 settle_user_idle_hours=t2_hours,
+                settlement_required=(not basic_normal),
             )
         except Exception as _b3_exec_exc:
             if delivery_fence is not None:
@@ -8078,10 +8095,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # Unified normal Wake is fail-closed from the outermost gateway boundary.
     # Any result not explicitly owned by blocked/none/message takeover must
     # stop here before the legacy runner can be reached.
-    from chat.behavior_authority_b3 import unified_normal_wake_enabled
     if (
         str(mode or 'normal').strip() == 'normal'
-        and unified_normal_wake_enabled()
+        and unified_normal_on
     ):
         _mark_production_attempt(
             'failed',

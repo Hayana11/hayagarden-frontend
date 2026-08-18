@@ -1,5 +1,8 @@
 import json
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from chat.authoritative_planner import BasicWakePlannerInput, run_authoritative_cc_planner
@@ -114,6 +117,92 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
             )
         self.assertEqual(status, 'error')
         self.assertEqual(decision['source'], 'authoritative_cc_planner')
+
+    def _run_basic_executor(self, action):
+        from wake.executor import execute
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = str(Path(temp_dir).joinpath('basic.db'))
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE wake_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thoughts TEXT,
+                    action TEXT,
+                    content TEXT,
+                    consumed INTEGER,
+                    woke_at TEXT,
+                    cache_info TEXT,
+                    wake_run_id TEXT
+                );
+                CREATE TABLE chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    author TEXT,
+                    content TEXT,
+                    thinking TEXT,
+                    cache_info TEXT,
+                    source_kind TEXT
+                );
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            def get_db():
+                return sqlite3.connect(db_path)
+
+            with mock.patch(
+                'chat.drive_authority.apply_wake_outcome_on_conn',
+                side_effect=AssertionError('basic Wake must not enter V3 Settlement'),
+            ):
+                return execute(
+                    action,
+                    'basic planner intent',
+                    'basic rendered content' if action == 'message' else '',
+                    'normal',
+                    get_db_fn=get_db,
+                    wake_run_id='uh-a1-basic-executor',
+                    settle_fired_drive=None,
+                    settle_provenance_present=False,
+                    settlement_required=False,
+                )
+
+    def test_basic_message_skips_v3_settlement_without_state_provenance(self):
+        result = self._run_basic_executor('message')
+        self.assertTrue(result['delivered'])
+        self.assertFalse(result['settled'])
+        self.assertIsNone(result['settle_status'])
+
+    def test_basic_none_skips_v3_settlement_without_internal_state(self):
+        result = self._run_basic_executor('none')
+        self.assertTrue(result['delivered'])
+        self.assertFalse(result['settled'])
+        self.assertIsNone(result['settle_status'])
+
+    def test_basic_executor_result_is_success_without_required_settlement(self):
+        from chat.planner_shadow import classify_production_outcome
+
+        self.assertEqual(
+            classify_production_outcome({
+                'delivered': True,
+                'settled': False,
+                'settlement_required': False,
+            }),
+            ('success', ''),
+        )
+
+    def test_unified_switch_gates_basic_planner_and_preserves_legacy_gate(self):
+        gateway = Path(__file__).resolve().parents[1].joinpath('gateway.py').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn('and unified_normal_on', gateway)
+        self.assertIn(
+            "str(mode or 'normal').strip() != 'normal'\n            or unified_normal_on",
+            gateway,
+        )
+        self.assertIn('allow_side_effects=(live and not basic_normal)', gateway)
+        self.assertIn('NORMAL_WAKE_UNIFIED_UNOWNED_SKIP', gateway)
 
     def test_gateway_visible_path_keeps_shared_resident_and_outer_fence(self):
         from pathlib import Path
