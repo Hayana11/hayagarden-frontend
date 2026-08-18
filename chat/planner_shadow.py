@@ -212,14 +212,16 @@ def classify_production_outcome(
     """Map executor return → (production_status, reason) for C2 markers.
 
     Accepted comparison evidence requires a real committed production attempt:
-    ``delivered=True`` and ``settled=True``. Soft-window gate blocks return
-    without raising and must become failed/orphan — never success.
+    delivered=True and either completed Settlement or an explicit no-state
+    settlement_required=False result. Soft-window gate blocks return without
+    raising and must become failed/orphan — never success.
     """
     if not isinstance(exec_out, Mapping):
         return 'failed', 'executor_result_missing'
     delivered = bool(exec_out.get('delivered'))
     settled = bool(exec_out.get('settled'))
-    if delivered and settled:
+    settlement_required = bool(exec_out.get('settlement_required', True))
+    if delivered and (settled or not settlement_required):
         return 'success', ''
     gate = str(exec_out.get('gate_reason') or '').strip()
     settle_status = exec_out.get('settle_status')
@@ -580,6 +582,36 @@ def run_shadow_attempt(
 
 
 def run_authoritative_planner_decision(
+    *,
+    planner_view: Any,
+    skill_view: Any,
+    wake_run_id: str,
+    decision_attempt_id: str,
+    timeout_sec: float = _SHADOW_TIMEOUT_SEC,
+    invoke_fn=None,
+    mode: str = 'normal',
+) -> tuple[str, dict]:
+    """Route production normal Wake to CC; retain legacy non-normal behavior."""
+    if str(mode or 'normal').strip() == 'normal':
+        from chat.authoritative_planner import run_authoritative_cc_planner
+        return run_authoritative_cc_planner(
+            planner_input=planner_view,
+            wake_run_id=wake_run_id,
+            decision_attempt_id=decision_attempt_id,
+            timeout_sec=timeout_sec,
+            invoke_fn=invoke_fn,
+        )
+    return _run_legacy_authoritative_planner_decision(
+        planner_view=planner_view,
+        skill_view=skill_view,
+        wake_run_id=wake_run_id,
+        decision_attempt_id=decision_attempt_id,
+        timeout_sec=timeout_sec,
+        invoke_fn=invoke_fn,
+    )
+
+
+def _run_legacy_authoritative_planner_decision(
     *,
     planner_view: Any,
     skill_view: Any,

@@ -157,8 +157,15 @@ def plan_b2_wake_action(
         wake_run_id=wake_run_id,
         decision_attempt_id=decision_attempt_id,
         invoke_fn=invoke_fn,
+        mode=mode,
     )
     if status != 'valid' or not isinstance(decision, dict):
+        if mode == 'normal':
+            return B2WakePlan(
+                route='blocked',
+                gate_reason=f'planner_{status or "invalid"}',
+                planner_decision=decision if isinstance(decision, dict) else None,
+            )
         return B2WakePlan(route='legacy')
 
     action = str(decision.get('action_candidate') or '').strip()
@@ -169,6 +176,12 @@ def plan_b2_wake_action(
             evaluate_message_gate,
         )
         if not effective_b3_enabled():
+            if mode == 'normal':
+                return B2WakePlan(
+                    route='blocked',
+                    gate_reason='b3_unavailable',
+                    planner_decision=decision,
+                )
             return B2WakePlan(route='legacy')
         # B3 ownership established; post-ownership failures must not legacy.
         try:
@@ -205,6 +218,12 @@ def plan_b2_wake_action(
         )
 
     if not is_owned_action(action):
+        if mode == 'normal':
+            return B2WakePlan(
+                route='blocked',
+                gate_reason='action_not_in_basic_capability',
+                planner_decision=decision,
+            )
         return B2WakePlan(route='legacy')
 
     # Ownership established for owned none; post-ownership reality failures must

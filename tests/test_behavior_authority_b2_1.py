@@ -139,7 +139,7 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
         self.assertFalse(consumer_enabled())
 
     def test_case1_planner_none_presses_legacy(self):
-        """Case 1: Planner none + Gate ALLOW → none_takeover; legacy runner not on path."""
+        """Non-normal Planner behavior keeps the legacy route for now."""
         with mock.patch(
             'chat.behavior_authority_b2.consumer_enabled', return_value=True,
         ):
@@ -148,6 +148,7 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
                 skill_view=self.skill,
                 wake_run_id='b21-run-1',
                 decision_attempt_id='da-b21-1',
+                mode='nightwatch',
                 get_db_fn=self._get_db,
                 now=T_OBS,
                 invoke_fn=self._none_invoke_for('b21-run-1'),
