@@ -99,6 +99,10 @@ def _insert(
 
 
 _NORMAL_WAKE_CACHE_INFO = {
+    'provider': 'claude_code',
+    'source': 'wake',
+    'b3_authority': True,
+    'unified_chat_resident': True,
     'wake_mode': 'normal',
     'canonical_chat_history': True,
 }

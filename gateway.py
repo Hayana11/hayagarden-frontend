@@ -8061,7 +8061,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         return jsonify({
             'ok': True,
             'skipped': True,
-            'reason': 'NORMAL_WAKE_UNOWNED_SKIP',
+            'reason': 'NORMAL_WAKE_UNIFIED_UNOWNED_SKIP',
             'detail': 'normal_wake_unified_unowned',
             'wake_run_id': wake_run_id,
             'b3_authority': True,

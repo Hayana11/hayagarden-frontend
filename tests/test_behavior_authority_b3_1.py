@@ -332,6 +332,11 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
             ).fetchone()[0],
             '晚安，费佳。',
         )
+        cache_row = conn.execute(
+            "SELECT cache_info FROM chat_messages WHERE author='fyodor' "
+            "ORDER BY id DESC LIMIT 1",
+        ).fetchone()
+        self.assertTrue(json.loads(cache_row[0])['canonical_chat_history'])
         self.assertEqual(
             conn.execute(
                 "SELECT COUNT(*) FROM wake_log WHERE wake_run_id='b31-run-1'",
@@ -351,7 +356,7 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
         locked = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
             'def _wake_decide_locked', 1,
         )[1].split('\ndef ', 1)[0]
-        gate = locked.index('NORMAL_WAKE_UNOWNED_SKIP')
+        gate = locked.index('NORMAL_WAKE_UNIFIED_UNOWNED_SKIP')
         legacy = locked.index('get_wake_runner')
         self.assertLess(gate, legacy)
         self.assertIn("str(mode or 'normal').strip() == 'normal'", locked)
