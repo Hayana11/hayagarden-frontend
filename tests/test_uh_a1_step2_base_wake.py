@@ -123,9 +123,16 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         section = gateway[gateway.index("if _b2_plan is not None and _b2_plan.route == 'message_takeover'"):
             gateway.index("try:\n        runner = _wake_runners.get_wake_runner")
         ]
+        b3 = Path(__file__).resolve().parents[1].joinpath(
+            'chat', 'behavior_authority_b3.py'
+        ).read_text(encoding='utf-8')
+        shared = b3[b3.index('def _try_invoke_shared_renderer'):
+            b3.index('def invoke_renderer(')
+        ]
         self.assertIn('invoke_renderer', section)
-        self.assertIn('_CC_RESIDENT', section)
-        self.assertIn('NORMAL_WAKE_UNIFIED_UNOWNED_SKIP', gateway)
+        self.assertIn("getattr(gateway, '_CC_RESIDENT'", shared)
+        self.assertIn('_try_invoke_shared_renderer', b3)
+        self.assertIn('NORMAL_WAKE_UNOWNED_SKIP', gateway)
 
 
 if __name__ == '__main__':
