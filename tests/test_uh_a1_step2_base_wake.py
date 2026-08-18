@@ -221,7 +221,7 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         self.assertIn('invoke_renderer', section)
         self.assertIn("getattr(gateway, '_CC_RESIDENT'", shared)
         self.assertIn('_try_invoke_shared_renderer', b3)
-        self.assertIn('NORMAL_WAKE_UNOWNED_SKIP', gateway)
+        self.assertIn('NORMAL_WAKE_UNIFIED_UNOWNED_SKIP', gateway)
 
 
 if __name__ == '__main__':
