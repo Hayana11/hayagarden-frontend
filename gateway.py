@@ -7906,6 +7906,28 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 decision_attempt_id=decision_attempt_id or '',
             )
             render_out = invoke_renderer(renderer_input=renderer_input)
+            if (
+                isinstance(render_out, dict)
+                and render_out.get('shared_unavailable')
+            ):
+                _shared_reason = str(
+                    render_out.get('shared_unavailable_reason')
+                    or 'unavailable'
+                )
+                _mark_production_attempt(
+                    'failed',
+                    action='message',
+                    reason=f'normal_wake_shared_unavailable:{_shared_reason}',
+                )
+                return jsonify({
+                    'ok': True,
+                    'skipped': True,
+                    'reason': 'NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP',
+                    'detail': _shared_reason,
+                    'wake_run_id': wake_run_id,
+                    'b3_gate': _b2_plan.gate_reason,
+                    'b3_authority': True,
+                })
             rendered_content = validate_rendered_content(
                 str(render_out.get('text') or ''),
             )

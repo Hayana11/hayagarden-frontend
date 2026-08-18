@@ -365,6 +365,10 @@ class _SharedPreTurnUnavailable(RuntimeError):
     """Shared route became unavailable before stdin was sent."""
 
 
+class UnifiedNormalWakeSharedUnavailable(RuntimeError):
+    """Unified normal Wake must skip when no safe shared hot route exists."""
+
+
 def invoke_renderer_cc_hot(
     *,
     renderer_input: RendererInput,
@@ -447,12 +451,15 @@ def _try_invoke_shared_renderer(
     *,
     renderer_input: RendererInput,
 ) -> Optional[dict]:
-    """Return shared result, or None only when no safe hot route exists.
+    """Return shared result, or raise an explicit skip for Unified normal Wake.
 
     Once the shared turn starts, errors propagate. We never auto-render a
     second answer after a possibly-partial shared resident turn.
     """
-    if not unified_normal_wake_enabled() or not _current_request_is_normal_wake():
+    is_unified_normal_wake = (
+        unified_normal_wake_enabled() and _current_request_is_normal_wake()
+    )
+    if not is_unified_normal_wake:
         return None
     try:
         import gateway
@@ -464,17 +471,19 @@ def _try_invoke_shared_renderer(
         from tools.lease_signer import issue_turn_lease
     except Exception as exc:
         _LOG.warning('UH-A1 shared renderer import unavailable: %s', exc)
-        return None
+        raise UnifiedNormalWakeSharedUnavailable(
+            'shared_import_unavailable'
+        ) from exc
 
     resident = getattr(gateway, '_CC_RESIDENT', None)
     db_path = str(getattr(gateway, 'DB_PATH', '') or '')
     if resident is None or not db_path:
-        return None
+        raise UnifiedNormalWakeSharedUnavailable('resident_or_db_unavailable')
 
     ready, reason = _hot_chat_resident_ready(resident, db_path=db_path)
     if not ready:
-        _LOG.info('UH-A1 shared renderer fallback before turn: %s', reason)
-        return None
+        _LOG.info('UH-A1 shared renderer unavailable before turn: %s', reason)
+        raise UnifiedNormalWakeSharedUnavailable(reason)
 
     acquired = False
     shared_started = False
@@ -484,14 +493,16 @@ def _try_invoke_shared_renderer(
     try:
         mode, _ = gateway._gen_acquire_or_wait(wait_timeout=0)
         if mode != 'own':
-            return None
+            raise UnifiedNormalWakeSharedUnavailable(
+                'generation_lock_unavailable'
+            )
         acquired = True
 
         # Close the race between the first check and generation lock.
         ready, reason = _hot_chat_resident_ready(resident, db_path=db_path)
         if not ready:
-            _LOG.info('UH-A1 shared renderer fallback after lock: %s', reason)
-            return None
+            _LOG.info('UH-A1 shared renderer unavailable after lock: %s', reason)
+            raise UnifiedNormalWakeSharedUnavailable(reason)
 
         # The formal Chat mapping Registry must already be exactly at EOF.
         # Otherwise a shared Wake turn would hide an older mapping backlog.
@@ -500,8 +511,8 @@ def _try_invoke_shared_renderer(
             db_path=db_path,
         )
         if watermark is None:
-            _LOG.info('UH-A1 shared renderer fallback before turn: %s', reason)
-            return None
+            _LOG.info('UH-A1 shared renderer unavailable before turn: %s', reason)
+            raise UnifiedNormalWakeSharedUnavailable(reason)
 
         identity = dict(renderer_input.decision_identity)
         turn_id = (
@@ -562,15 +573,17 @@ def _try_invoke_shared_renderer(
         return result
     except _SharedPreTurnUnavailable as exc:
         # This is still pre-turn: no delivery fence was created and no stdin
-        # was sent. Let the existing caller invoke the normal Relay fallback.
+        # was sent. Unified normal Wake must stop here; it cannot use Relay.
         _LOG.info('UH-A1 final guarded stale probe rejected shared route: %s', exc)
-        return None
+        raise UnifiedNormalWakeSharedUnavailable(str(exc)) from exc
     except Exception as exc:
         # Zero-wait busy is pre-turn unavailability. Once shared stdin may have
         # started, never auto-render a second answer.
         if not acquired and '上一轮回复仍在生成中' in str(exc):
-            _LOG.info('UH-A1 shared renderer busy; using existing fallback')
-            return None
+            _LOG.info('UH-A1 shared renderer busy; skipping Unified normal Wake')
+            raise UnifiedNormalWakeSharedUnavailable(
+                'generation_lock_busy'
+            ) from exc
         if shared_started and delivery_fence is not None:
             # Retire the matching resident while the same generation condition
             # is held, then release the shared owner token. An old Wake stream
@@ -679,7 +692,16 @@ def invoke_renderer(
 ) -> dict:
     """Invoke Renderer and return {text, provider, model_identity, ...}."""
     if invoke_fn is None:
-        shared = _try_invoke_shared_renderer(renderer_input=renderer_input)
+        try:
+            shared = _try_invoke_shared_renderer(renderer_input=renderer_input)
+        except UnifiedNormalWakeSharedUnavailable as exc:
+            return {
+                'text': '',
+                'provider': 'none',
+                'model_identity': 'none',
+                'shared_unavailable': True,
+                'shared_unavailable_reason': str(exc) or 'unavailable',
+            }
         if shared is not None:
             return shared
     invoker = invoke_fn or invoke_renderer_relay

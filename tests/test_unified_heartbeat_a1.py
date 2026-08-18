@@ -253,11 +253,16 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                  mock.patch.object(b3, 'invoke_renderer_relay', return_value=fallback) as relay:
                 result = b3.invoke_renderer(renderer_input=self.renderer_input())
 
-        self.assertEqual(result['provider'], 'api_relay')
+        self.assertTrue(result['shared_unavailable'])
+        self.assertEqual(
+            result['shared_unavailable_reason'],
+            'resident_stale:history_rewrite',
+        )
+        self.assertEqual(result['text'], '')
         self.assertEqual(len(resident.sent), 0)
         self.assertEqual(resident.ensure_calls, 0)
         close.assert_not_called()
-        relay.assert_called_once()
+        relay.assert_not_called()
         self.assertFalse(fake_gateway._gen_busy)
         self.assertEqual(released, [None])
 
@@ -408,10 +413,9 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                  mock.patch.object(uh, 'commit_shared_transcript_watermark', return_value={
                      'start_offset': 100, 'end_offset': 180, 'skipped_provider_round': True,
                  }), \
-                 mock.patch.dict(sys.modules, {'gateway': fake_gateway}):
-                out = b3._try_invoke_shared_renderer(
-                    renderer_input=self.renderer_input(),
-                )
+                 mock.patch.dict(sys.modules, {'gateway': fake_gateway}), \
+                 mock.patch.object(b3, 'invoke_renderer_relay') as relay:
+                out = b3.invoke_renderer(renderer_input=self.renderer_input())
         self.assertIsNotNone(out)
         self.assertTrue(out['shared_resident'])
         self.assertTrue(out['transcript_skip']['skipped_provider_round'])
@@ -424,6 +428,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         turn_lease = resident.sent[0][1]['turn_lease']
         self.assertEqual(turn_lease['turn_mode'], 'wake')
         self.assertEqual(turn_lease['issued_from'], 'default_policy')
+        relay.assert_not_called()
 
     def test_force_cancel_preserves_live_shared_wake_under_zombie_ttl(self):
         locks = _load_generation_lock_functions()
