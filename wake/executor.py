@@ -98,7 +98,15 @@ def execute(action: str, thoughts: str, content: str,
     if wake_cache_info is not None and action == 'message' and mode not in ('dream', 'summarize'):
         wake_mode = str(mode or '').strip()
         wake_cache_info['wake_mode'] = wake_mode
-        wake_cache_info['canonical_chat_history'] = (wake_mode == 'normal')
+        verified_unified_shared_chat = (
+            wake_cache_info.get('unified_chat_resident') is True
+            and wake_cache_info.get('b3_authority') is True
+            and wake_cache_info.get('source') == 'wake'
+            and wake_cache_info.get('provider') == 'claude_code'
+        )
+        wake_cache_info['canonical_chat_history'] = (
+            wake_mode == 'normal' and verified_unified_shared_chat
+        )
         cache_info_json = json.dumps(wake_cache_info, ensure_ascii=False)
     elif isinstance(cache_info, str):
         cache_info_json = cache_info

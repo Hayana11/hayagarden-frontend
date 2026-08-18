@@ -312,7 +312,10 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
             settle_provenance_present=True,
             settle_user_idle_hours=3.0,
             cache_info={
+                'provider': 'claude_code',
+                'source': 'wake',
                 'b3_authority': True,
+                'unified_chat_resident': True,
                 'renderer_provider': render_out.get('provider'),
                 'renderer_model': render_out.get('model_identity'),
             },
@@ -343,6 +346,47 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
             1,
         )
         conn.close()
+
+    def test_unified_normal_unowned_gate_precedes_legacy_runner(self):
+        locked = Path(ROOT, 'gateway.py').read_text(encoding='utf-8').split(
+            'def _wake_decide_locked', 1,
+        )[1].split('\ndef ', 1)[0]
+        gate = locked.index('NORMAL_WAKE_UNOWNED_SKIP')
+        legacy = locked.index('get_wake_runner')
+        self.assertLess(gate, legacy)
+        self.assertIn("str(mode or 'normal').strip() == 'normal'", locked)
+        self.assertIn('unified_normal_wake_enabled()', locked)
+        self.assertNotIn('NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP', locked[gate:legacy])
+
+    def test_normal_wake_canonical_history_requires_verified_shared_provenance(self):
+        from wake.executor import execute
+
+        out = execute(
+            'message',
+            'unverified legacy normal',
+            '不应成为主聊天正史。',
+            'normal',
+            self._get_db,
+            wake_run_id='b31-run-unverified-canonical',
+            settle_fired_drive='attachment',
+            settle_provenance_present=True,
+            settle_user_idle_hours=3.0,
+            cache_info={
+                'provider': 'claude_code',
+                'source': 'wake',
+                'b3_authority': True,
+            },
+        )
+        self.assertTrue(out['delivered'])
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT cache_info FROM chat_messages WHERE author='fyodor' "
+            "ORDER BY id DESC LIMIT 1",
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        cache = json.loads(row[0])
+        self.assertIsNot(cache.get('canonical_chat_history'), True)
 
     def test_gate_user_active_and_cooldown_split(self):
         """Fresh user → user_active; recent wake message + idle user → cooldown."""
