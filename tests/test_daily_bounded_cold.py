@@ -99,6 +99,10 @@ def _insert(
 
 
 _NORMAL_WAKE_CACHE_INFO = {
+    'provider': 'claude_code',
+    'source': 'wake',
+    'b3_authority': True,
+    'unified_chat_resident': True,
     'wake_mode': 'normal',
     'canonical_chat_history': True,
 }
@@ -661,6 +665,13 @@ class CanonicalWakeHistoryTests(unittest.TestCase):
             self.db, 'fyodor', 'wake-missing-provenance',
             '2026-07-27 05:04:00',
             source_kind='wake',
+            cache_info={
+                'provider': 'claude_code',
+                'source': 'wake',
+                'b3_authority': True,
+                'wake_mode': 'normal',
+                'canonical_chat_history': True,
+            },
         )
 
         history = self._build(cold=True)['current_day_history']

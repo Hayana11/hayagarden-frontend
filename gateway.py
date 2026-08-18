@@ -7966,6 +7966,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'source': 'wake',
             'wake_run_id': wake_run_id,
             'b3_authority': True,
+            # Only a successful shared Chat resident result may authenticate
+            # this normal Wake as canonical conversation history.
+            'unified_chat_resident': render_out.get('shared_resident') is True,
         })
         if renderer_model:
             wake_cache_info['model'] = renderer_model
@@ -8040,6 +8043,28 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'wake_run_id': wake_run_id,
             'b3_authority': True,
             'b3_gate': _b2_plan.gate_reason,
+        })
+
+    # Unified normal Wake is fail-closed from the outermost gateway boundary.
+    # Any result not explicitly owned by blocked/none/message takeover must
+    # stop here before the legacy runner can be reached.
+    from chat.behavior_authority_b3 import unified_normal_wake_enabled
+    if (
+        str(mode or 'normal').strip() == 'normal'
+        and unified_normal_wake_enabled()
+    ):
+        _mark_production_attempt(
+            'failed',
+            action='message',
+            reason='normal_wake_unified_unowned',
+        )
+        return jsonify({
+            'ok': True,
+            'skipped': True,
+            'reason': 'NORMAL_WAKE_UNIFIED_UNOWNED_SKIP',
+            'detail': 'normal_wake_unified_unowned',
+            'wake_run_id': wake_run_id,
+            'b3_authority': True,
         })
 
     try:

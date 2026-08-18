@@ -1492,6 +1492,13 @@ def is_canonical_conversation_message(
         return False
     if cache_info.get('canonical_chat_history') is not True:
         return False
+    if (
+        cache_info.get('unified_chat_resident') is not True
+        or cache_info.get('b3_authority') is not True
+        or cache_info.get('source') != SOURCE_KIND_WAKE
+        or cache_info.get('provider') != 'claude_code'
+    ):
+        return False
 
     author = str(row['author'] or '').strip().lower()
     if author not in _ASSISTANT_AUTHORS:
