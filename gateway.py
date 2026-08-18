@@ -7639,15 +7639,18 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         except Exception:
             pass
 
-    # B1-1A Decision-time freeze: one SQLite snapshot → PlannerStateView V.
-    # B8: only live Behavior-Decision attempts (not dry_run / inspect_only).
-    # DecisionClock from V is the sole clock for t_hours / t2 / Longing /
-    # legacy Decision / recall_photo. GuardClock stays eligibility-only.
+    # B1-1A Decision-time freeze remains Shadow-only for basic normal Wake.
+    # Production normal Planner receives GuardClock facts only.
     from chat.planner_state_view import (
         PlannerStateViewUnavailable,
         b1_1a_v_plumbing_eligible,
         decision_hours_from_view,
         freeze_planner_state_view,
+    )
+    basic_normal = bool(
+        live
+        and not dry_run
+        and str(mode or 'normal').strip() == 'normal'
     )
     planner_view = None
     if b1_1a_v_plumbing_eligible(mode=mode, live=live):
@@ -7658,16 +7661,31 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 wake_run_id=wake_run_id or None,
             )
         except PlannerStateViewUnavailable as exc:
-            # A3: no authoritative S ⇒ no valid V; fail closed (no synthetic V,
-            # no silent get_drive fallback, no model call with invented state).
-            return jsonify({
-                'ok': False,
-                'error': f'planner state view unavailable: {exc.reason}',
-                'reason': 'planner_state_view_unavailable',
-                'detail': exc.reason,
-                'mode': mode,
-            }), 503
-        t2_hours, t_hours = decision_hours_from_view(planner_view)
+            if not basic_normal:
+                return jsonify({
+                    'ok': False,
+                    'error': f'planner state view unavailable: {exc.reason}',
+                    'reason': 'planner_state_view_unavailable',
+                    'detail': exc.reason,
+                    'mode': mode,
+                }), 503
+            planner_view = None
+            try:
+                app.logger.warning(
+                    '[authoritative_cc_planner] Shadow V unavailable: %s',
+                    exc.reason,
+                )
+            except Exception:
+                pass
+        if planner_view is not None:
+            t2_hours, t_hours = decision_hours_from_view(planner_view)
+        else:
+            t2_hours = float(guard_clock.user_idle_hours or 0.0)
+            t_hours = float(
+                guard_clock.effective_idle_hours
+                if guard_clock.effective_idle_hours is not None
+                else t2_hours
+            )
     else:
         # dry_run / dream / summarize: non-B1-evidence paths; no V freeze.
         if guard_clock.reliable and guard_clock.user_idle_hours is not None:
@@ -7681,7 +7699,18 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             t2_hours = 0.0
             t_hours = 0.0
 
-    if live:
+    basic_planner_input = None
+    if basic_normal:
+        from chat.authoritative_planner import make_basic_wake_planner_input
+        basic_planner_input = make_basic_wake_planner_input(
+            wake_run_id=wake_run_id or '',
+            observed_at=now,
+            user_idle_hours=t2_hours,
+            effective_idle_hours=t_hours,
+            mode='normal',
+        )
+
+    if live and not basic_normal:
         # Stage D: _flush is a retired no-op. Do not get_drive() here — that
         # would be a pre-Decision psychological-state read outside V.
         try:
@@ -7710,9 +7739,9 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         t_hours=t_hours,
         t2_hours=t2_hours,
         now=now,
-        allow_side_effects=live,
+        allow_side_effects=(live and not basic_normal),
         dry_run=dry_run,
-        planner_state_view=planner_view,
+        planner_state_view=(planner_view if not basic_normal else None),
     )
     msgs = [{'role': 'user', 'content': _wake_trigger_message(mode, ritual_type)}]
     full_tools = _wake_full_tools_for_mode(mode)
@@ -7726,7 +7755,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     # C2: one decision_attempt_id binds Shadow + production outcome.
     decision_attempt_id = None
     _skill_view = None
-    if planner_view is not None and wake_run_id:
+    if (planner_view is not None or basic_planner_input is not None) and wake_run_id:
         try:
             from chat.capability_skill_view import freeze_capability_skill_view
             from chat.planner_shadow import (
@@ -7736,20 +7765,21 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             decision_attempt_id = new_decision_attempt_id()
             _skill_view = freeze_capability_skill_view(
                 wake_run_id=wake_run_id,
-                provider=wake_provider,
+                provider=('claude_code' if basic_normal else wake_provider),
                 mode=mode,
                 prepared_tools=_wake_tools,
                 dry_run=dry_run,
                 ritual_type=ritual_type,
                 captured_at=now,
             )
-            dispatch_planner_shadow(
-                planner_view=planner_view,
-                skill_view=_skill_view,
-                wake_run_id=wake_run_id,
-                decision_attempt_id=decision_attempt_id,
-                legacy_provenance=decision_provenance,
-            )
+            if planner_view is not None:
+                dispatch_planner_shadow(
+                    planner_view=planner_view,
+                    skill_view=_skill_view,
+                    wake_run_id=wake_run_id,
+                    decision_attempt_id=decision_attempt_id,
+                    legacy_provenance=decision_provenance,
+                )
         except Exception as _shadow_exc:
             # Fail-open: Shadow must never become a production Gate.
             try:
@@ -7790,7 +7820,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     if (
         live
         and not dry_run
-        and planner_view is not None
+        and (planner_view is not None or basic_planner_input is not None)
         and _skill_view is not None
         and decision_attempt_id
         and wake_run_id
@@ -7798,7 +7828,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         try:
             from chat.behavior_authority_b2 import plan_b2_wake_action
             _b2_plan = plan_b2_wake_action(
-                planner_view=planner_view,
+                planner_view=(basic_planner_input or planner_view),
                 skill_view=_skill_view,
                 wake_run_id=wake_run_id,
                 decision_attempt_id=decision_attempt_id,

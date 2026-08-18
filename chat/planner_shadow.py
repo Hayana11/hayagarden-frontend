@@ -587,6 +587,36 @@ def run_authoritative_planner_decision(
     decision_attempt_id: str,
     timeout_sec: float = _SHADOW_TIMEOUT_SEC,
     invoke_fn=None,
+    mode: str = 'normal',
+) -> tuple[str, dict]:
+    """Route production normal Wake to CC; retain legacy non-normal behavior."""
+    if str(mode or 'normal').strip() == 'normal':
+        from chat.authoritative_planner import run_authoritative_cc_planner
+        return run_authoritative_cc_planner(
+            planner_input=planner_view,
+            wake_run_id=wake_run_id,
+            decision_attempt_id=decision_attempt_id,
+            timeout_sec=timeout_sec,
+            invoke_fn=invoke_fn,
+        )
+    return _run_legacy_authoritative_planner_decision(
+        planner_view=planner_view,
+        skill_view=skill_view,
+        wake_run_id=wake_run_id,
+        decision_attempt_id=decision_attempt_id,
+        timeout_sec=timeout_sec,
+        invoke_fn=invoke_fn,
+    )
+
+
+def _run_legacy_authoritative_planner_decision(
+    *,
+    planner_view: Any,
+    skill_view: Any,
+    wake_run_id: str,
+    decision_attempt_id: str,
+    timeout_sec: float = _SHADOW_TIMEOUT_SEC,
+    invoke_fn=None,
 ) -> tuple[str, dict]:
     """Synchronous production Planner Decision for B2 consumer.
 
