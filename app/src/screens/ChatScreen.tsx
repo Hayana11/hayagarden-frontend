@@ -681,7 +681,7 @@ export function ChatScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest, clearChatComposerDraft, writeChatComposerDraft]);
+  }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest]);
 
   // Cold start: history first; a valid warm snapshot skips only the visible cold path.
   useEffect(() => {
@@ -1020,7 +1020,7 @@ export function ChatScreen() {
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest, clearChatComposerDraft, writeChatComposerDraft]);
 
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
