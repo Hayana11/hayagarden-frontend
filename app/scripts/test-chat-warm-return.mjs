@@ -134,7 +134,7 @@ try {
   now = 2_000_000;
   clearChatComposerDraft();
   assert.equal(readChatComposerDraft(), '');
-  const exactDraft = '  leading\\ntrailing  ';
+  const exactDraft = '  leading\ntrailing  ';
   writeChatComposerDraft(exactDraft);
   assert.equal(readChatComposerDraft(), exactDraft);
   now += CHAT_WARM_RETURN_TTL_MS - 1;
@@ -153,19 +153,19 @@ try {
   assert.doesNotThrow(() => writeChatComposerDraft('safe'));
   assert.doesNotThrow(() => clearChatComposerDraft());
 
-  assert.match(navigationState, /window\\.sessionStorage/);
-  assert.doesNotMatch(navigationState, /localStorage|indexedDB|CacheStorage|fetch\\(/);
-  assert.match(screen, /const \\[input, setInput\\] = useState\\(\\(\\) => readChatComposerDraft\\(\\)\\)/);
-  assert.match(screen, /writeChatComposerDraft\\(value\\)/);
-  assert.match(screen, /clearChatComposerDraft\\(\\)/);
+  assert.match(navigationState, /window\.sessionStorage/);
+  assert.doesNotMatch(navigationState, /localStorage|indexedDB|CacheStorage|fetch\(/);
+  assert.match(screen, /const \[input, setInput\] = useState\(\(\) => readChatComposerDraft\(\)\)/);
+  assert.match(screen, /writeChatComposerDraft\(value\)/);
+  assert.match(screen, /clearChatComposerDraft\(\)/);
   assert.doesNotMatch(screen, /localStorage/);
-  assert.match(screen, /onScroll=\\{updateFollowLatestFromScroll\\}/);
+  assert.match(screen, /onScroll=\{updateFollowLatestFromScroll\}/);
   const scrollHandler = screen.slice(screen.indexOf('const updateFollowLatestFromScroll'), screen.indexOf('const placeholder'));
   assert.match(scrollHandler, /scrollHeight|scrollTop|clientHeight/);
-  assert.match(scrollHandler, /txWinRef\\.current/);
-  assert.match(scrollHandler, /msgsRef\\.current/);
+  assert.match(scrollHandler, /txWinRef\.current/);
+  assert.match(scrollHandler, /msgsRef\.current/);
   assert.match(scrollHandler, /isTranscriptWindowAtLatest/);
-  assert.match(scrollHandler, /followLatestRef\\.current/);
+  assert.match(scrollHandler, /followLatestRef\.current/);
   assert.doesNotMatch(scrollHandler, /setState|setTxWin|setMsgs/);
 
   console.log('test:chat-warm-return — all checks passed');
