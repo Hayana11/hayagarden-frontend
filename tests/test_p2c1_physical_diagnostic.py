@@ -87,6 +87,9 @@ class P2C1PhysicalDiagnosticTests(unittest.TestCase):
     def test_a_card_and_owner_diagnostic_markers(self):
         self.assertIn("现实传感器诊断", self.html)
         self.assertIn("Elpis Canary · P2C.1 Physical State", self.html)
+        self.assertIn("冻结", self.html)
+        self.assertIn("复制 JSON", self.html)
+        self.assertIn("继续", self.js)
         self.assertLess(
             self.source.index("<!-- P2B_NOTIFICATION_DIAG_END -->"),
             self.source.index(PHYSICAL_HTML_BEGIN),
@@ -95,6 +98,10 @@ class P2C1PhysicalDiagnosticTests(unittest.TestCase):
             self.source.index(PHYSICAL_HTML_END),
             self.source.index("<!-- 生成锁急救 -->"),
         )
+
+    def test_b_existing_p2a_p2b_cards_remain(self):
+        self.assertIn("原生能力诊断", self.source)
+        self.assertIn("原生通知诊断", self.source)
 
     def test_b_bridge_guard_and_json_return_contract(self):
         self.assertIn("window.ElpisPhysical", self.js)
