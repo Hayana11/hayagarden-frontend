@@ -12,14 +12,12 @@ import {
   WINDOW_MS,
 } from "../src/lib/reality/physicalMotion.ts";
 
-type Vector = { x: number; y: number; z: number };
-
 function raw(
   sampledAt: number,
-  accel: Vector,
-  gyro: Vector,
+  accel,
+  gyro,
   monitoring = true,
-): Record<string, unknown> {
+) {
   return {
     monitoring,
     accelerometer: {
@@ -46,8 +44,8 @@ function raw(
 
 function pushSamples(
   window: PhysicalMotionWindow,
-  samples: Array<{ at: number; accel: Vector; gyro: Vector }>,
-): void {
+  samples,
+) {
   for (const sample of samples) {
     window.push(raw(sample.at, sample.accel, sample.gyro), sample.at);
   }
