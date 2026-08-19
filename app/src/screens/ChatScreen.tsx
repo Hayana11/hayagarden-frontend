@@ -2058,7 +2058,9 @@ export function ChatScreen() {
               disabled={posting}
               onChange={(e) => {
                 if (postingRef.current) return;
-                setInput(e.target.value);
+                const value = e.target.value;
+                setInput(value);
+                writeChatComposerDraft(value);
                 const ta = e.target;
                 ta.style.height = 'auto';
                 ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
