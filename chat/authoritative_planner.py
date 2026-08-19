@@ -131,6 +131,14 @@ def _json_object(text: str) -> dict[str, Any]:
                 value = candidate.get('result', candidate)
                 break
         if value is None:
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start >= 0 and end > start:
+                try:
+                    value = json.loads(raw[start:end + 1])
+                except json.JSONDecodeError:
+                    value = None
+        if value is None:
             raise ValueError('planner_invalid_json')
     if not isinstance(value, dict):
         raise ValueError('planner_result_not_object')
