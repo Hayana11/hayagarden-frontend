@@ -7854,6 +7854,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     if basic_normal:
         from chat.behavior_authority_b3 import UnifiedNormalWakeSharedUnavailable
         from wake.executor import execute as _wake_exec
+        main_turn = None
         try:
             main_turn = _run_unified_normal_main_chat_turn(
                 wake_run_id=wake_run_id,
