@@ -4390,7 +4390,6 @@ def _run_unified_normal_main_chat_turn(
             db_path=DB_PATH,
             jsonl_finality=jsonl_finality,
         )
-        result_cache_info['_shared_delivery_fence'] = delivery_fence
         return {
             'text': text,
             'thinking': ''.join(thinking_acc),
