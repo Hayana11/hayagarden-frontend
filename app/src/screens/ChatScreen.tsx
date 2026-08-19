@@ -3,7 +3,7 @@
 // (think/text/tool_use/tool_result/usage/done/err), inline branches
 // (branch/switch, regen prepare/finalize), edit-with-truncate, model catalog.
 // Mounted at /dash/chat, parallel to the legacy /chat page.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { CarryoverModal } from '../components/dailySoftWindow';
 import { useManualContextWindow } from '../hooks/useManualContextWindow';
@@ -53,6 +53,12 @@ import {
   reconcileChatWarmReturn,
   writeChatWarmReturn,
 } from '../lib/chatWarmReturn';
+import {
+  clearChatComposerDraft,
+  followLatestFromGeometry,
+  readChatComposerDraft,
+  writeChatComposerDraft,
+} from '../lib/chatNavigationState';
 import {
   bumpHistoryGenState,
   cancelInFlightWarmUpState,
@@ -332,7 +338,7 @@ export function ChatScreen() {
   const [hasMoreBefore, setHasMoreBefore] = useState(() => warmSnapshot ? warmSnapshot.hasMoreBefore : false);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(readChatComposerDraft);
   const [sending, setSending] = useState(false);
   const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
@@ -391,6 +397,7 @@ export function ChatScreen() {
   const warmUpInflightRef = useRef<Promise<void> | null>(null);
   const coldStartRaceRef = useRef<ColdStartRaceState>(createColdStartRaceState());
   const composerMutationRevisionRef = useRef(0);
+  const composerDraftRevisionRef = useRef(0);
   const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
     () => composerMutationRevisionRef.current,
     (file) => {
@@ -404,6 +411,18 @@ export function ChatScreen() {
   msgsRef.current = msgs;
   hasMoreBeforeRef.current = hasMoreBefore;
   txWinRef.current = txWin;
+
+  const handleTranscriptScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const target = event.currentTarget;
+    followLatestRef.current = followLatestFromGeometry(
+      {
+        scrollHeight: target.scrollHeight,
+        scrollTop: target.scrollTop,
+        clientHeight: target.clientHeight,
+      },
+      !legacyCompat || isTranscriptWindowAtLatest(txWinRef.current, msgsRef.current.length),
+    );
+  }, [legacyCompat]);
 
   const placeholder = useMemo(() => chatPlaceholder(new Date()), []);
   const capacityLabel = useMemo(
@@ -781,6 +800,13 @@ export function ChatScreen() {
     else container.scrollTop = snapshot.scrollTop;
   }, []);
 
+  useLayoutEffect(() => {
+    const textarea = taRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`;
+  }, [input]);
+
   useEffect(() => {
     if (!initialHistoryReady) return;
     let cancelled = false;
@@ -953,12 +979,17 @@ export function ChatScreen() {
   }, [pendingConfirmation, sending, runStream, refetchLatest]);
 
   const send = useCallback(async () => {
+    const rawText = input;
+    const sendText = rawText.trim();
     const attempt = {
-      text: input.trim(),
+      rawText,
+      text: sendText,
       file: pendingFile,
       image: pendingImage,
     };
     if ((!attempt.text && !attempt.file && !attempt.image) || sending) return;
+    const draftRevisionAtConsume = composerDraftRevisionRef.current;
+    clearChatComposerDraft();
     setSending(true);
     setChatError(null);
     setInput('');
@@ -980,7 +1011,10 @@ export function ChatScreen() {
     }
     if (messageId === null) {
       showToast('发送失败');
-      setInput((current) => current || attempt.text);
+      if (composerDraftRevisionRef.current === draftRevisionAtConsume) {
+        setInput(rawText);
+        writeChatComposerDraft(rawText);
+      }
       setSending(false);
       return;
     }
@@ -993,7 +1027,6 @@ export function ChatScreen() {
     setSending(false);
     taRef.current?.focus();
   }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
-
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
     if (!choice || sending) return false;
@@ -1851,7 +1884,7 @@ export function ChatScreen() {
       </div>
 
       {/* ══ message stream ══ */}
-      <div ref={scrollRef} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
+      <div ref={scrollRef} onScroll={handleTranscriptScroll} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
         <div className="vstack vstack-20" style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 26px' }}>
           {(canShowEarlierLoaded || canFetchEarlier) && (
             <div
@@ -2030,7 +2063,10 @@ export function ChatScreen() {
               disabled={posting}
               onChange={(e) => {
                 if (postingRef.current) return;
-                setInput(e.target.value);
+                const value = e.target.value;
+                composerDraftRevisionRef.current += 1;
+                writeChatComposerDraft(value);
+                setInput(value);
                 const ta = e.target;
                 ta.style.height = 'auto';
                 ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
