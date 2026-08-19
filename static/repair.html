@@ -1054,22 +1054,7 @@ function togglePhysicalFreeze() {
   }
 }
 
-function copyPhysicalJson() {
-  if (!currentPhysicalSnapshot) return;
-  var text = JSON.stringify(currentPhysicalSnapshot, null, 2);
-  var done = function (ok) {
-    setPhysicalError(ok ? '已复制' : '复制失败');
-  };
-  try {
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-      navigator.clipboard.writeText(text).then(function () {
-        done(true);
-      }, function () {
-        done(false);
-      });
-      return;
-    }
-  } catch (e) {}
+function copyPhysicalJsonFallback(text) {
   var area = document.createElement('textarea');
   area.value = text;
   area.setAttribute('readonly', 'readonly');
@@ -1082,9 +1067,33 @@ function copyPhysicalJson() {
     ok = document.execCommand('copy');
   } catch (e) {}
   document.body.removeChild(area);
-  done(ok);
+  return ok;
 }
 
+function copyPhysicalJson() {
+  if (!currentPhysicalSnapshot) return;
+  var text = JSON.stringify(currentPhysicalSnapshot, null, 2);
+  var done = function (ok) {
+    setPhysicalError(ok ? '已复制' : '复制失败');
+  };
+  var fallback = function () {
+    done(copyPhysicalJsonFallback(text));
+  };
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      var pending = navigator.clipboard.writeText(text);
+      if (pending && typeof pending.then === 'function') {
+        pending.then(function () {
+          done(true);
+        }, function () {
+          fallback();
+        });
+        return;
+      }
+    }
+  } catch (e) {}
+  fallback();
+}
 document.addEventListener('visibilitychange', function () {
   if (document.hidden) {
     stopPhysicalPolling();
