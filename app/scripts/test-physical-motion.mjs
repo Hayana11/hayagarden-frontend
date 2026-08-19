@@ -13,7 +13,7 @@ import {
 } from "../src/lib/reality/physicalMotion.ts";
 
 function raw(
-  sampledAt: number,
+  sampledAt,
   accel,
   gyro,
   monitoring = true,
@@ -43,7 +43,7 @@ function raw(
 }
 
 function pushSamples(
-  window: PhysicalMotionWindow,
+  window,
   samples,
 ) {
   for (const sample of samples) {
