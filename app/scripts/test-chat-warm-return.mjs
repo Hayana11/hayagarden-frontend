@@ -8,13 +8,35 @@ import {
   reconcileChatWarmReturn,
   writeChatWarmReturn,
 } from '../src/lib/chatWarmReturn.ts';
+import {
+  CHAT_COMPOSER_DRAFT_STORAGE_KEY,
+  CHAT_FOLLOW_LATEST_THRESHOLD_PX,
+  clearChatComposerDraft,
+  distanceFromBottom,
+  followLatestFromGeometry,
+  readChatComposerDraft,
+  writeChatComposerDraft,
+} from '../src/lib/chatNavigationState.ts';
 
 const warmSource = fs.readFileSync(new URL('../src/lib/chatWarmReturn.ts', import.meta.url), 'utf8');
+const navigationSource = fs.readFileSync(new URL('../src/lib/chatNavigationState.ts', import.meta.url), 'utf8');
 const screen = fs.readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
 const app = fs.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const realNow = Date.now;
 let now = 1_000_000;
 Date.now = () => now;
+const previousWindow = globalThis.window;
+let storage = new Map();
+function installStorage(overrides = {}) {
+  globalThis.window = {
+    sessionStorage: {
+      getItem: (key) => storage.has(key) ? storage.get(key) : null,
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+      ...overrides,
+    },
+  };
+}
 const message = (id) => ({ id, role: 'assistant', content: String(id) });
 const write = (messages, extra = {}) => writeChatWarmReturn({
   legacyCompat: false,
@@ -101,8 +123,85 @@ try {
   assert.match(warmBlock, /if \(gen !== coldStartRaceRef\.current\.historyGen\) return/);
   assert.match(warmBlock, /reconcileChatWarmReturn/);
   assert.doesNotMatch(warmBlock, /setMsgs\(\[\]\)/);
+
+  assert.equal(CHAT_FOLLOW_LATEST_THRESHOLD_PX, 32);
+  const geometry = (distance) => ({
+    scrollHeight: 1000,
+    scrollTop: 500 - distance,
+    clientHeight: 500,
+  });
+  assert.equal(distanceFromBottom(geometry(0)), 0);
+  assert.equal(followLatestFromGeometry(geometry(0)), true);
+  assert.equal(followLatestFromGeometry(geometry(31)), true);
+  assert.equal(followLatestFromGeometry(geometry(32)), true);
+  assert.equal(followLatestFromGeometry(geometry(33)), false);
+  assert.equal(followLatestFromGeometry(geometry(120)), false);
+  assert.equal(distanceFromBottom({ scrollHeight: 1000, scrollTop: 505, clientHeight: 500 }), 0);
+  assert.equal(followLatestFromGeometry(geometry(0), false), false);
+  assert.equal(followLatestFromGeometry(geometry(31), false), false);
+  assert.equal(followLatestFromGeometry(geometry(31), true), true);
+
+  storage = new Map();
+  installStorage();
+  clearChatComposerDraft();
+  assert.equal(readChatComposerDraft(), '');
+  const exactDraft = '  leading\ntrailing  ';
+  writeChatComposerDraft(exactDraft);
+  assert.equal(readChatComposerDraft(), exactDraft);
+  assert.equal(JSON.parse(storage.get(CHAT_COMPOSER_DRAFT_STORAGE_KEY)).text, exactDraft);
+  writeChatComposerDraft('');
+  assert.equal(storage.has(CHAT_COMPOSER_DRAFT_STORAGE_KEY), false);
+
+  now = 2_000_000;
+  writeChatComposerDraft('ttl');
+  now += CHAT_WARM_RETURN_TTL_MS - 1;
+  assert.equal(readChatComposerDraft(), 'ttl');
+  now += 1;
+  assert.equal(readChatComposerDraft(), '');
+  assert.equal(storage.has(CHAT_COMPOSER_DRAFT_STORAGE_KEY), false);
+
+  storage.set(CHAT_COMPOSER_DRAFT_STORAGE_KEY, '{bad json');
+  assert.equal(readChatComposerDraft(), '');
+  storage.set(CHAT_COMPOSER_DRAFT_STORAGE_KEY, JSON.stringify({ version: 2, text: 'bad', updatedAt: now }));
+  assert.equal(readChatComposerDraft(), '');
+  storage.set(CHAT_COMPOSER_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, text: 7, updatedAt: now }));
+  assert.equal(readChatComposerDraft(), '');
+  storage.set(CHAT_COMPOSER_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, text: 'bad', updatedAt: 'now' }));
+  assert.equal(readChatComposerDraft(), '');
+  storage.set(CHAT_COMPOSER_DRAFT_STORAGE_KEY, JSON.stringify({ version: 1, text: 'bad', updatedAt: Infinity }));
+  assert.equal(readChatComposerDraft(), '');
+
+  globalThis.window = { sessionStorage: { getItem: () => { throw new Error('get'); } } };
+  assert.equal(readChatComposerDraft(), '');
+  globalThis.window = { sessionStorage: { setItem: () => { throw new Error('set'); } } };
+  writeChatComposerDraft('safe');
+  globalThis.window = { sessionStorage: { removeItem: () => { throw new Error('remove'); } } };
+  clearChatComposerDraft();
+
+  assert.match(navigationSource, /CHAT_FOLLOW_LATEST_THRESHOLD_PX = 32/);
+  assert.match(screen, /const \[input, setInput\] = useState\(readChatComposerDraft\)/);
+  assert.match(screen, /const value = e\.target\.value/);
+  assert.match(screen, /writeChatComposerDraft\(value\)/);
+  assert.match(screen, /<div ref=\{scrollRef\} onScroll=\{handleTranscriptScroll\}/);
+  const scrollHandler = screen.slice(
+    screen.indexOf('const handleTranscriptScroll'),
+    screen.indexOf('const placeholder', screen.indexOf('const handleTranscriptScroll')),
+  );
+  assert.match(scrollHandler, /followLatestRef\.current = followLatestFromGeometry/);
+  assert.doesNotMatch(scrollHandler, /set[A-Z]|scrollBottom|setTimeout|requestAnimationFrame|fetch\(/);
+  const sendSource = screen.slice(screen.indexOf('const send = useCallback'), screen.indexOf('const sendChoice'));
+  assert.match(sendSource, /const rawText = input/);
+  assert.match(sendSource, /const sendText = rawText\.trim\(\)/);
+  assert.match(sendSource, /clearChatComposerDraft\(\)/);
+  assert.match(sendSource, /writeChatComposerDraft\(rawText\)/);
+  assert.equal((screen.match(/clearChatComposerDraft\(\)/g) || []).length, 1);
+  assert.doesNotMatch(navigationSource, /localStorage|pendingImage|fetch\(|api\//);
+  assert.doesNotMatch(navigationSource, /Object\.hasOwn|\.at\(|replaceAll\(|Promise\.any|structuredClone|crypto\.randomUUID|WeakRef|FinalizationRegistry/);
+
   console.log('test:chat-warm-return — all checks passed');
 } finally {
   Date.now = realNow;
   __resetChatWarmReturnForTests();
+  if (previousWindow === undefined) delete globalThis.window;
+  else globalThis.window = previousWindow;
 }
