@@ -203,6 +203,13 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         )
         self.assertIn('allow_side_effects=(live and not basic_normal)', gateway)
         self.assertIn('NORMAL_WAKE_UNIFIED_UNOWNED_SKIP', gateway)
+        normal_route = gateway[
+            gateway.index('if basic_normal:'):
+            gateway.index('    planner_view = None', gateway.index('if basic_normal:'))
+        ]
+        self.assertIn('_run_unified_normal_main_chat_turn', normal_route)
+        self.assertNotIn('plan_b2_wake_action', normal_route)
+        self.assertNotIn('invoke_renderer', normal_route)
 
     def test_gateway_visible_path_keeps_shared_resident_and_outer_fence(self):
         from pathlib import Path

@@ -49,7 +49,8 @@ def execute(action: str, thoughts: str, content: str,
             settle_provenance_present: Optional[bool] = None,
             settle_user_idle_hours: float = 0.0,
             settle_outcome_at: Optional[str] = None,
-            settlement_required: bool = True):
+            settlement_required: bool = True,
+            tool_calls_json: str = ''):
     """
     action: 'none' | 'message' | 'diary' | 'explore'
     get_db_fn: callable，返回 sqlite3 connection（来自 gateway.get_db）
@@ -257,28 +258,62 @@ def execute(action: str, thoughts: str, content: str,
             and content
             and mode not in ('summarize', 'dream')
         ):
-            if 'cache_info' in msg_cols and 'source_kind' in msg_cols:
+            unified_main_chat = bool(
+                isinstance(wake_cache_info, dict)
+                and wake_cache_info.get('unified_main_chat_proactive') is True
+            )
+            author = 'assistant' if unified_main_chat else 'fyodor'
+            if (
+                unified_main_chat
+                and 'tool_calls' in msg_cols
+                and 'cache_info' in msg_cols
+                and 'source_kind' in msg_cols
+            ):
+                conn.execute(
+                    "INSERT INTO chat_messages "
+                    "(author, content, thinking, tool_calls, cache_info, source_kind) "
+                    "VALUES (?,?,?,?,?,'wake')",
+                    (
+                        author,
+                        content,
+                        thoughts,
+                        tool_calls_json or '',
+                        cache_info_json,
+                    ),
+                )
+            elif (
+                unified_main_chat
+                and 'tool_calls' in msg_cols
+                and 'source_kind' in msg_cols
+            ):
+                conn.execute(
+                    "INSERT INTO chat_messages "
+                    "(author, content, thinking, tool_calls, source_kind) "
+                    "VALUES (?,?,?,?, 'wake')",
+                    (author, content, thoughts, tool_calls_json or ''),
+                )
+            elif 'cache_info' in msg_cols and 'source_kind' in msg_cols:
                 conn.execute(
                     "INSERT INTO chat_messages (author, content, thinking, cache_info, source_kind) "
-                    "VALUES ('fyodor',?,?,?,'wake')",
-                    (content, thoughts, cache_info_json),
+                    "VALUES (?,?,?,?,'wake')",
+                    (author, content, thoughts, cache_info_json),
                 )
             elif 'source_kind' in msg_cols:
                 conn.execute(
                     "INSERT INTO chat_messages (author, content, thinking, source_kind) "
-                    "VALUES ('fyodor',?,?,'wake')",
-                    (content, thoughts),
+                    "VALUES (?,?,?,'wake')",
+                    (author, content, thoughts),
                 )
             elif 'cache_info' in msg_cols:
                 conn.execute(
                     "INSERT INTO chat_messages (author, content, thinking, cache_info) "
-                    "VALUES ('fyodor',?,?,?)",
-                    (content, thoughts, cache_info_json),
+                    "VALUES (?,?,?,?)",
+                    (author, content, thoughts, cache_info_json),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO chat_messages (author, content, thinking) VALUES ('fyodor',?,?)",
-                    (content, thoughts),
+                    "INSERT INTO chat_messages (author, content, thinking) VALUES (?,?,?)",
+                    (author, content, thoughts),
                 )
         elif (
             deliver_chat

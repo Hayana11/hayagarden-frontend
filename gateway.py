@@ -3675,7 +3675,7 @@ def _format_group_chat_recap(rows, *, cold=False):
 def _cc_resident_stream_gen(
     messages, *, user_turn=True, history_stats=None, is_cold=None,
     rebuild_messages_fn=None, pending_respawn_reason=None,
-    display_thinking_mode='off',
+    display_thinking_mode='off', turn_lease=None,
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4139,7 +4139,10 @@ def _cc_resident_stream_gen(
         raise RuntimeError('cc observability mutated content')
 
     tool_result_chunks = []
-    for evt, payload in _CC_RESIDENT.send_turn(content, commit_meta=commit_meta):
+    _send_kwargs = {'commit_meta': commit_meta}
+    if turn_lease is not None:
+        _send_kwargs['turn_lease'] = copy.deepcopy(turn_lease)
+    for evt, payload in _CC_RESIDENT.send_turn(content, **_send_kwargs):
         if evt == 'tool_result' and isinstance(payload, dict):
             tool_result_chunks.append(str(payload.get('result') or ''))
         if evt == 'done' and isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
@@ -4226,6 +4229,199 @@ def _cc_resident_stream_gen(
             continue
         yield evt, payload
 
+
+_NORMAL_WAKE_MAIN_CHAT_TRIGGER = (
+    '【系统主动轮】现在没有新的用户消息。请沿用当前主聊天上下文，'
+    '自然地发言或行动；不要把这段系统触发词当作用户消息。'
+)
+
+
+def _run_unified_normal_main_chat_turn(
+    *,
+    wake_run_id: str,
+    window_identity=None,
+) -> dict:
+    """Run one proactive round through the formal main Chat resident path.
+
+    This is deliberately a provider-only control round: the existing main
+    Chat resident receives the smallest possible internal trigger, while the
+    SharedTranscriptWatermark keeps that control range out of formal Chat
+    user/assistant mapping. No Planner, B2, B3 Renderer, or fallback runner
+    is involved.
+    """
+    from chat.behavior_authority_b3 import (
+        UnifiedNormalWakeSharedUnavailable,
+        _hot_chat_resident_ready,
+    )
+    from chat.cc_history_rewrite import guard_cc_generation
+    from chat.unified_heartbeat_a1 import (
+        begin_shared_wake_delivery_fence,
+        commit_shared_transcript_watermark,
+        prepare_shared_transcript_watermark,
+    )
+    from chat.display_thinking import get_display_thinking_mode
+    from tools.lease_signer import issue_turn_lease
+
+    resident = _CC_RESIDENT
+    ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
+    if not ready:
+        raise UnifiedNormalWakeSharedUnavailable(reason)
+
+    acquired = False
+    shared_started = False
+    watermark = None
+    delivery_fence = None
+    result_cache_info = {
+        'provider': 'claude_code',
+        'source': 'wake',
+        'wake_run_id': str(wake_run_id or ''),
+        'b3_authority': True,
+        'unified_chat_resident': True,
+        'unified_main_chat_proactive': True,
+    }
+    try:
+        mode, _ = _gen_acquire_or_wait(wait_timeout=0)
+        if mode != 'own':
+            raise UnifiedNormalWakeSharedUnavailable('generation_lock_unavailable')
+        acquired = True
+
+        ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
+        if not ready:
+            raise UnifiedNormalWakeSharedUnavailable(reason)
+
+        watermark, reason = prepare_shared_transcript_watermark(
+            resident,
+            db_path=DB_PATH,
+        )
+        if watermark is None:
+            raise UnifiedNormalWakeSharedUnavailable(reason)
+
+        lease = issue_turn_lease(
+            turn_id='uh-a1-main-chat:' + str(wake_run_id or 'normal').strip(),
+            turn_mode='wake',
+            issued_from='default_policy',
+        )
+
+        def guarded_events():
+            nonlocal delivery_fence, shared_started
+            ready_now, reason_now = _hot_chat_resident_ready(
+                resident,
+                db_path=DB_PATH,
+            )
+            if not ready_now:
+                raise UnifiedNormalWakeSharedUnavailable(reason_now)
+            delivery_fence = begin_shared_wake_delivery_fence(
+                gateway=sys.modules[__name__],
+                resident=resident,
+            )
+            shared_started = True
+            yield from _cc_resident_stream_gen(
+                [{
+                    'role': 'user',
+                    'content': _NORMAL_WAKE_MAIN_CHAT_TRIGGER,
+                }],
+                user_turn=False,
+                history_stats={},
+                is_cold=False,
+                display_thinking_mode=get_display_thinking_mode(),
+                turn_lease=lease,
+            )
+
+        text_acc = []
+        thinking_acc = []
+        tool_calls = []
+        usage = {}
+        saw_done = False
+        for evt, payload in guard_cc_generation(guarded_events()):
+            if evt == 'text':
+                text_acc.append(str(payload or ''))
+            elif evt == 'think':
+                thinking_acc.append(str(payload or ''))
+            elif evt == 'tool_use' and isinstance(payload, dict):
+                tool_calls.append({
+                    'id': payload.get('id'),
+                    'name': payload.get('name'),
+                    'args': payload.get('args'),
+                    'result': '',
+                    'success': True,
+                })
+            elif evt == 'tool_result' and isinstance(payload, dict):
+                index = next(
+                    (
+                        i for i in range(len(tool_calls) - 1, -1, -1)
+                        if tool_calls[i].get('id') == payload.get('tool_use_id')
+                    ),
+                    -1,
+                )
+                if index >= 0:
+                    tool_calls[index]['result'] = payload.get('result', '')
+                    tool_calls[index]['success'] = not payload.get('is_error')
+            elif evt == 'done':
+                saw_done = True
+                if isinstance(payload, tuple) and len(payload) >= 3:
+                    usage = dict(payload[2]) if isinstance(payload[2], dict) else {}
+                    text_acc = [str(payload[0] or '')]
+                    thinking_acc = [str(payload[1] or '')]
+        if not saw_done:
+            raise RuntimeError('normal_wake_main_chat_missing_done')
+
+        text = ''.join(text_acc).strip()
+        if not text:
+            raise RuntimeError('normal_wake_main_chat_empty_response')
+
+        respawn_reason = str(usage.get('respawn_reason') or '').strip()
+        if respawn_reason:
+            raise RuntimeError(
+                'normal_wake_main_chat_respawned:%s' % respawn_reason
+            )
+        jsonl_finality = usage.get('jsonl_usage')
+        if not isinstance(jsonl_finality, dict):
+            raise RuntimeError('normal_wake_main_chat_jsonl_finality_missing')
+        if jsonl_finality.get('stream_totals_match') is not True:
+            raise RuntimeError('normal_wake_main_chat_jsonl_not_final')
+
+        result_cache_info.update(usage)
+        result_cache_info['tool_calls'] = tool_calls
+        result_cache_info['thinking'] = ''.join(thinking_acc)
+        result_cache_info['transcript_finality'] = dict(jsonl_finality)
+        result_cache_info['transcript_skip'] = commit_shared_transcript_watermark(
+            watermark,
+            resident,
+            db_path=DB_PATH,
+            jsonl_finality=jsonl_finality,
+        )
+        result_cache_info['_shared_delivery_fence'] = delivery_fence
+        return {
+            'text': text,
+            'thinking': ''.join(thinking_acc),
+            'tool_calls': tool_calls,
+            'provider': 'claude_code',
+            'model_identity': str(
+                getattr(resident, '_model_identity', None)
+                or 'claude-code:shared-resident'
+            ),
+            'cache_info': result_cache_info,
+            '_shared_delivery_fence': delivery_fence,
+        }
+    except UnifiedNormalWakeSharedUnavailable:
+        if shared_started and delivery_fence is not None:
+            delivery_fence.finish(
+                False,
+                cache_info=result_cache_info,
+                window_identity=window_identity,
+            )
+        raise
+    except Exception:
+        if shared_started and delivery_fence is not None:
+            delivery_fence.finish(
+                False,
+                cache_info=result_cache_info,
+                window_identity=window_identity,
+            )
+        raise
+    finally:
+        if acquired and delivery_fence is None:
+            _gen_release(None)
 
 def _cross_surface_recap_from_solo_chat(limit=8):
     try:
@@ -7655,6 +7851,91 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         and str(mode or 'normal').strip() == 'normal'
         and unified_normal_on
     )
+
+    if basic_normal:
+        from chat.behavior_authority_b3 import UnifiedNormalWakeSharedUnavailable
+        from wake.executor import execute as _wake_exec
+        try:
+            main_turn = _run_unified_normal_main_chat_turn(
+                wake_run_id=wake_run_id,
+                window_identity=_wake_window_identity,
+            )
+            main_cache_info = dict(main_turn.get('cache_info') or {})
+            main_cache_info.update({
+                'provider': 'claude_code',
+                'source': 'wake',
+                'wake_run_id': wake_run_id,
+                'b3_authority': True,
+                'unified_chat_resident': True,
+                'unified_main_chat_proactive': True,
+            })
+            exec_out = _wake_exec(
+                'message',
+                str(main_turn.get('thinking') or ''),
+                str(main_turn.get('text') or ''),
+                mode,
+                get_db_fn=get_db,
+                surfaced_desire_ids=[],
+                desire_ledger_enabled=False,
+                cache_info=main_cache_info,
+                tool_calls_json=json.dumps(
+                    [
+                        {k: v for k, v in call.items() if k != 'id'}
+                        for call in (main_turn.get('tool_calls') or [])
+                    ],
+                    ensure_ascii=False,
+                ),
+                wake_run_id=wake_run_id,
+                window_identity=_wake_window_identity,
+                settlement_required=False,
+            )
+        except UnifiedNormalWakeSharedUnavailable as exc:
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': 'NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP',
+                'detail': str(exc),
+                'wake_run_id': wake_run_id,
+            })
+        except Exception as exc:
+            app.logger.exception('[normal_wake_main_chat] failed: %s', exc)
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': 'NORMAL_WAKE_MAIN_CHAT_FAILED',
+                'detail': type(exc).__name__,
+                'wake_run_id': wake_run_id,
+            })
+
+        delivery_fence = main_turn.get('_shared_delivery_fence')
+        delivery_succeeded = bool(
+            isinstance(exec_out, dict) and exec_out.get('delivered')
+        )
+        if delivery_fence is not None:
+            delivery_fence.finish(
+                delivery_succeeded,
+                cache_info=main_cache_info,
+                window_identity=_wake_window_identity,
+            )
+        if not delivery_succeeded:
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': 'NORMAL_WAKE_MAIN_CHAT_DELIVERY_FAILED',
+                'wake_run_id': wake_run_id,
+            })
+        _wake_run_id_mark(wake_run_id)
+        return jsonify({
+            'ok': True,
+            'action': 'message',
+            'content': str(main_turn.get('text') or ''),
+            'thoughts': str(main_turn.get('thinking') or ''),
+            'provider': 'claude_code',
+            'model': main_turn.get('model_identity'),
+            'wake_run_id': wake_run_id,
+            'b3_authority': True,
+        })
+
     planner_view = None
     if b1_1a_v_plumbing_eligible(mode=mode, live=live):
         try:
