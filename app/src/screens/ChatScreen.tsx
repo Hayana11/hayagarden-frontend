@@ -54,6 +54,12 @@ import {
   writeChatWarmReturn,
 } from '../lib/chatWarmReturn';
 import {
+  clearChatComposerDraft,
+  isChatFollowLatest,
+  readChatComposerDraft,
+  writeChatComposerDraft,
+} from '../lib/chatNavigationState';
+import {
   bumpHistoryGenState,
   cancelInFlightWarmUpState,
   CHAT_AUTHORITATIVE_LIMIT,
@@ -332,7 +338,7 @@ export function ChatScreen() {
   const [hasMoreBefore, setHasMoreBefore] = useState(() => warmSnapshot ? warmSnapshot.hasMoreBefore : false);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(() => readChatComposerDraft());
   const [sending, setSending] = useState(false);
   const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
@@ -404,6 +410,16 @@ export function ChatScreen() {
   msgsRef.current = msgs;
   hasMoreBeforeRef.current = hasMoreBefore;
   txWinRef.current = txWin;
+
+  const updateFollowLatestFromScroll = useCallback(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    followLatestRef.current = isChatFollowLatest(
+      { scrollHeight: container.scrollHeight, scrollTop: container.scrollTop, clientHeight: container.clientHeight },
+      legacyCompat,
+      !legacyCompat || isTranscriptWindowAtLatest(txWinRef.current, msgsRef.current.length),
+    );
+  }, [legacyCompat]);
 
   const placeholder = useMemo(() => chatPlaceholder(new Date()), []);
   const capacityLabel = useMemo(
@@ -665,7 +681,7 @@ export function ChatScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest]);
+  }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest, clearChatComposerDraft, writeChatComposerDraft]);
 
   // Cold start: history first; a valid warm snapshot skips only the visible cold path.
   useEffect(() => {
@@ -740,6 +756,13 @@ export function ChatScreen() {
       root.removeAttribute('data-chat-legacy-renderer');
     }
   }, [legacyCompat]);
+
+  useLayoutEffect(() => {
+    const textarea = taRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = String(Math.min(textarea.scrollHeight, 120)) + 'px';
+  }, [input]);
 
   // Legacy DOM window: follow latest or clamp when loaded msgs length changes.
   useLayoutEffect(() => {
@@ -962,6 +985,7 @@ export function ChatScreen() {
     setSending(true);
     setChatError(null);
     setInput('');
+    clearChatComposerDraft();
     if (taRef.current) taRef.current.style.height = 'auto';
     const extra = attempt.image
       ? { imageFile: attempt.image }
@@ -980,7 +1004,11 @@ export function ChatScreen() {
     }
     if (messageId === null) {
       showToast('发送失败');
-      setInput((current) => current || attempt.text);
+      setInput((current) => {
+        if (current) return current;
+        writeChatComposerDraft(attempt.text);
+        return attempt.text;
+      });
       setSending(false);
       return;
     }
@@ -1851,7 +1879,7 @@ export function ChatScreen() {
       </div>
 
       {/* ══ message stream ══ */}
-      <div ref={scrollRef} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
+      <div ref={scrollRef} onScroll={updateFollowLatestFromScroll} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
         <div className="vstack vstack-20" style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 26px' }}>
           {(canShowEarlierLoaded || canFetchEarlier) && (
             <div
