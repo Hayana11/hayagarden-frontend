@@ -115,6 +115,26 @@ assert.equal(
   "unknown",
 );
 
+const future = new PhysicalMotionWindow();
+assert.equal(
+  future.push(
+    raw(1000, { x: 0, y: 0, z: 9.8 }, { x: 0, y: 0, z: 0 }),
+    0,
+  ),
+  "unknown",
+);
+assert.equal(future.samples.length, 0);
+
+const immutableWindow = new PhysicalMotionWindow();
+const immutableRaw = raw(
+  0,
+  { x: 0, y: 0, z: 9.8 },
+  { x: 0, y: 0, z: 0 },
+);
+const immutableBefore = JSON.stringify(immutableRaw);
+immutableWindow.push(immutableRaw, 0);
+assert.equal(JSON.stringify(immutableRaw), immutableBefore);
+
 const duplicates = new PhysicalMotionWindow();
 const duplicateSample = raw(
   0,
