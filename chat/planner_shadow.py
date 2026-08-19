@@ -40,6 +40,7 @@ _CONTRIBUTOR_ALLOWLIST = (
 _SHADOW_PROVIDER = 'api_relay'
 _DEFAULT_OBSERVE_PATH = '/opt/frontend/planner_shadow.jsonl'
 _SHADOW_TIMEOUT_SEC = 15
+_NORMAL_AUTHORITATIVE_TIMEOUT_SEC = 60.0
 _SHADOW_MAX_TOKENS = 700
 
 _SHADOW_SYSTEM = """你是 Wake Planner Shadow：只做结构化行为决策，不执行、不写给用户看的正文。
@@ -587,7 +588,7 @@ def run_authoritative_planner_decision(
     skill_view: Any,
     wake_run_id: str,
     decision_attempt_id: str,
-    timeout_sec: float = _SHADOW_TIMEOUT_SEC,
+    timeout_sec: Optional[float] = None,
     invoke_fn=None,
     mode: str = 'normal',
 ) -> tuple[str, dict]:
@@ -598,7 +599,10 @@ def run_authoritative_planner_decision(
             planner_input=planner_view,
             wake_run_id=wake_run_id,
             decision_attempt_id=decision_attempt_id,
-            timeout_sec=timeout_sec,
+            timeout_sec=(
+                _NORMAL_AUTHORITATIVE_TIMEOUT_SEC
+                if timeout_sec is None else timeout_sec
+            ),
             invoke_fn=invoke_fn,
         )
     return _run_legacy_authoritative_planner_decision(
@@ -606,7 +610,9 @@ def run_authoritative_planner_decision(
         skill_view=skill_view,
         wake_run_id=wake_run_id,
         decision_attempt_id=decision_attempt_id,
-        timeout_sec=timeout_sec,
+        timeout_sec=(
+            _SHADOW_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+        ),
         invoke_fn=invoke_fn,
     )
 
