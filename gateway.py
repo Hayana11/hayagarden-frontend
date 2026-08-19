@@ -4311,7 +4311,7 @@ def _run_unified_normal_main_chat_turn(
             if not ready_now:
                 raise UnifiedNormalWakeSharedUnavailable(reason_now)
             delivery_fence = begin_shared_wake_delivery_fence(
-                gateway=sys.modules[__name__],
+                gateway=_sys.modules[__name__],
                 resident=resident,
             )
             shared_started = True
@@ -7898,6 +7898,14 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'wake_run_id': wake_run_id,
             })
         except Exception as exc:
+            if isinstance(main_turn, dict):
+                failed_fence = main_turn.get('_shared_delivery_fence')
+                if failed_fence is not None:
+                    failed_fence.finish(
+                        False,
+                        cache_info=main_turn.get('cache_info'),
+                        window_identity=_wake_window_identity,
+                    )
             app.logger.exception('[normal_wake_main_chat] failed: %s', exc)
             return jsonify({
                 'ok': True,
