@@ -162,9 +162,15 @@ class P2C1PhysicalDiagnosticTests(unittest.TestCase):
         self.assertIn("physicalFrozen = false", self.js)
         self.assertIn('id="physical-diag-copy"', self.html)
         self.assertIn('onclick="copyPhysicalJson()"', self.html)
-        self.assertIn("navigator.clipboard", self.js)
-        self.assertIn("document.execCommand('copy')", self.js)
-        self.assertIn("JSON.stringify(currentPhysicalSnapshot, null, 2)", self.js)
+        self.assertIn("function copyPhysicalJsonFallback(text)", self.js)
+        fallback_body = _function_body(self.js, "copyPhysicalJsonFallback")
+        self.assertIn("document.execCommand('copy')", fallback_body)
+        copy_body = _function_body(self.js, "copyPhysicalJson")
+        self.assertIn("navigator.clipboard.writeText(text)", copy_body)
+        self.assertIn("pending.then", copy_body)
+        self.assertIn("fallback();", copy_body)
+        self.assertNotIn("getPhysicalState", copy_body)
+        self.assertIn("JSON.stringify(currentPhysicalSnapshot, null, 2)", copy_body)
 
     def test_g_error_keeps_last_snapshot(self):
         body = _function_body(self.js, "readPhysicalState")
