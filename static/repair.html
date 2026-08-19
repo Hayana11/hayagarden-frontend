@@ -58,6 +58,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .native-diag-app-min{flex-shrink:0;}
 .native-diag-charge{font-size:10px;color:var(--muted);margin-top:2px;}
 
+
+/* P2C1 Physical live diagnostic */
+.physical-diag-section{font-size:11px;color:var(--muted);padding:8px 0 3px;border-bottom:.5px solid var(--border);}
+.physical-diag-json{margin-top:8px;background:var(--code-bg);border-radius:8px;padding:8px 10px;font-size:11px;line-height:1.45;overflow-x:auto;white-space:pre-wrap;word-break:break-all;font-family:'SF Mono','Fira Code',monospace;}
+.physical-diag-details{margin-top:8px;}
+.physical-diag-details summary{font-size:11px;color:var(--primary);cursor:pointer;}
+.physical-diag-error{font-size:11px;color:var(--red);line-height:1.45;margin-top:8px;min-height:15px;}
+
 /* 生成锁急救 */
 .fix-card{background:linear-gradient(135deg,#fff9f0,#fff);border:1px solid #f0dfc8;border-radius:14px;padding:14px 16px;margin-bottom:12px;}
 .fix-title{font-size:13px;font-weight:600;color:#8a5a18;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
@@ -210,6 +218,53 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     <div class="notification-diag-result" id="notification-diag-result"></div>
   </div>
   <!-- P2B_NOTIFICATION_DIAG_END -->
+  <!-- P2C1_PHYSICAL_DIAGNOSTIC_BEGIN -->
+  <div class="native-diag-card" id="physical-diag-card">
+    <div class="native-diag-hd">
+      <div>
+        <div class="native-diag-title">现实传感器诊断</div>
+        <div class="native-diag-sub">Elpis Canary · P2C.1 Physical State</div>
+      </div>
+      <span class="status-badge badge-checking" id="physical-diag-bridge">检查中</span>
+    </div>
+    <div class="native-diag-row"><span class="native-diag-label">监控</span><span class="native-diag-value" id="physical-diag-monitoring">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">schemaVersion</span><span class="native-diag-value" id="physical-diag-schema">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">updatedAt</span><span class="native-diag-value" id="physical-diag-updated-age">—</span></div>
+
+    <div class="physical-diag-section">电池</div>
+    <div class="native-diag-row"><span class="native-diag-label">可用</span><span class="native-diag-value" id="physical-battery-available">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">电量</span><span class="native-diag-value" id="physical-battery-level">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">充电</span><span class="native-diag-value" id="physical-battery-charging">—</span></div>
+
+    <div class="physical-diag-section">加速度计</div>
+    <div class="native-diag-row"><span class="native-diag-label">状态</span><span class="native-diag-value" id="physical-accelerometer-status">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">x / y / z</span><span class="native-diag-value" id="physical-accelerometer-values">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">样本年龄</span><span class="native-diag-value" id="physical-accelerometer-age">—</span></div>
+
+    <div class="physical-diag-section">陀螺仪</div>
+    <div class="native-diag-row"><span class="native-diag-label">状态</span><span class="native-diag-value" id="physical-gyroscope-status">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">x / y / z</span><span class="native-diag-value" id="physical-gyroscope-values">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">样本年龄</span><span class="native-diag-value" id="physical-gyroscope-age">—</span></div>
+
+    <div class="physical-diag-section">接近度</div>
+    <div class="native-diag-row"><span class="native-diag-label">状态</span><span class="native-diag-value" id="physical-proximity-status">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">value / maxRange</span><span class="native-diag-value" id="physical-proximity-values">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">样本年龄</span><span class="native-diag-value" id="physical-proximity-age">—</span></div>
+
+    <div class="physical-diag-section">光线</div>
+    <div class="native-diag-row"><span class="native-diag-label">状态</span><span class="native-diag-value" id="physical-light-status">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">lux</span><span class="native-diag-value" id="physical-light-values">—</span></div>
+    <div class="native-diag-row"><span class="native-diag-label">样本年龄</span><span class="native-diag-value" id="physical-light-age">—</span></div>
+
+    <button type="button" class="native-diag-action" id="physical-diag-freeze" onclick="togglePhysicalFreeze()">冻结</button>
+    <button type="button" class="native-diag-action" id="physical-diag-copy" onclick="copyPhysicalJson()" disabled>复制 JSON</button>
+    <div class="physical-diag-error" id="physical-diag-error"></div>
+    <details class="physical-diag-details">
+      <summary>原始 JSON</summary>
+      <pre class="physical-diag-json" id="physical-diag-json">—</pre>
+    </details>
+  </div>
+  <!-- P2C1_PHYSICAL_DIAGNOSTIC_END -->
   <!-- 生成锁急救 -->
   <div class="fix-card">
     <div class="fix-title"><i class="ti ti-lock-open"></i> 聊天卡在「仍在生成」？</div>
@@ -814,6 +869,242 @@ document.addEventListener('visibilitychange', function () {
     refreshNativeDiagnostic();
   }
 });
+
+// P2C1_PHYSICAL_DIAGNOSTIC_JS_BEGIN
+var currentPhysicalSnapshot = null;
+var physicalPollTimer = null;
+var physicalFrozen = false;
+var physicalReadBusy = false;
+
+function getPhysicalBridge() {
+  try {
+    return window.ElpisPhysical || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function hasPhysicalGetter() {
+  var bridge = getPhysicalBridge();
+  return !!(bridge && typeof bridge.getPhysicalState === 'function');
+}
+
+function setPhysicalText(id, value) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
+function setPhysicalBridgeBadge(text, className) {
+  var el = document.getElementById('physical-diag-bridge');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'status-badge ' + className;
+}
+
+function physicalValue(value) {
+  if (typeof value !== 'number' || !isFinite(value)) return '—';
+  var rounded = Math.round(value * 1000) / 1000;
+  return String(rounded);
+}
+
+function physicalBoolean(value) {
+  if (value === true) return '是';
+  if (value === false) return '否';
+  return '—';
+}
+
+function physicalAvailability(value) {
+  return value === true ? '可用' : value === false ? '不可用' : '—';
+}
+
+function physicalSensorStatus(sensor) {
+  if (!sensor || sensor.available !== true) return '不可用';
+  return sensor.ready === true ? '正常' : '等待样本';
+}
+
+function physicalAge(timestamp) {
+  if (typeof timestamp !== 'number' || !isFinite(timestamp)) return '—';
+  var age = Date.now() - timestamp;
+  if (age < 0) age = 0;
+  if (age < 1000) return '刚刚';
+  var seconds = age / 1000;
+  return seconds < 10 ? seconds.toFixed(1) + ' 秒前' : Math.round(seconds) + ' 秒前';
+}
+
+function renderPhysicalEmpty() {
+  setPhysicalText('physical-diag-monitoring', '—');
+  setPhysicalText('physical-diag-schema', '—');
+  setPhysicalText('physical-diag-updated-age', '—');
+  setPhysicalText('physical-battery-available', '—');
+  setPhysicalText('physical-battery-level', '—');
+  setPhysicalText('physical-battery-charging', '—');
+  setPhysicalText('physical-accelerometer-status', '—');
+  setPhysicalText('physical-accelerometer-values', '—');
+  setPhysicalText('physical-accelerometer-age', '—');
+  setPhysicalText('physical-gyroscope-status', '—');
+  setPhysicalText('physical-gyroscope-values', '—');
+  setPhysicalText('physical-gyroscope-age', '—');
+  setPhysicalText('physical-proximity-status', '—');
+  setPhysicalText('physical-proximity-values', '—');
+  setPhysicalText('physical-proximity-age', '—');
+  setPhysicalText('physical-light-status', '—');
+  setPhysicalText('physical-light-values', '—');
+  setPhysicalText('physical-light-age', '—');
+  setPhysicalText('physical-diag-json', '—');
+}
+
+function renderPhysicalSensor(prefix, sensor, fields) {
+  setPhysicalText('physical-' + prefix + '-status', physicalSensorStatus(sensor));
+  if (!sensor || sensor.available !== true || sensor.ready !== true) {
+    setPhysicalText('physical-' + prefix + '-values', '—');
+    setPhysicalText('physical-' + prefix + '-age', '—');
+    return;
+  }
+  var values = [];
+  var i;
+  for (i = 0; i < fields.length; i++) {
+    values.push(physicalValue(sensor[fields[i]]));
+  }
+  setPhysicalText('physical-' + prefix + '-values', values.join(' / '));
+  setPhysicalText('physical-' + prefix + '-age', physicalAge(sensor.sampledAt));
+}
+
+function renderPhysicalSnapshot(snapshot) {
+  var battery = snapshot && snapshot.battery ? snapshot.battery : null;
+  var accelerometer = snapshot && snapshot.accelerometer ? snapshot.accelerometer : null;
+  var gyroscope = snapshot && snapshot.gyroscope ? snapshot.gyroscope : null;
+  var proximity = snapshot && snapshot.proximity ? snapshot.proximity : null;
+  var light = snapshot && snapshot.light ? snapshot.light : null;
+
+  setPhysicalText('physical-diag-monitoring', physicalBoolean(snapshot && snapshot.monitoring));
+  setPhysicalText('physical-diag-schema', typeof (snapshot && snapshot.schemaVersion) === 'number' ? String(snapshot.schemaVersion) : '—');
+  setPhysicalText('physical-diag-updated-age', physicalAge(snapshot && snapshot.updatedAt));
+
+  setPhysicalText('physical-battery-available', physicalAvailability(battery && battery.available));
+  setPhysicalText('physical-battery-level', battery && battery.available === true ? physicalValue(battery.level) : '—');
+  setPhysicalText('physical-battery-charging', battery && battery.available === true ? physicalBoolean(battery.charging) : '—');
+
+  renderPhysicalSensor('accelerometer', accelerometer, ['x', 'y', 'z']);
+  renderPhysicalSensor('gyroscope', gyroscope, ['x', 'y', 'z']);
+  renderPhysicalSensor('proximity', proximity, ['value', 'maxRange']);
+  renderPhysicalSensor('light', light, ['lux']);
+  setPhysicalText('physical-diag-json', JSON.stringify(snapshot, null, 2));
+  setPhysicalText('physical-diag-copy', '复制 JSON');
+  var copyButton = document.getElementById('physical-diag-copy');
+  if (copyButton) copyButton.disabled = false;
+}
+
+function setPhysicalError(message) {
+  setPhysicalText('physical-diag-error', message || '');
+}
+
+function readPhysicalState() {
+  if (physicalReadBusy) return;
+  physicalReadBusy = true;
+  try {
+    if (!hasPhysicalGetter()) {
+      setPhysicalBridgeBadge('原生桥不可用', 'badge-warn');
+      setPhysicalError('桌面浏览器、旧 APK 或非 Canary 环境无法读取。');
+      if (!currentPhysicalSnapshot) renderPhysicalEmpty();
+      return;
+    }
+    var raw = getPhysicalBridge().getPhysicalState();
+    var snapshot = JSON.parse(raw);
+    if (!snapshot || typeof snapshot !== 'object' || typeof snapshot.schemaVersion !== 'number') {
+      throw new Error('invalid schema');
+    }
+    currentPhysicalSnapshot = snapshot;
+    setPhysicalBridgeBadge('已连接', 'badge-ok');
+    setPhysicalError('');
+    renderPhysicalSnapshot(currentPhysicalSnapshot);
+  } catch (e) {
+    setPhysicalBridgeBadge('读取失败', 'badge-err');
+    setPhysicalError('当前读取失败，保留最近一次有效快照。');
+    if (!currentPhysicalSnapshot) renderPhysicalEmpty();
+  } finally {
+    physicalReadBusy = false;
+  }
+}
+
+function startPhysicalPolling() {
+  if (physicalFrozen || document.hidden || physicalPollTimer !== null) return;
+  physicalPollTimer = setInterval(function () {
+    readPhysicalState();
+  }, 500);
+}
+
+function stopPhysicalPolling() {
+  if (physicalPollTimer !== null) {
+    clearInterval(physicalPollTimer);
+    physicalPollTimer = null;
+  }
+}
+
+function togglePhysicalFreeze() {
+  var button = document.getElementById('physical-diag-freeze');
+  if (physicalFrozen) {
+    physicalFrozen = false;
+    if (button) button.textContent = '冻结';
+    readPhysicalState();
+    startPhysicalPolling();
+  } else {
+    physicalFrozen = true;
+    stopPhysicalPolling();
+    if (button) button.textContent = '继续';
+  }
+}
+
+function copyPhysicalJson() {
+  if (!currentPhysicalSnapshot) return;
+  var text = JSON.stringify(currentPhysicalSnapshot, null, 2);
+  var done = function (ok) {
+    setPhysicalError(ok ? '已复制' : '复制失败');
+  };
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(text).then(function () {
+        done(true);
+      }, function () {
+        done(false);
+      });
+      return;
+    }
+  } catch (e) {}
+  var area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', 'readonly');
+  area.style.position = 'fixed';
+  area.style.left = '-9999px';
+  document.body.appendChild(area);
+  area.select();
+  var ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch (e) {}
+  document.body.removeChild(area);
+  done(ok);
+}
+
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) {
+    stopPhysicalPolling();
+  } else if (!physicalFrozen) {
+    readPhysicalState();
+    startPhysicalPolling();
+  }
+});
+window.addEventListener('pagehide', function () {
+  stopPhysicalPolling();
+});
+window.addEventListener('unload', function () {
+  stopPhysicalPolling();
+});
+
+renderPhysicalEmpty();
+readPhysicalState();
+startPhysicalPolling();
+// P2C1_PHYSICAL_DIAGNOSTIC_JS_END
+
 </script>
 </body>
 </html>
