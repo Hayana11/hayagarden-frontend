@@ -26,7 +26,7 @@ _STATUS_LABELS = {
 _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("memory", "记忆", ("memory.search",)),
     ("home", "家", ("home.light.status",)),
-    ("plans", "计划", ("todo.read", "todo.write", "countdown.read")),
+    ("plans", "生活 / 日程", ("todo.read", "todo.write", "countdown.read")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
     ("external_read", "联网", ("web.search", "web.read")),
@@ -54,8 +54,8 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "physical_boundary": "只在明确记录意图下写入待办；不会因为聊天推测就自动新增。",
     },
     "countdown.read": {
-        "display_label": "查看倒计时",
-        "companion_hint": "她问起某个正在倒数的日期或提醒时，可以看看真实倒计时，再一起确认还剩多少时间。",
+        "display_label": "查看日期倒计时",
+        "companion_hint": "她问起某个日期或事件还有多久时，可以查看真实的日期倒计时，确认还剩多少天。它是日期级只读信息，不会启动秒级计时或 Wake。",
         "physical_boundary": "只读取已有倒计时，不会创建、修改或删除倒计时。",
     },
     "ledger.read": {

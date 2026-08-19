@@ -76,7 +76,7 @@ DRAWERS = {
                   'get_device_status', 'request_phone_screenshot'],
     },
     'calendar': {
-        'label': '日历记账',
+        'label': '生活 / 日程',
         'tools': ['get_todos', 'add_todo', 'get_countdowns',
                   'get_ledger', 'add_ledger', 'get_ledger_budget'],
     },
@@ -85,7 +85,7 @@ DRAWERS = {
         'tools': ['desire_add', 'desire_list', 'desire_act', 'desire_reflect', 'desire_history'],
     },
     'triggers': {
-        'label': '自我触发',
+        'label': 'Wake',
         'tools': ['set_self_trigger', 'cancel_self_trigger'],
     },
     'artifacts': {
@@ -93,7 +93,7 @@ DRAWERS = {
         'tools': ['create_html', 'create_markdown', 'create_document'],
     },
     'phone': {
-        'label': '手机指令',
+        'label': '行动',
         'tools': ['issue_command'],
     },
 }
