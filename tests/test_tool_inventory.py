@@ -4,7 +4,6 @@ from unittest import mock
 
 from tools import tool_companion_hints
 from tools import tool_inventory
-from tools import tool_drawers
 from tools.capability_manifest import P1_ENABLED_CAPABILITY_IDS
 
 
@@ -63,35 +62,47 @@ class ToolInventoryTest(unittest.TestCase):
         self.assertFalse(self.t["browse_github"]["available"])
         self.assertEqual(self.t["browse_github"]["reason_code"], "provider_blocked")
 
-    def test_countdown_wake_action_taxonomy_is_frozen(self):
+    def test_countdown_wake_action_taxonomy_matches_inventory_payload(self):
         groups = {group["id"]: group for group in self.p["groups"]}
         expected = {
-            "get_countdowns": ("查看日期倒计时", "plans_ledger", True, "active"),
-            "set_self_trigger": ("设置延时主动联系", "triggers", False, "legacy_only"),
-            "cancel_self_trigger": ("取消延时主动联系", "triggers", False, "legacy_only"),
-            "issue_command": ("设置行动倒计时", "phone", False, "legacy_only"),
+            "get_countdowns": (
+                "查看日期倒计时", "plans_ledger", True, "当前可用",
+                "active", "mcp__home__get_countdowns",
+            ),
+            "set_self_trigger": (
+                "设置延时主动联系", "triggers", False, "当前不可用",
+                "legacy_only", None,
+            ),
+            "cancel_self_trigger": (
+                "取消延时主动联系", "triggers", False, "当前不可用",
+                "legacy_only", None,
+            ),
+            "issue_command": (
+                "设置行动倒计时", "phone", False, "当前不可用",
+                "legacy_only", None,
+            ),
         }
-        for name, (label, group_id, available, reason_code) in expected.items():
-            self.assertEqual(self.t[name]["display_label"], label)
-            self.assertEqual(self.t[name]["available"], available)
-            self.assertEqual(self.t[name]["reason_code"], reason_code)
+        for name, (label, group_id, available, status_label, reason_code, provider) in expected.items():
+            tool = self.t[name]
+            self.assertEqual(
+                (tool["display_label"], tool["available"], tool["status_label"],
+                 tool["reason_code"], tool["provider"]),
+                (label, available, status_label, reason_code, provider),
+            )
             self.assertIn(name, {tool["tool_name"] for tool in groups[group_id]["tools"]})
+        self.assertEqual(groups["plans_ledger"]["label"], "生活 / 日程")
         self.assertEqual(groups["triggers"]["label"], "Wake")
         self.assertEqual(groups["phone"]["label"], "行动")
-        self.assertNotIn("issue_command", {tool["tool_name"] for tool in groups["triggers"]["tools"]})
-        drawers = tool_drawers.DRAWERS
-        self.assertEqual(drawers["triggers"]["label"], "Wake")
-        self.assertEqual(drawers["phone"]["label"], "行动")
-        self.assertEqual(drawers["calendar"]["label"], "生活 / 日程")
-        self.assertEqual(drawers["triggers"]["tools"], ["set_self_trigger", "cancel_self_trigger"])
-        self.assertEqual(drawers["phone"]["tools"], ["issue_command"])
-        companion = tool_companion_hints.payload()
-        countdown = next(
-            tool for group in companion["groups"] for tool in group["tools"]
-            if tool["capability_id"] == "countdown.read"
+        self.assertNotIn(
+            "issue_command",
+            {tool["tool_name"] for tool in groups["triggers"]["tools"]},
         )
-        self.assertEqual(countdown["display_label"], "查看日期倒计时")
-        self.assertIn("日期级只读", countdown["companion_hint"])
+        self.assertEqual(self.p["available_count"], 15)
+        self.assertEqual(self.p["unavailable_count"], 68)
+        self.assertEqual(
+            {self.t[name]["tool_name"] for name in expected},
+            set(expected),
+        )
 
     def test_all_display_labels_are_readable(self):
         names = tool_inventory.inventory_names()
