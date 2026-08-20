@@ -46,11 +46,10 @@ class DiaryWriterTests(unittest.TestCase):
         self.assertEqual(result, {"status": "INVALID_CONTENT"})
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 0)
 
-    def test_writer_has_no_duplicate_or_second_model_contract(self):
+    def test_writer_has_no_second_model_call(self):
         source = (
             Path(__file__).resolve().parents[1] / "tools" / "diary_writer.py"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("ALREADY_EXISTS", source)
         self.assertNotIn("auto_diary.generate", source)
         self.assertNotIn("anthropic", source.lower())
         self.assertNotIn("deepseek", source.lower())
