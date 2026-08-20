@@ -78,11 +78,8 @@ def call_api(system, user_msg, api_key, api_url=None):
     )
 
 def save_diary(text):
-    import sys
-    if '/opt/frontend/tools' not in sys.path:
-        sys.path.insert(0, '/opt/frontend/tools')
-    import memory_tool
-    memory_tool.save_memory(text, type='DIARY', layer='recent')
+    from tools.diary_writer import write_diary
+    write_diary(text)
 
 def today_diary_exists():
     today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
