@@ -51,6 +51,7 @@ NON_P3_HOME_MCP_TOOLS: tuple[str, ...] = (
 
 HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
+    "diary.write",
     "home.light.status",
     "todo.read",
     "todo.write",
