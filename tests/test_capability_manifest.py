@@ -35,6 +35,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             P1_ENABLED_CAPABILITY_IDS,
             {
                 "memory.search",
+                "diary.write",
                 "home.light.status",
                 "todo.read",
                 "todo.write",
@@ -123,6 +124,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
     def test_enabled_bindings_are_only_provider_specific_metadata(self):
         expected_cc_bindings = {
             "memory.search": "mcp__home__search_memories",
+            "diary.write": "mcp__home__write_diary",
             "home.light.status": "mcp__home__get_light_status",
             "todo.read": "mcp__home__get_todos",
             "todo.write": "mcp__home__add_todo",
