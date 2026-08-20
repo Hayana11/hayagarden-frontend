@@ -1,0 +1,55 @@
+name: M2-01 capability state base-head validation
+
+on:
+  pull_request:
+    paths:
+      - "tools/capability_manifest.py"
+      - "tools/lease_signer.py"
+      - "tools/cc_capability_adapter.py"
+      - "tools/cc_usage_observability.py"
+      - "tools/execution_fence.py"
+      - "tools/capability_state.py"
+      - "chat/cc_runtime.py"
+      - "tests/test_execution_fence.py"
+      - "tests/test_capability_state.py"
+      - ".github/workflows/m2-01-capability-state-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  base-head:
+    name: ${{ matrix.label }} execution fence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            ref: ${{ github.event.pull_request.base.sha }}
+            tests: tests.test_execution_fence
+          - label: head
+            ref: ${{ github.event.pull_request.head.sha }}
+            tests: tests.test_execution_fence tests.test_capability_state
+    steps:
+      - name: Checkout exact ${{ matrix.label }} SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+
+      - name: Run exact ${{ matrix.label }} contract
+        run: python -m unittest ${{ matrix.tests }} -v
