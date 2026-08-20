@@ -80,12 +80,12 @@ vm.runInNewContext(text, {
   fetch: async () => ({ text: async () => '' }),
 });
 const gate = moduleValue.exports.runGatedHomeWrite;
-async function sample(uhA0Profile, verifyOk) {
+async function sample(uhA0Profile, verifyOk, toolName = 'mcp__home__add_todo') {
   let posts = 0;
   let verifies = 0;
   const result = await gate({
     uhA0Profile,
-    toolName: 'mcp__home__add_todo',
+    toolName,
     toolInput: { content: 'test-only' },
     verify: () => { verifies += 1; return verifyOk
       ? { ok: true } : { ok: false, result: { denied: true } }; },
@@ -98,9 +98,12 @@ async function sample(uhA0Profile, verifyOk) {
   const legacyLedger = await sample(false, false);
   const uhA0DeniedTodo = await sample(true, false);
   const uhA0DeniedLedger = await sample(true, false);
+  const uhA0DeniedDiary = await sample(true, false, 'mcp__home__write_diary');
   const uhA0Allowed = await sample(true, true);
+  const uhA0AllowedDiary = await sample(true, true, 'mcp__home__write_diary');
   process.stdout.write(JSON.stringify({
-    legacyTodo, legacyLedger, uhA0DeniedTodo, uhA0DeniedLedger, uhA0Allowed,
+    legacyTodo, legacyLedger, uhA0DeniedTodo, uhA0DeniedLedger,
+    uhA0DeniedDiary, uhA0Allowed, uhA0AllowedDiary,
   }));
 })();
 """.replace("__FILENAME__", source_path)
@@ -115,11 +118,12 @@ async function sample(uhA0Profile, verifyOk) {
         for key in ("legacyTodo", "legacyLedger"):
             self.assertEqual(result[key]["posts"], 1)
             self.assertEqual(result[key]["verifies"], 0)
-        for key in ("uhA0DeniedTodo", "uhA0DeniedLedger"):
+        for key in ("uhA0DeniedTodo", "uhA0DeniedLedger", "uhA0DeniedDiary"):
             self.assertEqual(result[key]["posts"], 0)
             self.assertEqual(result[key]["verifies"], 1)
-        self.assertEqual(result["uhA0Allowed"]["posts"], 1)
-        self.assertEqual(result["uhA0Allowed"]["verifies"], 1)
+        for key in ("uhA0Allowed", "uhA0AllowedDiary"):
+            self.assertEqual(result[key]["posts"], 1)
+            self.assertEqual(result[key]["verifies"], 1)
 
 
 if __name__ == "__main__":
