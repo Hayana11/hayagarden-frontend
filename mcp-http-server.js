@@ -31,12 +31,16 @@ function momentsOwnerToken() {
 
 async function runGatedHomeWrite({
   uhA0Profile,
+  requireUhA0Profile = false,
   toolName,
   toolInput,
   verify,
   post,
 }) {
-  // Legacy /mcp Wake calls deliberately retain their historical write path.
+  if (requireUhA0Profile && !uhA0Profile) {
+    return { content: [{ type: 'text', text: 'UH-A0 PROFILE_REQUIRED' }] };
+  }
+  // Other legacy /mcp Wake calls deliberately retain their historical write path.
   if (!uhA0Profile) return post();
   const gate = verify(toolName, toolInput);
   if (!gate || !gate.ok) {
@@ -104,6 +108,7 @@ function buildServer({ uhA0Profile = false } = {}) {
     },
     async ({ content }) => runGatedHomeWrite({
       uhA0Profile,
+      requireUhA0Profile: true,
       toolName: 'mcp__home__write_diary',
       toolInput: { content },
       verify: verifyCurrentHomeAction,
@@ -162,9 +167,6 @@ function buildServer({ uhA0Profile = false } = {}) {
         timeout: 5000,
       });
       const result = JSON.parse(raw || '{}');
-      if (result.status === 'ALREADY_EXISTS') {
-        return { content: [{ type: 'text', text: 'ALREADY_EXISTS' }] };
-      }
       if (result.status === 'CREATED') {
         return { content: [{ type: 'text', text: 'DIARY_CREATED' }] };
       }
