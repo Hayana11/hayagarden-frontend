@@ -336,5 +336,114 @@ class LedgerRouteTests(unittest.TestCase):
         self.assertNotIn('evil', meta)
 
 
+def _init_todo_tables(db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            done INTEGER DEFAULT 0,
+            due_date TEXT,
+            author TEXT,
+            created_at DATETIME DEFAULT (datetime('now','+8 hours'))
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+class TodoRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / 'todo-test.db')
+        _init_todo_tables(self.db_path)
+        self.get_db = _make_get_db(self.db_path)
+        self.patcher = mock.patch.object(app_module, 'get_db', self.get_db)
+        self.patcher.start()
+        self.client = app_module.app.test_client()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    def _insert(self, content='待办', done=0, due_date=None, author='fyodor'):
+        conn = self.get_db()
+        cur = conn.execute(
+            'INSERT INTO todos (content, done, due_date, author) VALUES (?,?,?,?)',
+            (content, done, due_date, author),
+        )
+        conn.commit()
+        todo_id = cur.lastrowid
+        conn.close()
+        return todo_id
+
+    def test_get_post_roundtrip_and_order(self):
+        response = self.client.post('/api/todos', json={
+            'content': '有日期',
+            'due_date': '2026-08-21',
+            'author': 'fyodor',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {'ok': True})
+
+        self._insert('无日期')
+        listed = self.client.get('/api/todos')
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(
+            [row['content'] for row in listed.get_json()['todos']],
+            ['有日期', '无日期'],
+        )
+
+    def test_post_empty_returns_400_without_insert(self):
+        response = self.client.post('/api/todos', json={'content': '  '})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {'error': 'content required'})
+        conn = self.get_db()
+        count = conn.execute('SELECT COUNT(*) FROM todos').fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+    def test_patch_toggle_and_delete_persist(self):
+        todo_id = self._insert()
+        patched = self.client.patch(
+            f'/api/todos/{todo_id}',
+            json={'done': True},
+        )
+        self.assertEqual(patched.status_code, 200)
+        self.assertEqual(patched.get_json()['done'], 1)
+
+        toggled = self.client.post(f'/api/todos/{todo_id}/toggle')
+        self.assertEqual(toggled.status_code, 200)
+        conn = self.get_db()
+        row = conn.execute(
+            'SELECT done FROM todos WHERE id=?', (todo_id,)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row['done'], 0)
+
+        deleted = self.client.delete(f'/api/todos/{todo_id}')
+        self.assertEqual(deleted.status_code, 200)
+        conn = self.get_db()
+        remaining = conn.execute(
+            'SELECT COUNT(*) FROM todos WHERE id=?', (todo_id,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(remaining, 0)
+
+    def test_patch_validation_and_missing_row(self):
+        missing_done = self.client.patch('/api/todos/99999', json={})
+        self.assertEqual(missing_done.status_code, 400)
+        self.assertEqual(missing_done.get_json(), {'error': 'done required'})
+
+        missing_row = self.client.patch(
+            '/api/todos/99999',
+            json={'done': True},
+        )
+        self.assertEqual(missing_row.status_code, 404)
+        self.assertEqual(missing_row.get_json(), {'error': 'not found'})
+
+
 if __name__ == '__main__':
     unittest.main()
