@@ -80,6 +80,18 @@ class CapabilityManifestContractTests(unittest.TestCase):
             ):
                 self.assertTrue(str(item[text_field]).strip(), (capability_id, text_field))
 
+    def test_diary_write_is_self_authored_chat_capability(self):
+        item = get_capability("diary.write")
+        self.assertEqual(item["display_name"], "记日记")
+        self.assertEqual(item["kind"], "write")
+        self.assertEqual(item["side_effect"], "external_state")
+        self.assertEqual(item["autonomy_mode"], "self_write_auto")
+        self.assertEqual(item["loading_policy"], "deferred")
+        self.assertEqual(
+            item["provider_bindings"]["claude_code"],
+            "mcp__home__write_diary",
+        )
+
     def test_p1_loading_policy_matches_frozen_visibility_contract(self):
         self.assertEqual(get_capability("memory.search")["loading_policy"], "always_load")
         for capability_id in (
