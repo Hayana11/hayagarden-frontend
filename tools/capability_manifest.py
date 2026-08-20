@@ -61,7 +61,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "trigger": "一天里发生了让我在意的事、和她聊过什么、某种情绪停留得比平时久，或者我只是忽然想替今天留下一页时。",
         "purpose": "把 Fyodor 自己想留下的当日内容写入日记，不替用户修改待办、账本或长期记忆。",
         "deny_when": "当前没有值得留下的内容，或内容不是 Fyodor 自己要写的日记时。",
-        "failure_behavior": "明确说明没有写入；不得伪造成功或把重复日记说成已创建。",
+        "failure_behavior": "明确说明没有写入；不得伪造成功。",
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "mcp__home__write_diary"},
     },
