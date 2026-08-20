@@ -304,6 +304,10 @@ class ResidentSession:
         # gunicorn worker lazily invalidates after a rewrite, even when the
         # app→gateway bridge only eagers one worker.
         self._history_rewrite_epoch = ''
+        # M2-02B: surface identity bound to the currently alive UH-A0 process.
+        # It is written only after Popen succeeds and is intentionally not
+        # refreshed by _reset_session_meta or by a failed spawn.
+        self._bound_tool_surface_fingerprint = None
         # No-benefit respawn loop breaker (P0 cold-storm fix, Fence C).
         # Deliberately *not* reset by ``_reset_session_meta`` / ``_spawn`` —
         # the estimate/generation pair must survive across the respawn it gates.
@@ -352,6 +356,7 @@ class ResidentSession:
                 'extra': ['--allowedTools', ''],
                 'surface_allowed': '',
                 'mcp_path': None,
+                'surface_fingerprint': None,
             }
         if self._tool_profile == TOOL_PROFILE_UH_A0:
             from tools.cc_capability_adapter import build_uh_a0_spawn_plan
@@ -368,6 +373,7 @@ class ResidentSession:
                 'extra': list(plan['spawn_extra_args']),
                 'surface_allowed': plan['surface_allowlist_csv'],
                 'mcp_path': plan['mcp_config_path'],
+                'surface_fingerprint': plan['physical_surface_fingerprint'],
             }
         return {
             'tools': '',
@@ -378,7 +384,17 @@ class ResidentSession:
             ],
             'surface_allowed': self._allowed_tools,
             'mcp_path': self._mcp_config_path,
+            'surface_fingerprint': None,
         }
+
+    def _require_spawn_surface_fingerprint(self, tool_flags):
+        """Validate the surface identity before creating a UH-A0 process."""
+        if self._tool_profile != TOOL_PROFILE_UH_A0:
+            return None
+        fingerprint = str(tool_flags.get('surface_fingerprint') or '').strip()
+        if not fingerprint:
+            raise ResidentError('uh_a0_surface_fingerprint_missing')
+        return fingerprint
 
     def _capture_tool_surface(self, tool_flags):
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
@@ -404,6 +420,7 @@ class ResidentSession:
             raise ResidentError('claude_runtime:%s' % exc) from exc
         _model, model_identity, model_args = cc_model_snapshot()
         tool_flags = self._build_spawn_tool_flags(env=env)
+        surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
         base_args = claude_cmd(
             '-p',
             '--input-format', 'stream-json',
@@ -421,6 +438,8 @@ class ResidentSession:
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, cwd=self._cwd, env=env,
         )
+        if surface_fingerprint is not None:
+            self._bound_tool_surface_fingerprint = surface_fingerprint
         # Bind epoch only after a successful spawn. A failed Popen must leave
         # the prior (stale) binding so hot reuse stays forbidden.
         try:
@@ -523,6 +542,26 @@ class ResidentSession:
             and self._turns_since_respawn >= min_between
         ):
             return 'soft_context'
+
+        # M2-02B is lazy invalidation: compare only at the read-only
+        # pre-stdin decision boundary. The adapter fingerprint is pure and
+        # fail-closed, so storage failure cannot keep an open resident hot.
+        if (
+            str(tool_profile or TOOL_PROFILE_LEGACY) == TOOL_PROFILE_UH_A0
+            and str(self._tool_profile or TOOL_PROFILE_LEGACY) == TOOL_PROFILE_UH_A0
+        ):
+            bound_surface = str(
+                getattr(self, '_bound_tool_surface_fingerprint', None) or ''
+            ).strip()
+            if bound_surface:
+                try:
+                    from tools.cc_capability_adapter import physical_surface_fingerprint
+                    current_surface = str(physical_surface_fingerprint() or '').strip()
+                except Exception:
+                    current_surface = ''
+                if current_surface != bound_surface:
+                    return 'tool_surface_changed'
+
         return None
 
     def ensure_alive(self, system_text, env, *, tool_profile=TOOL_PROFILE_LEGACY):
@@ -574,6 +613,7 @@ class ResidentSession:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
+            surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
             base_args = claude_cmd(
                 '-p',
                 '--input-format', 'stream-json',
@@ -596,6 +636,8 @@ class ResidentSession:
             except Exception as exc:
                 self._proc = None
                 raise ResidentError('staged_spawn_failed:%s' % exc) from exc
+            if surface_fingerprint is not None:
+                self._bound_tool_surface_fingerprint = surface_fingerprint
             try:
                 from chat.cc_history_rewrite import (
                     current_history_rewrite_epoch,
@@ -766,6 +808,7 @@ class ResidentSession:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
+            surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
             base_args = claude_cmd(
                 '-p',
                 '--input-format', 'stream-json',
@@ -792,6 +835,8 @@ class ResidentSession:
             except Exception as exc:
                 self._proc = None
                 raise ResidentError('staged_spawn_failed:%s' % exc) from exc
+            if surface_fingerprint is not None:
+                self._bound_tool_surface_fingerprint = surface_fingerprint
             self._system_text = system_text
             self._model_identity = model_identity
             self._session_id = session_id
@@ -1536,6 +1581,13 @@ class ResidentSession:
     @property
     def mcp_config_path(self):
         return self._mcp_config_path
+
+    @property
+    def bound_tool_surface_fingerprint(self):
+        """Fingerprint bound to the currently alive process generation, if trusted."""
+        return str(
+            getattr(self, '_bound_tool_surface_fingerprint', None) or ''
+        ) or None
 
     @property
     def tool_surface_snapshot(self):
