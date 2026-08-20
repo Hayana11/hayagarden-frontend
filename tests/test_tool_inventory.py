@@ -53,6 +53,7 @@ class ToolInventoryTest(unittest.TestCase):
         ):
             self.assertTrue(self.t[name]["available"])
             self.assertEqual(self.t[name]["reason_code"], "active")
+            self.assertNotIn(name, tool_inventory._GRAY)
             self.assertEqual(self.t[name]["provider"], provider)
             self.assertEqual(self.t[name]["display_label"], label)
 
