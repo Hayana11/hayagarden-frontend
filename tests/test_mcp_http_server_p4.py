@@ -21,6 +21,17 @@ class HomeMcpP4Tests(unittest.TestCase):
         self.assertIn("runGatedHomeWrite", source)
         self.assertIn("buildServer({ uhA0Profile })", source)
 
+    def test_diary_provider_is_narrow_and_gated(self):
+        source = SERVER.read_text(encoding="utf-8")
+        start = source.index("  server.tool(\n    'write_diary'")
+        end = source.index("  server.tool(", start + 1)
+        block = source[start:end]
+        self.assertIn("mcp__home__write_diary", block)
+        self.assertIn("runGatedHomeWrite", block)
+        self.assertIn("toolInput: { content }", block)
+        for forbidden in ("type", "layer", "author", "processed", "metadata"):
+            self.assertNotIn(forbidden, block)
+
     def test_legacy_and_uh_a0_post_counts_without_production_write(self):
         node = shutil.which("node")
         if not node:
