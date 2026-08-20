@@ -59,6 +59,22 @@ class ExecutionFenceTests(unittest.TestCase):
             result = evaluate_tool_call(tool, {"query": "x"}, self.lease(mode="wake"))
             self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
 
+    def test_c_diary_chat_auto_allows_without_approval(self):
+        result = evaluate_tool_call(
+            "mcp__home__write_diary", {"content": "今天值得留下的一页"}, self.lease()
+        )
+        self.assertEqual(result["capability_id"], "diary.write")
+        self.assertEqual(result["lease_decision"], "ALLOW")
+        self.assertNotIn("approval_id", result)
+        self.assertEqual(
+            evaluate_tool_call(
+                "mcp__home__write_diary",
+                {"content": "Wake 不应写入"},
+                self.lease(mode="wake"),
+            )["lease_decision"],
+            "DENIED_CAPABILITY",
+        )
+
     def test_c_chat_native_read_denied(self):
         self.assertEqual(
             evaluate_tool_call("Read", {"file_path": "x"}, self.lease())["lease_decision"],
