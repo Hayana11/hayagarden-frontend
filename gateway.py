@@ -1421,7 +1421,7 @@ CALENDAR_TOOLS = [
     },
     {
         'name': 'get_countdowns',
-        'description': '查看所有日期/事件倒计时（如生日、纪念日等），只读；返回距离目标日期还有多少天。',
+        'description': '查看所有倒计时/纪念日（在一起多久、生日倒数等）。',
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {
@@ -1637,10 +1637,11 @@ _BASE_TOOLS = [
     },
     {
         'name': 'issue_command',
-        'description': ('给她一个需要现在完成的短任务，并启动秒级行动倒计时；'
-                        '倒计时结束后进入超时状态，完成或取消后可反馈实际用时。'
+        'description': ('给哈娅下一个带倒计时的任务，会以浮窗形式跳出来、数字实时倒数。'
+                        '合适的时机：她说要去做某件事（读书/洗澡/喝水/运动/睡觉），你可以顺手给她定个时长把她按下去；'
+                        '或者你看她聊了半天还在拖、该做的事没做，主动推一个逼她动。'
                         'countdown_seconds 是倒计时秒数（如 25 分钟=1500），不传则只计时不倒数。'
-                        '这不是未来 Wake 提醒。'),
+                        '这不是提醒，是你在管她——她取消了你会知道，做慢了你也会知道。'),
         'input_schema': {'type': 'object', 'properties': {
             'title': {'type': 'string', 'description': '任务标题，如"安静读 25 分钟""去喝水"'},
             'countdown_seconds': {'type': 'integer', 'description': '倒计时秒数，不传=只计时'},
@@ -1788,7 +1789,7 @@ _BASE_TOOLS = [
     },
     {
         'name': 'set_self_trigger',
-        'description': '设置延时主动联系：若干分钟后让 Wake 重新联系哈娅并主动联系她；这是未来 Wake，不是前端秒级行动倒计时。',
+        'description': '给自己设定时提醒：X分钟后主动联系哈娅。对话里承诺"一会儿提醒你"时使用。',
         'input_schema': {'type': 'object', 'properties': {
             'minutes': {'type': 'integer', 'description': '多少分钟后触发，1-1440'},
             'note': {'type': 'string', 'description': '触发时想说的话或上下文'},
@@ -1796,7 +1797,7 @@ _BASE_TOOLS = [
     },
     {
         'name': 'cancel_self_trigger',
-        'description': '取消之前设置的延时主动联系；不传 id 则取消全部。',
+        'description': '取消之前设的自定义提醒。不传id则取消全部。',
         'input_schema': {'type': 'object', 'properties': {
             'id': {'type': 'integer', 'description': 'trigger id，不传则取消全部'},
         }},
