@@ -70,6 +70,11 @@ _HOME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"keyword": {"type": "string"}},
         "required": ["keyword"],
     },
+    "mcp__home__write_diary": {
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "required": ["content"],
+    },
     "mcp__home__collect_chat_moment": {
         "type": "object",
         "properties": {
