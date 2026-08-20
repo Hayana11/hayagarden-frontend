@@ -1,4 +1,4 @@
-import React, { useSyncExternalStore } from 'react';
+import { useSyncExternalStore } from 'react';
 import type {
   CompiledRealityPrompt,
   RealityPromptSegment,

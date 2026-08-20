@@ -12,8 +12,10 @@ export class RealityPromptProjection {
   private readonly listeners = new Set<() => void>();
   private readonly unsubscribeSource: () => void;
   private disposed = false;
+  private readonly store: RealityStore;
 
-  constructor(private readonly store: RealityStore = realityStore) {
+  constructor(store: RealityStore = realityStore) {
+    this.store = store;
     this.current = compileRealityContext(this.store.getSnapshot());
     this.unsubscribeSource = this.store.subscribe(() => {
       this.refresh();

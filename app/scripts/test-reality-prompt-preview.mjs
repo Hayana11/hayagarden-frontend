@@ -31,7 +31,7 @@ const canonicalPrompt = {
 
 const canonicalMarkup = render(canonicalPrompt);
 const canonicalTextMarkup = canonicalMarkup.match(
-  /<p class="reality-prompt-text"[^>]*>(.*?)<\\/p>/,
+  /<p class="reality-prompt-text"[^>]*>(.*?)<\/p>/,
 )?.[1] ?? '';
 assert.equal(stripMarkup(canonicalTextMarkup), canonicalPrompt.text);
 assert.ok(canonicalMarkup.includes('<strong>静止</strong>'));
