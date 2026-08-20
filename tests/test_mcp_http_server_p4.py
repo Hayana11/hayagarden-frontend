@@ -19,6 +19,7 @@ class HomeMcpP4Tests(unittest.TestCase):
         self.assertIn("x-uh-a0-profile", source)
         self.assertIn("uh_a0", source)
         self.assertIn("runGatedHomeWrite", source)
+        self.assertIn("requireUhA0Profile", source)
         self.assertIn("buildServer({ uhA0Profile })", source)
 
     def test_diary_provider_is_narrow_and_gated(self):
@@ -80,11 +81,17 @@ vm.runInNewContext(text, {
   fetch: async () => ({ text: async () => '' }),
 });
 const gate = moduleValue.exports.runGatedHomeWrite;
-async function sample(uhA0Profile, verifyOk, toolName = 'mcp__home__add_todo') {
+async function sample(
+  uhA0Profile,
+  verifyOk,
+  toolName = 'mcp__home__add_todo',
+  requireUhA0Profile = false,
+) {
   let posts = 0;
   let verifies = 0;
   const result = await gate({
     uhA0Profile,
+    requireUhA0Profile,
     toolName,
     toolInput: { content: 'test-only' },
     verify: () => { verifies += 1; return verifyOk
@@ -96,14 +103,22 @@ async function sample(uhA0Profile, verifyOk, toolName = 'mcp__home__add_todo') {
 (async () => {
   const legacyTodo = await sample(false, false);
   const legacyLedger = await sample(false, false);
+  const legacyDiaryDenied = await sample(
+    false, true, 'mcp__home__write_diary', true
+  );
   const uhA0DeniedTodo = await sample(true, false);
   const uhA0DeniedLedger = await sample(true, false);
-  const uhA0DeniedDiary = await sample(true, false, 'mcp__home__write_diary');
+  const uhA0DeniedDiary = await sample(
+    true, false, 'mcp__home__write_diary', true
+  );
   const uhA0Allowed = await sample(true, true);
-  const uhA0AllowedDiary = await sample(true, true, 'mcp__home__write_diary');
+  const uhA0AllowedDiary = await sample(
+    true, true, 'mcp__home__write_diary', true
+  );
   process.stdout.write(JSON.stringify({
-    legacyTodo, legacyLedger, uhA0DeniedTodo, uhA0DeniedLedger,
-    uhA0DeniedDiary, uhA0Allowed, uhA0AllowedDiary,
+    legacyTodo, legacyLedger, legacyDiaryDenied,
+    uhA0DeniedTodo, uhA0DeniedLedger, uhA0DeniedDiary,
+    uhA0Allowed, uhA0AllowedDiary,
   }));
 })();
 """.replace("__FILENAME__", source_path)
@@ -118,6 +133,8 @@ async function sample(uhA0Profile, verifyOk, toolName = 'mcp__home__add_todo') {
         for key in ("legacyTodo", "legacyLedger"):
             self.assertEqual(result[key]["posts"], 1)
             self.assertEqual(result[key]["verifies"], 0)
+        self.assertEqual(result["legacyDiaryDenied"]["posts"], 0)
+        self.assertEqual(result["legacyDiaryDenied"]["verifies"], 0)
         for key in ("uhA0DeniedTodo", "uhA0DeniedLedger", "uhA0DeniedDiary"):
             self.assertEqual(result[key]["posts"], 0)
             self.assertEqual(result[key]["verifies"], 1)
