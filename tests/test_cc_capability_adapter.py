@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import cc_resident
+import chat.cc_history_rewrite
 import chat.daily_runtime as daily_runtime
 from tools.cc_tool_surface import _HOME_TOOL_SCHEMAS
 from tools.capability_manifest import (
@@ -275,11 +276,17 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             # once a live generation exists (process_dead otherwise wins).
             session._tool_profile = cc_resident.TOOL_PROFILE_TEXT_ONLY
             session._system_text = "SYS"
+            session._history_rewrite_epoch = "test-epoch"
             session._proc = mock.Mock(poll=mock.Mock(return_value=None))
-            reason = session._decide_respawn_reason(
-                "SYS",
-                tool_profile=cc_resident.TOOL_PROFILE_UH_A0,
-            )
+            with mock.patch.object(
+                chat.cc_history_rewrite,
+                "current_history_rewrite_epoch",
+                return_value="test-epoch",
+            ):
+                reason = session._decide_respawn_reason(
+                    "SYS",
+                    tool_profile=cc_resident.TOOL_PROFILE_UH_A0,
+                )
             self.assertEqual(reason, "tool_profile_changed")
             session._proc = None
 
