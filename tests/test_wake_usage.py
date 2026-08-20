@@ -166,9 +166,14 @@ class WakeExecutorUsageTests(unittest.TestCase):
             "SELECT author, content, thinking, cache_info FROM chat_messages"
         ).fetchone()
         conn.close()
-        self.assertEqual(json.loads(wake_raw), cache_info)
+        expected_cache_info = {
+            **cache_info,
+            "wake_mode": "normal",
+            "canonical_chat_history": False,
+        }
+        self.assertEqual(json.loads(wake_raw), expected_cache_info)
         self.assertEqual(chat_row[:3], ("fyodor", "hello", "thought"))
-        self.assertEqual(json.loads(chat_row[3]), cache_info)
+        self.assertEqual(json.loads(chat_row[3]), expected_cache_info)
 
     def test_none_action_still_persists_hidden_model_spend(self):
         cache_info = {"v": 2, "provider": "api_relay", "source": "wake", "cost_usd": 0.3}
