@@ -303,8 +303,9 @@ class ExecutionFenceTests(unittest.TestCase):
             set(physical_surface_names()),
             {
                 "Read", "Glob", "Grep", "WebSearch", "WebFetch",
-                "mcp__home__search_memories", "mcp__home__get_light_status",
-                "mcp__home__get_todos", "mcp__home__add_todo",
+                "mcp__home__search_memories", "mcp__home__write_diary",
+                "mcp__home__get_light_status", "mcp__home__get_todos",
+                "mcp__home__add_todo",
                 "mcp__home__get_countdowns", "mcp__home__get_ledger",
                 "mcp__home__get_ledger_budget", "mcp__home__add_ledger",
             },
