@@ -142,8 +142,12 @@ function assertInitial(store) {
 
 assert.equal(PHYSICAL_POLL_MS, 500);
 
+let immediateReads = 0;
 const validBridge = {
-  getPhysicalState: () => validJson(0),
+  getPhysicalState: () => {
+    immediateReads += 1;
+    return validJson(0);
+  },
 };
 const visibleStore = new RealityStore();
 const visibleEnvironment = createEnvironment({
@@ -155,7 +159,7 @@ const visibleRuntime = new PhysicalRealityRuntime(
   visibleEnvironment,
 );
 visibleRuntime.start();
-assert.equal(visibleEnvironment.metrics.bridgeReads, 0);
+assert.equal(immediateReads, 1);
 assert.equal(visibleStore.getSnapshot().physical.observedAt, 1000);
 assert.equal(visibleStore.getSnapshot().physical.facts.orientation, "face_up");
 
