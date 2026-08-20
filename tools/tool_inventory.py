@@ -101,7 +101,7 @@ _ACTIVE={
 "read_webpage":_tool("read_webpage","读取网页",available=True,reason_code="active",provider="Claude Code WebFetch"),
 "get_light_status":_tool("get_light_status","查看灯光状态",available=True,reason_code="active",provider="mcp__home__get_light_status"),
 "get_todos":_tool("get_todos","查看待办",available=True,reason_code="active",provider="mcp__home__get_todos"),
-"get_countdowns":_tool("get_countdowns","查看倒计时",available=True,reason_code="active",provider="mcp__home__get_countdowns"),
+"get_countdowns":_tool("get_countdowns","查看日期倒计时",available=True,reason_code="active",provider="mcp__home__get_countdowns"),
 "get_ledger":_tool("get_ledger","查看账本",available=True,reason_code="active",provider="mcp__home__get_ledger"),
 "get_ledger_budget":_tool("get_ledger_budget","查看预算",available=True,reason_code="active",provider="mcp__home__get_ledger_budget"),
 "codebase_describe_project":_tool("codebase_describe_project","读取项目架构",available=True,reason_code="active",provider="mcp__codebase"),
