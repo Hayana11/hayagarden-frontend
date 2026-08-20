@@ -99,6 +99,8 @@ def _tool(tool_name: str, display_label: str, *, available: bool=False, reason_c
 _ACTIVE={
 "search_memories":_tool("search_memories","搜索长期记忆",available=True,reason_code="active",provider="mcp__home__search_memories"),
 "write_diary":_tool("write_diary","记日记",available=True,reason_code="active",provider="mcp__home__write_diary"),
+"add_todo":_tool("add_todo","记录待办",available=True,reason_code="active",provider="mcp__home__add_todo"),
+"add_ledger":_tool("add_ledger","记一笔账",available=True,reason_code="active",provider="mcp__home__add_ledger"),
 "web_search":_tool("web_search","搜索网页",available=True,reason_code="active",provider="Claude Code WebSearch"),
 "read_webpage":_tool("read_webpage","读取网页",available=True,reason_code="active",provider="Claude Code WebFetch"),
 "get_light_status":_tool("get_light_status","查看灯光状态",available=True,reason_code="active",provider="mcp__home__get_light_status"),
@@ -115,8 +117,6 @@ _ACTIVE={
 "codebase_explain_history":_tool("codebase_explain_history","解释代码历史",available=True,reason_code="active",provider="mcp__codebase")}
 _GRAY={
 "browse_github":_tool("browse_github","浏览 GitHub",reason_code="provider_blocked",provider="gateway._github_browse"),
-"add_todo":_tool("add_todo","记录待办",available=True,reason_code="active",provider="mcp__home__add_todo"),
-"add_ledger":_tool("add_ledger","记一笔账",available=True,reason_code="active",provider="mcp__home__add_ledger"),
 "collect_chat_moment":_tool("collect_chat_moment","收藏聊天到朋友圈",reason_code="prerequisite_unproven",provider="mcp__home__collect_chat_moment"),
 "light_on":_tool("light_on","开灯",reason_code="contract_disabled",provider="mcp__home__light_on"),
 "light_off":_tool("light_off","关灯",reason_code="contract_disabled",provider="mcp__home__light_off"),
