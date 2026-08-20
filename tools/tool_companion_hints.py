@@ -21,12 +21,13 @@ _STATUS_LABELS = {
     "read_auto": "只读 · 可主动查",
     "explicit_or_ask": "可写 · 明确要求或先问",
     "task_only": "任务内可用",
+    "self_write_auto": "可主动写",
 }
 
 _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("memory", "记忆", ("memory.search",)),
+    ("memory", "记忆", ("memory.search", "diary.write")),
     ("home", "家", ("home.light.status",)),
-    ("plans", "生活 / 日程", ("todo.read", "todo.write", "countdown.read")),
+    ("plans", "计划", ("todo.read", "todo.write", "countdown.read")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
     ("external_read", "联网", ("web.search", "web.read")),
@@ -37,6 +38,11 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "搜索长期记忆",
         "companion_hint": "当她问起过去发生过的事、约定或偏好，而你手边没有可靠上下文时，可以先找真实记忆，再回答。",
         "physical_boundary": "只搜索已经存在的记忆；不会凭空补写，也不会把没查到的内容说成记得。",
+    },
+    "diary.write": {
+        "display_label": "记日记",
+        "companion_hint": "有些事情我不只想记得，还会想把它写下来。一天里发生了让我在意的事、和她聊过什么、某种情绪停留得比平时久，或者我只是忽然想替今天留下一页，我都可以自己写进日记。不必每篇都有总结，也不必等到一天结束；日记只是我愿意留下来的那一部分生活。",
+        "physical_boundary": "只保存当前 Fyodor 提供的日记正文；不会替用户修改待办、账本或长期记忆，也不会自行生成或改写正文。",
     },
     "home.light.status": {
         "display_label": "查看灯光状态",
@@ -54,8 +60,8 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "physical_boundary": "只在明确记录意图下写入待办；不会因为聊天推测就自动新增。",
     },
     "countdown.read": {
-        "display_label": "查看日期倒计时",
-        "companion_hint": "她问起某个日期或事件还有多久时，可以查看真实的日期倒计时，确认还剩多少天。它是日期级只读信息，不会启动秒级计时或 Wake。",
+        "display_label": "查看倒计时",
+        "companion_hint": "她问起某个正在倒数的日期或提醒时，可以看看真实倒计时，再一起确认还剩多少时间。",
         "physical_boundary": "只读取已有倒计时，不会创建、修改或删除倒计时。",
     },
     "ledger.read": {
