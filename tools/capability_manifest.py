@@ -33,7 +33,7 @@ CAPABILITY_FIELDS = (
 CAPABILITY_KINDS = frozenset({"read", "write", "execute"})
 CAPABILITY_SIDE_EFFECTS = frozenset({"none", "external_state", "code_or_process"})
 CAPABILITY_AUTONOMY_MODES = frozenset(
-    {"read_auto", "explicit_or_ask", "task_only", "never_auto"}
+    {"read_auto", "explicit_or_ask", "task_only", "never_auto", "self_write_auto"}
 )
 CAPABILITY_LOADING_POLICIES = frozenset({"always_load", "deferred", "task_scoped"})
 
@@ -51,6 +51,19 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "failure_behavior": "明确说明未能查询或未找到，不得假装记得或查到。",
         "loading_policy": "always_load",
         "provider_bindings": {"claude_code": "mcp__home__search_memories"},
+    },
+    {
+        "capability_id": "diary.write",
+        "display_name": "记日记",
+        "kind": "write",
+        "side_effect": "external_state",
+        "autonomy_mode": "self_write_auto",
+        "trigger": "一天里发生了让我在意的事、和她聊过什么、某种情绪停留得比平时久，或者我只是忽然想替今天留下一页时。",
+        "purpose": "把 Fyodor 自己想留下的当日内容写入日记，不替用户修改待办、账本或长期记忆。",
+        "deny_when": "当前没有值得留下的内容，或内容不是 Fyodor 自己要写的日记时。",
+        "failure_behavior": "明确说明没有写入；不得伪造成功。",
+        "loading_policy": "deferred",
+        "provider_bindings": {"claude_code": "mcp__home__write_diary"},
     },
     {
         "capability_id": "home.light.status",
@@ -266,6 +279,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
 P1_ENABLED_CAPABILITY_IDS = frozenset(
     {
         "memory.search",
+        "diary.write",
         "home.light.status",
         "todo.read",
         "todo.write",

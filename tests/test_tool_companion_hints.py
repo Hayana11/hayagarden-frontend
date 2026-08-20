@@ -34,7 +34,7 @@ class ToolCompanionHintsTest(unittest.TestCase):
     def test_catalog_is_exactly_the_enabled_manifest(self):
         grouped = [cid for _, _, ids in hints._EXPECTED_GROUPS for cid in ids]
         self.assertEqual(set(grouped), set(P1_ENABLED_CAPABILITY_IDS))
-        self.assertEqual(len(grouped), 13)
+        self.assertEqual(len(grouped), 14)
         self.assertEqual(len(grouped), len(set(grouped)))
         self.assertEqual(set(hints._DEFAULTS), set(P1_ENABLED_CAPABILITY_IDS))
 
@@ -68,6 +68,16 @@ class ToolCompanionHintsTest(unittest.TestCase):
             self.assertIn(phrase, boundary)
         self.assertIn('不读取亮度或色温', boundary)
         self.assertIn('不能开关灯', boundary)
+
+    def test_diary_hint_and_status_are_human_facing(self):
+        tools = {
+            tool['capability_id']: tool
+            for group in hints.payload()['groups']
+            for tool in group['tools']
+        }
+        self.assertEqual(tools['diary.write']['display_label'], '记日记')
+        self.assertEqual(tools['diary.write']['status_label'], '可主动写')
+        self.assertIn('有些事情我不只想记得', tools['diary.write']['companion_hint'])
 
     def test_status_label_comes_from_manifest_autonomy_mode(self):
         tools = {

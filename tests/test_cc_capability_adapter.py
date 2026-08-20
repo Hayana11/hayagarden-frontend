@@ -9,6 +9,7 @@ from unittest import mock
 
 import cc_resident
 import chat.daily_runtime as daily_runtime
+from tools.cc_tool_surface import _HOME_TOOL_SCHEMAS
 from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
@@ -68,11 +69,12 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 8)
+        self.assertEqual(len(home), 9)
         self.assertEqual(
             set(home),
             {
                 "mcp__home__search_memories",
+                "mcp__home__write_diary",
                 "mcp__home__get_light_status",
                 "mcp__home__get_todos",
                 "mcp__home__add_todo",
@@ -93,6 +95,11 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertNotIn("brain", cfg["mcpServers"])
         self.assertNotIn("codebase", cfg["mcpServers"])
         self.assertNotIn("workspace", cfg["mcpServers"])
+
+    def test_c_diary_surface_schema_is_content_only(self):
+        schema = _HOME_TOOL_SCHEMAS["mcp__home__write_diary"]
+        self.assertEqual(set(schema["properties"]), {"content"})
+        self.assertEqual(schema["required"], ["content"])
 
     def test_d_reserved_fail_closed(self):
         surface = physical_surface_names()

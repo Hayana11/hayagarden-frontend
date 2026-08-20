@@ -19,7 +19,19 @@ class HomeMcpP4Tests(unittest.TestCase):
         self.assertIn("x-uh-a0-profile", source)
         self.assertIn("uh_a0", source)
         self.assertIn("runGatedHomeWrite", source)
+        self.assertIn("requireUhA0Profile", source)
         self.assertIn("buildServer({ uhA0Profile })", source)
+
+    def test_diary_provider_is_narrow_and_gated(self):
+        source = SERVER.read_text(encoding="utf-8")
+        start = source.index("  server.tool(\n    'write_diary'")
+        end = source.index("  server.tool(", start + 1)
+        block = source[start:end]
+        self.assertIn("mcp__home__write_diary", block)
+        self.assertIn("runGatedHomeWrite", block)
+        self.assertIn("toolInput: { content }", block)
+        for forbidden in ("type", "layer", "author", "processed", "metadata"):
+            self.assertNotIn(forbidden, block)
 
     def test_legacy_and_uh_a0_post_counts_without_production_write(self):
         node = shutil.which("node")
@@ -69,12 +81,18 @@ vm.runInNewContext(text, {
   fetch: async () => ({ text: async () => '' }),
 });
 const gate = moduleValue.exports.runGatedHomeWrite;
-async function sample(uhA0Profile, verifyOk) {
+async function sample(
+  uhA0Profile,
+  verifyOk,
+  toolName = 'mcp__home__add_todo',
+  requireUhA0Profile = false,
+) {
   let posts = 0;
   let verifies = 0;
   const result = await gate({
     uhA0Profile,
-    toolName: 'mcp__home__add_todo',
+    requireUhA0Profile,
+    toolName,
     toolInput: { content: 'test-only' },
     verify: () => { verifies += 1; return verifyOk
       ? { ok: true } : { ok: false, result: { denied: true } }; },
@@ -85,11 +103,22 @@ async function sample(uhA0Profile, verifyOk) {
 (async () => {
   const legacyTodo = await sample(false, false);
   const legacyLedger = await sample(false, false);
+  const legacyDiaryDenied = await sample(
+    false, true, 'mcp__home__write_diary', true
+  );
   const uhA0DeniedTodo = await sample(true, false);
   const uhA0DeniedLedger = await sample(true, false);
+  const uhA0DeniedDiary = await sample(
+    true, false, 'mcp__home__write_diary', true
+  );
   const uhA0Allowed = await sample(true, true);
+  const uhA0AllowedDiary = await sample(
+    true, true, 'mcp__home__write_diary', true
+  );
   process.stdout.write(JSON.stringify({
-    legacyTodo, legacyLedger, uhA0DeniedTodo, uhA0DeniedLedger, uhA0Allowed,
+    legacyTodo, legacyLedger, legacyDiaryDenied,
+    uhA0DeniedTodo, uhA0DeniedLedger, uhA0DeniedDiary,
+    uhA0Allowed, uhA0AllowedDiary,
   }));
 })();
 """.replace("__FILENAME__", source_path)
@@ -104,11 +133,14 @@ async function sample(uhA0Profile, verifyOk) {
         for key in ("legacyTodo", "legacyLedger"):
             self.assertEqual(result[key]["posts"], 1)
             self.assertEqual(result[key]["verifies"], 0)
-        for key in ("uhA0DeniedTodo", "uhA0DeniedLedger"):
+        self.assertEqual(result["legacyDiaryDenied"]["posts"], 0)
+        self.assertEqual(result["legacyDiaryDenied"]["verifies"], 0)
+        for key in ("uhA0DeniedTodo", "uhA0DeniedLedger", "uhA0DeniedDiary"):
             self.assertEqual(result[key]["posts"], 0)
             self.assertEqual(result[key]["verifies"], 1)
-        self.assertEqual(result["uhA0Allowed"]["posts"], 1)
-        self.assertEqual(result["uhA0Allowed"]["verifies"], 1)
+        for key in ("uhA0Allowed", "uhA0AllowedDiary"):
+            self.assertEqual(result[key]["posts"], 1)
+            self.assertEqual(result[key]["verifies"], 1)
 
 
 if __name__ == "__main__":

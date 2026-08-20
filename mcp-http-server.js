@@ -31,12 +31,16 @@ function momentsOwnerToken() {
 
 async function runGatedHomeWrite({
   uhA0Profile,
+  requireUhA0Profile = false,
   toolName,
   toolInput,
   verify,
   post,
 }) {
-  // Legacy /mcp Wake calls deliberately retain their historical write path.
+  if (requireUhA0Profile && !uhA0Profile) {
+    return { content: [{ type: 'text', text: 'UH-A0 PROFILE_REQUIRED' }] };
+  }
+  // Other legacy /mcp Wake calls deliberately retain their historical write path.
   if (!uhA0Profile) return post();
   const gate = verify(toolName, toolInput);
   if (!gate || !gate.ok) {
@@ -97,6 +101,21 @@ function buildServer({ uhA0Profile = false } = {}) {
       }
     });
 
+  server.tool(
+    'write_diary',
+    {
+      content: z.string().describe('要保存的日记正文'),
+    },
+    async ({ content }) => runGatedHomeWrite({
+      uhA0Profile,
+      requireUhA0Profile: true,
+      toolName: 'mcp__home__write_diary',
+      toolInput: { content },
+      verify: verifyCurrentHomeAction,
+      post: () => writeDiaryDirect(content),
+    })
+  );
+
   server.tool('light_on',  {}, () => callLight('/light/on',  'POST'));
   server.tool('light_off', {}, () => callLight('/light/off', 'POST'));
   server.tool('get_light_status', {}, () => callLight('/light/status', 'GET'));
@@ -135,6 +154,25 @@ function buildServer({ uhA0Profile = false } = {}) {
       return { ok: false, decision, result: { content: [{ type: 'text', text: 'UH-A0 ' + (decision.lease_decision || 'LEASE_MISMATCH') }] } };
     } catch (_error) {
       return { ok: false, decision: { lease_decision: 'LEASE_MISMATCH' }, result: { content: [{ type: 'text', text: 'UH-A0 LEASE_MISMATCH' }] } };
+    }
+  }
+
+  function writeDiaryDirect(content) {
+    try {
+      const raw = execFileSync(process.env.PYTHON || 'python3', ['-m', 'tools.diary_writer'], {
+        cwd: process.env.UH_A0_REPO_ROOT || '/opt/frontend',
+        env: process.env,
+        input: JSON.stringify({ content }),
+        encoding: 'utf8',
+        timeout: 5000,
+      });
+      const result = JSON.parse(raw || '{}');
+      if (result.status === 'CREATED') {
+        return { content: [{ type: 'text', text: 'DIARY_CREATED' }] };
+      }
+      return { content: [{ type: 'text', text: String(result.status || 'DIARY_WRITE_FAILED') }] };
+    } catch (_error) {
+      return { content: [{ type: 'text', text: 'DIARY_WRITE_FAILED' }] };
     }
   }
 
