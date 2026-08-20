@@ -1,16 +1,14 @@
-"""Focused atomic diary writer contract tests."""
+"""Focused diary writer contract tests."""
 from __future__ import annotations
 
-import datetime as dt
 import sqlite3
 import unittest
+from pathlib import Path
 
-from tools.diary_writer import write_diary_once
+from tools.diary_writer import write_diary_row
 
 
 class DiaryWriterTests(unittest.TestCase):
-    NOW = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
-
     def make_db(self):
         conn = sqlite3.connect(":memory:")
         conn.execute(
@@ -28,42 +26,34 @@ class DiaryWriterTests(unittest.TestCase):
         )
         return conn
 
-    def test_existing_same_day_returns_already_exists_without_second_insert(self):
-        conn = self.make_db()
-        conn.execute(
-            "INSERT INTO posts (type, content, author, created_at, layer, processed) "
-            "VALUES ('DIARY', '已有日记', 'fyodor', '2026-08-20 09:00:00', 'recent', 0)"
-        )
-        conn.commit()
-
-        result = write_diary_once(conn, "第二篇不应写入", now=self.NOW)
-        count = conn.execute(
-            "SELECT COUNT(*) FROM posts WHERE type='DIARY' AND author='fyodor'"
-        ).fetchone()[0]
-
-        self.assertEqual(result, {"status": "ALREADY_EXISTS"})
-        self.assertEqual(count, 1)
-
-    def test_no_existing_diary_inserts_fixed_row_and_duplicate_is_atomic(self):
+    def test_inserts_fixed_diary_row(self):
         conn = self.make_db()
 
-        created = write_diary_once(conn, "今天值得留下的一页", now=self.NOW)
+        created = write_diary_row(conn, "今天值得留下的一页")
         row = conn.execute(
             "SELECT type, content, layer, author, processed FROM posts"
         ).fetchone()
-        duplicate = write_diary_once(conn, "第二次尝试", now=self.NOW)
 
         self.assertEqual(created["status"], "CREATED")
         self.assertEqual(row, ("DIARY", "今天值得留下的一页", "recent", "fyodor", 0))
-        self.assertEqual(duplicate, {"status": "ALREADY_EXISTS"})
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 1)
 
-    def test_writer_has_no_generation_or_second_model_call(self):
-        source = open("tools/diary_writer.py", encoding="utf-8").read()
+    def test_rejects_empty_content_without_insert(self):
+        conn = self.make_db()
+
+        result = write_diary_row(conn, "   ")
+
+        self.assertEqual(result, {"status": "INVALID_CONTENT"})
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 0)
+
+    def test_writer_has_no_duplicate_or_second_model_contract(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "tools" / "diary_writer.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("ALREADY_EXISTS", source)
         self.assertNotIn("auto_diary.generate", source)
         self.assertNotIn("anthropic", source.lower())
         self.assertNotIn("deepseek", source.lower())
-        self.assertIn("BEGIN IMMEDIATE", source)
 
 
 if __name__ == "__main__":
