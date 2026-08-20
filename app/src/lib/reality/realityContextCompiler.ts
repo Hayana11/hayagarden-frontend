@@ -56,6 +56,7 @@ function compileClauses(snapshot: RealitySnapshot): PromptClause[] {
 
   const batteryLevel = snapshot.physical.facts.batteryLevel;
   if (
+    typeof batteryLevel === "number" &&
     Number.isInteger(batteryLevel) &&
     batteryLevel >= 0 &&
     batteryLevel <= 100
