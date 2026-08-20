@@ -89,7 +89,7 @@ class ToolInventoryTest(unittest.TestCase):
             for capability_id in ids
         ]
         self.assertEqual(len(capability_ids), 14)
-        self.assertEqual(len(set(capability_ids), 14)
+        self.assertEqual(len(set(capability_ids)), 14)
         self.assertEqual(set(capability_ids), set(P1_ENABLED_CAPABILITY_IDS))
         with mock.patch.object(tool_companion_hints.config_store, "get", return_value=""):
             preview = tool_companion_hints.payload()["prompt_preview"]
