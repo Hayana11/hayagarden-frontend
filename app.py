@@ -15,6 +15,20 @@ from moments_routes import create_moments_blueprint
 from monopoly_rooms import MonopolyService
 from monopoly_routes import create_monopoly_blueprint
 from valence_scale import normalize_arousal, normalize_valence
+from tools.product_handlers import (
+    ProductHandlerError,
+    create_ledger as handle_create_ledger,
+    create_todo as handle_create_todo,
+    delete_ledger as handle_delete_ledger,
+    delete_todo as handle_delete_todo,
+    list_todos as handle_list_todos,
+    patch_todo as handle_patch_todo,
+    read_ledger as handle_read_ledger,
+    read_ledger_budget as handle_read_ledger_budget,
+    toggle_todo as handle_toggle_todo,
+    update_ledger as handle_update_ledger,
+    write_ledger_budget as handle_write_ledger_budget,
+)
 from chat.attachment_contract import (
     ALLOWED_TEXT_FILE_EXTENSIONS,
     MAX_TEXT_FILE_BYTES,
@@ -3029,58 +3043,57 @@ _init_todos_table()
 @app.route('/api/todos', methods=['GET'])
 def get_todos():
     conn = get_db()
-    undone = conn.execute(
-        'SELECT * FROM todos WHERE done=0 ORDER BY '
-        "CASE WHEN due_date IS NULL OR due_date='' THEN 1 ELSE 0 END, "
-        'due_date ASC, id ASC'
-    ).fetchall()
-    done = conn.execute(
-        'SELECT * FROM todos WHERE done=1 ORDER BY id DESC LIMIT 5'
-    ).fetchall()
-    conn.close()
-    return jsonify({'todos': [dict(r) for r in undone] + [dict(r) for r in done]})
+    try:
+        return jsonify({'todos': handle_list_todos(conn)})
+    finally:
+        conn.close()
 
 @app.route('/api/todos', methods=['POST'])
 def add_todo():
     data = request.get_json() or {}
-    content = (data.get('content') or '').strip()
-    if not content:
-        return jsonify({'error': 'content required'}), 400
-    due_date = (data.get('due_date') or '').strip() or None
-    author   = (data.get('author')   or '').strip() or None
     conn = get_db()
-    conn.execute('INSERT INTO todos (content, due_date, author) VALUES (?,?,?)',
-        (content, due_date, author))
-    conn.commit(); conn.close()
-    return jsonify({'ok': True})
+    try:
+        result = handle_create_todo(
+            conn,
+            content=data.get('content'),
+            due_date=data.get('due_date'),
+            author=data.get('author'),
+        )
+        return jsonify({'ok': result['ok']})
+    except ProductHandlerError as exc:
+        return jsonify(exc.payload), 400
+    finally:
+        conn.close()
 
 @app.route('/api/todos/<int:tid>/toggle', methods=['POST'])
 def toggle_todo(tid):
     conn = get_db()
-    conn.execute('UPDATE todos SET done = 1 - done WHERE id=?', (tid,))
-    conn.commit(); conn.close()
-    return jsonify({'ok': True})
+    try:
+        return jsonify(handle_toggle_todo(conn, tid))
+    finally:
+        conn.close()
 
 @app.route('/api/todos/<int:tid>', methods=['PATCH'])
 def patch_todo(tid):
     data = request.get_json() or {}
-    done = data.get('done')
-    if done is None:
-        return jsonify({'error': 'done required'}), 400
     conn = get_db()
-    conn.execute('UPDATE todos SET done=? WHERE id=?', (1 if bool(done) else 0, tid))
-    row = conn.execute('SELECT * FROM todos WHERE id=?', (tid,)).fetchone()
-    conn.commit(); conn.close()
-    if not row:
-        return jsonify({'error': 'not found'}), 404
-    return jsonify(dict(row))
+    try:
+        row = handle_patch_todo(conn, tid, done=data.get('done'))
+        if row is None:
+            return jsonify({'error': 'not found'}), 404
+        return jsonify(row)
+    except ProductHandlerError as exc:
+        return jsonify(exc.payload), 400
+    finally:
+        conn.close()
 
 @app.route('/api/todos/<int:tid>', methods=['DELETE'])
 def delete_todo(tid):
     conn = get_db()
-    conn.execute('DELETE FROM todos WHERE id=?', (tid,))
-    conn.commit(); conn.close()
-    return jsonify({'ok': True})
+    try:
+        return jsonify(handle_delete_todo(conn, tid))
+    finally:
+        conn.close()
 
 # ── 位置上报 ──────────────────────────────────────────────────
 @app.route('/api/geo/report', methods=['POST'])
@@ -4205,56 +4218,7 @@ def release_self_triggers():
     return jsonify({'ok': True, 'released': released})
 
 
-import math as _math
-
-_LEDGER_MONTH_RE = re.compile(r'^\d{4}-\d{2}$')
-_LEDGER_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
-
-
-def _ledger_valid_month(month):
-    if not isinstance(month, str) or not _LEDGER_MONTH_RE.match(month):
-        return False
-    mm = int(month[5:7])
-    return 1 <= mm <= 12
-
-
-def _ledger_valid_date(date):
-    if not isinstance(date, str) or not _LEDGER_DATE_RE.match(date):
-        return False
-    try:
-        datetime.datetime.strptime(date, '%Y-%m-%d')
-        return True
-    except ValueError:
-        return False
-
-
-def _ledger_parse_amount(raw, *, allow_zero=False):
-    """Parse ledger entry amount. Rejects NaN/Inf/0 (unless allow_zero)."""
-    if raw is None:
-        return None, (jsonify({'ok': False, 'error': 'amount required'}), 400)
-    try:
-        amount = float(raw)
-    except (ValueError, TypeError):
-        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
-    if _math.isnan(amount) or _math.isinf(amount):
-        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
-    if not allow_zero and amount == 0:
-        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
-    return amount, None
-
-
-def _ledger_parse_budget_amount(raw):
-    """Parse monthly budget. Rejects NaN/Inf/negative."""
-    if raw is None:
-        return None, (jsonify({'ok': False, 'error': 'month and amount required'}), 400)
-    try:
-        amount = float(raw)
-    except (ValueError, TypeError):
-        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
-    if _math.isnan(amount) or _math.isinf(amount) or amount < 0:
-        return None, (jsonify({'ok': False, 'error': 'invalid amount'}), 400)
-    return amount, None
-
+# Ledger validation and persistence live in tools.product_handlers.
 
 @app.route('/api/ledger/trend', methods=['GET'])
 def ledger_trend():
@@ -4335,146 +4299,75 @@ def delete_wishlist(wid):
 @app.route('/api/ledger', methods=['GET'])
 def get_ledger():
     month = request.args.get('month', '')
-    if month and not _ledger_valid_month(month):
-        return jsonify({'ok': False, 'error': 'invalid month'}), 400
     conn = get_db()
-    if month:
-        rows = conn.execute(
-            "SELECT * FROM ledger WHERE date LIKE ? ORDER BY date DESC, id DESC",
-            (month + '%',)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM ledger ORDER BY date DESC, id DESC LIMIT 50"
-        ).fetchall()
-    conn.close()
-    records = [dict(r) for r in rows]
-    income  = sum(r['amount'] for r in records if r['amount'] > 0)
-    expense = sum(r['amount'] for r in records if r['amount'] < 0)
-    balance = income + expense
-    # 计算上个月支出
-    prev_expense = 0.0
-    if month and len(month) == 7:
-        y, m = int(month[:4]), int(month[5:7])
-        m -= 1
-        if m == 0: m, y = 12, y - 1
-        prev_month = f'{y:04d}-{m:02d}'
-        conn2 = get_db()
-        prev_rows = conn2.execute(
-            "SELECT amount FROM ledger WHERE date LIKE ? AND amount < 0",
-            (prev_month + '%',)
-        ).fetchall()
-        conn2.close()
-        prev_expense = sum(r['amount'] for r in prev_rows)
-    return jsonify({
-        'records': records,
-        'summary': {
-            'income': round(income, 2),
-            'expense': round(expense, 2),
-            'balance': round(balance, 2),
-            'prev_expense': round(prev_expense, 2),
-        }
-    })
-
-_LEDGER_META_KEYS = {'who', 'reason', 'note', 'mem', 'read', 'later'}
-
-def _clean_ledger_meta(meta):
-    if not isinstance(meta, dict):
-        return None
-    cleaned = {k: v for k, v in meta.items()
-               if k in _LEDGER_META_KEYS and isinstance(v, str) and v.strip()}
-    return json.dumps(cleaned, ensure_ascii=False) if cleaned else None
+    try:
+        return jsonify(handle_read_ledger(conn, month=month))
+    except ProductHandlerError as exc:
+        return jsonify(exc.payload), 400
+    finally:
+        conn.close()
 
 @app.route('/api/ledger', methods=['POST'])
 def add_ledger():
-    data     = request.get_json() or {}
-    amount, err = _ledger_parse_amount(data.get('amount'))
-    if err:
-        return err
-    category = (data.get('category') or '').strip() or None
-    note     = (data.get('note')     or '').strip() or None
-    date     = (data.get('date')     or '').strip() or None
-    if date is not None and not _ledger_valid_date(date):
-        return jsonify({'ok': False, 'error': 'invalid date'}), 400
-    author   = (data.get('author')   or '').strip() or None
-    meta     = _clean_ledger_meta(data.get('meta'))
+    data = request.get_json() or {}
     conn = get_db()
-    cur = conn.execute(
-        'INSERT INTO ledger (amount, category, note, date, author, meta) VALUES (?,?,?,?,?,?)',
-        (amount, category, note, date, author, meta)
-    )
-    conn.commit(); conn.close()
-    return jsonify({'ok': True, 'id': cur.lastrowid})
+    try:
+        return jsonify(handle_create_ledger(conn, **{
+            key: data.get(key)
+            for key in ('amount', 'category', 'note', 'date', 'author', 'meta')
+        }))
+    except ProductHandlerError as exc:
+        return jsonify(exc.payload), 400
+    finally:
+        conn.close()
 
 @app.route('/api/ledger/<int:lid>', methods=['PATCH'])
 def update_ledger(lid):
     data = request.get_json() or {}
-    sets, vals = [], []
-    if 'amount' in data:
-        amount, err = _ledger_parse_amount(data['amount'])
-        if err:
-            return err
-        vals.append(amount); sets.append('amount=?')
-    for col in ('category', 'note', 'date', 'author'):
-        if col in data:
-            raw = (data[col] or '').strip() or None
-            if col == 'date' and raw is not None and not _ledger_valid_date(raw):
-                return jsonify({'ok': False, 'error': 'invalid date'}), 400
-            sets.append(f'{col}=?')
-            vals.append(raw)
-    if 'meta' in data:
-        sets.append('meta=?')
-        vals.append(_clean_ledger_meta(data['meta']))
-    if not sets:
-        return jsonify({'error': 'nothing to update'}), 400
-    vals.append(lid)
     conn = get_db()
-    cur = conn.execute(f"UPDATE ledger SET {','.join(sets)} WHERE id=?", vals)
-    conn.commit()
-    rowcount = cur.rowcount if cur.rowcount is not None else 0
-    conn.close()
-    if rowcount == 0:
-        return jsonify({'ok': False, 'error': 'ledger entry not found'}), 404
-    return jsonify({'ok': True})
+    try:
+        return jsonify(handle_update_ledger(conn, lid, data))
+    except ProductHandlerError as exc:
+        status = 404 if exc.payload.get('error') == 'ledger entry not found' else 400
+        return jsonify(exc.payload), status
+    finally:
+        conn.close()
 
 @app.route('/api/ledger/<int:lid>', methods=['DELETE'])
 def delete_ledger(lid):
     conn = get_db()
-    cur = conn.execute('DELETE FROM ledger WHERE id=?', (lid,))
-    conn.commit()
-    rowcount = cur.rowcount if cur.rowcount is not None else 0
-    conn.close()
-    if rowcount == 0:
-        return jsonify({'ok': False, 'error': 'ledger entry not found'}), 404
-    return jsonify({'ok': True})
+    try:
+        return jsonify(handle_delete_ledger(conn, lid))
+    except ProductHandlerError as exc:
+        return jsonify(exc.payload), 404
+    finally:
+        conn.close()
 
 @app.route('/api/ledger/budget', methods=['GET'])
 def get_ledger_budget():
     month = request.args.get('month', '')
-    if not month:
-        return jsonify({'amount': None})
-    if not _ledger_valid_month(month):
-        return jsonify({'ok': False, 'error': 'invalid month'}), 400
     conn = get_db()
-    row = conn.execute('SELECT amount FROM ledger_budget WHERE month=?', (month,)).fetchone()
-    conn.close()
-    return jsonify({'amount': row['amount'] if row else None})
+    try:
+        return jsonify(handle_read_ledger_budget(conn, month=month))
+    except ProductHandlerError as exc:
+        return jsonify(exc.payload), 400
+    finally:
+        conn.close()
 
 @app.route('/api/ledger/budget', methods=['POST'])
 def set_ledger_budget():
     data = request.get_json() or {}
-    month = (data.get('month') or '').strip()
-    if not month or data.get('amount') is None:
-        return jsonify({'error': 'month and amount required'}), 400
-    if not _ledger_valid_month(month):
-        return jsonify({'ok': False, 'error': 'invalid month'}), 400
-    amount, err = _ledger_parse_budget_amount(data.get('amount'))
-    if err:
-        return err
     conn = get_db()
-    conn.execute('INSERT OR REPLACE INTO ledger_budget (month, amount) VALUES (?,?)', (month, amount))
-    conn.commit(); conn.close()
-    return jsonify({'ok': True})
+    try:
+        return jsonify(handle_write_ledger_budget(
+            conn,
+            month=data.get('month'),
+            amount=data.get('amount'),
+        ))
+    except ProductHandlerError as exc:
+        return jsonify(exc.payload), 400
+    finally:
+        conn.close()
 
 
 # ── Chat branches (regen + edit) ──────────────────────────
