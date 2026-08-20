@@ -1,11 +1,12 @@
 """Read-only historical Gateway tool inventory; never imports gateway.py."""
 from __future__ import annotations
 from typing import Any
-GROUP_DEFS=[["memory","记忆",["save_memory","search_memories"]],["web","联网",["web_search","browse_github","read_webpage"]],["pocket","Pocket 手机浏览器",["pocket_status","pocket_goto","pocket_js","pocket_html","pocket_screenshot"]],["light","灯",["light_on","light_off","light_warm","light_neutral","set_brightness","set_color_temp","get_light_status"]],["shopping","购物",["shop_browse","shop_act","shop_checkout","shop_login_start","shop_login_status"]],["gallery","相册/截图",["save_to_gallery","recall_photo","screenshot_chat"]],["code_files","代码/文件",["read_backend_file","search_files","read_frontend_file","write_frontend_file","str_replace_frontend_file","check_page_render","codebase_describe_project","codebase_read_file","codebase_list_directory","codebase_search_code","codebase_find_references","codebase_patch","codebase_create_file","codebase_git_view","codebase_explain_history"]],["workspace","Workspace",["shell_exec","ws_job","ws_ls","ws_read","ws_write","ws_edit","ws_patch","ws_diff","mcp_search","mcp_load","mcp_call","workspace_app"]],["self_config","自我配置",["read_bot_config","edit_bot_config","get_wake_settings","set_wake_settings"]],["board","留言板",["read_board","post_to_board","reply_to_board","block_user"]],["life","生活状态",["get_activity_summary","log_period_event","get_location","get_device_status","request_phone_screenshot"]],["plans_ledger","计划与账本",["get_todos","add_todo","get_countdowns","get_ledger","add_ledger","get_ledger_budget"]],["desire","欲望账本",["desire_add","desire_list","desire_act","desire_reflect","desire_history"]],["triggers","自主触发",["set_self_trigger","cancel_self_trigger"]],["artifacts","产物生成",["create_html","create_markdown","create_document"]],["phone","手机指令",["issue_command"]],["moments","朋友圈",["collect_chat_moment"]]]
+GROUP_DEFS=[["memory","记忆",["save_memory","search_memories","write_diary"]],["web","联网",["web_search","browse_github","read_webpage"]],["pocket","Pocket 手机浏览器",["pocket_status","pocket_goto","pocket_js","pocket_html","pocket_screenshot"]],["light","灯",["light_on","light_off","light_warm","light_neutral","set_brightness","set_color_temp","get_light_status"]],["shopping","购物",["shop_browse","shop_act","shop_checkout","shop_login_start","shop_login_status"]],["gallery","相册/截图",["save_to_gallery","recall_photo","screenshot_chat"]],["code_files","代码/文件",["read_backend_file","search_files","read_frontend_file","write_frontend_file","str_replace_frontend_file","check_page_render","codebase_describe_project","codebase_read_file","codebase_list_directory","codebase_search_code","codebase_find_references","codebase_patch","codebase_create_file","codebase_git_view","codebase_explain_history"]],["workspace","Workspace",["shell_exec","ws_job","ws_ls","ws_read","ws_write","ws_edit","ws_patch","ws_diff","mcp_search","mcp_load","mcp_call","workspace_app"]],["self_config","自我配置",["read_bot_config","edit_bot_config","get_wake_settings","set_wake_settings"]],["board","留言板",["read_board","post_to_board","reply_to_board","block_user"]],["life","生活状态",["get_activity_summary","log_period_event","get_location","get_device_status","request_phone_screenshot"]],["plans_ledger","计划与账本",["get_todos","add_todo","get_countdowns","get_ledger","add_ledger","get_ledger_budget"]],["desire","欲望账本",["desire_add","desire_list","desire_act","desire_reflect","desire_history"]],["triggers","自主触发",["set_self_trigger","cancel_self_trigger"]],["artifacts","产物生成",["create_html","create_markdown","create_document"]],["phone","手机指令",["issue_command"]],["moments","朋友圈",["collect_chat_moment"]]]
 
 DISPLAY_LABELS = {
   "save_memory": "保存长期记忆",
   "search_memories": "搜索长期记忆",
+  "write_diary": "记日记",
   "web_search": "搜索网页",
   "browse_github": "浏览 GitHub",
   "read_webpage": "读取网页",
@@ -97,6 +98,7 @@ def _tool(tool_name: str, display_label: str, *, available: bool=False, reason_c
     return {"tool_name":tool_name,"display_label":display_label,"available":available,"status_label":"当前可用" if available else "当前不可用","reason_code":reason_code,"provider":provider}
 _ACTIVE={
 "search_memories":_tool("search_memories","搜索长期记忆",available=True,reason_code="active",provider="mcp__home__search_memories"),
+"write_diary":_tool("write_diary","记日记",available=True,reason_code="active",provider="mcp__home__write_diary"),
 "web_search":_tool("web_search","搜索网页",available=True,reason_code="active",provider="Claude Code WebSearch"),
 "read_webpage":_tool("read_webpage","读取网页",available=True,reason_code="active",provider="Claude Code WebFetch"),
 "get_light_status":_tool("get_light_status","查看灯光状态",available=True,reason_code="active",provider="mcp__home__get_light_status"),
@@ -113,8 +115,8 @@ _ACTIVE={
 "codebase_explain_history":_tool("codebase_explain_history","解释代码历史",available=True,reason_code="active",provider="mcp__codebase")}
 _GRAY={
 "browse_github":_tool("browse_github","浏览 GitHub",reason_code="provider_blocked",provider="gateway._github_browse"),
-"add_todo":_tool("add_todo","记录待办",reason_code="safety_gap",provider="mcp__home__add_todo"),
-"add_ledger":_tool("add_ledger","记一笔账",reason_code="safety_gap",provider="mcp__home__add_ledger"),
+"add_todo":_tool("add_todo","记录待办",available=True,reason_code="active",provider="mcp__home__add_todo"),
+"add_ledger":_tool("add_ledger","记一笔账",available=True,reason_code="active",provider="mcp__home__add_ledger"),
 "collect_chat_moment":_tool("collect_chat_moment","收藏聊天到朋友圈",reason_code="prerequisite_unproven",provider="mcp__home__collect_chat_moment"),
 "light_on":_tool("light_on","开灯",reason_code="contract_disabled",provider="mcp__home__light_on"),
 "light_off":_tool("light_off","关灯",reason_code="contract_disabled",provider="mcp__home__light_off"),
