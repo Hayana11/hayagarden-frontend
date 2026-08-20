@@ -16,6 +16,11 @@ from tools.capability_manifest import (
     P1_RESERVED_CAPABILITY_IDS,
     get_capability,
 )
+from tools.capability_state import (
+    CapabilityStateError,
+    RUNTIME_STATE_OFF,
+    read_capability_state,
+)
 from tools.lease_signer import ISSUED_FROM_VALUES, TURN_LEASE_FIELDS, TURN_MODES
 
 LEASE_DECISIONS = frozenset(
@@ -148,6 +153,21 @@ def evaluate_tool_call(
             capability_id=capability_id, turn_mode=turn_mode,
             lease_decision="DENIED_CAPABILITY",
             diagnostic="capability is RESERVED or not P1-enabled",
+        )
+
+    try:
+        runtime_state = read_capability_state(capability_id)
+    except CapabilityStateError as exc:
+        return _decision(
+            capability_id=capability_id, turn_mode=turn_mode,
+            lease_decision="DENIED_CAPABILITY",
+            diagnostic=f"capability runtime state unavailable: {exc}",
+        )
+    if runtime_state == RUNTIME_STATE_OFF:
+        return _decision(
+            capability_id=capability_id, turn_mode=turn_mode,
+            lease_decision="DENIED_CAPABILITY",
+            diagnostic="capability is explicitly disabled at runtime",
         )
 
     action_id = build_approval_id(capability_id, tool_name, tool_input)

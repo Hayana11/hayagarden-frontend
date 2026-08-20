@@ -1,10 +1,14 @@
 """Focused UH-A0 P4 execution-enforcement tests."""
 from __future__ import annotations
 
+import sqlite3
 import tempfile
+import unittest
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 
+from tools import capability_state
 from tools.capability_manifest import P1_RESERVED_CAPABILITY_IDS
 from tools.cc_capability_adapter import build_uh_a0_spawn_plan, physical_surface_names
 from tools.execution_fence import (
@@ -20,6 +24,24 @@ from tools.lease_signer import issue_turn_lease
 
 
 class ExecutionFenceTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._db_path = Path(self._tmp.name) / "runtime.db"
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "CREATE TABLE runtime_config ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+            "updated_at DATETIME DEFAULT (datetime('now')))"
+        )
+        conn.commit()
+        conn.close()
+        self._state_db_patch = patch.object(
+            capability_state, "DB_PATH", str(self._db_path)
+        )
+        self._state_db_patch.start()
+        self.addCleanup(self._state_db_patch.stop)
+        self.addCleanup(self._tmp.cleanup)
+
     def lease(self, *, mode="chat", source="default_policy", requested=(),
               approvals=(), turn_id="turn-1"):
         args = dict(
