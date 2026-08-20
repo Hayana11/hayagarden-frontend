@@ -30,7 +30,10 @@ const canonicalPrompt = {
 };
 
 const canonicalMarkup = render(canonicalPrompt);
-assert.equal(stripMarkup(canonicalMarkup), canonicalPrompt.text);
+const canonicalTextMarkup = canonicalMarkup.match(
+  /<p class="reality-prompt-text"[^>]*>(.*?)<\\/p>/,
+)?.[1] ?? '';
+assert.equal(stripMarkup(canonicalTextMarkup), canonicalPrompt.text);
 assert.ok(canonicalMarkup.includes('<strong>静止</strong>'));
 assert.ok(canonicalMarkup.includes('<strong>正在充电</strong>'));
 assert.ok(canonicalMarkup.includes('<strong>80%</strong>'));
