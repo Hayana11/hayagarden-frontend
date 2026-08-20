@@ -1,0 +1,59 @@
+name: Product handler HTTP contract
+
+on:
+  pull_request:
+    paths:
+      - 'app.py'
+      - 'tools/product_handlers.py'
+      - 'tools/diary_writer.py'
+      - 'tests/test_ledger_routes.py'
+      - 'tests/test_product_handlers.py'
+      - 'tests/test_diary_writer.py'
+      - 'tests/test_auto_diary_contract.py'
+      - '.github/workflows/product-handlers-http.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  flask-contract:
+    name: ${{ matrix.label }} Flask contract
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            ref: ${{ github.event.pull_request.base.sha }}
+            tests: tests.test_ledger_routes tests.test_diary_writer
+          - label: head
+            ref: ${{ github.event.pull_request.head.sha }}
+            tests: tests.test_ledger_routes tests.test_product_handlers tests.test_diary_writer tests.test_auto_diary_contract
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Flask route test dependencies
+        run: python -m pip install Flask -r requirements.txt
+
+      - name: Prepare isolated /opt/frontend runtime path
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          python - <<'PY'
+          import sqlite3
+          for name in ("memories.db", "commands.db"):
+              sqlite3.connect(f"/opt/frontend/{name}").close()
+          PY
+          touch /opt/frontend/.env
+
+      - name: Run Flask contract tests
+        run: python3 -m unittest ${{ matrix.tests }} -v
