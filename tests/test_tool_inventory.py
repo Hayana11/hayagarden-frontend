@@ -15,13 +15,13 @@ class ToolInventoryTest(unittest.TestCase):
 
     def test_total_unique_and_group_sum(self):
         names = tool_inventory.inventory_names()
-        self.assertEqual(self.p["total"], 83)
-        self.assertEqual(len(names), 83)
+        self.assertEqual(self.p["total"], 84)
+        self.assertEqual(len(names), 84)
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(sum(g["total"] for g in self.p["groups"]), 83)
+        self.assertEqual(sum(g["total"] for g in self.p["groups"]), 84)
         self.assertEqual(sum(g["available"] for g in self.p["groups"]), self.p["available_count"])
-        self.assertEqual(self.p["available_count"], 15)
-        self.assertEqual(self.p["unavailable_count"], 68)
+        self.assertEqual(self.p["available_count"], 18)
+        self.assertEqual(self.p["unavailable_count"], 66)
 
     def test_workspace_not_duplicated(self):
         gs = {g["id"]: g for g in self.p["groups"]}
@@ -40,10 +40,21 @@ class ToolInventoryTest(unittest.TestCase):
         for n in ("set_brightness", "set_color_temp"):
             self.assertFalse(self.t[n]["available"])
             self.assertEqual(self.t[n]["reason_code"], "retired")
-        for n in ("codebase_patch", "codebase_create_file", "add_todo", "add_ledger"):
+        for n in ("codebase_patch", "codebase_create_file"):
             self.assertFalse(self.t[n]["available"])
             self.assertEqual(self.t[n]["reason_code"], "safety_gap")
         self.assertEqual(self.t["collect_chat_moment"]["reason_code"], "prerequisite_unproven")
+
+    def test_write_graduation_inventory_is_green(self):
+        for name, provider, label in (
+            ("add_todo", "mcp__home__add_todo", "记录待办"),
+            ("add_ledger", "mcp__home__add_ledger", "记一笔账"),
+            ("write_diary", "mcp__home__write_diary", "记日记"),
+        ):
+            self.assertTrue(self.t[name]["available"])
+            self.assertEqual(self.t[name]["reason_code"], "active")
+            self.assertEqual(self.t[name]["provider"], provider)
+            self.assertEqual(self.t[name]["display_label"], label)
 
     def test_codebase_read_green(self):
         for n in (
@@ -65,7 +76,7 @@ class ToolInventoryTest(unittest.TestCase):
     def test_all_display_labels_are_readable(self):
         names = tool_inventory.inventory_names()
         labels = {row["tool_name"]: row["display_label"] for group in self.p["groups"] for row in group["tools"]}
-        self.assertEqual(len(tool_inventory.DISPLAY_LABELS), 83)
+        self.assertEqual(len(tool_inventory.DISPLAY_LABELS), 84)
         self.assertEqual(set(labels), set(names))
         self.assertTrue(all(labels[name].strip() for name in names))
         self.assertTrue(all(labels[name] != name for name in names))
