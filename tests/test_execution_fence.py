@@ -4,9 +4,8 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch
-import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools import capability_state
 from tools.capability_manifest import P1_RESERVED_CAPABILITY_IDS
