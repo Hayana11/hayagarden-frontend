@@ -21,6 +21,14 @@ from tools.capability_manifest import (
     get_capability,
 )
 from tools.cc_usage_observability import sha256_canonical_json
+from tools.capability_state import (
+    CapabilityStateError,
+    RUNTIME_STATE_DENY,
+    RUNTIME_STATE_INHERIT,
+    RUNTIME_STATE_OFF,
+    RUNTIME_STATE_ON,
+    read_capability_state,
+)
 
 TOOL_PROFILE_UH_A0 = "uh_a0"
 
@@ -250,19 +258,109 @@ def short_intent_instructions() -> str:
     )
 
 
-def physical_surface_names() -> tuple[str, ...]:
-    return UH_A0_BUILTIN_TOOLS + uh_a0_home_mcp_tools()
-
-
-def physical_surface_fingerprint() -> str:
+def _surface_fingerprint(snapshot: Mapping[str, Any]) -> str:
+    """Hash the real visible surface, preserving the P3 fingerprint shape."""
     return sha256_canonical_json(
         {
-            "built_ins": list(UH_A0_BUILTIN_TOOLS),
-            "home_mcp": list(uh_a0_home_mcp_tools()),
+            "built_ins": list(snapshot["built_in_tools"]),
+            "home_mcp": list(snapshot["home_mcp_tools"]),
             "forbidden_built_ins": list(FORBIDDEN_BUILTIN_TOOLS),
             "non_p3_home": list(NON_P3_HOME_MCP_TOOLS),
         }
     )
+
+
+def _surface_snapshot() -> dict[str, Any]:
+    """Build one fail-closed, runtime-state-aware UH-A0 surface snapshot."""
+    home_bindings = {
+        cid: _claude_binding(cid) for cid in HOME_MCP_CAPABILITY_IDS
+    }
+    native_file_bindings = {
+        cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS
+    }
+    external_bindings = {
+        cid: _claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS
+    }
+    all_capability_ids = (
+        HOME_MCP_CAPABILITY_IDS
+        + NATIVE_FILE_CAPABILITY_IDS
+        + EXTERNAL_READ_CAPABILITY_IDS
+    )
+    visible_states = {RUNTIME_STATE_INHERIT, RUNTIME_STATE_ON}
+    try:
+        states = {
+            cid: read_capability_state(cid)
+            for cid in all_capability_ids
+        }
+        if any(
+            state not in {
+                RUNTIME_STATE_INHERIT,
+                RUNTIME_STATE_ON,
+                RUNTIME_STATE_OFF,
+                RUNTIME_STATE_DENY,
+            }
+            for state in states.values()
+        ):
+            raise CapabilityStateError("runtime capability state is invalid")
+        status = "OK"
+        diagnostic = ""
+    except Exception as exc:
+        # A new generation must never turn an unreadable state store into the
+        # old static-all-visible surface. Keep text-only operation possible.
+        states = {}
+        status = "FAIL_CLOSED"
+        diagnostic = str(exc)
+
+    if status == "FAIL_CLOSED":
+        visible_home_ids: tuple[str, ...] = ()
+        visible_native_file_ids: tuple[str, ...] = ()
+        visible_external_ids: tuple[str, ...] = ()
+        hidden_home = tuple(home_bindings.values())
+    else:
+        visible_home_ids = tuple(
+            cid for cid in HOME_MCP_CAPABILITY_IDS
+            if states[cid] in visible_states
+        )
+        visible_native_file_ids = tuple(
+            cid for cid in NATIVE_FILE_CAPABILITY_IDS
+            if states[cid] in visible_states
+        )
+        visible_external_ids = tuple(
+            cid for cid in EXTERNAL_READ_CAPABILITY_IDS
+            if states[cid] in visible_states
+        )
+        hidden_home = tuple(
+            home_bindings[cid]
+            for cid in HOME_MCP_CAPABILITY_IDS
+            if states[cid] not in visible_states
+        )
+
+    built_in_tools = tuple(
+        native_file_bindings[cid] for cid in visible_native_file_ids
+    ) + tuple(
+        external_bindings[cid] for cid in visible_external_ids
+    )
+    home_tools = tuple(home_bindings[cid] for cid in visible_home_ids)
+    native_bindings = {
+        cid: native_file_bindings[cid] for cid in visible_native_file_ids
+    }
+    return {
+        "runtime_state_status": status,
+        "runtime_state_diagnostic": diagnostic,
+        "built_in_tools": built_in_tools,
+        "home_mcp_tools": home_tools,
+        "native_bindings": native_bindings,
+        "runtime_hidden_home_mcp_tools": hidden_home,
+    }
+
+
+def physical_surface_names() -> tuple[str, ...]:
+    snapshot = _surface_snapshot()
+    return snapshot["built_in_tools"] + snapshot["home_mcp_tools"]
+
+
+def physical_surface_fingerprint() -> str:
+    return _surface_fingerprint(_surface_snapshot())
 
 
 def build_uh_a0_spawn_plan(
@@ -274,15 +372,16 @@ def build_uh_a0_spawn_plan(
     actual_version: str | None = None,
     write_mcp_config: bool = True,
 ) -> dict[str, Any]:
-    """Build generation-stable UH-A0 Claude Code spawn plan.
+    """Build a generation-stable UH-A0 plan with runtime-state HIDE.
 
-    ``turn_lease`` is accepted and ignored for physical surface construction so
-    callers cannot accidentally couple lease contents to tool availability.
+    "turn_lease" is accepted and ignored for physical surface construction so
+    lease contents cannot reshape the generation surface.
     """
-    _ = turn_lease  # explicit: lease must not reshape physical surface
+    _ = turn_lease
     diagnosis = diagnose_tool_search(env=env, actual_version=actual_version)
-    home_tools = uh_a0_home_mcp_tools()
-    native = uh_a0_native_bindings()
+    surface = _surface_snapshot()
+    home_tools = surface["home_mcp_tools"]
+    native = surface["native_bindings"]
     loading = loading_plan_from_manifest()
 
     if diagnosis["tool_search_status"] == "ENVIRONMENT_BLOCKED":
@@ -300,9 +399,14 @@ def build_uh_a0_spawn_plan(
     settings_path = write_uh_a0_settings(target_cwd)
     turn_lease_path = resolve_uh_a0_turn_lease_path(target_cwd, env=env)
 
-    allowlist = list(UH_A0_BUILTIN_TOOLS) + list(home_tools)
-    disallowed = list(FORBIDDEN_BUILTIN_TOOLS) + list(NON_P3_HOME_MCP_TOOLS)
-    built_in_csv = ",".join(UH_A0_BUILTIN_TOOLS)
+    built_in_tools = tuple(surface["built_in_tools"])
+    allowlist = list(built_in_tools) + list(home_tools)
+    disallowed = (
+        list(FORBIDDEN_BUILTIN_TOOLS)
+        + list(NON_P3_HOME_MCP_TOOLS)
+        + list(surface["runtime_hidden_home_mcp_tools"])
+    )
+    built_in_csv = ",".join(built_in_tools)
     allowed_csv = ",".join(allowlist)
     disallowed_csv = ",".join(disallowed)
 
@@ -320,7 +424,7 @@ def build_uh_a0_spawn_plan(
 
     plan = {
         "tool_profile": TOOL_PROFILE_UH_A0,
-        "built_in_tools": UH_A0_BUILTIN_TOOLS,
+        "built_in_tools": built_in_tools,
         "built_in_tools_csv": built_in_csv,
         "home_mcp_tools": home_tools,
         "native_bindings": native,
@@ -333,14 +437,16 @@ def build_uh_a0_spawn_plan(
         "settings_path": settings_path,
         "turn_lease_path": turn_lease_path,
         "spawn_extra_args": spawn_extra_args,
-        "physical_surface_fingerprint": physical_surface_fingerprint(),
+        "physical_surface_fingerprint": _surface_fingerprint(surface),
         "loading_plan": loading,
         "memory_search_loading": loading["memory.search"],
         "home_loading_mode": home_loading_mode,
         "tool_search": diagnosis,
+        "runtime_state_status": surface["runtime_state_status"],
+        "runtime_state_diagnostic": surface["runtime_state_diagnostic"],
         "intent_instructions": short_intent_instructions(),
         # Visibility claim for reports: what Claude can see under UH-A0 plan.
-        "claude_visible_built_ins": UH_A0_BUILTIN_TOOLS,
+        "claude_visible_built_ins": built_in_tools,
         "claude_visible_mcp_tools": home_tools,
         "claude_absent_servers": ("brain", "codebase", "workspace"),
     }
