@@ -41,6 +41,8 @@ export class PhysicalRealityRuntime {
   private started = false;
   private intervalHandle: unknown = null;
   private listenersAttached = false;
+  private readonly store: RealityStore;
+  private readonly environment: RealityRuntimeEnvironment;
 
   private readonly onVisibilityChange = (): void => {
     if (!this.started) {
@@ -74,9 +76,12 @@ export class PhysicalRealityRuntime {
   };
 
   constructor(
-    private readonly store: RealityStore,
-    private readonly environment: RealityRuntimeEnvironment,
-  ) {}
+    store: RealityStore,
+    environment: RealityRuntimeEnvironment,
+  ) {
+    this.store = store;
+    this.environment = environment;
+  }
 
   start(): void {
     if (this.started) {
