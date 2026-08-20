@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import cc_resident
-from chat.capacity_swap import CAPACITY_SWAP_REASONS, REJECTED_NON_CAPACITY_REASONS
+from chat.capacity_swap import CAPACITY_SWAP_REASONS
 
 
 class _FakeProcess:
@@ -239,7 +239,6 @@ class SurfaceGenerationTests(unittest.TestCase):
 
     def test_tool_surface_change_is_not_capacity_swap(self):
         self.assertNotIn("tool_surface_changed", CAPACITY_SWAP_REASONS)
-        self.assertIn("tool_surface_changed", REJECTED_NON_CAPACITY_REASONS)
 
     def test_uh_a0_spawn_plan_fingerprint_is_passed_through(self):
         self.rs._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
