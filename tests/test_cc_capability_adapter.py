@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,11 @@ from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
     get_capability,
+)
+from tools import capability_state
+from tools.capability_state import (
+    CAPABILITY_STATE_KEY,
+    set_capability_state,
 )
 from tools.cc_capability_adapter import (
     FORBIDDEN_BUILTIN_TOOLS,
@@ -37,6 +43,40 @@ from tools.lease_signer import issue_turn_lease
 
 
 class CcCapabilityAdapterContractTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._db_path = Path(self._tmp.name) / "runtime.db"
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "CREATE TABLE runtime_config ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+            "updated_at DATETIME DEFAULT (datetime('now')))"
+        )
+        conn.commit()
+        conn.close()
+        self._state_patch = mock.patch.object(
+            capability_state, "DB_PATH", str(self._db_path)
+        )
+        self._state_patch.start()
+        self.addCleanup(self._state_patch.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _plan(self):
+        return build_uh_a0_spawn_plan(
+            cwd=self._tmp.name,
+            write_mcp_config=False,
+            env={},
+        )
+
+    def _write_raw_state(self, value):
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_config (key, value) VALUES (?, ?)",
+            (CAPABILITY_STATE_KEY, value),
+        )
+        conn.commit()
+        conn.close()
+
     def test_a_bindings_come_from_capability_manifest(self):
         home = uh_a0_home_mcp_tools()
         native = uh_a0_native_bindings()
@@ -289,6 +329,91 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 )
             self.assertEqual(reason, "tool_profile_changed")
             session._proc = None
+
+
+    def test_l_runtime_off_hides_native_external_and_home_surface(self):
+        set_capability_state("files.read", enabled=False)
+        set_capability_state("web.search", enabled=False)
+        set_capability_state("todo.read", enabled=False)
+        plan = self._plan()
+
+        self.assertNotIn("Read", plan["built_in_tools"])
+        self.assertNotIn("Read", plan["built_in_tools_csv"])
+        self.assertNotIn("Read", plan["surface_allowlist"])
+        self.assertNotIn("Read", plan["claude_visible_built_ins"])
+        self.assertNotIn("WebSearch", plan["built_in_tools"])
+        self.assertNotIn("WebSearch", plan["built_in_tools_csv"])
+        self.assertNotIn("WebSearch", plan["claude_visible_built_ins"])
+
+        self.assertNotIn("mcp__home__get_todos", plan["home_mcp_tools"])
+        self.assertNotIn(
+            "mcp__home__get_todos", plan["surface_allowlist"]
+        )
+        self.assertIn("mcp__home__get_todos", plan["disallowed_tools"])
+        self.assertIn("mcp__home__get_ledger", plan["home_mcp_tools"])
+        self.assertIn("mcp__home__search_memories", plan["home_mcp_tools"])
+        self.assertIn("mcp__home__light_on", plan["disallowed_tools"])
+        self.assertIn("mcp__home__exec_vps", plan["disallowed_tools"])
+
+        tools_idx = plan["spawn_extra_args"].index("--allowedTools") + 1
+        deny_idx = plan["spawn_extra_args"].index("--disallowedTools") + 1
+        self.assertNotIn("Read", plan["spawn_extra_args"][tools_idx])
+        self.assertIn(
+            "mcp__home__get_todos", plan["spawn_extra_args"][deny_idx]
+        )
+
+    def test_m2_runtime_on_restores_surface_and_fingerprint(self):
+        baseline = self._plan()
+        set_capability_state("todo.read", enabled=False)
+        hidden = self._plan()
+        set_capability_state("todo.read", enabled=True)
+        restored = self._plan()
+
+        self.assertNotEqual(
+            baseline["physical_surface_fingerprint"],
+            hidden["physical_surface_fingerprint"],
+        )
+        for field in (
+            "built_in_tools",
+            "home_mcp_tools",
+            "surface_allowlist",
+            "disallowed_tools",
+            "claude_visible_built_ins",
+            "claude_visible_mcp_tools",
+            "physical_surface_fingerprint",
+        ):
+            self.assertEqual(restored[field], baseline[field], field)
+
+    def test_m3_reserved_and_unknown_runtime_on_cannot_enter_surface(self):
+        with self.assertRaises(ValueError):
+            set_capability_state("github.read", enabled=True)
+        with self.assertRaises(ValueError):
+            set_capability_state("unknown.capability", enabled=True)
+        plan = self._plan()
+        assert_reserved_absent_from_surface(plan["surface_allowlist"])
+        self.assertEqual(plan["runtime_state_status"], "OK")
+
+    def test_m4_malformed_runtime_state_fails_closed(self):
+        self._write_raw_state("{not-json")
+        plan = self._plan()
+        self.assertEqual(plan["runtime_state_status"], "FAIL_CLOSED")
+        self.assertEqual(plan["built_in_tools"], ())
+        self.assertEqual(plan["home_mcp_tools"], ())
+        self.assertEqual(plan["surface_allowlist"], ())
+        for tool in uh_a0_home_mcp_tools():
+            self.assertIn(tool, plan["disallowed_tools"])
+
+    def test_m5_storage_unavailable_fails_closed(self):
+        with mock.patch.object(
+            capability_state,
+            "_connect",
+            side_effect=sqlite3.OperationalError("locked"),
+        ):
+            plan = self._plan()
+        self.assertEqual(plan["runtime_state_status"], "FAIL_CLOSED")
+        self.assertEqual(plan["built_in_tools"], ())
+        self.assertEqual(plan["home_mcp_tools"], ())
+        self.assertEqual(plan["surface_allowlist"], ())
 
 
 if __name__ == "__main__":

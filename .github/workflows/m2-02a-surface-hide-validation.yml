@@ -1,0 +1,52 @@
+name: M2-02A surface hide base-head validation
+
+on:
+  pull_request:
+    paths:
+      - "tools/capability_manifest.py"
+      - "tools/lease_signer.py"
+      - "tools/cc_capability_adapter.py"
+      - "tools/cc_usage_observability.py"
+      - "tools/capability_state.py"
+      - "chat/cc_runtime.py"
+      - "cc_resident.py"
+      - "tests/test_cc_capability_adapter.py"
+      - ".github/workflows/m2-02a-surface-hide-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  base-head:
+    name: ${{ matrix.label }} surface contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            ref: ${{ github.event.pull_request.base.sha }}
+          - label: head
+            ref: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact ${{ matrix.label }} SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+
+      - name: Run exact ${{ matrix.label }} adapter contract
+        run: python -m unittest tests.test_cc_capability_adapter -v
