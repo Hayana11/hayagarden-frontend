@@ -102,7 +102,6 @@ jobs:
             'deploy/systemd/internal-mcp.service' \
             'scripts/activate-internal-mcp.sh' \
             'scripts/check-internal-mcp-readiness.mjs' \
-            'tests/test-m3-02a-internal-mcp-service.py' \
             'tests/test_m3_02a_internal_mcp_service.py' \
             'tests/test-m3-02a-internal-mcp-readiness.mjs' \
             'tests/test-m3-02a-internal-mcp-readiness.mjs' \
