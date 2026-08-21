@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Activate the versioned Internal MCP unit only after an exact deploy.
+# Activate the Internal MCP bootstrap service only after an exact deploy.
+# This pre-Daily-cutover contract is fail-closed on activation failure; it never restores an old process.
 # Usage: sudo bash scripts/activate-internal-mcp.sh <expected-deployed-sha>
 set -Eeuo pipefail
 
@@ -63,7 +64,7 @@ OLD_ENABLED="disabled"
 OLD_ACTIVE="inactive"
 OLD_ACTIVATED_SHA=""
 OLD_ACTIVATED_SHA_EXISTS=0
-UNIT_REPLACED=0
+ACTIVATION_STARTED=0
 
 cleanup() {
   rm -rf "$BACKUP_DIR"
@@ -100,40 +101,27 @@ fi
 
 rollback() {
   trap - ERR
-  if [[ "$UNIT_REPLACED" -ne 1 ]]; then
+  if [[ "$ACTIVATION_STARTED" -ne 1 ]]; then
     return
   fi
 
+  # Fail closed: the current checkout cannot prove an old unit would run old code.
+  # Restore configuration if useful, but never restore the old process or marker.
   "$SYSTEMCTL" stop "$UNIT_NAME" >/dev/null 2>&1 || true
+  "$SYSTEMCTL" disable "$UNIT_NAME" >/dev/null 2>&1 || true
   if [[ "$OLD_EXISTS" -eq 1 ]]; then
     cp -p "$OLD_UNIT" "$UNIT_PATH"
     "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || true
-    case "$OLD_ENABLED" in
-      enabled*) "$SYSTEMCTL" enable "$UNIT_NAME" >/dev/null 2>&1 || true ;;
-      masked*) "$SYSTEMCTL" mask "$UNIT_NAME" >/dev/null 2>&1 || true ;;
-      *) "$SYSTEMCTL" disable "$UNIT_NAME" >/dev/null 2>&1 || true ;;
-    esac
-    if [[ "$OLD_ACTIVE" == active ]]; then
-      "$SYSTEMCTL" start "$UNIT_NAME" >/dev/null 2>&1 || true
-    else
-      "$SYSTEMCTL" stop "$UNIT_NAME" >/dev/null 2>&1 || true
-    fi
   else
-    "$SYSTEMCTL" disable "$UNIT_NAME" >/dev/null 2>&1 || true
     rm -f "$UNIT_PATH"
     "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || true
   fi
-
-  if [[ "$OLD_EXISTS" -eq 1 && "$OLD_ACTIVATED_SHA_EXISTS" -eq 1 ]]; then
-    cp -p "$BACKUP_DIR/activated-sha" "$ACTIVATED_SHA_FILE"
-  else
-    rm -f "$ACTIVATED_SHA_FILE"
-  fi
+  rm -f "$ACTIVATED_SHA_FILE"
 }
 trap rollback ERR
 
+ACTIVATION_STARTED=1
 install -m 0644 "$UNIT_SOURCE" "$UNIT_PATH"
-UNIT_REPLACED=1
 "$SYSTEMCTL" daemon-reload
 "$SYSTEMCTL" enable "$UNIT_NAME"
 if [[ "$OLD_ACTIVE" == active ]]; then
