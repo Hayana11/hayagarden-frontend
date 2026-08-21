@@ -35,7 +35,7 @@ assert.doesNotMatch(canonical, /tool_name/);
 assert.match(canonical, /data-capability-id/);
 assert.match(canonical, /effective_enabled/);
 for (const label of ['默认开启', '已开启', '已关闭', '不可用', '状态未知', '当前不可确认']) {
-  assert.match(canonical, new RegExp(label));
+  assert.match(moments, new RegExp(label));
 }
 assert.match(canonical, /disabled=\{!canToggle \|\| pending\}/);
 assert.match(canonical, /role="switch"/);
