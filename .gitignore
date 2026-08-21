@@ -10,6 +10,7 @@ static/qrcode.png
 -e 
 gateway.log
 mcp-http.log
+internal-mcp.log
 .discord-session-id
 .claude/
 # Deploy-managed pinned Claude Code install (see scripts/ensure-claude-runtime.sh)

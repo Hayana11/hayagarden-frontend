@@ -99,6 +99,16 @@ bash "$1"
             self.readiness,
             """#!/usr/bin/env bash
 printf '%s\n' readiness >> "${FAKE_SYSTEMCTL_LOG}"
+if [[ -n "${FAKE_READINESS_SEQUENCE:-}" ]]; then
+  IFS=',' read -r -a codes <<< "${FAKE_READINESS_SEQUENCE}"
+  count=0
+  [[ ! -f "${FAKE_STATE_DIR}/readiness-count" ]] || count="$(cat "${FAKE_STATE_DIR}/readiness-count")"
+  last_index=$((${#codes[@]} - 1))
+  selected="$count"
+  [[ "$selected" -le "$last_index" ]] || selected="$last_index"
+  printf '%s\n' "$((count + 1))" > "${FAKE_STATE_DIR}/readiness-count"
+  exit "${codes[$selected]}"
+fi
 exit "${FAKE_READINESS_RC:-0}"
 """,
         )
@@ -106,7 +116,7 @@ exit "${FAKE_READINESS_RC:-0}"
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def env(self, *, head=SHA, dirty="0", readiness="0") -> dict[str, str]:
+    def env(self, *, head=SHA, dirty="0", readiness="0", readiness_sequence="") -> dict[str, str]:
         return {
             "FRONTEND_ROOT": str(self.root),
             "INTERNAL_MCP_STATE_DIR": str(self.state),
@@ -122,6 +132,7 @@ exit "${FAKE_READINESS_RC:-0}"
             "FAKE_PROCESS_IDENTITY": head,
             "FAKE_DIRTY": dirty,
             "FAKE_READINESS_RC": readiness,
+            "FAKE_READINESS_SEQUENCE": readiness_sequence,
         }
 
     def run_activation(self, env: dict[str, str], expected=SHA) -> subprocess.CompletedProcess[str]:
@@ -168,6 +179,18 @@ exit "${FAKE_READINESS_RC:-0}"
         result = self.run_activation(bad_state)
         self.assertNotEqual(result.returncode, 0, result.stderr)
 
+    def test_transient_readiness_failure_is_retried(self) -> None:
+        result = self.run_activation(self.env(readiness_sequence="1,0"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertEqual(log.splitlines().count("readiness"), 2)
+        self.assertTrue((self.fake_state / "active").exists())
+        self.assertEqual((self.fake_state / "enabled").read_text(encoding="utf-8").strip(), "enabled")
+        self.assertEqual((self.fake_state / "process").read_text(encoding="utf-8").strip(), SHA)
+        self.assertEqual(
+            (self.state / "internal-mcp-activated-sha").read_text(encoding="utf-8").strip(),
+            SHA,
+        )
     def test_first_activation_failure_leaves_no_unit(self) -> None:
         result = self.run_activation(self.env(readiness="1"))
         self.assertNotEqual(result.returncode, 0, result.stderr)

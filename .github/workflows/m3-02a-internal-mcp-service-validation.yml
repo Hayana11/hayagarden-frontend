@@ -75,6 +75,23 @@ jobs:
       - name: Checkout exact head SHA
         run: git checkout --detach --force "$HEAD_SHA"
 
+      - name: Verify runtime log hygiene and clean-worktree guards
+        shell: bash
+        run: |
+          git check-ignore -v -- internal-mcp.log
+          git check-ignore -v -- mcp-http.log
+          test -z "$(git ls-files -- internal-mcp.log)"
+          test "$(git show "$BASE_SHA:.gitignore" | grep -Fxc 'mcp-http.log')" -eq 1
+          python - <<'PY'
+          from pathlib import Path
+          deploy = Path('scripts/deploy-frontend.sh').read_text(encoding='utf-8')
+          activation = Path('scripts/activate-internal-mcp.sh').read_text(encoding='utf-8')
+          assert 'git status --porcelain --untracked-files=all' in deploy
+          assert 'production worktree has local changes' in deploy
+          assert 'status --porcelain --untracked-files=all' in activation
+          assert 'production worktree is dirty' in activation
+          print('clean-worktree guard source contracts: PASS')
+          PY
       - name: Run head regressions and M3-01 contracts
         shell: bash
         run: |
@@ -109,13 +126,12 @@ jobs:
           cat /tmp/m3-02a-head-fingerprint
           cmp /tmp/m3-02a-base-fingerprint /tmp/m3-02a-head-fingerprint
           actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          # M3-02A1 is a post-merge maintenance slice; fence its workflow plus two fixes.
           expected="$(printf '%s\n' \
             '.github/workflows/m3-02a-internal-mcp-service-validation.yml' \
-            'deploy/systemd/internal-mcp.service' \
+            '.gitignore' \
             'scripts/activate-internal-mcp.sh' \
-            'scripts/check-internal-mcp-readiness.mjs' \
-            'tests/test_m3_02a_internal_mcp_service.py' \
-            'tests/test-m3-02a-internal-mcp-readiness.mjs' | sort)"
+            'tests/test_m3_02a_internal_mcp_service.py' | sort)"
           test "$actual" = "$expected"
           if printf '%s\n' "$actual" | grep -E '^(tools/|wake/|cc_resident.py$|chat/daily_runtime.py$|app.py$|internal-mcp-server.js$|deploy-frontend.sh$|app/)' ; then
             exit 1
