@@ -1,0 +1,65 @@
+name: M2-03B2 Moments capability control validation
+
+on:
+  pull_request:
+    paths:
+      - "app/src/lib/capabilityStates.ts"
+      - "app/src/screens/MomentsScreen.tsx"
+      - "app/scripts/test-capability-state-moments.mjs"
+      - "app/scripts/test-capability-state-profile.mjs"
+      - ".github/workflows/m2-03b2-moments-capability-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  base-head:
+    name: ${{ matrix.label }} Moments capability validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            ref: ${{ github.event.pull_request.base.sha }}
+          - label: head
+            ref: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact ${{ matrix.label }} SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build exact ${{ matrix.label }} frontend
+        working-directory: app
+        run: npm run build
+
+      - name: Lint exact head frontend
+        if: matrix.label == 'head'
+        working-directory: app
+        run: npm run lint
+
+      - name: Run exact head capability contract
+        if: matrix.label == 'head'
+        working-directory: app
+        run: node scripts/test-capability-state-moments.mjs
+
+      - name: Enforce exact changed-file fence
+        if: matrix.label == 'head'
+        shell: bash
+        run: |
+          actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" | sort)"
+          expected="$(printf '%s\n'             '.github/workflows/m2-03b2-moments-capability-validation.yml'             'app/scripts/test-capability-state-moments.mjs'             'app/scripts/test-capability-state-profile.mjs'             'app/src/lib/capabilityStates.ts'             'app/src/screens/MomentsScreen.tsx' | sort)"
+          test "$actual" = "$expected"

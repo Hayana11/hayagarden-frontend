@@ -32,6 +32,8 @@ import {
   type MoodState,
 } from '../lib/moments';
 import { HttpError } from '../lib/http';
+import { fetchCapabilityStates, patchCapabilityState, type CapabilityState } from '../lib/capabilityStates';
+import { fetchToolCompanionHints, type ToolCompanionHints } from '../lib/toolCompanionHints';
 import { FONT_CN, FONT_DISPLAY, fontFamilyForText, hasCJK } from '../lib/typography';
 
 function inventoryReasonText(reasonCode: string): string {
@@ -46,6 +48,24 @@ function inventoryReasonText(reasonCode: string): string {
     prerequisite_unproven: '必要前置条件尚未得到可靠证明',
   };
   return labels[reasonCode] || `状态原因：${reasonCode}`;
+}
+
+
+const CAPABILITY_STATE_LABELS: Record<CapabilityState['runtime_state'], string> = {
+  INHERIT: '默认开启',
+  ON: '已开启',
+  OFF: '已关闭',
+  DENY: '不可用',
+};
+
+function presentCapabilityState(state: CapabilityState | undefined) {
+  if (!state) {
+    return { runtimeLabel: '状态未知', availabilityLabel: '当前不可确认' };
+  }
+  return {
+    runtimeLabel: CAPABILITY_STATE_LABELS[state.runtime_state],
+    availabilityLabel: state.effective_enabled ? '当前可用' : '当前不可用',
+  };
 }
 
 
@@ -565,9 +585,20 @@ export function MomentsScreen() {
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [unlockDraft, setUnlockDraft] = useState('');
   const [unlockBusy, setUnlockBusy] = useState(false);
+  const [capabilityHints, setCapabilityHints] = useState<ToolCompanionHints | null>(null);
+  const [capabilityStates, setCapabilityStates] = useState<CapabilityState[]>([]);
+  const [capabilityHintsLoading, setCapabilityHintsLoading] = useState(false);
+  const [capabilityHintsError, setCapabilityHintsError] = useState('');
+  const [capabilityStatesError, setCapabilityStatesError] = useState('');
+  const [capabilityPending, setCapabilityPending] = useState<Record<string, boolean>>({});
 
   const effTheme = theme === 'auto' ? (sysDark ? 'dark' : 'light') : theme;
   const vars = effTheme === 'dark' ? DARK_VARS : LIGHT_VARS;
+
+  const capabilityStateById = useMemo(
+    () => new Map(capabilityStates.map((state) => [state.capability_id, state])),
+    [capabilityStates],
+  );
 
   const flashToast = useCallback((msg: string) => {
     setToast(msg);
@@ -604,6 +635,32 @@ export function MomentsScreen() {
     flashToast('需要主人授权');
     return false;
   }, [flashToast, ownerStatus.authenticated, requestOwnerUnlock]);
+
+  const toggleCapability = useCallback(async (state: CapabilityState | undefined) => {
+    if (!state || !state.writable || state.runtime_state === 'DENY' || capabilityPending[state.capability_id]) return;
+    if (!ensureOwner()) return;
+
+    const capabilityId = state.capability_id;
+    const enabled = !state.effective_enabled;
+    setCapabilityPending((current) => ({ ...current, [capabilityId]: true }));
+    try {
+      const updated = await patchCapabilityState(capabilityId, enabled);
+      setCapabilityStates((current) => current.map((item) => (
+        item.capability_id === updated.capability_id ? updated : item
+      )));
+      flashToast(`${updated.runtime_state === 'OFF' ? '能力已关闭' : '能力已开启'}：${capabilityId}`);
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 401) {
+        setOwnerStatus((current) => ({ ...current, authenticated: false }));
+        requestOwnerUnlock();
+        flashToast('主人授权已失效，请重新授权');
+      } else {
+        flashToast('能力状态保存失败，原状态未改变');
+      }
+    } finally {
+      setCapabilityPending((current) => ({ ...current, [capabilityId]: false }));
+    }
+  }, [capabilityPending, ensureOwner, flashToast, requestOwnerUnlock]);
 
   const submitOwnerUnlock = useCallback(async () => {
     const token = unlockDraft.trim();
@@ -709,6 +766,31 @@ export function MomentsScreen() {
     const totallyEmpty = !feedOk
       && (!aux || (aux.dreams.length === 0 && aux.gallery.length === 0 && !aux.mood && aux.toolGroups.length === 0));
     setPhase(totallyEmpty ? 'failed' : 'ready');
+  }, []);
+
+  const loadCanonicalTools = useCallback(async () => {
+    setCapabilityHintsLoading(true);
+    setCapabilityHints(null);
+    setCapabilityStates([]);
+    setCapabilityHintsError('');
+    setCapabilityStatesError('');
+    const [hintsResult, statesResult] = await Promise.allSettled([
+      fetchToolCompanionHints(),
+      fetchCapabilityStates(),
+    ]);
+
+    if (hintsResult.status === 'fulfilled') {
+      setCapabilityHints(hintsResult.value);
+    } else {
+      setCapabilityHintsError('当前能力分组暂时读不到');
+    }
+    if (statesResult.status === 'fulfilled') {
+      setCapabilityStates(statesResult.value.states);
+    } else {
+      const reason = statesResult.reason;
+      setCapabilityStatesError(reason instanceof Error ? reason.message : '真实能力状态暂时读不到');
+    }
+    setCapabilityHintsLoading(false);
   }, []);
 
   const reloadFeed = useCallback(async (feedType: FeedType = 'all') => {
@@ -829,6 +911,10 @@ export function MomentsScreen() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (tab === 'tools') void loadCanonicalTools();
+  }, [loadCanonicalTools, tab]);
 
   useEffect(() => {
     if (tab === 'posts' && phase === 'ready') {
@@ -1368,6 +1454,61 @@ export function MomentsScreen() {
               {/* ── 工具 ── */}
               {tab === 'tools' && (
                 <div className="vstack vstack-14">
+                  {/* canonical capability controls: capability_id is the only control identity */}
+                  <section aria-labelledby="moments-current-capabilities" style={{ padding: '16px 17px', borderRadius: 16, background: 'var(--card)', boxShadow: '0 6px 16px var(--shadow)' }}>
+                    <div style={{ color: 'var(--deep)', fontSize: 15, letterSpacing: 1 }} id="moments-current-capabilities">当前能力</div>
+                    <div style={{ marginTop: 6, color: 'var(--ink2)', fontSize: 13, lineHeight: 1.8 }}>当前主聊天真实控制面。状态来自服务端，开关即时生效。</div>
+                    {capabilityHintsError && <div role="status" style={{ marginTop: 10, padding: '9px 10px', borderRadius: 10, background: 'rgba(217,164,65,0.10)', color: 'var(--gold)', fontSize: 12, lineHeight: 1.6 }}>{capabilityHintsError}</div>}
+                    {capabilityStatesError && <div role="status" style={{ marginTop: 10, padding: '9px 10px', borderRadius: 10, background: 'rgba(217,164,65,0.10)', color: 'var(--gold)', fontSize: 12, lineHeight: 1.6 }}>真实能力状态暂时读不到：{capabilityStatesError}。当前不臆测开关状态。</div>}
+                    {capabilityHintsLoading ? (
+                      <div style={{ marginTop: 14, color: 'var(--mut)', fontSize: 12.5 }}>正在读取当前能力…</div>
+                    ) : (capabilityHints?.groups || []).length === 0 ? (
+                      <div style={{ marginTop: 14, color: 'var(--mut)', fontSize: 12.5 }}>当前能力分组暂时读不到。</div>
+                    ) : (
+                      <div className="vstack vstack-12" style={{ marginTop: 14 }}>
+                        {capabilityHints?.groups.map((group) => (
+                          <div key={group.id} style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+                            <div style={{ color: 'var(--deep)', fontSize: 13, letterSpacing: 1 }}>{group.label}</div>
+                            <div className="vstack vstack-8" style={{ marginTop: 9 }}>
+                              {group.tools.map((tool) => {
+                                const state = capabilityStateById.get(tool.capability_id);
+                                const presentation = presentCapabilityState(state);
+                                const pending = Boolean(capabilityPending[tool.capability_id]);
+                                const canToggle = Boolean(state && state.writable && state.runtime_state !== 'DENY');
+                                return (
+                                  <div key={tool.capability_id} data-capability-id={tool.capability_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 10px', borderRadius: 12, background: 'var(--card2)', border: '1px solid var(--line)' }}>
+                                    <div style={{ minWidth: 0, flex: 1 }}>
+                                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, flexWrap: 'wrap' }}>
+                                        <span style={{ color: 'var(--ink)', fontSize: 13, lineHeight: 1.45 }}>{tool.display_label}</span>
+                                        <span style={{ color: 'var(--mut)', fontSize: 10.5 }}>{tool.status_label}</span>
+                                      </div>
+                                      <div style={{ marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap', color: 'var(--faint)', fontSize: 10.5 }}>
+                                        <span>运行时：{presentation.runtimeLabel}</span>
+                                        <span>有效：{presentation.availabilityLabel}</span>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      role="switch"
+                                      aria-checked={state?.effective_enabled === true}
+                                      aria-label={`${tool.display_label}：${presentation.runtimeLabel}`}
+                                      disabled={!canToggle || pending}
+                                      onClick={() => { void toggleCapability(state); }}
+                                      style={{ width: 48, height: 28, flexShrink: 0, padding: 2, border: 0, borderRadius: 999, cursor: canToggle && !pending ? 'pointer' : 'not-allowed', background: state?.effective_enabled ? 'var(--ok)' : 'var(--ghost)', opacity: canToggle && !pending ? 1 : 0.55, transition: 'background 160ms ease, opacity 160ms ease' }}
+                                    >
+                                      <span style={{ display: 'block', width: 24, height: 24, borderRadius: '50%', background: 'var(--card)', transform: state?.effective_enabled ? 'translateX(20px)' : 'translateX(0)', transition: 'transform 160ms ease' }} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  {/* legacy inventory: tool_name identity, read-only, no capability mutation */}
                   <div style={{ padding: '16px 17px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(183,110,121,0.10),rgba(217,164,65,0.10))', color: 'var(--ink2)', fontSize: 13, lineHeight: 1.8 }}>
                     <div style={{ color: 'var(--deep)', fontSize: 15, letterSpacing: 1 }}>工具总账</div>
                     <div style={{ marginTop: 6 }}>这里展示哈娅花园历史登记过的完整 Gateway 工具家底。绿色表示当前主聊天可用；灰色表示当前不可用，不代表工具已被删除。</div>
