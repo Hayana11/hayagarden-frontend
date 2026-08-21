@@ -2689,6 +2689,92 @@ def tool_companion_hints():
         return jsonify({'ok': False, 'error': str(exc)}), 500
 
 
+@app.route('/api/capabilities/states', methods=['GET'])
+def capability_state_list():
+    """Read the manifest-backed runtime capability state snapshot."""
+    from tools.capability_state import (
+        SCHEMA_VERSION,
+        capability_state_snapshot,
+    )
+
+    try:
+        return jsonify({
+            'ok': True,
+            'version': SCHEMA_VERSION,
+            'states': capability_state_snapshot(),
+        })
+    except Exception:
+        # Runtime state is a control-plane input. Any unreadable state must
+        # fail closed rather than be presented as an enabled surface.
+        return jsonify({
+            'ok': False,
+            'error': 'capability_state_unavailable',
+        }), 503
+
+
+@app.route('/api/capabilities/<string:capability_id>/state', methods=['PATCH'])
+def capability_state_patch(capability_id):
+    """Persist one explicit ON/OFF state for a manifest capability."""
+    try:
+        require_owner(request)
+    except OwnerAuthError as exc:
+        resp = jsonify({'ok': False, 'error': exc.message})
+        resp.status_code = exc.status_code
+        if exc.status_code == 401:
+            resp.headers['WWW-Authenticate'] = 'Bearer'
+        return resp
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {'enabled'}:
+        return jsonify({
+            'ok': False,
+            'error': 'body must contain only enabled',
+        }), 400
+    enabled = payload.get('enabled')
+    if not isinstance(enabled, bool):
+        return jsonify({
+            'ok': False,
+            'error': 'enabled must be boolean',
+        }), 400
+
+    from tools.capability_state import (
+        SCHEMA_VERSION,
+        capability_state_snapshot,
+        set_capability_state,
+    )
+
+    try:
+        set_capability_state(capability_id, enabled=enabled)
+    except ValueError:
+        return jsonify({
+            'ok': False,
+            'error': 'capability_not_writable',
+        }), 400
+    except Exception:
+        return jsonify({
+            'ok': False,
+            'error': 'capability_state_write_failed',
+        }), 503
+
+    try:
+        state = next(
+            item
+            for item in capability_state_snapshot()
+            if item['capability_id'] == capability_id
+        )
+    except Exception:
+        return jsonify({
+            'ok': False,
+            'error': 'capability_state_unavailable',
+        }), 503
+
+    return jsonify({
+        'ok': True,
+        'version': SCHEMA_VERSION,
+        'state': state,
+    })
+
+
 @app.route('/api/tools/inventory', methods=['GET'])
 def tool_inventory():
     """Read-only historical Gateway tool inventory; never dispatches a tool."""
