@@ -88,12 +88,25 @@ run_readiness() {
   "$NODE" "$READINESS"
 }
 
+run_readiness_with_retry() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if run_readiness; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 5 ]]; then
+      sleep 1
+    fi
+  done
+  return 1
+}
+
 if [[ "$OLD_EXISTS" -eq 1 ]] \
   && cmp -s "$UNIT_SOURCE" "$UNIT_PATH" \
   && [[ "$OLD_ENABLED" == enabled* ]] \
   && [[ "$OLD_ACTIVE" == active ]] \
   && [[ "$OLD_ACTIVATED_SHA" == "$EXPECTED_SHA" ]] \
-  && run_readiness
+  && run_readiness_with_retry
 then
   echo "Internal MCP activation already ready for $EXPECTED_SHA"
   exit 0
@@ -129,7 +142,7 @@ if [[ "$OLD_ACTIVE" == active ]]; then
 else
   "$SYSTEMCTL" start "$UNIT_NAME"
 fi
-run_readiness
+run_readiness_with_retry
 
 MARKER_TMP="$BACKUP_DIR/activated-sha.new"
 printf '%s\n' "$EXPECTED_SHA" > "$MARKER_TMP"
