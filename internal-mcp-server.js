@@ -51,7 +51,7 @@ function verifyCurrentInternalAction(toolName, toolInput, {
   }
 }
 
-function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd } = {}) {
+function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd, uhA0Profile = false } = {}) {
   const server = new McpServer({ name: INTERNAL_SERVER_NAME, version: '1.0.0' });
 
   server.tool(
@@ -74,6 +74,9 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
     async ({ content, due_date }) => {
       const toolInput = { content };
       if (due_date !== undefined) toolInput.due_date = due_date;
+      if (!uhA0Profile) {
+        return gateFailure({ lease_decision: 'PROFILE_REQUIRED' });
+      }
       const decision = await verify('mcp__internal__add_todo', toolInput);
       if (!decision || decision.lease_decision !== 'ALLOW') {
         return gateFailure(decision);
@@ -119,7 +122,8 @@ function createApp(options = {}) {
         return;
       }
 
-      const server = buildServer(options);
+      const uhA0Profile = String(req.headers['x-uh-a0-profile'] || '').trim() === 'uh_a0';
+      const server = buildServer({ ...options, uhA0Profile });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => { sessions[id] = { server, transport }; },
