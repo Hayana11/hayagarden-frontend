@@ -698,8 +698,10 @@ class ResidentSession:
         turn_runtime=None,
     ):
         """Resume one provider-deferred action with a new confirmation lease."""
+        from tools.capability_manifest import get_capability
         from tools.execution_fence import (
             UH_A0TurnRuntime,
+            capability_for_tool,
             evaluate_tool_call,
         )
 
@@ -714,6 +716,24 @@ class ResidentSession:
             raise ResidentError('deferred_resume:LEASE_MISMATCH')
         if pending['approval_id'] not in tuple(turn_lease.get('approval_ids') or ()):
             raise ResidentError('deferred_resume:LEASE_MISMATCH')
+        pending_tool_name = str(pending.get('tool_name') or '').strip()
+        capability_id = capability_for_tool(pending_tool_name)
+        entry = get_capability(capability_id) if capability_id else None
+        raw_binding = ((entry or {}).get('provider_bindings') or {}).get('claude_code')
+        if isinstance(raw_binding, str):
+            current_bindings = {raw_binding.strip()} if raw_binding.strip() else set()
+        elif isinstance(raw_binding, (list, tuple)):
+            current_bindings = {
+                value.strip()
+                for value in raw_binding
+                if isinstance(value, str) and value.strip()
+            }
+        else:
+            current_bindings = set()
+        if pending_tool_name not in current_bindings:
+            self._pending_deferred = None
+            raise ResidentError('deferred_resume:LEASE_MISMATCH')
+
         decision = evaluate_tool_call(
             pending['tool_name'],
             pending['tool_input'],

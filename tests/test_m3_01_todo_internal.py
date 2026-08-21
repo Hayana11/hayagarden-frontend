@@ -54,15 +54,17 @@ class TodoInternalAdapterTests(unittest.TestCase):
         self.assertEqual(
             get_capability("todo.read")["provider_bindings"],
             {
-                "claude_code": "mcp__home__get_todos",
+                "claude_code": "mcp__internal__get_todos",
                 "internal_mcp": "mcp__internal__get_todos",
+                "home_mcp": "mcp__home__get_todos",
             },
         )
         self.assertEqual(
             get_capability("todo.write")["provider_bindings"],
             {
-                "claude_code": "mcp__home__add_todo",
+                "claude_code": "mcp__internal__add_todo",
                 "internal_mcp": "mcp__internal__add_todo",
+                "home_mcp": "mcp__home__add_todo",
             },
         )
 
@@ -213,12 +215,15 @@ class TodoInternalAdapterTests(unittest.TestCase):
                     7,
                 )
 
-    def test_live_surface_stays_home_only(self):
+    def test_live_surface_uses_internal_todo_and_forbids_home_todo(self):
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
-        self.assertEqual(set(plan["mcp_config"]["mcpServers"]), {"home"})
-        self.assertNotIn("internal", str(plan["mcp_config"]).lower())
-        self.assertNotIn("mcp__internal__", plan["surface_allowlist_csv"])
-        self.assertNotIn("mcp__internal__", plan["disallowed_tools_csv"])
+        self.assertEqual(set(plan["mcp_config"]["mcpServers"]), {"home", "internal"})
+        self.assertIn("mcp__internal__get_todos", plan["surface_allowlist"])
+        self.assertIn("mcp__internal__add_todo", plan["surface_allowlist"])
+        self.assertNotIn("mcp__home__get_todos", plan["surface_allowlist"])
+        self.assertNotIn("mcp__home__add_todo", plan["surface_allowlist"])
+        self.assertIn("mcp__home__get_todos", plan["disallowed_tools"])
+        self.assertIn("mcp__home__add_todo", plan["disallowed_tools"])
 
 
 if __name__ == "__main__":

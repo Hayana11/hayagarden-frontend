@@ -85,6 +85,16 @@ _HOME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
 }
 
+# Internal MCP Todo schemas mirror Home Todo schemas exactly.
+_INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "mcp__internal__get_todos": _EMPTY_SCHEMA,
+    "mcp__internal__add_todo": {
+        "type": "object",
+        "properties": {"content": {"type": "string"}, "due_date": {"type": "string"}},
+        "required": ["content"],
+    },
+}
+
 
 def _parse_allowed_tools_ordered(allowed_tools: Optional[str]) -> list[str]:
     """Preserve allowlist CSV order; dedupe by first occurrence only."""
@@ -102,6 +112,7 @@ def _parse_allowed_tools_ordered(allowed_tools: Optional[str]) -> list[str]:
 def _static_schema_registry() -> dict[str, dict[str, Any]]:
     registry = dict(_BRAIN_TOOL_SCHEMAS)
     registry.update(_HOME_TOOL_SCHEMAS)
+    registry.update(_INTERNAL_TOOL_SCHEMAS)
     try:
         from codebase.client import CODEBASE_TOOLS
 
