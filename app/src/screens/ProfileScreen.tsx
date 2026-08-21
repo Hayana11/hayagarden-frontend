@@ -8,6 +8,7 @@ import {
   type ToolCompanionHints,
   type ToolCompanionTool,
 } from '../lib/toolCompanionHints';
+import { fetchCapabilityStates, type CapabilityState } from '../lib/capabilityStates';
 import { FONT_CN, FONT_DISPLAY } from '../lib/typography';
 import './ProfileScreen.css';
 
@@ -58,6 +59,28 @@ function updateTool(
   return next;
 }
 
+const RUNTIME_STATE_LABELS: Record<CapabilityState['runtime_state'], string> = {
+  INHERIT: '默认开启',
+  ON: '已开启',
+  OFF: '已关闭',
+  DENY: '不可用',
+};
+
+function presentCapabilityState(state: CapabilityState | undefined) {
+  if (!state) {
+    return {
+      runtimeLabel: '状态未知',
+      availabilityLabel: '当前不可确认',
+      className: 'missing',
+    };
+  }
+  return {
+    runtimeLabel: RUNTIME_STATE_LABELS[state.runtime_state],
+    availabilityLabel: state.effective_enabled ? '当前可用' : '当前不可用',
+    className: state.runtime_state.toLowerCase(),
+  };
+}
+
 export function ProfileScreen() {
   const navigate = useNavigate();
   const [theme] = useState(() => {
@@ -80,6 +103,8 @@ export function ProfileScreen() {
   const [savedHints, setSavedHints] = useState<ToolCompanionHints | null>(null);
   const [draftHints, setDraftHints] = useState<ToolCompanionHints | null>(null);
   const [toolHintsLoadError, setToolHintsLoadError] = useState('');
+  const [capabilityStates, setCapabilityStates] = useState<CapabilityState[]>([]);
+  const [capabilityStateLoadError, setCapabilityStateLoadError] = useState('');
   const [resetCapabilities, setResetCapabilities] = useState<Record<string, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
 
@@ -103,10 +128,13 @@ export function ProfileScreen() {
     setLoading(true);
     setPersonaLoadError('');
     setToolHintsLoadError('');
+    setCapabilityStateLoadError('');
+    setCapabilityStates([]);
     setResetCapabilities({});
-    const [personaResult, hintsResult] = await Promise.allSettled([
+    const [personaResult, hintsResult, capabilityStateResult] = await Promise.allSettled([
       http.get<PersonaResponse>('/api/persona'),
       fetchToolCompanionHints(),
+      fetchCapabilityStates(),
     ]);
 
     if (personaResult.status === 'fulfilled' && personaResult.value.ok !== false) {
@@ -138,10 +166,27 @@ export function ProfileScreen() {
       setToolHintsLoadError(detail);
       showToast(detail);
     }
+    if (capabilityStateResult.status === 'fulfilled') {
+      setCapabilityStates(capabilityStateResult.value.states);
+    } else {
+      const detail = capabilityStateResult.reason instanceof HttpError && capabilityStateResult.reason.detail
+        ? capabilityStateResult.reason.detail
+        : capabilityStateResult.reason instanceof Error
+          ? capabilityStateResult.reason.message
+          : '真实能力状态暂时读不到';
+      setCapabilityStates([]);
+      setCapabilityStateLoadError(detail);
+      showToast(detail);
+    }
     setLoading(false);
   }, [showToast]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const capabilityStateById = useMemo(
+    () => new Map(capabilityStates.map((state) => [state.capability_id, state])),
+    [capabilityStates],
+  );
 
   useEffect(() => {
     const warnBeforeLeave = (event: BeforeUnloadEvent) => {
@@ -289,6 +334,11 @@ export function ProfileScreen() {
                 <div className="profile-help-text">48h 试用 · 只编辑工具名称与自然语言说明；真实能力边界由系统固定。</div>
               </div>
             </div>
+            {capabilityStateLoadError && (
+              <div className="profile-capability-state-error" role="status">
+                真实能力状态暂时读不到：{capabilityStateLoadError}。工具直觉仍可编辑，当前不臆测开启状态。
+              </div>
+            )}
             <div className="profile-tool-groups">
               {toolHintsLoadError ? (
                 <div className="profile-help-text">工具直觉暂时读不到：{toolHintsLoadError}。当前不展示伪造的工具数据，请稍后重新读取。</div>
@@ -297,6 +347,8 @@ export function ProfileScreen() {
                   <div className="profile-tool-group-title">{group.label}</div>
                   {group.tools.map((tool) => {
                     const open = Boolean(openTools[tool.capability_id]);
+                    const capabilityState = capabilityStateById.get(tool.capability_id);
+                    const statePresentation = presentCapabilityState(capabilityState);
                     const longHint = Array.from(tool.companion_hint).length > 800;
                     const preview = `【${tool.display_label}】\n${tool.companion_hint}\n真实能力边界：${tool.physical_boundary}`;
                     return (
@@ -305,6 +357,15 @@ export function ProfileScreen() {
                           <span>{tool.display_label}</span><span className="profile-tool-status">{tool.status_label}</span><span>{open ? '⌃' : '⌄'}</span>
                         </button>
                         <div className="profile-tool-boundary">{tool.physical_boundary}</div>
+                        <div
+                          className={`profile-capability-state-badge profile-capability-state-badge--${statePresentation.className}`}
+                          data-runtime-state={capabilityState?.runtime_state ?? 'MISSING'}
+                          aria-label={`能力状态：${statePresentation.runtimeLabel}，${statePresentation.availabilityLabel}`}
+                        >
+                          <span className="profile-capability-state-badge__label">真实能力</span>
+                          <strong>{statePresentation.runtimeLabel}</strong>
+                          <span>{statePresentation.availabilityLabel}</span>
+                        </div>
                         {open && (
                           <div className="profile-tool-editor">
                             <label>小猫看到的工具名字<input value={tool.display_label} onChange={(event) => editTool(tool.capability_id, 'display_label', event.target.value)} /></label>

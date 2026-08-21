@@ -1,0 +1,57 @@
+name: M2-03B1 Profile capability state validation
+
+on:
+  pull_request:
+    paths:
+      - "app/src/lib/capabilityStates.ts"
+      - "app/src/screens/ProfileScreen.tsx"
+      - "app/src/screens/ProfileScreen.css"
+      - "app/scripts/test-capability-state-profile.mjs"
+      - ".github/workflows/m2-03b1-profile-capability-state-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  base-head:
+    name: ${{ matrix.label }} Profile build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            ref: ${{ github.event.pull_request.base.sha }}
+          - label: head
+            ref: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact ${{ matrix.label }} SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build exact ${{ matrix.label }} frontend
+        working-directory: app
+        run: npm run build
+
+      - name: Lint exact head frontend
+        if: matrix.label == 'head'
+        working-directory: app
+        run: npm run lint
+
+      - name: Run exact head capability-state contract
+        if: matrix.label == 'head'
+        working-directory: app
+        run: node scripts/test-capability-state-profile.mjs
