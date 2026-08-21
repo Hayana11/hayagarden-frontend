@@ -1,0 +1,70 @@
+name: M2-03A capability state HTTP base-head validation
+
+on:
+  pull_request:
+    paths:
+      - "app.py"
+      - "tools/capability_state.py"
+      - "tests/test_capability_state_http.py"
+      - "cc_resident.py"
+      - "tools/cc_capability_adapter.py"
+      - "tests/test_cc_runtime.py"
+      - "tests/test_cc_deferred_resume.py"
+      - "tests/test_m2_02b_surface_generation.py"
+      - "tests/test_execution_fence.py"
+      - "tests/test_capability_state.py"
+      - "tests/test_cc_capability_adapter.py"
+      - ".github/workflows/m2-03a-capability-state-http-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  base-head:
+    name: ${{ matrix.label }} capability state contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            ref: ${{ github.event.pull_request.base.sha }}
+            resident_tests: tests.test_cc_runtime tests.test_cc_deferred_resume tests.test_m2_02b_surface_generation
+          - label: head
+            ref: ${{ github.event.pull_request.head.sha }}
+            resident_tests: tests.test_cc_runtime tests.test_cc_deferred_resume tests.test_m2_02b_surface_generation
+    steps:
+      - name: Checkout exact ${{ matrix.label }} SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install contract test dependencies
+        run: python -m pip install Flask Pillow Markdown
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+
+      - name: Run resident and generation contracts
+        run: python -m unittest ${{ matrix.resident_tests }} -v
+
+      - name: Run M2-01 execution fence regression
+        run: python -m unittest tests.test_execution_fence tests.test_capability_state -v
+
+      - name: Run M2-02A surface regression
+        run: python -m unittest tests.test_cc_capability_adapter -v
+
+      - name: Run M2-03A HTTP contract
+        if: matrix.label == 'head'
+        run: python -m unittest tests.test_capability_state_http -v
