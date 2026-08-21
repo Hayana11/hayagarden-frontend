@@ -72,7 +72,16 @@ case "$action" in
   daemon-reload) exit 0 ;;
   enable) printf '%s\n' enabled > "$state/enabled" ;;
   disable) rm -f "$state/enabled" ;;
-  start) printf '%s\n' active > "$state/active" ;;
+  start)
+    if [[ ! -f "$state/active" ]]; then
+      printf '%s\n' active > "$state/active"
+      printf '%s\n' started > "$state/process"
+    fi
+    ;;
+  restart)
+    printf '%s\n' active > "$state/active"
+    printf '%s\n' restarted > "$state/process"
+    ;;
   stop) rm -f "$state/active" ;;
   mask) printf '%s\n' masked > "$state/enabled" ;;
 esac
@@ -183,11 +192,14 @@ exit "${FAKE_READINESS_RC:-0}"
         unit_path.write_bytes(UNIT.read_bytes())
         (self.fake_state / "active").write_text("active" + chr(10), encoding="utf-8")
         (self.fake_state / "enabled").write_text("enabled" + chr(10), encoding="utf-8")
+        (self.fake_state / "process").write_text("old" + chr(10), encoding="utf-8")
         (self.state / "internal-mcp-activated-sha").write_text(("b" * 40) + chr(10), encoding="utf-8")
         result = self.run_activation(self.env())
         self.assertEqual(result.returncode, 0, result.stderr)
         log = self.log.read_text(encoding="utf-8")
-        self.assertIn("start internal-mcp.service", log)
+        self.assertIn("restart internal-mcp.service", log)
+        self.assertNotIn("\nstart internal-mcp.service\n", "\n" + log + "\n")
+        self.assertEqual((self.fake_state / "process").read_text(encoding="utf-8").strip(), "restarted")
         self.assertEqual((self.state / "internal-mcp-activated-sha").read_text(encoding="utf-8").strip(), SHA)
 
     def test_repeated_ready_activation_is_idempotent(self) -> None:
@@ -195,6 +207,7 @@ exit "${FAKE_READINESS_RC:-0}"
         unit_path.write_bytes(UNIT.read_bytes())
         (self.fake_state / "active").write_text("active" + chr(10), encoding="utf-8")
         (self.fake_state / "enabled").write_text("enabled" + chr(10), encoding="utf-8")
+        (self.fake_state / "process").write_text("old" + chr(10), encoding="utf-8")
         (self.state / "internal-mcp-activated-sha").write_text(SHA + chr(10), encoding="utf-8")
         result = self.run_activation(self.env())
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -202,6 +215,8 @@ exit "${FAKE_READINESS_RC:-0}"
         self.assertNotIn("daemon-reload", log)
         self.assertNotIn(" enable ", f" {log} ")
         self.assertNotIn(" start ", f" {log} ")
+        self.assertNotIn(" restart ", f" {log} ")
+        self.assertEqual((self.fake_state / "process").read_text(encoding="utf-8").strip(), "old")
 
 if __name__ == "__main__":
     unittest.main()
