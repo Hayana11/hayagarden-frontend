@@ -61,12 +61,15 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
     "diary.write",
     "home.light.status",
-    "todo.read",
-    "todo.write",
     "countdown.read",
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
+)
+
+INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
+    "todo.read",
+    "todo.write",
 )
 
 NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
@@ -78,6 +81,7 @@ NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
 EXTERNAL_READ_CAPABILITY_IDS: tuple[str, ...] = ("web.search", "web.read")
 
 DEFAULT_HOME_MCP_URL = "http://127.0.0.1:3100/mcp"
+DEFAULT_INTERNAL_MCP_URL = "http://127.0.0.1:3101/mcp"
 UH_A0_MCP_CONFIG_FILENAME = "cc-tools-uh-a0.json"
 UH_A0_SETTINGS_FILENAME = "cc-settings-uh-a0.json"
 DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
@@ -101,24 +105,38 @@ def write_uh_a0_settings(cwd):
     return str(out)
 
 
-def _claude_binding(capability_id: str) -> str:
+def _provider_binding(capability_id: str, provider: str) -> str:
     entry = get_capability(capability_id)
     if entry is None:
         raise KeyError(f"unknown capability_id: {capability_id}")
-    binding = (entry.get("provider_bindings") or {}).get("claude_code")
+    binding = (entry.get("provider_bindings") or {}).get(provider)
     if not isinstance(binding, str) or not binding.strip():
-        raise KeyError(f"missing claude_code binding for {capability_id}")
+        raise KeyError(f"missing {provider} binding for {capability_id}")
+    return binding.strip()
+
+
+def _claude_binding(capability_id: str) -> str:
+    binding = _provider_binding(capability_id, "claude_code")
     if capability_id in P1_RESERVED_CAPABILITY_IDS:
         raise KeyError(f"RESERVED capability cannot enter P3 surface: {capability_id}")
     if capability_id not in P1_ENABLED_CAPABILITY_IDS:
         raise KeyError(f"capability is not P1-enabled: {capability_id}")
-    return binding.strip()
+    return binding
 
 
 def uh_a0_home_mcp_tools() -> tuple[str, ...]:
-    """Exact Home MCP CC names for P1-enabled Home capabilities."""
+    """Exact Home MCP CC names for non-Todo P1 Home capabilities."""
     return tuple(_claude_binding(cid) for cid in HOME_MCP_CAPABILITY_IDS)
 
+
+def uh_a0_internal_mcp_tools() -> tuple[str, ...]:
+    """Exact Internal MCP CC names for Daily Todo capabilities."""
+    return tuple(_claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS)
+
+
+def uh_a0_home_legacy_todo_tools() -> tuple[str, ...]:
+    """Home Todo names retained for Wake/legacy and forbidden in Daily."""
+    return tuple(_provider_binding(cid, "home_mcp") for cid in INTERNAL_MCP_CAPABILITY_IDS)
 
 def uh_a0_native_bindings() -> dict[str, str]:
     return {cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS}
@@ -129,36 +147,48 @@ def uh_a0_external_read_tools() -> tuple[str, ...]:
     return tuple(_claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS)
 
 
-def resolve_home_mcp_url(legacy_mcp_config_path: str | os.PathLike[str] | None = None) -> str:
+def _resolve_mcp_url(server_name: str, default_url: str, legacy_mcp_config_path=None) -> str:
     path = Path(legacy_mcp_config_path) if legacy_mcp_config_path else None
     if path and path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            servers = data.get("mcpServers") or {}
-            home = servers.get("home") or {}
-            url = str(home.get("url") or "").strip()
+            server = (data.get("mcpServers") or {}).get(server_name) or {}
+            url = str(server.get("url") or "").strip()
             if url:
                 return url
         except (OSError, json.JSONDecodeError, TypeError, AttributeError):
             pass
-    return DEFAULT_HOME_MCP_URL
+    return default_url
+
+
+def resolve_home_mcp_url(legacy_mcp_config_path: str | os.PathLike[str] | None = None) -> str:
+    return _resolve_mcp_url("home", DEFAULT_HOME_MCP_URL, legacy_mcp_config_path)
+
+
+def resolve_internal_mcp_url(legacy_mcp_config_path: str | os.PathLike[str] | None = None) -> str:
+    return _resolve_mcp_url("internal", DEFAULT_INTERNAL_MCP_URL, legacy_mcp_config_path)
 
 
 def build_uh_a0_mcp_config(
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    """Strict UH-A0 MCP config: Home only. No brain/codebase/workspace."""
+    """Strict UH-A0 config with Home compatibility and Internal Todo."""
     return {
         "mcpServers": {
             "home": {
                 "type": "http",
                 "url": resolve_home_mcp_url(legacy_mcp_config_path),
                 "headers": {"X-UH-A0-Profile": "uh_a0"},
-            }
+            },
+            "internal": {
+                "type": "http",
+                "url": resolve_internal_mcp_url(legacy_mcp_config_path),
+                "headers": {"X-UH-A0-Profile": "uh_a0"},
+            },
         }
     }
-
+}
 
 def write_uh_a0_mcp_config(
     cwd: str | os.PathLike[str],
@@ -240,9 +270,9 @@ def diagnose_tool_search(
 
 
 def loading_plan_from_manifest() -> dict[str, str]:
-    """capability_id -> loading_policy for P3 Home + native file caps."""
+    """capability_id -> loading_policy for the UH-A0 provider surface."""
     out: dict[str, str] = {}
-    for cid in HOME_MCP_CAPABILITY_IDS + NATIVE_FILE_CAPABILITY_IDS:
+    for cid in HOME_MCP_CAPABILITY_IDS + INTERNAL_MCP_CAPABILITY_IDS + NATIVE_FILE_CAPABILITY_IDS:
         entry = get_capability(cid)
         assert entry is not None
         out[cid] = str(entry["loading_policy"])
@@ -259,104 +289,70 @@ def short_intent_instructions() -> str:
 
 
 def _surface_fingerprint(snapshot: Mapping[str, Any]) -> str:
-    """Hash the real visible surface, preserving the P3 fingerprint shape."""
-    return sha256_canonical_json(
-        {
-            "built_ins": list(snapshot["built_in_tools"]),
-            "home_mcp": list(snapshot["home_mcp_tools"]),
-            "forbidden_built_ins": list(FORBIDDEN_BUILTIN_TOOLS),
-            "non_p3_home": list(NON_P3_HOME_MCP_TOOLS),
-        }
-    )
+    """Hash the complete visible and forbidden physical UH-A0 surface."""
+    return sha256_canonical_json({
+        "built_ins": list(snapshot["built_in_tools"]),
+        "home_mcp": list(snapshot["home_mcp_tools"]),
+        "internal_mcp": list(snapshot["internal_mcp_tools"]),
+        "runtime_hidden_home_mcp": list(snapshot["runtime_hidden_home_mcp_tools"]),
+        "runtime_hidden_internal_mcp": list(snapshot["runtime_hidden_internal_mcp_tools"]),
+        "forbidden_built_ins": list(FORBIDDEN_BUILTIN_TOOLS),
+        "non_p3_home": list(NON_P3_HOME_MCP_TOOLS),
+    })
 
 
 def _surface_snapshot() -> dict[str, Any]:
     """Build one fail-closed, runtime-state-aware UH-A0 surface snapshot."""
-    home_bindings = {
-        cid: _claude_binding(cid) for cid in HOME_MCP_CAPABILITY_IDS
-    }
-    native_file_bindings = {
-        cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS
-    }
-    external_bindings = {
-        cid: _claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS
-    }
-    all_capability_ids = (
-        HOME_MCP_CAPABILITY_IDS
-        + NATIVE_FILE_CAPABILITY_IDS
-        + EXTERNAL_READ_CAPABILITY_IDS
-    )
+    home_bindings = {cid: _claude_binding(cid) for cid in HOME_MCP_CAPABILITY_IDS}
+    internal_bindings = {cid: _claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS}
+    legacy_home_todo = uh_a0_home_legacy_todo_tools()
+    native_file_bindings = {cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS}
+    external_bindings = {cid: _claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS}
+    all_capability_ids = HOME_MCP_CAPABILITY_IDS + INTERNAL_MCP_CAPABILITY_IDS + NATIVE_FILE_CAPABILITY_IDS + EXTERNAL_READ_CAPABILITY_IDS
     visible_states = {RUNTIME_STATE_INHERIT, RUNTIME_STATE_ON}
     try:
-        states = {
-            cid: read_capability_state(cid)
-            for cid in all_capability_ids
-        }
-        if any(
-            state not in {
-                RUNTIME_STATE_INHERIT,
-                RUNTIME_STATE_ON,
-                RUNTIME_STATE_OFF,
-                RUNTIME_STATE_DENY,
-            }
-            for state in states.values()
-        ):
+        states = {cid: read_capability_state(cid) for cid in all_capability_ids}
+        if any(state not in {RUNTIME_STATE_INHERIT, RUNTIME_STATE_ON, RUNTIME_STATE_OFF, RUNTIME_STATE_DENY} for state in states.values()):
             raise CapabilityStateError("runtime capability state is invalid")
         status = "OK"
         diagnostic = ""
     except Exception as exc:
-        # A new generation must never turn an unreadable state store into the
-        # old static-all-visible surface. Keep text-only operation possible.
         states = {}
         status = "FAIL_CLOSED"
         diagnostic = str(exc)
 
     if status == "FAIL_CLOSED":
         visible_home_ids: tuple[str, ...] = ()
+        visible_internal_ids: tuple[str, ...] = ()
         visible_native_file_ids: tuple[str, ...] = ()
         visible_external_ids: tuple[str, ...] = ()
-        hidden_home = tuple(home_bindings.values())
+        hidden_home = tuple(home_bindings.values()) + legacy_home_todo
+        hidden_internal = tuple(internal_bindings.values())
     else:
-        visible_home_ids = tuple(
-            cid for cid in HOME_MCP_CAPABILITY_IDS
-            if states[cid] in visible_states
-        )
-        visible_native_file_ids = tuple(
-            cid for cid in NATIVE_FILE_CAPABILITY_IDS
-            if states[cid] in visible_states
-        )
-        visible_external_ids = tuple(
-            cid for cid in EXTERNAL_READ_CAPABILITY_IDS
-            if states[cid] in visible_states
-        )
-        hidden_home = tuple(
-            home_bindings[cid]
-            for cid in HOME_MCP_CAPABILITY_IDS
-            if states[cid] not in visible_states
-        )
+        visible_home_ids = tuple(cid for cid in HOME_MCP_CAPABILITY_IDS if states[cid] in visible_states)
+        visible_internal_ids = tuple(cid for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] in visible_states)
+        visible_native_file_ids = tuple(cid for cid in NATIVE_FILE_CAPABILITY_IDS if states[cid] in visible_states)
+        visible_external_ids = tuple(cid for cid in EXTERNAL_READ_CAPABILITY_IDS if states[cid] in visible_states)
+        hidden_home = legacy_home_todo + tuple(home_bindings[cid] for cid in HOME_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
+        hidden_internal = tuple(internal_bindings[cid] for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
 
-    built_in_tools = tuple(
-        native_file_bindings[cid] for cid in visible_native_file_ids
-    ) + tuple(
-        external_bindings[cid] for cid in visible_external_ids
-    )
+    built_in_tools = tuple(native_file_bindings[cid] for cid in visible_native_file_ids) + tuple(external_bindings[cid] for cid in visible_external_ids)
     home_tools = tuple(home_bindings[cid] for cid in visible_home_ids)
-    native_bindings = {
-        cid: native_file_bindings[cid] for cid in visible_native_file_ids
-    }
+    internal_tools = tuple(internal_bindings[cid] for cid in visible_internal_ids)
     return {
         "runtime_state_status": status,
         "runtime_state_diagnostic": diagnostic,
         "built_in_tools": built_in_tools,
         "home_mcp_tools": home_tools,
-        "native_bindings": native_bindings,
+        "internal_mcp_tools": internal_tools,
+        "native_bindings": {cid: native_file_bindings[cid] for cid in visible_native_file_ids},
         "runtime_hidden_home_mcp_tools": hidden_home,
+        "runtime_hidden_internal_mcp_tools": hidden_internal,
     }
-
 
 def physical_surface_names() -> tuple[str, ...]:
     snapshot = _surface_snapshot()
-    return snapshot["built_in_tools"] + snapshot["home_mcp_tools"]
+    return snapshot["built_in_tools"] + snapshot["home_mcp_tools"] + snapshot["internal_mcp_tools"]
 
 
 def physical_surface_fingerprint() -> str:
@@ -381,6 +377,7 @@ def build_uh_a0_spawn_plan(
     diagnosis = diagnose_tool_search(env=env, actual_version=actual_version)
     surface = _surface_snapshot()
     home_tools = surface["home_mcp_tools"]
+    internal_tools = surface["internal_mcp_tools"]
     native = surface["native_bindings"]
     loading = loading_plan_from_manifest()
 
@@ -400,11 +397,12 @@ def build_uh_a0_spawn_plan(
     turn_lease_path = resolve_uh_a0_turn_lease_path(target_cwd, env=env)
 
     built_in_tools = tuple(surface["built_in_tools"])
-    allowlist = list(built_in_tools) + list(home_tools)
+    allowlist = list(built_in_tools) + list(home_tools) + list(internal_tools)
     disallowed = (
         list(FORBIDDEN_BUILTIN_TOOLS)
         + list(NON_P3_HOME_MCP_TOOLS)
         + list(surface["runtime_hidden_home_mcp_tools"])
+        + list(surface["runtime_hidden_internal_mcp_tools"])
     )
     built_in_csv = ",".join(built_in_tools)
     allowed_csv = ",".join(allowlist)
@@ -427,6 +425,7 @@ def build_uh_a0_spawn_plan(
         "built_in_tools": built_in_tools,
         "built_in_tools_csv": built_in_csv,
         "home_mcp_tools": home_tools,
+        "internal_mcp_tools": internal_tools,
         "native_bindings": native,
         "surface_allowlist": tuple(allowlist),
         "surface_allowlist_csv": allowed_csv,
@@ -447,7 +446,7 @@ def build_uh_a0_spawn_plan(
         "intent_instructions": short_intent_instructions(),
         # Visibility claim for reports: what Claude can see under UH-A0 plan.
         "claude_visible_built_ins": built_in_tools,
-        "claude_visible_mcp_tools": home_tools,
+        "claude_visible_mcp_tools": home_tools + internal_tools,
         "claude_absent_servers": ("brain", "codebase", "workspace"),
     }
     return plan
