@@ -64,7 +64,6 @@ OLD_ACTIVE="inactive"
 OLD_ACTIVATED_SHA=""
 OLD_ACTIVATED_SHA_EXISTS=0
 UNIT_REPLACED=0
-MARKER_CHANGED=0
 
 cleanup() {
   rm -rf "$BACKUP_DIR"
@@ -125,7 +124,7 @@ rollback() {
     "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || true
   fi
 
-  if [[ "$OLD_ACTIVATED_SHA_EXISTS" -eq 1 ]]; then
+  if [[ "$OLD_EXISTS" -eq 1 && "$OLD_ACTIVATED_SHA_EXISTS" -eq 1 ]]; then
     cp -p "$BACKUP_DIR/activated-sha" "$ACTIVATED_SHA_FILE"
   else
     rm -f "$ACTIVATED_SHA_FILE"
@@ -143,6 +142,5 @@ run_readiness
 MARKER_TMP="$BACKUP_DIR/activated-sha.new"
 printf '%s\n' "$EXPECTED_SHA" > "$MARKER_TMP"
 mv -f "$MARKER_TMP" "$ACTIVATED_SHA_FILE"
-MARKER_CHANGED=1
 
 echo "Internal MCP activated for $EXPECTED_SHA"
