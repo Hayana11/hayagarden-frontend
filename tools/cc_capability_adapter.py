@@ -72,6 +72,14 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "todo.write",
 )
 
+# M3-03A shadow tools are installed on Internal MCP but remain forbidden from
+# the Daily allowlist until the M3-03B provider cutover.
+INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "mcp__internal__get_ledger",
+    "mcp__internal__get_ledger_budget",
+    "mcp__internal__add_ledger",
+)
+
 NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
     "files.read",
     "files.find",
@@ -326,14 +334,14 @@ def _surface_snapshot() -> dict[str, Any]:
         visible_native_file_ids: tuple[str, ...] = ()
         visible_external_ids: tuple[str, ...] = ()
         hidden_home = tuple(home_bindings.values()) + legacy_home_todo
-        hidden_internal = tuple(internal_bindings.values())
+        hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings.values())
     else:
         visible_home_ids = tuple(cid for cid in HOME_MCP_CAPABILITY_IDS if states[cid] in visible_states)
         visible_internal_ids = tuple(cid for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] in visible_states)
         visible_native_file_ids = tuple(cid for cid in NATIVE_FILE_CAPABILITY_IDS if states[cid] in visible_states)
         visible_external_ids = tuple(cid for cid in EXTERNAL_READ_CAPABILITY_IDS if states[cid] in visible_states)
         hidden_home = legacy_home_todo + tuple(home_bindings[cid] for cid in HOME_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
-        hidden_internal = tuple(internal_bindings[cid] for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
+        hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings[cid] for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
 
     built_in_tools = tuple(native_file_bindings[cid] for cid in visible_native_file_ids) + tuple(external_bindings[cid] for cid in visible_external_ids)
     home_tools = tuple(home_bindings[cid] for cid in visible_home_ids)

@@ -1,0 +1,110 @@
+name: M3-03A Ledger Internal shadow validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/m3-03a-ledger-internal-validation.yml"
+      - "internal-mcp-server.js"
+      - "scripts/check-internal-mcp-readiness.mjs"
+      - "tests/test-m3-01-todo-internal.mjs"
+      - "tests/test-m3-02a-internal-mcp-readiness.mjs"
+      - "tests/test-m3-03a-ledger-internal.mjs"
+      - "tests/test_m3_03a_ledger_shadow.py"
+      - "tools/capability_manifest.py"
+      - "tools/cc_capability_adapter.py"
+      - "tools/ledger_internal_adapter.py"
+
+permissions:
+  contents: read
+
+jobs:
+  m3-03a:
+    name: M3-03A exact head validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Install Python test dependencies
+        run: python -m pip install Flask Pillow Markdown
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+      - name: Run M3-03A Python contracts
+        shell: bash
+        run: |
+          set +e
+          python -m unittest tests.test_m3_03a_ledger_shadow -v > m3-03a-python.log 2>&1
+          rc=$?
+          cat m3-03a-python.log
+          exit $rc
+      - name: Capture head fingerprint
+        shell: bash
+        run: |
+          python - <<'PY' > m3-03a-head-fingerprint.txt
+          from tools.cc_capability_adapter import physical_surface_fingerprint
+          print(physical_surface_fingerprint())
+          PY
+          cat m3-03a-head-fingerprint.txt
+      - name: Run existing capability adapter regression
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          python -m unittest tests.test_cc_capability_adapter -v > cc-capability-adapter.log 2>&1
+          rc=$?
+          cat cc-capability-adapter.log
+          exit $rc
+      - name: Upload Python contract logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-03a-python-contract-logs
+          path: |
+            m3-03a-python.log
+            cc-capability-adapter.log
+            m3-03a-head-fingerprint.txt
+          if-no-files-found: warn
+      - name: Run M3-03A Internal MCP dynamic shadow
+        run: node tests/test-m3-03a-ledger-internal.mjs
+      - name: Run Todo Internal regression
+        run: node tests/test-m3-01-todo-internal.mjs
+      - name: Run M3-02A service and readiness regressions
+        run: |
+          python -m unittest tests.test_m3_02a_internal_mcp_service
+          node tests/test-m3-02a-internal-mcp-readiness.mjs
+      - name: Run exact readiness contract
+        run: |
+          test "$(node -e "const fs=require('fs'); const s=fs.readFileSync('scripts/check-internal-mcp-readiness.mjs','utf8'); process.stdout.write(s.includes('get_ledger_budget') ? 'ok' : 'bad')")" = ok
+      - name: Run M2/M3 resident and fence regressions
+        run: >-
+          python -m unittest
+          tests.test_capability_state
+          tests.test_execution_fence
+          tests.test_cc_runtime
+          tests.test_cc_deferred_resume
+          tests.test_m2_02b_surface_generation
+      - name: Verify no Wake or production boundary changes
+        shell: bash
+        run: |
+          actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" | sort)"
+          expected="$(printf '%s\n' '.github/workflows/m3-03a-ledger-internal-validation.yml' 'internal-mcp-server.js' 'scripts/check-internal-mcp-readiness.mjs' 'tests/test-m3-01-todo-internal.mjs' 'tests/test-m3-02a-internal-mcp-readiness.mjs' 'tests/test-m3-03a-ledger-internal.mjs' 'tests/test_m3_03a_ledger_shadow.py' 'tools/capability_manifest.py' 'tools/cc_capability_adapter.py' 'tools/ledger_internal_adapter.py' | sort)"
+          test "$actual" = "$expected"
+          test -z "$(printf '%s\n' "$actual" | grep -E '^(wake/|app.py$|mcp-http-server.js$|tools/execution_fence.py$|tools/product_handlers.py$|cc_resident.py$|chat/daily_runtime.py$|deploy/systemd/|scripts/activate-internal-mcp.sh$)' || true)"
+      - name: Check diff whitespace
+        run: git diff --check

@@ -84,7 +84,7 @@ async function connectClient(name, profile) {
 const noProfile = await connectClient('m3-01-no-profile', undefined);
 const listed = await noProfile.client.listTools();
 assert.deepEqual(
-  listed.tools.map((tool) => tool.name),
+  listed.tools.filter((tool) => ['get_todos', 'add_todo'].includes(tool.name)).map((tool) => tool.name),
   ['get_todos', 'add_todo'],
 );
 assert.equal(listed.tools[1].inputSchema.required[0], 'content');

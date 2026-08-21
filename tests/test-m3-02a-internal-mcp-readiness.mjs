@@ -80,7 +80,7 @@ try {
   });
   const result = JSON.parse(output);
   assert.equal(result.status, 'PASS');
-  assert.deepEqual(result.tools.slice().sort(), ['add_todo', 'get_todos']);
+  assert.ok(['add_todo', 'get_todos'].every((name) => result.tools.includes(name)));
   assert.equal(result.write_tools_called, false);
   assert.equal(countRows(), before);
 } finally {
