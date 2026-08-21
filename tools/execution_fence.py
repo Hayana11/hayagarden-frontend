@@ -40,13 +40,24 @@ def _binding_values(binding: Any) -> tuple[str, ...]:
 
 
 def tool_capability_index() -> dict[str, str]:
-    """Compile the provider lookup from the frozen manifest."""
+    """Compile every provider's physical binding from the manifest."""
     out: dict[str, str] = {}
+    owners: dict[str, str] = {}
     for entry in CAPABILITY_MANIFEST:
         capability_id = str(entry.get("capability_id") or "")
         bindings = entry.get("provider_bindings") or {}
-        for tool_name in _binding_values(bindings.get("claude_code")):
-            out[tool_name] = capability_id
+        if not isinstance(bindings, Mapping):
+            continue
+        for raw_binding in bindings.values():
+            for tool_name in _binding_values(raw_binding):
+                previous = owners.get(tool_name)
+                if previous is not None and previous != capability_id:
+                    raise ValueError(
+                        f"physical tool binding collision: {tool_name} "
+                        f"maps to {previous} and {capability_id}"
+                    )
+                owners[tool_name] = capability_id
+                out[tool_name] = capability_id
     return out
 
 
@@ -360,19 +371,18 @@ class UH_A0TurnRuntime:
 
 
 def approval_prompt(tool_name, tool_input):
-    """Concrete Chinese confirmation copy for the two UH-A0 write actions."""
-    name = str(tool_name or "")
+    """Concrete Chinese confirmation copy for supported write capabilities."""
+    capability_id = capability_for_tool(tool_name)
     values = dict(tool_input or {})
-    if name == "mcp__home__add_todo":
+    if capability_id == "todo.write":
         return "我顺手给你记进待办里？"
-    if name == "mcp__home__add_ledger":
+    if capability_id == "ledger.write":
         amount = values.get("amount")
         if isinstance(amount, (int, float)) and not isinstance(amount, bool):
             amount_text = str(abs(amount)).rstrip("0").rstrip(".") if isinstance(amount, float) else str(abs(amount))
             return f"这笔 {amount_text} 元要我一起记账吗？"
         return "这笔账要我一起记账吗？"
     return None
-
 
 def pretooluse_payload(result):
     decision = str(result.get("lease_decision") or "LEASE_MISMATCH")
