@@ -53,7 +53,7 @@ jobs:
           tests.test_capability_state
           tests.test_execution_fence
           tests.test_cc_capability_adapter
-          tests.test_cc_resident
+          tests.test_context_window_resident
           tests.test_daily_runtime
 
       - name: Run base Todo handler and Home MCP contracts
@@ -65,7 +65,19 @@ jobs:
 
       - name: Run head M3-01 Python contracts
         if: matrix.label == 'head'
-        run: python -m unittest tests.test_m3_01_todo_internal
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import unittest
+
+          path = 'tests/test_m3_01_todo_internal.py'
+          spec = importlib.util.spec_from_file_location('m3_01_todo_internal', path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(module.TodoInternalAdapterTests)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() else 1)
+          PY
 
       - name: Run head Internal MCP shadow
         if: matrix.label == 'head'
