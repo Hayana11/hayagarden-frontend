@@ -17,7 +17,7 @@ assert.match(capabilityStates, /fetchCapabilityStates/);
 assert.match(capabilityStates, /patchCapabilityState/);
 assert.match(capabilityStates, /\/api\/capabilities\/\$\{encodedId\}\/state/);
 assert.match(capabilityStates, /typeof enabled !== 'boolean'/);
-assert.match(capabilityStates, /typeof payload\.state/);
+assert.match(capabilityStates, /isRecord\(payload\.state\)/);
 assert.match(capabilityStates, /parseCapabilityState\(payload\.state\)/);
 
 assert.match(moments, /fetchToolCompanionHints/);
