@@ -259,6 +259,29 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         self.assertEqual('正文', text)
         self.assertEqual('', thinking)
 
+    def test_normal_wake_filter_removes_authored_tags_and_preserves_tools(self):
+        events = [
+            ('tool_use', {'name': 'mcp__home__get_todos'}),
+            ('text', '<思绪>先看一眼</思绪>正式回复'),
+            ('tool_result', {'result': 'ok'}),
+            ('done', ('<思绪>先看一眼</思绪>正式回复', '', {})),
+        ]
+        output = list(filter_display_thinking_events(events, 'auto'))
+        self.assertEqual(
+            '正式回复',
+            ''.join(p for event, p in output if event == 'text'),
+        )
+        self.assertEqual(
+            '先看一眼',
+            ''.join(p for event, p in output if event == 'think'),
+        )
+        self.assertIn(('tool_use', {'name': 'mcp__home__get_todos'}), output)
+        self.assertIn(('tool_result', {'result': 'ok'}), output)
+        done = next(p for event, p in output if event == 'done')
+        self.assertEqual(('正式回复', '先看一眼'), done[:2])
+        self.assertNotIn('<思绪>', repr(output))
+        self.assertNotIn('</思绪>', repr(output))
+
     def test_tool_events_are_unchanged(self):
         events = [
             ('tool_use', {'name': 'x'}),
@@ -309,7 +332,11 @@ class DisplayThinkingStreamTests(unittest.TestCase):
             owners['append_authored_thinking_instruction'],
         )
         self.assertEqual(
-            {'_stream_cc_daily_soft_window', 'gen_cc'},
+            {
+                '_run_unified_normal_main_chat_turn',
+                '_stream_cc_daily_soft_window',
+                'gen_cc',
+            },
             owners['filter_display_thinking_events'],
         )
         self.assertIn(
