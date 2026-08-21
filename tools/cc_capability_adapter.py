@@ -188,7 +188,6 @@ def build_uh_a0_mcp_config(
             },
         }
     }
-}
 
 def write_uh_a0_mcp_config(
     cwd: str | os.PathLike[str],
