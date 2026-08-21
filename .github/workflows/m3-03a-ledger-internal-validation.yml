@@ -39,9 +39,31 @@ jobs:
       - name: Install Python test dependencies
         run: python -m pip install Flask Pillow Markdown
       - name: Run M3-03A Python contracts
-        run: python -m unittest tests.test_m3_03a_ledger_shadow
+        shell: bash
+        run: |
+          set +e
+          python -m unittest tests.test_m3_03a_ledger_shadow -v > m3-03a-python.log 2>&1
+          rc=$?
+          cat m3-03a-python.log
+          exit $rc
       - name: Run existing capability adapter regression
-        run: python -m unittest tests.test_cc_capability_adapter
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          python -m unittest tests.test_cc_capability_adapter -v > cc-capability-adapter.log 2>&1
+          rc=$?
+          cat cc-capability-adapter.log
+          exit $rc
+      - name: Upload Python contract logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m3-03a-python-contract-logs
+          path: |
+            m3-03a-python.log
+            cc-capability-adapter.log
+          if-no-files-found: warn
       - name: Run M3-03A Internal MCP dynamic shadow
         run: node tests/test-m3-03a-ledger-internal.mjs
       - name: Run Todo Internal regression
