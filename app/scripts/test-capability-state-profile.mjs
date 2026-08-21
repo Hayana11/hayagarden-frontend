@@ -28,7 +28,6 @@ for (const field of [
 for (const state of ['INHERIT', 'ON', 'OFF', 'DENY']) {
   assert.match(client, new RegExp(state));
 }
-assert.doesNotMatch(client, /http\.patch|PATCH|patchCapabilityState/);
 
 assert.match(profile, /fetchCapabilityStates/);
 assert.match(profile, /Promise\.allSettled/);

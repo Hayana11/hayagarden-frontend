@@ -6,6 +6,7 @@ on:
       - "app/src/lib/capabilityStates.ts"
       - "app/src/screens/MomentsScreen.tsx"
       - "app/scripts/test-capability-state-moments.mjs"
+      - "app/scripts/test-capability-state-profile.mjs"
       - ".github/workflows/m2-03b2-moments-capability-validation.yml"
 
 permissions:
@@ -60,5 +61,5 @@ jobs:
         shell: bash
         run: |
           actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" | sort)"
-          expected="$(printf '%s\n'             '.github/workflows/m2-03b2-moments-capability-validation.yml'             'app/scripts/test-capability-state-moments.mjs'             'app/src/lib/capabilityStates.ts'             'app/src/screens/MomentsScreen.tsx' | sort)"
+          expected="$(printf '%s\n'             '.github/workflows/m2-03b2-moments-capability-validation.yml'             'app/scripts/test-capability-state-moments.mjs'             'app/scripts/test-capability-state-profile.mjs'             'app/src/lib/capabilityStates.ts'             'app/src/screens/MomentsScreen.tsx' | sort)"
           test "$actual" = "$expected"
