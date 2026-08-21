@@ -12,6 +12,10 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'm3-01-todo-internal-'));
 const dbPath = join(tempRoot, 'todos.db');
 const leasePath = join(tempRoot, 'turn-lease.json');
 
+// The shadow server verifies against this isolated lease, never the production lease.
+process.env.UH_A0_REPO_ROOT = root;
+process.env.UH_A0_TURN_LEASE_PATH = leasePath;
+
 function python(code, args = []) {
   return execFileSync(process.env.PYTHON || 'python3', ['-c', code, ...args], {
     cwd: root,
