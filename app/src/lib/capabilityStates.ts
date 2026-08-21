@@ -60,3 +60,16 @@ export function fetchCapabilityStates(): Promise<CapabilityStateResponse> {
     };
   });
 }
+
+export function patchCapabilityState(capabilityId: string, enabled: boolean): Promise<CapabilityState> {
+  if (typeof enabled !== 'boolean') {
+    return Promise.reject(new TypeError('enabled 必须是 boolean'));
+  }
+  const encodedId = encodeURIComponent(capabilityId);
+  return http.patch<unknown>(`/api/capabilities/${encodedId}/state`, { enabled }).then((payload) => {
+    if (!isRecord(payload) || payload.ok !== true || !isRecord(payload.state)) {
+      throw new Error('能力状态写入响应无效');
+    }
+    return parseCapabilityState(payload.state);
+  });
+}
