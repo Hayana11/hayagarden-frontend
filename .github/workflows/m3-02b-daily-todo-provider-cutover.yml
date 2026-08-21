@@ -6,6 +6,7 @@ on:
       - "tools/cc_capability_adapter.py"
       - "tools/cc_tool_surface.py"
       - "tests/test_m3_01_todo_internal.py"
+      - "tests/test_execution_fence.py"
       - "tests/test_m3_02b_daily_todo_cutover.py"
       - ".github/workflows/m3-02b-daily-todo-provider-cutover.yml"
 permissions:
