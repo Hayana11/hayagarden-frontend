@@ -4259,7 +4259,10 @@ def _run_unified_normal_main_chat_turn(
         commit_shared_transcript_watermark,
         prepare_shared_transcript_watermark,
     )
-    from chat.display_thinking import get_display_thinking_mode
+    from chat.display_thinking import (
+        filter_display_thinking_events,
+        get_display_thinking_mode,
+    )
     from tools.lease_signer import issue_turn_lease
 
     resident = _CC_RESIDENT
@@ -4271,6 +4274,7 @@ def _run_unified_normal_main_chat_turn(
     shared_started = False
     watermark = None
     delivery_fence = None
+    display_thinking_mode = get_display_thinking_mode()
     result_cache_info = {
         'provider': 'claude_code',
         'source': 'wake',
@@ -4323,7 +4327,7 @@ def _run_unified_normal_main_chat_turn(
                 user_turn=False,
                 history_stats={},
                 is_cold=False,
-                display_thinking_mode=get_display_thinking_mode(),
+                display_thinking_mode=display_thinking_mode,
                 turn_lease=lease,
             )
 
@@ -4332,7 +4336,10 @@ def _run_unified_normal_main_chat_turn(
         tool_calls = []
         usage = {}
         saw_done = False
-        for evt, payload in guard_cc_generation(guarded_events()):
+        for evt, payload in filter_display_thinking_events(
+            guard_cc_generation(guarded_events()),
+            display_thinking_mode,
+        ):
             if evt == 'text':
                 text_acc.append(str(payload or ''))
             elif evt == 'think':
