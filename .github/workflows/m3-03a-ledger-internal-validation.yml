@@ -38,6 +38,13 @@ jobs:
         run: npm ci
       - name: Install Python test dependencies
         run: python -m pip install Flask Pillow Markdown
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
       - name: Run M3-03A Python contracts
         shell: bash
         run: |
