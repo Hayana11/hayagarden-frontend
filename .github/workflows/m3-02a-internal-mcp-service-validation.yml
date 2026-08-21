@@ -1,0 +1,123 @@
+name: M3-02A Internal MCP service-ready validation
+
+on:
+  pull_request:
+    paths:
+      - "deploy/systemd/internal-mcp.service"
+      - "scripts/activate-internal-mcp.sh"
+      - "scripts/check-internal-mcp-readiness.mjs"
+      - "tests/test_m3_02a_internal_mcp_service.py"
+      - "tests/test-m3-02a-internal-mcp-readiness.mjs"
+      - ".github/workflows/m3-02a-internal-mcp-service-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-base-head:
+    name: Exact base/head service-ready validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact base SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install test dependencies
+        run: |
+          npm ci
+          python -m pip install Flask Pillow Markdown
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+
+      - name: Run base regressions and capture live surface
+        shell: bash
+        run: |
+          python -m unittest \
+            tests.test_cc_runtime \
+            tests.test_cc_deferred_resume \
+            tests.test_m2_02b_surface_generation \
+            tests.test_execution_fence \
+            tests.test_capability_state \
+            tests.test_cc_capability_adapter \
+            tests.test_mcp_http_server_p4 -v
+          python - <<'PY' | tee /tmp/m3-02a-base-fingerprint
+          import tempfile
+          from tools.cc_capability_adapter import build_uh_a0_spawn_plan
+          with tempfile.TemporaryDirectory() as root:
+              plan = build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
+          assert set(plan["mcp_config"]["mcpServers"]) == {"home"}
+          assert "mcp__internal__" not in plan["surface_allowlist_csv"]
+          print(plan["physical_surface_fingerprint"])
+          PY
+
+      - name: Checkout exact head SHA
+        run: git checkout --detach --force "$HEAD_SHA"
+
+      - name: Run head regressions and M3-01 contracts
+        shell: bash
+        run: |
+          python -m unittest \
+            tests.test_cc_runtime \
+            tests.test_cc_deferred_resume \
+            tests.test_m2_02b_surface_generation \
+            tests.test_execution_fence \
+            tests.test_capability_state \
+            tests.test_cc_capability_adapter \
+            tests.test_mcp_http_server_p4 \
+            tests.test_m3_01_todo_internal \
+            tests.test_m3_02a_internal_mcp_service -v
+          node tests/test-m3-01-todo-internal.mjs
+          node tests/test-m3-02a-internal-mcp-readiness.mjs
+          python - <<'PY' | tee /tmp/m3-02a-head-fingerprint
+          import tempfile
+          from tools.cc_capability_adapter import build_uh_a0_spawn_plan
+          with tempfile.TemporaryDirectory() as root:
+              plan = build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
+          assert set(plan["mcp_config"]["mcpServers"]) == {"home"}
+          assert "mcp__internal__" not in plan["surface_allowlist_csv"]
+          print(plan["physical_surface_fingerprint"])
+          PY
+
+      - name: Prove base/head surface identity and scope
+        shell: bash
+        run: |
+          printf 'base fingerprint: '
+          cat /tmp/m3-02a-base-fingerprint
+          printf 'head fingerprint: '
+          cat /tmp/m3-02a-head-fingerprint
+          cmp /tmp/m3-02a-base-fingerprint /tmp/m3-02a-head-fingerprint
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            '.github/workflows/m3-02a-internal-mcp-service-validation.yml' \
+            'deploy/systemd/internal-mcp.service' \
+            'scripts/activate-internal-mcp.sh' \
+            'scripts/check-internal-mcp-readiness.mjs' \
+            'tests/test_m3_02a_internal_mcp_service.py' \
+            'tests/test-m3-02a-internal-mcp-readiness.mjs' | sort)"
+          test "$actual" = "$expected"
+          if printf '%s\n' "$actual" | grep -E '^(tools/|wake/|cc_resident.py$|chat/daily_runtime.py$|app.py$|internal-mcp-server.js$|deploy-frontend.sh$|app/)' ; then
+            exit 1
+          fi
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
