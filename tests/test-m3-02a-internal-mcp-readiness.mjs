@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,6 +39,28 @@ function countRows() {
   ));
 }
 
+function runReadiness(env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [readinessPath], {
+      cwd: root,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+      reject(new Error(stderr || `readiness exited with code ${code}`));
+    });
+  });
+}
+
 seedDb();
 const before = countRows();
 const { listener, port } = await internalServer.startInternalMcpServer({
@@ -52,13 +74,9 @@ try {
   assert.match(source, /X-UH-A0-Profile/);
   assert.doesNotMatch(source, /callTool\s*\(/);
 
-  const output = execFileSync(process.execPath, [readinessPath], {
-    cwd: root,
-    env: {
-      ...process.env,
-      INTERNAL_MCP_URL: `http://127.0.0.1:${port}/mcp`,
-    },
-    encoding: 'utf8',
+  const output = await runReadiness({
+    ...process.env,
+    INTERNAL_MCP_URL: `http://127.0.0.1:${port}/mcp`,
   });
   const result = JSON.parse(output);
   assert.equal(result.status, 'PASS');
