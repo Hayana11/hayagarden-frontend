@@ -11,7 +11,12 @@ from unittest import mock
 
 import cc_resident
 from chat import cc_runtime
-from tools.execution_fence import UH_A0TurnRuntime, read_current_turn_lease
+from tools.execution_fence import (
+    UH_A0TurnRuntime,
+    capability_for_tool,
+    evaluate_tool_call,
+    read_current_turn_lease,
+)
 from tools.lease_signer import issue_turn_lease
 
 
@@ -58,7 +63,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                 "content": [{
                     "type": "tool_use",
                     "id": "toolu-1",
-                    "name": "mcp__home__add_todo",
+                    "name": "mcp__internal__add_todo",
                     "input": action,
                 }],
             },
@@ -69,7 +74,7 @@ class DeferredResumeContractTests(unittest.TestCase):
             "session_id": "session-abc",
             "deferred_tool_use": {
                 "id": "toolu-1",
-                "name": "mcp__home__add_todo",
+                "name": "mcp__internal__add_todo",
                 "input": action,
             },
         }
@@ -80,7 +85,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                     "content": [{
                         "type": "tool_use",
                         "id": "toolu-1",
-                        "name": "mcp__home__add_todo",
+                        "name": "mcp__internal__add_todo",
                         "input": action,
                     }],
                 },
@@ -138,7 +143,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                 self.assertTrue(first_payload["deferred_tool_use"])
                 self.assertEqual(first_payload["status"], "waiting_for_confirmation")
                 self.assertEqual(first_payload["id"], "toolu-1")
-                self.assertEqual(first_payload["name"], "mcp__home__add_todo")
+                self.assertEqual(first_payload["name"], "mcp__internal__add_todo")
                 self.assertEqual(first_payload["args"], action)
                 # The first externally visible waiting event is authoritative:
                 # pending state exists and the default lease is already gone.
@@ -148,7 +153,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                     {
                         "session_id": "session-abc",
                         "tool_use_id": "toolu-1",
-                        "tool_name": "mcp__home__add_todo",
+                        "tool_name": "mcp__internal__add_todo",
                         "tool_input": action,
                         "approval_id": first_payload["approval_id"],
                     },
@@ -207,12 +212,76 @@ class DeferredResumeContractTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(resumed_tool_uses), 1)
                 self.assertEqual(resumed_tool_uses[0]["id"], "toolu-1")
-                self.assertEqual(resumed_tool_uses[0]["name"], "mcp__home__add_todo")
+                self.assertEqual(resumed_tool_uses[0]["name"], "mcp__internal__add_todo")
                 self.assertEqual(resumed_tool_uses[0]["args"], action)
                 self.assertEqual(resumed_tool_uses[0]["lease_decision"], "ALLOW")
                 self.assertIsNone(session.pending_deferred)
                 self.assertIsNone(read_current_turn_lease(lease_path)[0])
 
+
+    
+    def test_stale_home_pending_is_rejected_after_provider_cutover(self):
+        action = {"content": "明天寄快递"}
+        old_tool = "mcp__home__add_todo"
+        current_tool = "mcp__internal__add_todo"
+        self.assertEqual(capability_for_tool(old_tool), "todo.write")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = cc_resident.ResidentSession(
+                cwd=tmp,
+                allowed_tools="",
+                mcp_config_path=str(Path(tmp) / "cc-tools.json"),
+            )
+            session._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
+            session._system_text = "UH-A0 test system"
+            pending = session._capture_authoritative_deferred({
+                "session_id": "old-session",
+                "deferred_tool_use": {
+                    "id": "old-toolu-1",
+                    "name": old_tool,
+                    "input": action,
+                },
+            })
+            old_approval_id = pending["approval_id"]
+            confirmation = self.lease(
+                source="user_confirmation",
+                requested=("todo.write",),
+                approvals=(old_approval_id,),
+                turn_id="cutover-confirmation",
+            )
+            home_tool_calls = []
+
+            def forbidden_home_execution(*args, **kwargs):
+                home_tool_calls.append((args, kwargs))
+                raise AssertionError("stale Home tool execution")
+
+            with mock.patch.object(
+                session,
+                "spawn_resumable",
+                side_effect=AssertionError("stale pending spawned"),
+            ) as spawn, mock.patch.object(
+                session,
+                "send_turn",
+                side_effect=forbidden_home_execution,
+            ):
+                with self.assertRaisesRegex(
+                    cc_resident.ResidentError,
+                    r"deferred_resume:LEASE_MISMATCH",
+                ):
+                    list(session.resume_pending_deferred_turn(
+                        "好，记上吧",
+                        dict(os.environ),
+                        confirmation,
+                    ))
+
+            self.assertIsNone(session.pending_deferred)
+            spawn.assert_not_called()
+            self.assertEqual(home_tool_calls, [])
+
+            new_action = evaluate_tool_call(current_tool, action, self.lease())
+            self.assertEqual(new_action["capability_id"], "todo.write")
+            self.assertEqual(new_action["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+            self.assertNotEqual(new_action["approval_id"], old_approval_id)
 
 if __name__ == "__main__":
     unittest.main()
