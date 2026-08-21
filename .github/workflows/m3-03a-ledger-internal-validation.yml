@@ -53,6 +53,14 @@ jobs:
           rc=$?
           cat m3-03a-python.log
           exit $rc
+      - name: Capture head fingerprint
+        shell: bash
+        run: |
+          python - <<'PY' > m3-03a-head-fingerprint.txt
+          from tools.cc_capability_adapter import physical_surface_fingerprint
+          print(physical_surface_fingerprint())
+          PY
+          cat m3-03a-head-fingerprint.txt
       - name: Run existing capability adapter regression
         if: always()
         shell: bash
@@ -70,6 +78,7 @@ jobs:
           path: |
             m3-03a-python.log
             cc-capability-adapter.log
+            m3-03a-head-fingerprint.txt
           if-no-files-found: warn
       - name: Run M3-03A Internal MCP dynamic shadow
         run: node tests/test-m3-03a-ledger-internal.mjs
