@@ -110,15 +110,13 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 9)
+        self.assertEqual(len(home), 7)
         self.assertEqual(
             set(home),
             {
                 "mcp__home__search_memories",
                 "mcp__home__write_diary",
                 "mcp__home__get_light_status",
-                "mcp__home__get_todos",
-                "mcp__home__add_todo",
                 "mcp__home__get_countdowns",
                 "mcp__home__get_ledger",
                 "mcp__home__get_ledger_budget",
@@ -128,13 +126,18 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for name in NON_P3_HOME_MCP_TOOLS:
             self.assertNotIn(name, home)
         cfg = build_uh_a0_mcp_config()
-        self.assertEqual(set(cfg["mcpServers"]), {"home"})
+        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal"})
         self.assertEqual(
             cfg["mcpServers"]["home"]["headers"],
             {"X-UH-A0-Profile": "uh_a0"},
         )
         self.assertNotIn("brain", cfg["mcpServers"])
         self.assertNotIn("codebase", cfg["mcpServers"])
+        self.assertEqual(cfg["mcpServers"]["internal"]["url"], "http://127.0.0.1:3101/mcp")
+        self.assertEqual(
+            cfg["mcpServers"]["internal"]["headers"],
+            {"X-UH-A0-Profile": "uh_a0"},
+        )
         self.assertNotIn("workspace", cfg["mcpServers"])
 
     def test_c_diary_surface_schema_is_content_only(self):
@@ -305,12 +308,16 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             allowed = flags["extra"][allowed_idx]
             self.assertIn("Read", allowed)
             self.assertIn("mcp__home__search_memories", allowed)
+            self.assertIn("mcp__internal__get_todos", allowed)
+            self.assertIn("mcp__internal__add_todo", allowed)
             self.assertNotIn("mcp__brain__", allowed)
+            self.assertNotIn("mcp__home__get_todos", allowed)
+            self.assertNotIn("mcp__home__add_todo", allowed)
             self.assertNotIn("mcp__home__light_on", allowed)
             mcp_path = Path(flags["mcp_path"])
             self.assertTrue(mcp_path.is_file())
             cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
-            self.assertEqual(set(cfg["mcpServers"]), {"home"})
+            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal"})
 
             # tool_profile mismatch is detected by the existing decision helper
             # once a live generation exists (process_dead otherwise wins).
