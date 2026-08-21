@@ -32,8 +32,8 @@ async function main() {
 
     assert.deepEqual(
       [...names].sort(),
-      ['add_todo', 'get_todos'],
-      'Internal MCP catalog must contain exactly get_todos and add_todo',
+      ['add_ledger', 'add_todo', 'get_ledger', 'get_ledger_budget', 'get_todos'],
+      'Internal MCP catalog must contain exactly the five Todo and Ledger tools',
     );
 
     const addTodo = tools.find((tool) => tool?.name === 'add_todo');
@@ -46,6 +46,29 @@ async function main() {
     );
     assert.equal(schema.properties?.content?.type, 'string');
     assert.equal(schema.properties?.due_date?.type, 'string');
+
+    const getLedger = tools.find((tool) => tool?.name === 'get_ledger');
+    assert.ok(getLedger, 'get_ledger must be listed');
+    assert.deepEqual(Object.keys(schemaFor(getLedger).properties || {}).sort(), ['month']);
+    assert.deepEqual(schemaFor(getLedger).required || [], []);
+
+    const getLedgerBudget = tools.find((tool) => tool?.name === 'get_ledger_budget');
+    assert.ok(getLedgerBudget, 'get_ledger_budget must be listed');
+    assert.deepEqual(Object.keys(schemaFor(getLedgerBudget).properties || {}).sort(), ['month']);
+    assert.deepEqual(schemaFor(getLedgerBudget).required || [], []);
+
+    const addLedger = tools.find((tool) => tool?.name === 'add_ledger');
+    assert.ok(addLedger, 'add_ledger must be listed');
+    const ledgerSchema = schemaFor(addLedger);
+    assert.deepEqual(ledgerSchema.required || [], ['amount']);
+    assert.deepEqual(
+      Object.keys(ledgerSchema.properties || {}).sort(),
+      ['amount', 'category', 'date', 'note'],
+    );
+    assert.equal(ledgerSchema.properties?.amount?.type, 'number');
+    assert.equal(ledgerSchema.properties?.category?.type, 'string');
+    assert.equal(ledgerSchema.properties?.note?.type, 'string');
+    assert.equal(ledgerSchema.properties?.date?.type, 'string');
 
     process.stdout.write(
       JSON.stringify({

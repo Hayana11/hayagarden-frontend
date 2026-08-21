@@ -8,17 +8,33 @@ const { randomUUID } = require('crypto');
 const { z } = require('zod');
 
 const INTERNAL_SERVER_NAME = 'internal-mcp';
-const INTERNAL_TOOL_NAMES = Object.freeze(['get_todos', 'add_todo']);
+const INTERNAL_TOOL_NAMES = Object.freeze([
+  'get_todos',
+  'add_todo',
+  'get_ledger',
+  'get_ledger_budget',
+  'add_ledger',
+]);
 
 function adapterCommand({ python = process.env.PYTHON || 'python3', cwd = process.env.UH_A0_REPO_ROOT || process.cwd() } = {}) {
   return { python, cwd };
+}
+
+function adapterModuleFor(operation) {
+  if (operation === 'get_todos' || operation === 'add_todo') {
+    return 'tools.todo_internal_adapter';
+  }
+  if (operation === 'get_ledger' || operation === 'get_ledger_budget' || operation === 'add_ledger') {
+    return 'tools.ledger_internal_adapter';
+  }
+  throw new Error('unknown Internal MCP operation');
 }
 
 function callInternalAdapter(operation, input, { dbPath, python, cwd } = {}) {
   const command = adapterCommand({ python, cwd });
   const payload = { operation, ...input };
   if (dbPath) payload.db_path = dbPath;
-  const output = execFileSync(command.python, ['-m', 'tools.todo_internal_adapter'], {
+  const output = execFileSync(command.python, ['-m', adapterModuleFor(operation)], {
     cwd: command.cwd,
     env: { ...process.env, ...(dbPath ? { TODO_INTERNAL_DB_PATH: dbPath } : {}) },
     input: JSON.stringify(payload),
@@ -94,6 +110,73 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
     },
   );
 
+  server.tool(
+    'get_ledger',
+    { month: z.string().optional().describe('YYYY-MM，默认当月') },
+    async ({ month }) => {
+      const resolvedMonth = month || new Date().toISOString().slice(0, 7);
+      const result = callInternalAdapter(
+        'get_ledger',
+        { month: resolvedMonth },
+        { dbPath, python, cwd },
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    },
+  );
+
+  server.tool(
+    'get_ledger_budget',
+    { month: z.string().optional().describe('YYYY-MM，默认当月') },
+    async ({ month }) => {
+      const resolvedMonth = month || new Date().toISOString().slice(0, 7);
+      const result = callInternalAdapter(
+        'get_ledger_budget',
+        { month: resolvedMonth },
+        { dbPath, python, cwd },
+      );
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    },
+  );
+
+  server.tool(
+    'add_ledger',
+    {
+      amount: z.number().describe('正数=收入，负数=支出'),
+      category: z.string().optional().describe('餐饮/购物/交通/娱乐/居家/其他'),
+      note: z.string().optional().describe('备注'),
+      date: z.string().optional().describe('YYYY-MM-DD，默认今天'),
+    },
+    async ({ amount, category, note, date }) => {
+      const toolInput = { amount };
+      if (category !== undefined) toolInput.category = category;
+      if (note !== undefined) toolInput.note = note;
+      if (date !== undefined) toolInput.date = date;
+      if (!uhA0Profile) {
+        return gateFailure({ lease_decision: 'PROFILE_REQUIRED' });
+      }
+      const decision = await verify('mcp__internal__add_ledger', toolInput);
+      if (!decision || decision.lease_decision !== 'ALLOW') {
+        return gateFailure(decision);
+      }
+      try {
+        const result = callInternalAdapter(
+          'add_ledger',
+          {
+            amount,
+            category: category || '其他',
+            note: note || null,
+            date: date || new Date().toISOString().slice(0, 10),
+            author: 'fyodor_api',
+          },
+          { dbPath, python, cwd },
+        );
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (_error) {
+        return { content: [{ type: 'text', text: 'INTERNAL_LEDGER_WRITE_FAILED' }] };
+      }
+    },
+  );
+
   return server;
 }
 
@@ -101,6 +184,9 @@ function createApp(options = {}) {
   const app = express();
   app.use(express.json());
   const sessions = {};
+  // Production resolves the existing service DB boundary once; adapters receive
+  // the resolved path explicitly. Tests may pass an isolated dbPath directly.
+  const dbPath = options.dbPath || process.env.TODO_INTERNAL_DB_PATH;
 
   app.all('/mcp', async (req, res) => {
     try {
@@ -123,7 +209,7 @@ function createApp(options = {}) {
       }
 
       const uhA0Profile = String(req.headers['x-uh-a0-profile'] || '').trim() === 'uh_a0';
-      const server = buildServer({ ...options, uhA0Profile });
+      const server = buildServer({ ...options, dbPath, uhA0Profile });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => { sessions[id] = { server, transport }; },

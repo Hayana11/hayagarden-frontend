@@ -128,7 +128,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前问题不依赖账本事实，或用户已经给出足够数据时。",
         "failure_behavior": "说明账本读取失败，不得编造金额或记录。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__home__get_ledger"},
+        "provider_bindings": {"claude_code": "mcp__home__get_ledger", "internal_mcp": "mcp__internal__get_ledger"},
     },
     {
         "capability_id": "ledger.budget.read",
@@ -141,7 +141,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前话题不需要预算事实，或预算已经明确时。",
         "failure_behavior": "说明预算读取失败，不得伪造预算额度。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__home__get_ledger_budget"},
+        "provider_bindings": {"claude_code": "mcp__home__get_ledger_budget", "internal_mcp": "mcp__internal__get_ledger_budget"},
     },
     {
         "capability_id": "ledger.write",
@@ -154,7 +154,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "金额、用途或写入意图不明确，且没有完成 ASK 确认时。",
         "failure_behavior": "明确说明没有写入；不得说“已经记账”或伪造结果。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__home__add_ledger"},
+        "provider_bindings": {"claude_code": "mcp__home__add_ledger", "internal_mcp": "mcp__internal__add_ledger"},
     },
     {
         "capability_id": "files.read",
