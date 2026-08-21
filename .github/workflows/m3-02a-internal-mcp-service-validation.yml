@@ -97,7 +97,7 @@ jobs:
         run: |
           cmp /tmp/m3-02a-base-fingerprint /tmp/m3-02a-head-fingerprint
           actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
-          expected="$(printf '%s\\n' \
+          expected="$(printf '%s\n' \
             '.github/workflows/m3-02a-internal-mcp-service-validation.yml' \
             'deploy/systemd/internal-mcp.service' \
             'scripts/activate-internal-mcp.sh' \
