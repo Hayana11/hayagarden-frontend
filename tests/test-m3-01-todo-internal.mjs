@@ -45,19 +45,18 @@ function countRows() {
   ));
 }
 
-function installAllowedLease() {
+function installLease(capability) {
   python(
     [
       'import sys',
       'from tools.lease_signer import issue_turn_lease',
       'from tools.execution_fence import write_current_turn_lease',
-      'lease = issue_turn_lease(turn_id="m3-01-turn", turn_mode="chat", issued_from="explicit_user_intent", requested_capabilities=("todo.write",), issued_at="2026-08-21T00:00:00Z")',
+      'lease = issue_turn_lease(turn_id="m3-01-turn", turn_mode="chat", issued_from="explicit_user_intent", requested_capabilities=(sys.argv[2],), issued_at="2026-08-21T00:00:00Z")',
       'write_current_turn_lease(sys.argv[1], lease)',
     ].join('; '),
-    [leasePath],
+    [leasePath, capability],
   );
 }
-
 function textOf(result) {
   return result?.content?.find((item) => item.type === 'text')?.text ?? '';
 }
@@ -69,18 +68,28 @@ const { listener, port } = await internalServer.startInternalMcpServer({
   cwd: root,
   python: process.env.PYTHON || 'python3',
 });
-const client = new Client({ name: 'm3-01-test-client', version: '1.0.0' });
-const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
-await client.connect(transport);
+async function connectClient(name, profile) {
+  const client = new Client({ name, version: '1.0.0' });
+  const requestInit = profile
+    ? { headers: { 'x-uh-a0-profile': profile } }
+    : undefined;
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://127.0.0.1:${port}/mcp`),
+    { requestInit },
+  );
+  await client.connect(transport);
+  return { client, transport };
+}
 
-const listed = await client.listTools();
+const noProfile = await connectClient('m3-01-no-profile', undefined);
+const listed = await noProfile.client.listTools();
 assert.deepEqual(
   listed.tools.map((tool) => tool.name),
   ['get_todos', 'add_todo'],
 );
 assert.equal(listed.tools[1].inputSchema.required[0], 'content');
 
-const read = await client.callTool({ name: 'get_todos', arguments: {} });
+const read = await noProfile.client.callTool({ name: 'get_todos', arguments: {} });
 const readPayload = JSON.parse(textOf(read));
 assert.equal(readPayload.todos.length, 2);
 assert.equal(readPayload.todos[0].content, '未完成');
@@ -92,15 +101,32 @@ const denied = await client.callTool({
 assert.match(textOf(denied), /LEASE_MISMATCH/);
 assert.equal(countRows(), 2);
 
-installAllowedLease();
-const written = await client.callTool({
+installLease('todo.write');
+const noProfileWrite = await noProfile.client.callTool({
   name: 'add_todo',
-  arguments: { content: '只写一次', due_date: '2026-08-23' },
+  arguments: { content: '没有 profile 不得写入' },
+});
+assert.match(textOf(noProfileWrite), /PROFILE_REQUIRED/);
+assert.equal(countRows(), 2);
+
+const withProfile = await connectClient('m3-01-uh-a0-profile', 'uh_a0');
+const written = await withProfile.client.callTool({
+  name: 'add_todo',
+  arguments: { content: 'profile 写一次', due_date: '2026-08-23' },
 });
 assert.deepEqual(JSON.parse(textOf(written)), { ok: true });
 assert.equal(countRows(), 3);
 
-await client.close();
+installLease('todo.read');
+const badLease = await withProfile.client.callTool({
+  name: 'add_todo',
+  arguments: { content: '坏 lease 不得写入' },
+});
+assert.match(textOf(badLease), /LEASE_MISMATCH/);
+assert.equal(countRows(), 3);
+
+await noProfile.client.close();
+await withProfile.client.close();
 await new Promise((resolve) => listener.close(resolve));
 rmSync(tempRoot, { recursive: true, force: true });
 console.log('test-m3-01-todo-internal: ok');
