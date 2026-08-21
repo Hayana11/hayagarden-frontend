@@ -109,13 +109,11 @@ jobs:
           cat /tmp/m3-02a-head-fingerprint
           cmp /tmp/m3-02a-base-fingerprint /tmp/m3-02a-head-fingerprint
           actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          # M3-02A1 is a post-merge maintenance slice; fence its workflow plus two fixes.
           expected="$(printf '%s\n' \
             '.github/workflows/m3-02a-internal-mcp-service-validation.yml' \
-            'deploy/systemd/internal-mcp.service' \
             'scripts/activate-internal-mcp.sh' \
-            'scripts/check-internal-mcp-readiness.mjs' \
-            'tests/test_m3_02a_internal_mcp_service.py' \
-            'tests/test-m3-02a-internal-mcp-readiness.mjs' | sort)"
+            'tests/test_m3_02a_internal_mcp_service.py' | sort)"
           test "$actual" = "$expected"
           if printf '%s\n' "$actual" | grep -E '^(tools/|wake/|cc_resident.py$|chat/daily_runtime.py$|app.py$|internal-mcp-server.js$|deploy-frontend.sh$|app/)' ; then
             exit 1
