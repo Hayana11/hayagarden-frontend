@@ -7,6 +7,7 @@ ROOT="${FRONTEND_ROOT:-/opt/frontend}"
 EXPECTED_SHA="${1:-}"
 STATE_DIR="${INTERNAL_MCP_STATE_DIR:-/var/lib/hayagarden}"
 DEPLOYED_SHA_FILE="${STATE_DIR}/DEPLOYED_SHA"
+ACTIVATED_SHA_FILE="${INTERNAL_MCP_ACTIVATED_SHA_FILE:-${STATE_DIR}/internal-mcp-activated-sha}"
 UNIT_NAME="internal-mcp.service"
 SYSTEMD_DIR="${INTERNAL_MCP_SYSTEMD_DIR:-/etc/systemd/system}"
 UNIT_PATH="${SYSTEMD_DIR}/${UNIT_NAME}"
@@ -60,12 +61,21 @@ OLD_UNIT="$BACKUP_DIR/$UNIT_NAME"
 OLD_EXISTS=0
 OLD_ENABLED="disabled"
 OLD_ACTIVE="inactive"
+OLD_ACTIVATED_SHA=""
+OLD_ACTIVATED_SHA_EXISTS=0
 UNIT_REPLACED=0
+MARKER_CHANGED=0
 
 cleanup() {
   rm -rf "$BACKUP_DIR"
 }
 trap cleanup EXIT
+
+if [[ -f "$ACTIVATED_SHA_FILE" ]]; then
+  OLD_ACTIVATED_SHA_EXISTS=1
+  cp -p "$ACTIVATED_SHA_FILE" "$BACKUP_DIR/activated-sha"
+  OLD_ACTIVATED_SHA="$(tr -d '\r\n' < "$ACTIVATED_SHA_FILE")"
+fi
 
 if [[ -f "$UNIT_PATH" ]]; then
   OLD_EXISTS=1
@@ -82,6 +92,7 @@ if [[ "$OLD_EXISTS" -eq 1 ]] \
   && cmp -s "$UNIT_SOURCE" "$UNIT_PATH" \
   && [[ "$OLD_ENABLED" == enabled* ]] \
   && [[ "$OLD_ACTIVE" == active ]] \
+  && [[ "$OLD_ACTIVATED_SHA" == "$EXPECTED_SHA" ]] \
   && run_readiness
 then
   echo "Internal MCP activation already ready for $EXPECTED_SHA"
@@ -113,6 +124,12 @@ rollback() {
     rm -f "$UNIT_PATH"
     "$SYSTEMCTL" daemon-reload >/dev/null 2>&1 || true
   fi
+
+  if [[ "$OLD_ACTIVATED_SHA_EXISTS" -eq 1 ]]; then
+    cp -p "$BACKUP_DIR/activated-sha" "$ACTIVATED_SHA_FILE"
+  else
+    rm -f "$ACTIVATED_SHA_FILE"
+  fi
 }
 trap rollback ERR
 
@@ -122,5 +139,10 @@ UNIT_REPLACED=1
 "$SYSTEMCTL" enable "$UNIT_NAME"
 "$SYSTEMCTL" start "$UNIT_NAME"
 run_readiness
+
+MARKER_TMP="$BACKUP_DIR/activated-sha.new"
+printf '%s\n' "$EXPECTED_SHA" > "$MARKER_TMP"
+mv -f "$MARKER_TMP" "$ACTIVATED_SHA_FILE"
+MARKER_CHANGED=1
 
 echo "Internal MCP activated for $EXPECTED_SHA"
