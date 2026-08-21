@@ -1,0 +1,19 @@
+[Unit]
+Description=HayaGarden Internal MCP (Todo shadow service)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/frontend
+ExecStart=/usr/bin/node /opt/frontend/internal-mcp-server.js
+Environment=INTERNAL_MCP_PORT=3101
+Environment=TODO_INTERNAL_DB_PATH=/opt/frontend/memories.db
+Environment=UH_A0_REPO_ROOT=/opt/frontend
+Environment=NODE_ENV=production
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/frontend/internal-mcp.log
+StandardError=append:/opt/frontend/internal-mcp.log
+
+[Install]
+WantedBy=multi-user.target
