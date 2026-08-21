@@ -59,6 +59,9 @@ class CapabilityStateHttpContractTests(unittest.TestCase):
             def isolated_connect(database, *args, **kwargs):
                 if os.fspath(database) == "/opt/frontend/memories.db":
                     database = self.db_path
+                    conn = real_connect(database, *args, **kwargs)
+                    conn.row_factory = sqlite3.Row
+                    return conn
                 return real_connect(database, *args, **kwargs)
 
             def isolated_open(file, *args, **kwargs):
