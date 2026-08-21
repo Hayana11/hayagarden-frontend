@@ -131,7 +131,7 @@ export function ProfileScreen() {
     setCapabilityStateLoadError('');
     setCapabilityStates([]);
     setResetCapabilities({});
-    const [personaResult, hintsResult] = await Promise.allSettled([
+    const [personaResult, hintsResult, capabilityStateResult] = await Promise.allSettled([
       http.get<PersonaResponse>('/api/persona'),
       fetchToolCompanionHints(),
       fetchCapabilityStates(),
