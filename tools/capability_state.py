@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from tools.capability_manifest import (
+    CAPABILITY_MANIFEST,
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
     get_capability,
@@ -122,6 +123,49 @@ def effective_capability_state(capability_id: str) -> str:
     if not _qualified_for_runtime_state(str(capability_id or "")):
         return RUNTIME_STATE_DENY
     return read_capability_state(capability_id)
+
+
+def capability_state_snapshot() -> list[dict[str, Any]]:
+    """Return one consistent, read-only capability state snapshot."""
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _connect()
+        document, _present = _load_document(conn)
+        states: list[dict[str, Any]] = []
+        for capability in CAPABILITY_MANIFEST:
+            capability_id = str(capability["capability_id"])
+            static_enabled = capability_id in P1_ENABLED_CAPABILITY_IDS
+            writable = _qualified_for_runtime_state(capability_id)
+            if not writable:
+                runtime_state = RUNTIME_STATE_DENY
+                effective_enabled = False
+            else:
+                runtime_state = document["states"].get(
+                    capability_id, RUNTIME_STATE_INHERIT
+                )
+                effective_enabled = runtime_state in {
+                    RUNTIME_STATE_INHERIT,
+                    RUNTIME_STATE_ON,
+                }
+            states.append(
+                {
+                    "capability_id": capability_id,
+                    "static_enabled": static_enabled,
+                    "runtime_state": runtime_state,
+                    "effective_enabled": effective_enabled,
+                    "writable": writable,
+                }
+            )
+        return states
+    except CapabilityStateError:
+        raise
+    except Exception as exc:
+        raise CapabilityStateError(
+            "runtime capability state storage is unavailable"
+        ) from exc
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _assert_writable_capability(capability_id: str) -> str:
