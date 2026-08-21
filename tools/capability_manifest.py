@@ -89,7 +89,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前话题不需要待办事实，或已有充分上下文时。",
         "failure_behavior": "说明待办读取失败，不得声称看过未取得的数据。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__home__get_todos"},
+        "provider_bindings": {"claude_code": "mcp__home__get_todos", "internal_mcp": "mcp__internal__get_todos"},
     },
     {
         "capability_id": "todo.write",
@@ -102,7 +102,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "只是讨论计划、没有明确写入意图且未取得 ASK 确认时。",
         "failure_behavior": "明确说明没有写入；不得说“记好了”或伪造成功。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__home__add_todo"},
+        "provider_bindings": {"claude_code": "mcp__home__add_todo", "internal_mcp": "mcp__internal__add_todo"},
     },
     {
         "capability_id": "countdown.read",
