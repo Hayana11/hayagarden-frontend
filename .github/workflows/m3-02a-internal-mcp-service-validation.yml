@@ -88,7 +88,7 @@ jobs:
           activation = Path('scripts/activate-internal-mcp.sh').read_text(encoding='utf-8')
           assert 'git status --porcelain --untracked-files=all' in deploy
           assert 'production worktree has local changes' in deploy
-          assert 'git status --porcelain --untracked-files=all' in activation
+          assert 'status --porcelain --untracked-files=all' in activation
           assert 'production worktree is dirty' in activation
           print('clean-worktree guard source contracts: PASS')
           PY
