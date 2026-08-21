@@ -136,7 +136,11 @@ install -m 0644 "$UNIT_SOURCE" "$UNIT_PATH"
 UNIT_REPLACED=1
 "$SYSTEMCTL" daemon-reload
 "$SYSTEMCTL" enable "$UNIT_NAME"
-"$SYSTEMCTL" start "$UNIT_NAME"
+if [[ "$OLD_ACTIVE" == active ]]; then
+  "$SYSTEMCTL" restart "$UNIT_NAME"
+else
+  "$SYSTEMCTL" start "$UNIT_NAME"
+fi
 run_readiness
 
 MARKER_TMP="$BACKUP_DIR/activated-sha.new"
