@@ -219,7 +219,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                 self.assertIsNone(read_current_turn_lease(lease_path)[0])
 
 
-    
+
     def test_stale_home_pending_is_rejected_after_provider_cutover(self):
         action = {"content": "明天寄快递"}
         old_tool = "mcp__home__add_todo"
