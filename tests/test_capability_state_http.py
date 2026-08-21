@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import builtins
+import importlib
+import io
 import json
 import os
 import sqlite3
@@ -8,10 +11,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import app as app_module
 import config_store
 import moments_auth
 from tools import capability_state
+
+
+app_module = None
 
 
 class CapabilityStateHttpContractTests(unittest.TestCase):
@@ -19,6 +24,19 @@ class CapabilityStateHttpContractTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.temp_dir.name) / "runtime.db")
         conn = sqlite3.connect(self.db_path)
+        # app.py's import-time migration expects the canonical chat table to
+        # exist, but the columns owned by that migration must remain absent.
+        conn.execute(
+            "CREATE TABLE chat_messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "author TEXT NOT NULL DEFAULT 'user', "
+            "content TEXT NOT NULL, "
+            "thinking TEXT DEFAULT '', "
+            "image_url TEXT DEFAULT '', "
+            "session_id INTEGER DEFAULT 1, "
+            "created_at DATETIME DEFAULT (datetime('now', '+8 hours'))"
+            ")"
+        )
         conn.execute(
             "CREATE TABLE runtime_config ("
             "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)"
@@ -34,6 +52,34 @@ class CapabilityStateHttpContractTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+        global app_module
+        if app_module is None:
+            real_connect = sqlite3.connect
+
+            def isolated_connect(database, *args, **kwargs):
+                if os.fspath(database) == "/opt/frontend/memories.db":
+                    database = self.db_path
+                return real_connect(database, *args, **kwargs)
+
+            def isolated_open(file, *args, **kwargs):
+                if os.fspath(file) == "/opt/frontend/.env":
+                    return io.StringIO("")
+                return real_open(file, *args, **kwargs)
+
+            real_open = builtins.open
+            with mock.patch.object(
+                sqlite3,
+                "connect",
+                side_effect=isolated_connect,
+            ), mock.patch.object(
+                builtins,
+                "open",
+                side_effect=isolated_open,
+            ):
+                app_module = importlib.import_module("app")
+
+        self.app_db_patch = mock.patch.object(app_module, "DB_PATH", self.db_path)
+        self.app_db_patch.start()
         self.db_patch = mock.patch.object(capability_state, "DB_PATH", self.db_path)
         self.db_patch.start()
         self.config_db_patch = mock.patch.object(config_store, "DB_PATH", self.db_path)
@@ -58,6 +104,7 @@ class CapabilityStateHttpContractTests(unittest.TestCase):
         self.env_patch.stop()
         self.config_db_patch.stop()
         self.db_patch.stop()
+        self.app_db_patch.stop()
         self.temp_dir.cleanup()
 
     def _read_rows(self):
