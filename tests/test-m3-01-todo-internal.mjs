@@ -94,11 +94,11 @@ const readPayload = JSON.parse(textOf(read));
 assert.equal(readPayload.todos.length, 2);
 assert.equal(readPayload.todos[0].content, '未完成');
 
-const denied = await client.callTool({
+const noLease = await noProfile.client.callTool({
   name: 'add_todo',
-  arguments: { content: '不得写入' },
+  arguments: { content: '没有 profile 不得写入' },
 });
-assert.match(textOf(denied), /LEASE_MISMATCH/);
+assert.match(textOf(noLease), /PROFILE_REQUIRED/);
 assert.equal(countRows(), 2);
 
 installLease('todo.write');
