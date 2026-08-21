@@ -230,6 +230,22 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         self.assertIn('_try_invoke_shared_renderer', b3)
         self.assertIn('NORMAL_WAKE_UNIFIED_UNOWNED_SKIP', gateway)
 
+    def test_unified_normal_wake_reuses_main_chat_display_filter(self):
+        gateway = Path(__file__).resolve().parents[1].joinpath('gateway.py').read_text(
+            encoding='utf-8'
+        )
+        start = gateway.index('def _run_unified_normal_main_chat_turn')
+        end = gateway.index('def _cross_surface_recap_from_solo_chat', start)
+        section = gateway[start:end]
+        self.assertIn('filter_display_thinking_events', section)
+        self.assertIn(
+            'for evt, payload in filter_display_thinking_events(',
+            section,
+        )
+        self.assertIn('guard_cc_generation(guarded_events())', section)
+        self.assertIn('display_thinking_mode=display_thinking_mode', section)
+
+
 
 if __name__ == '__main__':
     unittest.main()
