@@ -7,7 +7,9 @@ on:
       - "tools/cc_tool_surface.py"
       - "tests/test_capability_manifest.py"
       - "tests/test_cc_capability_adapter.py"
+      - "tests/test_cc_deferred_resume.py"
       - "tests/test_m3_01_todo_internal.py"
+      - "cc_resident.py"
       - "tests/test_execution_fence.py"
       - "tests/test_m3_02b_daily_todo_cutover.py"
       - ".github/workflows/m3-02b-daily-todo-provider-cutover.yml"
@@ -90,8 +92,10 @@ jobs:
           actual="$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | sort)"
           expected="$(printf '%s\n' \
             '.github/workflows/m3-02b-daily-todo-provider-cutover.yml' \
+            'cc_resident.py' \
             'tests/test_capability_manifest.py' \
             'tests/test_cc_capability_adapter.py' \
+            'tests/test_cc_deferred_resume.py' \
             'tests/test_execution_fence.py' \
             'tests/test_m3_01_todo_internal.py' \
             'tests/test_m3_02b_daily_todo_cutover.py' \
@@ -99,5 +103,5 @@ jobs:
             'tools/cc_capability_adapter.py' \
             'tools/cc_tool_surface.py' | sort)"
           test "$actual" = "$expected"
-          if printf '%s\n' "$actual" | grep -E '^(tools/execution_fence.py$|cc_resident.py$|chat/daily_runtime.py$|wake/|tools/product_handlers.py$|internal-mcp-server.js$|app.py$|app/|deploy/systemd/|scripts/)' ; then exit 1; fi
+          if printf '%s\n' "$actual" | grep -E '^(tools/execution_fence.py$|chat/daily_runtime.py$|wake/|tools/product_handlers.py$|internal-mcp-server.js$|app.py$|app/|deploy/systemd/|scripts/)' ; then exit 1; fi
           git diff --check ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }}
