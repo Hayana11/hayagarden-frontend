@@ -43,6 +43,14 @@ jobs:
           npm ci
           python -m pip install Flask Pillow Markdown
 
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+
       - name: Run base regressions and capture live surface
         shell: bash
         run: |
