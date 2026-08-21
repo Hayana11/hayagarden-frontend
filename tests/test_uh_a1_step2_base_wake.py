@@ -153,6 +153,9 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
                 return sqlite3.connect(db_path)
 
             with mock.patch(
+                'chat.window_identity.soft_window_enabled',
+                return_value=False,
+            ), mock.patch(
                 'chat.drive_authority.apply_wake_outcome_on_conn',
                 side_effect=AssertionError('basic Wake must not enter V3 Settlement'),
             ):
