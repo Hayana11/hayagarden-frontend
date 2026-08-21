@@ -79,6 +79,7 @@ class M302BTodoCutoverTests(unittest.TestCase):
             resident._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
             resident._system_text = "same-system"
             resident._history_rewrite_epoch = "test-epoch"
+            resident._bound_tool_surface_fingerprint = "base"
             resident._model_identity = None
             before = resident.generation
             with patch("chat.cc_history_rewrite.current_history_rewrite_epoch", return_value="test-epoch"), patch("chat.cc_history_rewrite.is_unreadable_epoch", return_value=False), patch("tools.cc_capability_adapter.physical_surface_fingerprint", return_value="head"):
