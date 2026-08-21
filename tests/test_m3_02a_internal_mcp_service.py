@@ -75,14 +75,14 @@ case "$action" in
   start)
     if [[ ! -f "$state/active" ]]; then
       printf '%s\n' active > "$state/active"
-      printf '%s\n' started > "$state/process"
+      printf '%s\n' "${FAKE_PROCESS_IDENTITY:-unknown}" > "$state/process"
     fi
     ;;
   restart)
     printf '%s\n' active > "$state/active"
-    printf '%s\n' restarted > "$state/process"
+    printf '%s\n' "${FAKE_PROCESS_IDENTITY:-unknown}" > "$state/process"
     ;;
-  stop) rm -f "$state/active" ;;
+  stop) rm -f "$state/active" "$state/process" ;;
   mask) printf '%s\n' masked > "$state/enabled" ;;
 esac
 """,
@@ -119,6 +119,7 @@ exit "${FAKE_READINESS_RC:-0}"
             "FAKE_STATE_DIR": str(self.fake_state),
             "FAKE_SYSTEMCTL_LOG": str(self.log),
             "FAKE_HEAD": head,
+            "FAKE_PROCESS_IDENTITY": head,
             "FAKE_DIRTY": dirty,
             "FAKE_READINESS_RC": readiness,
         }
@@ -173,6 +174,8 @@ exit "${FAKE_READINESS_RC:-0}"
         self.assertFalse((self.systemd / "internal-mcp.service").exists())
         self.assertFalse((self.fake_state / "active").exists())
         self.assertFalse((self.fake_state / "enabled").exists())
+        self.assertFalse((self.fake_state / "process").exists())
+        self.assertFalse((self.state / "internal-mcp-activated-sha").exists())
 
     def test_existing_unit_is_restored_after_readiness_failure(self) -> None:
         unit_path = self.systemd / "internal-mcp.service"
@@ -184,9 +187,13 @@ exit "${FAKE_READINESS_RC:-0}"
         result = self.run_activation(self.env(readiness="1"))
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertEqual(unit_path.read_text(encoding="utf-8"), "old-unit" + chr(10))
-        self.assertEqual((self.fake_state / "active").read_text(encoding="utf-8").strip(), "active")
-        self.assertEqual((self.fake_state / "enabled").read_text(encoding="utf-8").strip(), "enabled")
-        self.assertEqual(marker.read_text(encoding="utf-8").strip(), "b" * 40)
+        self.assertFalse((self.fake_state / "active").exists())
+        self.assertFalse((self.fake_state / "enabled").exists())
+        self.assertFalse((self.fake_state / "process").exists())
+        self.assertFalse(marker.exists())
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("restart internal-mcp.service", log)
+        self.assertNotIn("\nstart internal-mcp.service\n", "\n" + log + "\n")
     def test_cross_sha_activation_restarts_same_unit_and_records_sha(self) -> None:
         unit_path = self.systemd / "internal-mcp.service"
         unit_path.write_bytes(UNIT.read_bytes())
@@ -199,8 +206,31 @@ exit "${FAKE_READINESS_RC:-0}"
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("restart internal-mcp.service", log)
         self.assertNotIn("\nstart internal-mcp.service\n", "\n" + log + "\n")
-        self.assertEqual((self.fake_state / "process").read_text(encoding="utf-8").strip(), "restarted")
+        self.assertEqual((self.fake_state / "process").read_text(encoding="utf-8").strip(), SHA)
         self.assertEqual((self.state / "internal-mcp-activated-sha").read_text(encoding="utf-8").strip(), SHA)
+        self.assertTrue((self.fake_state / "active").exists())
+        self.assertEqual((self.fake_state / "enabled").read_text(encoding="utf-8").strip(), "enabled")
+
+    def test_cross_sha_readiness_failure_is_fail_closed(self) -> None:
+        unit_path = self.systemd / "internal-mcp.service"
+        unit_path.write_text("old-unit" + chr(10), encoding="utf-8")
+        (self.fake_state / "active").write_text("active" + chr(10), encoding="utf-8")
+        (self.fake_state / "enabled").write_text("enabled" + chr(10), encoding="utf-8")
+        (self.fake_state / "process").write_text(("b" * 40) + chr(10), encoding="utf-8")
+        marker = self.state / "internal-mcp-activated-sha"
+        marker.write_text(("b" * 40) + chr(10), encoding="utf-8")
+        result = self.run_activation(self.env(readiness="1"))
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(unit_path.read_text(encoding="utf-8"), "old-unit" + chr(10))
+        self.assertFalse((self.fake_state / "active").exists())
+        self.assertFalse((self.fake_state / "enabled").exists())
+        self.assertFalse((self.fake_state / "process").exists())
+        self.assertFalse(marker.exists())
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("restart internal-mcp.service", log)
+        self.assertIn("stop internal-mcp.service", log)
+        self.assertIn("disable internal-mcp.service", log)
+        self.assertNotIn("\nstart internal-mcp.service\n", "\n" + log + "\n")
 
     def test_repeated_ready_activation_is_idempotent(self) -> None:
         unit_path = self.systemd / "internal-mcp.service"
