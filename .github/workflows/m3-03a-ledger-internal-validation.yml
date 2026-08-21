@@ -84,6 +84,10 @@ jobs:
         run: node tests/test-m3-03a-ledger-internal.mjs
       - name: Run Todo Internal regression
         run: node tests/test-m3-01-todo-internal.mjs
+      - name: Run M3-02A service and readiness regressions
+        run: |
+          python -m unittest tests.test_m3_02a_internal_mcp_service
+          node tests/test-m3-02a-internal-mcp-readiness.mjs
       - name: Run exact readiness contract
         run: |
           test "$(node -e "const fs=require('fs'); const s=fs.readFileSync('scripts/check-internal-mcp-readiness.mjs','utf8'); process.stdout.write(s.includes('get_ledger_budget') ? 'ok' : 'bad')")" = ok
