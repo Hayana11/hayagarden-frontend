@@ -39,9 +39,11 @@ class Runtime:
         self.off = False
         self.fail = False
         self.calls = 0
+        self.last_input = None
 
     def __call__(self, tool_name, tool_input, lease):
         self.calls += 1
+        self.last_input = dict(tool_input)
         if self.fail:
             raise RuntimeError("state store unavailable")
         if self.off:
@@ -169,6 +171,15 @@ def test_approve_issues_new_user_confirmation_lease_from_durable_row(db):
     assert store.get(action.pending_action_id, now=BASE_TIME).state == "approved"
 
 
+def test_confirmation_uses_durable_tool_input_not_frontend_extra(db):
+    _, _, store, runtime = db
+    action = create(store, content="买牛奶")
+    payload = request(action)
+    payload["tool_input"] = {"content": "恶意替换"}
+    store.confirm(payload, owner_id="conversation-1", now=BASE_TIME)
+    assert runtime.last_input == {"content": "买牛奶"}
+
+
 def test_runtime_off_keeps_pending_and_has_zero_side_effect(db):
     _, _, store, runtime = db
     action = create(store)
@@ -211,6 +222,28 @@ def test_approved_action_cannot_be_reapproved_or_rejected(db):
         store.reject(request(action, decision="reject"), owner_id="conversation-1", now=BASE_TIME)
 
 
+def test_completed_action_is_terminal(db):
+    _, _, store, _ = db
+    action = create(store)
+    store.confirm(request(action), owner_id="conversation-1", now=BASE_TIME)
+    assert store.mark_completed(action.pending_action_id, owner_id="conversation-1", now=BASE_TIME).state == "completed"
+    with pytest.raises(ConfirmationError):
+        store.confirm(request(action), owner_id="conversation-1", now=BASE_TIME)
+
+
+def test_malformed_durable_row_fails_closed(db):
+    _, conn, store, _ = db
+    action = create(store)
+    conn.execute(
+        "UPDATE confirmation_pending_actions SET approval_id=? WHERE pending_action_id=?",
+        ("tampered", action.pending_action_id),
+    )
+    conn.commit()
+    with pytest.raises(PendingActionStoreError) as exc:
+        store.get(action.pending_action_id, now=BASE_TIME)
+    assert exc.value.code == "MALFORMED_ROW"
+
+
 def test_deferred_payload_round_trips_pending_action_id(db):
     _, _, store, _ = db
     action = create(store)
@@ -242,6 +275,16 @@ def test_store_read_failure_fails_closed(tmp_path):
     conn.close()
     with pytest.raises(PendingActionStoreError) as exc:
         store.get("missing")
+    assert exc.value.code == "STORE_UNAVAILABLE"
+
+
+def test_confirmation_on_closed_store_fails_closed(tmp_path):
+    conn = sqlite3.connect(tmp_path / "closed-confirm.sqlite3")
+    conn.row_factory = sqlite3.Row
+    store = PendingActionStore(conn, approval_builder=approval_builder)
+    conn.close()
+    with pytest.raises(PendingActionStoreError) as exc:
+        store.confirm({"pending_action_id": "A", "approval_id": "H", "confirmation_decision": "approve"}, owner_id="conversation-1")
     assert exc.value.code == "STORE_UNAVAILABLE"
 
 
