@@ -10,7 +10,7 @@ from tools.cc_capability_adapter import build_uh_a0_spawn_plan, physical_surface
 from tools.cc_tool_surface import _static_schema_registry
 from tools.capability_state import RUNTIME_STATE_INHERIT, RUNTIME_STATE_OFF
 
-BASE_FINGERPRINT = "d9f1faa9469bd4f7cfceec47d7bb2d3850d06a6b21235881d3067be5606faa69"
+BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
 
 class M302BTodoCutoverTests(unittest.TestCase):
     def plan(self, state=RUNTIME_STATE_INHERIT):
@@ -37,7 +37,7 @@ class M302BTodoCutoverTests(unittest.TestCase):
         self.assertNotIn("mcp__home__add_todo", allowed)
         self.assertIn("mcp__home__get_todos", disallowed)
         self.assertIn("mcp__home__add_todo", disallowed)
-        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__internal__get_todos", "mcp__internal__add_todo", "mcp__home__search_memories", "mcp__home__write_diary", "mcp__home__get_light_status", "mcp__home__get_countdowns", "mcp__home__get_ledger", "mcp__home__get_ledger_budget", "mcp__home__add_ledger"})
+        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__internal__get_todos", "mcp__internal__add_todo", "mcp__home__search_memories", "mcp__home__write_diary", "mcp__home__get_light_status", "mcp__home__get_countdowns", "mcp__internal__get_ledger", "mcp__internal__get_ledger_budget", "mcp__internal__add_ledger"})
 
     def test_runtime_off_hides_both_provider_surfaces(self):
         plan = self.plan(RUNTIME_STATE_OFF)

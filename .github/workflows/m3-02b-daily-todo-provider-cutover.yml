@@ -73,9 +73,9 @@ jobs:
           )"
           echo "$actual"
           if [ "${{ matrix.label }}" = "base" ]; then
-            test "$actual" = "d9f1faa9469bd4f7cfceec47d7bb2d3850d06a6b21235881d3067be5606faa69"
+            test "$actual" = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
           else
-            test "$actual" != "d9f1faa9469bd4f7cfceec47d7bb2d3850d06a6b21235881d3067be5606faa69"
+            test "$actual" != "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
             repeat="$(python - <<'PY'
           import tempfile
           from tools.cc_capability_adapter import build_uh_a0_spawn_plan
@@ -97,6 +97,7 @@ jobs:
             'tests/test_capability_manifest.py' \
             'tests/test_cc_capability_adapter.py' \
             'tests/test_execution_fence.py' \
+            'tests/test_m3_02b_daily_todo_cutover.py' \
             'tests/test_m3_03b_daily_ledger_cutover.py' \
             'tools/capability_manifest.py' \
             'tools/cc_capability_adapter.py' \

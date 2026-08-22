@@ -8,6 +8,7 @@ on:
       - ".github/workflows/m3-02b-daily-todo-provider-cutover.yml"
       - "tests/test_m3_03b_daily_ledger_cutover.py"
       - "tests/test_capability_manifest.py"
+      - "tests/test_m3_02b_daily_todo_cutover.py"
       - "tests/test_execution_fence.py"
       - "tests/test_cc_capability_adapter.py"
       - "tools/capability_manifest.py"
@@ -64,6 +65,6 @@ jobs:
         shell: bash
         run: |
           actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" | sort)"
-          expected="$(printf '%s\n' '.github/workflows/m3-02b-daily-todo-provider-cutover.yml' '.github/workflows/m3-03a-ledger-internal-validation.yml' '.github/workflows/m3-03b-daily-ledger-cutover-validation.yml' 'tests/test_capability_manifest.py' 'tests/test_cc_capability_adapter.py' 'tests/test_execution_fence.py' 'tests/test_m3_03b_daily_ledger_cutover.py' 'tools/capability_manifest.py' 'tools/cc_capability_adapter.py' 'tools/cc_tool_surface.py' | sort)"
+          expected="$(printf '%s\n' '.github/workflows/m3-02b-daily-todo-provider-cutover.yml' '.github/workflows/m3-03a-ledger-internal-validation.yml' '.github/workflows/m3-03b-daily-ledger-cutover-validation.yml' 'tests/test_capability_manifest.py' 'tests/test_cc_capability_adapter.py' 'tests/test_execution_fence.py' 'tests/test_m3_02b_daily_todo_cutover.py' 'tests/test_m3_03b_daily_ledger_cutover.py' 'tools/capability_manifest.py' 'tools/cc_capability_adapter.py' 'tools/cc_tool_surface.py' | sort)"
           test "$actual" = "$expected"
           test -z "$(printf '%s\n' "$actual" | grep -E '^(internal-mcp-server.js$|tools/ledger_internal_adapter.py$|scripts/activate-internal-mcp.sh$|wake/|tools/product_handlers.py$|app.py$|mcp-http-server.js$|cc_resident.py$|tools/execution_fence.py$|chat/daily_runtime.py$|deploy/systemd/|UI)' || true)"
