@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 from collections.abc import Mapping
 from typing import Any
 
@@ -45,3 +46,9 @@ def decode_result(raw: str) -> dict[str, Any]:
     if not isinstance(result, dict) or "ok" not in result:
         raise RuntimeError("Todo execution returned malformed result")
     return result
+
+
+def is_valid_internal_token(expected: str, supplied: str) -> bool:
+    configured = str(expected or "")
+    presented = str(supplied or "")
+    return bool(configured and presented and hmac.compare_digest(presented, configured))
