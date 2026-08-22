@@ -25,6 +25,7 @@ from tools.product_handlers import (
     patch_todo as handle_patch_todo,
     read_ledger as handle_read_ledger,
     read_ledger_budget as handle_read_ledger_budget,
+    search_memory_posts as handle_search_memory_posts,
     toggle_todo as handle_toggle_todo,
     update_ledger as handle_update_ledger,
     write_ledger_budget as handle_write_ledger_budget,
@@ -293,6 +294,26 @@ def get_posts():
     resolved = request.args.get('resolved','')
     layer    = request.args.get('layer','')
     limit    = min(int(request.args.get('limit','200')), 1000)
+    conn = get_db()
+
+    # The Home memory.search path keeps its historical query contract while
+    # routing only search-only requests through the provider-neutral handler.
+    search_only = (
+        'search' in request.args
+        and not t
+        and not tags
+        and resolved == ''
+        and not layer
+    )
+    if search_only:
+        try:
+            rows = handle_search_memory_posts(
+                conn, keyword=search, limit=limit
+            )
+        finally:
+            conn.close()
+        return jsonify({"posts":[dict(row) for row in rows]})
+
     where, params = [], []
     if t:
         where.append('type=?'); params.append(t)
@@ -305,7 +326,6 @@ def get_posts():
     if resolved != '':
         where.append('resolved=?'); params.append(int(resolved))
     clause = ('WHERE '+' AND '.join(where)) if where else ''
-    conn = get_db()
     rows = conn.execute(
         f'SELECT * FROM posts {clause} ORDER BY id DESC LIMIT ?',
         params+[limit]

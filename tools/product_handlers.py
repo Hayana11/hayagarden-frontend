@@ -313,6 +313,35 @@ def write_ledger_budget(
     return {"ok": True}
 
 
+
+# -- Memory search ------------------------------------------------------------
+
+def search_memory_posts(
+    conn: sqlite3.Connection,
+    *,
+    keyword: Any = "",
+    limit: Any = 8,
+) -> list[dict[str, Any]]:
+    """Read posts using the provider-neutral Home memory.search contract.
+
+    The caller owns the SQLite connection. This handler deliberately keeps the
+    historical query semantics narrow: one content substring, no tag/resolved
+    filtering, id-desc ordering, and the same empty-keyword behavior.
+    """
+    search = keyword if isinstance(keyword, str) else ""
+    limit_n = min(int(limit), 1000)
+    where: list[str] = []
+    params: list[Any] = []
+    if search:
+        where.append("content LIKE ?")
+        params.append("%" + search + "%")
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    rows = conn.execute(
+        f"SELECT * FROM posts {clause} ORDER BY id DESC LIMIT ?",
+        params + [limit_n],
+    ).fetchall()
+    return [dict(row) for row in rows]
+
 # -- Diary --------------------------------------------------------------------
 
 def write_diary_row(
