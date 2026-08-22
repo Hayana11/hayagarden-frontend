@@ -512,6 +512,7 @@ API_URL = 'https://gua.guagua.uk/v1/messages'
 API_KEY = ''
 CC_TOKEN = ''
 CC_CLEAN_WINDOW_SHADOW_TOKEN = ''
+TODO_INTERNAL_EXECUTION_TOKEN = ''
 TAVILY_KEY = ''
 GITHUB_TOKEN = ''
 try:
@@ -528,6 +529,8 @@ try:
             TAVILY_KEY = line.split('=', 1)[1].strip()
         elif line.startswith('GITHUB_TOKEN='):
             GITHUB_TOKEN = line.split('=', 1)[1].strip()
+        elif line.startswith('TODO_INTERNAL_EXECUTION_TOKEN='):
+            TODO_INTERNAL_EXECUTION_TOKEN = line.split('=', 1)[1].strip()
 except Exception:
     pass
 
@@ -2831,14 +2834,152 @@ def _issue_api_chat_turn_lease(turn_id):
     )
 
 
-def _dispatch_api_chat_tool(name, args, turn_lease):
-    """Dispatch API Chat tools through one narrow read-fence seam."""
+def _api_confirmation_error(exc):
+    code = str(getattr(exc, 'code', '') or 'CONFIRMATION_FAILED')
+    return code, str(exc)
+
+
+def _call_todo_execution(payload):
+    token = str(TODO_INTERNAL_EXECUTION_TOKEN or '').strip()
+    if not token:
+        raise RuntimeError('Todo internal execution token is not configured')
+    from tools.todo_write_adapter import INTERNAL_ROUTE
+    body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    req = urllib.request.Request(
+        FRONTEND_APP_URL + INTERNAL_ROUTE,
+        data=body,
+        method='POST',
+        headers={
+            'Content-Type': 'application/json',
+            'X-Todo-Internal-Token': token,
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode('utf-8')
+
+
+def _complete_api_todo_confirmation(request_data):
+    from tools.confirmation_store import (
+        ConfirmationError,
+        PendingActionStore,
+        PendingActionStoreError,
+    )
+    from tools.todo_write_adapter import (
+        API_OWNER_ID,
+        decode_result,
+        execution_payload,
+        format_result,
+    )
+
+    if not isinstance(request_data, dict):
+        raise ConfirmationError('MALFORMED_REQUEST', 'confirmation request must be an object')
+    pending_id = str(request_data.get('pending_action_id') or '').strip()
+    approval_id = str(request_data.get('approval_id') or '').strip()
+    decision = str(request_data.get('confirmation_decision') or '').strip()
+    if not pending_id or not approval_id or decision not in {'approve', 'reject'}:
+        raise ConfirmationError('MALFORMED_REQUEST', 'pending_action_id, approval_id and decision are required')
+
+    conn = get_db()
+    try:
+        store = PendingActionStore(conn)
+        action = store.get(pending_id)
+        if action.approval_id != approval_id:
+            raise ConfirmationError('APPROVAL_MISMATCH', 'approval_id does not match pending action')
+        if decision == 'reject':
+            store.reject(request_data, owner_id=API_OWNER_ID)
+            return action, None, '已取消'
+        if action.state == 'pending':
+            context = store.confirm(request_data, owner_id=API_OWNER_ID)
+            action = context.action
+        elif action.state == 'approved':
+            context = store.resume_approved(request_data, owner_id=API_OWNER_ID)
+            action = context.action
+        elif action.state != 'completed':
+            raise ConfirmationError('STATE_CONFLICT', 'pending action is not resumable')
+        payload = execution_payload(action, owner_id=API_OWNER_ID)
+    finally:
+        conn.close()
+
+    raw = _call_todo_execution(payload)
+    result = decode_result(raw)
+    return action, result, format_result(result, action.tool_input)
+
+
+def _stream_api_confirmation(request_data):
+    try:
+        action, result, result_text = _complete_api_todo_confirmation(request_data)
+        if result is None:
+            yield 'data: ' + json.dumps({'t': 'text', 'd': result_text}, ensure_ascii=False) + SSE_END
+            yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
+            return
+        tool_use = {
+            'id': action.tool_use_id,
+            'name': action.tool_name,
+            'args': dict(action.tool_input),
+        }
+        yield 'data: ' + json.dumps({'t': 'tool_use', 'd': tool_use, 'idx': 0}, ensure_ascii=False) + SSE_END
+        yield 'data: ' + json.dumps({
+            't': 'tool_result',
+            'd': {
+                **tool_use,
+                'result': result_text,
+                'success': bool(result.get('ok')),
+            },
+            'idx': 0,
+        }, ensure_ascii=False) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'text', 'd': result_text}, ensure_ascii=False) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
+    except Exception as exc:
+        code, message = _api_confirmation_error(exc)
+        yield 'data: ' + json.dumps({
+            't': 'err', 'd': message, 'code': code,
+        }, ensure_ascii=False) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+
+
+def _dispatch_api_chat_tool(name, args, turn_lease, tool_use_id=None):
+    """Dispatch only API Todo/read tools through the canonical narrow seam."""
+    if name == 'add_todo':
+        from tools.execution_fence import evaluate_tool_call
+        from tools.todo_write_adapter import (
+            API_OWNER_ID,
+            CAPABILITY_ID,
+            deferred_todo_payload,
+        )
+        decision = evaluate_tool_call(
+            tool_name='add_todo',
+            tool_input=args,
+            turn_lease=turn_lease,
+        )
+        lease_decision = decision.get('lease_decision')
+        if lease_decision == 'CAPABILITY_ASK_REQUIRED':
+            conn = get_db()
+            try:
+                from tools.confirmation_store import PendingActionStore
+                action = PendingActionStore(conn).create_pending_action(
+                    capability_id=CAPABILITY_ID,
+                    tool_name='add_todo',
+                    tool_input=args,
+                    owner_id=API_OWNER_ID,
+                    turn_id=str((turn_lease or {}).get('turn_id') or ''),
+                    tool_use_id=tool_use_id,
+                )
+                return deferred_todo_payload(action)
+            finally:
+                conn.close()
+        if lease_decision != 'ALLOW':
+            diagnostic = str(decision.get('diagnostic') or 'no diagnostic')
+            return (
+                f'工具执行失败：{lease_decision or "DENIED_CAPABILITY"}'
+                f'（add_todo；{diagnostic}）'
+            )
+        return '工具执行失败：LEASE_MISMATCH（add_todo；confirmed execution context required）'
+
     if name != 'get_todos':
         # Legacy API tools retain their existing run_tool behavior.
         return run_tool(name, args)
 
     from tools.execution_fence import evaluate_tool_call
-
     decision = evaluate_tool_call(
         tool_name='get_todos',
         tool_input=args,
@@ -4644,6 +4785,7 @@ def agent_loop(system, messages, max_rounds=5, api_turn_lease=None):
     from chat.response_parser import extract_text, extract_thinking, extract_tool_uses
     msgs = list(messages)
     think_parts, text_parts = [], []
+    deferred_tool = None
     for _ in range(max_rounds):
         result = api_call(system, msgs)
         blocks = result.get('content', [])
@@ -4655,18 +4797,30 @@ def agent_loop(system, messages, max_rounds=5, api_turn_lease=None):
         if not tool_uses:
             break
         msgs.append({'role': 'assistant', 'content': blocks})
-        msgs.append({'role': 'user', 'content': [
-            {'type': 'tool_result', 'tool_use_id': t.get('id'),
-             'content': _dispatch_api_chat_tool(
-                 t.get('name', ''),
-                 t.get('input') or {},
-                 api_turn_lease,
-             )}
-            for t in tool_uses
-        ]})
+        tool_results = []
+        for tool_use in tool_uses:
+            dispatched = _dispatch_api_chat_tool(
+                tool_use.get('name', ''),
+                tool_use.get('input') or {},
+                api_turn_lease,
+                tool_use_id=tool_use.get('id'),
+            )
+            if isinstance(dispatched, dict) and dispatched.get('deferred_tool_use'):
+                deferred_tool = dispatched
+                break
+            tool_results.append({
+                'type': 'tool_result',
+                'tool_use_id': tool_use.get('id'),
+                'content': dispatched,
+            })
+        if deferred_tool is not None:
+            break
+        msgs.append({'role': 'user', 'content': tool_results})
+    if deferred_tool is not None:
+        return '', ''.join(think_parts), deferred_tool
     joined = NL.join(t for t in text_parts if t).strip()
-    joined = re.sub(r'```tool_use\s.*?```\s*', '', joined, flags=re.DOTALL).strip()
-    joined = re.sub(r'```tool_result\s.*?```\s*', '', joined, flags=re.DOTALL).strip()
+    joined = re.sub(r"\x60\x60\x60tool_use\s.*?\x60\x60\x60\s*", '', joined, flags=re.DOTALL).strip()
+    joined = re.sub(r"\x60\x60\x60tool_result\s.*?\x60\x60\x60\s*", '', joined, flags=re.DOTALL).strip()
     return joined, ''.join(think_parts)
 
 
@@ -4733,8 +4887,25 @@ def workspace_chat():
 def chat():
     from moments_turn import prepare_turn, activate_turn, insert_user_message, release_turn, DEFAULT_CONVERSATION_ID
 
+    _request_data = request.get_json(silent=True) or {}
+    if (
+        _request_data.get('approval_id') is not None
+        or _request_data.get('confirmation_decision') is not None
+        or _request_data.get('pending_action_id') is not None
+    ):
+        try:
+            _action, _result, _result_text = _complete_api_todo_confirmation(_request_data)
+            return jsonify({
+                'ok': True,
+                'content': _result_text,
+                'tool_result': _result,
+            })
+        except Exception as exc:
+            _code, _message = _api_confirmation_error(exc)
+            return jsonify({'ok': False, 'error': _message, 'code': _code}), 409
+
     _conv = DEFAULT_CONVERSATION_ID
-    _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
+    _turn_data = prepare_turn(_request_data, conversation_id=_conv, memories_db_path=DB_PATH)
     _uc = (_turn_data.get('content') or '').strip()
     _turn_data = insert_user_message(get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv)
     # touch_user_interaction() runs inside insert_user_message after persist.
@@ -4766,11 +4937,20 @@ def chat():
             _api_turn_lease = None
             if _get_provider() != 'claude_code':
                 _api_turn_lease = _issue_api_chat_turn_lease(_turn_data.get('turn_key'))
-            text, thinking_text = generate_reply(
+            generated = generate_reply(
                 system,
                 messages,
                 api_turn_lease=_api_turn_lease,
             )
+            deferred_tool = generated[2] if len(generated) >= 3 else None
+            text, thinking_text = generated[0], generated[1]
+            if deferred_tool is not None:
+                return jsonify({
+                    'ok': True,
+                    'content': '',
+                    'thinking': thinking_text,
+                    'deferred_tool': deferred_tool,
+                })
             if not text:
                 return jsonify({'error': 'AI 没有返回内容'}), 500
 
@@ -6619,8 +6799,16 @@ def chat_stream():
         _conv = DEFAULT_CONVERSATION_ID
         _persisted = [False]
         _turn_data: dict = {}
+        _request_data = request.get_json(silent=True) or {}
+        if (
+            _request_data.get('approval_id') is not None
+            or _request_data.get('confirmation_decision') is not None
+            or _request_data.get('pending_action_id') is not None
+        ):
+            yield from _stream_api_confirmation(_request_data)
+            return
         try:
-            _turn_data = prepare_turn(request.get_json(), conversation_id=_conv, memories_db_path=DB_PATH)
+            _turn_data = prepare_turn(_request_data, conversation_id=_conv, memories_db_path=DB_PATH)
             _uc = (_turn_data.get('content') or '').strip()
             _turn_data = insert_user_message(
                 get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
@@ -6904,14 +7092,43 @@ def chat_stream():
                     for tu in tool_uses:
                         tname = tu.get('name', '')
                         targs = tu.get('input') or {}
-                        yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': tname, 'args': _slim_args(targs)}, 'idx': len(tool_calls_acc)}) + SSE_END
-                        file_path = _write_tool_file_path(tname, targs)
-                        old_content = _read_file_safe(file_path) if file_path else None
-                        result_str = _dispatch_api_chat_tool(
+                        dispatched = _dispatch_api_chat_tool(
                             tname,
                             targs,
                             _api_turn_lease,
+                            tool_use_id=tu.get('id'),
                         )
+                        if isinstance(dispatched, dict) and dispatched.get('deferred_tool_use'):
+                            deferred_event = {
+                                'id': dispatched.get('id') or tu.get('id'),
+                                'name': dispatched.get('name') or tname,
+                                'args': _slim_args(dispatched.get('args') or targs),
+                                'tool_input': _slim_args(dispatched.get('tool_input') or targs),
+                                'approval_id': dispatched.get('approval_id'),
+                                'pending_action_id': dispatched.get('pending_action_id'),
+                                'deferred_tool_use': True,
+                                'status': dispatched.get('status'),
+                                'approval_prompt': dispatched.get('approval_prompt'),
+                            }
+                            yield 'data: ' + json.dumps({
+                                't': 'tool_use',
+                                'd': deferred_event,
+                                'idx': len(tool_calls_acc),
+                            }, ensure_ascii=False) + SSE_END
+                            yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
+                            return
+                        result_str = str(dispatched)
+                        yield 'data: ' + json.dumps({
+                            't': 'tool_use',
+                            'd': {
+                                'id': tu.get('id'),
+                                'name': tname,
+                                'args': _slim_args(targs),
+                            },
+                            'idx': len(tool_calls_acc),
+                        }, ensure_ascii=False) + SSE_END
+                        file_path = _write_tool_file_path(tname, targs)
+                        old_content = _read_file_safe(file_path) if file_path else None
                         tc_item = {
                             'name': tname,
                             'args': targs,
