@@ -298,4 +298,3 @@ def test_no_product_side_effect_and_api_relay_binding_absent(db):
     for entry in manifest.CAPABILITY_MANIFEST:
         bindings = entry.get("provider_bindings") or {}
         assert bindings.get("api_relay") != "add_todo"
-
