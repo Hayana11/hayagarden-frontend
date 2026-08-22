@@ -898,7 +898,7 @@ export function ChatScreen() {
       userMessageId: number | null,
       opts: {
         rewriteId?: string | null;
-        confirmation?: { approvalId: string; decision: 'approve' | 'reject' };
+        confirmation?: { approvalId: string; pendingActionId?: string | null; decision: 'approve' | 'reject' };
       } = {},
     ): Promise<boolean> => {
       // Invariant: any path entering live streaming pins the DOM window to latest
@@ -934,6 +934,7 @@ export function ChatScreen() {
         {
           rewriteId: opts.rewriteId,
           approvalId: opts.confirmation?.approvalId,
+          pendingActionId: opts.confirmation?.pendingActionId,
           confirmationDecision: opts.confirmation?.decision,
         },
       );
@@ -960,12 +961,13 @@ export function ChatScreen() {
   const confirmDeferred = useCallback(async (decision: 'approve' | 'reject') => {
     const pending = pendingConfirmation;
     const approvalId = pending?.approval_id;
+    const pendingActionId = pending?.pending_action_id;
     if (!pending || !approvalId || sending || pending.confirmation_state === 'processing') return;
     setPendingConfirmation({ ...pending, confirmation_state: 'processing', running: false });
     setSending(true);
     setChatError(null);
     const ok = await runStream(null, {
-      confirmation: { approvalId, decision },
+      confirmation: { approvalId, pendingActionId, decision },
     });
     if (decision === 'reject') {
       setPendingConfirmation({ ...pending, confirmation_state: 'rejected', running: false });

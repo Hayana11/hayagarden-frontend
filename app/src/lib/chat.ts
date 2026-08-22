@@ -29,6 +29,7 @@ export interface ChatToolCall {
   running?: boolean;
   artifact?: ChatArtifact;
   approval_id?: string;
+  pending_action_id?: string;
   deferred_tool_use?: boolean;
   status?: string;
   approval_prompt?: string;
@@ -314,6 +315,7 @@ export async function streamChatReply(
   extra: {
     rewriteId?: string | null;
     approvalId?: string | null;
+    pendingActionId?: string | null;
     confirmationDecision?: 'approve' | 'reject';
   } = {},
 ): Promise<StreamResult> {
@@ -328,6 +330,7 @@ export async function streamChatReply(
     if (userMessageId) body.user_message_id = userMessageId;
     if (extra.rewriteId) body.rewrite_id = extra.rewriteId;
     if (extra.approvalId) body.approval_id = extra.approvalId;
+    if (extra.pendingActionId) body.pending_action_id = extra.pendingActionId;
     if (extra.confirmationDecision) body.confirmation_decision = extra.confirmationDecision;
     const resp = await fetch(sseUrl('/api/gw/chat/stream'), {
       method: 'POST',
