@@ -35,15 +35,14 @@ const rows = [
 ];
 
 python(
-  [
-    'import sqlite3, sys',
-    'conn = sqlite3.connect(sys.argv[1])',
-    'conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL, author TEXT DEFAULT \'fyodor\', created_at TEXT, pinned INTEGER DEFAULT 0, tags TEXT DEFAULT \'\', layer TEXT DEFAULT \'recent\', resolved INTEGER DEFAULT 0, recall_count INTEGER DEFAULT 0, last_recalled_at TEXT)")',
-    'conn.executemany("INSERT INTO posts (id,type,content,created_at,pinned,tags,layer,resolved) VALUES (?,?,?,?,?,?,?,?)", [(int(r[0]),r[1],r[2],r[3],int(r[4]),r[5],r[6],int(r[7])) for r in rows])',
-    'conn.commit()',
-    'conn.close()',
-  ].join('; '),
-  [dbPath],
+  `import json, sqlite3, sys
+data = json.loads(sys.argv[2])
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL, author TEXT DEFAULT 'fyodor', created_at TEXT, pinned INTEGER DEFAULT 0, tags TEXT DEFAULT '', layer TEXT DEFAULT 'recent', resolved INTEGER DEFAULT 0, recall_count INTEGER DEFAULT 0, last_recalled_at TEXT)")
+conn.executemany("INSERT INTO posts (id,type,content,created_at,pinned,tags,layer,resolved) VALUES (?,?,?,?,?,?,?,?)", data)
+conn.commit()
+conn.close()`,
+  [dbPath, JSON.stringify(rows)],
 );
 
 function snapshot() {
@@ -84,21 +83,19 @@ assert.match(serverSource, /Error: ' \+ error\.message/);
 assert.match(serverSource, /limit: 8/);
 
 const meta = JSON.parse(python(
-  [
-    'import json, tempfile',
-    'from unittest.mock import patch',
-    'from tools.capability_manifest import get_capability',
-    'from tools.cc_capability_adapter import HOME_MCP_CAPABILITY_IDS, INTERNAL_MCP_CAPABILITY_IDS, INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, build_uh_a0_spawn_plan, physical_surface_fingerprint',
-    'from tools.cc_tool_surface import _HOME_TOOL_SCHEMAS, _INTERNAL_TOOL_SCHEMAS',
-    'from tools.capability_state import RUNTIME_STATE_INHERIT, RUNTIME_STATE_OFF',
-    'with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_INHERIT):',
-    '  with tempfile.TemporaryDirectory() as root_dir:',
-    '    plan = build_uh_a0_spawn_plan(cwd=root_dir, write_mcp_config=False, env={})',
-    'with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_OFF):',
-    '  with tempfile.TemporaryDirectory() as root_dir:',
-    '    off_plan = build_uh_a0_spawn_plan(cwd=root_dir, write_mcp_config=False, env={})',
-    'print(json.dumps({"binding": get_capability("memory.search")["provider_bindings"], "home_ids": HOME_MCP_CAPABILITY_IDS, "internal_ids": INTERNAL_MCP_CAPABILITY_IDS, "shadow": INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, "schema_equal": _HOME_TOOL_SCHEMAS["mcp__home__search_memories"] == _INTERNAL_TOOL_SCHEMAS["mcp__internal__search_memories"], "fingerprint": plan["physical_surface_fingerprint"], "off_allow": off_plan["surface_allowlist"], "off_disallow": off_plan["disallowed_tools"], "home_visible": plan["home_mcp_tools"]}, ensure_ascii=False))',
-  ].join('; '),
+  `import json, tempfile
+from unittest.mock import patch
+from tools.capability_manifest import get_capability
+from tools.cc_capability_adapter import HOME_MCP_CAPABILITY_IDS, INTERNAL_MCP_CAPABILITY_IDS, INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, build_uh_a0_spawn_plan
+from tools.cc_tool_surface import _HOME_TOOL_SCHEMAS, _INTERNAL_TOOL_SCHEMAS
+from tools.capability_state import RUNTIME_STATE_INHERIT, RUNTIME_STATE_OFF
+with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_INHERIT):
+    with tempfile.TemporaryDirectory() as root_dir:
+        plan = build_uh_a0_spawn_plan(cwd=root_dir, write_mcp_config=False, env={})
+with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_OFF):
+    with tempfile.TemporaryDirectory() as root_dir:
+        off_plan = build_uh_a0_spawn_plan(cwd=root_dir, write_mcp_config=False, env={})
+print(json.dumps({"binding": get_capability("memory.search")["provider_bindings"], "home_ids": HOME_MCP_CAPABILITY_IDS, "internal_ids": INTERNAL_MCP_CAPABILITY_IDS, "shadow": INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, "schema_equal": _HOME_TOOL_SCHEMAS["mcp__home__search_memories"] == _INTERNAL_TOOL_SCHEMAS["mcp__internal__search_memories"], "fingerprint": plan["physical_surface_fingerprint"], "off_allow": off_plan["surface_allowlist"], "off_disallow": off_plan["disallowed_tools"], "home_visible": plan["home_mcp_tools"]}, ensure_ascii=False))`,
 ));
 
 assert.deepEqual(meta.binding, {
