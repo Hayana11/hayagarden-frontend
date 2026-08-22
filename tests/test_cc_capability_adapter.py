@@ -110,7 +110,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 7)
+        self.assertEqual(len(home), 4)
         self.assertEqual(
             set(home),
             {
@@ -118,9 +118,6 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 "mcp__home__write_diary",
                 "mcp__home__get_light_status",
                 "mcp__home__get_countdowns",
-                "mcp__home__get_ledger",
-                "mcp__home__get_ledger_budget",
-                "mcp__home__add_ledger",
             },
         )
         for name in NON_P3_HOME_MCP_TOOLS:
@@ -357,7 +354,13 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             "mcp__home__get_todos", plan["surface_allowlist"]
         )
         self.assertIn("mcp__home__get_todos", plan["disallowed_tools"])
-        self.assertIn("mcp__home__get_ledger", plan["home_mcp_tools"])
+        for ledger_tool in (
+            "mcp__home__get_ledger",
+            "mcp__home__get_ledger_budget",
+            "mcp__home__add_ledger",
+        ):
+            self.assertNotIn(ledger_tool, plan["home_mcp_tools"])
+            self.assertIn(ledger_tool, plan["disallowed_tools"])
         self.assertIn("mcp__home__search_memories", plan["home_mcp_tools"])
         self.assertIn("mcp__home__light_on", plan["disallowed_tools"])
         self.assertIn("mcp__home__exec_vps", plan["disallowed_tools"])
