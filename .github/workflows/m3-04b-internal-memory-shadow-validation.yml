@@ -13,6 +13,7 @@ on:
       - ".github/workflows/m3-04b-internal-memory-shadow-validation.yml"
       - "tests/test_m3_03a_ledger_shadow.py"
       - "tests/test_m3_03b_daily_ledger_cutover.py"
+      - "tests/test_execution_fence.py"
   workflow_dispatch:
 
 permissions:
@@ -141,6 +142,7 @@ jobs:
             'tests/test_m3_02b_daily_todo_cutover.py' \
             'tests/test_m3_03a_ledger_shadow.py' \
             'tests/test_m3_03b_daily_ledger_cutover.py' \
+            'tests/test_execution_fence.py' \
             'tests/test_m3_04c_daily_memory_cutover.py' \
             'tools/capability_manifest.py' \
             'tools/cc_capability_adapter.py' | sort)"
