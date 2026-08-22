@@ -99,17 +99,19 @@ print(json.dumps({"binding": get_capability("memory.search")["provider_bindings"
 ));
 
 assert.deepEqual(meta.binding, {
-  claude_code: 'mcp__home__search_memories',
+  claude_code: 'mcp__internal__search_memories',
   internal_mcp: 'mcp__internal__search_memories',
+  home_mcp: 'mcp__home__search_memories',
 });
-assert.deepEqual(meta.home_ids, ['memory.search', 'diary.write', 'home.light.status', 'countdown.read']);
-assert.deepEqual(meta.internal_ids, ['todo.read', 'todo.write', 'ledger.read', 'ledger.budget.read', 'ledger.write']);
-assert.deepEqual(meta.shadow, ['mcp__internal__search_memories']);
+assert.deepEqual(meta.home_ids, ['diary.write', 'home.light.status', 'countdown.read']);
+assert.deepEqual(meta.internal_ids, ['todo.read', 'todo.write', 'ledger.read', 'ledger.budget.read', 'ledger.write', 'memory.search']);
+assert.deepEqual(meta.shadow, []);
 assert.equal(meta.schema_equal, true);
-assert.equal(meta.fingerprint, '8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15');
-assert.ok(meta.home_visible.includes('mcp__home__search_memories'));
-assert.ok(!meta.off_allow.includes('mcp__home__search_memories'));
-assert.ok(!meta.off_allow.includes('mcp__internal__search_memories'));
+assert.equal(meta.fingerprint, 'fb7319322de9ab600395f776043cbc29aa9925c30637727cbd92c7d0b23b6d11');
+assert.ok(!meta.home_visible.includes('mcp__home__search_memories'));
+assert.ok(meta.home_visible.includes('mcp__home__write_diary'));
+assert.ok(meta.off_allow.includes('mcp__internal__search_memories') === false);
+assert.ok(meta.off_allow.includes('mcp__home__search_memories') === false);
 assert.ok(meta.off_disallow.includes('mcp__internal__search_memories'));
 assert.ok(meta.off_disallow.includes('mcp__home__search_memories'));
 

@@ -58,7 +58,6 @@ NON_P3_HOME_MCP_TOOLS: tuple[str, ...] = (
 )
 
 HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
-    "memory.search",
     "diary.write",
     "home.light.status",
     "countdown.read",
@@ -70,12 +69,11 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
+    "memory.search",
 )
 
-# Internal read-only shadows remain explicit Daily denies until their provider cutover.
-INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = (
-    "mcp__internal__search_memories",
-)
+# No Internal Memory shadow remains after the Daily provider cutover.
+INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = ()
 
 NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
     "files.read",

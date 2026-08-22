@@ -10,7 +10,8 @@ from tools.cc_capability_adapter import build_uh_a0_spawn_plan, physical_surface
 from tools.cc_tool_surface import _static_schema_registry
 from tools.capability_state import RUNTIME_STATE_INHERIT, RUNTIME_STATE_OFF
 
-BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
+BASE_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
+TARGET_FINGERPRINT = "fb7319322de9ab600395f776043cbc29aa9925c30637727cbd92c7d0b23b6d11"
 
 class M302BTodoCutoverTests(unittest.TestCase):
     def plan(self, state=RUNTIME_STATE_INHERIT):
@@ -37,7 +38,10 @@ class M302BTodoCutoverTests(unittest.TestCase):
         self.assertNotIn("mcp__home__add_todo", allowed)
         self.assertIn("mcp__home__get_todos", disallowed)
         self.assertIn("mcp__home__add_todo", disallowed)
-        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__internal__get_todos", "mcp__internal__add_todo", "mcp__home__search_memories", "mcp__home__write_diary", "mcp__home__get_light_status", "mcp__home__get_countdowns", "mcp__internal__get_ledger", "mcp__internal__get_ledger_budget", "mcp__internal__add_ledger"})
+        self.assertIn("mcp__internal__search_memories", allowed)
+        self.assertNotIn("mcp__home__search_memories", allowed)
+        self.assertIn("mcp__home__search_memories", disallowed)
+        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__internal__get_todos", "mcp__internal__add_todo", "mcp__internal__get_ledger", "mcp__internal__get_ledger_budget", "mcp__internal__add_ledger", "mcp__internal__search_memories", "mcp__home__write_diary", "mcp__home__get_light_status", "mcp__home__get_countdowns"})
 
     def test_runtime_off_hides_both_provider_surfaces(self):
         plan = self.plan(RUNTIME_STATE_OFF)
@@ -51,13 +55,20 @@ class M302BTodoCutoverTests(unittest.TestCase):
         self.assertIn("mcp__internal__add_todo", disallowed)
         self.assertIn("mcp__home__get_todos", disallowed)
         self.assertIn("mcp__home__add_todo", disallowed)
+        self.assertNotIn("mcp__internal__search_memories", allowed)
+        self.assertNotIn("mcp__home__search_memories", allowed)
+        self.assertIn("mcp__internal__search_memories", disallowed)
+        self.assertIn("mcp__home__search_memories", disallowed)
 
     def test_fingerprint_and_names(self):
         with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_INHERIT):
             first = physical_surface_fingerprint()
             self.assertEqual(first, physical_surface_fingerprint())
             self.assertNotEqual(first, BASE_FINGERPRINT)
+            self.assertEqual(first, TARGET_FINGERPRINT)
             self.assertIn("mcp__internal__get_todos", physical_surface_names())
+            self.assertIn("mcp__internal__search_memories", physical_surface_names())
+            self.assertNotIn("mcp__home__search_memories", physical_surface_names())
             self.assertNotIn("mcp__home__get_todos", physical_surface_names())
 
     def test_fence_and_approval_identity(self):

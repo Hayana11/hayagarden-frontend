@@ -23,7 +23,7 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
-TARGET_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
+TARGET_FINGERPRINT = "fb7319322de9ab600395f776043cbc29aa9925c30637727cbd92c7d0b23b6d11"
 LEDGER_INTERNAL = (
     "mcp__internal__get_ledger",
     "mcp__internal__get_ledger_budget",
@@ -63,7 +63,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
     def test_manifest_provider_bindings_and_grouping(self):
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
+            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search"),
         )
         self.assertEqual(
             get_capability("ledger.read")["provider_bindings"],
@@ -96,9 +96,10 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         disallowed = set(plan["disallowed_tools"])
         self.assertTrue(set(LEDGER_INTERNAL) <= allowed)
         self.assertTrue(set(LEDGER_HOME) <= disallowed)
-        self.assertIn("mcp__home__search_memories", allowed)
-        self.assertIn("mcp__internal__search_memories", disallowed)
-        self.assertNotIn("mcp__internal__search_memories", allowed)
+        self.assertIn("mcp__internal__search_memories", allowed)
+        self.assertNotIn("mcp__home__search_memories", allowed)
+        self.assertIn("mcp__home__search_memories", disallowed)
+        self.assertNotIn("mcp__internal__search_memories", disallowed)
         self.assertTrue(set(LEDGER_HOME).isdisjoint(allowed))
         self.assertTrue(set(LEDGER_INTERNAL).isdisjoint(disallowed))
         self.assertIn("mcp__internal__get_todos", allowed)
@@ -106,11 +107,15 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertNotIn("mcp__home__get_todos", allowed)
         self.assertNotIn("mcp__home__add_todo", allowed)
         self.assertEqual(plan["physical_surface_fingerprint"], TARGET_FINGERPRINT)
+        self.assertIn("mcp__internal__search_memories", allowed)
+        self.assertNotIn("mcp__home__search_memories", allowed)
+        self.assertIn("mcp__home__search_memories", disallowed)
+        self.assertNotIn("mcp__internal__search_memories", disallowed)
         self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
         self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
-            ("mcp__internal__search_memories",),
+            (),
         )
 
     def test_runtime_off_hides_internal_and_keeps_home_denied(self):
