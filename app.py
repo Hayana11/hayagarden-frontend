@@ -3179,7 +3179,8 @@ def execute_internal_todo_write():
     supplied = request.headers.get('X-Todo-Internal-Token', '')
     if not expected:
         return jsonify({'error': 'internal Todo execution is not configured'}), 503
-    if not supplied or not hmac.compare_digest(str(supplied), expected):
+    from tools.todo_write_adapter import is_valid_internal_token
+    if not is_valid_internal_token(expected, supplied):
         return jsonify({'error': 'unauthorized'}), 401
     data = request.get_json(silent=True)
     conn = get_db()
