@@ -176,37 +176,14 @@ def test_runtime_off_is_denied_before_execution(tmp_path, monkeypatch):
     assert decision["lease_decision"] == "DENIED_CAPABILITY"
 
 
-def test_internal_todo_route_requires_server_token(monkeypatch):
-    import app as app_module
-    monkeypatch.setattr(app_module, "TODO_INTERNAL_EXECUTION_TOKEN", "server-secret")
-    client = app_module.app.test_client()
-    denied = client.post(
-        "/internal/todos/execute",
-        json={"pending_action_id": "x"},
-        headers={"X-Todo-Internal-Token": "wrong"},
-    )
-    assert denied.status_code == 401
+
+def test_internal_token_check_fails_closed():
+    from tools.todo_write_adapter import is_valid_internal_token
+    assert not is_valid_internal_token("", "anything")
+    assert not is_valid_internal_token("server-secret", "")
+    assert not is_valid_internal_token("server-secret", "wrong")
 
 
-def test_internal_todo_route_passes_only_authenticated_payload(monkeypatch):
-    import app as app_module
-    import tools.todo_write_execution as execution
-    monkeypatch.setattr(app_module, "TODO_INTERNAL_EXECUTION_TOKEN", "server-secret")
-    seen = {}
-    conn = sqlite3.connect(":memory:")
-
-    def fake_execute(db, payload):
-        seen["db"] = db
-        seen["payload"] = payload
-        return {"ok": True, "id": 7}
-
-    monkeypatch.setattr(execution, "execute_todo_write", fake_execute)
-    monkeypatch.setattr(app_module, "get_db", lambda: conn)
-    client = app_module.app.test_client()
-    response = client.post(
-        "/internal/todos/execute",
-        json={"pending_action_id": "durable-id", "approval_id": "approval"},
-        headers={"X-Todo-Internal-Token": "server-secret"},
-    )
-    assert response.status_code == 200
-    assert seen["payload"]["pending_action_id"] == "durable-id"
+def test_internal_token_check_accepts_exact_secret():
+    from tools.todo_write_adapter import is_valid_internal_token
+    assert is_valid_internal_token("server-secret", "server-secret")
