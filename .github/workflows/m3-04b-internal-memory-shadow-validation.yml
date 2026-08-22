@@ -132,7 +132,7 @@ jobs:
       - name: Verify exact M3-04B changed-file fence
         run: |
           actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
-          expected="$(printf '%s\\n' \
+          expected="$(printf '%s\n' \
             '.github/workflows/m3-04b-internal-memory-shadow-validation.yml' \
             '.github/workflows/m3-04c-daily-memory-cutover-validation.yml' \
             'tests/test-m3-04b-internal-memory.mjs' \
