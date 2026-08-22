@@ -43,6 +43,16 @@ jobs:
       - name: Install pytest
         run: python -m pip install --disable-pip-version-check pytest
 
+      - name: Compile modified Python entrypoints
+        run: >-
+          python -m py_compile
+          app.py
+          gateway.py
+          tools/confirmation_store.py
+          tools/product_handlers.py
+          tools/todo_write_adapter.py
+          tools/todo_write_execution.py
+
       - name: Run M4-01B2 focused contracts
         run: python -m pytest -q tests/test_m4_01b2_todo_write.py
 
