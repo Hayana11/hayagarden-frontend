@@ -133,5 +133,3 @@ def test_real_runtime_storage_failure_fails_closed(canonical_store, tmp_path, mo
 def test_canonical_manifest_has_internal_write_binding_only():
     assert capability_for_tool("mcp__internal__add_todo") == "todo.write"
     assert capability_for_tool("add_todo") is None
-
-
