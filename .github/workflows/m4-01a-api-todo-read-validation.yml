@@ -27,6 +27,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          touch "$GITHUB_WORKSPACE/.env"
+
       - name: Run M4-01A focused contracts
         run: python -m unittest tests.test_m4_01a_api_todo_read -v
 
