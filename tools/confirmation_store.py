@@ -409,6 +409,35 @@ class PendingActionStore:
             _rollback(self.conn)
             raise PendingActionStoreError("STORE_UNAVAILABLE", "confirmation state write failed") from exc
 
+    def resume_approved(
+        self,
+        request: Mapping[str, Any],
+        *,
+        owner_id: str,
+        now: datetime | str | None = None,
+    ) -> ConfirmedActionContext:
+        """Revalidate an approved action after a gateway crash or lost response."""
+        pending_id, approval_id, decision = self._validate_request(request)
+        if decision != "approve":
+            raise ConfirmationError("MALFORMED_REQUEST", "resume requires approve")
+        try:
+            action = self._load_owned(pending_id, approval_id, owner_id, now)
+            if action.state != "approved":
+                raise ConfirmationError("STATE_CONFLICT", "pending action is not approved")
+            lease = self._issue_confirmation_lease(action)
+            evaluation = self._recheck_runtime(action, lease)
+            return ConfirmedActionContext(
+                action=self.get(pending_id, now=now),
+                turn_lease=lease,
+                evaluation=evaluation,
+            )
+        except ConfirmationError:
+            _rollback(self.conn)
+            raise
+        except sqlite3.Error as exc:
+            _rollback(self.conn)
+            raise PendingActionStoreError("STORE_UNAVAILABLE", "approved action resume failed") from exc
+
     def reject(self, request: Mapping[str, Any], *, owner_id: str, now: datetime | str | None = None) -> PendingAction:
         pending_id, approval_id, decision = self._validate_request(request)
         if decision != "reject":
