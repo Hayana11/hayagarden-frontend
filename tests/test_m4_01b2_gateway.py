@@ -160,6 +160,28 @@ def test_normal_confirmation_executes_and_replays_through_gateway_helper(
     check.close()
 
 
+def test_normal_reject_does_not_reach_internal_execution(gateway_fixture):
+    get_db, lease, _todo_path = gateway_fixture
+    helpers = _gateway_functions(
+        "_dispatch_api_chat_tool",
+        "_complete_api_todo_confirmation",
+    )
+    deferred = _make_pending(helpers, get_db, lease)
+    calls = []
+    helpers["_call_todo_execution"] = lambda payload: calls.append(payload)
+    action, result, text = helpers["_complete_api_todo_confirmation"](
+        {
+            "pending_action_id": deferred["pending_action_id"],
+            "approval_id": deferred["approval_id"],
+            "confirmation_decision": "reject",
+        }
+    )
+    assert result is None
+    assert text == "已取消"
+    assert action.state == "rejected"
+    assert calls == []
+
+
 def test_stream_confirmation_emits_result_and_done(gateway_fixture):
     get_db, lease, _todo_path = gateway_fixture
     helpers = _gateway_functions(
