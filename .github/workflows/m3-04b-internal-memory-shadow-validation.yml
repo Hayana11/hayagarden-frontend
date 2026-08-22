@@ -142,6 +142,7 @@ jobs:
             'tools/cc_tool_surface.py' \
             'tools/memory_internal_adapter.py' \
             'tests/test_m3_03a_ledger_shadow.py' \
-            'tests/test_m3_03b_daily_ledger_cutover.py' | sort)"
+            'tests/test_m3_03b_daily_ledger_cutover.py' \
+            'tests/test-m3-03a-ledger-internal.mjs' | sort)"
           test "$actual" = "$expected"
           printf '%s\n' "$actual"
