@@ -70,4 +70,3 @@ jobs:
             'tests/test_m4_01b1_canonical.py' \
             'tools/confirmation_store.py' | sort)"
           test "$actual" = "$expected"
-
