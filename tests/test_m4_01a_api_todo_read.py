@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import re
 import sqlite3
+import sys
 import tempfile
 import types
 import unittest
@@ -230,9 +231,25 @@ class M401AApiTodoReadTests(unittest.TestCase):
             }
         )
         lease = object()
-        text, thinking = helpers["generate_reply"](
-            "system", [], api_turn_lease=lease
+        parser = types.ModuleType("chat.response_parser")
+        parser.extract_text = lambda blocks: "".join(
+            item.get("text", "")
+            for item in blocks
+            if item.get("type") == "text"
         )
+        parser.extract_thinking = lambda blocks: ""
+        parser.extract_tool_uses = lambda blocks: [
+            item for item in blocks if item.get("type") == "tool_use"
+        ]
+        fake_chat = types.ModuleType("chat")
+        fake_chat.__path__ = []
+        with patch.dict(
+            sys.modules,
+            {"chat": fake_chat, "chat.response_parser": parser},
+        ):
+            text, thinking = helpers["generate_reply"](
+                "system", [], api_turn_lease=lease
+            )
         self.assertIn("done", text)
         self.assertEqual(len(observed_leases), 2)
         self.assertTrue(all(item is lease for item in observed_leases))
