@@ -11,6 +11,8 @@ on:
       - "scripts/check-internal-mcp-readiness.mjs"
       - "tests/test-m3-04b-internal-memory.mjs"
       - ".github/workflows/m3-04b-internal-memory-shadow-validation.yml"
+      - "tests/test_m3_03a_ledger_shadow.py"
+      - "tests/test_m3_03b_daily_ledger_cutover.py"
   workflow_dispatch:
 
 permissions:
@@ -44,7 +46,7 @@ jobs:
       - name: Install isolated test dependencies
         run: |
           npm ci
-          python -m pip install -r requirements.txt
+          python -m pip install Flask Pillow Markdown -r requirements.txt
 
       - name: Prepare isolated runtime paths
         run: |
@@ -138,6 +140,8 @@ jobs:
             'tools/capability_manifest.py' \
             'tools/cc_capability_adapter.py' \
             'tools/cc_tool_surface.py' \
-            'tools/memory_internal_adapter.py' | sort)"
+            'tools/memory_internal_adapter.py' \
+            'tests/test_m3_03a_ledger_shadow.py' \
+            'tests/test_m3_03b_daily_ledger_cutover.py' | sort)"
           test "$actual" = "$expected"
           printf '%s\n' "$actual"
