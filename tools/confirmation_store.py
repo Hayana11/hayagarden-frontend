@@ -99,6 +99,13 @@ def _nonempty(name: str, value: Any) -> str:
     return result
 
 
+def _rollback(conn: sqlite3.Connection) -> None:
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        pass
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create only the generic pending-action schema, idempotently."""
     try:
@@ -238,10 +245,10 @@ class PendingActionStore:
                 tool_use_id=None if tool_use_id is None else str(tool_use_id),
             )
         except ConfirmationError:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise
         except sqlite3.Error as exc:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise PendingActionStoreError("STORE_UNAVAILABLE", "pending action write failed") from exc
 
     def get(self, pending_action_id: str, *, now: datetime | str | None = None) -> PendingAction:
@@ -387,7 +394,7 @@ class PendingActionStore:
                 (stamp, pending_id),
             )
             if updated.rowcount != 1:
-                self.conn.rollback()
+                _rollback(self.conn)
                 raise ConfirmationError("STATE_CONFLICT", "pending action changed concurrently")
             self.conn.commit()
             return ConfirmedActionContext(
@@ -396,10 +403,10 @@ class PendingActionStore:
                 evaluation=evaluation,
             )
         except ConfirmationError:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise
         except sqlite3.Error as exc:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise PendingActionStoreError("STORE_UNAVAILABLE", "confirmation state write failed") from exc
 
     def reject(self, request: Mapping[str, Any], *, owner_id: str, now: datetime | str | None = None) -> PendingAction:
@@ -422,15 +429,15 @@ class PendingActionStore:
                 (stamp, pending_id),
             )
             if updated.rowcount != 1:
-                self.conn.rollback()
+                _rollback(self.conn)
                 raise ConfirmationError("STATE_CONFLICT", "pending action changed concurrently")
             self.conn.commit()
             return self.get(pending_id, now=now)
         except ConfirmationError:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise
         except sqlite3.Error as exc:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise PendingActionStoreError("STORE_UNAVAILABLE", "rejection state write failed") from exc
 
     def mark_completed(self, pending_action_id: str, *, owner_id: str, now: datetime | str | None = None) -> PendingAction:
@@ -448,10 +455,10 @@ class PendingActionStore:
             self.conn.commit()
             return self.get(action.pending_action_id, now=now)
         except ConfirmationError:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise
         except sqlite3.Error as exc:
-            self.conn.rollback()
+            _rollback(self.conn)
             raise PendingActionStoreError("STORE_UNAVAILABLE", "completion state write failed") from exc
 
 
