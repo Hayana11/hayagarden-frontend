@@ -478,4 +478,3 @@ def deferred_payload(action: PendingAction, *, approval_prompt: str | None = Non
     if action.tool_use_id is not None:
         payload["id"] = action.tool_use_id
     return payload
-
