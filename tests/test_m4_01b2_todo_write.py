@@ -63,7 +63,7 @@ def _approved_action(tmp_path, monkeypatch, *, content="明天寄快递", due_da
     context = store.confirm(request, owner_id=API_OWNER_ID)
     assert context.evaluation["lease_decision"] == "ALLOW"
     assert context.turn_lease["issued_from"] == "user_confirmation"
-    return conn, action, request
+    return conn, context.action, request
 
 
 def test_default_policy_asks_and_does_not_insert(tmp_path, monkeypatch):
