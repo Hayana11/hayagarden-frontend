@@ -96,29 +96,29 @@ jobs:
           from wake.cc_tools import WAKE_TO_CC_MCP
 
           assert get_capability("memory.search")["provider_bindings"] == {
-              "claude_code": "mcp__home__search_memories",
+              "claude_code": "mcp__internal__search_memories",
               "internal_mcp": "mcp__internal__search_memories",
+              "home_mcp": "mcp__home__search_memories",
           }
           assert HOME_MCP_CAPABILITY_IDS == (
-              "memory.search", "diary.write", "home.light.status", "countdown.read"
+              "diary.write", "home.light.status", "countdown.read"
           )
           assert INTERNAL_MCP_CAPABILITY_IDS == (
               "todo.read", "todo.write", "ledger.read",
-              "ledger.budget.read", "ledger.write"
+              "ledger.budget.read", "ledger.write", "memory.search"
           )
-          assert INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS == (
-              "mcp__internal__search_memories",
-          )
+          assert INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS == ()
           assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
           with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_INHERIT):
               with tempfile.TemporaryDirectory() as root:
                   plan = build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
-          assert "mcp__home__search_memories" in plan["home_mcp_tools"]
-          assert "mcp__internal__search_memories" not in plan["internal_mcp_tools"]
-          assert "mcp__internal__search_memories" not in plan["surface_allowlist"]
-          assert "mcp__internal__search_memories" in plan["disallowed_tools"]
+          assert "mcp__home__search_memories" not in plan["home_mcp_tools"]
+          assert "mcp__internal__search_memories" in plan["internal_mcp_tools"]
+          assert "mcp__internal__search_memories" in plan["surface_allowlist"]
+          assert "mcp__home__search_memories" in plan["disallowed_tools"]
+          assert "mcp__internal__search_memories" not in plan["disallowed_tools"]
           assert plan["physical_surface_fingerprint"] == (
-              "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
+              "fb7319322de9ab600395f776043cbc29aa9925c30637727cbd92c7d0b23b6d11"
           )
           print("providers/shadow deny/fingerprint PASS")
           PY
@@ -142,7 +142,8 @@ jobs:
             'tools/cc_tool_surface.py' \
             'tools/memory_internal_adapter.py' \
             'tests/test_m3_03a_ledger_shadow.py' \
-            'tests/test_m3_03b_daily_ledger_cutover.py' \
+            'tests/test-m3_03b_daily_ledger_cutover.py' \
+            'tests/test_m3_04c_daily_memory_cutover.py' \
             'tests/test-m3-03a-ledger-internal.mjs' | sort)"
           test "$actual" = "$expected"
           printf '%s\n' "$actual"
