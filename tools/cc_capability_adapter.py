@@ -62,23 +62,18 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "diary.write",
     "home.light.status",
     "countdown.read",
-    "ledger.read",
-    "ledger.budget.read",
-    "ledger.write",
 )
 
 INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "todo.read",
     "todo.write",
+    "ledger.read",
+    "ledger.budget.read",
+    "ledger.write",
 )
 
-# M3-03A shadow tools are installed on Internal MCP but remain forbidden from
-# the Daily allowlist until the M3-03B provider cutover.
-INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = (
-    "mcp__internal__get_ledger",
-    "mcp__internal__get_ledger_budget",
-    "mcp__internal__add_ledger",
-)
+# Kept as an empty compatibility symbol; Ledger is now Daily-visible on Internal.
+INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = ()
 
 NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
     "files.read",
@@ -138,12 +133,12 @@ def uh_a0_home_mcp_tools() -> tuple[str, ...]:
 
 
 def uh_a0_internal_mcp_tools() -> tuple[str, ...]:
-    """Exact Internal MCP CC names for Daily Todo capabilities."""
+    """Exact Internal MCP CC names for Daily Todo and Ledger capabilities."""
     return tuple(_claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS)
 
 
 def uh_a0_home_legacy_todo_tools() -> tuple[str, ...]:
-    """Home Todo names retained for Wake/legacy and forbidden in Daily."""
+    """Home Todo and Ledger names retained for Wake/legacy and forbidden in Daily."""
     return tuple(_provider_binding(cid, "home_mcp") for cid in INTERNAL_MCP_CAPABILITY_IDS)
 
 def uh_a0_native_bindings() -> dict[str, str]:

@@ -93,6 +93,24 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"content": {"type": "string"}, "due_date": {"type": "string"}},
         "required": ["content"],
     },
+    "mcp__internal__get_ledger": {
+        "type": "object",
+        "properties": {"month": {"type": "string"}},
+    },
+    "mcp__internal__get_ledger_budget": {
+        "type": "object",
+        "properties": {"month": {"type": "string"}},
+    },
+    "mcp__internal__add_ledger": {
+        "type": "object",
+        "properties": {
+            "amount": {"type": "number"},
+            "category": {"type": "string"},
+            "note": {"type": "string"},
+            "date": {"type": "string"},
+        },
+        "required": ["amount"],
+    },
 }
 
 
