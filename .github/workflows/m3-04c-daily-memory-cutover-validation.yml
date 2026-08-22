@@ -10,6 +10,7 @@ on:
       - "tests/test_m3_02b_daily_todo_cutover.py"
       - "tests/test_m3_03a_ledger_shadow.py"
       - "tests/test_m3_03b_daily_ledger_cutover.py"
+      - "tests/test_execution_fence.py"
       - "tests/test-m3-04b-internal-memory.mjs"
       - "tests/test_m3_04c_daily_memory_cutover.py"
       - ".github/workflows/m3-04b-internal-memory-shadow-validation.yml"
@@ -119,6 +120,6 @@ jobs:
       - name: Verify exact M3-04C changed-file fence
         run: |
           actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
-          expected="$(printf '%s\n'             '.github/workflows/m3-04b-internal-memory-shadow-validation.yml'             '.github/workflows/m3-04c-daily-memory-cutover-validation.yml'             'tests/test-m3-04b-internal-memory.mjs'             'tests/test_capability_manifest.py'             'tests/test_cc_capability_adapter.py'             'tests/test_m3_02b_daily_todo_cutover.py'             'tests/test_m3_03a_ledger_shadow.py'             'tests/test_m3_03b_daily_ledger_cutover.py'             'tests/test_m3_04c_daily_memory_cutover.py'             'tools/capability_manifest.py'             'tools/cc_capability_adapter.py' | sort)"
+          expected="$(printf '%s\n'             '.github/workflows/m3-04b-internal-memory-shadow-validation.yml'             '.github/workflows/m3-04c-daily-memory-cutover-validation.yml'             'tests/test-m3-04b-internal-memory.mjs'             'tests/test_capability_manifest.py'             'tests/test_cc_capability_adapter.py'             'tests/test_m3_02b_daily_todo_cutover.py'             'tests/test_m3_03a_ledger_shadow.py'             'tests/test_m3_03b_daily_ledger_cutover.py'             'tests/test_execution_fence.py'             'tests/test_m3_04c_daily_memory_cutover.py'             'tools/capability_manifest.py'             'tools/cc_capability_adapter.py' | sort)"
           test "$actual" = "$expected"
           printf '%s\n' "$actual"
