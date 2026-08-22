@@ -207,5 +207,5 @@ def test_runtime_off_never_reaches_internal_execution(gateway_fixture):
                 "confirmation_decision": "approve",
             }
         )
-    assert "DENIED_CAPABILITY" in str(exc.value)
+    assert getattr(exc.value, "code", None) == "DENIED_CAPABILITY"
     assert calls == []
