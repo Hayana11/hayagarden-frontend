@@ -132,8 +132,9 @@ def test_old_instance_cannot_confirm_new_same_content_action(db):
     _, _, store, _ = db
     first = create(store)
     second = create(store)
+    store.reject(request(first, decision="reject"), owner_id="conversation-1", now=BASE_TIME)
     with pytest.raises(ConfirmationError):
-        store.confirm(request(second, pending_action_id=first.pending_action_id), owner_id="conversation-1", now=BASE_TIME)
+        store.confirm(request(first), owner_id="conversation-1", now=BASE_TIME)
     assert store.get(second.pending_action_id, now=BASE_TIME).state == "pending"
 
 
