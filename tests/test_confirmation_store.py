@@ -295,6 +295,9 @@ def test_no_product_side_effect_and_api_relay_binding_present(db):
     store.confirm(request(action), owner_id="conversation-1", now=BASE_TIME)
     assert side_effects == []
     manifest = pytest.importorskip("tools.capability_manifest")
-    for entry in manifest.CAPABILITY_MANIFEST:
-        bindings = entry.get("provider_bindings") or {}
-        assert bindings.get("api_relay") == "add_todo"
+    todo_write = next(
+        entry for entry in manifest.CAPABILITY_MANIFEST
+        if entry.get("capability_id") == "todo.write"
+    )
+    bindings = todo_write.get("provider_bindings") or {}
+    assert bindings.get("api_relay") == "add_todo"
