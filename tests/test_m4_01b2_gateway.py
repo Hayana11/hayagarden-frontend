@@ -178,7 +178,11 @@ def test_normal_reject_does_not_reach_internal_execution(gateway_fixture):
     )
     assert result is None
     assert text == "已取消"
-    assert action.state == "rejected"
+    check = get_db()
+    try:
+        assert PendingActionStore(check).get(deferred["pending_action_id"]).state == "rejected"
+    finally:
+        check.close()
     assert calls == []
 
 
