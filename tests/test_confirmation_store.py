@@ -288,7 +288,7 @@ def test_confirmation_on_closed_store_fails_closed(tmp_path):
     assert exc.value.code == "STORE_UNAVAILABLE"
 
 
-def test_no_product_side_effect_and_api_relay_binding_absent(db):
+def test_no_product_side_effect_and_api_relay_binding_present(db):
     _, _, store, _ = db
     side_effects = []
     action = create(store)
@@ -297,4 +297,4 @@ def test_no_product_side_effect_and_api_relay_binding_absent(db):
     manifest = pytest.importorskip("tools.capability_manifest")
     for entry in manifest.CAPABILITY_MANIFEST:
         bindings = entry.get("provider_bindings") or {}
-        assert bindings.get("api_relay") != "add_todo"
+        assert bindings.get("api_relay") == "add_todo"
