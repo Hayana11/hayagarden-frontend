@@ -232,6 +232,7 @@ def test_pending_survives_backend_restart(tmp_path):
     reopened.row_factory = sqlite3.Row
     restored = PendingActionStore(reopened, approval_builder=approval_builder)
     assert restored.get(action.pending_action_id, now=BASE_TIME) == action
+    reopened.close()
 
 
 def test_store_read_failure_fails_closed(tmp_path):
