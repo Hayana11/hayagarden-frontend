@@ -50,7 +50,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前对话已经有充分事实，或只是为了展示工具能力时。",
         "failure_behavior": "明确说明未能查询或未找到，不得假装记得或查到。",
         "loading_policy": "always_load",
-        "provider_bindings": {"claude_code": "mcp__home__search_memories"},
+        "provider_bindings": {"claude_code": "mcp__home__search_memories", "internal_mcp": "mcp__internal__search_memories"},
     },
     {
         "capability_id": "diary.write",
