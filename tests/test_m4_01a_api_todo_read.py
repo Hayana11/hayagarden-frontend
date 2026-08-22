@@ -101,7 +101,10 @@ class M401AApiTodoReadTests(unittest.TestCase):
             get_capability("todo.read")["provider_bindings"]["api_relay"],
             "get_todos",
         )
-        self.assertEqual(\n            get_capability("todo.write")["provider_bindings"]["api_relay"],\n            "add_todo",\n        )
+        self.assertEqual(
+            get_capability("todo.write")["provider_bindings"]["api_relay"],
+            "add_todo",
+        )
         decision = evaluate_tool_call("get_todos", {}, self._lease())
         self.assertEqual(decision["capability_id"], "todo.read")
         self.assertEqual(decision["turn_mode"], "chat")
