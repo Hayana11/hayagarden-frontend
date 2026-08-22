@@ -141,8 +141,8 @@ try {
   const needle = await client.callTool({ name: 'search_memories', arguments: { keyword: 'needle' } });
   assert.equal(textOf(needle), homeFormat(selectedByIds([12, 11, 10, 9, 8, 7, 5, 3])), JSON.stringify({ actual: textOf(needle), expected: homeFormat(selectedByIds([12, 11, 10, 9, 8, 7, 5, 3])) }));
   assert.equal((textOf(needle).match(/\n---\n/g) || []).length, 7);
-  assert.equal(textOf(needle).includes('x'.repeat(220)), true);
-  assert.equal(textOf(needle).includes('x'.repeat(221)), false);
+  assert.equal(textOf(needle).includes('needle ' + 'x'.repeat(213)), true);
+  assert.equal(textOf(needle).includes('needle ' + 'x'.repeat(214)), false);
   assert.equal(snapshot(), before);
 
   const empty = await client.callTool({ name: 'search_memories', arguments: { keyword: '' } });
