@@ -19,7 +19,16 @@ from tools.capability_state import RUNTIME_STATE_INHERIT
 from wake.cc_tools import WAKE_TO_CC_MCP
 
 
-BASE_FINGERPRINT = "061edc791e062cb21701620a336d07395e3ab480bc6503a21ea80eaf4c2f1703"
+BASE_FINGERPRINT = "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
+TARGET_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
+INTERNAL_MEMORY_SHADOW_TOOLS = (
+    "mcp__internal__search_memories",
+)
+LEDGER_HOME_TOOLS = (
+    "mcp__home__get_ledger",
+    "mcp__home__get_ledger_budget",
+    "mcp__home__add_ledger",
+)
 INTERNAL_LEDGER_TOOLS = (
     "mcp__internal__get_ledger",
     "mcp__internal__get_ledger_budget",
@@ -29,26 +38,32 @@ INTERNAL_LEDGER_TOOLS = (
 
 class LedgerInternalShadowTests(unittest.TestCase):
     def test_manifest_and_fence_bindings(self):
-        self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ("todo.read", "todo.write"))
+        self.assertEqual(
+            INTERNAL_MCP_CAPABILITY_IDS,
+            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
+        )
         self.assertEqual(
             get_capability("ledger.read")["provider_bindings"],
             {
-                "claude_code": "mcp__home__get_ledger",
+                "claude_code": "mcp__internal__get_ledger",
                 "internal_mcp": "mcp__internal__get_ledger",
+                "home_mcp": "mcp__home__get_ledger",
             },
         )
         self.assertEqual(
             get_capability("ledger.budget.read")["provider_bindings"],
             {
-                "claude_code": "mcp__home__get_ledger_budget",
+                "claude_code": "mcp__internal__get_ledger_budget",
                 "internal_mcp": "mcp__internal__get_ledger_budget",
+                "home_mcp": "mcp__home__get_ledger_budget",
             },
         )
         self.assertEqual(
             get_capability("ledger.write")["provider_bindings"],
             {
-                "claude_code": "mcp__home__add_ledger",
+                "claude_code": "mcp__internal__add_ledger",
                 "internal_mcp": "mcp__internal__add_ledger",
+                "home_mcp": "mcp__home__add_ledger",
             },
         )
         for tool_name, capability_id in (
@@ -78,18 +93,18 @@ class LedgerInternalShadowTests(unittest.TestCase):
                 first = physical_surface_fingerprint()
                 second = physical_surface_fingerprint()
 
-        self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, INTERNAL_LEDGER_TOOLS)
+        self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, INTERNAL_MEMORY_SHADOW_TOOLS)
+        self.assertEqual(first, TARGET_FINGERPRINT)
         self.assertNotEqual(first, BASE_FINGERPRINT)
         self.assertEqual(first, second)
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
-        self.assertNotIn("mcp__internal__get_ledger", allowed)
-        self.assertNotIn("mcp__internal__get_ledger_budget", allowed)
-        self.assertNotIn("mcp__internal__add_ledger", allowed)
-        self.assertTrue(set(INTERNAL_LEDGER_TOOLS).issubset(disallowed))
-        self.assertIn("mcp__home__get_ledger", allowed)
-        self.assertIn("mcp__home__get_ledger_budget", allowed)
-        self.assertIn("mcp__home__add_ledger", allowed)
+        self.assertTrue(set(INTERNAL_LEDGER_TOOLS).issubset(allowed))
+        self.assertTrue(set(LEDGER_HOME_TOOLS).issubset(disallowed))
+        self.assertTrue(set(INTERNAL_MEMORY_SHADOW_TOOLS).isdisjoint(allowed))
+        self.assertTrue(set(INTERNAL_MEMORY_SHADOW_TOOLS).issubset(disallowed))
+        self.assertIn("mcp__home__search_memories", allowed)
+        self.assertNotIn("mcp__internal__search_memories", allowed)
         self.assertIn("mcp__internal__get_todos", allowed)
         self.assertIn("mcp__internal__add_todo", allowed)
         self.assertNotIn("mcp__home__get_todos", allowed)
