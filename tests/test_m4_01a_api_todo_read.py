@@ -93,7 +93,7 @@ class M401AApiTodoReadTests(unittest.TestCase):
 
     def test_binding_default_policy_and_todo_write_scope(self):
         self.assertEqual(capability_for_tool("get_todos"), "todo.read")
-        self.assertIsNone(capability_for_tool("add_todo"))
+        self.assertEqual(capability_for_tool("add_todo"), "todo.write")
         self.assertEqual(
             capability_for_tool("mcp__internal__add_todo"), "todo.write"
         )
@@ -101,10 +101,7 @@ class M401AApiTodoReadTests(unittest.TestCase):
             get_capability("todo.read")["provider_bindings"]["api_relay"],
             "get_todos",
         )
-        self.assertNotIn(
-            "api_relay",
-            get_capability("todo.write")["provider_bindings"],
-        )
+        self.assertEqual(\n            get_capability("todo.write")["provider_bindings"]["api_relay"],\n            "add_todo",\n        )
         decision = evaluate_tool_call("get_todos", {}, self._lease())
         self.assertEqual(decision["capability_id"], "todo.read")
         self.assertEqual(decision["turn_mode"], "chat")
@@ -217,7 +214,7 @@ class M401AApiTodoReadTests(unittest.TestCase):
         def api_call(system, messages):
             return next(responses)
 
-        def dispatch(name, args, lease):
+        def dispatch(name, args, lease, tool_use_id=None):
             observed_leases.append(lease)
             return f"result:{name}"
 
