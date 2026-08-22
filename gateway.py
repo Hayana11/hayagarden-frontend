@@ -2820,6 +2820,40 @@ def _annotate_book(quote, note='', paragraph_idx=0, kind=None, book_id=None, chu
         return '留痕失败：%s' % e
 
 
+def _issue_api_chat_turn_lease(turn_id):
+    """Issue exactly one independent lease for the current API Chat request."""
+    from tools.lease_signer import issue_turn_lease
+
+    return issue_turn_lease(
+        turn_id=str(turn_id or '').strip(),
+        turn_mode='chat',
+        issued_from='default_policy',
+    )
+
+
+def _dispatch_api_chat_tool(name, args, turn_lease):
+    """Dispatch API Chat tools through one narrow read-fence seam."""
+    if name != 'get_todos':
+        # Legacy API tools retain their existing run_tool behavior.
+        return run_tool(name, args)
+
+    from tools.execution_fence import evaluate_tool_call
+
+    decision = evaluate_tool_call(
+        tool_name='get_todos',
+        tool_input=args,
+        turn_lease=turn_lease,
+    )
+    lease_decision = decision.get('lease_decision')
+    if lease_decision != 'ALLOW':
+        diagnostic = str(decision.get('diagnostic') or 'no diagnostic')
+        return (
+            f'工具执行失败：{lease_decision or "DENIED_CAPABILITY"}'
+            f'（get_todos；{diagnostic}）'
+        )
+    return run_tool('get_todos', args)
+
+
 def run_tool(name, args, caller='fyodor_cc'):
     try:
         if name == 'web_search':
@@ -4601,12 +4635,12 @@ def claude_code_call(system, messages):
             text, thinking = payload[0], payload[1]
     return _cc_save_markers(text), thinking
 
-def generate_reply(system, messages):
+def generate_reply(system, messages, api_turn_lease=None):
     if _get_provider() == 'claude_code':
         return claude_code_call(system, messages)
-    return agent_loop(system, messages)
+    return agent_loop(system, messages, api_turn_lease=api_turn_lease)
 
-def agent_loop(system, messages, max_rounds=5):
+def agent_loop(system, messages, max_rounds=5, api_turn_lease=None):
     from chat.response_parser import extract_text, extract_thinking, extract_tool_uses
     msgs = list(messages)
     think_parts, text_parts = [], []
@@ -4623,7 +4657,11 @@ def agent_loop(system, messages, max_rounds=5):
         msgs.append({'role': 'assistant', 'content': blocks})
         msgs.append({'role': 'user', 'content': [
             {'type': 'tool_result', 'tool_use_id': t.get('id'),
-             'content': run_tool(t.get('name', ''), t.get('input') or {})}
+             'content': _dispatch_api_chat_tool(
+                 t.get('name', ''),
+                 t.get('input') or {},
+                 api_turn_lease,
+             )}
             for t in tool_uses
         ]})
     joined = NL.join(t for t in text_parts if t).strip()
@@ -4725,7 +4763,14 @@ def chat():
             )
             messages = build_messages()
 
-            text, thinking_text = generate_reply(system, messages)
+            _api_turn_lease = None
+            if _get_provider() != 'claude_code':
+                _api_turn_lease = _issue_api_chat_turn_lease(_turn_data.get('turn_key'))
+            text, thinking_text = generate_reply(
+                system,
+                messages,
+                api_turn_lease=_api_turn_lease,
+            )
             if not text:
                 return jsonify({'error': 'AI 没有返回内容'}), 500
 
@@ -6613,6 +6658,9 @@ def chat_stream():
                     yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                     return
             _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
+            _api_turn_lease = None
+            if _get_provider() != 'claude_code':
+                _api_turn_lease = _issue_api_chat_turn_lease(_turn_data.get('turn_key'))
             _tool_ctx.conversation_id = _conv
             for _jev in _workspace_job_sse_payloads():
                 yield 'data: ' + json.dumps(_jev, ensure_ascii=False) + SSE_END
@@ -6859,7 +6907,11 @@ def chat_stream():
                         yield 'data: ' + json.dumps({'t': 'tool_use', 'd': {'name': tname, 'args': _slim_args(targs)}, 'idx': len(tool_calls_acc)}) + SSE_END
                         file_path = _write_tool_file_path(tname, targs)
                         old_content = _read_file_safe(file_path) if file_path else None
-                        result_str = run_tool(tname, targs)
+                        result_str = _dispatch_api_chat_tool(
+                            tname,
+                            targs,
+                            _api_turn_lease,
+                        )
                         tc_item = {
                             'name': tname,
                             'args': targs,
