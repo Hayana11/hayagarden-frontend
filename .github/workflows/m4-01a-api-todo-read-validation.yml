@@ -1,0 +1,68 @@
+name: M4-01A API Todo read validation
+
+on:
+  pull_request:
+    paths:
+      - "gateway.py"
+      - "tools/capability_manifest.py"
+      - "tests/test_m4_01a_api_todo_read.py"
+      - ".github/workflows/m4-01a-api-todo-read-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head:
+    name: M4-01A exact-head focused contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          touch "$GITHUB_WORKSPACE/.env"
+
+      - name: Run M4-01A focused contracts
+        run: python -m unittest tests.test_m4_01a_api_todo_read -v
+
+      - name: Run existing execution controls
+        run: >-
+          python -m unittest
+          tests.test_execution_fence
+          tests.test_lease_signer
+          tests.test_capability_manifest
+          -v
+
+      - name: Enforce exact head and diff fences
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            '.github/workflows/m4-01a-api-todo-read-validation.yml' \
+            'gateway.py' \
+            'tests/test_m4_01a_api_todo_read.py' \
+            'tools/capability_manifest.py' | sort)"
+          test "$actual" = "$expected"
+
+          product_actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+            gateway.py tools/capability_manifest.py | sort)"
+          product_expected="$(printf '%s\n' \
+            'gateway.py' 'tools/capability_manifest.py' | sort)"
+          test "$product_actual" = "$product_expected"
