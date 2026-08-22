@@ -898,7 +898,7 @@ export function ChatScreen() {
       userMessageId: number | null,
       opts: {
         rewriteId?: string | null;
-        confirmation?: { approvalId: string; pendingActionId: string; decision: 'approve' | 'reject' };
+        confirmation?: { approvalId: string; pendingActionId?: string | null; decision: 'approve' | 'reject' };
       } = {},
     ): Promise<boolean> => {
       // Invariant: any path entering live streaming pins the DOM window to latest
@@ -962,7 +962,7 @@ export function ChatScreen() {
     const pending = pendingConfirmation;
     const approvalId = pending?.approval_id;
     const pendingActionId = pending?.pending_action_id;
-    if (!pending || !approvalId || !pendingActionId || sending || pending.confirmation_state === 'processing') return;
+    if (!pending || !approvalId || sending || pending.confirmation_state === 'processing') return;
     setPendingConfirmation({ ...pending, confirmation_state: 'processing', running: false });
     setSending(true);
     setChatError(null);
