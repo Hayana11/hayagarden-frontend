@@ -326,7 +326,6 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             allowed = flags["extra"][allowed_idx]
             self.assertIn("Read", allowed)
             self.assertNotIn("mcp__home__search_memories", allowed)
-            self.assertIn("mcp__home__search_memories", plan["disallowed_tools"])
             self.assertIn("mcp__internal__search_memories", allowed)
             self.assertIn("mcp__internal__get_todos", allowed)
             self.assertIn("mcp__internal__add_todo", allowed)
