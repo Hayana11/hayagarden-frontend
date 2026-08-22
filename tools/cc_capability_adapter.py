@@ -137,8 +137,8 @@ def uh_a0_internal_mcp_tools() -> tuple[str, ...]:
     return tuple(_claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS)
 
 
-def uh_a0_home_legacy_todo_tools() -> tuple[str, ...]:
-    """Home Todo and Ledger names retained for Wake/legacy and forbidden in Daily."""
+def uh_a0_home_legacy_tools() -> tuple[str, ...]:
+    """Home capability names retained for Wake/legacy and forbidden in Daily."""
     return tuple(_provider_binding(cid, "home_mcp") for cid in INTERNAL_MCP_CAPABILITY_IDS)
 
 def uh_a0_native_bindings() -> dict[str, str]:
@@ -307,7 +307,7 @@ def _surface_snapshot() -> dict[str, Any]:
     """Build one fail-closed, runtime-state-aware UH-A0 surface snapshot."""
     home_bindings = {cid: _claude_binding(cid) for cid in HOME_MCP_CAPABILITY_IDS}
     internal_bindings = {cid: _claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS}
-    legacy_home_todo = uh_a0_home_legacy_todo_tools()
+    legacy_home_tools = uh_a0_home_legacy_tools()
     native_file_bindings = {cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS}
     external_bindings = {cid: _claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS}
     all_capability_ids = HOME_MCP_CAPABILITY_IDS + INTERNAL_MCP_CAPABILITY_IDS + NATIVE_FILE_CAPABILITY_IDS + EXTERNAL_READ_CAPABILITY_IDS
@@ -328,14 +328,14 @@ def _surface_snapshot() -> dict[str, Any]:
         visible_internal_ids: tuple[str, ...] = ()
         visible_native_file_ids: tuple[str, ...] = ()
         visible_external_ids: tuple[str, ...] = ()
-        hidden_home = tuple(home_bindings.values()) + legacy_home_todo
+        hidden_home = tuple(home_bindings.values()) + legacy_home_tools
         hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings.values())
     else:
         visible_home_ids = tuple(cid for cid in HOME_MCP_CAPABILITY_IDS if states[cid] in visible_states)
         visible_internal_ids = tuple(cid for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] in visible_states)
         visible_native_file_ids = tuple(cid for cid in NATIVE_FILE_CAPABILITY_IDS if states[cid] in visible_states)
         visible_external_ids = tuple(cid for cid in EXTERNAL_READ_CAPABILITY_IDS if states[cid] in visible_states)
-        hidden_home = legacy_home_todo + tuple(home_bindings[cid] for cid in HOME_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
+        hidden_home = legacy_home_tools + tuple(home_bindings[cid] for cid in HOME_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
         hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings[cid] for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
 
     built_in_tools = tuple(native_file_bindings[cid] for cid in visible_native_file_ids) + tuple(external_bindings[cid] for cid in visible_external_ids)

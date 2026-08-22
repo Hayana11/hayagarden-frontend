@@ -36,6 +36,7 @@ from tools.cc_capability_adapter import (
     physical_surface_fingerprint,
     physical_surface_names,
     uh_a0_home_mcp_tools,
+    uh_a0_home_legacy_tools,
     uh_a0_external_read_tools,
     uh_a0_native_bindings,
 )
@@ -95,6 +96,18 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 if get_capability(cid)["provider_bindings"].get("claude_code") == name
             ]
             self.assertEqual(len(matches), 1, name)
+
+    def test_b_home_legacy_tools_keep_todo_and_ledger_order(self):
+        self.assertEqual(
+            uh_a0_home_legacy_tools(),
+            (
+                "mcp__home__get_todos",
+                "mcp__home__add_todo",
+                "mcp__home__get_ledger",
+                "mcp__home__get_ledger_budget",
+                "mcp__home__add_ledger",
+            ),
+        )
 
     def test_b_exact_builtin_surface(self):
         self.assertEqual(
