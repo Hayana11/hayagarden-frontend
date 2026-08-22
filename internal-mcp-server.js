@@ -14,6 +14,7 @@ const INTERNAL_TOOL_NAMES = Object.freeze([
   'get_ledger',
   'get_ledger_budget',
   'add_ledger',
+  'search_memories',
 ]);
 
 function adapterCommand({ python = process.env.PYTHON || 'python3', cwd = process.env.UH_A0_REPO_ROOT || process.cwd() } = {}) {
@@ -26,6 +27,9 @@ function adapterModuleFor(operation) {
   }
   if (operation === 'get_ledger' || operation === 'get_ledger_budget' || operation === 'add_ledger') {
     return 'tools.ledger_internal_adapter';
+  }
+  if (operation === 'search_memories') {
+    return 'tools.memory_internal_adapter';
   }
   throw new Error('unknown Internal MCP operation');
 }
@@ -65,6 +69,18 @@ function verifyCurrentInternalAction(toolName, toolInput, {
   } catch (_error) {
     return { lease_decision: 'LEASE_MISMATCH' };
   }
+}
+
+function formatMemorySearch(posts) {
+  const items = (Array.isArray(posts) ? posts : []).map((post) => {
+    const id = post?.id ?? '';
+    const type = post?.type ?? '';
+    const date = String(post?.created_at || '').slice(0, 10);
+    const pinned = post?.pinned ? ' 📌' : '';
+    const content = String(post?.content || '').slice(0, 220);
+    return `[#${id} ${type} ${date}${pinned}] ${content}`;
+  });
+  return items.join('\n---\n') || '没有找到相关记忆';
 }
 
 function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd, uhA0Profile = false } = {}) {
@@ -173,6 +189,29 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
       } catch (_error) {
         return { content: [{ type: 'text', text: 'INTERNAL_LEDGER_WRITE_FAILED' }] };
+      }
+    },
+  );
+
+  server.tool(
+    'search_memories',
+    {
+      keyword: z.string().describe('搜索关键词'),
+    },
+    async ({ keyword }) => {
+      try {
+        const result = callInternalAdapter(
+          'search_memories',
+          { keyword, limit: 8 },
+          { dbPath, python, cwd },
+        );
+        return {
+          content: [{ type: 'text', text: formatMemorySearch(result.posts) }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text', text: 'Error: ' + error.message }],
+        };
       }
     },
   );

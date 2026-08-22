@@ -23,7 +23,7 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
-TARGET_FINGERPRINT = "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
+TARGET_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
 LEDGER_INTERNAL = (
     "mcp__internal__get_ledger",
     "mcp__internal__get_ledger_budget",
@@ -96,6 +96,9 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         disallowed = set(plan["disallowed_tools"])
         self.assertTrue(set(LEDGER_INTERNAL) <= allowed)
         self.assertTrue(set(LEDGER_HOME) <= disallowed)
+        self.assertIn("mcp__home__search_memories", allowed)
+        self.assertIn("mcp__internal__search_memories", disallowed)
+        self.assertNotIn("mcp__internal__search_memories", allowed)
         self.assertTrue(set(LEDGER_HOME).isdisjoint(allowed))
         self.assertTrue(set(LEDGER_INTERNAL).isdisjoint(disallowed))
         self.assertIn("mcp__internal__get_todos", allowed)
@@ -105,7 +108,10 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertEqual(plan["physical_surface_fingerprint"], TARGET_FINGERPRINT)
         self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
         self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
-        self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, ())
+        self.assertEqual(
+            INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
+            ("mcp__internal__search_memories",),
+        )
 
     def test_runtime_off_hides_internal_and_keeps_home_denied(self):
         plan = _plan(RUNTIME_STATE_OFF)
@@ -115,6 +121,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertTrue(set(LEDGER_HOME).isdisjoint(allowed))
         self.assertTrue(set(LEDGER_INTERNAL) <= disallowed)
         self.assertTrue(set(LEDGER_HOME) <= disallowed)
+        self.assertTrue({"mcp__home__search_memories", "mcp__internal__search_memories"} <= disallowed)
 
     def test_internal_ledger_schema_matches_home_exactly(self):
         registry = _static_schema_registry()

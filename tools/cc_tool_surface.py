@@ -111,6 +111,11 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "required": ["amount"],
     },
+    "mcp__internal__search_memories": {
+        "type": "object",
+        "properties": {"keyword": {"type": "string"}},
+        "required": ["keyword"],
+    },
 }
 
 

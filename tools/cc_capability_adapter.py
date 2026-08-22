@@ -72,8 +72,10 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "ledger.write",
 )
 
-# Kept as an empty compatibility symbol; Ledger is now Daily-visible on Internal.
-INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = ()
+# Internal read-only shadows remain explicit Daily denies until their provider cutover.
+INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "mcp__internal__search_memories",
+)
 
 NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
     "files.read",
