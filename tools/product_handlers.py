@@ -58,6 +58,7 @@ def create_todo(
     content: Any,
     due_date: Any = None,
     author: Any = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     text = _text(content)
     if not text:
@@ -68,7 +69,8 @@ def create_todo(
         "INSERT INTO todos (content, due_date, author) VALUES (?,?,?)",
         (text, due, owner),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return {"ok": True, "id": int(cursor.lastrowid)}
 
 

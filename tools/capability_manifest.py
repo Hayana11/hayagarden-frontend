@@ -102,7 +102,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "只是讨论计划、没有明确写入意图且未取得 ASK 确认时。",
         "failure_behavior": "明确说明没有写入；不得说“记好了”或伪造成功。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__add_todo", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo"},
+        "provider_bindings": {"claude_code": "mcp__internal__add_todo", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo", "api_relay": "add_todo"},
     },
     {
         "capability_id": "countdown.read",

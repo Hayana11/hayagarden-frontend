@@ -1,4 +1,4 @@
-import os, re, json, sqlite3, datetime, base64, uuid, threading, shutil
+import os, re, json, sqlite3, datetime, base64, uuid, threading, shutil, hmac
 from flask import Flask, request, jsonify, send_from_directory, abort, Response, stream_with_context
 import config_store
 import attachment_store
@@ -51,11 +51,13 @@ APP_DIST_DIR = '/opt/frontend/app/dist'
 
 BOARD_TOKEN_FYODOR = os.environ.get('BOARD_TOKEN_FYODOR', '')
 CONTEXT_USAGE_REPORT_TOKEN = os.environ.get('CONTEXT_USAGE_REPORT_TOKEN', '')
+TODO_INTERNAL_EXECUTION_TOKEN = os.environ.get('TODO_INTERNAL_EXECUTION_TOKEN', '')
 for line in open('/opt/frontend/.env'):
     k, _, v = line.partition('=')
     k = k.strip(); v = v.strip()
     if k == 'BOARD_TOKEN_FYODOR': BOARD_TOKEN_FYODOR = v
     if k == 'CONTEXT_USAGE_REPORT_TOKEN': CONTEXT_USAGE_REPORT_TOKEN = v
+    if k == 'TODO_INTERNAL_EXECUTION_TOKEN': TODO_INTERNAL_EXECUTION_TOKEN = v
 # API_URL/API_KEY/MODEL 不再是这里的冻结常量：谁要发请求，
 # 就 new 一个 relay.manager.RelayManager()，永远拿实时值。
 
@@ -3170,6 +3172,31 @@ def add_todo():
         return jsonify(exc.payload), 400
     finally:
         conn.close()
+
+@app.route('/internal/todos/execute', methods=['POST'])
+def execute_internal_todo_write():
+    expected = str(TODO_INTERNAL_EXECUTION_TOKEN or '')
+    supplied = request.headers.get('X-Todo-Internal-Token', '')
+    if not expected:
+        return jsonify({'error': 'internal Todo execution is not configured'}), 503
+    from tools.todo_write_adapter import is_valid_internal_token
+    if not is_valid_internal_token(expected, supplied):
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.get_json(silent=True)
+    conn = get_db()
+    try:
+        from tools.todo_write_execution import (
+            TodoWriteExecutionError,
+            execute_todo_write,
+        )
+        try:
+            result = execute_todo_write(conn, data)
+        except TodoWriteExecutionError as exc:
+            return jsonify({'error': str(exc), 'code': exc.code}), 409
+        return jsonify(result)
+    finally:
+        conn.close()
+
 
 @app.route('/api/todos/<int:tid>/toggle', methods=['POST'])
 def toggle_todo(tid):

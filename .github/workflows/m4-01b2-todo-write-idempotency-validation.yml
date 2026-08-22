@@ -1,0 +1,100 @@
+name: M4-01B2 Todo write idempotency validation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "app.py"
+      - "gateway.py"
+      - "tools/capability_manifest.py"
+      - "tools/confirmation_store.py"
+      - "tools/product_handlers.py"
+      - "tools/todo_write_adapter.py"
+      - "tools/todo_write_execution.py"
+      - "tests/test_m4_01b2_todo_write.py"
+      - "tests/test_m4_01b2_gateway.py"
+      - "tests/test_m4_01a_api_todo_read.py"
+      - "tests/test_confirmation_store.py"
+      - "tests/test_m4_01b1_canonical.py"
+      - ".github/workflows/m4-01b2-todo-write-idempotency-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head:
+    name: M4-01B2 exact-head Todo write contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          touch "$GITHUB_WORKSPACE/.env"
+
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Compile modified Python entrypoints
+        run: >-
+          python -m py_compile
+          app.py
+          gateway.py
+          tools/confirmation_store.py
+          tools/product_handlers.py
+          tools/todo_write_adapter.py
+          tools/todo_write_execution.py
+
+      - name: Run M4-01B2 focused contracts
+        run: >-
+          python -m pytest -q
+          tests/test_m4_01b2_todo_write.py
+          tests/test_m4_01b2_gateway.py
+          tests/test_m4_01a_api_todo_read.py
+          tests/test_confirmation_store.py
+          tests/test_m4_01b1_canonical.py
+
+      - name: Run canonical fence regressions
+        run: >-
+          python -m pytest -q
+          tests/test_execution_fence.py
+          tests/test_lease_signer.py
+
+      - name: Enforce exact base, head, diff check and file fence
+        shell: bash
+        env:
+          EXPECTED_BASE_SHA: a75fca503d7c44ce5decb3f666b2dad1126e127a
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'a75fca503d7c44ce5decb3f666b2dad1126e127a' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$BASE_SHA" = "$EXPECTED_BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            '.github/workflows/m4-01b2-todo-write-idempotency-validation.yml' \
+            'app.py' \
+            'gateway.py' \
+            'tests/test_m4_01b2_todo_write.py' \
+            'tests/test_m4_01b2_gateway.py' \
+            'tests/test_m4_01a_api_todo_read.py' \
+            'tests/test_confirmation_store.py' \
+            'tests/test_m4_01b1_canonical.py' \
+            'tools/capability_manifest.py' \
+            'tools/confirmation_store.py' \
+            'tools/product_handlers.py' \
+            'tools/todo_write_adapter.py' \
+            'tools/todo_write_execution.py' | sort)"
+          test "$actual" = "$expected"
