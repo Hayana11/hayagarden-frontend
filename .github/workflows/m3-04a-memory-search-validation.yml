@@ -27,7 +27,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python dependencies
-        run: python -m pip install Flask Pillow Markdown
+        run: python -m pip install Flask -r requirements.txt
 
       - name: Prepare isolated runtime paths
         run: |
