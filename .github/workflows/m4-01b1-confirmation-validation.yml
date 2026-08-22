@@ -29,6 +29,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          touch "$GITHUB_WORKSPACE/.env"
+
       - name: Install pytest
         run: python -m pip install --disable-pip-version-check pytest
 
