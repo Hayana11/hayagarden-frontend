@@ -326,8 +326,9 @@ class ExecutionFenceTests(unittest.TestCase):
                 "Read", "Glob", "Grep", "WebSearch", "WebFetch",
                 "mcp__home__search_memories", "mcp__home__write_diary",
                 "mcp__home__get_light_status",
-                "mcp__home__get_countdowns", "mcp__home__get_ledger",
-                "mcp__home__get_ledger_budget", "mcp__home__add_ledger",
+                "mcp__home__get_countdowns",
+                "mcp__internal__get_ledger",
+                "mcp__internal__get_ledger_budget", "mcp__internal__add_ledger",
                 "mcp__internal__get_todos", "mcp__internal__add_todo",
             },
         )
