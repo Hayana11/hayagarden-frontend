@@ -1,0 +1,143 @@
+name: M3-04B Internal Memory read-only shadow validation
+
+on:
+  pull_request:
+    paths:
+      - "internal-mcp-server.js"
+      - "tools/memory_internal_adapter.py"
+      - "tools/capability_manifest.py"
+      - "tools/cc_capability_adapter.py"
+      - "tools/cc_tool_surface.py"
+      - "scripts/check-internal-mcp-readiness.mjs"
+      - "tests/test-m3-04b-internal-memory.mjs"
+      - ".github/workflows/m3-04b-internal-memory-shadow-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head:
+    name: M3-04B exact head shadow validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact head SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install isolated test dependencies
+        run: |
+          npm ci
+          python -m pip install -r requirements.txt
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+
+      - name: Run Internal Memory dynamic shadow parity
+        run: node tests/test-m3-04b-internal-memory.mjs
+
+      - name: Run M3-04A and provider/fence regressions
+        run: |
+          python -m unittest \
+            tests.test_m3_04a_memory_search \
+            tests.test_product_handlers \
+            tests.test_capability_manifest \
+            tests.test_cc_capability_adapter \
+            tests.test_execution_fence \
+            tests.test_m2_02b_surface_generation \
+            tests.test_cc_runtime \
+            tests.test_cc_deferred_resume \
+            tests.test_m3_03a_ledger_shadow \
+            tests.test_m3_03b_daily_ledger_cutover \
+            tests.test_m3_02a_internal_mcp_service -v
+
+      - name: Run exact Internal catalog and readiness regressions
+        run: |
+          node tests/test-m3-01-todo-internal.mjs
+          node tests/test-m3-02a-internal-mcp-readiness.mjs
+          node tests/test-m3-03a-ledger-internal.mjs
+
+      - name: Assert frozen providers, shadow deny, and target fingerprint
+        run: |
+          python - <<'PY'
+          import tempfile
+          from unittest.mock import patch
+          from tools.capability_manifest import get_capability
+          from tools.capability_state import RUNTIME_STATE_INHERIT
+          from tools.cc_capability_adapter import (
+              HOME_MCP_CAPABILITY_IDS,
+              INTERNAL_MCP_CAPABILITY_IDS,
+              INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
+              build_uh_a0_spawn_plan,
+          )
+          from wake.cc_tools import WAKE_TO_CC_MCP
+
+          assert get_capability("memory.search")["provider_bindings"] == {
+              "claude_code": "mcp__home__search_memories",
+              "internal_mcp": "mcp__internal__search_memories",
+          }
+          assert HOME_MCP_CAPABILITY_IDS == (
+              "memory.search", "diary.write", "home.light.status", "countdown.read"
+          )
+          assert INTERNAL_MCP_CAPABILITY_IDS == (
+              "todo.read", "todo.write", "ledger.read",
+              "ledger.budget.read", "ledger.write"
+          )
+          assert INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS == (
+              "mcp__internal__search_memories",
+          )
+          assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
+          with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_INHERIT):
+              with tempfile.TemporaryDirectory() as root:
+                  plan = build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
+          assert "mcp__home__search_memories" in plan["home_mcp_tools"]
+          assert "mcp__internal__search_memories" not in plan["internal_mcp_tools"]
+          assert "mcp__internal__search_memories" not in plan["surface_allowlist"]
+          assert "mcp__internal__search_memories" in plan["disallowed_tools"]
+          assert plan["physical_surface_fingerprint"] == (
+              "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
+          )
+          print("providers/shadow deny/fingerprint PASS")
+          PY
+
+      - name: Check diff whitespace and forbidden files
+        run: |
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          test -z "$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -E '^(app.py|mcp-http-server.js|tools/product_handlers.py|tools/memory_tool.py|tools/memory_library.py|tools/ombre_adapter.py|tools/execution_fence.py|cc_resident.py|chat/|wake/|deploy/|systemd/|static/|UI/)' || true)"
+          test ! -e scripts/activate-internal-mcp.sh.changed
+
+      - name: Verify exact M3-04B changed-file fence
+        run: |
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            '.github/workflows/m3-04b-internal-memory-shadow-validation.yml' \
+            'internal-mcp-server.js' \
+            'scripts/check-internal-mcp-readiness.mjs' \
+            'tests/test-m3-04b-internal-memory.mjs' \
+            'tools/capability_manifest.py' \
+            'tools/cc_capability_adapter.py' \
+            'tools/cc_tool_surface.py' \
+            'tools/memory_internal_adapter.py' | sort)"
+          test "$actual" = "$expected"
+          printf '%s\n' "$actual"
