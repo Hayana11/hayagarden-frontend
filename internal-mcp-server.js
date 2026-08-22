@@ -80,7 +80,7 @@ function formatMemorySearch(posts) {
     const content = String(post?.content || '').slice(0, 220);
     return `[#${id} ${type} ${date}${pinned}] ${content}`;
   });
-  return items.join('\\n---\\n') || '没有找到相关记忆';
+  return items.join('\n---\n') || '没有找到相关记忆';
 }
 
 function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd, uhA0Profile = false } = {}) {
