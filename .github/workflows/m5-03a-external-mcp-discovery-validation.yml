@@ -37,6 +37,7 @@ jobs:
             echo "No supported forbidden-term scanner is available" >&2
             exit 1
           fi
+          echo "scope_scanner=$scanner"
           set +e
           "$scanner" -nF \
             -e 'external_server_registry' -e 'external_secret_store' -e 'fetchSecret' \
@@ -46,11 +47,15 @@ jobs:
             tools/external_mcp_discovery_transport.mjs
           scan_status=$?
           set -e
+          echo "scope_scan_status=$scan_status"
           if test "$scan_status" -eq 0; then
             echo "forbidden term found" >&2
             exit 1
           fi
-          test "$scan_status" -eq 1
+          if test "$scan_status" -ne 1; then
+            echo "scope scanner failed with status $scan_status" >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
