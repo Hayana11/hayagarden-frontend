@@ -136,15 +136,172 @@ class RealityRequestContextTests(unittest.TestCase):
     def test_gateway_strips_context_before_turn_persistence(self):
         source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
         extract = source.index(
-            '_reality_context = _normalize_reality_context('
+            'request_reality_context = _normalize_reality_context('
         )
         prepare = source.index('prepare_turn(', extract)
         strip = source.index("_request_data.pop('reality_context', None)", extract)
         self.assertLess(strip, prepare)
         self.assertIn(
-            'reality_context=_reality_context',
+            'reality_context=request_reality_context',
             source,
         )
+
+
+    def test_daily_active_route_passes_request_reality_to_production_path(self):
+        source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+        tree = ast.parse(source, filename='gateway.py')
+        daily_function = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_stream_cc_daily_soft_window'
+        )
+        daily_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == '_stream_cc_daily_soft_window'
+        ]
+        self.assertEqual(len(daily_calls), 1)
+        keyword = next(
+            item for item in daily_calls[0].keywords
+            if item.arg == 'request_reality_context'
+        )
+        self.assertIsInstance(keyword.value, ast.Name)
+        self.assertEqual(keyword.value.id, 'request_reality_context')
+        parameter_names = {
+            arg.arg for arg in (
+                daily_function.args.args
+                + daily_function.args.kwonlyargs
+            )
+        }
+        self.assertIn('request_reality_context', parameter_names)
+
+    def test_daily_adapter_appends_at_send_seam_without_downstream_normalize(self):
+        source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+        tree = ast.parse(source, filename='gateway.py')
+        adapter = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and node.name == '_RequestRealityResident'
+        )
+        send_turn = next(
+            node for node in adapter.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == 'send_turn'
+        )
+        append_calls = [
+            node for node in ast.walk(send_turn)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == '_append_reality_context'
+        ]
+        self.assertEqual(len(append_calls), 1)
+        self.assertIsInstance(append_calls[0].args[1], ast.Attribute)
+        self.assertEqual(
+            append_calls[0].args[1].attr,
+            '_request_reality_context',
+        )
+        daily_function = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_stream_cc_daily_soft_window'
+        )
+        daily_stream = next(
+            node for node in ast.walk(daily_function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'stream_daily_resident_turn'
+        )
+        resident_kw = next(
+            item for item in daily_stream.keywords
+            if item.arg == 'resident'
+        )
+        self.assertIsInstance(resident_kw.value, ast.Name)
+        self.assertEqual(resident_kw.value.id, '_daily_resident')
+        self.assertEqual(
+            sum(
+                1 for node in ast.walk(daily_function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == '_normalize_reality_context'
+            ),
+            0,
+        )
+
+    def test_daily_empty_snapshot_is_noop_and_not_in_turn_data(self):
+        source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+        tree = ast.parse(source, filename='gateway.py')
+        daily_function = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_stream_cc_daily_soft_window'
+        )
+        turn_data_reality_writes = [
+            node for node in ast.walk(daily_function)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == '_turn_data'
+            and isinstance(node.targets[0].slice, ast.Constant)
+            and node.targets[0].slice.value == 'reality_context'
+        ]
+        self.assertEqual(turn_data_reality_writes, [])
+        self.assertIn(
+            "if request_reality_context else _CC_RESIDENT",
+            ast.get_source_segment(source, daily_function),
+        )
+        helpers = _load_reality_helpers()
+        self.assertEqual(
+            helpers['_append_reality_context']('hello', ''),
+            'hello',
+        )
+
+    def test_daily_cold_hot_use_one_request_local_send_adapter(self):
+        source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+        tree = ast.parse(source, filename='gateway.py')
+        daily_function = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_stream_cc_daily_soft_window'
+        )
+        stream_calls = [
+            node for node in ast.walk(daily_function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'stream_daily_resident_turn'
+        ]
+        self.assertEqual(len(stream_calls), 1)
+        daily_source = ast.get_source_segment(source, daily_function)
+        self.assertIn('_daily_plan', daily_source)
+        self.assertIn('_full_system', daily_source)
+        self.assertIn('_RequestRealityResident', daily_source)
+        self.assertIn('_CC_RESIDENT', daily_source)
+
+    def test_daily_legacy_context_coexists_with_physical_request_context(self):
+        gateway = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+        daily_runtime = (ROOT / 'chat/daily_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('request_reality_context', gateway)
+        self.assertIn('from chat.reality_context import build_reality_context', daily_runtime)
+        self.assertIn(
+            'from chat.reality_context import prepend_reality_to_provider_content',
+            daily_runtime,
+        )
+        self.assertIn('_append_reality_context', gateway)
+        self.assertNotIn('compileRealityContext', daily_runtime)
+
+    def test_daily_reality_does_not_feed_static_or_resident_identity(self):
+        source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+        tree = ast.parse(source, filename='gateway.py')
+        daily_function = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_stream_cc_daily_soft_window'
+        )
+        daily_source = ast.get_source_segment(source, daily_function)
+        self.assertNotIn('static_system=request_reality_context', daily_source)
+        self.assertNotIn('resident_key=request_reality_context', daily_source)
+        self.assertNotIn('static_system_sha256=request_reality_context', daily_source)
+        self.assertNotIn('persona_sha256=request_reality_context', daily_source)
 
 
 if __name__ == '__main__':
