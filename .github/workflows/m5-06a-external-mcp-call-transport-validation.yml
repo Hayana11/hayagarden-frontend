@@ -1,0 +1,58 @@
+name: M5-06A External MCP call transport validation
+
+on:
+  pull_request:
+    paths:
+      - 'tools/external_mcp_call_transport.mjs'
+      - 'tests/test_external_mcp_call_transport.mjs'
+      - '.github/workflows/m5-06a-external-mcp-call-transport-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact base, head, merge-base, and three-file fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA=34aef67a6933ab4c8ae2cdd754cd8be69ce09b2d
+          EXPECTED_HEAD="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          expected=$'.github/workflows/m5-06a-external-mcp-call-transport-validation.yml\ntests/test_external_mcp_call_transport.mjs\ntools/external_mcp_call_transport.mjs'
+          test "$(git diff --name-only "$BASE_SHA" HEAD | sort)" = "$expected"
+          git diff --check "$BASE_SHA" HEAD
+      - name: Verify product source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          product=tools/external_mcp_call_transport.mjs
+          test -r "$product"
+          forbidden='external_server_registry|external_tool_registry|external_tool_side_effect_policy|external_tool_execution_fence|external_secret_store|credential_vault|decrypt_secret|encrypt_secret|sqlite3|subprocess|confirmation_store|lease_signer|capability_manifest|tool_drawers|cc-tools|public route|Authorization|Bearer|api[_-]?key|cookie|secret_ref|credential_slot'
+          if grep -nEi "$forbidden" "$product"; then
+            echo "forbidden product dependency or credential surface found" >&2
+            exit 1
+          fi
+          grep -n 'validateEndpoint' "$product"
+          grep -n 'createSafeDispatcher' "$product"
+          grep -n 'SUPPORTED_TRANSPORT' "$product"
+          grep -n 'maxRetries: 0' "$product"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Focused real-SDK single-call tests
+        run: node --test tests/test_external_mcp_call_transport.mjs
+      - name: Narrow M5-03A discovery regression
+        run: node --test tests/test_external_mcp_discovery_transport.mjs
