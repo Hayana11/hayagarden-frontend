@@ -122,6 +122,33 @@ test('production fetch path reaches the real Undici lookup seam before any TCP d
   assert.equal(result.diagnostics.request_count, 1);
 });
 
+test('response body is bounded while the SDK consumes the stream', async () => {
+  const oversizedBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('x'.repeat(128)));
+      controller.close();
+    },
+  });
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.method === 'initialize') {
+      return jsonResponse({ jsonrpc: '2.0', id: body.id, result: {
+        protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'fixture', version: '1.0.0' },
+      } });
+    }
+    if (body.method === 'notifications/initialized') return jsonResponse(undefined, 202);
+    return new Response(oversizedBody, { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const result = await discoverExternalMcp({
+    endpoint: 'https://public.example.test/mcp',
+    limits: { maxResponseBytes: 16 },
+    fetchImpl,
+  });
+  assert.equal(result.status, DISCOVERY_STATUS.LIMIT_EXCEEDED);
+  assert.equal(result.catalog_complete, false);
+  assert.equal(result.tools.length, 0);
+});
+
 test('request, overall and cleanup paths remain finite with no automatic retry', async () => {
   let closedSignalSeen = false;
   const calls = [];
