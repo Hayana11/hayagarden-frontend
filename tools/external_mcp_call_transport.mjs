@@ -94,7 +94,10 @@ function assertJsonSafe(value, seen = new Set(), path = 'value') {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => assertJsonSafe(entry, seen, `${path}[${index}]`));
   } else {
-    for (const [key, entry] of Object.entries(value)) assertJsonSafe(entry, seen, `${path}.${key}`);
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === 'toJSON' && typeof entry === 'function') continue;
+      assertJsonSafe(entry, seen, `${path}.${key}`);
+    }
   }
   seen.delete(value);
 }
@@ -102,6 +105,10 @@ function assertJsonSafe(value, seen = new Set(), path = 'value') {
 function validateToolInput(toolInput, maxBytes) {
   if (toolInput === null || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
     throw new CallInputError('tool_input must be an object');
+  }
+  const prototype = Object.getPrototypeOf(toolInput);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new CallInputError('tool_input must be a plain object');
   }
   assertJsonSafe(toolInput, new Set(), 'tool_input');
   let serialized;
@@ -113,6 +120,17 @@ function validateToolInput(toolInput, maxBytes) {
   if (textEncoder.encode(serialized).byteLength > maxBytes) {
     throw new CallLimitError('tool_input exceeded the byte limit');
   }
+  let snapshot;
+  try {
+    snapshot = JSON.parse(serialized);
+  } catch {
+    throw new CallInputError('tool_input is not JSON-serializable');
+  }
+  if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw new CallInputError('tool_input must serialize to an object');
+  }
+  assertJsonSafe(snapshot, new Set(), 'tool_input_snapshot');
+  return snapshot;
 }
 
 function validateToolName(toolName) {
@@ -227,7 +245,7 @@ export async function invokeExternalMcp({
     limits = mergedLimits(requestedLimits);
     validateToolName(toolName);
     const url = validateCallEndpoint(endpoint, transport);
-    validateToolInput(toolInput, limits.maxInputBytes);
+    const toolInputSnapshot = validateToolInput(toolInput, limits.maxInputBytes);
     const result = skeleton(diagnostics);
     const dispatcher = fetchImpl ? null : createSafeDispatcher({ resolver });
     let requestIndex = 0;
@@ -277,7 +295,7 @@ export async function invokeExternalMcp({
       diagnostics.phase = 'CALL';
       diagnostics.call_started = true;
       diagnostics.call_tool_count += 1;
-      const callResult = await Promise.race([client.callTool({ name: toolName, arguments: toolInput }), overallTimeout]);
+      const callResult = await Promise.race([client.callTool({ name: toolName, arguments: toolInputSnapshot }), overallTimeout]);
       const safeResult = serializeCallToolResult(callResult, limits.maxResultBytes);
       diagnostics.call_result_received = true;
       result.status = safeResult.isError === true ? CALL_OUTCOME.TOOL_ERROR : CALL_OUTCOME.SUCCESS;

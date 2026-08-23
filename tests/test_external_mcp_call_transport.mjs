@@ -31,13 +31,14 @@ function callResult(text = 'ok', isError) {
   return { content: [{ type: 'text', text }], ...(isError === undefined ? {} : { isError }) };
 }
 
-function fixtureFetch({ calls = [], result = callResult(), onCall, connectError, connectDelayMs = 0 } = {}) {
+function fixtureFetch({ calls = [], result = callResult(), onCall, onInitialize, connectError, connectDelayMs = 0 } = {}) {
   return async (_url, init) => {
     const body = JSON.parse(init.body);
     calls.push({ method: body.method, params: body.params, redirect: init.redirect, signal: init.signal });
     if (body.method === 'initialize') {
       if (connectError) throw connectError;
       if (connectDelayMs) await new Promise((resolve) => setTimeout(resolve, connectDelayMs));
+      onInitialize?.();
       return initializeResponse(body.id);
     }
     if (body.method === 'notifications/initialized') return jsonResponse(undefined, 202);
@@ -146,6 +147,47 @@ test('oversized and non-serializable input is rejected before connect', async ()
   const invalid = await invoke({ tool_input: circular });
   assert.equal(invalid.status, CALL_OUTCOME.NOT_INVOKED);
   assert.match(invalid.error.summary, /circular/);
+});
+
+test('tool_input is snapshotted before connect and later caller mutation cannot change wire arguments', async () => {
+  const calls = [];
+  const tool_input = { value: 'before-connect' };
+  const result = await invoke({
+    calls,
+    tool_input,
+    onInitialize: () => { tool_input.value = 'x'.repeat(300 * 1024); },
+  });
+  assert.equal(result.status, CALL_OUTCOME.SUCCESS);
+  const call = calls.find((entry) => entry.method === 'tools/call');
+  assert.deepEqual(call.params.arguments, { value: 'before-connect' });
+});
+
+test('plain-object custom toJSON is evaluated once and the parsed snapshot is sent', async () => {
+  const calls = [];
+  let serializationCount = 0;
+  const tool_input = {
+    value: 'stable',
+    toJSON() {
+      serializationCount += 1;
+      return serializationCount === 1 ? { value: 'stable' } : { value: 'x'.repeat(300 * 1024) };
+    },
+  };
+  const result = await invoke({ calls, tool_input });
+  assert.equal(result.status, CALL_OUTCOME.SUCCESS);
+  assert.equal(serializationCount, 1);
+  const call = calls.find((entry) => entry.method === 'tools/call');
+  assert.deepEqual(call.params.arguments, { value: 'stable' });
+});
+
+test('non-plain-object tool_input is rejected before any MCP request', async () => {
+  class ToolInput {
+    constructor() { this.value = 'not-plain'; }
+  }
+  const calls = [];
+  const result = await invoke({ calls, tool_input: new ToolInput() });
+  assert.equal(result.status, CALL_OUTCOME.NOT_INVOKED);
+  assert.match(result.error.summary, /plain object/);
+  assert.equal(calls.length, 0);
 });
 
 test('HTTP endpoint is rejected by the shared endpoint authority', async () => {
