@@ -6601,7 +6601,11 @@ def chat_stream():
                 if _daily_ctx.enabled() and not _rewrite_id:
                     _daily_out = None
                     try:
-                        for _chunk in _stream_cc_daily_soft_window(_turn_data, _uc):
+                        for _chunk in _stream_cc_daily_soft_window(
+                            _turn_data,
+                            _uc,
+                            request_reality_context=request_reality_context,
+                        ):
                             if isinstance(_chunk, tuple) and _chunk[0] == 'persisted':
                                 _daily_out = _chunk
                                 continue
