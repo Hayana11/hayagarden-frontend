@@ -283,6 +283,54 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
             TURN_LEASE_INVALID,
         )
 
+    def test_turn_lease_cross_field_contract_matches_canonical_signer(self):
+        invalid_leases = (
+            self.lease(
+                issued_from="task_contract",
+                mode="chat",
+                task_contract_id="contract-1",
+            ),
+            self.lease(
+                issued_from="task_contract",
+                mode="task",
+                task_contract_id=None,
+            ),
+            self.lease(
+                issued_from="user_confirmation",
+                mode="chat",
+                task_contract_id="forged-contract",
+            ),
+        )
+        for invalid in invalid_leases:
+            with self.subTest(
+                issued_from=invalid["issued_from"],
+                mode=invalid["turn_mode"],
+                task_contract_id=invalid["task_contract_id"],
+            ):
+                self.assertEqual(
+                    self.evaluate(invalid)["reason_code"],
+                    TURN_LEASE_INVALID,
+                )
+
+        self.prepare(EXTERNAL_STATE)
+        ask = self.evaluate()
+        forged_confirmation = self.allow_lease(ask["external_action_id"])
+        forged_confirmation["task_contract_id"] = "forged-contract"
+        self.assertEqual(
+            self.evaluate(forged_confirmation)["reason_code"],
+            TURN_LEASE_INVALID,
+        )
+
+        valid_task_contract = self.lease(
+            issued_from="task_contract",
+            mode="task",
+            task_contract_id="contract-1",
+        )
+        self.assertEqual(
+            self.evaluate(valid_task_contract)["reason_code"],
+            TURN_MODE_NOT_ALLOWED,
+        )
+
     def test_non_user_confirmation_lease_cannot_allow(self):
         candidate = self.prepare(NONE)
         action = self.action_id(candidate)
