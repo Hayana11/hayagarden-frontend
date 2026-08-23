@@ -1,0 +1,71 @@
+name: M5-04B2 External tool review validation
+
+on:
+  pull_request:
+    paths:
+      - "tools/external_tool_registry.py"
+      - "tests/test_external_tool_registry.py"
+      - ".github/workflows/m5-04b2-external-tool-review-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact pull request head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact base, head, merge-base, and three-file fence
+        shell: bash
+        env:
+          BASE_SHA: 9e37c1f8673085686456e321d5581f5b51e778a7
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          expected=$(printf '%s\n' \
+            .github/workflows/m5-04b2-external-tool-review-validation.yml \
+            tests/test_external_tool_registry.py \
+            tools/external_tool_registry.py)
+          actual=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Product source boundary fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=tools/external_tool_registry.py
+          for needle in \
+            confirmation_store \
+            PendingActionStore \
+            ExternalSecretStore \
+            decrypt \
+            materialize \
+            "MCP Client" \
+            callTool \
+            tools/call \
+            capability_manifest \
+            execution_fence \
+            tool_drawers \
+            cc-tools \
+            build_uh_a0_spawn_plan \
+            "public route"; do
+            if grep -Fqi -- "$needle" "$source_file"; then
+              echo "forbidden source term: $needle"
+              exit 1
+            fi
+          done
+
+      - name: Run focused external tool review tests
+        shell: bash
+        run: python -m unittest tests.test_external_tool_registry

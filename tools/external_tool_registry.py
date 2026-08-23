@@ -1,14 +1,15 @@
 """Administrative candidate records for complete external-tool discoveries.
 
 This module deliberately owns only candidate metadata and immutable raw
-snapshots.  It has no default database, network, MCP client, approval API, or
-runtime/model integration.
+snapshots.  It has no default database, network, approval API, or runtime/model
+integration.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ MAX_TOOL_NAME_BYTES = 256
 MAX_TOOL_SNAPSHOT_BYTES = 2 * 1024 * 1024
 MAX_CATALOG_BYTES = 2 * 1024 * 1024
 MAX_CATALOG_TOOLS = 1000
+MAX_REVIEW_TEXT_BYTES = 200
 
 
 class ToolRegistryError(Exception):
@@ -102,6 +104,43 @@ def _validate_tool_name(value: Any) -> str:
     return value
 
 
+def _validate_review_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ToolRegistryRejectedError(
+            f"{field} must be a non-empty exact string", code=f"INVALID_{field.upper()}"
+        )
+    if value.lower() == "anonymous" or len(value.encode("utf-8")) > MAX_REVIEW_TEXT_BYTES:
+        raise ToolRegistryRejectedError(
+            f"{field} is not an accepted review identity", code=f"INVALID_{field.upper()}"
+        )
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ToolRegistryRejectedError(
+            f"{field} contains a control character", code=f"INVALID_{field.upper()}"
+        )
+    return value
+
+
+def _validate_expected_fingerprint(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != hashlib.sha256().digest_size * 2
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ToolRegistryRejectedError(
+            "expected fingerprint is invalid", code="INVALID_EXPECTED_FINGERPRINT"
+        )
+    return value
+
+
+def _validate_expected_revision(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ToolRegistryRejectedError(
+            "expected source registry revision is invalid",
+            code="INVALID_EXPECTED_SOURCE_REVISION",
+        )
+    return value
+
+
 class ExternalToolCandidateRegistry:
     """SQLite owner for stable external-tool candidate identity and snapshots."""
 
@@ -157,6 +196,42 @@ class ExternalToolCandidateRegistry:
                 first_observed_at TEXT NOT NULL,
                 UNIQUE (server_id, tool_name, fingerprint)
             );
+            CREATE TABLE IF NOT EXISTS external_tool_approval_baselines (
+                server_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                approved_fingerprint TEXT NOT NULL,
+                approved_source_registry_revision INTEGER NOT NULL CHECK (
+                    approved_source_registry_revision >= 1
+                ),
+                approved_at TEXT NOT NULL,
+                approved_actor TEXT NOT NULL,
+                approved_provenance TEXT NOT NULL,
+                PRIMARY KEY (server_id, tool_name)
+            );
+            CREATE TABLE IF NOT EXISTS external_tool_review_audit (
+                audit_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_event_id TEXT NOT NULL UNIQUE,
+                server_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                decision TEXT NOT NULL CHECK (decision IN ('APPROVE', 'REJECT')),
+                fingerprint TEXT NOT NULL,
+                source_registry_revision INTEGER NOT NULL CHECK (
+                    source_registry_revision >= 1
+                ),
+                actor TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                reviewed_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS external_tool_review_audit_no_update
+            BEFORE UPDATE ON external_tool_review_audit
+            BEGIN
+                SELECT RAISE(ABORT, 'review audit is append-only');
+            END;
+            CREATE TRIGGER IF NOT EXISTS external_tool_review_audit_no_delete
+            BEFORE DELETE ON external_tool_review_audit
+            BEGIN
+                SELECT RAISE(ABORT, 'review audit is append-only');
+            END;
             """
         )
         columns = {
@@ -172,6 +247,14 @@ class ExternalToolCandidateRegistry:
                 "current_source_registry_revision IS NULL OR "
                 "current_source_registry_revision >= 1)"
             )
+        self._connection.execute(
+            "UPDATE external_tool_candidate_registry SET review_state=? "
+            "WHERE review_state=? AND NOT EXISTS ("
+            "SELECT 1 FROM external_tool_approval_baselines b "
+            "WHERE b.server_id=external_tool_candidate_registry.server_id "
+            "AND b.tool_name=external_tool_candidate_registry.tool_name)"
+            , (REVIEW_REQUIRED, APPROVED)
+        )
         self._connection.commit()
 
     def ingest(self, discovery_result: Mapping[str, Any]) -> dict[str, Any]:
@@ -209,12 +292,24 @@ class ExternalToolCandidateRegistry:
                         ),
                     )
                 else:
-                    _, _, old_presence, old_review, old_fingerprint, _, _, _, old_revision = old
-                    review = (
-                        REVIEW_REQUIRED
-                        if old_presence == MISSING or old_fingerprint != fingerprint
-                        else old_review
+                    _, _, old_presence, old_review, old_fingerprint, old_source_revision, _, _, old_revision = old
+                    baseline = self._approval_baseline_row(server_id, name)
+                    preserves_approval = (
+                        old_presence == PRESENT
+                        and old_review == APPROVED
+                        and old_fingerprint == fingerprint
+                        and old_source_revision == source_revision
+                        and baseline is not None
+                        and baseline[0] == fingerprint
+                        and baseline[1] == source_revision
                     )
+                    review = APPROVED if preserves_approval else REVIEW_REQUIRED
+                    if not preserves_approval:
+                        self._connection.execute(
+                            "DELETE FROM external_tool_approval_baselines "
+                            "WHERE server_id=? AND tool_name=?",
+                            (server_id, name),
+                        )
                     self._connection.execute(
                         "UPDATE external_tool_candidate_registry SET presence_state=?, "
                         "review_state=?, current_fingerprint=?, current_source_registry_revision=?, "
@@ -238,6 +333,11 @@ class ExternalToolCandidateRegistry:
             for name, row in existing.items():
                 if name not in present_names:
                     old_revision = row[8]
+                    self._connection.execute(
+                        "DELETE FROM external_tool_approval_baselines "
+                        "WHERE server_id=? AND tool_name=?",
+                        (server_id, name),
+                    )
                     self._connection.execute(
                         "UPDATE external_tool_candidate_registry SET presence_state=?, "
                         "review_state=?, current_source_registry_revision=?, updated_at=?, "
@@ -310,6 +410,342 @@ class ExternalToolCandidateRegistry:
             for row in rows
         )
 
+    def approve_candidate(
+        self,
+        *,
+        server_id: object,
+        tool_name: object,
+        expected_fingerprint: object,
+        expected_source_registry_revision: object,
+        actor: object,
+        provenance: object,
+    ) -> dict[str, Any]:
+        """Record an explicit approval for one current candidate version."""
+        server_id = _require_server_id(server_id)
+        tool_name = _validate_tool_name(tool_name)
+        fingerprint = _validate_expected_fingerprint(expected_fingerprint)
+        source_revision = _validate_expected_revision(expected_source_registry_revision)
+        actor = _validate_review_text(actor, "actor")
+        provenance = _validate_review_text(provenance, "provenance")
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            candidate = self._review_candidate(
+                server_id, tool_name, fingerprint, source_revision
+            )
+            self._gate_review_server(server_id, source_revision)
+            self._verify_raw_snapshot(candidate, server_id, tool_name, fingerprint)
+            baseline = self._approval_baseline_row(server_id, tool_name)
+            if (
+                candidate["review_state"] == APPROVED
+                and baseline is not None
+                and baseline[0] == fingerprint
+                and baseline[1] == source_revision
+                and baseline[3] == actor
+                and baseline[4] == provenance
+            ):
+                self._connection.rollback()
+                return self._review_result(
+                    server_id, tool_name, fingerprint, source_revision,
+                    decision="APPROVE", changed=False, baseline=baseline,
+                )
+
+            now = _timestamp()
+            self._connection.execute(
+                "INSERT INTO external_tool_approval_baselines ("
+                "server_id, tool_name, approved_fingerprint, "
+                "approved_source_registry_revision, approved_at, approved_actor, "
+                "approved_provenance) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(server_id, tool_name) DO UPDATE SET "
+                "approved_fingerprint=excluded.approved_fingerprint, "
+                "approved_source_registry_revision=excluded.approved_source_registry_revision, "
+                "approved_at=excluded.approved_at, approved_actor=excluded.approved_actor, "
+                "approved_provenance=excluded.approved_provenance",
+                (server_id, tool_name, fingerprint, source_revision, now, actor, provenance),
+            )
+            self._connection.execute(
+                "UPDATE external_tool_candidate_registry SET review_state=?, "
+                "updated_at=?, revision=revision+1, model_visible=0, execution_allowed=0 "
+                "WHERE server_id=? AND tool_name=?",
+                (APPROVED, now, server_id, tool_name),
+            )
+            self._append_review_audit(
+                server_id, tool_name, "APPROVE", fingerprint, source_revision,
+                actor, provenance, now,
+            )
+            baseline = self._approval_baseline_row(server_id, tool_name)
+            self._connection.commit()
+            return self._review_result(
+                server_id, tool_name, fingerprint, source_revision,
+                decision="APPROVE", changed=True, baseline=baseline,
+            )
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    def reject_candidate(
+        self,
+        *,
+        server_id: object,
+        tool_name: object,
+        expected_fingerprint: object,
+        expected_source_registry_revision: object,
+        actor: object,
+        provenance: object,
+    ) -> dict[str, Any]:
+        """Record an explicit rejection without creating a rejected state."""
+        server_id = _require_server_id(server_id)
+        tool_name = _validate_tool_name(tool_name)
+        fingerprint = _validate_expected_fingerprint(expected_fingerprint)
+        source_revision = _validate_expected_revision(expected_source_registry_revision)
+        actor = _validate_review_text(actor, "actor")
+        provenance = _validate_review_text(provenance, "provenance")
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            candidate = self._review_candidate(
+                server_id, tool_name, fingerprint, source_revision
+            )
+            self._gate_review_server(server_id, source_revision)
+            baseline = self._approval_baseline_row(server_id, tool_name)
+            latest_reject = self._latest_matching_audit(
+                server_id, tool_name, "REJECT", fingerprint, source_revision,
+                actor, provenance,
+            )
+            if (
+                candidate["review_state"] == REVIEW_REQUIRED
+                and baseline is None
+                and latest_reject is not None
+            ):
+                self._connection.rollback()
+                return self._review_result(
+                    server_id, tool_name, fingerprint, source_revision,
+                    decision="REJECT", changed=False, baseline=None,
+                )
+
+            now = _timestamp()
+            self._connection.execute(
+                "DELETE FROM external_tool_approval_baselines "
+                "WHERE server_id=? AND tool_name=?",
+                (server_id, tool_name),
+            )
+            self._connection.execute(
+                "UPDATE external_tool_candidate_registry SET review_state=?, "
+                "updated_at=?, revision=revision+1, model_visible=0, execution_allowed=0 "
+                "WHERE server_id=? AND tool_name=?",
+                (REVIEW_REQUIRED, now, server_id, tool_name),
+            )
+            self._append_review_audit(
+                server_id, tool_name, "REJECT", fingerprint, source_revision,
+                actor, provenance, now,
+            )
+            self._connection.commit()
+            return self._review_result(
+                server_id, tool_name, fingerprint, source_revision,
+                decision="REJECT", changed=True, baseline=None,
+            )
+        except Exception:
+            self._connection.rollback()
+            raise
+
+    def get_approval_baseline(
+        self, server_id: object, tool_name: object
+    ) -> Optional[dict[str, Any]]:
+        server_id = _require_server_id(server_id)
+        tool_name = _validate_tool_name(tool_name)
+        row = self._approval_baseline_row(server_id, tool_name)
+        return self._baseline_dict(server_id, tool_name, row) if row else None
+
+    def list_review_audit(
+        self, server_id: object, tool_name: object
+    ) -> tuple[dict[str, Any], ...]:
+        server_id = _require_server_id(server_id)
+        tool_name = _validate_tool_name(tool_name)
+        rows = self._connection.execute(
+            "SELECT review_event_id, server_id, tool_name, decision, fingerprint, "
+            "source_registry_revision, actor, provenance, reviewed_at "
+            "FROM external_tool_review_audit WHERE server_id=? AND tool_name=? "
+            "ORDER BY audit_sequence",
+            (server_id, tool_name),
+        ).fetchall()
+        keys = (
+            "review_event_id", "server_id", "tool_name", "decision", "fingerprint",
+            "source_registry_revision", "actor", "provenance", "reviewed_at",
+        )
+        return tuple(dict(zip(keys, row)) for row in rows)
+
+    def get_effective_approval(
+        self, server_id: object, tool_name: object
+    ) -> dict[str, Any]:
+        server_id = _require_server_id(server_id)
+        tool_name = _validate_tool_name(tool_name)
+        candidate = self.get_candidate(server_id, tool_name)
+        baseline = self.get_approval_baseline(server_id, tool_name)
+        effective = False
+        current_server = None
+        if candidate is not None:
+            try:
+                current_server = self._server_registry.get(server_id)
+            except UnknownServerError:
+                current_server = None
+            effective = bool(
+                candidate["presence_state"] == PRESENT
+                and candidate["review_state"] == APPROVED
+                and candidate["current_source_registry_revision"] is not None
+                and candidate["model_visible"] == 0
+                and candidate["execution_allowed"] == 0
+                and baseline is not None
+                and baseline["approved_fingerprint"] == candidate["current_fingerprint"]
+                and baseline["approved_source_registry_revision"]
+                == candidate["current_source_registry_revision"]
+                and current_server is not None
+                and current_server.lifecycle_state
+                in (REGISTRATION_STATE, SERVER_REVIEW_REQUIRED)
+                and current_server.revision
+                == candidate["current_source_registry_revision"]
+            )
+        return {
+            "effective_approved": effective,
+            "server_id": server_id,
+            "tool_name": tool_name,
+            "candidate_fingerprint": (
+                candidate["current_fingerprint"] if candidate else None
+            ),
+            "candidate_source_registry_revision": (
+                candidate["current_source_registry_revision"] if candidate else None
+            ),
+            "baseline": baseline,
+        }
+
+    def _approval_baseline_row(self, server_id: str, tool_name: str):
+        return self._connection.execute(
+            "SELECT approved_fingerprint, approved_source_registry_revision, "
+            "approved_at, approved_actor, approved_provenance "
+            "FROM external_tool_approval_baselines WHERE server_id=? AND tool_name=?",
+            (server_id, tool_name),
+        ).fetchone()
+
+    @staticmethod
+    def _baseline_dict(server_id: str, tool_name: str, row) -> dict[str, Any]:
+        keys = (
+            "approved_fingerprint", "approved_source_registry_revision", "approved_at",
+            "approved_actor", "approved_provenance",
+        )
+        return {
+            "server_id": server_id,
+            "tool_name": tool_name,
+            **dict(zip(keys, row)),
+        }
+
+    def _review_candidate(
+        self, server_id: str, tool_name: str, fingerprint: str, source_revision: int
+    ) -> dict[str, Any]:
+        candidate = self.get_candidate(server_id, tool_name)
+        if candidate is None:
+            raise ToolRegistryRejectedError(
+                "candidate does not exist", code="UNKNOWN_CANDIDATE"
+            )
+        if candidate["presence_state"] != PRESENT:
+            raise ToolRegistryRejectedError(
+                "only a present candidate can be reviewed", code="CANDIDATE_NOT_PRESENT"
+            )
+        if candidate["current_fingerprint"] != fingerprint:
+            raise ToolRegistryRejectedError(
+                "candidate fingerprint changed", code="FINGERPRINT_MISMATCH"
+            )
+        if candidate["current_source_registry_revision"] is None:
+            raise ToolRegistryRejectedError(
+                "candidate freshness is not known", code="FRESHNESS_UNKNOWN"
+            )
+        if candidate["current_source_registry_revision"] != source_revision:
+            raise ToolRegistryRejectedError(
+                "candidate source revision changed", code="SOURCE_REVISION_MISMATCH"
+            )
+        return candidate
+
+    def _gate_review_server(self, server_id: str, source_revision: int) -> None:
+        try:
+            record = self._server_registry.get(server_id)
+        except UnknownServerError as exc:
+            raise ToolRegistryRejectedError(
+                "server identity is unknown", code="UNKNOWN_SERVER"
+            ) from exc
+        if record.lifecycle_state == REVOKED_STATE:
+            raise ToolRegistryRejectedError(
+                "revoked server cannot be reviewed", code="REVOKED_SERVER"
+            )
+        if record.lifecycle_state not in (REGISTRATION_STATE, SERVER_REVIEW_REQUIRED):
+            raise ToolRegistryRejectedError(
+                "server lifecycle is not reviewable", code="INVALID_SERVER_STATE"
+            )
+        if record.revision != source_revision:
+            raise ToolRegistryRejectedError(
+                "server revision changed before review", code="REVISION_MISMATCH"
+            )
+
+    def _verify_raw_snapshot(
+        self, candidate: Mapping[str, Any], server_id: str, tool_name: str,
+        fingerprint: str,
+    ) -> None:
+        row = self._connection.execute(
+            "SELECT raw_snapshot_json FROM external_tool_raw_snapshots "
+            "WHERE server_id=? AND tool_name=? AND fingerprint=?",
+            (server_id, tool_name, fingerprint),
+        ).fetchone()
+        if row is None:
+            raise ToolRegistryRejectedError(
+                "approved raw snapshot does not exist", code="SNAPSHOT_MISSING"
+            )
+        actual = hashlib.sha256(row[0].encode("utf-8")).hexdigest()
+        if actual != candidate["current_fingerprint"]:
+            raise ToolRegistryRejectedError(
+                "raw snapshot hash does not match candidate", code="SNAPSHOT_MISMATCH"
+            )
+
+    def _append_review_audit(
+        self, server_id: str, tool_name: str, decision: str, fingerprint: str,
+        source_revision: int, actor: str, provenance: str, reviewed_at: str,
+    ) -> None:
+        self._connection.execute(
+            "INSERT INTO external_tool_review_audit ("
+            "review_event_id, server_id, tool_name, decision, fingerprint, "
+            "source_registry_revision, actor, provenance, reviewed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                secrets.token_hex(16), server_id, tool_name, decision, fingerprint,
+                source_revision, actor, provenance, reviewed_at,
+            ),
+        )
+
+    def _latest_matching_audit(
+        self, server_id: str, tool_name: str, decision: str, fingerprint: str,
+        source_revision: int, actor: str, provenance: str,
+    ):
+        return self._connection.execute(
+            "SELECT review_event_id FROM external_tool_review_audit "
+            "WHERE server_id=? AND tool_name=? AND decision=? AND fingerprint=? "
+            "AND source_registry_revision=? AND actor=? AND provenance=? "
+            "ORDER BY audit_sequence DESC LIMIT 1",
+            (server_id, tool_name, decision, fingerprint, source_revision, actor, provenance),
+        ).fetchone()
+
+    def _review_result(
+        self, server_id: str, tool_name: str, fingerprint: str, source_revision: int,
+        *, decision: str, changed: bool, baseline,
+    ) -> dict[str, Any]:
+        return {
+            "changed": changed,
+            "decision": decision,
+            "server_id": server_id,
+            "tool_name": tool_name,
+            "fingerprint": fingerprint,
+            "source_registry_revision": source_revision,
+            "baseline": (
+                self._baseline_dict(server_id, tool_name, baseline)
+                if baseline else None
+            ),
+        }
+
     def _validate_discovery(
         self, result: Mapping[str, Any]
     ) -> tuple[str, int, list[tuple[str, str, str]]]:
@@ -375,6 +811,7 @@ __all__ = [
     "ExternalToolCandidateRegistry",
     "MAX_CATALOG_BYTES",
     "MAX_CATALOG_TOOLS",
+    "MAX_REVIEW_TEXT_BYTES",
     "MAX_TOOL_NAME_BYTES",
     "MAX_TOOL_SNAPSHOT_BYTES",
     "MISSING",
