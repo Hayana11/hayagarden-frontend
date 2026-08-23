@@ -29,33 +29,16 @@ jobs:
           test "$(git rev-parse origin/main)" = "a2c4d2118d055323acf75022ab2acdc4c07e6988"
           test "$(git diff --name-only HEAD^ HEAD | sort)" = $'.github/workflows/m5-03a-external-mcp-discovery-validation.yml\ntests/test_external_mcp_discovery_transport.mjs\ntools/external_mcp_discovery_transport.mjs'
           git diff --check HEAD^ HEAD
-          if command -v rg >/dev/null 2>&1; then
-            scanner=rg
-          elif command -v grep >/dev/null 2>&1; then
-            scanner=grep
-          else
-            echo "No supported forbidden-term scanner is available" >&2
-            exit 1
-          fi
-          echo "scope_scanner=$scanner"
-          set +e
-          "$scanner" -nF \
-            -e 'external_server_registry' -e 'external_secret_store' -e 'fetchSecret' \
-            -e 'decrypt' -e 'Authorization' -e 'oauth' -e 'callTool' -e 'tools/call' \
-            -e 'claude' -e 'model.' -e 'model_' -e 'model/' -e ' model ' \
-            -e 'registry.' -e 'registry_' -e 'registry/' -e ' registry ' \
-            tools/external_mcp_discovery_transport.mjs
-          scan_status=$?
-          set -e
-          echo "scope_scan_status=$scan_status"
-          if test "$scan_status" -eq 0; then
-            echo "forbidden term found" >&2
-            exit 1
-          fi
-          if test "$scan_status" -ne 1; then
-            echo "scope scanner failed with status $scan_status" >&2
-            exit 1
-          fi
+          scan_file=tools/external_mcp_discovery_transport.mjs
+          test -f "$scan_file" && test -r "$scan_file"
+          while IFS= read -r line || test -n "$line"; do
+            case "$line" in
+              *external_server_registry*|*external_secret_store*|*fetchSecret*|*decrypt*|*Authorization*|*oauth*|*callTool*|*tools/call*|*claude*|*model.*|*model_*|*model/*|*\ model\ *|*registry.*|*registry_*|*registry/*|*\ registry\ *)
+                echo "forbidden term found in $scan_file" >&2
+                exit 1
+                ;;
+            esac
+          done < "$scan_file"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
