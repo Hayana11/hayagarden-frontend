@@ -337,4 +337,3 @@ export async function discoverExternalMcp({
 }
 
 export { SUPPORTED_TRANSPORT };
-

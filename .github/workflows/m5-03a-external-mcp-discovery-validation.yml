@@ -35,4 +35,3 @@ jobs:
       - run: npm ci
       - name: Focused real-SDK safe discovery tests
         run: node --test tests/test_external_mcp_discovery_transport.mjs
-
