@@ -257,8 +257,8 @@ test('disconnect after callTool is OUTCOME_UNKNOWN without retry', async () => {
 
 test('malformed call response is OUTCOME_UNKNOWN, not NOT_INVOKED', async () => {
   const calls = [];
-  const result = await invoke({ calls, onCall: async (body) => jsonResponse({ jsonrpc: '2.0', id: body.id, result: { nope: true } }) });
-  assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN);
+  const result = await invoke({ calls, onCall: async () => new Response('{not-json', { status: 200, headers: { 'content-type': 'application/json' } }) });
+  assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN, JSON.stringify(result));
   assert.equal(result.diagnostics.call_started, true);
   assert.equal(result.diagnostics.call_result_received, false);
   assert.equal(result.diagnostics.call_tool_count, 1);
@@ -272,7 +272,7 @@ test('response overflow before call is NOT_INVOKED', async () => {
     onCall: async () => oversized,
     limits: { maxResponseBytes: 16 },
   });
-  assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN);
+  assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN, JSON.stringify(result));
   assert.equal(result.diagnostics.call_started, true);
   assert.equal(result.diagnostics.call_tool_count, 1);
   assert.equal(callCount(calls), 1);
@@ -288,7 +288,7 @@ test('call response overflow is OUTCOME_UNKNOWN after call begins', async () => 
     }),
     limits: { maxResponseBytes: 64 },
   });
-  assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN);
+  assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN, JSON.stringify(result));
   assert.equal(result.diagnostics.call_started, true);
   assert.equal(result.diagnostics.call_result_received, false);
   assert.equal(result.diagnostics.call_tool_count, 1);
