@@ -1,0 +1,76 @@
+name: M5-04B1 Candidate freshness validation
+
+on:
+  pull_request:
+    paths:
+      - "tools/external_tool_registry.py"
+      - "tests/test_external_tool_registry.py"
+      - ".github/workflows/m5-04b1-candidate-freshness-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact pull request head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact base, head, and three-file fence
+        shell: bash
+        env:
+          BASE_SHA: 0bc4564a2f99f5cc18cf58c4d0acd79a039fa44d
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          expected=$(printf '%s\n' \
+            .github/workflows/m5-04b1-candidate-freshness-validation.yml \
+            tests/test_external_tool_registry.py \
+            tools/external_tool_registry.py)
+          actual=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Product source boundary fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=tools/external_tool_registry.py
+          for needle in \
+            approve_tool \
+            reject_tool \
+            ExternalSecretStore \
+            decrypt \
+            materialize \
+            network_client \
+            callTool \
+            tools/call \
+            capability_manifest \
+            execution_fence \
+            tool_drawers \
+            cc-tools \
+            "public route"; do
+            found=1
+            while IFS= read -r line; do
+              case "$line" in
+                *"$needle"*) found=0; break ;;
+              esac
+            done < "$source_file"
+            if test "$found" -eq 0; then
+              echo "forbidden source term: $needle"
+              exit 1
+            fi
+          done
+
+      - name: Run focused freshness and legacy migration tests
+        shell: bash
+        run: python -m unittest tests.test_external_tool_registry

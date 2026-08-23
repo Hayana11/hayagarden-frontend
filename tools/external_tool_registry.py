@@ -135,6 +135,10 @@ class ExternalToolCandidateRegistry:
                     review_state IN ('REVIEW_REQUIRED', 'APPROVED')
                 ),
                 current_fingerprint TEXT NOT NULL,
+                current_source_registry_revision INTEGER CHECK (
+                    current_source_registry_revision IS NULL
+                    OR current_source_registry_revision >= 1
+                ),
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -155,6 +159,19 @@ class ExternalToolCandidateRegistry:
             );
             """
         )
+        columns = {
+            row[1]
+            for row in self._connection.execute(
+                "PRAGMA table_info(external_tool_candidate_registry)"
+            ).fetchall()
+        }
+        if "current_source_registry_revision" not in columns:
+            self._connection.execute(
+                "ALTER TABLE external_tool_candidate_registry ADD COLUMN "
+                "current_source_registry_revision INTEGER CHECK ("
+                "current_source_registry_revision IS NULL OR "
+                "current_source_registry_revision >= 1)"
+            )
         self._connection.commit()
 
     def ingest(self, discovery_result: Mapping[str, Any]) -> dict[str, Any]:
@@ -169,7 +186,8 @@ class ExternalToolCandidateRegistry:
                 row[0]: row
                 for row in self._connection.execute(
                     "SELECT tool_name, control_id, presence_state, review_state, "
-                    "current_fingerprint, first_seen, last_seen, revision "
+                    "current_fingerprint, current_source_registry_revision, "
+                    "first_seen, last_seen, revision "
                     "FROM external_tool_candidate_registry WHERE server_id=?",
                     (server_id,),
                 )
@@ -182,15 +200,16 @@ class ExternalToolCandidateRegistry:
                     self._connection.execute(
                         "INSERT INTO external_tool_candidate_registry ("
                         "server_id, tool_name, control_id, presence_state, review_state, "
-                        "current_fingerprint, first_seen, last_seen, updated_at, revision, "
-                        "model_visible, execution_allowed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0)",
+                        "current_fingerprint, current_source_registry_revision, first_seen, "
+                        "last_seen, updated_at, revision, model_visible, execution_allowed) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0)",
                         (
                             server_id, name, f"ext:{server_id}:{name}", PRESENT,
-                            REVIEW_REQUIRED, fingerprint, now, now, now,
+                            REVIEW_REQUIRED, fingerprint, source_revision, now, now, now,
                         ),
                     )
                 else:
-                    _, _, old_presence, old_review, old_fingerprint, first_seen, _, old_revision = old
+                    _, _, old_presence, old_review, old_fingerprint, _, _, _, old_revision = old
                     review = (
                         REVIEW_REQUIRED
                         if old_presence == MISSING or old_fingerprint != fingerprint
@@ -198,11 +217,13 @@ class ExternalToolCandidateRegistry:
                     )
                     self._connection.execute(
                         "UPDATE external_tool_candidate_registry SET presence_state=?, "
-                        "review_state=?, current_fingerprint=?, last_seen=?, updated_at=?, "
-                        "revision=?, model_visible=0, execution_allowed=0 "
+                        "review_state=?, current_fingerprint=?, current_source_registry_revision=?, "
+                        "last_seen=?, updated_at=?, revision=?, model_visible=0, "
+                        "execution_allowed=0 "
                         "WHERE server_id=? AND tool_name=?",
                         (
-                            PRESENT, review, fingerprint, now, now, old_revision + 1,
+                            PRESENT, review, fingerprint, source_revision, now, now,
+                            old_revision + 1,
                             server_id, name,
                         ),
                     )
@@ -216,12 +237,16 @@ class ExternalToolCandidateRegistry:
 
             for name, row in existing.items():
                 if name not in present_names:
-                    old_revision = row[7]
+                    old_revision = row[8]
                     self._connection.execute(
                         "UPDATE external_tool_candidate_registry SET presence_state=?, "
-                        "review_state=?, updated_at=?, revision=?, model_visible=0, "
+                        "review_state=?, current_source_registry_revision=?, updated_at=?, "
+                        "revision=?, model_visible=0, "
                         "execution_allowed=0 WHERE server_id=? AND tool_name=?",
-                        (MISSING, REVIEW_REQUIRED, now, old_revision + 1, server_id, name),
+                        (
+                            MISSING, REVIEW_REQUIRED, source_revision, now,
+                            old_revision + 1, server_id, name,
+                        ),
                     )
             self._connection.commit()
         except Exception:
@@ -242,7 +267,8 @@ class ExternalToolCandidateRegistry:
     def get_candidate(self, server_id: str, tool_name: str) -> Optional[dict[str, Any]]:
         row = self._connection.execute(
             "SELECT server_id, tool_name, control_id, presence_state, review_state, "
-            "current_fingerprint, first_seen, last_seen, updated_at, revision, "
+            "current_fingerprint, current_source_registry_revision, first_seen, last_seen, "
+            "updated_at, revision, "
             "model_visible, execution_allowed FROM external_tool_candidate_registry "
             "WHERE server_id=? AND tool_name=?",
             (server_id, tool_name),
@@ -251,7 +277,8 @@ class ExternalToolCandidateRegistry:
             return None
         keys = (
             "server_id", "tool_name", "control_id", "presence_state", "review_state",
-            "current_fingerprint", "first_seen", "last_seen", "updated_at", "revision",
+            "current_fingerprint", "current_source_registry_revision", "first_seen",
+            "last_seen", "updated_at", "revision",
             "model_visible", "execution_allowed",
         )
         return dict(zip(keys, row))

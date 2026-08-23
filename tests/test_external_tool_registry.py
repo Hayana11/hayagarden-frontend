@@ -80,6 +80,12 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
 
     def test_only_complete_current_success_is_accepted(self):
         self.assertEqual(self.owner.ingest(self.result([tool()]))["present_tool_count"], 1)
+        self.assertEqual(
+            self.owner.get_candidate(self.server.server_id, "calendar.list")[
+                "current_source_registry_revision"
+            ],
+            self.server.revision,
+        )
         for overrides, code in (
             ({"status": "BRIDGE_ERROR"}, "INCOMPLETE_DISCOVERY"),
             ({"catalog_complete": False}, "INCOMPLETE_DISCOVERY"),
@@ -88,6 +94,20 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
             ({"diagnostics": {}}, "STALE_DISCOVERY"),
         ):
             self.assertRejectedWithoutWrites(self.result([tool("other")], **overrides), code)
+
+    def test_new_schema_exposes_nullable_current_source_revision(self):
+        columns = {
+            row[1]: row
+            for row in self.connection.execute(
+                "PRAGMA table_info(external_tool_candidate_registry)"
+            ).fetchall()
+        }
+        self.assertIn("current_source_registry_revision", columns)
+        self.assertEqual(columns["current_source_registry_revision"][3], 0)
+        self.assertEqual(
+            self.owner.ingest(self.result([tool()]))["registry_revision"],
+            self.server.revision,
+        )
 
     def test_server_gate_is_atomic_and_fail_closed(self):
         self.assertRejectedWithoutWrites(
@@ -152,6 +172,36 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
         self.assertEqual(row_after[1], "https://calendar-2.example/mcp")
         self.assertEqual(row_after[2], "REVIEW_REQUIRED")
         self.assertEqual(row_after[3], changed.revision)
+        candidate = self.owner.get_candidate(self.server.server_id, "calendar.list")
+        self.assertEqual(candidate["presence_state"], MISSING)
+        self.assertEqual(candidate["current_source_registry_revision"], changed.revision)
+
+    def test_same_fingerprint_cross_revision_updates_candidate_not_snapshot(self):
+        first = tool()
+        self.owner.ingest(self.result([first]))
+        first_candidate = self.owner.get_candidate(self.server.server_id, first["name"])
+        first_snapshot = self.owner.list_snapshots(self.server.server_id, first["name"])
+        self.assertEqual(first_candidate["current_source_registry_revision"], self.server.revision)
+        self.assertEqual(first_snapshot[0]["source_registry_revision"], self.server.revision)
+        self.connection.execute(
+            "UPDATE external_tool_candidate_registry SET review_state='APPROVED' "
+            "WHERE server_id=? AND tool_name=?",
+            (self.server.server_id, first["name"]),
+        )
+        self.connection.commit()
+
+        renamed = self.server_registry.rename(self.server.server_id, "Calendar v2")
+        self.owner.ingest(self.result([first], registry_revision=renamed.revision))
+        current = self.owner.get_candidate(self.server.server_id, first["name"])
+        snapshots = self.owner.list_snapshots(self.server.server_id, first["name"])
+        self.assertEqual(current["current_source_registry_revision"], renamed.revision)
+        self.assertEqual(current["current_fingerprint"], first_candidate["current_fingerprint"])
+        self.assertEqual(current["review_state"], APPROVED)
+        self.assertEqual(current["revision"], 2)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["source_registry_revision"], self.server.revision)
+        listed = self.owner.list_candidates(self.server.server_id)[0]
+        self.assertEqual(listed["current_source_registry_revision"], renamed.revision)
 
     def test_identity_names_and_atomic_validation(self):
         with self.assertRaises(ToolCatalogValidationError):
@@ -186,6 +236,7 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
         candidate = self.owner.get_candidate(self.server.server_id, first["name"])
         self.assertEqual(candidate["presence_state"], PRESENT)
         self.assertEqual(candidate["review_state"], REVIEW_REQUIRED)
+        self.assertEqual(candidate["current_source_registry_revision"], self.server.revision)
 
         self.connection.execute(
             "UPDATE external_tool_candidate_registry SET review_state='APPROVED' "
@@ -196,42 +247,214 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
         self.assertEqual(
             self.owner.get_candidate(self.server.server_id, first["name"])["review_state"], APPROVED
         )
+        self.assertEqual(
+            self.owner.get_candidate(self.server.server_id, first["name"])[
+                "current_source_registry_revision"
+            ],
+            self.server.revision,
+        )
         drifted = tool(description="changed")
         self.owner.ingest(self.result([drifted]))
         self.assertEqual(
             self.owner.get_candidate(self.server.server_id, first["name"])["review_state"], REVIEW_REQUIRED
+        )
+        self.assertEqual(
+            self.owner.get_candidate(self.server.server_id, first["name"])[
+                "current_source_registry_revision"
+            ],
+            self.server.revision,
         )
         self.assertEqual(len(self.owner.list_snapshots(self.server.server_id, first["name"])), 2)
         self.owner.ingest(self.result([]))
         missing = self.owner.get_candidate(self.server.server_id, first["name"])
         self.assertEqual(missing["presence_state"], MISSING)
         self.assertEqual(missing["review_state"], REVIEW_REQUIRED)
+        self.assertEqual(missing["current_source_registry_revision"], self.server.revision)
         self.owner.ingest(self.result([drifted]))
         reappeared = self.owner.get_candidate(self.server.server_id, first["name"])
         self.assertEqual(reappeared["presence_state"], PRESENT)
         self.assertEqual(reappeared["review_state"], REVIEW_REQUIRED)
+        self.assertEqual(
+            reappeared["current_source_registry_revision"], self.server.revision
+        )
         self.owner.ingest(self.result([tool("calendar.renamed")]))
         self.assertEqual(
             self.owner.get_candidate(self.server.server_id, first["name"])["presence_state"], MISSING
         )
         self.assertEqual(
+            self.owner.get_candidate(self.server.server_id, first["name"])[
+                "current_source_registry_revision"
+            ],
+            self.server.revision,
+        )
+        self.assertEqual(
             self.owner.get_candidate(self.server.server_id, "calendar.renamed")["review_state"], REVIEW_REQUIRED
+        )
+        self.assertEqual(
+            self.owner.get_candidate(self.server.server_id, "calendar.renamed")[
+                "current_source_registry_revision"
+            ],
+            self.server.revision,
         )
 
     def test_zero_tools_marks_every_previous_tool_missing_and_deduplicates_snapshot(self):
         self.owner.ingest(self.result([tool("a"), tool("b")]))
         self.owner.ingest(self.result([tool("a"), tool("b")]))
         self.assertEqual(len(self.owner.list_snapshots(self.server.server_id, "a")), 1)
-        self.owner.ingest(self.result([]))
+        revised = self.server_registry.rename(self.server.server_id, "Calendar zero")
+        self.owner.ingest(self.result([], registry_revision=revised.revision))
         self.assertEqual(
             [row["presence_state"] for row in self.owner.list_candidates(self.server.server_id)],
             [MISSING, MISSING],
         )
+        for row in self.owner.list_candidates(self.server.server_id):
+            self.assertEqual(row["current_source_registry_revision"], revised.revision)
 
     def test_rejected_result_cannot_supply_identity_or_approval(self):
         for field, value in (("control_id", "caller"), ("review_state", APPROVED), ("approved", True)):
             self.assertRejectedWithoutWrites(self.result([], **{field: value}), "UNSUPPORTED_DISCOVERY_FIELD")
         self.assertRejectedWithoutWrites(self.result([], model_visible=True), "UNSAFE_DISCOVERY_RESULT")
+        self.assertFalse(any(name in dir(self.owner) for name in ("approve", "reject", "review_tool")))
+
+    def test_rejected_and_stale_discovery_do_not_change_source_revision(self):
+        self.owner.ingest(self.result([tool()]))
+        before = self.owner.get_candidate(self.server.server_id, "calendar.list")
+        revised = self.server_registry.rename(self.server.server_id, "Calendar stale")
+        stale = self.result(
+            [tool()],
+            registry_revision=before["current_source_registry_revision"],
+            diagnostics={"registry_changed_during_attempt": True},
+        )
+        self.assertRejectedWithoutWrites(stale, "STALE_DISCOVERY")
+        after = self.owner.get_candidate(self.server.server_id, "calendar.list")
+        self.assertEqual(after["current_source_registry_revision"], before["current_source_registry_revision"])
+        self.assertEqual(after["current_fingerprint"], before["current_fingerprint"])
+        self.assertEqual(revised.revision, before["current_source_registry_revision"] + 1)
+
+    def test_atomic_failure_cannot_tear_fingerprint_from_source_revision(self):
+        original = tool()
+        self.owner.ingest(self.result([original]))
+        before = self.owner.get_candidate(self.server.server_id, original["name"])
+        self.connection.executescript(
+            """
+            CREATE TRIGGER fail_candidate_update
+            BEFORE UPDATE ON external_tool_candidate_registry
+            BEGIN
+                SELECT RAISE(ABORT, 'forced candidate update failure');
+            END;
+            """
+        )
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.owner.ingest(self.result([tool(description="drift")]))
+        finally:
+            self.connection.execute("DROP TRIGGER fail_candidate_update")
+            self.connection.commit()
+        after = self.owner.get_candidate(self.server.server_id, original["name"])
+        self.assertEqual(after["current_fingerprint"], before["current_fingerprint"])
+        self.assertEqual(
+            after["current_source_registry_revision"],
+            before["current_source_registry_revision"],
+        )
+        self.assertEqual(len(self.owner.list_snapshots(self.server.server_id, original["name"])), 1)
+
+    def test_legacy_schema_migrates_to_null_and_fresh_ingest_repairs_it(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            server_registry = ExternalServerRegistry(
+                connection, id_factory=lambda: "legacy-server"
+            )
+            server = server_registry.register(
+                display_name="Legacy",
+                endpoint="https://legacy.example/mcp",
+                provenance="test",
+            )
+            legacy_tool = tool("legacy.tool")
+            legacy_json = canonical_json(legacy_tool)
+            legacy_fingerprint = fingerprint_raw_tool(legacy_tool)
+            connection.executescript(
+                """
+                CREATE TABLE external_tool_candidate_registry (
+                    server_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    control_id TEXT NOT NULL UNIQUE,
+                    presence_state TEXT NOT NULL,
+                    review_state TEXT NOT NULL,
+                    current_fingerprint TEXT NOT NULL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    model_visible INTEGER NOT NULL DEFAULT 0,
+                    execution_allowed INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (server_id, tool_name)
+                );
+                CREATE TABLE external_tool_raw_snapshots (
+                    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    raw_snapshot_json TEXT NOT NULL,
+                    source_registry_revision INTEGER NOT NULL,
+                    first_observed_at TEXT NOT NULL,
+                    UNIQUE (server_id, tool_name, fingerprint)
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO external_tool_candidate_registry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    server.server_id, legacy_tool["name"],
+                    f"ext:{server.server_id}:{legacy_tool['name']}", PRESENT,
+                    APPROVED, legacy_fingerprint, "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", 7, 0, 0,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO external_tool_raw_snapshots VALUES (NULL, ?, ?, ?, ?, ?, ?)",
+                (
+                    server.server_id, legacy_tool["name"], legacy_fingerprint,
+                    legacy_json, 99, "2026-01-01T00:00:00Z",
+                ),
+            )
+            connection.commit()
+            owner = ExternalToolCandidateRegistry(connection, server_registry=server_registry)
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(external_tool_candidate_registry)"
+                ).fetchall()
+            }
+            self.assertIn("current_source_registry_revision", columns)
+            legacy = owner.get_candidate(server.server_id, legacy_tool["name"])
+            self.assertEqual(legacy["current_source_registry_revision"], None)
+            self.assertEqual(legacy["current_fingerprint"], legacy_fingerprint)
+            self.assertEqual(legacy["review_state"], APPROVED)
+            self.assertEqual(legacy["revision"], 7)
+            self.assertEqual(owner.list_snapshots(server.server_id, legacy_tool["name"])[0]["source_registry_revision"], 99)
+
+            owner_again = ExternalToolCandidateRegistry(connection, server_registry=server_registry)
+            self.assertIsNone(
+                owner_again.get_candidate(server.server_id, legacy_tool["name"])[
+                    "current_source_registry_revision"
+                ]
+            )
+            fresh = {
+                "status": "SUCCESS", "catalog_complete": True,
+                "server_id": server.server_id, "registry_revision": server.revision,
+                "tool_record_boundary": "SDK_VISIBLE_RAW", "tools": [legacy_tool],
+                "diagnostics": {"registry_changed_during_attempt": False},
+                "model_visible": False, "execution_allowed": False,
+            }
+            owner_again.ingest(fresh)
+            repaired = owner_again.get_candidate(server.server_id, legacy_tool["name"])
+            self.assertEqual(repaired["current_source_registry_revision"], server.revision)
+            self.assertEqual(repaired["revision"], 8)
+            snapshots = owner_again.list_snapshots(server.server_id, legacy_tool["name"])
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(snapshots[0]["source_registry_revision"], 99)
+        finally:
+            connection.close()
 
     def test_concurrent_complete_ingests_are_serial_and_never_hybrid(self):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as handle:
@@ -278,6 +501,8 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
                 if row["presence_state"] == PRESENT
             }
             self.assertIn(final_names, ({"a", "a-only"}, {"b", "b-only"}))
+            for row in first_owner.list_candidates(first_server.server_id):
+                self.assertEqual(row["current_source_registry_revision"], 1)
         finally:
             first_connection.close()
             second_connection.close()
