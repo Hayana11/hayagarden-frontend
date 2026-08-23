@@ -58,11 +58,13 @@ jobs:
             cc-tools \
             build_uh_a0_spawn_plan \
             public_routes; do
-            if while IFS= read -r line; do
+            found=1
+            while IFS= read -r line; do
               case "$line" in
-                *"$needle"*) exit 0 ;;
+                *"$needle"*) found=0; break ;;
               esac
-            done < "$source_file"; then
+            done < "$source_file"
+            if test "$found" -eq 0; then
               echo "forbidden source term: $needle"
               exit 1
             fi
