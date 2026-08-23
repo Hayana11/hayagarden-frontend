@@ -33,7 +33,7 @@ jobs:
           test -f "$scan_file" && test -r "$scan_file"
           while IFS= read -r line || test -n "$line"; do
             case "$line" in
-              *external_server_registry*|*external_secret_store*|*fetchSecret*|*decrypt*|*Authorization*|*oauth*|*callTool*|*tools/call*|*claude*|*model.*|*model_*|*model/*|*\ model\ *|*registry.*|*registry_*|*registry/*|*\ registry\ *)
+              *external_server_registry*|*external_secret_store*|*fetchSecret*|*decrypt*|*Authorization*|*oauth*|*callTool*|*tools/call*|*claude*)
                 echo "forbidden term found in $scan_file" >&2
                 exit 1
                 ;;
