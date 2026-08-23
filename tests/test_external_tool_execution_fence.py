@@ -8,6 +8,8 @@ import tempfile
 import threading
 import unittest
 
+import tools.external_tool_execution_fence as external_fence
+from tools.lease_signer import LeaseSignError, issue_turn_lease
 from tools.external_server_registry import ExternalServerRegistry
 from tools.external_tool_registry import ExternalToolCandidateRegistry
 from tools.external_tool_side_effect_policy import (
@@ -284,47 +286,81 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
         )
 
     def test_turn_lease_cross_field_contract_matches_canonical_signer(self):
-        invalid_leases = (
-            self.lease(
-                issued_from="task_contract",
-                mode="chat",
-                task_contract_id="contract-1",
-            ),
-            self.lease(
-                issued_from="task_contract",
-                mode="task",
-                task_contract_id=None,
-            ),
-            self.lease(
-                issued_from="user_confirmation",
-                mode="chat",
-                task_contract_id="forged-contract",
-            ),
+        from tools.lease_signer import (
+            ISSUED_FROM_VALUES as SIGNER_ISSUED_FROM_VALUES,
+            LEASE_VERSION as SIGNER_LEASE_VERSION,
+            TURN_LEASE_FIELDS as SIGNER_TURN_LEASE_FIELDS,
+            TURN_MODES as SIGNER_TURN_MODES,
         )
-        for invalid in invalid_leases:
-            with self.subTest(
-                issued_from=invalid["issued_from"],
-                mode=invalid["turn_mode"],
-                task_contract_id=invalid["task_contract_id"],
-            ):
-                self.assertEqual(
-                    self.evaluate(invalid)["reason_code"],
-                    TURN_LEASE_INVALID,
-                )
+
+        self.assertIs(external_fence.TURN_LEASE_FIELDS, SIGNER_TURN_LEASE_FIELDS)
+        self.assertIs(external_fence.TURN_MODES, SIGNER_TURN_MODES)
+        self.assertIs(external_fence.ISSUED_FROM_VALUES, SIGNER_ISSUED_FROM_VALUES)
+        self.assertIs(external_fence.LEASE_VERSION, SIGNER_LEASE_VERSION)
 
         self.prepare(EXTERNAL_STATE)
         ask = self.evaluate()
-        forged_confirmation = self.allow_lease(ask["external_action_id"])
+        signed_confirmation = issue_turn_lease(
+            turn_id="turn-1",
+            turn_mode="chat",
+            issued_from="user_confirmation",
+            requested_capabilities=(),
+            approval_ids=(ask["external_action_id"],),
+            issued_at="2026-08-23T13:00:00Z",
+        )
+        self.assertEqual(self.evaluate(signed_confirmation)["decision"], ALLOW)
+
+        forged_confirmation = dict(signed_confirmation)
         forged_confirmation["task_contract_id"] = "forged-contract"
         self.assertEqual(
             self.evaluate(forged_confirmation)["reason_code"],
             TURN_LEASE_INVALID,
         )
 
-        valid_task_contract = self.lease(
+        with self.assertRaises(LeaseSignError):
+            issue_turn_lease(
+                turn_id="turn-1",
+                turn_mode="chat",
+                issued_from="user_confirmation",
+                requested_capabilities=(),
+                approval_ids=(ask["external_action_id"],),
+                task_contract_id="forged-contract",
+                issued_at="2026-08-23T13:00:00Z",
+            )
+
+        invalid_signer_inputs = (
+            {"turn_mode": "chat", "issued_from": "task_contract", "task_contract_id": "contract-1"},
+            {"turn_mode": "task", "issued_from": "task_contract", "task_contract_id": None},
+        )
+        for values in invalid_signer_inputs:
+            with self.subTest(**values):
+                with self.assertRaises(LeaseSignError):
+                    issue_turn_lease(
+                        turn_id="turn-1",
+                        requested_capabilities=(),
+                        approval_ids=(),
+                        issued_at="2026-08-23T13:00:00Z",
+                        **values,
+                    )
+                self.assertEqual(
+                    self.evaluate(
+                        self.lease(
+                            mode=values["turn_mode"],
+                            issued_from=values["issued_from"],
+                            task_contract_id=values["task_contract_id"],
+                        )
+                    )["reason_code"],
+                    TURN_LEASE_INVALID,
+                )
+
+        valid_task_contract = issue_turn_lease(
+            turn_id="turn-1",
+            turn_mode="task",
             issued_from="task_contract",
-            mode="task",
+            requested_capabilities=(),
+            approval_ids=(),
             task_contract_id="contract-1",
+            issued_at="2026-08-23T13:00:00Z",
         )
         self.assertEqual(
             self.evaluate(valid_task_contract)["reason_code"],
