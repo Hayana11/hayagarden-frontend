@@ -35,20 +35,32 @@ jobs:
             rg -n "$forbidden" tools/external_mcp_discovery_transport.mjs
             scan_status=$?
             set -e
-          elif command -v grep >/dev/null 2>&1; then
-            set +e
-            grep -nE "$forbidden" tools/external_mcp_discovery_transport.mjs
-            scan_status=$?
-            set -e
+            if test "$scan_status" -eq 0; then
+              echo "forbidden term found" >&2
+              exit 1
+            fi
+            test "$scan_status" -eq 1
+          elif command -v python3 >/dev/null 2>&1; then
+            python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path('tools/external_mcp_discovery_transport.mjs').read_text(encoding='utf-8')
+          patterns = [
+              r'external_server_registry', r'external_secret_store', r'fetchSecret',
+              r'decrypt', r'Authorization', r'oauth', r'callTool', r'tools/call',
+              r'claude', r'(^|[^A-Za-z])model([^A-Za-z]|$)',
+              r'(^|[^A-Za-z])registry([^A-Za-z]|$)',
+          ]
+          for pattern in patterns:
+              match = re.search(pattern, text)
+              if match:
+                  raise SystemExit(f'forbidden term found: {pattern}')
+          PY
           else
             echo "No supported forbidden-term scanner is available" >&2
             exit 1
           fi
-          if test "$scan_status" -eq 0; then
-            echo "forbidden term found" >&2
-            exit 1
-          fi
-          test "$scan_status" -eq 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
