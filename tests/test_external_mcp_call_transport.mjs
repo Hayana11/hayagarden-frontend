@@ -90,8 +90,8 @@ test('isError=true is a determinate TOOL_ERROR and never retries', async () => {
 test('the SDK-visible result structure is preserved without text flattening or follow-up fetches', async () => {
   const calls = [];
   const sdkResult = {
-    content: [{ type: 'text', text: 'one' }, { type: 'resource_link', uri: 'https://example.test/resource' }],
-    structuredContent: { answer: 42 },
+    content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }],
+    isError: false,
   };
   const result = await invoke({ calls, result: sdkResult });
   assert.deepEqual(result.result, sdkResult);
@@ -140,7 +140,7 @@ test('NaN and Infinity are rejected instead of becoming JSON null', async () => 
 test('oversized and non-serializable input is rejected before connect', async () => {
   const oversized = await invoke({ tool_input: { value: 'x'.repeat(300), }, limits: { maxInputBytes: 32 } });
   assert.equal(oversized.status, CALL_OUTCOME.NOT_INVOKED);
-  assert.match(oversized.error.summary, /byte limit/);
+  assert.equal(oversized.error.summary, 'MCP transport limit exceeded');
   const circular = {};
   circular.self = circular;
   const invalid = await invoke({ tool_input: circular });

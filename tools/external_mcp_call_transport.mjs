@@ -3,6 +3,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 import {
   DEFAULT_LIMITS,
+  classifyAddress,
   DiscoveryInputError,
   DiscoveryLimitError,
   DiscoveryTimeoutError,
@@ -120,6 +121,15 @@ function validateToolName(toolName) {
   if (/\s/.test(toolName) || /[\u0000-\u001f\u007f]/.test(toolName)) throw new CallInputError('tool_name contains forbidden whitespace or controls');
 }
 
+function validateCallEndpoint(endpoint, transport) {
+  const url = validateEndpoint(endpoint, transport);
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (host !== url.hostname && classifyAddress(host) !== 'PUBLIC') {
+    throw new DiscoveryInputError('endpoint address is not public');
+  }
+  return url;
+}
+
 function boundedResponse(response, maxBytes) {
   const declared = Number(response.headers?.get?.('content-length') ?? 0);
   if (Number.isFinite(declared) && declared > maxBytes) throw new CallLimitError('MCP response exceeded the byte limit');
@@ -216,7 +226,7 @@ export async function invokeExternalMcp({
   try {
     limits = mergedLimits(requestedLimits);
     validateToolName(toolName);
-    const url = validateEndpoint(endpoint, transport);
+    const url = validateCallEndpoint(endpoint, transport);
     validateToolInput(toolInput, limits.maxInputBytes);
     const result = skeleton(diagnostics);
     const dispatcher = fetchImpl ? null : createSafeDispatcher({ resolver });
