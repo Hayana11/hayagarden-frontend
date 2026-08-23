@@ -38,6 +38,10 @@ jobs:
             tests/test_external_tool_execution_fence.py \
             tools/external_tool_execution_fence.py)
           actual=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)
+          printf 'main=<%s> head=<%s> merge_base=<%s>\n' \
+            "$(git rev-parse origin/main)" "$HEAD_SHA" \
+            "$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          printf 'expected=<%s> actual=<%s>\n' "$expected" "$actual"
           test "$actual" = "$expected"
           git diff --check "$BASE_SHA" "$HEAD_SHA"
           test -z "$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
