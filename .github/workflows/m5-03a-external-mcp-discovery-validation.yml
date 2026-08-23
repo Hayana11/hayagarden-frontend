@@ -31,9 +31,19 @@ jobs:
           git diff --check HEAD^ HEAD
           forbidden='external_server_registry|external_secret_store|fetchSecret|decrypt|Authorization|oauth|callTool|tools/call|claude|(^|[^A-Za-z])model([^A-Za-z]|$)|(^|[^A-Za-z])registry([^A-Za-z]|$)'
           if command -v rg >/dev/null 2>&1; then
-            if rg -n "$forbidden" tools/external_mcp_discovery_transport.mjs; then exit 1; fi
+            if rg -n "$forbidden" tools/external_mcp_discovery_transport.mjs; then
+              echo "forbidden term found" >&2
+              exit 1
+            else
+              test "$?" -eq 1
+            fi
           elif command -v grep >/dev/null 2>&1; then
-            if grep -nE "$forbidden" tools/external_mcp_discovery_transport.mjs; then exit 1; fi
+            if grep -nE "$forbidden" tools/external_mcp_discovery_transport.mjs; then
+              echo "forbidden term found" >&2
+              exit 1
+            else
+              test "$?" -eq 1
+            fi
           else
             echo "No supported forbidden-term scanner is available" >&2
             exit 1
