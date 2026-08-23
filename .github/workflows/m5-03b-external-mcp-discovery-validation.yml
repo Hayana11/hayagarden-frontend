@@ -1,0 +1,56 @@
+name: M5-03B registry to discovery validation
+
+on:
+  pull_request:
+    paths:
+      - 'tools/external_mcp_discovery.py'
+      - 'tools/external_mcp_discovery_bridge.mjs'
+      - 'tests/test_external_mcp_discovery.py'
+      - 'tests/test_external_mcp_discovery_bridge.mjs'
+      - '.github/workflows/m5-03b-external-mcp-discovery-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact main base and changed-file fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA=d06d0ccd727b32df0027774041117c960bde55f4
+          HEAD_SHA=${{ github.event.pull_request.head.sha || github.sha }}
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" HEAD | sort)" = $'.github/workflows/m5-03b-external-mcp-discovery-validation.yml\ntests/test_external_mcp_discovery.py\ntests/test_external_mcp_discovery_bridge.mjs\ntools/external_mcp_discovery.py\ntools/external_mcp_discovery_bridge.mjs'
+          git diff --check "$BASE_SHA" HEAD
+          for scan_file in tools/external_mcp_discovery.py tools/external_mcp_discovery_bridge.mjs; do
+            test -f "$scan_file" && test -r "$scan_file"
+            mapfile -t scan_lines < "$scan_file"
+            for line in "${scan_lines[@]}"; do
+              case "$line" in
+                *external_secret_store*|*ExternalSecretStore*|*decrypt*|*materialize*|*Authorization*|*Bearer*|*OAuth*|*callTool*|*tools/call*|*capability_manifest*|*execution_fence*|*tool_drawers*|*cc-tools.json*|*build_uh_a0_spawn_plan*)
+                  echo "forbidden term found in $scan_file" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Focused Python registry integration tests
+        run: python -m unittest tests.test_external_mcp_discovery
+      - name: Focused Node bridge contract tests
+        run: node --test tests/test_external_mcp_discovery_bridge.mjs
