@@ -43,6 +43,7 @@ import {
   type ChatToolCall,
 } from '../lib/chat';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
+import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { ComposerUploadCoordinator } from '../lib/composerUpload';
 import { ChatThemeQuickToggle, ChatThemeSegmented } from '../components/ChatThemeControl';
 import { ThemePerfRows } from '../components/ThemePerfRows';
@@ -898,6 +899,7 @@ export function ChatScreen() {
       userMessageId: number | null,
       opts: {
         rewriteId?: string | null;
+        realityContext?: string;
         confirmation?: { approvalId: string; pendingActionId?: string | null; decision: 'approve' | 'reject' };
       } = {},
     ): Promise<boolean> => {
@@ -936,6 +938,7 @@ export function ChatScreen() {
           approvalId: opts.confirmation?.approvalId,
           pendingActionId: opts.confirmation?.pendingActionId,
           confirmationDecision: opts.confirmation?.decision,
+          realityContext: opts.realityContext,
         },
       );
       if (res.deferredTool) {
@@ -966,8 +969,12 @@ export function ChatScreen() {
     setPendingConfirmation({ ...pending, confirmation_state: 'processing', running: false });
     setSending(true);
     setChatError(null);
+    const realityContext = decision === 'approve'
+      ? realityPromptProjection.getSnapshot().text
+      : undefined;
     const ok = await runStream(null, {
       confirmation: { approvalId, pendingActionId, decision },
+      realityContext,
     });
     if (decision === 'reject') {
       setPendingConfirmation({ ...pending, confirmation_state: 'rejected', running: false });
@@ -990,6 +997,7 @@ export function ChatScreen() {
       image: pendingImage,
     };
     if ((!attempt.text && !attempt.file && !attempt.image) || sending) return;
+    const realityContext = realityPromptProjection.getSnapshot().text;
     const draftRevisionAtConsume = composerDraftRevisionRef.current;
     clearChatComposerDraft();
     setSending(true);
@@ -1024,7 +1032,7 @@ export function ChatScreen() {
     setPendingImage((current) => (current === attempt.image ? null : current));
     pinTranscriptToLatest();
     await refetchLatest();
-    await runStream(messageId);
+    await runStream(messageId, { realityContext });
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
@@ -1032,6 +1040,7 @@ export function ChatScreen() {
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
     if (!choice || sending) return false;
+    const realityContext = realityPromptProjection.getSnapshot().text;
     setSending(true);
     setChatError(null);
     uploadCoordinatorRef.current.beginChoicePost();
@@ -1052,7 +1061,7 @@ export function ChatScreen() {
     }
     pinTranscriptToLatest();
     await refetchLatest();
-    await runStream(messageId);
+    await runStream(messageId, { realityContext });
     await refetchLatest();
     setSending(false);
     return true;
