@@ -115,6 +115,20 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
         self.assertEqual(success["status"], "SUCCESS")
         self.assertEqual(self.registry.get(self.record.server_id), before)
 
+        empty = ExternalMcpDiscovery(
+            self.registry,
+            runner=lambda _: {
+                **SUCCESS,
+                "catalog_complete": True,
+                "zero_tools": True,
+                "tools": [],
+            },
+        ).discover(self.record.server_id)
+        self.assertEqual(empty["status"], "SUCCESS")
+        self.assertTrue(empty["catalog_complete"])
+        self.assertTrue(empty["zero_tools"])
+        self.assertEqual(empty["tools"], [])
+
         def unavailable(_record):
             return {
                 **SUCCESS,
@@ -128,6 +142,23 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
         failed = ExternalMcpDiscovery(self.registry, runner=unavailable).discover(self.record.server_id)
         self.assertEqual(failed["status"], "AUTH_REQUIRED")
         self.assertEqual(self.registry.get(self.record.server_id), before)
+
+        for status in ("UNAVAILABLE", "PROTOCOL_ERROR", "LIMIT_EXCEEDED"):
+            with self.subTest(status=status):
+                result = ExternalMcpDiscovery(
+                    self.registry,
+                    runner=lambda _, status=status: {
+                        **SUCCESS,
+                        "status": status,
+                        "catalog_complete": False,
+                        "zero_tools": False,
+                        "tools": [],
+                        "error": {"code": status, "summary": status.lower()},
+                    },
+                ).discover(self.record.server_id)
+                self.assertEqual(result["status"], status)
+                self.assertEqual(result["tools"], [])
+                self.assertEqual(self.registry.get(self.record.server_id), before)
 
     def test_registry_races_invalidate_success_catalog(self):
         for mutation in (
