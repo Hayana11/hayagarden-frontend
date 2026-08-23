@@ -54,4 +54,3 @@ jobs:
         run: python -m unittest tests.test_external_mcp_discovery
       - name: Focused Node bridge contract tests
         run: node --test tests/test_external_mcp_discovery_bridge.mjs
-

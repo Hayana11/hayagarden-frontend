@@ -63,4 +63,3 @@ test('bridge production entrypoint is bound to the completed discovery core', as
   assert.match(source, /import \{ discoverExternalMcp \} from '\.\/external_mcp_discovery_transport\.mjs'/);
   assert.match(source, /executeBridgeEnvelope\(input\)/);
 });
-
