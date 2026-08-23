@@ -266,11 +266,11 @@ test('malformed call response is OUTCOME_UNKNOWN, not NOT_INVOKED', async () => 
 
 test('response overflow before call is NOT_INVOKED', async () => {
   const calls = [];
-  const oversized = new Response('x'.repeat(128), { status: 200, headers: { 'content-length': '128' } });
+  const oversized = new Response('x'.repeat(1024), { status: 200, headers: { 'content-length': '1024' } });
   const result = await invoke({
     calls,
     onCall: async () => oversized,
-    limits: { maxResponseBytes: 16 },
+    limits: { maxResponseBytes: 512 },
   });
   assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN, JSON.stringify(result));
   assert.equal(result.diagnostics.call_started, true);
@@ -282,11 +282,11 @@ test('call response overflow is OUTCOME_UNKNOWN after call begins', async () => 
   const calls = [];
   const result = await invoke({
     calls,
-    onCall: async (body) => new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: callResult('x'.repeat(128)) }), {
+    onCall: async (body) => new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: callResult('x'.repeat(2048)) }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }),
-    limits: { maxResponseBytes: 64 },
+    limits: { maxResponseBytes: 512 },
   });
   assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN, JSON.stringify(result));
   assert.equal(result.diagnostics.call_started, true);
