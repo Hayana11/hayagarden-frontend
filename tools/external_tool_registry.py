@@ -825,4 +825,3 @@ __all__ = [
     "canonical_json",
     "fingerprint_raw_tool",
 ]
-

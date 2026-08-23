@@ -69,4 +69,3 @@ jobs:
       - name: Run focused external tool review tests
         shell: bash
         run: python -m unittest tests.test_external_tool_registry
-
