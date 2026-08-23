@@ -1,0 +1,70 @@
+name: M5-05B External execution fence validation
+
+on:
+  pull_request:
+    paths:
+      - tools/external_tool_execution_fence.py
+      - tests/test_external_tool_execution_fence.py
+      - .github/workflows/m5-05b-external-execution-fence-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact base, head, merge-base, and three-file fence
+        shell: bash
+        env:
+          BASE_SHA: 98fd0a35ea799077fa0b18f414ad25ea331b0995
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" = "$BASE_SHA"
+          expected=$(printf '%s\n' \
+            .github/workflows/m5-05b-external-execution-fence-validation.yml \
+            tests/test_external_tool_execution_fence.py \
+            tools/external_tool_execution_fence.py)
+          actual=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          test -z "$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+            tools/execution_fence.py tools/lease_signer.py \
+            tools/capability_manifest.py tools/external_tool_registry.py \
+            tools/external_tool_side_effect_policy.py)"
+
+      - name: Verify product source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=tools/external_tool_execution_fence.py
+          for needle in \
+            'MCP Client' StreamableHTTPClientTransport callTool tools/call \
+            ExternalSecretStore secret_ref decrypt materialize Authorization \
+            Bearer OAuth confirmation_store PendingActionStore tool_drawers \
+            cc-tools build_uh_a0_spawn_plan 'public route' fetch urllib requests httpx; do
+            if grep -Fqi -- "$needle" "$source_file"; then
+              echo "forbidden product dependency: $needle" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run focused external fence tests
+        shell: bash
+        run: python -m unittest -v tests.test_external_tool_execution_fence
+
+      - name: Run narrow static execution fence regression
+        shell: bash
+        run: python -m unittest tests.test_execution_fence
