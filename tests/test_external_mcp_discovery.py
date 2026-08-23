@@ -187,9 +187,24 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
 
             result = ExternalMcpDiscovery(registry, runner=runner).discover(record.server_id)
             self.assertEqual(result["status"], STALE)
+            self.assertEqual(result["server_id"], record.server_id)
+            self.assertEqual(result["display_name"], record.display_name)
+            self.assertEqual(result["registration_provenance"], record.registration_provenance)
+            self.assertEqual(result["registry_revision"], record.revision)
+            self.assertEqual(result["lifecycle_state"], record.lifecycle_state)
+            self.assertEqual(result["master_state"], record.master_state)
+            self.assertEqual(result["transport"], record.transport)
+            self.assertEqual(result["endpoint_snapshot"], record.endpoint)
             self.assertFalse(result["catalog_complete"])
             self.assertEqual(result["tools"], [])
             self.assertTrue(result["diagnostics"]["registry_changed_during_attempt"])
+            self.assertNotEqual(result["current_registry_revision"], record.revision)
+            if mutation == "rename":
+                self.assertEqual(result["current_display_name"], "Renamed")
+            elif mutation == "endpoint":
+                self.assertEqual(result["current_endpoint"], "https://calendar-race.example/mcp")
+            else:
+                self.assertEqual(result["current_lifecycle_state"], REVOKED_STATE)
             connection.close()
 
     def test_registry_race_does_not_turn_remote_failure_into_success(self):
@@ -219,6 +234,18 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
         ).discover(self.record.server_id)
         self.assertEqual(result["status"], BRIDGE_ERROR)
         self.assertEqual(self.registry.get(self.record.server_id), before)
+
+    def test_real_runner_reaches_bridge_and_03a_rejects_private_endpoint_before_dial(self):
+        record = self.registry.register(
+            display_name="Private fixture",
+            endpoint="https://127.0.0.1/mcp",
+            provenance="owner-admin",
+        )
+        result = ExternalMcpDiscovery(self.registry).discover(record.server_id)
+        self.assertEqual(result["status"], "PROTOCOL_ERROR")
+        self.assertEqual(result["error"]["summary"], "endpoint address is not public")
+        self.assertEqual(result["diagnostics"]["request_count"], 0)
+        self.assertEqual(self.registry.get(record.server_id), record)
 
 
 class SubprocessBridgeTests(unittest.TestCase):

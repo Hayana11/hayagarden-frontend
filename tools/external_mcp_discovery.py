@@ -293,11 +293,21 @@ class ExternalMcpDiscovery:
                     },
                     diagnostics=diagnostics,
                 ),
-                current or snapshot,
+                snapshot,
             )
-            stale["registry_revision"] = current.revision if current else None
-            stale["lifecycle_state"] = current.lifecycle_state if current else None
-            stale["master_state"] = current.master_state if current else None
+            stale.update(
+                {
+                    "current_display_name": current.display_name if current else None,
+                    "current_registration_provenance": (
+                        current.registration_provenance if current else None
+                    ),
+                    "current_registry_revision": current.revision if current else None,
+                    "current_lifecycle_state": current.lifecycle_state if current else None,
+                    "current_master_state": current.master_state if current else None,
+                    "current_transport": current.transport if current else None,
+                    "current_endpoint": current.endpoint if current else None,
+                }
+            )
             return stale
         return _with_registry_provenance(discovered, snapshot)
 
