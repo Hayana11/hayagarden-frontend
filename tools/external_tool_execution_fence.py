@@ -16,6 +16,12 @@ from typing import Any, Optional
 
 from .external_server_registry import ExternalServerRegistry
 from .external_tool_registry import ExternalToolCandidateRegistry
+from .lease_signer import (
+    ISSUED_FROM_VALUES,
+    LEASE_VERSION,
+    TURN_LEASE_FIELDS,
+    TURN_MODES,
+)
 from .external_tool_side_effect_policy import (
     CODE_OR_PROCESS,
     EXTERNAL_STATE,
@@ -55,11 +61,6 @@ TURN_LEASE_FIELDS = (
     "issued_at",
 )
 TURN_MODES = frozenset({"chat", "wake", "task"})
-ISSUED_FROM_VALUES = frozenset(
-    {"default_policy", "explicit_user_intent", "user_confirmation", "task_contract"}
-)
-
-
 class ExternalExecutionFenceError(ValueError):
     code = "EXTERNAL_EXECUTION_FENCE_ERROR"
 
@@ -182,7 +183,7 @@ def _lease_error(turn_lease: Any) -> Optional[str]:
         return "turn_lease is not an object"
     if set(turn_lease) != set(TURN_LEASE_FIELDS):
         return "turn_lease field set mismatch"
-    if turn_lease.get("lease_version") != 1:
+    if turn_lease.get("lease_version") != LEASE_VERSION:
         return "lease_version mismatch"
     turn_id = turn_lease.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id or turn_id != turn_id.strip():
@@ -220,6 +221,13 @@ def _lease_error(turn_lease: Any) -> Optional[str]:
         return "user_confirmation has no approval_ids"
     if issued_from != "user_confirmation" and turn_lease["approval_ids"]:
         return "approval_ids require user_confirmation"
+    if issued_from == "task_contract":
+        if task_contract_id is None:
+            return "task_contract requires task_contract_id"
+        if mode != "task":
+            return "task_contract leases require turn_mode=task"
+    elif task_contract_id is not None:
+        return "task_contract_id is only valid with issued_from=task_contract"
     return None
 
 
