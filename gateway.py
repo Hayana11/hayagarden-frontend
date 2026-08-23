@@ -3847,10 +3847,46 @@ def _format_group_chat_recap(rows, *, cold=False):
     return head + NL.join(lines) + NL + NL
 
 
+def _normalize_reality_context(value):
+    """Normalize the request-scoped Reality snapshot without reading its source."""
+    if not isinstance(value, str):
+        return ''
+    return value.strip()
+
+
+def _append_reality_context(content, reality_context):
+    """Append non-persistent Reality to one provider's current-turn content."""
+    context = _normalize_reality_context(reality_context)
+    if not context:
+        return content
+    suffix = '\n\n' + context
+    if isinstance(content, str):
+        return content + suffix
+    if isinstance(content, list):
+        return list(content) + [{'type': 'text', 'text': suffix}]
+    return content
+
+
+def _append_reality_to_last_user(messages, reality_context):
+    context = _normalize_reality_context(reality_context)
+    if not context or not isinstance(messages, list):
+        return messages
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        updated = list(messages)
+        last = dict(message)
+        last['content'] = _append_reality_context(last.get('content'), context)
+        updated[index] = last
+        return updated
+    return messages
+
+
 def _cc_resident_stream_gen(
     messages, *, user_turn=True, history_stats=None, is_cold=None,
     rebuild_messages_fn=None, pending_respawn_reason=None,
-    display_thinking_mode='off', turn_lease=None,
+    display_thinking_mode='off', turn_lease=None, reality_context='',
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4213,6 +4249,8 @@ def _cc_resident_stream_gen(
         ):
             # 热轮仅在有新增行时推进 cursor；空成功保持原 cursor
             commit_meta['group_max_id'] = group_max_id
+
+    content = _append_reality_context(content, reality_context)
 
     # Resident cursors advance only after stdin.flush() succeeds inside
     # ResidentSession.send_turn().  Failed sends therefore cannot suppress a
@@ -5283,7 +5321,7 @@ def _confirmation_error(message='LEASE_MISMATCH'):
     yield _sse_json({'t': 'done', 'ok': False})
 
 
-def _stream_cc_deferred_confirmation(request_data):
+def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
     """Bridge one exact provider-deferred action through the existing lease/fence."""
     import uuid
     from tools.execution_fence import (
@@ -5346,7 +5384,10 @@ def _stream_cc_deferred_confirmation(request_data):
     usage = {}
     done_text = ''
     try:
-        resume_content = '用户已确认执行刚才等待确认的具体动作，请继续完成并回复。'
+        resume_content = _append_reality_context(
+            '用户已确认执行刚才等待确认的具体动作，请继续完成并回复。',
+            reality_context,
+        )
         for evt, payload in _CC_RESIDENT.resume_pending_deferred_turn(
             resume_content,
             resume_env,
@@ -6451,6 +6492,9 @@ def chat_stream():
             _turn_data: dict = {}
             try:
                 _request_data = request.get_json(silent=True) or {}
+                _reality_context = _normalize_reality_context(
+                    _request_data.pop('reality_context', None)
+                )
                 if (
                     _request_data.get('approval_id') is not None
                     or _request_data.get('confirmation_decision') is not None
@@ -6460,7 +6504,10 @@ def chat_stream():
                         yield from _confirmation_error('上一轮回复仍在生成中，请稍候再试')
                         return
                     try:
-                        yield from _stream_cc_deferred_confirmation(_request_data)
+                        yield from _stream_cc_deferred_confirmation(
+                            _request_data,
+                            reality_context=_reality_context,
+                        )
                     finally:
                         _gen_release(None)
                     return
@@ -6606,6 +6653,7 @@ def chat_stream():
                         rebuild_messages_fn=_rebuild_cc_messages if _cc_is_cold else None,
                         pending_respawn_reason=_cc_pending_respawn_reason,
                         display_thinking_mode=_display_thinking_mode,
+                        reality_context=_reality_context,
                     )
                     for evt, payload in filter_display_thinking_events(
                         _resident_events, _display_thinking_mode,
@@ -6800,6 +6848,9 @@ def chat_stream():
         _persisted = [False]
         _turn_data: dict = {}
         _request_data = request.get_json(silent=True) or {}
+        _reality_context = _normalize_reality_context(
+            _request_data.pop('reality_context', None)
+        )
         if (
             _request_data.get('approval_id') is not None
             or _request_data.get('confirmation_decision') is not None
@@ -6971,6 +7022,8 @@ def chat_stream():
                     system, messages = _guagua_safe_context(system, messages)
                 # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
                 _turn_tools, _ = tool_drawers.select_tools_from_messages(messages, get_tools())
+                # Reality is request-scoped and must not affect tool selection.
+                messages = _append_reality_to_last_user(messages, _reality_context)
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,
