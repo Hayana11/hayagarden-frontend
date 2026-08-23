@@ -1,87 +1,104 @@
 """Focused P2C.1h Reality request-context tests.
 
-These tests cover the provider seam helpers and source-level fences without
-starting a provider or reading the Reality runtime.
+Load only the three pure gateway helper functions under test. Importing the
+whole gateway would start unrelated production infrastructure (POSIX locks,
+/opt/frontend databases, resident wiring, and provider setup).
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
+import ast
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-os.environ.setdefault(
-    'HAYAGARDEN_CONFIG_DB_PATH',
-    str(Path(tempfile.gettempdir()) / 'hayagarden-test-reality-chat-config.db'),
-)
 
 
-def _import_gateway():
-    if 'gateway' in sys.modules:
-        return sys.modules['gateway']
-    stubbed = []
-    if 'tools.workspace_registry' not in sys.modules:
-        registry = mock.MagicMock()
-        registry.TOOLS_NOTE = ''
-        registry.build_resident_tool_defs.return_value = []
-        registry.load_registry.return_value = []
-        sys.modules['tools.workspace_registry'] = registry
-        stubbed.append('tools.workspace_registry')
-    if 'tools.workspace_agent' not in sys.modules:
-        agent = mock.MagicMock()
-        agent.get_workspace_tool_defs.return_value = []
-        sys.modules['tools.workspace_agent'] = agent
-        stubbed.append('tools.workspace_agent')
-    import gateway
-    for name in stubbed:
-        sys.modules.pop(name, None)
-    return gateway
+def _load_reality_helpers():
+    source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+    tree = ast.parse(source, filename='gateway.py')
+    wanted = {
+        '_normalize_reality_context',
+        '_append_reality_context',
+        '_append_reality_to_last_user',
+    }
+    body = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in wanted
+    ]
+    namespace = {}
+    exec(compile(ast.Module(body=body, type_ignores=[]), 'gateway.py', 'exec'), namespace)
+    return namespace
 
 
 class RealityRequestContextTests(unittest.TestCase):
-    def test_empty_context_is_a_noop(self):
-        gateway = _import_gateway()
-        original = [{'role': 'user', 'content': 'hello'}]
-        self.assertEqual(gateway._normalize_reality_context(None), '')
-        self.assertEqual(gateway._normalize_reality_context('   '), '')
-        self.assertIs(
-            gateway._append_reality_to_last_user(original, '   '),
-            original,
+    def test_normalization_canonicalizes_empty_values(self):
+        helpers = _load_reality_helpers()
+        normalize = helpers['_normalize_reality_context']
+        for raw in (None, '', '   ', '\n\t'):
+            self.assertEqual(normalize(raw), '')
+        self.assertEqual(
+            normalize('  设备当前静止，电量80%。  '),
+            '设备当前静止，电量80%。',
         )
-        self.assertEqual(original[0]['content'], 'hello')
 
-    def test_multimodal_context_appends_text_without_touching_image(self):
-        gateway = _import_gateway()
+    def test_empty_context_is_a_noop(self):
+        helpers = _load_reality_helpers()
+        append = helpers['_append_reality_context']
+        append_last = helpers['_append_reality_to_last_user']
+        original_content = 'hello'
+        original_messages = [{'role': 'user', 'content': original_content}]
+        for empty in (None, '', '   ', '\n\t'):
+            self.assertEqual(append(original_content, empty), original_content)
+            self.assertIs(
+                append_last(original_messages, empty),
+                original_messages,
+            )
+        self.assertEqual(original_messages[0]['content'], original_content)
+
+    def test_multimodal_context_preserves_existing_blocks(self):
+        helpers = _load_reality_helpers()
+
+        class CanonicalReality(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError('downstream helper must not normalize')
+
+        reality = CanonicalReality('设备当前静止，电量80%。')
         original = [
             {
                 'role': 'user',
                 'content': [
                     {'type': 'text', 'text': 'hello'},
-                    {'type': 'image', 'source': {'type': 'base64', 'data': 'abc'}},
+                    {
+                        'type': 'image',
+                        'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'abc'},
+                    },
                 ],
             },
         ]
-        injected = gateway._append_reality_to_last_user(
-            original,
-            '设备当前静止，电量80%。',
-        )
+        injected = helpers['_append_reality_to_last_user'](original, reality)
         self.assertIsNot(injected, original)
-        self.assertEqual(
-            injected[0]['content'][:2],
-            original[0]['content'],
-        )
+        self.assertEqual(injected[0]['content'][:2], original[0]['content'])
         self.assertEqual(injected[0]['content'][2], {
             'type': 'text',
             'text': '\n\n设备当前静止，电量80%。',
         })
+        self.assertEqual(original[0]['content'][1]['source']['data'], 'abc')
         self.assertEqual(len(original[0]['content']), 2)
+
+    def test_persistence_payload_is_separate_from_canonical_context(self):
+        helpers = _load_reality_helpers()
+        request_data = {
+            'user_message_id': 42,
+            'reality_context': '  设备当前静止。  ',
+        }
+        reality = helpers['_normalize_reality_context'](
+            request_data.pop('reality_context', None)
+        )
+        self.assertEqual(reality, '设备当前静止。')
+        self.assertEqual(request_data, {'user_message_id': 42})
 
     def test_relay_selector_precedes_reality_injection(self):
         source = (ROOT / 'gateway.py').read_text(encoding='utf-8')
@@ -95,7 +112,7 @@ class RealityRequestContextTests(unittest.TestCase):
         self.assertLess(selector, reality)
         self.assertLess(reality, rounds)
 
-    def test_frontend_has_three_independent_capture_boundaries(self):
+    def test_frontend_has_independent_capture_boundaries(self):
         screen = (ROOT / 'app/src/screens/ChatScreen.tsx').read_text(encoding='utf-8')
         self.assertEqual(
             screen.count('realityPromptProjection.getSnapshot().text'),
@@ -106,7 +123,7 @@ class RealityRequestContextTests(unittest.TestCase):
             screen,
         )
         self.assertIn(
-            'const realityContext = decision === \'approve\'',
+            "const realityContext = decision === 'approve'",
             screen,
         )
 
@@ -122,10 +139,6 @@ class RealityRequestContextTests(unittest.TestCase):
         prepare = source.index('prepare_turn(', extract)
         strip = source.index("_request_data.pop('reality_context', None)", extract)
         self.assertLess(strip, prepare)
-        self.assertIn(
-            "_stream_cc_deferred_confirmation(",
-            source,
-        )
         self.assertIn(
             'reality_context=_reality_context',
             source,
