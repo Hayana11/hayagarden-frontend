@@ -1,0 +1,61 @@
+name: M5-05A External side-effect policy validation
+
+on:
+  pull_request:
+    paths:
+      - tools/external_tool_side_effect_policy.py
+      - tests/test_external_tool_side_effect_policy.py
+      - .github/workflows/m5-05a-external-side-effect-policy-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact base, head, merge-base, and three-file fence
+        shell: bash
+        env:
+          BASE_SHA: fd767de6b394958d951bf1e3de3d80b5c306d981
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" = "$BASE_SHA"
+          expected=$(printf '%s\n' \
+            .github/workflows/m5-05a-external-side-effect-policy-validation.yml \
+            tests/test_external_tool_side_effect_policy.py \
+            tools/external_tool_side_effect_policy.py)
+          actual=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Verify product source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=tools/external_tool_side_effect_policy.py
+          for needle in \
+            capability_manifest execution_fence lease_signer confirmation_store \
+            ExternalSecretStore decrypt materialize 'MCP Client' callTool \
+            tools/call tool_drawers cc-tools build_uh_a0_spawn_plan 'public route'; do
+            if grep -Fqi -- "$needle" "$source_file"; then
+              echo "forbidden product dependency: $needle" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run focused side-effect policy tests
+        shell: bash
+        run: python -m unittest -v tests.test_external_tool_side_effect_policy
