@@ -19,6 +19,7 @@ from .external_server_registry import (
     REGISTRATION_STATE,
     REVIEW_REQUIRED_STATE as SERVER_REVIEW_REQUIRED,
     REVOKED_STATE,
+    UnknownServerError,
 )
 
 PRESENT = "PRESENT"
@@ -111,6 +112,11 @@ class ExternalToolCandidateRegistry:
             raise TypeError("connection must be an sqlite3.Connection")
         if not isinstance(server_registry, ExternalServerRegistry):
             raise TypeError("server_registry must be an ExternalServerRegistry")
+        if getattr(server_registry, "_connection", None) is not connection:
+            raise ToolRegistryRejectedError(
+                "candidate and server registries must share the exact authoritative connection",
+                code="SERVER_AUTHORITY_MISMATCH",
+            )
         self._connection = connection
         self._server_registry = server_registry
         self.initialize()
@@ -322,18 +328,17 @@ class ExternalToolCandidateRegistry:
         return server_id, source_revision, tools
 
     def _gate_current_server(self, server_id: str, source_revision: int) -> None:
-        row = self._connection.execute(
-            "SELECT lifecycle_state, revision FROM external_server_registry WHERE server_id=?",
-            (server_id,),
-        ).fetchone()
-        if row is None:
-            raise ToolRegistryRejectedError("server identity is unknown", code="UNKNOWN_SERVER")
-        lifecycle_state, revision = row
-        if lifecycle_state == REVOKED_STATE:
+        try:
+            record = self._server_registry.get(server_id)
+        except UnknownServerError as exc:
+            raise ToolRegistryRejectedError(
+                "server identity is unknown", code="UNKNOWN_SERVER"
+            ) from exc
+        if record.lifecycle_state == REVOKED_STATE:
             raise ToolRegistryRejectedError("revoked server cannot ingest tools", code="REVOKED_SERVER")
-        if lifecycle_state not in (REGISTRATION_STATE, SERVER_REVIEW_REQUIRED):
+        if record.lifecycle_state not in (REGISTRATION_STATE, SERVER_REVIEW_REQUIRED):
             raise ToolRegistryRejectedError("server lifecycle is not ingestible", code="INVALID_SERVER_STATE")
-        if revision != source_revision:
+        if record.revision != source_revision:
             raise ToolRegistryRejectedError("server revision changed before ingest", code="REVISION_MISMATCH")
 
 

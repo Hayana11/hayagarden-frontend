@@ -99,6 +99,41 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
         self.server_registry.revoke(self.server.server_id)
         self.assertRejectedWithoutWrites(self.result([]), "REVOKED_SERVER")
 
+    def test_injected_server_registry_is_the_only_authority(self):
+        candidate_connection = sqlite3.connect(":memory:")
+        authority_connection = sqlite3.connect(":memory:")
+        try:
+            stale_registry = ExternalServerRegistry(
+                candidate_connection, id_factory=lambda: self.server.server_id
+            )
+            stale_registry.register(
+                display_name="Stale copy",
+                endpoint="https://stale-copy.example/mcp",
+                provenance="test",
+            )
+            authority_registry = ExternalServerRegistry(
+                authority_connection, id_factory=lambda: self.server.server_id
+            )
+            authority_registry.register(
+                display_name="Authoritative",
+                endpoint="https://authoritative.example/mcp",
+                provenance="test",
+            )
+            with self.assertRaises(ToolRegistryRejectedError) as raised:
+                ExternalToolCandidateRegistry(
+                    candidate_connection, server_registry=authority_registry
+                )
+            self.assertEqual(raised.exception.code, "SERVER_AUTHORITY_MISMATCH")
+            self.assertEqual(
+                candidate_connection.execute(
+                    "SELECT COUNT(*) FROM external_server_registry"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            candidate_connection.close()
+            authority_connection.close()
+
     def test_registered_and_review_required_are_allowed_but_server_owner_is_unchanged(self):
         self.owner.ingest(self.result([tool()]))
         row_before = self.connection.execute(
