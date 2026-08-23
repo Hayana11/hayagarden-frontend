@@ -102,6 +102,26 @@ test('HTTPS/transport and egress policy reject unsafe targets and mixed DNS', ()
   assert.throws(() => validateResolvedAddresses([{ address: '8.8.8.8', family: 4 }, { address: '10.0.0.1', family: 4 }]), /non-public/);
 });
 
+test('production fetch path reaches the real Undici lookup seam before any TCP dial', async () => {
+  const resolverCalls = [];
+  const result = await discoverExternalMcp({
+    endpoint: 'https://mixed.example.test/mcp',
+    limits: { connectTimeoutMs: 100, overallTimeoutMs: 500 },
+    resolver: async (hostname) => {
+      resolverCalls.push(hostname);
+      return [
+        { address: '8.8.8.8', family: 4 },
+        { address: '192.168.1.10', family: 4 },
+      ];
+    },
+  });
+  assert.equal(resolverCalls.length, 1);
+  assert.equal(resolverCalls[0], 'mixed.example.test');
+  assert.notEqual(result.status, DISCOVERY_STATUS.SUCCESS);
+  assert.equal(result.catalog_complete, false);
+  assert.equal(result.diagnostics.request_count, 1);
+});
+
 test('request, overall and cleanup paths remain finite with no automatic retry', async () => {
   let closedSignalSeen = false;
   const calls = [];

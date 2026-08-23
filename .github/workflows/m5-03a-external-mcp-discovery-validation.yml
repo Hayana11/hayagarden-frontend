@@ -19,15 +19,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Verify exact main base and changed-file fence
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
           test "$(git rev-parse HEAD^)" = "a2c4d2118d055323acf75022ab2acdc4c07e6988"
           test "$(git rev-parse origin/main)" = "a2c4d2118d055323acf75022ab2acdc4c07e6988"
           test "$(git diff --name-only HEAD^ HEAD | sort)" = $'.github/workflows/m5-03a-external-mcp-discovery-validation.yml\ntests/test_external_mcp_discovery_transport.mjs\ntools/external_mcp_discovery_transport.mjs'
           git diff --check HEAD^ HEAD
-          ! rg -n "external_server_registry|external_secret_store|fetchSecret|decrypt|Authorization|oauth|callTool|tools/call|claude|model|registry" tools/external_mcp_discovery_transport.mjs
+          forbidden='external_server_registry|external_secret_store|fetchSecret|decrypt|Authorization|oauth|callTool|tools/call|claude|model|registry'
+          if command -v rg >/dev/null 2>&1; then
+            if rg -n "$forbidden" tools/external_mcp_discovery_transport.mjs; then exit 1; fi
+          elif command -v grep >/dev/null 2>&1; then
+            if grep -nE "$forbidden" tools/external_mcp_discovery_transport.mjs; then exit 1; fi
+          else
+            echo "No supported forbidden-term scanner is available" >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22

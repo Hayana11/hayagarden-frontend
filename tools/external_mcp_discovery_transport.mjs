@@ -196,6 +196,29 @@ function boundedSummary(value, limit) {
   return clean.slice(0, limit);
 }
 
+function boundedResponse(response, maxBytes) {
+  const declared = Number(response.headers?.get?.('content-length') ?? 0);
+  if (declared > maxBytes) throw new DiscoveryLimitError('MCP response exceeded the byte limit');
+  if (!response.body || typeof response.body.pipeThrough !== 'function') return response;
+  let total = 0;
+  const boundedBody = response.body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      const bytes = typeof chunk === 'string' ? textEncoder.encode(chunk) : chunk;
+      total += bytes.byteLength;
+      if (total > maxBytes) {
+        controller.error(new DiscoveryLimitError('MCP response exceeded the byte limit'));
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  }));
+  return new Response(boundedBody, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 function resultSkeleton(diagnostics) {
   return {
     status: DISCOVERY_STATUS.PROTOCOL_ERROR,
@@ -232,6 +255,7 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
     const requestController = new AbortController();
     const signal = combineSignals([init.signal, requestController.signal]);
     const timer = setTimeout(() => requestController.abort(), timeoutMs);
+    let requestTimeoutHandle;
     try {
       const requestInit = {
         ...init,
@@ -241,16 +265,15 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
       };
       const response = await Promise.race([
         Promise.resolve((fetchImpl ?? globalThis.fetch)(input, requestInit)),
-        new Promise((_, reject) => setTimeout(() => reject(new DiscoveryTimeoutError('MCP request timed out')), timeoutMs)),
+        new Promise((_, reject) => {
+          requestTimeoutHandle = setTimeout(() => reject(new DiscoveryTimeoutError('MCP request timed out')), timeoutMs);
+        }),
       ]);
-      if (!response || typeof response.arrayBuffer !== 'function') throw new DiscoveryInputError('fetch returned an invalid response');
-      const declared = Number(response.headers?.get?.('content-length') ?? 0);
-      if (declared > limits.maxResponseBytes) throw new DiscoveryLimitError('MCP response exceeded the byte limit');
-      const body = await response.arrayBuffer();
-      if (body.byteLength > limits.maxResponseBytes) throw new DiscoveryLimitError('MCP response exceeded the byte limit');
-      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+      if (!response || typeof response.body === 'undefined') throw new DiscoveryInputError('fetch returned an invalid response');
+      return boundedResponse(response, limits.maxResponseBytes);
     } finally {
       clearTimeout(timer);
+      clearTimeout(requestTimeoutHandle);
     }
   };
 
