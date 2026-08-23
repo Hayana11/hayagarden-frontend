@@ -3883,6 +3883,33 @@ def _append_reality_to_last_user(messages, reality_context):
     return messages
 
 
+
+class _RequestRealityResident:
+    """Ephemeral resident adapter for one request-scoped Reality snapshot."""
+
+    __slots__ = ('_resident', '_request_reality_context')
+
+    def __init__(self, resident, request_reality_context):
+        self._resident = resident
+        self._request_reality_context = request_reality_context
+
+    def send_turn(self, content, **kwargs):
+        content = _append_reality_context(
+            content,
+            self._request_reality_context,
+        )
+        return self._resident.send_turn(content, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._resident, name)
+
+    def __setattr__(self, name, value):
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._resident, name, value)
+
+
 def _cc_resident_stream_gen(
     messages, *, user_turn=True, history_stats=None, is_cold=None,
     rebuild_messages_fn=None, pending_respawn_reason=None,
@@ -5517,7 +5544,9 @@ def _gw_first_turn_precommit_terminal(
             return 'failed'
 
 
-def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
+def _stream_cc_first_turn(
+    _turn_data, _uc, intent: dict, *, request_reality_context='',
+):
     """First-turn path: claim existing user → staged send → handoff on first text."""
     import logging
     import uuid
@@ -5790,6 +5819,10 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
                 'first-turn reality_context injection failed; continuing without',
                 exc_info=True,
             )
+        first_turn_content = _append_reality_context(
+            first_turn_content,
+            request_reality_context,
+        )
 
         event_iter = iter(session.staged.send_turn(
             first_turn_content,
@@ -5995,7 +6028,9 @@ def _stream_cc_first_turn(_turn_data, _uc, intent: dict):
         _close_event_iter()
 
 
-def _stream_cc_daily_soft_window(_turn_data, _uc):
+def _stream_cc_daily_soft_window(
+    _turn_data, _uc, *, request_reality_context='',
+):
     """Yield SSE event strings for DAILY_SOFT_WINDOW_ENABLED claude_code chat."""
     import hashlib
     import logging
@@ -6023,7 +6058,10 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
                 and int(current['id']) == int(intent['source_context_id'])
                 and int(current['context_epoch']) == int(intent['source_context_epoch'])
             ):
-                yield from _stream_cc_first_turn(_turn_data, _uc, intent)
+                yield from _stream_cc_first_turn(
+                    _turn_data, _uc, intent,
+                    request_reality_context=request_reality_context,
+                )
                 return
             yield _sse_json({
                 't': 'err',
@@ -6117,9 +6155,13 @@ def _stream_cc_daily_soft_window(_turn_data, _uc):
 
         cc_tool_calls = []
         deferred_payload = None
+        _daily_resident = (
+            _RequestRealityResident(_CC_RESIDENT, request_reality_context)
+            if request_reality_context else _CC_RESIDENT
+        )
         _daily_events = _daily_rt.stream_daily_resident_turn(
             _daily_plan,
-            resident=_CC_RESIDENT,
+            resident=_daily_resident,
             env=_cc_env,
             static_system=_full_system,
         )
@@ -6492,7 +6534,7 @@ def chat_stream():
             _turn_data: dict = {}
             try:
                 _request_data = request.get_json(silent=True) or {}
-                _reality_context = _normalize_reality_context(
+                request_reality_context = _normalize_reality_context(
                     _request_data.pop('reality_context', None)
                 )
                 if (
@@ -6506,7 +6548,7 @@ def chat_stream():
                     try:
                         yield from _stream_cc_deferred_confirmation(
                             _request_data,
-                            reality_context=_reality_context,
+                            reality_context=request_reality_context,
                         )
                     finally:
                         _gen_release(None)
@@ -6653,7 +6695,7 @@ def chat_stream():
                         rebuild_messages_fn=_rebuild_cc_messages if _cc_is_cold else None,
                         pending_respawn_reason=_cc_pending_respawn_reason,
                         display_thinking_mode=_display_thinking_mode,
-                        reality_context=_reality_context,
+                        reality_context=request_reality_context,
                     )
                     for evt, payload in filter_display_thinking_events(
                         _resident_events, _display_thinking_mode,
@@ -6848,7 +6890,7 @@ def chat_stream():
         _persisted = [False]
         _turn_data: dict = {}
         _request_data = request.get_json(silent=True) or {}
-        _reality_context = _normalize_reality_context(
+        request_reality_context = _normalize_reality_context(
             _request_data.pop('reality_context', None)
         )
         if (
@@ -7023,7 +7065,7 @@ def chat_stream():
                 # 工具抽屉路由：默认关闭（TOOL_DRAWERS_ENABLED=0 时原样全量）
                 _turn_tools, _ = tool_drawers.select_tools_from_messages(messages, get_tools())
                 # Reality is request-scoped and must not affect tool selection.
-                messages = _append_reality_to_last_user(messages, _reality_context)
+                messages = _append_reality_to_last_user(messages, request_reality_context)
                 for _round in range(5):
                     payload = {
                         'max_tokens': 16000,
