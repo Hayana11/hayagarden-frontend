@@ -108,7 +108,7 @@ class RealityRequestContextTests(unittest.TestCase):
             'tool_drawers.select_tools_from_messages(messages, get_tools())'
         )
         reality = source.index(
-            'messages = _append_reality_to_last_user(messages, _reality_context)'
+            'messages = _append_reality_to_last_user(messages, request_reality_context)'
         )
         rounds = source.index('for _round in range(5):', reality)
         self.assertLess(selector, reality)
