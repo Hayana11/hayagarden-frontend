@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 
 from tools.external_server_registry import ExternalServerRegistry, REVOKED_STATE
@@ -706,6 +708,194 @@ class ExternalToolCandidateRegistryTests(unittest.TestCase):
             if second_connection is not None:
                 second_connection.close()
             import os
+            os.unlink(path)
+
+    def test_review_and_discovery_cross_races_are_fail_closed(self):
+        def make_case():
+            handle = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
+            path = handle.name
+            handle.close()
+            connection = sqlite3.connect(path, timeout=5, check_same_thread=False)
+            servers = ExternalServerRegistry(connection)
+            server = servers.register(
+                display_name="Cross race",
+                endpoint="https://cross-race.example/mcp",
+                provenance="test",
+            )
+            owner = ExternalToolCandidateRegistry(connection, server_registry=servers)
+            original = tool()
+            owner.ingest({
+                "status": "SUCCESS", "catalog_complete": True,
+                "server_id": server.server_id, "registry_revision": server.revision,
+                "tool_record_boundary": "SDK_VISIBLE_RAW", "tools": [original],
+                "diagnostics": {"registry_changed_during_attempt": False},
+                "model_visible": False, "execution_allowed": False,
+            })
+            other_connection = sqlite3.connect(path, timeout=5, check_same_thread=False)
+            other_servers = ExternalServerRegistry(other_connection)
+            other_owner = ExternalToolCandidateRegistry(
+                other_connection, server_registry=other_servers
+            )
+            return path, connection, owner, other_connection, other_owner, server, original
+
+        def discovery_result(server, catalog):
+            return {
+                "status": "SUCCESS", "catalog_complete": True,
+                "server_id": server.server_id, "registry_revision": server.revision,
+                "tool_record_boundary": "SDK_VISIBLE_RAW", "tools": catalog,
+                "diagnostics": {"registry_changed_during_attempt": False},
+                "model_visible": False, "execution_allowed": False,
+            }
+
+        # Discovery takes the write lock first. The review starts while that
+        # transaction is held and must reject the stale expected fingerprint.
+        path, connection, owner, other_connection, other_owner, server, original = make_case()
+        entered = threading.Event()
+        release = threading.Event()
+        callback_calls = [0]
+
+        def pause_discovery():
+            if callback_calls[0] == 0:
+                callback_calls[0] += 1
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return 0
+
+        try:
+            connection.create_function("pause_discovery", 0, pause_discovery)
+            connection.executescript(
+                """
+                CREATE TRIGGER pause_cross_race_discovery
+                BEFORE UPDATE OF current_fingerprint ON external_tool_candidate_registry
+                BEGIN
+                    SELECT pause_discovery();
+                END;
+                """
+            )
+            candidate = owner.get_candidate(server.server_id, original["name"])
+            discovery_errors = []
+            review_errors = []
+            review_started = threading.Event()
+
+            def discover_new_version():
+                try:
+                    owner.ingest(discovery_result(server, [tool(description="new")]))
+                except Exception as exc:  # pragma: no cover - asserted below
+                    discovery_errors.append(exc)
+
+            def review_old_version():
+                review_started.set()
+                try:
+                    other_owner.approve_candidate(
+                        server_id=server.server_id, tool_name=original["name"],
+                        expected_fingerprint=candidate["current_fingerprint"],
+                        expected_source_registry_revision=candidate["current_source_registry_revision"],
+                        actor="owner", provenance="settings-admin",
+                    )
+                except Exception as exc:
+                    review_errors.append(exc)
+
+            discovery_thread = threading.Thread(target=discover_new_version)
+            review_thread = threading.Thread(target=review_old_version)
+            discovery_thread.start()
+            self.assertTrue(entered.wait(5))
+            review_thread.start()
+            self.assertTrue(review_started.wait(5))
+            time.sleep(0.05)
+            release.set()
+            discovery_thread.join(5)
+            review_thread.join(5)
+            self.assertFalse(discovery_thread.is_alive())
+            self.assertFalse(review_thread.is_alive())
+            self.assertEqual(discovery_errors, [])
+            self.assertEqual(len(review_errors), 1)
+            self.assertEqual(review_errors[0].code, "FINGERPRINT_MISMATCH")
+            final = owner.get_candidate(server.server_id, original["name"])
+            self.assertEqual(final["review_state"], REVIEW_REQUIRED)
+            self.assertIsNone(owner.get_approval_baseline(server.server_id, original["name"]))
+            self.assertEqual(owner.list_review_audit(server.server_id, original["name"]), ())
+        finally:
+            connection.close()
+            other_connection.close()
+            os.unlink(path)
+
+        # Review takes the write lock first. Discovery starts concurrently,
+        # then commits a new version and must invalidate the approval baseline.
+        path, connection, owner, other_connection, other_owner, server, original = make_case()
+        entered = threading.Event()
+        release = threading.Event()
+        callback_calls = [0]
+
+        def pause_review():
+            if callback_calls[0] == 0:
+                callback_calls[0] += 1
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return 0
+
+        try:
+            connection.create_function("pause_review", 0, pause_review)
+            other_connection.create_function("pause_review", 0, lambda: 0)
+            connection.executescript(
+                """
+                CREATE TRIGGER pause_cross_race_review
+                BEFORE UPDATE OF review_state ON external_tool_candidate_registry
+                BEGIN
+                    SELECT pause_review();
+                END;
+                """
+            )
+            candidate = owner.get_candidate(server.server_id, original["name"])
+            review_results = []
+            discovery_results = []
+            discovery_started = threading.Event()
+
+            def approve_current_version():
+                try:
+                    review_results.append(owner.approve_candidate(
+                        server_id=server.server_id, tool_name=original["name"],
+                        expected_fingerprint=candidate["current_fingerprint"],
+                        expected_source_registry_revision=candidate["current_source_registry_revision"],
+                        actor="owner", provenance="settings-admin",
+                    ))
+                except Exception as exc:  # pragma: no cover - asserted below
+                    review_results.append(exc)
+
+            def discover_after_review_starts():
+                discovery_started.set()
+                try:
+                    discovery_results.append(
+                        other_owner.ingest(discovery_result(server, [tool(description="new")]))
+                    )
+                except Exception as exc:  # pragma: no cover - asserted below
+                    discovery_results.append(exc)
+
+            review_thread = threading.Thread(target=approve_current_version)
+            discovery_thread = threading.Thread(target=discover_after_review_starts)
+            review_thread.start()
+            self.assertTrue(entered.wait(5))
+            discovery_thread.start()
+            self.assertTrue(discovery_started.wait(5))
+            time.sleep(0.05)
+            release.set()
+            review_thread.join(5)
+            discovery_thread.join(5)
+            self.assertFalse(review_thread.is_alive())
+            self.assertFalse(discovery_thread.is_alive())
+            self.assertEqual(len(review_results), 1)
+            self.assertTrue(review_results[0]["changed"])
+            self.assertEqual(len(discovery_results), 1)
+            self.assertIsInstance(discovery_results[0], dict)
+            final = owner.get_candidate(server.server_id, original["name"])
+            self.assertEqual(final["review_state"], REVIEW_REQUIRED)
+            self.assertIsNone(owner.get_approval_baseline(server.server_id, original["name"]))
+            self.assertEqual(
+                [row["decision"] for row in owner.list_review_audit(server.server_id, original["name"])],
+                ["APPROVE"],
+            )
+        finally:
+            connection.close()
+            other_connection.close()
             os.unlink(path)
     def test_rejected_and_stale_discovery_do_not_change_source_revision(self):
         self.owner.ingest(self.result([tool()]))
