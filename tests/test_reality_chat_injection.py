@@ -46,11 +46,13 @@ class RealityRequestContextTests(unittest.TestCase):
 
     def test_empty_context_is_a_noop(self):
         helpers = _load_reality_helpers()
+        normalize = helpers['_normalize_reality_context']
         append = helpers['_append_reality_context']
         append_last = helpers['_append_reality_to_last_user']
         original_content = 'hello'
         original_messages = [{'role': 'user', 'content': original_content}]
-        for empty in (None, '', '   ', '\n\t'):
+        for raw in (None, '', '   ', '\n\t'):
+            empty = normalize(raw)
             self.assertEqual(append(original_content, empty), original_content)
             self.assertIs(
                 append_last(original_messages, empty),
