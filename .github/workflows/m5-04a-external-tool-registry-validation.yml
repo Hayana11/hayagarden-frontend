@@ -1,0 +1,73 @@
+name: M5-04A External tool candidate registry validation
+
+on:
+  pull_request:
+    paths:
+      - "tools/external_tool_registry.py"
+      - "tests/test_external_tool_registry.py"
+      - ".github/workflows/m5-04a-external-tool-registry-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact pull request head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact base, head, and three-file fence
+        shell: bash
+        env:
+          BASE_SHA: fd0c1668c704cf63c9f671093f8723c2fa88aff2
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          expected=$(printf '%s\n' \
+            .github/workflows/m5-04a-external-tool-registry-validation.yml \
+            tests/test_external_tool_registry.py \
+            tools/external_tool_registry.py)
+          actual=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Product source boundary fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=tools/external_tool_registry.py
+          for needle in \
+            external_secret_store \
+            ExternalSecretStore \
+            decrypt \
+            materialize \
+            callTool \
+            tools/call \
+            capability_manifest \
+            execution_fence \
+            tool_drawers \
+            cc-tools \
+            build_uh_a0_spawn_plan \
+            public_routes; do
+            if while IFS= read -r line; do
+              case "$line" in
+                *"$needle"*) exit 0 ;;
+              esac
+            done < "$source_file"; then
+              echo "forbidden source term: $needle"
+              exit 1
+            fi
+          done
+
+      - name: Run focused candidate registry tests
+        shell: bash
+        run: python -m unittest tests.test_external_tool_registry
