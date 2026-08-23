@@ -1,0 +1,51 @@
+name: M5-03A External MCP discovery validation
+
+on:
+  pull_request:
+    paths:
+      - 'tools/external_mcp_discovery_transport.mjs'
+      - 'tests/test_external_mcp_discovery_transport.mjs'
+      - '.github/workflows/m5-03a-external-mcp-discovery-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact main base and changed-file fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA=a2c4d2118d055323acf75022ab2acdc4c07e6988
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" HEAD | sort)" = $'.github/workflows/m5-03a-external-mcp-discovery-validation.yml\ntests/test_external_mcp_discovery_transport.mjs\ntools/external_mcp_discovery_transport.mjs'
+          git diff --check "$BASE_SHA" HEAD
+          scan_file=tools/external_mcp_discovery_transport.mjs
+          test -f "$scan_file" && test -r "$scan_file"
+          mapfile -t scan_lines < "$scan_file"
+          for line in "${scan_lines[@]}"; do
+            case "$line" in
+              *external_server_registry*|*external_secret_store*|*fetchSecret*|*decrypt*|*Authorization*|*oauth*|*callTool*|*tools/call*|*claude*)
+                echo "forbidden term found in $scan_file" >&2
+                exit 1
+                ;;
+            esac
+          done
+          true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Focused real-SDK safe discovery tests
+        run: node --test tests/test_external_mcp_discovery_transport.mjs
