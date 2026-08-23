@@ -50,17 +50,8 @@ ALLOW_CURRENT_ACTION = "ALLOW_CURRENT_ACTION"
 AUTHORITY_READ_FAILED = "AUTHORITY_READ_FAILED"
 
 ACTION_ID_PREFIX = "external_action_sha256:"
-TURN_LEASE_FIELDS = (
-    "lease_version",
-    "turn_id",
-    "turn_mode",
-    "issued_from",
-    "allowed_capabilities",
-    "approval_ids",
-    "task_contract_id",
-    "issued_at",
-)
-TURN_MODES = frozenset({"chat", "wake", "task"})
+
+
 class ExternalExecutionFenceError(ValueError):
     code = "EXTERNAL_EXECUTION_FENCE_ERROR"
 
