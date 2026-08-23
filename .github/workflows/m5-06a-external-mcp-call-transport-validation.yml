@@ -56,4 +56,3 @@ jobs:
         run: node --test tests/test_external_mcp_call_transport.mjs
       - name: Narrow M5-03A discovery regression
         run: node --test tests/test_external_mcp_discovery_transport.mjs
-

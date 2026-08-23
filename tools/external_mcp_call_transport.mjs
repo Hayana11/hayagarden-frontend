@@ -297,4 +297,3 @@ export async function invokeExternalMcp({
 }
 
 export { SUPPORTED_TRANSPORT };
-
