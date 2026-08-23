@@ -31,23 +31,24 @@ jobs:
           git diff --check HEAD^ HEAD
           forbidden='external_server_registry|external_secret_store|fetchSecret|decrypt|Authorization|oauth|callTool|tools/call|claude|(^|[^A-Za-z])model([^A-Za-z]|$)|(^|[^A-Za-z])registry([^A-Za-z]|$)'
           if command -v rg >/dev/null 2>&1; then
-            if rg -n "$forbidden" tools/external_mcp_discovery_transport.mjs; then
-              echo "forbidden term found" >&2
-              exit 1
-            else
-              test "$?" -eq 1
-            fi
+            set +e
+            rg -n "$forbidden" tools/external_mcp_discovery_transport.mjs
+            scan_status=$?
+            set -e
           elif command -v grep >/dev/null 2>&1; then
-            if grep -nE "$forbidden" tools/external_mcp_discovery_transport.mjs; then
-              echo "forbidden term found" >&2
-              exit 1
-            else
-              test "$?" -eq 1
-            fi
+            set +e
+            grep -nE "$forbidden" tools/external_mcp_discovery_transport.mjs
+            scan_status=$?
+            set -e
           else
             echo "No supported forbidden-term scanner is available" >&2
             exit 1
           fi
+          if test "$scan_status" -eq 0; then
+            echo "forbidden term found" >&2
+            exit 1
+          fi
+          test "$scan_status" -eq 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
