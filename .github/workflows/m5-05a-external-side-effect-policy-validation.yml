@@ -59,4 +59,3 @@ jobs:
       - name: Run focused side-effect policy tests
         shell: bash
         run: python -m unittest -v tests.test_external_tool_side_effect_policy
-
