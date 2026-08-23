@@ -1,0 +1,39 @@
+name: M5-01 External Server Registry validation
+
+on:
+  pull_request:
+    paths:
+      - "tools/external_server_registry.py"
+      - "tests/test_external_server_registry.py"
+      - ".github/workflows/m5-01-external-server-registry-validation.yml"
+
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/heads/codex/m5-01-external-server-registry
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify exact base, changed-files fence, and diff check
+        shell: bash
+        env:
+          BASE_SHA: 2a85cc2a3725f09b3b3ef5e08ec8b1ffafa3c608
+        run: |
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test -z "$(git -c core.whitespace=cr-at-eol diff --check "$BASE_SHA" HEAD)"
+          actual="$(git diff --name-only "$BASE_SHA" HEAD | sort | tr '\n' ' ')"
+          expected=".github/workflows/m5-01-external-server-registry-validation.yml tests/test_external_server_registry.py tools/external_server_registry.py "
+          echo "actual_files=<$actual>"
+          echo "expected_files=<$expected>"
+          test "$actual" = "$expected"
+
+      - name: Run focused M5-01 tests
+        run: python -m unittest -v tests.test_external_server_registry
