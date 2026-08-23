@@ -3855,11 +3855,10 @@ def _normalize_reality_context(value):
 
 
 def _append_reality_context(content, reality_context):
-    """Append non-persistent Reality to one provider's current-turn content."""
-    context = _normalize_reality_context(reality_context)
-    if not context:
+    """Append a canonical request-scoped Reality string to current-turn content."""
+    if not reality_context:
         return content
-    suffix = '\n\n' + context
+    suffix = '\n\n' + reality_context
     if isinstance(content, str):
         return content + suffix
     if isinstance(content, list):
@@ -3868,8 +3867,7 @@ def _append_reality_context(content, reality_context):
 
 
 def _append_reality_to_last_user(messages, reality_context):
-    context = _normalize_reality_context(reality_context)
-    if not context or not isinstance(messages, list):
+    if not reality_context or not isinstance(messages, list):
         return messages
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
@@ -3877,7 +3875,9 @@ def _append_reality_to_last_user(messages, reality_context):
             continue
         updated = list(messages)
         last = dict(message)
-        last['content'] = _append_reality_context(last.get('content'), context)
+        last['content'] = _append_reality_context(
+            last.get('content'), reality_context,
+        )
         updated[index] = last
         return updated
     return messages
