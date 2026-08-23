@@ -215,6 +215,7 @@ function classifyFailure(error, limits) {
   if (error instanceof DiscoveryTimeoutError || error?.name === 'AbortError') return { code: DISCOVERY_STATUS.UNAVAILABLE, summary: 'discovery timed out' };
   const status = Number(error?.code ?? error?.status ?? 0);
   if (status === 401 || status === 403) return { code: DISCOVERY_STATUS.AUTH_REQUIRED, summary: `remote server returned HTTP ${status}` };
+  if (status >= 500 && status <= 599) return { code: DISCOVERY_STATUS.UNAVAILABLE, summary: `remote server returned HTTP ${status}` };
   if (REDIRECT_STATUS.has(status)) return { code: DISCOVERY_STATUS.PROTOCOL_ERROR, summary: 'redirects are not permitted' };
   if (error?.name === 'SyntaxError' || error?.name === 'McpError' || error?.name === 'ZodError') return { code: DISCOVERY_STATUS.PROTOCOL_ERROR, summary: 'remote MCP response was malformed' };
   if (error?.name === 'TypeError' || error?.name === 'ConnectTimeoutError') return { code: DISCOVERY_STATUS.UNAVAILABLE, summary: 'remote MCP network request failed' };
