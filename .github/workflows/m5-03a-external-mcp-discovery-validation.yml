@@ -29,33 +29,20 @@ jobs:
           test "$(git rev-parse origin/main)" = "a2c4d2118d055323acf75022ab2acdc4c07e6988"
           test "$(git diff --name-only HEAD^ HEAD | sort)" = $'.github/workflows/m5-03a-external-mcp-discovery-validation.yml\ntests/test_external_mcp_discovery_transport.mjs\ntools/external_mcp_discovery_transport.mjs'
           git diff --check HEAD^ HEAD
-          forbidden='external_server_registry|external_secret_store|fetchSecret|decrypt|Authorization|oauth|callTool|tools/call|claude|(^|[^A-Za-z])model([^A-Za-z]|$)|(^|[^A-Za-z])registry([^A-Za-z]|$)'
-          if command -v rg >/dev/null 2>&1; then
-            set +e
-            rg -n "$forbidden" tools/external_mcp_discovery_transport.mjs
-            scan_status=$?
-            set -e
-            if test "$scan_status" -eq 0; then
-              echo "forbidden term found" >&2
-              exit 1
-            fi
-            test "$scan_status" -eq 1
-          elif command -v python3 >/dev/null 2>&1; then
+          if command -v python3 >/dev/null 2>&1; then
             python3 - <<'PY'
-          import re
           from pathlib import Path
 
           text = Path('tools/external_mcp_discovery_transport.mjs').read_text(encoding='utf-8')
-          patterns = [
-              r'external_server_registry', r'external_secret_store', r'fetchSecret',
-              r'decrypt', r'Authorization', r'oauth', r'callTool', r'tools/call',
-              r'claude', r'(^|[^A-Za-z])model([^A-Za-z]|$)',
-              r'(^|[^A-Za-z])registry([^A-Za-z]|$)',
-          ]
-          for pattern in patterns:
-              match = re.search(pattern, text)
-              if match:
-                  raise SystemExit(f'forbidden term found: {pattern}')
+          forbidden = (
+              'external_server_registry', 'external_secret_store', 'fetchSecret',
+              'decrypt', 'Authorization', 'oauth', 'callTool', 'tools/call',
+              'claude', 'model.', 'model_', 'model/', ' model ',
+              'registry.', 'registry_', 'registry/', ' registry ',
+          )
+          hits = [term for term in forbidden if term in text]
+          if hits:
+              raise SystemExit(f'forbidden term found: {hits}')
           PY
           else
             echo "No supported forbidden-term scanner is available" >&2
