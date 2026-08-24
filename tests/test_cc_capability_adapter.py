@@ -362,6 +362,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         set_capability_state("web.search", enabled=False)
         set_capability_state("todo.read", enabled=False)
         set_capability_state("memory.search", enabled=False)
+        set_capability_state("memory.write", enabled=False)
         plan = self._plan()
 
         self.assertNotIn("Read", plan["built_in_tools"])
