@@ -154,13 +154,24 @@ def fetch_history_rows(
         available = conn.execute(
             'SELECT COUNT(*) FROM chat_messages WHERE ' + _HISTORY_WHERE
         ).fetchone()[0] or 0
-        rows = list(reversed(conn.execute(
-            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name, attachments '
-            'FROM chat_messages WHERE ' + _HISTORY_WHERE + (
-                ' AND id >= ?' if min_id > 0 else ''
-            ) + ' ORDER BY id DESC LIMIT ?',
-            ((min_id, fetch_limit) if min_id > 0 else (fetch_limit,)),
-        ).fetchall()))
+        params = (min_id, fetch_limit) if min_id > 0 else (fetch_limit,)
+        where = _HISTORY_WHERE + (' AND id >= ?' if min_id > 0 else '')
+        try:
+            rows = list(reversed(conn.execute(
+                'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name, attachments '
+                'FROM chat_messages WHERE ' + where + ' ORDER BY id DESC LIMIT ?',
+                params,
+            ).fetchall()))
+        except Exception as exc:
+            # Existing installations run the migration at app startup. Keep pure
+            # history consumers backward-compatible with older read-only fixtures.
+            if 'no such column: attachments' not in str(exc).lower():
+                raise
+            rows = list(reversed(conn.execute(
+                'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name '
+                'FROM chat_messages WHERE ' + where + ' ORDER BY id DESC LIMIT ?',
+                params,
+            ).fetchall()))
     finally:
         conn.close()
     return rows, int(available)
