@@ -97,7 +97,12 @@ class ChatMultiAttachmentRouteTests(unittest.TestCase):
         end = source.index("@app.route", start + 1)
         route = source[start:end]
         self.assertIn("request.files.getlist('image')", route)
+        self.assertIn("requested_attachment_count > MAX_CHAT_ATTACHMENTS", route)
         self.assertIn("len(attachments) > MAX_CHAT_ATTACHMENTS", route)
+        self.assertLess(
+            route.index("requested_attachment_count > MAX_CHAT_ATTACHMENTS"),
+            route.index("for image_upload in image_uploads:"),
+        )
         self.assertIn("attachments_json = json.dumps(attachments, ensure_ascii=False)", route)
         self.assertIn("file_name,attachments", route)
         rewrite_source = (Path(__file__).parents[1] / 'chat' / 'rewrite_staging.py').read_text(
