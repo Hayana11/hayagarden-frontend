@@ -429,7 +429,7 @@ export function fetchChatMessagesOrNull(
 }
 
 // POST /api/chat/send -> { ok, message_id }. Files are pre-uploaded;
- // images are submitted together so the backend can re-encode them.
+// images are submitted together so the backend can re-encode them.
 export interface PendingChatFile {
   fileUrl: string;
   fileName: string;
