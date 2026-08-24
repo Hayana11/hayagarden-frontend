@@ -120,6 +120,7 @@ const { listener, port } = await internalServer.startInternalMcpServer({
   dbPath,
   cwd: root,
   python: process.env.PYTHON || 'python3',
+  verify: async () => ({ lease_decision: 'ALLOW' }),
 });
 const client = new Client({ name: 'm3-04b-internal-memory', version: '1.0.0' });
 const transport = new StreamableHTTPClientTransport(
