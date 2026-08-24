@@ -12,8 +12,10 @@ from chat.attachment_contract import (
     MAX_IMAGE_INPUT_BYTES,
     MAX_TEXT_FILE_BYTES,
     AttachmentValidationError,
+    persisted_chat_attachments,
     read_limited_upload,
     render_markdown_preview_page,
+    text_file_attachments,
     reencode_chat_image,
     resolve_uploaded_file_url,
     safe_child_path,
@@ -90,6 +92,22 @@ class MultiAttachmentContractTests(unittest.TestCase):
                 self.assertEqual(result[0], path.resolve())
 
 
+    def test_binary_attachments_are_never_text_history_candidates(self):
+        attachments = [
+            {'type': 'file', 'url': '/static/uploads/files/abcd1234_readme.md', 'name': 'readme.md'},
+            {'type': 'file', 'url': '/static/uploads/files/abcd1234_plan.pdf', 'name': 'plan.pdf'},
+            {'type': 'file', 'url': '/static/uploads/files/abcd1234_notes.docx', 'name': 'notes.docx'},
+        ]
+        self.assertEqual(
+            [item['name'] for item in text_file_attachments(attachments)],
+            ['readme.md'],
+        )
+        self.assertEqual(
+            [item['name'] for item in persisted_chat_attachments(attachments)],
+            ['readme.md', 'plan.pdf', 'notes.docx'],
+        )
+
+
 class ChatMultiAttachmentRouteTests(unittest.TestCase):
     def test_send_route_uses_durable_attachment_array_and_four_item_gate(self):
         source = (Path(__file__).parents[1] / 'app.py').read_text(encoding='utf-8')
@@ -105,6 +123,11 @@ class ChatMultiAttachmentRouteTests(unittest.TestCase):
         )
         self.assertIn("attachments_json = json.dumps(attachments, ensure_ascii=False)", route)
         self.assertIn("file_name,attachments", route)
+        boundary_source = (Path(__file__).parents[1] / 'chat' / 'history_boundary.py').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn("attachments", boundary_source)
+        self.assertIn("path.suffix.lower() not in ALLOWED_TEXT_FILE_EXTENSIONS", boundary_source)
         rewrite_source = (Path(__file__).parents[1] / 'chat' / 'rewrite_staging.py').read_text(
             encoding='utf-8'
         )
