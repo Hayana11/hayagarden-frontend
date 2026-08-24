@@ -70,6 +70,7 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "ledger.budget.read",
     "ledger.write",
     "memory.search",
+    "memory.write",
 )
 
 # No Internal Memory shadow remains after the Daily provider cutover.
@@ -139,7 +140,11 @@ def uh_a0_internal_mcp_tools() -> tuple[str, ...]:
 
 def uh_a0_home_legacy_tools() -> tuple[str, ...]:
     """Home capability names retained for Wake/legacy and forbidden in Daily."""
-    return tuple(_provider_binding(cid, "home_mcp") for cid in INTERNAL_MCP_CAPABILITY_IDS)
+    return tuple(
+        _provider_binding(cid, "home_mcp")
+        for cid in INTERNAL_MCP_CAPABILITY_IDS
+        if (get_capability(cid).get("provider_bindings") or {}).get("home_mcp")
+    )
 
 def uh_a0_native_bindings() -> dict[str, str]:
     return {cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS}

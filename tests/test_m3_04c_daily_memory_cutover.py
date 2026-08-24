@@ -24,7 +24,7 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
-TARGET_FINGERPRINT = "fb7319322de9ab600395f776043cbc29aa9925c30637727cbd92c7d0b23b6d11"
+TARGET_FINGERPRINT = "d37ffa3da77cbbe5added332b433f541974f6c0dd2251510da89610b2f18cb7a"
 HOME_MEMORY = "mcp__home__search_memories"
 INTERNAL_MEMORY = "mcp__internal__search_memories"
 
@@ -47,7 +47,7 @@ class DailyMemoryCutoverTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search"),
+            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search", "memory.write"),
         )
         self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, ())
         item = get_capability("memory.search")

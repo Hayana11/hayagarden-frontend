@@ -84,7 +84,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search"),
+            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search", "memory.write"),
         )
         self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, ())
         home = uh_a0_home_mcp_tools()
@@ -362,6 +362,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         set_capability_state("web.search", enabled=False)
         set_capability_state("todo.read", enabled=False)
         set_capability_state("memory.search", enabled=False)
+        set_capability_state("memory.write", enabled=False)
         plan = self._plan()
 
         self.assertNotIn("Read", plan["built_in_tools"])
@@ -386,8 +387,10 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertIn(ledger_tool, plan["disallowed_tools"])
         self.assertNotIn("mcp__home__search_memories", plan["home_mcp_tools"])
         self.assertNotIn("mcp__internal__search_memories", plan["internal_mcp_tools"])
+        self.assertNotIn("mcp__internal__write_memory", plan["internal_mcp_tools"])
         self.assertIn("mcp__home__search_memories", plan["disallowed_tools"])
         self.assertIn("mcp__internal__search_memories", plan["disallowed_tools"])
+        self.assertIn("mcp__internal__write_memory", plan["disallowed_tools"])
         self.assertIn("mcp__home__light_on", plan["disallowed_tools"])
         self.assertIn("mcp__home__exec_vps", plan["disallowed_tools"])
 

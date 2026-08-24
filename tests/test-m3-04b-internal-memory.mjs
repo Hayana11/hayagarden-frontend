@@ -38,7 +38,7 @@ python(
   `import json, sqlite3, sys
 data = json.loads(sys.argv[2])
 conn = sqlite3.connect(sys.argv[1])
-conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL, author TEXT DEFAULT 'fyodor', created_at TEXT, pinned INTEGER DEFAULT 0, tags TEXT DEFAULT '', layer TEXT DEFAULT 'recent', resolved INTEGER DEFAULT 0, recall_count INTEGER DEFAULT 0, last_recalled_at TEXT)")
+conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL, author TEXT DEFAULT 'fyodor', created_at TEXT, pinned INTEGER DEFAULT 0, importance INTEGER DEFAULT 0, tags TEXT DEFAULT '', layer TEXT DEFAULT 'recent', resolved INTEGER DEFAULT 0, recall_count INTEGER DEFAULT 0, last_recalled_at TEXT)")
 conn.executemany("INSERT INTO posts (id,type,content,created_at,pinned,tags,layer,resolved) VALUES (?,?,?,?,?,?,?,?)", data)
 conn.commit()
 conn.close()`,
@@ -104,10 +104,10 @@ assert.deepEqual(meta.binding, {
   home_mcp: 'mcp__home__search_memories',
 });
 assert.deepEqual(meta.home_ids, ['diary.write', 'home.light.status', 'countdown.read']);
-assert.deepEqual(meta.internal_ids, ['todo.read', 'todo.write', 'ledger.read', 'ledger.budget.read', 'ledger.write', 'memory.search']);
+assert.deepEqual(meta.internal_ids, ['todo.read', 'todo.write', 'ledger.read', 'ledger.budget.read', 'ledger.write', 'memory.search', 'memory.write']);
 assert.deepEqual(meta.shadow, []);
 assert.equal(meta.schema_equal, true);
-assert.equal(meta.fingerprint, 'fb7319322de9ab600395f776043cbc29aa9925c30637727cbd92c7d0b23b6d11');
+assert.equal(meta.fingerprint, 'd37ffa3da77cbbe5added332b433f541974f6c0dd2251510da89610b2f18cb7a');
 assert.ok(!meta.home_visible.includes('mcp__home__search_memories'));
 assert.ok(meta.home_visible.includes('mcp__home__write_diary'));
 assert.ok(meta.off_allow.includes('mcp__internal__search_memories') === false);
@@ -120,6 +120,7 @@ const { listener, port } = await internalServer.startInternalMcpServer({
   dbPath,
   cwd: root,
   python: process.env.PYTHON || 'python3',
+  verify: async () => ({ lease_decision: 'ALLOW' }),
 });
 const client = new Client({ name: 'm3-04b-internal-memory', version: '1.0.0' });
 const transport = new StreamableHTTPClientTransport(
@@ -132,7 +133,7 @@ try {
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name),
-    ['get_todos', 'add_todo', 'get_ledger', 'get_ledger_budget', 'add_ledger', 'search_memories'],
+    ['get_todos', 'add_todo', 'get_ledger', 'get_ledger_budget', 'add_ledger', 'search_memories', 'write_memory'],
   );
   const searchSchema = listed.tools.find((tool) => tool.name === 'search_memories')?.inputSchema;
   assert.deepEqual(Object.keys(searchSchema.properties || {}), ['keyword']);
@@ -169,6 +170,18 @@ try {
   const noHit = await client.callTool({ name: 'search_memories', arguments: { keyword: '__no_hit__' } });
   assert.equal(textOf(noHit), '没有找到相关记忆');
   assert.equal(snapshot(), before);
+
+  const write = await client.callTool({
+    name: 'write_memory',
+    arguments: { content: '  Internal MCP bridge fact 😀  ' },
+  });
+  assert.equal(textOf(write), 'MEMORY_CREATED');
+  const writtenRows = JSON.parse(snapshot());
+  const written = writtenRows[writtenRows.length - 1];
+  assert.equal(written[1], 'MEMORY');
+  assert.equal(written[2], 'Internal MCP bridge fact 😀');
+  assert.equal(written[6], 'long-term');
+  assert.equal(writtenRows.length, rows.length + 1);
 
   const readinessSource = readFileSync(join(root, 'scripts/check-internal-mcp-readiness.mjs'), 'utf8');
   assert.doesNotMatch(readinessSource, /callTool\s*\(/);

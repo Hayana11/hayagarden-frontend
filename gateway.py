@@ -1662,9 +1662,9 @@ _BASE_TOOLS = [
         }, 'required': ['title']},
     },
     {
-        'name': 'save_memory',
-        'description': '把对话中重要的信息存入长期记忆（哈娅提到的事件、约定、喜好、重要日期等）。在她说了值得记住的事时安静地使用。',
-        'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'description': '要记住的内容，一句话概括'},'tags': {'type': 'string', 'description': '可选标签，core（核心）或 long-term（长期）'}}, 'required': ['content']},
+        'name': 'memory_write',
+        'description': '把对话中重要的信息存入长期记忆。只接收正文，不接收类型、作者、标签或存储参数。',
+        'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'maxLength': 4000, 'description': '要记住的正文'}}, 'required': ['content']},
     },
     {
         'name': 'search_memories',
@@ -2949,7 +2949,29 @@ def _stream_api_confirmation(request_data):
 
 
 def _dispatch_api_chat_tool(name, args, turn_lease, tool_use_id=None):
-    """Dispatch only API Todo/read tools through the canonical narrow seam."""
+    """Dispatch fenced formal API capability tools through narrow seams."""
+    if name == 'memory_write':
+        from tools.execution_fence import evaluate_tool_call
+        decision = evaluate_tool_call(
+            tool_name=name,
+            tool_input=args,
+            turn_lease=turn_lease,
+        )
+        lease_decision = decision.get('lease_decision')
+        if lease_decision != 'ALLOW':
+            diagnostic = str(decision.get('diagnostic') or 'no diagnostic')
+            return (
+                f'工具执行失败：{lease_decision or "DENIED_CAPABILITY"}'
+                f'（{name}；{diagnostic}）'
+            )
+        from tools.memory_write_adapter import write_memory
+        result = write_memory(DB_PATH, content=args.get('content'))
+        if result.get('status') == 'CREATED':
+            return '已存入长期记忆'
+        if result.get('status') == 'CONTENT_TOO_LONG':
+            return '工具执行失败：正文超过 4000 字符上限'
+        return '工具执行失败：正文为空或无效'
+
     if name == 'add_todo':
         from tools.execution_fence import evaluate_tool_call
         from tools.todo_write_adapter import (

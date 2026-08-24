@@ -106,7 +106,7 @@ try {
   const listed = await noProfile.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ['add_ledger', 'add_todo', 'get_ledger', 'get_ledger_budget', 'get_todos', 'search_memories'],
+    ['add_ledger', 'add_todo', 'get_ledger', 'get_ledger_budget', 'get_todos', 'search_memories', 'write_memory'],
   );
 
   const specified = await noProfile.callTool({
