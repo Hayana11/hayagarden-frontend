@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  PHYSICAL_BACKGROUND_POLL_MS,
   PHYSICAL_POLL_MS,
   PhysicalRealityRuntime,
 } from "../src/lib/reality/realityRuntime.ts";
@@ -60,6 +61,7 @@ function createEnvironment({
     bridgeReads: 0,
     intervalStarts: 0,
     intervalClears: 0,
+    lastIntervalMs: null,
     listenerAdds: 0,
     listenerRemoves: 0,
   };
@@ -69,8 +71,9 @@ function createEnvironment({
     getBridge: () => currentBridge,
     isVisible: () => currentVisible,
     setInterval: (callback, intervalMs) => {
-      assert.equal(intervalMs, PHYSICAL_POLL_MS);
+      assert.ok([PHYSICAL_POLL_MS, PHYSICAL_BACKGROUND_POLL_MS].includes(intervalMs));
       metrics.intervalStarts += 1;
+      metrics.lastIntervalMs = intervalMs;
       intervalCallback = callback;
       return nextIntervalId++;
     },
@@ -201,8 +204,12 @@ assertSourceFailure({
 });
 
 const hiddenStore = new RealityStore();
+let hiddenReads = 0;
 const hiddenBridge = {
-  getPhysicalState: () => validJson(0),
+  getPhysicalState: () => {
+    hiddenReads += 1;
+    return validJson(hiddenReads);
+  },
 };
 const hiddenEnvironment = createEnvironment({
   bridge: hiddenBridge,
@@ -214,13 +221,25 @@ const hiddenRuntime = new PhysicalRealityRuntime(
 );
 hiddenRuntime.start();
 assert.equal(hiddenEnvironment.metrics.intervalStarts, 1);
+assert.equal(hiddenEnvironment.metrics.lastIntervalMs, PHYSICAL_POLL_MS);
+assert.equal(hiddenStore.getSnapshot().physical.observedAt, 0);
 hiddenEnvironment.setVisible(false);
+hiddenEnvironment.setNow(1000);
 hiddenEnvironment.fire("visibilitychange");
 assert.equal(hiddenEnvironment.metrics.intervalClears, 1);
-const hiddenReads = hiddenEnvironment.metrics.bridgeReads;
+assert.equal(hiddenEnvironment.metrics.intervalStarts, 2);
+assert.equal(
+  hiddenEnvironment.metrics.lastIntervalMs,
+  PHYSICAL_BACKGROUND_POLL_MS,
+);
+assert.equal(hiddenReads, 2);
+assert.equal(hiddenStore.getSnapshot().physical.observedAt, 1000);
+
+hiddenEnvironment.setNow(300000);
 hiddenEnvironment.tick();
-assert.equal(hiddenEnvironment.metrics.bridgeReads, hiddenReads);
-assertInitial(hiddenStore);
+assert.equal(hiddenReads, 3);
+assert.equal(hiddenStore.getSnapshot().physical.observedAt, 300000);
+assert.notEqual(hiddenStore.getSnapshot().physical.facts, undefined);
 
 hiddenEnvironment.setBridge({
   getPhysicalState: () => validJson(2000),
@@ -228,7 +247,8 @@ hiddenEnvironment.setBridge({
 hiddenEnvironment.setNow(2000);
 hiddenEnvironment.setVisible(true);
 hiddenEnvironment.fire("visibilitychange");
-assert.equal(hiddenEnvironment.metrics.intervalStarts, 2);
+assert.equal(hiddenEnvironment.metrics.intervalStarts, 3);
+assert.equal(hiddenEnvironment.metrics.lastIntervalMs, PHYSICAL_POLL_MS);
 assert.equal(hiddenStore.getSnapshot().physical.observedAt, 2000);
 
 const idempotentStore = new RealityStore();
