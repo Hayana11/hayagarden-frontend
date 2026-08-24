@@ -123,6 +123,34 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
 }
 
+_CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "mcp__capability__memory_search": {
+        "type": "object",
+        "properties": {"keyword": {"type": "string"}},
+        "required": ["keyword"],
+    },
+    "mcp__capability__memory_write": {
+        "type": "object",
+        "properties": {"content": {"type": "string", "maxLength": 4000}},
+        "required": ["content"],
+    },
+    "mcp__capability__todo_write": {
+        "type": "object",
+        "properties": {"content": {"type": "string"}, "due_date": {"type": "string"}},
+        "required": ["content"],
+    },
+    "mcp__capability__ledger_write": {
+        "type": "object",
+        "properties": {
+            "amount": {"type": "number"},
+            "category": {"type": "string"},
+            "note": {"type": "string"},
+            "date": {"type": "string"},
+        },
+        "required": ["amount"],
+    },
+}
+
 
 def _parse_allowed_tools_ordered(allowed_tools: Optional[str]) -> list[str]:
     """Preserve allowlist CSV order; dedupe by first occurrence only."""
@@ -141,6 +169,7 @@ def _static_schema_registry() -> dict[str, dict[str, Any]]:
     registry = dict(_BRAIN_TOOL_SCHEMAS)
     registry.update(_HOME_TOOL_SCHEMAS)
     registry.update(_INTERNAL_TOOL_SCHEMAS)
+    registry.update(_CAPABILITY_PROXY_TOOL_SCHEMAS)
     try:
         from codebase.client import CODEBASE_TOOLS
 
@@ -252,6 +281,16 @@ def _default_live_tool_lists(
     return ordered
 
 
+def _surface_kind(name: str) -> str:
+    if str(name).startswith("mcp__capability__"):
+        return "capability_proxy"
+    if str(name).startswith("mcp__"):
+        return "legacy_physical"
+    if str(name) in {"Read", "Glob", "Grep", "WebSearch", "WebFetch"}:
+        return "claude_native"
+    return "builtin"
+
+
 def _build_ordered_surface(
     allowlist: list[str],
     *,
@@ -272,7 +311,11 @@ def _build_ordered_surface(
             schema = tool.get("input_schema")
             if not isinstance(schema, dict):
                 schema = _EMPTY_SCHEMA
-            surface.append({"name": cc_name, "input_schema": schema})
+            surface.append({
+                "name": cc_name,
+                "input_schema": schema,
+                "surface_kind": _surface_kind(cc_name),
+            })
             seen.add(cc_name)
 
     for name in allowlist:
@@ -282,7 +325,11 @@ def _build_ordered_surface(
         if schema is None:
             missing.append(name)
             schema = _EMPTY_SCHEMA
-        surface.append({"name": name, "input_schema": schema})
+        surface.append({
+            "name": name,
+            "input_schema": schema,
+            "surface_kind": _surface_kind(name),
+        })
         seen.add(name)
 
     if not allowlist:
@@ -340,4 +387,7 @@ def capture_tool_surface_snapshot(
         "tool_count": len(allowlist),
         "allowed_tool_count": len(allowlist),
         "missing_tool_schemas": missing,
+        "tool_surface_kinds": {
+            item["name"]: item["surface_kind"] for item in surface
+        },
     }

@@ -65,6 +65,19 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
 
 INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "todo.read",
+    "ledger.read",
+    "ledger.budget.read",
+)
+
+CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
+    "memory.search",
+    "memory.write",
+    "todo.write",
+    "ledger.write",
+)
+
+INTERNAL_MCP_LEGACY_CAPABILITY_IDS: tuple[str, ...] = (
+    "todo.read",
     "todo.write",
     "ledger.read",
     "ledger.budget.read",
@@ -73,8 +86,14 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.write",
 )
 
-# No Internal Memory shadow remains after the Daily provider cutover.
-INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = ()
+# Legacy Internal MCP registrations remain available to other providers but
+# are explicitly denied from the Claude UH-A0 surface.
+INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "mcp__internal__search_memories",
+    "mcp__internal__write_memory",
+    "mcp__internal__add_todo",
+    "mcp__internal__add_ledger",
+)
 
 NATIVE_FILE_CAPABILITY_IDS: tuple[str, ...] = (
     "files.read",
@@ -134,15 +153,20 @@ def uh_a0_home_mcp_tools() -> tuple[str, ...]:
 
 
 def uh_a0_internal_mcp_tools() -> tuple[str, ...]:
-    """Exact Internal MCP CC names for Daily Todo and Ledger capabilities."""
+    """Exact Internal MCP CC names for Daily read capabilities."""
     return tuple(_claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS)
+
+
+def uh_a0_capability_proxy_tools() -> tuple[str, ...]:
+    """Exact Claude CC names for capability-facing proxy tools."""
+    return tuple(_claude_binding(cid) for cid in CAPABILITY_PROXY_CAPABILITY_IDS)
 
 
 def uh_a0_home_legacy_tools() -> tuple[str, ...]:
     """Home capability names retained for Wake/legacy and forbidden in Daily."""
     return tuple(
         _provider_binding(cid, "home_mcp")
-        for cid in INTERNAL_MCP_CAPABILITY_IDS
+        for cid in INTERNAL_MCP_LEGACY_CAPABILITY_IDS
         if (get_capability(cid).get("provider_bindings") or {}).get("home_mcp")
     )
 
@@ -193,6 +217,14 @@ def build_uh_a0_mcp_config(
                 "type": "http",
                 "url": resolve_internal_mcp_url(legacy_mcp_config_path),
                 "headers": {"X-UH-A0-Profile": "uh_a0"},
+            },
+            "capability": {
+                "type": "stdio",
+                "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
+                "args": [str(Path(__file__).resolve().parent.parent / "capability-proxy-mcp-server.js")],
+                "env": {
+                    "UH_A0_REPO_ROOT": str(Path(__file__).resolve().parent.parent),
+                },
             },
         }
     }
@@ -279,7 +311,12 @@ def diagnose_tool_search(
 def loading_plan_from_manifest() -> dict[str, str]:
     """capability_id -> loading_policy for the UH-A0 provider surface."""
     out: dict[str, str] = {}
-    for cid in HOME_MCP_CAPABILITY_IDS + INTERNAL_MCP_CAPABILITY_IDS + NATIVE_FILE_CAPABILITY_IDS:
+    for cid in (
+        HOME_MCP_CAPABILITY_IDS
+        + INTERNAL_MCP_CAPABILITY_IDS
+        + CAPABILITY_PROXY_CAPABILITY_IDS
+        + NATIVE_FILE_CAPABILITY_IDS
+    ):
         entry = get_capability(cid)
         assert entry is not None
         out[cid] = str(entry["loading_policy"])
@@ -303,6 +340,7 @@ def _surface_fingerprint(snapshot: Mapping[str, Any]) -> str:
         "internal_mcp": list(snapshot["internal_mcp_tools"]),
         "runtime_hidden_home_mcp": list(snapshot["runtime_hidden_home_mcp_tools"]),
         "runtime_hidden_internal_mcp": list(snapshot["runtime_hidden_internal_mcp_tools"]),
+        "capability_proxy": list(snapshot["capability_proxy_tools"]),
         "forbidden_built_ins": list(FORBIDDEN_BUILTIN_TOOLS),
         "non_p3_home": list(NON_P3_HOME_MCP_TOOLS),
     })
@@ -312,10 +350,17 @@ def _surface_snapshot() -> dict[str, Any]:
     """Build one fail-closed, runtime-state-aware UH-A0 surface snapshot."""
     home_bindings = {cid: _claude_binding(cid) for cid in HOME_MCP_CAPABILITY_IDS}
     internal_bindings = {cid: _claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS}
+    proxy_bindings = {cid: _claude_binding(cid) for cid in CAPABILITY_PROXY_CAPABILITY_IDS}
     legacy_home_tools = uh_a0_home_legacy_tools()
     native_file_bindings = {cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS}
     external_bindings = {cid: _claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS}
-    all_capability_ids = HOME_MCP_CAPABILITY_IDS + INTERNAL_MCP_CAPABILITY_IDS + NATIVE_FILE_CAPABILITY_IDS + EXTERNAL_READ_CAPABILITY_IDS
+    all_capability_ids = (
+        HOME_MCP_CAPABILITY_IDS
+        + INTERNAL_MCP_CAPABILITY_IDS
+        + CAPABILITY_PROXY_CAPABILITY_IDS
+        + NATIVE_FILE_CAPABILITY_IDS
+        + EXTERNAL_READ_CAPABILITY_IDS
+    )
     visible_states = {RUNTIME_STATE_INHERIT, RUNTIME_STATE_ON}
     try:
         states = {cid: read_capability_state(cid) for cid in all_capability_ids}
@@ -331,35 +376,47 @@ def _surface_snapshot() -> dict[str, Any]:
     if status == "FAIL_CLOSED":
         visible_home_ids: tuple[str, ...] = ()
         visible_internal_ids: tuple[str, ...] = ()
+        visible_proxy_ids: tuple[str, ...] = ()
         visible_native_file_ids: tuple[str, ...] = ()
         visible_external_ids: tuple[str, ...] = ()
         hidden_home = tuple(home_bindings.values()) + legacy_home_tools
         hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings.values())
+        hidden_proxy = tuple(proxy_bindings.values())
     else:
         visible_home_ids = tuple(cid for cid in HOME_MCP_CAPABILITY_IDS if states[cid] in visible_states)
         visible_internal_ids = tuple(cid for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] in visible_states)
+        visible_proxy_ids = tuple(cid for cid in CAPABILITY_PROXY_CAPABILITY_IDS if states[cid] in visible_states)
         visible_native_file_ids = tuple(cid for cid in NATIVE_FILE_CAPABILITY_IDS if states[cid] in visible_states)
         visible_external_ids = tuple(cid for cid in EXTERNAL_READ_CAPABILITY_IDS if states[cid] in visible_states)
         hidden_home = legacy_home_tools + tuple(home_bindings[cid] for cid in HOME_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
         hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings[cid] for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] not in visible_states)
+        hidden_proxy = tuple(proxy_bindings[cid] for cid in CAPABILITY_PROXY_CAPABILITY_IDS if states[cid] not in visible_states)
 
     built_in_tools = tuple(native_file_bindings[cid] for cid in visible_native_file_ids) + tuple(external_bindings[cid] for cid in visible_external_ids)
     home_tools = tuple(home_bindings[cid] for cid in visible_home_ids)
     internal_tools = tuple(internal_bindings[cid] for cid in visible_internal_ids)
+    proxy_tools = tuple(proxy_bindings[cid] for cid in visible_proxy_ids)
     return {
         "runtime_state_status": status,
         "runtime_state_diagnostic": diagnostic,
         "built_in_tools": built_in_tools,
         "home_mcp_tools": home_tools,
         "internal_mcp_tools": internal_tools,
+        "capability_proxy_tools": proxy_tools,
         "native_bindings": {cid: native_file_bindings[cid] for cid in visible_native_file_ids},
         "runtime_hidden_home_mcp_tools": hidden_home,
         "runtime_hidden_internal_mcp_tools": hidden_internal,
+        "runtime_hidden_capability_proxy_tools": hidden_proxy,
     }
 
 def physical_surface_names() -> tuple[str, ...]:
     snapshot = _surface_snapshot()
-    return snapshot["built_in_tools"] + snapshot["home_mcp_tools"] + snapshot["internal_mcp_tools"]
+    return (
+        snapshot["built_in_tools"]
+        + snapshot["home_mcp_tools"]
+        + snapshot["internal_mcp_tools"]
+        + snapshot["capability_proxy_tools"]
+    )
 
 
 def physical_surface_fingerprint() -> str:
@@ -385,6 +442,7 @@ def build_uh_a0_spawn_plan(
     surface = _surface_snapshot()
     home_tools = surface["home_mcp_tools"]
     internal_tools = surface["internal_mcp_tools"]
+    proxy_tools = surface["capability_proxy_tools"]
     native = surface["native_bindings"]
     loading = loading_plan_from_manifest()
 
@@ -404,7 +462,12 @@ def build_uh_a0_spawn_plan(
     turn_lease_path = resolve_uh_a0_turn_lease_path(target_cwd, env=env)
 
     built_in_tools = tuple(surface["built_in_tools"])
-    allowlist = list(built_in_tools) + list(home_tools) + list(internal_tools)
+    allowlist = (
+        list(built_in_tools)
+        + list(home_tools)
+        + list(internal_tools)
+        + list(proxy_tools)
+    )
     disallowed = (
         list(FORBIDDEN_BUILTIN_TOOLS)
         + list(NON_P3_HOME_MCP_TOOLS)
@@ -433,6 +496,7 @@ def build_uh_a0_spawn_plan(
         "built_in_tools_csv": built_in_csv,
         "home_mcp_tools": home_tools,
         "internal_mcp_tools": internal_tools,
+        "capability_proxy_tools": proxy_tools,
         "native_bindings": native,
         "surface_allowlist": tuple(allowlist),
         "surface_allowlist_csv": allowed_csv,
@@ -453,7 +517,7 @@ def build_uh_a0_spawn_plan(
         "intent_instructions": short_intent_instructions(),
         # Visibility claim for reports: what Claude can see under UH-A0 plan.
         "claude_visible_built_ins": built_in_tools,
-        "claude_visible_mcp_tools": home_tools + internal_tools,
+        "claude_visible_mcp_tools": home_tools + internal_tools + proxy_tools,
         "claude_absent_servers": ("brain", "codebase", "workspace"),
     }
     return plan
