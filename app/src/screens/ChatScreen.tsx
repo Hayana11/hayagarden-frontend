@@ -1481,7 +1481,10 @@ export function ChatScreen() {
   }
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
-    const attachments = m.attachments || [];
+    const attachments = m.attachments?.length ? m.attachments : [
+      ...(m.fileUrl ? [{ type: 'file' as const, url: m.fileUrl, name: m.fileName || '文件' }] : []),
+      ...(m.imageUrl ? [{ type: 'image' as const, url: m.imageUrl, name: '图片' }] : []),
+    ];
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-7${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-end', borderRadius: 16 }}>
         {editing ? (
