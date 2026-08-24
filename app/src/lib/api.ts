@@ -428,35 +428,30 @@ export function fetchChatMessagesOrNull(
     .catch(() => null);
 }
 
-// POST /api/chat/send -> { ok, message_id }. Images go as multipart (backend
-// compresses); text files are pre-uploaded via uploadChatFile then referenced.
+// POST /api/chat/send -> { ok, message_id }. Files are pre-uploaded;
+// images are submitted together so the backend can re-encode them.
+export interface PendingChatFile {
+  fileUrl: string;
+  fileName: string;
+}
+
 export function sendChatMessage(
   content: string,
-  extra: { fileUrl?: string; fileName?: string; imageFile?: File } = {},
+  extra: { files?: PendingChatFile[]; imageFiles?: File[] } = {},
 ): Promise<number | null> {
-  if (extra.imageFile) {
-    const fd = new FormData();
-    fd.append('author', 'hayana');
-    fd.append('content', content);
-    fd.append('image', extra.imageFile);
-    return fetch('/api/chat/send', { method: 'POST', body: fd })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((r) => (r?.ok ? (r.message_id ?? null) : null))
-      .catch(() => null);
-  }
-  return http
-    .post<{ ok: boolean; message_id?: number }>('/api/chat/send', {
-      author: 'hayana',
-      content,
-      file_url: extra.fileUrl || '',
-      file_name: extra.fileName || '',
-    })
-    .then((r) => (r.ok ? (r.message_id ?? null) : null))
+  const fd = new FormData();
+  fd.append('author', 'hayana');
+  fd.append('content', content);
+  fd.append('attachments', JSON.stringify(extra.files || []));
+  for (const image of extra.imageFiles || []) fd.append('image', image);
+  return fetch('/api/chat/send', { method: 'POST', body: fd })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((r) => (r?.ok ? (r.message_id ?? null) : null))
     .catch(() => null);
 }
 
-// POST /api/chat/upload_file (multipart) -> { file_url, file_name } — text files ≤2MB
-export function uploadChatFile(file: File): Promise<{ fileUrl: string; fileName: string } | null> {
+// POST /api/chat/upload_file (multipart) -> { file_url, file_name } — each file ≤2MB
+export function uploadChatFile(file: File): Promise<PendingChatFile | null> {
   const fd = new FormData();
   fd.append('file', file);
   return fetch('/api/chat/upload_file', { method: 'POST', body: fd })

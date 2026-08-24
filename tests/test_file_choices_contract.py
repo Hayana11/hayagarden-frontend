@@ -7,11 +7,15 @@ import unittest
 from pathlib import Path
 
 from chat.attachment_contract import (
+    ALLOWED_CHAT_FILE_EXTENSIONS,
+    MAX_CHAT_ATTACHMENTS,
     MAX_IMAGE_INPUT_BYTES,
     MAX_TEXT_FILE_BYTES,
     AttachmentValidationError,
+    persisted_chat_attachments,
     read_limited_upload,
     render_markdown_preview_page,
+    text_file_attachments,
     reencode_chat_image,
     resolve_uploaded_file_url,
     safe_child_path,
@@ -65,6 +69,69 @@ class AttachmentPathTests(unittest.TestCase):
             self.assertIsNone(safe_child_path(td, '..\\secret.md'))
             self.assertIsNone(validate_uploaded_file_reference(url, 'note.html', td))
             self.assertIsNone(validate_uploaded_file_reference(url, '[choices]x[/choices].md', td))
+
+
+class MultiAttachmentContractTests(unittest.TestCase):
+    def test_word_pdf_and_four_attachment_limit_are_explicit(self):
+        self.assertEqual(MAX_CHAT_ATTACHMENTS, 4)
+        self.assertTrue({'.doc', '.docx', '.pdf'}.issubset(ALLOWED_CHAT_FILE_EXTENSIONS))
+
+    def test_word_and_pdf_references_keep_path_and_size_validation(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for suffix in ('.doc', '.docx', '.pdf'):
+                name = 'abcd1234_note' + suffix
+                path = base / name
+                path.write_bytes(b'not parsed as text')
+                result = validate_uploaded_file_reference(
+                    '/static/uploads/files/' + name,
+                    'note' + suffix,
+                    td,
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual(result[0], path.resolve())
+
+
+    def test_binary_attachments_are_never_text_history_candidates(self):
+        attachments = [
+            {'type': 'file', 'url': '/static/uploads/files/abcd1234_readme.md', 'name': 'readme.md'},
+            {'type': 'file', 'url': '/static/uploads/files/abcd1234_plan.pdf', 'name': 'plan.pdf'},
+            {'type': 'file', 'url': '/static/uploads/files/abcd1234_notes.docx', 'name': 'notes.docx'},
+        ]
+        self.assertEqual(
+            [item['name'] for item in text_file_attachments(attachments)],
+            ['readme.md'],
+        )
+        self.assertEqual(
+            [item['name'] for item in persisted_chat_attachments(attachments)],
+            ['readme.md', 'plan.pdf', 'notes.docx'],
+        )
+
+
+class ChatMultiAttachmentRouteTests(unittest.TestCase):
+    def test_send_route_uses_durable_attachment_array_and_four_item_gate(self):
+        source = (Path(__file__).parents[1] / 'app.py').read_text(encoding='utf-8')
+        start = source.index("def send_chat():")
+        end = source.index("@app.route", start + 1)
+        route = source[start:end]
+        self.assertIn("request.files.getlist('image')", route)
+        self.assertIn("requested_attachment_count > MAX_CHAT_ATTACHMENTS", route)
+        self.assertIn("len(attachments) > MAX_CHAT_ATTACHMENTS", route)
+        self.assertLess(
+            route.index("requested_attachment_count > MAX_CHAT_ATTACHMENTS"),
+            route.index("for image_upload in image_uploads:"),
+        )
+        self.assertIn("attachments_json = json.dumps(attachments, ensure_ascii=False)", route)
+        self.assertIn("file_name,attachments", route)
+        boundary_source = (Path(__file__).parents[1] / 'chat' / 'history_boundary.py').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn("attachments", boundary_source)
+        self.assertIn("path.suffix.lower() not in ALLOWED_TEXT_FILE_EXTENSIONS", boundary_source)
+        rewrite_source = (Path(__file__).parents[1] / 'chat' / 'rewrite_staging.py').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn("('attachments', attachments)", rewrite_source)
 
 
 class ArtifactSandboxTests(unittest.TestCase):
