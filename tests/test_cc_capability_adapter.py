@@ -25,6 +25,7 @@ from tools.capability_state import (
 from tools.cc_capability_adapter import (
     FORBIDDEN_BUILTIN_TOOLS,
     HOME_MCP_CAPABILITY_IDS,
+    CAPABILITY_PROXY_CAPABILITY_IDS,
     INTERNAL_MCP_CAPABILITY_IDS,
     INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
     NON_P3_HOME_MCP_TOOLS,
@@ -38,6 +39,7 @@ from tools.cc_capability_adapter import (
     physical_surface_fingerprint,
     physical_surface_names,
     uh_a0_home_mcp_tools,
+    uh_a0_capability_proxy_tools,
     uh_a0_home_legacy_tools,
     uh_a0_external_read_tools,
     uh_a0_native_bindings,
@@ -84,9 +86,17 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search", "memory.write"),
+            ("todo.read", "ledger.read", "ledger.budget.read"),
         )
-        self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, ())
+        self.assertEqual(
+            INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
+            (
+                "mcp__internal__search_memories",
+                "mcp__internal__write_memory",
+                "mcp__internal__add_todo",
+                "mcp__internal__add_ledger",
+            ),
+        )
         home = uh_a0_home_mcp_tools()
         native = uh_a0_native_bindings()
         for cid in HOME_MCP_CAPABILITY_IDS:
@@ -143,8 +153,12 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         for name in NON_P3_HOME_MCP_TOOLS:
             self.assertNotIn(name, home)
-        cfg = build_uh_a0_mcp_config()
-        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal"})
+        cfg = build_uh_a0_mcp_config(env={})
+        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability"})
+        capability_cfg = cfg["mcpServers"]["capability"]
+        self.assertEqual(capability_cfg["type"], "stdio")
+        self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"])
+        self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"].endswith("memories.db"))
         self.assertEqual(
             cfg["mcpServers"]["home"]["headers"],
             {"X-UH-A0-Profile": "uh_a0"},
@@ -326,9 +340,9 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             allowed = flags["extra"][allowed_idx]
             self.assertIn("Read", allowed)
             self.assertNotIn("mcp__home__search_memories", allowed)
-            self.assertIn("mcp__internal__search_memories", allowed)
+            self.assertIn("mcp__capability__memory_search", allowed)
             self.assertIn("mcp__internal__get_todos", allowed)
-            self.assertIn("mcp__internal__add_todo", allowed)
+            self.assertIn("mcp__capability__todo_write", allowed)
             self.assertNotIn("mcp__brain__", allowed)
             self.assertNotIn("mcp__home__get_todos", allowed)
             self.assertNotIn("mcp__home__add_todo", allowed)
@@ -336,7 +350,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             mcp_path = Path(flags["mcp_path"])
             self.assertTrue(mcp_path.is_file())
             cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
-            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal"})
+            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability"})
 
             # tool_profile mismatch is detected by the existing decision helper
             # once a live generation exists (process_dead otherwise wins).
@@ -391,6 +405,8 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertIn("mcp__home__search_memories", plan["disallowed_tools"])
         self.assertIn("mcp__internal__search_memories", plan["disallowed_tools"])
         self.assertIn("mcp__internal__write_memory", plan["disallowed_tools"])
+        self.assertIn("mcp__capability__memory_search", plan["disallowed_tools"])
+        self.assertIn("mcp__capability__memory_write", plan["disallowed_tools"])
         self.assertIn("mcp__home__light_on", plan["disallowed_tools"])
         self.assertIn("mcp__home__exec_vps", plan["disallowed_tools"])
 

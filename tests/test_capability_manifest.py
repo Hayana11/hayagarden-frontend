@@ -142,16 +142,16 @@ class CapabilityManifestContractTests(unittest.TestCase):
 
     def test_enabled_bindings_are_only_provider_specific_metadata(self):
         expected_cc_bindings = {
-            "memory.search": "mcp__internal__search_memories",
-            "memory.write": "mcp__internal__write_memory",
+            "memory.search": "mcp__capability__memory_search",
+            "memory.write": "mcp__capability__memory_write",
             "diary.write": "mcp__home__write_diary",
             "home.light.status": "mcp__home__get_light_status",
             "todo.read": "mcp__internal__get_todos",
-            "todo.write": "mcp__internal__add_todo",
+            "todo.write": "mcp__capability__todo_write",
             "countdown.read": "mcp__home__get_countdowns",
             "ledger.read": "mcp__internal__get_ledger",
             "ledger.budget.read": "mcp__internal__get_ledger_budget",
-            "ledger.write": "mcp__internal__add_ledger",
+            "ledger.write": "mcp__capability__ledger_write",
             "files.read": "Read",
             "files.find": "Glob",
             "code.search": "Grep",

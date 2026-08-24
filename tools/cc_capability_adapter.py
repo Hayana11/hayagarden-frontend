@@ -201,9 +201,25 @@ def resolve_internal_mcp_url(legacy_mcp_config_path: str | os.PathLike[str] | No
     return _resolve_mcp_url("internal", DEFAULT_INTERNAL_MCP_URL, legacy_mcp_config_path)
 
 
+def _resolve_capability_proxy_db_path(
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve the explicit SQLite path handed to the stdio capability proxy."""
+    environ = env or os.environ
+    configured = str(environ.get("TODO_INTERNAL_DB_PATH") or "").strip()
+    if configured:
+        return configured
+    repo_root = str(
+        environ.get("UH_A0_REPO_ROOT")
+        or (Path(__file__).resolve().parent.parent)
+    ).strip()
+    return str(Path(repo_root) / "memories.db")
+
+
 def build_uh_a0_mcp_config(
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Strict UH-A0 config with Home compatibility and Internal Todo."""
     return {
@@ -224,6 +240,7 @@ def build_uh_a0_mcp_config(
                 "args": [str(Path(__file__).resolve().parent.parent / "capability-proxy-mcp-server.js")],
                 "env": {
                     "UH_A0_REPO_ROOT": str(Path(__file__).resolve().parent.parent),
+                    "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
                 },
             },
         }
@@ -233,10 +250,14 @@ def write_uh_a0_mcp_config(
     cwd: str | os.PathLike[str],
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> str:
     root = Path(cwd)
     out = root / UH_A0_MCP_CONFIG_FILENAME
-    payload = build_uh_a0_mcp_config(legacy_mcp_config_path=legacy_mcp_config_path)
+    payload = build_uh_a0_mcp_config(
+        legacy_mcp_config_path=legacy_mcp_config_path,
+        env=env,
+    )
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(out)
 
@@ -453,11 +474,18 @@ def build_uh_a0_spawn_plan(
     else:
         home_loading_mode = "preload_fallback"
 
-    mcp_config = build_uh_a0_mcp_config(legacy_mcp_config_path=legacy_mcp_config_path)
+    mcp_config = build_uh_a0_mcp_config(
+        legacy_mcp_config_path=legacy_mcp_config_path,
+        env=env,
+    )
     target_cwd = Path(cwd or (Path(legacy_mcp_config_path).parent if legacy_mcp_config_path else Path.cwd()))
     mcp_path = ""
     if write_mcp_config:
-        mcp_path = write_uh_a0_mcp_config(target_cwd, legacy_mcp_config_path=legacy_mcp_config_path)
+        mcp_path = write_uh_a0_mcp_config(
+            target_cwd,
+            legacy_mcp_config_path=legacy_mcp_config_path,
+            env=env,
+        )
     settings_path = write_uh_a0_settings(target_cwd)
     turn_lease_path = resolve_uh_a0_turn_lease_path(target_cwd, env=env)
 
@@ -473,6 +501,7 @@ def build_uh_a0_spawn_plan(
         + list(NON_P3_HOME_MCP_TOOLS)
         + list(surface["runtime_hidden_home_mcp_tools"])
         + list(surface["runtime_hidden_internal_mcp_tools"])
+        + list(surface["runtime_hidden_capability_proxy_tools"])
     )
     built_in_csv = ",".join(built_in_tools)
     allowed_csv = ",".join(allowlist)
