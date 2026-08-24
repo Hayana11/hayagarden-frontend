@@ -1481,7 +1481,10 @@ export function ChatScreen() {
   }
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
-    const filePreview = chatFilePreviewUrl(m.fileUrl);
+    const attachments = m.attachments?.length ? m.attachments : [
+      ...(m.fileUrl ? [{ type: 'file' as const, url: m.fileUrl, name: m.fileName || '文件' }] : []),
+      ...(m.imageUrl ? [{ type: 'image' as const, url: m.imageUrl, name: '图片' }] : []),
+    ];
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-7${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-end', borderRadius: 16 }}>
         {editing ? (
@@ -1505,20 +1508,35 @@ export function ChatScreen() {
         ) : (
           <>
             <div className="vstack vstack-8" style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)' }}>
-              {(m.fileName || m.imageUrl) && (
+              {attachments.length > 0 && (
                 <div className="flex-wrap-gap-6">
-                  {m.fileName && (filePreview ? (
-                    <a href={filePreview} target="_blank" rel="noopener noreferrer" className="hstack hstack-6" style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}>
-                      <Svg d={IC.clip} size={11} sw={1.8} />
-                      {m.fileName}
-                    </a>
-                  ) : (
-                    <span className="hstack hstack-6" style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)' }}>
-                      <Svg d={IC.clip} size={11} sw={1.8} />
-                      {m.fileName}
-                    </span>
-                  ))}
-                  {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 200, maxHeight: 200, borderRadius: 12, objectFit: 'cover' }} />}
+                  {attachments.map((attachment, index) => {
+                    if (attachment.type === 'image') {
+                      return (
+                        <img
+                          key={`image-${attachment.url}-${index}`}
+                          src={attachment.url}
+                          alt={attachment.name || '图片附件'}
+                          style={{ maxWidth: 200, maxHeight: 200, borderRadius: 12, objectFit: 'cover' }}
+                        />
+                      );
+                    }
+                    const previewUrl = chatFilePreviewUrl(attachment.url);
+                    return (
+                      <a
+                        key={`file-${attachment.url}-${index}`}
+                        href={previewUrl || attachment.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hstack hstack-6"
+                        style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}
+                        title={attachment.name}
+                      >
+                        <Svg d={IC.clip} size={11} sw={1.8} />
+                        {attachment.name}
+                      </a>
+                    );
+                  })}
                 </div>
               )}
               {m.text && <span style={{ fontSize: '1em', lineHeight: 1.75, letterSpacing: 0.3, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>{m.text}</span>}
