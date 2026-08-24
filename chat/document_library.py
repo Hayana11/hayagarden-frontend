@@ -8,6 +8,7 @@ This module only builds a stable library identity and delete contract.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -18,7 +19,9 @@ from urllib.parse import quote
 import artifact_store
 from chat.attachment_contract import (
     CHAT_FILE_URL_PREFIX,
+    persisted_chat_attachments,
     resolve_uploaded_file_url,
+    uploaded_file_urls,
 )
 
 DB_PATH = '/opt/frontend/memories.db'
@@ -105,10 +108,10 @@ def list_documents(limit: int = LIBRARY_LIMIT) -> list[dict]:
     conn = _db()
     try:
         uploads = conn.execute(
-            "SELECT id, author, file_name, file_url, created_at, session_id "
-            "FROM chat_messages WHERE file_url != '' "
+            "SELECT id, author, file_name, file_url, attachments, created_at, session_id "
+            "FROM chat_messages WHERE file_url != '' OR attachments != '[]' "
             "ORDER BY datetime(created_at) DESC, id DESC LIMIT ?",
-            (lim,),
+            (lim * 4,),
         ).fetchall()
     finally:
         conn.close()
@@ -118,22 +121,29 @@ def list_documents(limit: int = LIBRARY_LIMIT) -> list[dict]:
     items: list[dict] = []
     for row in uploads:
         mid = int(row['id'])
-        file_url = str(row['file_url'] or '')
-        file_name = str(row['file_name'] or '') or os.path.basename(file_url)
-        items.append({
-            'library_key': library_key('user_upload', mid),
-            'source': 'user_upload',
-            'id': mid,
-            'author': row['author'],
-            'file_name': file_name,
-            'file_url': file_url,
-            'created_at': row['created_at'],
-            'session_id': row['session_id'],
-            'file_type': _file_type_from_name(file_name),
-            'size': _upload_size(file_url),
-            'preview_url': _upload_preview_url(file_url),
-            'download_url': _upload_download_url(file_url),
-        })
+        for attachment in persisted_chat_attachments(
+            row['attachments'],
+            legacy_file_url=row['file_url'],
+            legacy_file_name=row['file_name'],
+        ):
+            if attachment['type'] != 'file':
+                continue
+            file_url = attachment['url']
+            file_name = attachment['name'] or os.path.basename(file_url)
+            items.append({
+                'library_key': library_key('user_upload', mid),
+                'source': 'user_upload',
+                'id': mid,
+                'author': row['author'],
+                'file_name': file_name,
+                'file_url': file_url,
+                'created_at': row['created_at'],
+                'session_id': row['session_id'],
+                'file_type': _file_type_from_name(file_name),
+                'size': _upload_size(file_url),
+                'preview_url': _upload_preview_url(file_url),
+                'download_url': _upload_download_url(file_url),
+            })
 
     for meta in artifacts:
         aid = int(meta['id'])
@@ -165,21 +175,35 @@ def list_documents(limit: int = LIBRARY_LIMIT) -> list[dict]:
 
 def _delete_upload(conn: sqlite3.Connection, message_id: int) -> bool:
     row = conn.execute(
-        'SELECT file_url FROM chat_messages WHERE id=?',
+        'SELECT file_url, file_name, attachments FROM chat_messages WHERE id=?',
         (message_id,),
     ).fetchone()
-    if not row or not row['file_url']:
+    if not row:
         return False
-    url = row['file_url']
-    path = resolve_uploaded_file_url(url, FILES_DIR)
-    if path is not None and path.is_file():
-        try:
-            path.unlink()
-        except OSError:
-            pass
+    urls = uploaded_file_urls(
+        row['attachments'],
+        legacy_file_url=row['file_url'],
+    )
+    if not urls:
+        return False
+    for url in urls:
+        path = resolve_uploaded_file_url(url, FILES_DIR)
+        if path is not None and path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    remaining = [
+        item for item in persisted_chat_attachments(
+            row['attachments'],
+            legacy_file_url=row['file_url'],
+            legacy_file_name=row['file_name'],
+        )
+        if item['type'] != 'file'
+    ]
     conn.execute(
-        "UPDATE chat_messages SET file_url='', file_name='' WHERE id=?",
-        (message_id,),
+        "UPDATE chat_messages SET file_url='', file_name='', attachments=? WHERE id=?",
+        (json.dumps(remaining, ensure_ascii=False), message_id),
     )
     return True
 
