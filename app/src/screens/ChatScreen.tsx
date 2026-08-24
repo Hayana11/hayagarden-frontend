@@ -327,6 +327,8 @@ function CopyIcon({ size = 15 }: { size?: number }) {
   );
 }
 
+const MAX_COMPOSER_ATTACHMENTS = 4;
+
 export function ChatScreen() {
   const [settings, setSettings] = useState<ChatPrefs>(loadChatPrefs);
   const legacyCompat = useMemo(() => getLegacyNativeCompatDetails().legacyNativeCompat, []);
@@ -344,8 +346,8 @@ export function ChatScreen() {
   const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<ChatToolCall | null>(null);
-  const [pendingFile, setPendingFile] = useState<{ fileUrl: string; fileName: string } | null>(null);
-  const [pendingImage, setPendingImage] = useState<File | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<Array<{ fileUrl: string; fileName: string }>>([]);
+  const [pendingImages, setPendingImages] = useState<File[]>([]);
 
   const [navOpen, setNavOpen] = useState<null | 'wrench' | 'font' | 'search' | 'profile'>(null);
   const [searchQ, setSearchQ] = useState('');
@@ -401,9 +403,10 @@ export function ChatScreen() {
   const composerDraftRevisionRef = useRef(0);
   const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
     () => composerMutationRevisionRef.current,
-    (file) => {
-      setPendingFile(file);
-      setPendingImage(null);
+    (files) => {
+      setPendingFiles((current) => (
+        [...current, ...files].slice(0, MAX_COMPOSER_ATTACHMENTS)
+      ));
     },
   ));
 
@@ -993,10 +996,10 @@ export function ChatScreen() {
     const attempt = {
       rawText,
       text: sendText,
-      file: pendingFile,
-      image: pendingImage,
+      files: pendingFiles,
+      images: pendingImages,
     };
-    if ((!attempt.text && !attempt.file && !attempt.image) || sending) return;
+    if ((!attempt.text && !attempt.files.length && !attempt.images.length) || sending) return;
     const realityContext = realityPromptProjection.getSnapshot().text;
     const draftRevisionAtConsume = composerDraftRevisionRef.current;
     clearChatComposerDraft();
@@ -1004,11 +1007,7 @@ export function ChatScreen() {
     setChatError(null);
     setInput('');
     if (taRef.current) taRef.current.style.height = 'auto';
-    const extra = attempt.image
-      ? { imageFile: attempt.image }
-      : attempt.file
-        ? { fileUrl: attempt.file.fileUrl, fileName: attempt.file.fileName }
-        : {};
+    const extra = { files: attempt.files, imageFiles: attempt.images };
     postingRef.current = true;
     composerMutationRevisionRef.current += 1;
     setPosting(true);
@@ -1028,15 +1027,16 @@ export function ChatScreen() {
       setSending(false);
       return;
     }
-    setPendingFile((current) => (current === attempt.file ? null : current));
-    setPendingImage((current) => (current === attempt.image ? null : current));
+    setPendingFiles((current) => (current === attempt.files ? [] : current));
+    setPendingImages((current) => (current === attempt.images ? [] : current));
     pinTranscriptToLatest();
     await refetchLatest();
     await runStream(messageId, { realityContext });
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFile, pendingImage, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+  }, [input, pendingFiles, pendingImages, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
     if (!choice || sending) return false;
@@ -1257,18 +1257,29 @@ export function ChatScreen() {
     return -1;
   }, [msgs]);
 
-  const onAttachFile = useCallback(
-    async (f: File | undefined) => {
+  const onAttachFiles = useCallback(
+    async (selectedFiles: FileList | null) => {
       setAttachMenuOpen(false);
-      if (!f || postingRef.current) return;
+      if (!selectedFiles || postingRef.current) return;
+      const remaining = MAX_COMPOSER_ATTACHMENTS - pendingFiles.length - pendingImages.length;
+      const selected = Array.from(selectedFiles).slice(0, Math.max(0, remaining));
+      if (!selected.length) {
+        showToast('一次消息最多上传 4 个附件');
+        return;
+      }
       const mutationRevision = composerMutationRevisionRef.current;
-      const uploaded = await uploadCoordinatorRef.current.settle(
-        uploadChatFile(f),
+      const uploadedFiles = (await Promise.all(selected.map(uploadChatFile)))
+        .filter((file): file is { fileUrl: string; fileName: string } => file !== null);
+      const settled = await uploadCoordinatorRef.current.settle(
+        Promise.resolve(uploadedFiles),
         mutationRevision,
       );
-      if (!uploaded) showToast('上传失败（只收 2MB 内文本类文件）');
+      if (!settled || uploadedFiles.length !== selected.length) {
+        showToast('部分上传失败（每个文件限 2MB，支持文本、Word 和 PDF）');
+      }
+      if (selectedFiles.length > selected.length) showToast('一次消息最多上传 4 个附件');
     },
-    [showToast],
+    [pendingFiles.length, pendingImages.length, showToast],
   );
 
   const segStyle = (on: boolean): CSSProperties => ({
@@ -1290,7 +1301,7 @@ export function ChatScreen() {
     return hit?.label || currentModel.replace(/^.*\]\s*/, '').slice(0, 22) || '模型';
   }, [models, currentModel, chatProvider, modelMode]);
 
-  const canSend = Boolean(input.trim() || pendingFile || pendingImage) && !sending;
+  const canSend = Boolean(input.trim() || pendingFiles.length || pendingImages.length) && !sending;
 
   // ── message block renderers ──
 
@@ -2052,69 +2063,37 @@ export function ChatScreen() {
               </div>
             </>
           )}
-          <input ref={imgInputRef} type="file" accept="image/*" disabled={posting} style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; if (f && !postingRef.current) { setPendingImage(f); setPendingFile(null); } e.target.value = ''; }} />
-          <input ref={fileInputRef} type="file" disabled={posting} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFile(e.target.files?.[0]); e.target.value = ''; }} />
+          <input ref={imgInputRef} type="file" accept="image/*" multiple disabled={posting} style={{ display: 'none' }} onChange={(e) => {
+            if (!postingRef.current) {
+              const remaining = MAX_COMPOSER_ATTACHMENTS - pendingFiles.length - pendingImages.length;
+              const selected = Array.from(e.target.files || []).slice(0, Math.max(0, remaining));
+              if (selected.length) setPendingImages((current) => [...current, ...selected]);
+              if ((e.target.files?.length || 0) > selected.length) showToast('一次消息最多上传 4 个附件');
+            }
+            e.target.value = '';
+          }} />
+          <input ref={fileInputRef} type="file" accept=".md,.txt,.html,.htm,.py,.js,.json,.csv,.css,.xml,.yaml,.yml,.log,.ini,.sh,.pdf,.doc,.docx" multiple disabled={posting} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFiles(e.target.files); e.target.value = ''; }} />
 
-          {(pendingFile || pendingImage) && (
+          {(pendingFiles.length || pendingImages.length) > 0 && (
             <div className="flex-wrap-gap-8" style={{ padding: '0 4px 8px' }}>
-              <div className="hstack hstack-7" style={{ background: 'var(--card)', borderRadius: 999, padding: '7px 12px', boxShadow: '0 4px 12px var(--shadow)', animation: 'chatFadeIn .2s ease' }}>
-                <span style={{ color: 'var(--rose)', display: 'flex' }}>
-                  <Svg d={IC.clip} size={12} sw={1.8} />
-                </span>
-                <span style={{ fontSize: 12.5, color: 'var(--ink2)' }}>{pendingImage ? pendingImage.name : pendingFile?.fileName}</span>
-                <span role="button" aria-disabled={posting} onClick={() => { if (!postingRef.current) { setPendingFile(null); setPendingImage(null); } }} style={{ cursor: posting ? 'default' : 'pointer', color: 'var(--ghost)', fontSize: 13, padding: '0 2px' }}>×</span>
-              </div>
+              {pendingImages.map((image, index) => (
+                <div key={`image-${image.name}-${index}`} className="hstack hstack-7" style={{ background: 'var(--card)', borderRadius: 999, padding: '7px 12px', boxShadow: '0 4px 12px var(--shadow)', animation: 'chatFadeIn .2s ease' }}>
+                  <span style={{ color: 'var(--rose)', display: 'flex' }}><Svg d={IC.clip} size={12} sw={1.8} /></span>
+                  <span style={{ fontSize: 12.5, color: 'var(--ink2)' }}>{image.name}</span>
+                  <span role="button" aria-disabled={posting} onClick={() => { if (!postingRef.current) setPendingImages((current) => current.filter((_, i) => i !== index)); }} style={{ cursor: posting ? 'default' : 'pointer', color: 'var(--ghost)', fontSize: 13, padding: '0 2px' }}>×</span>
+                </div>
+              ))}
+              {pendingFiles.map((file, index) => (
+                <div key={`file-${file.fileUrl}`} className="hstack hstack-7" style={{ background: 'var(--card)', borderRadius: 999, padding: '7px 12px', boxShadow: '0 4px 12px var(--shadow)', animation: 'chatFadeIn .2s ease' }}>
+                  <span style={{ color: 'var(--rose)', display: 'flex' }}><Svg d={IC.clip} size={12} sw={1.8} /></span>
+                  <span style={{ fontSize: 12.5, color: 'var(--ink2)' }}>{file.fileName}</span>
+                  <span role="button" aria-disabled={posting} onClick={() => { if (!postingRef.current) setPendingFiles((current) => current.filter((_, i) => i !== index)); }} style={{ cursor: posting ? 'default' : 'pointer', color: 'var(--ghost)', fontSize: 13, padding: '0 2px' }}>×</span>
+                </div>
+              ))}
             </div>
           )}
 
-          <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px' }}>
-            <textarea
-              ref={taRef}
-              value={input}
-              disabled={posting}
-              onChange={(e) => {
-                if (postingRef.current) return;
-                const value = e.target.value;
-                composerDraftRevisionRef.current += 1;
-                writeChatComposerDraft(value);
-                setInput(value);
-                const ta = e.target;
-                ta.style.height = 'auto';
-                ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
-              }}
-              onKeyDown={(e) => {
-                if (postingRef.current) return;
-                if (e.key === 'Enter' && !e.shiftKey && wide) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={1}
-              placeholder={sending ? 'Fyodor 正在回复…' : placeholder}
-              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: INPUT_FONT_SIZE, lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: FONT_CN, outline: 'none' }}
-            />
-            <div className="hstack hstack-8" style={{ marginTop: 2 }}>
-              <div onClick={() => { if (!postingRef.current) setAttachMenuOpen(!attachMenuOpen); }} style={{ cursor: posting ? 'default' : 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                <Svg d={IC.plus} size={17} sw={1.8} />
-              </div>
-              <div onClick={toggleModelPop} className="hstack hstack-6" style={{ cursor: 'pointer', padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>
-                <span style={{ fontFamily: fontFamilyForText(modelBadge), fontSize: 12, letterSpacing: 0.5, color: 'var(--ink2)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{modelBadge}</span>
-                <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--ghost)', flexShrink: 0 }}>
-                  <path d="M18 15l-6-6-6 6" />
-                </svg>
-              </div>
-              <div
-                onClick={() => { if (canSend) void send(); }}
-                style={{ marginLeft: 'auto', width: 42, height: 42, flexShrink: 0, borderRadius: '50%', background: canSend ? 'var(--deep)' : 'var(--card2)', color: canSend ? '#FBF3F0' : 'var(--ghost)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: canSend ? 'pointer' : 'default', boxShadow: canSend ? '0 8px 20px var(--shadow2)' : 'none', transition: 'background .15s ease' }}
-              >
-                {sending ? <span style={{ width: 15, height: 15, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} /> : <Svg d={IC.up} size={17} sw={2} />}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ══ thinking drawer ══ */}
+          {/* ══ thinking drawer ══ */}
       {drawer && (
         <div className="c78-fill-fixed" style={{ zIndex: 60 }}>
           <div onClick={() => setDrawer(null)} className="c78-fill-absolute" style={{ background: 'rgba(30,20,18,0.42)', animation: 'chatFadeIn .2s ease' }} />
