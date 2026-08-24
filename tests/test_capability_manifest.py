@@ -35,6 +35,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             P1_ENABLED_CAPABILITY_IDS,
             {
                 "memory.search",
+                "memory.write",
                 "diary.write",
                 "home.light.status",
                 "todo.read",
@@ -102,6 +103,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "ledger.read",
             "ledger.budget.read",
             "ledger.write",
+            "memory.write",
         ):
             self.assertEqual(get_capability(capability_id)["loading_policy"], "deferred")
         for capability_id in ("files.read", "files.find", "code.search"):
@@ -136,6 +138,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
     def test_enabled_bindings_are_only_provider_specific_metadata(self):
         expected_cc_bindings = {
             "memory.search": "mcp__internal__search_memories",
+            "memory.write": "mcp__internal__write_memory",
             "diary.write": "mcp__home__write_diary",
             "home.light.status": "mcp__home__get_light_status",
             "todo.read": "mcp__internal__get_todos",

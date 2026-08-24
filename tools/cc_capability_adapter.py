@@ -70,6 +70,7 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "ledger.budget.read",
     "ledger.write",
     "memory.search",
+    "memory.write",
 )
 
 # No Internal Memory shadow remains after the Daily provider cutover.

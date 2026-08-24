@@ -15,6 +15,7 @@ const INTERNAL_TOOL_NAMES = Object.freeze([
   'get_ledger_budget',
   'add_ledger',
   'search_memories',
+  'write_memory',
 ]);
 
 function adapterCommand({ python = process.env.PYTHON || 'python3', cwd = process.env.UH_A0_REPO_ROOT || process.cwd() } = {}) {
@@ -30,6 +31,9 @@ function adapterModuleFor(operation) {
   }
   if (operation === 'search_memories') {
     return 'tools.memory_internal_adapter';
+  }
+  if (operation === 'write_memory') {
+    return 'tools.memory_write_adapter';
   }
   throw new Error('unknown Internal MCP operation');
 }
@@ -212,6 +216,36 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
         return {
           content: [{ type: 'text', text: 'Error: ' + error.message }],
         };
+      }
+    },
+  );
+
+  server.tool(
+    'write_memory',
+    {
+      content: z.string().min(1).max(4000).describe('要保存的长期记忆正文'),
+    },
+    async ({ content }) => {
+      if (!uhA0Profile) {
+        return gateFailure({ lease_decision: 'PROFILE_REQUIRED' });
+      }
+      const toolInput = { content };
+      const decision = await verify('mcp__internal__write_memory', toolInput);
+      if (!decision || decision.lease_decision !== 'ALLOW') {
+        return gateFailure(decision);
+      }
+      try {
+        const result = callInternalAdapter(
+          'write_memory',
+          toolInput,
+          { dbPath, python, cwd },
+        );
+        if (result.status === 'CREATED') {
+          return { content: [{ type: 'text', text: 'MEMORY_CREATED' }] };
+        }
+        return { content: [{ type: 'text', text: String(result.status || 'MEMORY_WRITE_FAILED') }] };
+      } catch (_error) {
+        return { content: [{ type: 'text', text: 'MEMORY_WRITE_FAILED' }] };
       }
     },
   );

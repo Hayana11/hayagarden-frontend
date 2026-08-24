@@ -25,7 +25,7 @@ _STATUS_LABELS = {
 }
 
 _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("memory", "记忆", ("memory.search", "diary.write")),
+    ("memory", "记忆", ("memory.search", "memory.write", "diary.write")),
     ("home", "家", ("home.light.status",)),
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
@@ -38,6 +38,11 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "搜索长期记忆",
         "companion_hint": "当她问起过去发生过的事、约定或偏好，而你手边没有可靠上下文时，可以先找真实记忆，再回答。",
         "physical_boundary": "只搜索已经存在的记忆；不会凭空补写，也不会把没查到的内容说成记得。",
+    },
+    "memory.write": {
+        "display_label": "写入长期记忆",
+        "companion_hint": "当对话里出现值得在未来继续记住的稳定事实、约定、偏好或重要事件时，可以把正文写进长期记忆；只写你真正想留下的内容。",
+        "physical_boundary": "只接收当前正文并固定写成 MEMORY / long-term；不会让模型选择类型、作者、标签、重要度或其他存储字段，也不会写入日记、待办或账本。",
     },
     "diary.write": {
         "display_label": "记日记",

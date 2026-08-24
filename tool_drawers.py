@@ -25,7 +25,7 @@ import config_store
 DRAWERS = {
     'memory': {
         'label': '记忆',
-        'tools': ['save_memory', 'search_memories'],
+        'tools': ['memory.write', 'memory.search'],
     },
     'web': {
         'label': '联网',

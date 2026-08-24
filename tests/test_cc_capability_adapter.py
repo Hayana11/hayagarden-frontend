@@ -84,7 +84,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search"),
+            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search", "memory.write"),
         )
         self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, ())
         home = uh_a0_home_mcp_tools()

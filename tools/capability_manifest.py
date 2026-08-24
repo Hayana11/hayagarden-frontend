@@ -50,7 +50,20 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前对话已经有充分事实，或只是为了展示工具能力时。",
         "failure_behavior": "明确说明未能查询或未找到，不得假装记得或查到。",
         "loading_policy": "always_load",
-        "provider_bindings": {"claude_code": "mcp__internal__search_memories", "internal_mcp": "mcp__internal__search_memories", "home_mcp": "mcp__home__search_memories"},
+        "provider_bindings": {"claude_code": "mcp__internal__search_memories", "internal_mcp": "mcp__internal__search_memories", "home_mcp": "mcp__home__search_memories", "api_relay": "memory.search"},
+    },
+    {
+        "capability_id": "memory.write",
+        "display_name": "写入长期记忆",
+        "kind": "write",
+        "side_effect": "external_state",
+        "autonomy_mode": "self_write_auto",
+        "trigger": "对话中出现了值得在未来继续记住的稳定事实、约定、偏好或重要事件时。",
+        "purpose": "把 Fyodor 明确提供的记忆正文写入过渡期长期 MEMORY，而不是写入日记、待办或账本。",
+        "deny_when": "内容为空、只是临时上下文，或当前没有值得保留的长期事实时。",
+        "failure_behavior": "明确说明没有写入；不得伪造成功，也不得把失败内容写入其他存储。",
+        "loading_policy": "deferred",
+        "provider_bindings": {"claude_code": "mcp__internal__write_memory", "internal_mcp": "mcp__internal__write_memory", "api_relay": "memory.write"},
     },
     {
         "capability_id": "diary.write",
@@ -279,6 +292,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
 P1_ENABLED_CAPABILITY_IDS = frozenset(
     {
         "memory.search",
+        "memory.write",
         "diary.write",
         "home.light.status",
         "todo.read",

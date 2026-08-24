@@ -42,12 +42,13 @@ class DailyMemoryCutoverTests(unittest.TestCase):
                 "claude_code": INTERNAL_MEMORY,
                 "internal_mcp": INTERNAL_MEMORY,
                 "home_mcp": HOME_MEMORY,
+                "api_relay": "memory.search",
             },
         )
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search"),
+            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search", "memory.write"),
         )
         self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, ())
         item = get_capability("memory.search")

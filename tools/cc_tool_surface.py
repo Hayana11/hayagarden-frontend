@@ -116,6 +116,11 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"keyword": {"type": "string"}},
         "required": ["keyword"],
     },
+    "mcp__internal__write_memory": {
+        "type": "object",
+        "properties": {"content": {"type": "string", "maxLength": 4000}},
+        "required": ["content"],
+    },
 }
 
 

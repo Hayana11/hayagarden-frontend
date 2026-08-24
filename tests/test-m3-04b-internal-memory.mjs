@@ -132,7 +132,7 @@ try {
   const listed = await client.listTools();
   assert.deepEqual(
     listed.tools.map((tool) => tool.name),
-    ['get_todos', 'add_todo', 'get_ledger', 'get_ledger_budget', 'add_ledger', 'search_memories'],
+    ['get_todos', 'add_todo', 'get_ledger', 'get_ledger_budget', 'add_ledger', 'search_memories', 'write_memory'],
   );
   const searchSchema = listed.tools.find((tool) => tool.name === 'search_memories')?.inputSchema;
   assert.deepEqual(Object.keys(searchSchema.properties || {}), ['keyword']);
