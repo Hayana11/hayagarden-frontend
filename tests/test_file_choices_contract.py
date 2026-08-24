@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 
 from chat.attachment_contract import (
+    ALLOWED_CHAT_FILE_EXTENSIONS,
+    MAX_CHAT_ATTACHMENTS,
     MAX_IMAGE_INPUT_BYTES,
     MAX_TEXT_FILE_BYTES,
     AttachmentValidationError,
@@ -65,6 +67,39 @@ class AttachmentPathTests(unittest.TestCase):
             self.assertIsNone(safe_child_path(td, '..\\secret.md'))
             self.assertIsNone(validate_uploaded_file_reference(url, 'note.html', td))
             self.assertIsNone(validate_uploaded_file_reference(url, '[choices]x[/choices].md', td))
+
+
+class MultiAttachmentContractTests(unittest.TestCase):
+    def test_word_pdf_and_four_attachment_limit_are_explicit(self):
+        self.assertEqual(MAX_CHAT_ATTACHMENTS, 4)
+        self.assertTrue({'.doc', '.docx', '.pdf'}.issubset(ALLOWED_CHAT_FILE_EXTENSIONS))
+
+    def test_word_and_pdf_references_keep_path_and_size_validation(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            for suffix in ('.doc', '.docx', '.pdf'):
+                name = 'abcd1234_note' + suffix
+                path = base / name
+                path.write_bytes(b'not parsed as text')
+                result = validate_uploaded_file_reference(
+                    '/static/uploads/files/' + name,
+                    'note' + suffix,
+                    td,
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual(result[0], path.resolve())
+
+
+class ChatMultiAttachmentRouteTests(unittest.TestCase):
+    def test_send_route_uses_durable_attachment_array_and_four_item_gate(self):
+        source = (Path(__file__).parents[1] / 'app.py').read_text(encoding='utf-8')
+        start = source.index("def send_chat():")
+        end = source.index("@app.route", start + 1)
+        route = source[start:end]
+        self.assertIn("request.files.getlist('image')", route)
+        self.assertIn("len(attachments) > MAX_CHAT_ATTACHMENTS", route)
+        self.assertIn("attachments_json = json.dumps(attachments, ensure_ascii=False)", route)
+        self.assertIn("file_name,attachments", route)
 
 
 class ArtifactSandboxTests(unittest.TestCase):
