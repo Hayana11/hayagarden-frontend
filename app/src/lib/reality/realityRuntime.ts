@@ -3,7 +3,7 @@ import type { RealitySnapshot } from "./realityStore";
 import { REALITY_BACKGROUND_POLL_MS } from "./realityStore";
 
 export const PHYSICAL_POLL_MS = 500;
-export { REALITY_BACKGROUND_POLL_MS };
+export const PHYSICAL_BACKGROUND_POLL_MS = REALITY_BACKGROUND_POLL_MS;
 
 export interface ElpisPhysicalBridge {
   getPhysicalState?: () => unknown;
