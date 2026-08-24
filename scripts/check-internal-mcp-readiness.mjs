@@ -100,7 +100,7 @@ async function main() {
       }) + '\n',
     );
   } finally {
-    await client.close().catch(() => {});
+    client.close().catch(() => {});
   }
 }
 
