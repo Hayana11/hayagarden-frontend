@@ -23,10 +23,10 @@ def _load_get_device_status(db_row):
         value=ast.Constant(value=10 * 60),
     )
     namespace = {"get_db": lambda: _FakeConnection(db_row)}
-    exec(
-        compile(ast.Module(body=[constant, function], type_ignores=[]), "gateway.py", "exec"),
-        namespace,
+    module = ast.fix_missing_locations(
+        ast.Module(body=[constant, function], type_ignores=[]),
     )
+    exec(compile(module, "gateway.py", "exec"), namespace)
     return namespace["_get_device_status"]
 
 
