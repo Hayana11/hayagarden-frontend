@@ -348,6 +348,7 @@ export function ChatScreen() {
   const [pendingConfirmation, setPendingConfirmation] = useState<ChatToolCall | null>(null);
   const [pendingFiles, setPendingFiles] = useState<Array<{ fileUrl: string; fileName: string }>>([]);
   const [pendingImages, setPendingImages] = useState<File[]>([]);
+  const [uploadingFileCount, setUploadingFileCount] = useState(0);
 
   const [navOpen, setNavOpen] = useState<null | 'wrench' | 'font' | 'search' | 'profile'>(null);
   const [searchQ, setSearchQ] = useState('');
@@ -401,6 +402,7 @@ export function ChatScreen() {
   const coldStartRaceRef = useRef<ColdStartRaceState>(createColdStartRaceState());
   const composerMutationRevisionRef = useRef(0);
   const composerDraftRevisionRef = useRef(0);
+  const uploadingFileSlotsRef = useRef(0);
   const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
     () => composerMutationRevisionRef.current,
     (files) => {
@@ -1261,21 +1263,31 @@ export function ChatScreen() {
     async (selectedFiles: FileList | null) => {
       setAttachMenuOpen(false);
       if (!selectedFiles || postingRef.current) return;
-      const remaining = MAX_COMPOSER_ATTACHMENTS - pendingFiles.length - pendingImages.length;
+      const remaining = MAX_COMPOSER_ATTACHMENTS
+        - pendingFiles.length
+        - pendingImages.length
+        - uploadingFileSlotsRef.current;
       const selected = Array.from(selectedFiles).slice(0, Math.max(0, remaining));
       if (!selected.length) {
         showToast('一次消息最多上传 4 个附件');
         return;
       }
-      const mutationRevision = composerMutationRevisionRef.current;
-      const uploadedFiles = (await Promise.all(selected.map(uploadChatFile)))
-        .filter((file): file is { fileUrl: string; fileName: string } => file !== null);
-      const settled = await uploadCoordinatorRef.current.settle(
-        Promise.resolve(uploadedFiles),
-        mutationRevision,
-      );
-      if (!settled || uploadedFiles.length !== selected.length) {
-        showToast('部分上传失败（每个文件限 2MB，支持文本、Word 和 PDF）');
+      uploadingFileSlotsRef.current += selected.length;
+      setUploadingFileCount(uploadingFileSlotsRef.current);
+      try {
+        const mutationRevision = composerMutationRevisionRef.current;
+        const uploadedFiles = (await Promise.all(selected.map(uploadChatFile)))
+          .filter((file): file is { fileUrl: string; fileName: string } => file !== null);
+        const settled = await uploadCoordinatorRef.current.settle(
+          Promise.resolve(uploadedFiles),
+          mutationRevision,
+        );
+        if (!settled || uploadedFiles.length !== selected.length) {
+          showToast('部分上传失败（每个文件限 2MB，支持文本、Word 和 PDF）');
+        }
+      } finally {
+        uploadingFileSlotsRef.current -= selected.length;
+        setUploadingFileCount(uploadingFileSlotsRef.current);
       }
       if (selectedFiles.length > selected.length) showToast('一次消息最多上传 4 个附件');
     },
@@ -1301,7 +1313,8 @@ export function ChatScreen() {
     return hit?.label || currentModel.replace(/^.*\]\s*/, '').slice(0, 22) || '模型';
   }, [models, currentModel, chatProvider, modelMode]);
 
-  const canSend = Boolean(input.trim() || pendingFiles.length || pendingImages.length) && !sending;
+  const canSend = Boolean(input.trim() || pendingFiles.length || pendingImages.length)
+    && !sending && uploadingFileCount === 0;
 
   // ── message block renderers ──
 
@@ -2045,7 +2058,7 @@ export function ChatScreen() {
             <>
               <div onClick={() => setAttachMenuOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
               <div className="vstack vstack-2" style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 190, background: 'var(--card)', borderRadius: 16, boxShadow: '0 24px 60px var(--shadow2)', padding: 8, animation: 'chatFadeIn .15s ease' }}>
-                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (!postingRef.current && uploadingFileCount === 0) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || uploadingFileCount ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <rect x={3} y={3} width={18} height={18} rx={3} />
                     <circle cx={9} cy={9} r={2} />
@@ -2053,7 +2066,7 @@ export function ChatScreen() {
                   </svg>
                   <span style={{ fontSize: 13.5, color: 'var(--ink)' }}>上传图片</span>
                 </div>
-                <div onClick={() => { if (!postingRef.current) { setAttachMenuOpen(false); fileInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (!postingRef.current && uploadingFileCount === 0) { setAttachMenuOpen(false); fileInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || uploadingFileCount ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <path d="M14 2v6h6" />
@@ -2063,16 +2076,17 @@ export function ChatScreen() {
               </div>
             </>
           )}
-          <input ref={imgInputRef} type="file" accept="image/*" multiple disabled={posting} style={{ display: 'none' }} onChange={(e) => {
+          <input ref={imgInputRef} type="file" accept="image/*" multiple disabled={posting || uploadingFileCount > 0} style={{ display: 'none' }} onChange={(e) => {
             if (!postingRef.current) {
-              const remaining = MAX_COMPOSER_ATTACHMENTS - pendingFiles.length - pendingImages.length;
+              const remaining = MAX_COMPOSER_ATTACHMENTS
+                - pendingFiles.length - pendingImages.length - uploadingFileSlotsRef.current;
               const selected = Array.from(e.target.files || []).slice(0, Math.max(0, remaining));
               if (selected.length) setPendingImages((current) => [...current, ...selected]);
               if ((e.target.files?.length || 0) > selected.length) showToast('一次消息最多上传 4 个附件');
             }
             e.target.value = '';
           }} />
-          <input ref={fileInputRef} type="file" accept=".md,.txt,.html,.htm,.py,.js,.json,.csv,.css,.xml,.yaml,.yml,.log,.ini,.sh,.pdf,.doc,.docx" multiple disabled={posting} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFiles(e.target.files); e.target.value = ''; }} />
+          <input ref={fileInputRef} type="file" accept=".md,.txt,.html,.htm,.py,.js,.json,.csv,.css,.xml,.yaml,.yml,.log,.ini,.sh,.pdf,.doc,.docx" multiple disabled={posting || uploadingFileCount > 0} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFiles(e.target.files); e.target.value = ''; }} />
 
           {(pendingFiles.length || pendingImages.length) > 0 && (
             <div className="flex-wrap-gap-8" style={{ padding: '0 4px 8px' }}>
