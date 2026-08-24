@@ -221,7 +221,7 @@ def persisted_chat_attachments(
     )
     if legacy_file:
         items.append(legacy_file)
-    legacy_image = _safe_static_url(legacy_image_url, prefix='/static/uploads/')
+    legacy_image = _safe_static_url(legacy_image_url, prefix='/static/', allow_nested=True)
     if legacy_image and not legacy_image.startswith(CHAT_FILE_URL_PREFIX):
         items.append({'type': 'image', 'url': legacy_image, 'name': ''})
 
