@@ -32,8 +32,8 @@ async function main() {
 
     assert.deepEqual(
       [...names].sort(),
-      ['add_ledger', 'add_todo', 'get_ledger', 'get_ledger_budget', 'get_todos', 'search_memories'],
-      'Internal MCP catalog must contain exactly the six Todo, Ledger, and Memory tools',
+      ['add_ledger', 'add_todo', 'get_ledger', 'get_ledger_budget', 'get_todos', 'search_memories', 'write_memory'],
+      'Internal MCP catalog must contain the Todo, Ledger, and Memory tools',
     );
 
     const addTodo = tools.find((tool) => tool?.name === 'add_todo');
@@ -79,6 +79,17 @@ async function main() {
       ['keyword'],
     );
     assert.equal(memorySchema.properties?.keyword?.type, 'string');
+
+    const writeMemory = tools.find((tool) => tool?.name === 'write_memory');
+    assert.ok(writeMemory, 'write_memory must be listed');
+    const writeSchema = schemaFor(writeMemory);
+    assert.deepEqual(writeSchema.required || [], ['content']);
+    assert.deepEqual(
+      Object.keys(writeSchema.properties || {}).sort(),
+      ['content'],
+    );
+    assert.equal(writeSchema.properties?.content?.type, 'string');
+    assert.equal(writeSchema.properties?.content?.maxLength, 4000);
 
     process.stdout.write(
       JSON.stringify({
