@@ -38,7 +38,7 @@ python(
   `import json, sqlite3, sys
 data = json.loads(sys.argv[2])
 conn = sqlite3.connect(sys.argv[1])
-conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL, author TEXT DEFAULT 'fyodor', created_at TEXT, pinned INTEGER DEFAULT 0, tags TEXT DEFAULT '', layer TEXT DEFAULT 'recent', resolved INTEGER DEFAULT 0, recall_count INTEGER DEFAULT 0, last_recalled_at TEXT)")
+conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL, author TEXT DEFAULT 'fyodor', created_at TEXT, pinned INTEGER DEFAULT 0, importance INTEGER DEFAULT 0, tags TEXT DEFAULT '', layer TEXT DEFAULT 'recent', resolved INTEGER DEFAULT 0, recall_count INTEGER DEFAULT 0, last_recalled_at TEXT)")
 conn.executemany("INSERT INTO posts (id,type,content,created_at,pinned,tags,layer,resolved) VALUES (?,?,?,?,?,?,?,?)", data)
 conn.commit()
 conn.close()`,
