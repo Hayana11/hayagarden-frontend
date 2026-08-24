@@ -103,9 +103,14 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "ledger.read",
             "ledger.budget.read",
             "ledger.write",
-            "memory.write",
         ):
             self.assertEqual(get_capability(capability_id)["loading_policy"], "deferred")
+        memory_write = get_capability("memory.write")
+        self.assertEqual(memory_write["kind"], "write")
+        self.assertEqual(memory_write["side_effect"], "external_state")
+        self.assertEqual(memory_write["autonomy_mode"], "self_write_auto")
+        self.assertEqual(memory_write["loading_policy"], "deferred")
+
         for capability_id in ("files.read", "files.find", "code.search"):
             self.assertEqual(get_capability(capability_id)["loading_policy"], "task_scoped")
 

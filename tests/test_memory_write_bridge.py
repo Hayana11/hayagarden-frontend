@@ -29,7 +29,7 @@ class MemoryWriteBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = str(Path(root) / "memory.db")
             make_db(path)
-            for content in ("", "   ", "x" * (MAX_CONTENT_SIZE + 1), None, 123, "emoji 😀\ncore long-term MEMORY {"x":1}"):
+            for content in ("", "   ", "x" * (MAX_CONTENT_SIZE + 1), None, 123, 'emoji 😀\ncore long-term MEMORY {"x":1}'):
                 if isinstance(content, str) and content.startswith("emoji"):
                     result = write_memory(path, content=content)
                     self.assertEqual(result["status"], "CREATED")
