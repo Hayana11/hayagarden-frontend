@@ -31,7 +31,9 @@ from tools.product_handlers import (
     write_ledger_budget as handle_write_ledger_budget,
 )
 from chat.attachment_contract import (
+    ALLOWED_CHAT_FILE_EXTENSIONS,
     ALLOWED_TEXT_FILE_EXTENSIONS,
+    MAX_CHAT_ATTACHMENTS,
     MAX_TEXT_FILE_BYTES,
     AttachmentValidationError,
     read_limited_upload,
@@ -71,7 +73,7 @@ def get_db():
 #   file_url 有值=文件卡片，choices 有值(JSON 数组)=选择器按钮组。
 # 幂等 migration，跑几次都安全。
 FILES_DIR = '/opt/frontend/static/uploads/files'
-ALLOWED_FILE_EXT = set(ALLOWED_TEXT_FILE_EXTENSIONS)
+ALLOWED_FILE_EXT = set(ALLOWED_CHAT_FILE_EXTENSIONS)
 MAX_FILE_BYTES = MAX_TEXT_FILE_BYTES
 
 def _migrate_chat_columns():
@@ -80,6 +82,7 @@ def _migrate_chat_columns():
     ddl = {
         'file_url':  "ALTER TABLE chat_messages ADD COLUMN file_url TEXT DEFAULT ''",
         'file_name': "ALTER TABLE chat_messages ADD COLUMN file_name TEXT DEFAULT ''",
+        'attachments': "ALTER TABLE chat_messages ADD COLUMN attachments TEXT DEFAULT '[]'",
         'choices':   "ALTER TABLE chat_messages ADD COLUMN choices TEXT DEFAULT ''",
     }
     for col, stmt in ddl.items():
@@ -775,15 +778,14 @@ def upload_image():
 
 @app.route('/api/chat/upload_file', methods=['POST'])
 def upload_file():
-    """用户发文本类文件（与图片上传分开，图片走压缩管线、文件不需要）。
-    三道防御：扩展名白名单 + 2MB 上限 + 文件名安全化后加随机前缀存储。"""
+    """Upload one chat file: allowlisted type, 2MB cap, safe generated name."""
     if 'file' not in request.files:
         return jsonify({"error": "no file"}), 400
     f = request.files['file']
     orig = os.path.basename(f.filename or 'file')
     ext = os.path.splitext(orig)[1].lower()
     if ext not in ALLOWED_FILE_EXT:
-        return jsonify({"error": "不支持的文件类型（只收文本类）"}), 400
+        return jsonify({"error": "不支持的文件类型（支持文本、Word 和 PDF）"}), 400
     safe = re.sub(r'[^\w\u4e00-\u9fff.\-]', '_', orig)
     fname = f"{uuid.uuid4().hex[:8]}_{safe}"
     os.makedirs(FILES_DIR, exist_ok=True)
@@ -803,6 +805,8 @@ def uploaded_file_preview(filename):
     path = safe_child_path(FILES_DIR, filename)
     if path is None or not path.is_file() or path.suffix.lower() not in ALLOWED_FILE_EXT:
         return jsonify({'error': 'not found'}), 404
+    if path.suffix.lower() not in ALLOWED_TEXT_FILE_EXTENSIONS:
+        return send_from_directory(FILES_DIR, filename, as_attachment=True)
     if path.suffix.lower() in {'.html', '.htm'}:
         import urllib.parse as _up
         return _sandbox_preview_shell(
@@ -1056,30 +1060,54 @@ def group_chat_clear():
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
     ct = request.content_type or ''
-    file_url = file_name = ''
-    image_upload = None
+    raw_attachments = []
+    legacy_image_url = ''
     if 'application/json' in ct:
-        data = request.get_json()
-        author    = data.get('author', 'user')
-        content   = data.get('content', '').strip()
-        image_url = data.get('image_url', '')
-        file_url  = (data.get('file_url') or '').strip()
-        file_name = (data.get('file_name') or '').strip()
+        data = request.get_json(silent=True) or {}
+        author = data.get('author', 'user')
+        content = (data.get('content') or '').strip()
+        raw_attachments = data.get('attachments', [])
+        if not raw_attachments and data.get('file_url'):
+            raw_attachments = [{
+                'fileUrl': data.get('file_url'),
+                'fileName': data.get('file_name'),
+            }]
+        legacy_image_url = str(data.get('image_url') or '').strip()
+        image_uploads = []
     else:
-        author  = request.form.get('author', 'user')
-        content = request.form.get('content', '').strip()
-        image_url = ''
-        file_url  = (request.form.get('file_url') or '').strip()
-        file_name = (request.form.get('file_name') or '').strip()
-        image_upload = request.files.get('image')
-    if file_url:
+        author = request.form.get('author', 'user')
+        content = (request.form.get('content') or '').strip()
+        raw_attachments = request.form.get('attachments', '[]')
+        if raw_attachments in ('', '[]') and request.form.get('file_url'):
+            raw_attachments = [{
+                'fileUrl': request.form.get('file_url'),
+                'fileName': request.form.get('file_name'),
+            }]
+        image_uploads = request.files.getlist('image')
+
+    if isinstance(raw_attachments, str):
+        try:
+            raw_attachments = json.loads(raw_attachments)
+        except (TypeError, ValueError):
+            return jsonify({'error': '附件格式无效'}), 400
+    if not isinstance(raw_attachments, list):
+        return jsonify({'error': '附件格式无效'}), 400
+
+    attachments = []
+    for item in raw_attachments:
+        if not isinstance(item, dict):
+            return jsonify({'error': '附件格式无效'}), 400
+        file_url = str(item.get('fileUrl') or item.get('file_url') or '').strip()
+        file_name = str(item.get('fileName') or item.get('file_name') or '').strip()
         validated = validate_uploaded_file_reference(file_url, file_name, FILES_DIR)
         if validated is None:
             return jsonify({'error': '无效的文件引用'}), 400
         _file_path, file_name = validated
-    if file_url and image_upload is not None:
-        return jsonify({'error': '一次消息只能携带一种附件'}), 400
-    if image_upload is not None:
+        attachments.append({'type': 'file', 'url': file_url, 'name': file_name})
+
+    if legacy_image_url:
+        attachments.append({'type': 'image', 'url': legacy_image_url, 'name': ''})
+    for image_upload in image_uploads:
         try:
             raw_image = read_limited_upload(image_upload.stream)
             image_data, image_ext, _image_mime = reencode_chat_image(raw_image)
@@ -1089,12 +1117,34 @@ def send_chat():
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         with open(os.path.join(UPLOAD_DIR, fname), 'wb') as out:
             out.write(image_data)
-        image_url = f"/static/uploads/{fname}"
-    if not content and not image_url and not file_url:
-        return jsonify({"error":"empty"}), 400
-    # 文件消息的 content 给个可读标记，历史回放给模型时能看懂自己发过什么
-    if file_url and not content:
-        content = '[文件:%s]' % (file_name or '附件')
+        attachments.append({
+            'type': 'image',
+            'url': f"/static/uploads/{fname}",
+            'name': os.path.basename(image_upload.filename or fname),
+        })
+
+    if len(attachments) > MAX_CHAT_ATTACHMENTS:
+        return jsonify({'error': '一次消息最多上传 4 个附件'}), 400
+    if not content and not attachments:
+        return jsonify({"error": "empty"}), 400
+
+    # Legacy scalar columns keep one-attachment messages compatible. New
+    # multi-attachment rendering will read the durable attachments JSON later.
+    image_url = ''
+    file_url = ''
+    file_name = ''
+    if len(attachments) == 1:
+        first = attachments[0]
+        if first['type'] == 'image':
+            image_url = first['url']
+        else:
+            file_url = first['url']
+            file_name = first['name']
+    if attachments and not content:
+        labels = [item['name'] or '图片' for item in attachments]
+        content = '[附件: %s]' % '、'.join(labels)
+    attachments_json = json.dumps(attachments, ensure_ascii=False)
+
     conn = get_db()
     previous_user_at = None
     created_at = None
@@ -1118,11 +1168,10 @@ def send_chat():
                 previous_user_at = prev['created_at'] if hasattr(prev, 'keys') else prev[0]
                 previous_user_at = str(previous_user_at) if previous_user_at else None
         cur = conn.execute(
-            "INSERT INTO chat_messages (author,content,image_url,file_url,file_name) "
-            "VALUES (?,?,?,?,?)",
-            (author, content, image_url, file_url, file_name),
-        )
-        message_id = cur.lastrowid
+            "INSERT INTO chat_messages (author,content,image_url,file_url,file_name,attachments) "
+            "VALUES (?,?,?,?,?,?)",
+            (author, content, image_url, file_url, file_name, attachments_json),
+        )        message_id = cur.lastrowid
         if _user_events_requested:
             row = conn.execute(
                 "SELECT created_at FROM chat_messages WHERE id=?",
