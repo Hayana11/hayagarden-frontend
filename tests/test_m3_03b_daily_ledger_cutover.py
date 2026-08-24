@@ -108,15 +108,20 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertNotIn("mcp__home__get_todos", allowed)
         self.assertNotIn("mcp__home__add_todo", allowed)
         self.assertEqual(plan["physical_surface_fingerprint"], TARGET_FINGERPRINT)
-        self.assertIn("mcp__internal__search_memories", allowed)
+        self.assertIn("mcp__capability__memory_search", allowed)
         self.assertNotIn("mcp__home__search_memories", allowed)
         self.assertIn("mcp__home__search_memories", disallowed)
-        self.assertNotIn("mcp__internal__search_memories", disallowed)
+        self.assertIn("mcp__internal__search_memories", disallowed)
         self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
         self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
-            (),
+            (
+                "mcp__internal__search_memories",
+                "mcp__internal__write_memory",
+                "mcp__internal__add_todo",
+                "mcp__internal__add_ledger",
+            ),
         )
 
     def test_runtime_off_hides_internal_and_keeps_home_denied(self):
