@@ -52,10 +52,10 @@ class MemoryWriteBridgeTests(unittest.TestCase):
         gateway = (root / "gateway.py").read_text(encoding="utf-8")
         tools_block = gateway[gateway.index("TOOLS = ["):gateway.index("def get_tools")]
         self.assertIn("'name': 'memory.write'", tools_block)
-        self.assertIn("'name': 'memory.search'", tools_block)
+        self.assertIn("'name': 'search_memories'", tools_block)
         self.assertNotIn("'name': 'save_memory'", tools_block)
         drawers = (root / "tool_drawers.py").read_text(encoding="utf-8")
-        self.assertIn("'tools': ['memory.write', 'memory.search']", drawers)
+        self.assertIn("'tools': ['memory.write', 'search_memories']", drawers)
 
     def test_schema_is_content_only(self):
         from tools.cc_tool_surface import _INTERNAL_TOOL_SCHEMAS

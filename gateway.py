@@ -1656,7 +1656,7 @@ _BASE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'maxLength': 4000, 'description': '要记住的正文'}}, 'required': ['content']},
     },
     {
-        'name': 'memory.search',
+        'name': 'search_memories',
         'description': '在长期记忆中按关键词搜索，找回更久之前的记忆。当她提到过去的事而你不确定细节时使用。',
         'input_schema': {'type': 'object', 'properties': {'keyword': {'type': 'string'}}, 'required': ['keyword']},
     },
@@ -2939,7 +2939,7 @@ def _stream_api_confirmation(request_data):
 
 def _dispatch_api_chat_tool(name, args, turn_lease, tool_use_id=None):
     """Dispatch fenced formal API capability tools through narrow seams."""
-    if name in ('memory.write', 'memory.search'):
+    if name == 'memory.write':
         from tools.execution_fence import evaluate_tool_call
         decision = evaluate_tool_call(
             tool_name=name,
@@ -2953,8 +2953,6 @@ def _dispatch_api_chat_tool(name, args, turn_lease, tool_use_id=None):
                 f'工具执行失败：{lease_decision or "DENIED_CAPABILITY"}'
                 f'（{name}；{diagnostic}）'
             )
-        if name == 'memory.search':
-            return run_tool('search_memories', args)
         from tools.memory_write_adapter import write_memory
         result = write_memory(DB_PATH, content=args.get('content'))
         if result.get('status') == 'CREATED':
