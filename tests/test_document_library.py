@@ -1,6 +1,7 @@
 """Documents View union + delete contract."""
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -16,6 +17,7 @@ CREATE TABLE chat_messages (
   content TEXT DEFAULT '',
   file_url TEXT DEFAULT '',
   file_name TEXT DEFAULT '',
+  attachments TEXT DEFAULT '[]',
   created_at TEXT,
   session_id TEXT DEFAULT '',
   tool_calls TEXT DEFAULT ''
@@ -77,6 +79,26 @@ class DocumentLibraryTests(unittest.TestCase):
         conn.commit()
         conn.close()
         return url
+
+    def _add_multi_upload(self, message_id, names, created_at):
+        attachments = []
+        for index, name in enumerate(names):
+            fname = 'abcd%d123_%s' % (index, name)
+            Path(self.files, fname).write_bytes(b'payload')
+            attachments.append({
+                'type': 'file',
+                'url': '/static/uploads/files/%s' % fname,
+                'name': name,
+            })
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            'INSERT INTO chat_messages (id, author, content, attachments, created_at, session_id) '
+            'VALUES (?,?,?,?,?,?)',
+            (message_id, 'hayana', 'x', json.dumps(attachments), created_at, 's1'),
+        )
+        conn.commit()
+        conn.close()
+        return [Path(self.files) / ('abcd%d123_%s' % (i, name)) for i, name in enumerate(names)]
 
     def test_l1_uploads_only(self):
         self._add_upload(10, 'a.txt', '2026-08-05 10:00:00')
@@ -143,6 +165,21 @@ class DocumentLibraryTests(unittest.TestCase):
         row = conn.execute('SELECT file_url FROM chat_messages WHERE id=3').fetchone()
         conn.close()
         self.assertEqual(row[0], '')
+
+    def test_d1_multi_upload_lists_and_cleans_every_file(self):
+        paths = self._add_multi_upload(31, ['one.pdf', 'two.docx'], '2026-08-05 12:00:00')
+        items = self.dl.list_documents()
+        self.assertEqual([item['file_name'] for item in items], ['one.pdf', 'two.docx'])
+        self.assertEqual({item['library_key'] for item in items}, {'upload:31'})
+        out = self.dl.delete_documents(keys=['upload:31'], strict_keys=True)
+        self.assertEqual(out['deleted_uploads'], 1)
+        self.assertTrue(all(not path.exists() for path in paths))
+        conn = sqlite3.connect(self.db)
+        row = conn.execute(
+            'SELECT file_url, file_name, attachments FROM chat_messages WHERE id=31'
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row, ('', '', '[]'))
 
     def test_d2_artifact_key_only(self):
         self._add_upload(4, 'keep.txt', '2026-08-05 12:00:00')
