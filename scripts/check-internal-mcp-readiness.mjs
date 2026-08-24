@@ -104,7 +104,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write('INTERNAL_MCP_READINESS_FAILED: ' + error.message + '\n');
-  process.exitCode = 1;
-});
+main().then(
+  () => process.exit(0),
+  (error) => {
+    process.stderr.write('INTERNAL_MCP_READINESS_FAILED: ' + error.message + '\n');
+    process.exitCode = 1;
+  },
+);
