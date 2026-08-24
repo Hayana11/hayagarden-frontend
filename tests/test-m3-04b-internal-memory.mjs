@@ -170,6 +170,18 @@ try {
   assert.equal(textOf(noHit), '没有找到相关记忆');
   assert.equal(snapshot(), before);
 
+  const write = await client.callTool({
+    name: 'write_memory',
+    arguments: { content: '  Internal MCP bridge fact 😀  ' },
+  });
+  assert.equal(textOf(write), 'MEMORY_CREATED');
+  const writtenRows = JSON.parse(snapshot());
+  const written = writtenRows[writtenRows.length - 1];
+  assert.equal(written[1], 'MEMORY');
+  assert.equal(written[2], 'Internal MCP bridge fact 😀');
+  assert.equal(written[6], 'long-term');
+  assert.equal(writtenRows.length, rows.length + 1);
+
   const readinessSource = readFileSync(join(root, 'scripts/check-internal-mcp-readiness.mjs'), 'utf8');
   assert.doesNotMatch(readinessSource, /callTool\s*\(/);
 
