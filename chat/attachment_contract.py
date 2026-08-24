@@ -267,10 +267,19 @@ def image_attachment_urls(
     ]
 
 
-def uploaded_file_urls(value: object, *, legacy_file_url: object = '') -> list[str]:
+def uploaded_file_urls(
+    value: object,
+    *,
+    legacy_file_url: object = '',
+    legacy_file_name: object = '',
+) -> list[str]:
     """Return canonical stored chat file URLs for cleanup; ignore all others."""
     urls: list[str] = []
-    for item in persisted_chat_attachments(value, legacy_file_url=legacy_file_url):
+    for item in persisted_chat_attachments(
+        value,
+        legacy_file_url=legacy_file_url,
+        legacy_file_name=legacy_file_name,
+    ):
         if item['type'] != 'file':
             continue
         if _safe_static_url(item['url'], prefix=CHAT_FILE_URL_PREFIX):
