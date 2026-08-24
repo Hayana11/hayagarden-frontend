@@ -1171,7 +1171,8 @@ def send_chat():
             "INSERT INTO chat_messages (author,content,image_url,file_url,file_name,attachments) "
             "VALUES (?,?,?,?,?,?)",
             (author, content, image_url, file_url, file_name, attachments_json),
-        )        message_id = cur.lastrowid
+        )
+        message_id = cur.lastrowid
         if _user_events_requested:
             row = conn.execute(
                 "SELECT created_at FROM chat_messages WHERE id=?",
