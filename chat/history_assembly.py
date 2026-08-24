@@ -11,6 +11,7 @@ from chat.context_budget import (
     file_ref_key,
     trim_rows_to_token_budget,
 )
+from chat.attachment_contract import image_attachment_urls, text_file_attachments
 from chat.context_continuity import format_tool_history
 from chat.history_boundary import (
     compute_boundary_ids,
@@ -103,6 +104,22 @@ def _has_file_marker(blocks: list[dict[str, Any]], filename: str) -> bool:
     return any(
         any(marker in str(block.get('text') or '') for marker in markers)
         for block in blocks if block.get('type') == 'text'
+    )
+
+
+
+def _row_text_files(row: Any) -> list[dict[str, str]]:
+    return text_file_attachments(
+        _row_get(row, 'attachments'),
+        legacy_file_url=_row_get(row, 'file_url'),
+        legacy_file_name=_row_get(row, 'file_name'),
+    )
+
+
+def _row_image_urls(row: Any) -> list[str]:
+    return image_attachment_urls(
+        _row_get(row, 'attachments'),
+        legacy_image_url=_row_get(row, 'image_url'),
     )
 
 
@@ -413,7 +430,7 @@ def assemble_history_from_rows(
             author = _row_get(row, 'author')
             tool_calls = _row_get(row, 'tool_calls')
             content = _row_get(row, 'content')
-            file_url = _row_get(row, 'file_url')
+            file_refs = _row_text_files(row)
             gap = ''
             cur_dt = None
             try:
@@ -438,11 +455,16 @@ def assemble_history_from_rows(
                     cap_large=large,
                     cap_per_message=per_message,
                 )
-            fu = file_url
-            if fu and not is_ai_author(author) and str(fu).startswith('/static/'):
-                file_body = read_file_fn(static_dir, str(fu)) or ''
-                if file_body and _resident_knows_file(str(fu), file_body, resident_known_files):
-                    file_body = file_body[:400] + '\n' + _RESIDENT_FILE_SUMMARY_SUFFIX
+            if not is_ai_author(author):
+                file_bodies: list[str] = []
+                for file_ref in file_refs:
+                    fu = file_ref['url']
+                    body = read_file_fn(static_dir, fu) or ''
+                    if body and _resident_knows_file(fu, body, resident_known_files):
+                        body = body[:400] + '\n' + _RESIDENT_FILE_SUMMARY_SUFFIX
+                    if body:
+                        file_bodies.append(body)
+                file_body = '\n'.join(file_bodies)
             return estimate_row_rendered_text(
                 {'content': content},
                 time_gap_prefix=gap,
@@ -464,10 +486,12 @@ def assemble_history_from_rows(
 
     stats.rows_after_trim = len(rows)
     total = len(rows)
-    img_indices = [i for i, r in enumerate(rows) if _row_get(r, 'image_url')]
-    keep_img_indices = set(img_indices[-2:])
+    row_image_urls = [_row_image_urls(r) for r in rows]
+    image_count = sum(len(urls) for urls in row_image_urls)
+    keep_image_positions = set(range(max(0, image_count - 2), image_count))
 
     msgs: list[dict[str, Any]] = []
+    image_position = 0
     prev_dt = None
 
     for ri, r in enumerate(rows):
@@ -493,72 +517,74 @@ def assemble_history_from_rows(
             prev_dt = cur_dt
 
         blocks: list[dict[str, Any]] = []
-        if _row_get(r, 'image_url'):
-            if ri in keep_img_indices:
-                blk = img_block_fn(_row_get(r, 'image_url'))
+        for image_url in row_image_urls[ri]:
+            if image_position in keep_image_positions:
+                blk = img_block_fn(image_url)
                 if blk:
                     blocks.append(blk)
                     stats.image_block_count += 1
             else:
                 blocks.append(_text_block('[一张较早发送的图片，内容已不在上下文中]'))
                 stats.image_placeholder_count += 1
+            image_position += 1
 
         if _row_get(r, 'content'):
             blocks.append(_text_block(note + _row_get(r, 'content')))
 
-        fu = _row_get(r, 'file_url')
-        if fu and not is_ai and str(fu).startswith('/static/'):
-            fname = _row_get(r, 'file_name') or '附件'
-            body = read_file_fn(static_dir, str(fu))
-            if body is not None:
-                full_sha = file_content_sha256(body)
-                ref_key = file_ref_key(str(fu), full_sha)
-                mode = 'full'
-                if _resident_knows_file(str(fu), body, resident_known_files):
-                    body = body[:400] + '\n' + _RESIDENT_FILE_SUMMARY_SUFFIX
-                    mode = 'resident_summary'
-                elif ri >= total - 6:
-                    if len(body) > 30000:
-                        body = body[:30000] + '\n...(文件过长已截断)'
-                else:
-                    mode = 'marker_only'
-                    body = ''
-                if body:
-                    text = '[用户发来文件: %s]\n```\n%s\n```' % (fname, body)
-                    blocks.append(_text_block(text, meta={
-                        'kind': 'file',
-                        'mode': mode,
-                        'url': str(fu),
-                        'ref_key': ref_key,
-                        'content_sha256': full_sha,
-                    }))
-                    stats.file_injections.append({
-                        'url': str(fu),
-                        'mode': mode,
-                        'content_sha256': full_sha,
-                        'ref_key': ref_key,
-                        'tokens_estimate': estimate_tokens(text),
-                    })
+        if not is_ai:
+            for file_ref in _row_text_files(r):
+                fu = file_ref['url']
+                fname = file_ref['name'] or '附件'
+                body = read_file_fn(static_dir, fu)
+                if body is not None:
+                    full_sha = file_content_sha256(body)
+                    ref_key = file_ref_key(fu, full_sha)
+                    mode = 'full'
+                    if _resident_knows_file(fu, body, resident_known_files):
+                        body = body[:400] + '\n' + _RESIDENT_FILE_SUMMARY_SUFFIX
+                        mode = 'resident_summary'
+                    elif ri >= total - 6:
+                        if len(body) > 30000:
+                            body = body[:30000] + '\n...(文件过长已截断)'
+                    else:
+                        mode = 'marker_only'
+                        body = ''
+                    if body:
+                        text = '[用户发来文件: %s]\n```\n%s\n```' % (fname, body)
+                        blocks.append(_text_block(text, meta={
+                            'kind': 'file',
+                            'mode': mode,
+                            'url': fu,
+                            'ref_key': ref_key,
+                            'content_sha256': full_sha,
+                        }))
+                        stats.file_injections.append({
+                            'url': fu,
+                            'mode': mode,
+                            'content_sha256': full_sha,
+                            'ref_key': ref_key,
+                            'tokens_estimate': estimate_tokens(text),
+                        })
+                    elif not _has_file_marker(blocks, fname):
+                        marker = _file_marker(fname)
+                        blocks.append(_text_block(marker, meta={
+                            'kind': 'file',
+                            'mode': 'marker_only',
+                            'url': fu,
+                            'ref_key': ref_key,
+                            'content_sha256': full_sha,
+                        }))
+                        stats.file_injections.append({
+                            'url': fu,
+                            'mode': 'marker_only',
+                            'content_sha256': full_sha,
+                            'ref_key': ref_key,
+                            'tokens_estimate': estimate_tokens(marker),
+                        })
                 elif not _has_file_marker(blocks, fname):
-                    marker = _file_marker(fname)
-                    blocks.append(_text_block(marker, meta={
-                        'kind': 'file',
-                        'mode': 'marker_only',
-                        'url': str(fu),
-                        'ref_key': ref_key,
-                        'content_sha256': full_sha,
+                    blocks.append(_text_block(_file_marker(fname), meta={
+                        'kind': 'file', 'mode': 'marker_only', 'url': fu,
                     }))
-                    stats.file_injections.append({
-                        'url': str(fu),
-                        'mode': 'marker_only',
-                        'content_sha256': full_sha,
-                        'ref_key': ref_key,
-                        'tokens_estimate': estimate_tokens(marker),
-                    })
-            elif not _has_file_marker(blocks, fname):
-                blocks.append(_text_block(_file_marker(fname), meta={
-                    'kind': 'file', 'mode': 'marker_only', 'url': str(fu),
-                }))
 
         if is_ai and _row_get(r, 'tool_calls'):
             small, large, per_message, _ = _tool_caps()
