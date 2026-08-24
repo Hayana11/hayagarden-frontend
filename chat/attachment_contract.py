@@ -138,6 +138,136 @@ def validate_uploaded_file_reference(
     return path, label
 
 
+
+def _safe_static_url(value: object, *, prefix: str) -> str:
+    parsed = urlsplit(str(value or ''))
+    if (
+        parsed.scheme or parsed.netloc or parsed.query or parsed.fragment
+        or not parsed.path.startswith(prefix)
+    ):
+        return ''
+    tail = parsed.path[len(prefix):]
+    if not tail or '/' in tail or '\\' in tail:
+        return ''
+    return parsed.path
+
+
+def _file_attachment(
+    url: object,
+    name: object,
+    *,
+    allow_legacy_static: bool,
+) -> Optional[dict[str, str]]:
+    safe_url = _safe_static_url(
+        url,
+        prefix='/static/' if allow_legacy_static else CHAT_FILE_URL_PREFIX,
+    )
+    label = os.path.basename(str(name or '').strip())
+    if not safe_url or not label or Path(label).suffix.lower() not in ALLOWED_CHAT_FILE_EXTENSIONS:
+        return None
+    if Path(safe_url).suffix.lower() != Path(label).suffix.lower():
+        return None
+    return {'type': 'file', 'url': safe_url, 'name': label}
+
+
+def persisted_chat_attachments(
+    value: object,
+    *,
+    legacy_file_url: object = '',
+    legacy_file_name: object = '',
+    legacy_image_url: object = '',
+) -> list[dict[str, str]]:
+    """Normalize durable attachment JSON and legacy scalar columns fail closed.
+
+    The returned values are metadata only. Callers must still resolve any file
+    URL below their own storage root before opening it.
+    """
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = []
+    items: list[dict[str, str]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get('type') or '').strip().lower()
+            if kind == 'file':
+                normalized = _file_attachment(
+                    item.get('url') or item.get('fileUrl') or item.get('file_url'),
+                    item.get('name') or item.get('fileName') or item.get('file_name'),
+                    allow_legacy_static=False,
+                )
+                if normalized:
+                    items.append(normalized)
+            elif kind == 'image':
+                url = _safe_static_url(item.get('url') or item.get('image_url'), prefix='/static/uploads/')
+                if url and not url.startswith(CHAT_FILE_URL_PREFIX):
+                    items.append({'type': 'image', 'url': url, 'name': str(item.get('name') or '')})
+    legacy_file = _file_attachment(
+        legacy_file_url, legacy_file_name, allow_legacy_static=True,
+    )
+    if legacy_file:
+        items.append(legacy_file)
+    legacy_image = _safe_static_url(legacy_image_url, prefix='/static/')
+    if legacy_image and not legacy_image.startswith(CHAT_FILE_URL_PREFIX):
+        items.append({'type': 'image', 'url': legacy_image, 'name': ''})
+
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        key = (item['type'], item['url'])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def text_file_attachments(
+    value: object,
+    *,
+    legacy_file_url: object = '',
+    legacy_file_name: object = '',
+) -> list[dict[str, str]]:
+    """Return only text-like files that are eligible for prompt extraction."""
+    return [
+        item for item in persisted_chat_attachments(
+            value,
+            legacy_file_url=legacy_file_url,
+            legacy_file_name=legacy_file_name,
+        )
+        if item['type'] == 'file'
+        and Path(item['name']).suffix.lower() in ALLOWED_TEXT_FILE_EXTENSIONS
+    ]
+
+
+def image_attachment_urls(
+    value: object,
+    *,
+    legacy_image_url: object = '',
+) -> list[str]:
+    return [
+        item['url'] for item in persisted_chat_attachments(
+            value,
+            legacy_image_url=legacy_image_url,
+        )
+        if item['type'] == 'image'
+    ]
+
+
+def uploaded_file_urls(value: object, *, legacy_file_url: object = '') -> list[str]:
+    """Return canonical stored chat file URLs for cleanup; ignore all others."""
+    urls: list[str] = []
+    for item in persisted_chat_attachments(value, legacy_file_url=legacy_file_url):
+        if item['type'] != 'file':
+            continue
+        if _safe_static_url(item['url'], prefix=CHAT_FILE_URL_PREFIX):
+            urls.append(item['url'])
+    return urls
+
+
 def read_limited_upload(stream: BinaryIO, max_bytes: int = MAX_IMAGE_INPUT_BYTES) -> bytes:
     data = stream.read(max_bytes + 1)
     if len(data) > max_bytes:
