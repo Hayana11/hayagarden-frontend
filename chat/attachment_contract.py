@@ -139,7 +139,12 @@ def validate_uploaded_file_reference(
 
 
 
-def _safe_static_url(value: object, *, prefix: str) -> str:
+def _safe_static_url(
+    value: object,
+    *,
+    prefix: str,
+    allow_nested: bool = False,
+) -> str:
     parsed = urlsplit(str(value or ''))
     if (
         parsed.scheme or parsed.netloc or parsed.query or parsed.fragment
@@ -147,7 +152,11 @@ def _safe_static_url(value: object, *, prefix: str) -> str:
     ):
         return ''
     tail = parsed.path[len(prefix):]
-    if not tail or '/' in tail or '\\' in tail:
+    parts = tail.split('/')
+    if (
+        not tail or '\\' in tail or any(part in {'', '.', '..'} for part in parts)
+        or (not allow_nested and len(parts) != 1)
+    ):
         return ''
     return parsed.path
 
@@ -161,6 +170,7 @@ def _file_attachment(
     safe_url = _safe_static_url(
         url,
         prefix='/static/' if allow_legacy_static else CHAT_FILE_URL_PREFIX,
+        allow_nested=allow_legacy_static,
     )
     label = os.path.basename(str(name or '').strip())
     if not safe_url or not label or Path(label).suffix.lower() not in ALLOWED_CHAT_FILE_EXTENSIONS:
