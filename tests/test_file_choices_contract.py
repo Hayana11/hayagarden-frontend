@@ -100,6 +100,10 @@ class ChatMultiAttachmentRouteTests(unittest.TestCase):
         self.assertIn("len(attachments) > MAX_CHAT_ATTACHMENTS", route)
         self.assertIn("attachments_json = json.dumps(attachments, ensure_ascii=False)", route)
         self.assertIn("file_name,attachments", route)
+        rewrite_source = (Path(__file__).parents[1] / 'chat' / 'rewrite_staging.py').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn("('attachments', attachments)", rewrite_source)
 
 
 class ArtifactSandboxTests(unittest.TestCase):
