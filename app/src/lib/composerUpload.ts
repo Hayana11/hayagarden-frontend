@@ -4,20 +4,20 @@ export interface PendingComposerFile {
 }
 
 type QueuedUpload = {
-  file: PendingComposerFile;
+  files: PendingComposerFile[];
   revision: number;
 };
 
-/** Keep an upload started before a choice without mutating the composer mid-POST. */
+/** Keep uploads started before a choice from mutating the composer mid-POST. */
 export class ComposerUploadCoordinator {
   private choicePosting = false;
   private queuedUpload: QueuedUpload | null = null;
   private readonly currentRevision: () => number;
-  private readonly commit: (file: PendingComposerFile) => void;
+  private readonly commit: (files: PendingComposerFile[]) => void;
 
   constructor(
     currentRevision: () => number,
-    commit: (file: PendingComposerFile) => void,
+    commit: (files: PendingComposerFile[]) => void,
   ) {
     this.currentRevision = currentRevision;
     this.commit = commit;
@@ -32,22 +32,22 @@ export class ComposerUploadCoordinator {
     const queued = this.queuedUpload;
     this.queuedUpload = null;
     if (queued && queued.revision === this.currentRevision()) {
-      this.commit(queued.file);
+      this.commit(queued.files);
     }
   }
 
   async settle(
-    upload: Promise<PendingComposerFile | null>,
+    upload: Promise<PendingComposerFile[]>,
     revision: number,
   ): Promise<boolean> {
-    const file = await upload;
-    if (!file) return false;
+    const files = await upload;
+    if (!files.length) return false;
     if (revision !== this.currentRevision()) return true;
     if (this.choicePosting) {
-      this.queuedUpload = { file, revision };
+      this.queuedUpload = { files, revision };
       return true;
     }
-    this.commit(file);
+    this.commit(files);
     return true;
   }
 }
