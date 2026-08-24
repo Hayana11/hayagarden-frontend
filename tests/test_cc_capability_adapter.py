@@ -386,8 +386,10 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertIn(ledger_tool, plan["disallowed_tools"])
         self.assertNotIn("mcp__home__search_memories", plan["home_mcp_tools"])
         self.assertNotIn("mcp__internal__search_memories", plan["internal_mcp_tools"])
+        self.assertNotIn("mcp__internal__write_memory", plan["internal_mcp_tools"])
         self.assertIn("mcp__home__search_memories", plan["disallowed_tools"])
         self.assertIn("mcp__internal__search_memories", plan["disallowed_tools"])
+        self.assertIn("mcp__internal__write_memory", plan["disallowed_tools"])
         self.assertIn("mcp__home__light_on", plan["disallowed_tools"])
         self.assertIn("mcp__home__exec_vps", plan["disallowed_tools"])
 

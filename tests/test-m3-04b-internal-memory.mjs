@@ -104,10 +104,10 @@ assert.deepEqual(meta.binding, {
   home_mcp: 'mcp__home__search_memories',
 });
 assert.deepEqual(meta.home_ids, ['diary.write', 'home.light.status', 'countdown.read']);
-assert.deepEqual(meta.internal_ids, ['todo.read', 'todo.write', 'ledger.read', 'ledger.budget.read', 'ledger.write', 'memory.search']);
+assert.deepEqual(meta.internal_ids, ['todo.read', 'todo.write', 'ledger.read', 'ledger.budget.read', 'ledger.write', 'memory.search', 'memory.write']);
 assert.deepEqual(meta.shadow, []);
 assert.equal(meta.schema_equal, true);
-assert.equal(meta.fingerprint, 'fb7319322de9ab600395f776043cbc29aa9925c30637727cbd92c7d0b23b6d11');
+assert.equal(meta.fingerprint, 'd37ffa3da77cbbe5added332b433f541974f6c0dd2251510da89610b2f18cb7a');
 assert.ok(!meta.home_visible.includes('mcp__home__search_memories'));
 assert.ok(meta.home_visible.includes('mcp__home__write_diary'));
 assert.ok(meta.off_allow.includes('mcp__internal__search_memories') === false);
