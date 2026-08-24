@@ -166,12 +166,15 @@ class HistoryAssemblyTests(unittest.TestCase):
             ]),
         )]
         read_urls = []
+        def read_file(_static, url):
+            read_urls.append(url)
+            return 'SAFE TEXT' if url == text_url else 'PDF BYTES'
         with mock.patch('chat.history_legacy.persist_history_boundary'):
             msgs, _stats = assemble_legacy_history(
                 rows,
                 available_count=1,
                 static_dir='/tmp',
-                read_file_fn=lambda _static, url: read_urls.append(url) or 'SAFE TEXT',
+                read_file_fn=read_file,
                 img_block_fn=lambda *_a, **_k: None,
                 format_tool_history_fn=lambda _raw: '',
                 is_ai_author=lambda a: a in ('assistant', 'fyodor', 'claude'),
@@ -179,7 +182,7 @@ class HistoryAssemblyTests(unittest.TestCase):
         visible = json.dumps(msgs, ensure_ascii=False)
         self.assertEqual(read_urls, [text_url])
         self.assertIn('SAFE TEXT', visible)
-        self.assertNotIn('plan.pdf', visible)
+        self.assertNotIn('PDF BYTES', visible)
 
     def test_trimmed_file_block_not_committed(self):
         body = 'x' * 800
