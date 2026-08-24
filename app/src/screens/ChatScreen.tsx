@@ -2093,6 +2093,53 @@ export function ChatScreen() {
             </div>
           )}
 
+          <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px' }}>
+            <textarea
+              ref={taRef}
+              value={input}
+              disabled={posting}
+              onChange={(e) => {
+                if (postingRef.current) return;
+                const value = e.target.value;
+                composerDraftRevisionRef.current += 1;
+                writeChatComposerDraft(value);
+                setInput(value);
+                const ta = e.target;
+                ta.style.height = 'auto';
+                ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
+              }}
+              onKeyDown={(e) => {
+                if (postingRef.current) return;
+                if (e.key === 'Enter' && !e.shiftKey && wide) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              rows={1}
+              placeholder={sending ? 'Fyodor 正在回复…' : placeholder}
+              style={{ width: '100%', border: 'none', background: 'transparent', fontSize: INPUT_FONT_SIZE, lineHeight: 1.6, color: 'var(--ink)', resize: 'none', maxHeight: 120, padding: '4px 8px 8px', display: 'block', overflowY: 'auto', fontFamily: FONT_CN, outline: 'none' }}
+            />
+            <div className="hstack hstack-8" style={{ marginTop: 2 }}>
+              <div onClick={() => { if (!postingRef.current) setAttachMenuOpen(!attachMenuOpen); }} style={{ cursor: posting ? 'default' : 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Svg d={IC.plus} size={17} sw={1.8} />
+              </div>
+              <div onClick={toggleModelPop} className="hstack hstack-6" style={{ cursor: 'pointer', padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>
+                <span style={{ fontFamily: fontFamilyForText(modelBadge), fontSize: 12, letterSpacing: 0.5, color: 'var(--ink2)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{modelBadge}</span>
+                <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--ghost)', flexShrink: 0 }}>
+                  <path d="M18 15l-6-6-6 6" />
+                </svg>
+              </div>
+              <div
+                onClick={() => { if (canSend) void send(); }}
+                style={{ marginLeft: 'auto', width: 42, height: 42, flexShrink: 0, borderRadius: '50%', background: canSend ? 'var(--deep)' : 'var(--card2)', color: canSend ? '#FBF3F0' : 'var(--ghost)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: canSend ? 'pointer' : 'default', boxShadow: canSend ? '0 8px 20px var(--shadow2)' : 'none', transition: 'background .15s ease' }}
+              >
+                {sending ? <span style={{ width: 15, height: 15, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} /> : <Svg d={IC.up} size={17} sw={2} />}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
           {/* ══ thinking drawer ══ */}
       {drawer && (
         <div className="c78-fill-fixed" style={{ zIndex: 60 }}>
