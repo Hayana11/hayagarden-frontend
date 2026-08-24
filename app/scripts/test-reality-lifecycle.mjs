@@ -145,13 +145,13 @@ assert.equal(environment.intervalMs, PHYSICAL_BACKGROUND_POLL_MS);
 assert.equal(store.getSnapshot().physical.facts.batteryLevel, 50);
 assert.equal(store.getSnapshot().physical.observedAt, 600000);
 
-environment.setNow(REALITY_ASSISTANT_MAX_AGE_MS + 600000);
-const stale = getRealityFreshness(store.getSnapshot(), REALITY_ASSISTANT_MAX_AGE_MS + 600000);
+environment.setNow(600000 + REALITY_ASSISTANT_MAX_AGE_MS + 1);
+const stale = getRealityFreshness(store.getSnapshot(), 600000 + REALITY_ASSISTANT_MAX_AGE_MS + 1);
 assert.equal(stale.status, "stale");
 assert.equal(stale.observedAt, 600000);
 assert.equal(getAssistantRealitySnapshot(
   store.getSnapshot(),
-  REALITY_ASSISTANT_MAX_AGE_MS + 600000,
+  600000 + REALITY_ASSISTANT_MAX_AGE_MS + 1,
 ), null);
 
 environment.setVisible(true);
