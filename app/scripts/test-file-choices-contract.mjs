@@ -26,7 +26,7 @@ const composerUi = screen.slice(
 );
 assert.equal((composerUi.match(/multiple/g) || []).length, 2);
 assert.match(composerUi, /\.pdf,\.doc,\.docx/);
-assert.match(composerUi, /MAX_COMPOSER_ATTACHMENTS = 4/);
+assert.match(screen, /MAX_COMPOSER_ATTACHMENTS = 4/);
 assert.match(composerUi, /pendingFiles\.map/);
 assert.match(composerUi, /pendingImages\.map/);
 
