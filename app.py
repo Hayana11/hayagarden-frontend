@@ -1092,6 +1092,11 @@ def send_chat():
             return jsonify({'error': '附件格式无效'}), 400
     if not isinstance(raw_attachments, list):
         return jsonify({'error': '附件格式无效'}), 400
+    requested_attachment_count = len(raw_attachments) + len(image_uploads)
+    if legacy_image_url:
+        requested_attachment_count += 1
+    if requested_attachment_count > MAX_CHAT_ATTACHMENTS:
+        return jsonify({'error': '一次消息最多上传 4 个附件'}), 400
 
     attachments = []
     for item in raw_attachments:
