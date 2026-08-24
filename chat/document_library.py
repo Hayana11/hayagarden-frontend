@@ -183,6 +183,7 @@ def _delete_upload(conn: sqlite3.Connection, message_id: int) -> bool:
     urls = uploaded_file_urls(
         row['attachments'],
         legacy_file_url=row['file_url'],
+        legacy_file_name=row['file_name'],
     )
     if not urls:
         return False
