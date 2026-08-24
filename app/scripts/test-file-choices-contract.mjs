@@ -42,7 +42,8 @@ const composerSend = screen.slice(sendStart, choiceStart);
 const choiceSend = screen.slice(choiceStart, chooseStart);
 assert.match(composerSend, /file: pendingFile/);
 assert.match(composerSend, /image: pendingImage/);
-assert.match(composerSend, /setInput\(\(current\) => current \|\| attempt\.text\)/);
+assert.match(composerSend, /setInput\(''\)/);
+assert.match(composerSend, /setInput\(rawText\)/);
 const failureCheck = composerSend.indexOf('if (messageId === null)');
 assert.ok(failureCheck >= 0);
 const composerPostCall = composerSend.indexOf('sendChatMessage(attempt.text, extra)');
@@ -93,7 +94,7 @@ const mutateWhileAllowed = (next) => {
 };
 mutateWhileAllowed({ text: 'new draft', file: { fileName: 'new.txt' }, image: { name: 'new.png' } });
 posting = false;
-composerState = { ...composerState, text: composerState.text || failedAttempt.text };
+composerState = { ...composerState, text: failedAttempt.text };
 assert.deepEqual(composerState, failedAttempt);
 
 function deferred() {

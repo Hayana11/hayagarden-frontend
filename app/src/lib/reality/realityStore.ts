@@ -3,6 +3,17 @@ import type { PhysicalDeviceFacts } from "./physicalInterpretation";
 import { PhysicalMotionWindow } from "./physicalMotion";
 import type { PhysicalMotion } from "./physicalMotion";
 
+export const REALITY_BACKGROUND_POLL_MS = 5 * 60 * 1000;
+export const REALITY_ASSISTANT_MAX_AGE_MS = 2 * REALITY_BACKGROUND_POLL_MS;
+
+export type RealityFreshness = "fresh" | "stale" | "unknown";
+
+export interface RealityFreshnessResult {
+  status: RealityFreshness;
+  ageMs: number | null;
+  observedAt: number | null;
+}
+
 export interface RealitySnapshot {
   schemaVersion: 1;
   physical: {
@@ -11,6 +22,48 @@ export interface RealitySnapshot {
     motion: PhysicalMotion;
     observedAt: number | null;
   };
+}
+
+export function getRealityFreshness(
+  snapshot: RealitySnapshot,
+  nowMs: number,
+  maxAgeMs: number = REALITY_ASSISTANT_MAX_AGE_MS,
+): RealityFreshnessResult {
+  const observedAt = snapshot.physical.observedAt;
+  if (
+    observedAt === null ||
+    !Number.isFinite(observedAt) ||
+    !Number.isFinite(nowMs) ||
+    !Number.isFinite(maxAgeMs) ||
+    maxAgeMs < 0
+  ) {
+    return { status: "unknown", ageMs: null, observedAt };
+  }
+
+  const ageMs = nowMs - observedAt;
+  if (ageMs < 0) {
+    return { status: "unknown", ageMs: null, observedAt };
+  }
+
+  return {
+    status: ageMs <= maxAgeMs ? "fresh" : "stale",
+    ageMs,
+    observedAt,
+  };
+}
+
+/**
+ * Assistant/Wake callers must use this gate instead of treating a stored value
+ * as current solely because it exists. A stale snapshot is deliberately absent.
+ */
+export function getAssistantRealitySnapshot(
+  snapshot: RealitySnapshot,
+  nowMs: number,
+  maxAgeMs: number = REALITY_ASSISTANT_MAX_AGE_MS,
+): RealitySnapshot | null {
+  return getRealityFreshness(snapshot, nowMs, maxAgeMs).status === "fresh"
+    ? snapshot
+    : null;
 }
 
 function unknownFacts(): PhysicalDeviceFacts {
