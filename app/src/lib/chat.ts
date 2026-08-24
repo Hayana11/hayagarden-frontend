@@ -50,6 +50,12 @@ export interface ChatUsage {
   respawnReason?: string;
 }
 
+export interface ChatAttachment {
+  type: 'file' | 'image';
+  url: string;
+  name: string;
+}
+
 export interface ChatMsg {
   id: number;
   role: 'user' | 'assistant';
@@ -87,8 +93,34 @@ export interface ChatMessageRow {
   image_url?: string | null;
   file_url?: string | null;
   file_name?: string | null;
+  attachments?: string | null;
   choices?: string | null;
   created_at?: string | null;
+}
+
+export function normalizeChatAttachments(value: unknown): ChatAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: ChatAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as { type?: unknown; url?: unknown; name?: unknown };
+    const type = raw.type === 'file' || raw.type === 'image' ? raw.type : '';
+    const url = typeof raw.url === 'string' ? raw.url : '';
+    const fileUrl = url.startsWith('/static/uploads/files/');
+    const imageUrl = url.startsWith('/static/uploads/') && !fileUrl;
+    if (!type || !url || (type === 'file' ? !fileUrl : !imageUrl)) continue;
+    const key = type + ':' + url;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const fallback = url.slice(url.lastIndexOf('/') + 1) || (type === 'image' ? '图片' : '文件');
+    out.push({
+      type,
+      url,
+      name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : fallback,
+    });
+  }
+  return out;
 }
 
 export const MAX_CHAT_CHOICES = 8;
@@ -189,6 +221,20 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
     imageUrl: row.image_url || '',
     fileUrl: row.file_url || '',
     fileName: row.file_name || '',
+    attachments: normalizeChatAttachments(parseJson<unknown>(row.attachments, []))
+      .concat(
+        row.file_url && row.file_name
+          ? normalizeChatAttachments([{ type: 'file', url: row.file_url, name: row.file_name }])
+          : [],
+      )
+      .concat(
+        row.image_url
+          ? normalizeChatAttachments([{ type: 'image', url: row.image_url, name: '' }])
+          : [],
+      )
+      .filter((item, index, all) => all.findIndex((candidate) => (
+        candidate.type === item.type && candidate.url === item.url
+      )) === index),
     choices: normalizeChatChoices(parseJson<unknown>(row.choices, [])),
     ts: created.length >= 16 ? created.slice(11, 16) : '',
     dateKey: created.slice(0, 10),
