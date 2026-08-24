@@ -3,7 +3,8 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from tools.execution_fence import evaluate_tool_call
+from tools.capability_manifest import get_capability
+from tools.execution_fence import capability_for_tool, evaluate_tool_call
 from tools.lease_signer import issue_turn_lease
 from tools.memory_write_adapter import MAX_CONTENT_SIZE, write_memory
 
@@ -43,7 +44,7 @@ class MemoryWriteBridgeTests(unittest.TestCase):
     def test_fence_chat_and_wake(self):
         chat = issue_turn_lease(turn_id="chat-1", turn_mode="chat", issued_from="default_policy")
         wake = issue_turn_lease(turn_id="wake-1", turn_mode="wake", issued_from="default_policy")
-        for tool_name in ("mcp__internal__write_memory", "memory.write"):
+        for tool_name in ("mcp__internal__write_memory", "memory_write"):
             self.assertEqual(evaluate_tool_call(tool_name, {"content":"x"}, chat)["lease_decision"], "ALLOW")
             self.assertEqual(evaluate_tool_call(tool_name, {"content":"x"}, wake)["lease_decision"], "DENIED_CAPABILITY")
 
@@ -51,11 +52,18 @@ class MemoryWriteBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         gateway = (root / "gateway.py").read_text(encoding="utf-8")
         tools_block = gateway[gateway.index("TOOLS = ["):gateway.index("def get_tools")]
-        self.assertIn("'name': 'memory.write'", tools_block)
+        self.assertIn("'name': 'memory_write'", tools_block)
+        self.assertNotIn("'name': 'memory.write'", tools_block)
         self.assertIn("'name': 'search_memories'", tools_block)
         self.assertNotIn("'name': 'save_memory'", tools_block)
         drawers = (root / "tool_drawers.py").read_text(encoding="utf-8")
         self.assertIn("'tools': ['memory.write', 'search_memories']", drawers)
+
+    def test_api_relay_binding_uses_anthropic_safe_physical_name(self):
+        binding = get_capability("memory.write")["provider_bindings"]["api_relay"]
+        self.assertEqual(binding, "memory_write")
+        self.assertRegex(binding, r"^[A-Za-z0-9_-]{1,64}$")
+        self.assertEqual(capability_for_tool(binding), "memory.write")
 
     def test_schema_is_content_only(self):
         from tools.cc_tool_surface import _INTERNAL_TOOL_SCHEMAS

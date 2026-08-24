@@ -63,7 +63,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "内容为空、只是临时上下文，或当前没有值得保留的长期事实时。",
         "failure_behavior": "明确说明没有写入；不得伪造成功，也不得把失败内容写入其他存储。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__write_memory", "internal_mcp": "mcp__internal__write_memory", "api_relay": "memory.write"},
+        "provider_bindings": {"claude_code": "mcp__internal__write_memory", "internal_mcp": "mcp__internal__write_memory", "api_relay": "memory_write"},
     },
     {
         "capability_id": "diary.write",

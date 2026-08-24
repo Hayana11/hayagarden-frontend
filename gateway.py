@@ -1651,7 +1651,7 @@ _BASE_TOOLS = [
         }, 'required': ['title']},
     },
     {
-        'name': 'memory.write',
+        'name': 'memory_write',
         'description': '把对话中重要的信息存入长期记忆。只接收正文，不接收类型、作者、标签或存储参数。',
         'input_schema': {'type': 'object', 'properties': {'content': {'type': 'string', 'maxLength': 4000, 'description': '要记住的正文'}}, 'required': ['content']},
     },
@@ -2939,7 +2939,7 @@ def _stream_api_confirmation(request_data):
 
 def _dispatch_api_chat_tool(name, args, turn_lease, tool_use_id=None):
     """Dispatch fenced formal API capability tools through narrow seams."""
-    if name == 'memory.write':
+    if name == 'memory_write':
         from tools.execution_fence import evaluate_tool_call
         decision = evaluate_tool_call(
             tool_name=name,
