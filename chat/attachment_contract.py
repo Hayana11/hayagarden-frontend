@@ -17,7 +17,12 @@ ALLOWED_TEXT_FILE_EXTENSIONS = frozenset({
     '.md', '.txt', '.html', '.htm', '.py', '.js', '.json', '.csv', '.css',
     '.xml', '.yaml', '.yml', '.log', '.ini', '.sh',
 })
+ALLOWED_BINARY_FILE_EXTENSIONS = frozenset({'.pdf', '.doc', '.docx'})
+ALLOWED_CHAT_FILE_EXTENSIONS = (
+    ALLOWED_TEXT_FILE_EXTENSIONS | ALLOWED_BINARY_FILE_EXTENSIONS
+)
 MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
+MAX_CHAT_ATTACHMENTS = 4
 
 MAX_IMAGE_INPUT_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8192
@@ -123,7 +128,7 @@ def validate_uploaded_file_reference(
     ):
         return None
     suffix = path.suffix.lower()
-    if suffix not in ALLOWED_TEXT_FILE_EXTENSIONS or Path(label).suffix.lower() != suffix:
+    if suffix not in ALLOWED_CHAT_FILE_EXTENSIONS or Path(label).suffix.lower() != suffix:
         return None
     try:
         if path.stat().st_size > MAX_TEXT_FILE_BYTES:
@@ -147,7 +152,7 @@ def write_limited_text_upload(
     destination: str | os.PathLike,
     max_bytes: int = MAX_TEXT_FILE_BYTES,
 ) -> int:
-    """Bound the application read before creating a stored text attachment."""
+    """Bound the application read before creating a stored chat attachment."""
     data = stream.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise AttachmentValidationError('文件超过 2MB', 413)
