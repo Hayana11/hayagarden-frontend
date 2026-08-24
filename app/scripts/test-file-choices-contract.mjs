@@ -42,7 +42,26 @@ assert.match(composerSend, /images: pendingImages/);
 assert.match(composerSend, /const extra = \{ files: attempt\.files, imageFiles: attempt\.images \}/);
 assert.match(composerSend, /setPendingFiles/);
 assert.match(composerSend, /setPendingImages/);
+assert.match(composerSend, /setInput\(''\)/);
+assert.match(composerSend, /setInput\(rawText\)/);
+const failureCheck = composerSend.indexOf('if (messageId === null)');
+const composerPostCall = composerSend.indexOf('sendChatMessage(attempt.text, extra)');
+assert.ok(failureCheck >= 0 && composerPostCall >= 0);
+assert.ok(composerSend.indexOf('postingRef.current = true') < composerPostCall);
+assert.ok(composerSend.indexOf('setPosting(true)') < composerPostCall);
+assert.ok(composerSend.indexOf('setPosting(false)') > composerPostCall);
+assert.ok(composerSend.indexOf('setPosting(false)') < failureCheck);
+assert.ok(composerSend.indexOf('setPendingFiles', failureCheck) > composerSend.indexOf('return;', failureCheck));
+assert.ok(composerSend.indexOf('setPendingImages', failureCheck) > composerSend.indexOf('return;', failureCheck));
+
 assert.match(choiceSend, /sendChatMessage\(choice\)/);
+const choicePostCall = choiceSend.indexOf('sendChatMessage(choice)');
+assert.ok(choiceSend.indexOf('postingRef.current = true') < choicePostCall);
+assert.ok(choiceSend.indexOf('setPosting(false)') > choicePostCall);
+assert.ok(choiceSend.indexOf('setPosting(false)') < choiceSend.indexOf('await refetchLatest()'));
+assert.match(choiceSend, /uploadCoordinatorRef\.current\.beginChoicePost\(\)/);
+assert.match(choiceSend, /uploadCoordinatorRef\.current\.endChoicePost\(\)/);
+assert.doesNotMatch(choiceSend, /composerMutationRevisionRef\.current \+= 1/);
 assert.doesNotMatch(choiceSend, /pendingFiles|pendingImages|setPendingFiles|setPendingImages/);
 
 const composerUi = screen.slice(
@@ -88,5 +107,57 @@ revision += 1;
 assert.equal(await coordinator.settle(Promise.resolve([two]), staleRevision), true);
 coordinator.endChoicePost();
 assert.deepEqual(committed, [[one, two], [one]]);
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function exerciseChoiceUploadRace({ uploadDuringPost }) {
+  const files = [
+    { fileUrl: '/static/uploads/files/queued-a.txt', fileName: 'queued-a.txt' },
+    { fileUrl: '/static/uploads/files/queued-b.pdf', fileName: 'queued-b.pdf' },
+  ];
+  const upload = deferred();
+  const choicePost = deferred();
+  const sent = [];
+  let currentRevision = 7;
+  let pending = [];
+  const raceCoordinator = new ComposerUploadCoordinator(
+    () => currentRevision,
+    (next) => { pending = [...pending, ...next]; },
+  );
+
+  const uploadTask = raceCoordinator.settle(upload.promise, currentRevision);
+  raceCoordinator.beginChoicePost();
+  const choiceTask = (async () => {
+    try {
+      sent.push({ content: 'Choice A' });
+      await choicePost.promise;
+    } finally {
+      raceCoordinator.endChoicePost();
+    }
+  })();
+
+  if (uploadDuringPost) {
+    upload.resolve(files);
+    await uploadTask;
+    assert.deepEqual(pending, []);
+    choicePost.resolve(101);
+    await choiceTask;
+  } else {
+    choicePost.resolve(101);
+    await choiceTask;
+    upload.resolve(files);
+    await uploadTask;
+  }
+
+  assert.deepEqual(sent, [{ content: 'Choice A' }]);
+  assert.deepEqual(pending, files);
+}
+
+await exerciseChoiceUploadRace({ uploadDuringPost: false });
+await exerciseChoiceUploadRace({ uploadDuringPost: true });
 
 console.log('FILE+CHOICES frontend contract: ok');
