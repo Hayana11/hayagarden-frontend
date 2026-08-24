@@ -21,7 +21,10 @@ const chatFilePreviewUrl = new Function('fileUrl', previewBody);
 
 assert.deepEqual(normalize('abc'), []);
 assert.deepEqual(normalize([1, null, ' A ', '']), ['A']);
+assert.deepEqual(normalize(['A', 'B', 'C']), ['A', 'B', 'C']);
 assert.equal(normalize(['x'.repeat(121)]).length, 0);
+assert.deepEqual(normalize(['😀'.repeat(120)]), ['😀'.repeat(120)]);
+assert.equal(normalize(['😀'.repeat(121)]).length, 0);
 assert.equal(normalize(Array.from({ length: 12 }, (_, i) => String(i))).length, 8);
 assert.equal(chatFilePreviewUrl('/static/uploads/files/abc_design.html'), '/api/chat/files/abc_design.html/preview');
 assert.equal(chatFilePreviewUrl('/etc/passwd'), '');
@@ -51,6 +54,13 @@ assert.match(composerUi, /\.pdf,\.doc,\.docx/);
 assert.match(screen, /MAX_COMPOSER_ATTACHMENTS = 4/);
 assert.match(composerUi, /pendingFiles\.map/);
 assert.match(composerUi, /pendingImages\.map/);
+const composerValue = screen.indexOf('value={input}');
+const composerTextareaStart = screen.lastIndexOf('<textarea', composerValue);
+const composerTextareaEnd = screen.indexOf('/>', composerValue);
+const composerTextarea = screen.slice(composerTextareaStart, composerTextareaEnd);
+assert.match(composerTextarea, /disabled=\{posting\}/);
+assert.match(composerTextarea, /if \(postingRef\.current\) return/);
+assert.doesNotMatch(composerTextarea, /disabled=\{sending\}/);
 
 assert.match(api, /fd\.append\('attachments', JSON\.stringify\(extra\.files \|\| \[\]\)\)/);
 assert.match(api, /for \(const image of extra\.imageFiles \|\| \[\]\) fd\.append\('image', image\)/);
