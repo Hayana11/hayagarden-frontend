@@ -57,7 +57,7 @@ class MemoryWriteBridgeTests(unittest.TestCase):
         self.assertIn("'name': 'search_memories'", tools_block)
         self.assertNotIn("'name': 'save_memory'", tools_block)
         drawers = (root / "tool_drawers.py").read_text(encoding="utf-8")
-        self.assertIn("'tools': ['memory.write', 'search_memories']", drawers)
+        self.assertIn("'tools': ['memory_write', 'search_memories']", drawers)
 
     def test_api_relay_binding_uses_anthropic_safe_physical_name(self):
         binding = get_capability("memory.write")["provider_bindings"]["api_relay"]

@@ -35,7 +35,7 @@ class ToolDrawersToggleTests(unittest.TestCase):
 
     def test_disabled_tool_excluded_from_routed_selection(self):
         all_tools = [
-            {'name': 'memory.write'},
+            {'name': 'memory_write'},
             {'name': 'light_on'},
             {'name': 'web_search'},
         ]
@@ -50,7 +50,7 @@ class ToolDrawersToggleTests(unittest.TestCase):
 
     def test_disabled_tool_excluded_from_fallback_all(self):
         all_tools = [
-            {'name': 'memory.write'},
+            {'name': 'memory_write'},
             {'name': 'light_on'},
             {'name': 'web_search'},
         ]
