@@ -29,6 +29,7 @@ def _row(author, content, **kwargs):
         'tool_calls': '',
         'file_url': '',
         'file_name': '',
+        'attachments': '[]',
     }
     base.update(kwargs)
     return SimpleNamespace(**base)
@@ -116,6 +117,69 @@ class HistoryAssemblyTests(unittest.TestCase):
         self.assertIn('[用户发来文件: a.txt]', visible)
         self.assertNotIn('/static/a.txt', visible)
         self.assertIn(ref, stats.committed_full_file_refs)
+
+    def test_multi_attachments_inject_text_only_and_never_read_word_pdf(self):
+        text_url = '/static/uploads/files/abcd1234_readme.md'
+        pdf_url = '/static/uploads/files/abcd1234_plan.pdf'
+        docx_url = '/static/uploads/files/abcd1234_notes.docx'
+        rows = [_row(
+            'hayana',
+            '[附件: readme.md、plan.pdf、notes.docx]',
+            id=5,
+            attachments=json.dumps([
+                {'type': 'file', 'url': text_url, 'name': 'readme.md'},
+                {'type': 'file', 'url': pdf_url, 'name': 'plan.pdf'},
+                {'type': 'file', 'url': docx_url, 'name': 'notes.docx'},
+            ]),
+        )]
+        read_urls = []
+        def read_file(_static, url):
+            read_urls.append(url)
+            return {'%s' % text_url: 'SAFE TEXT', '%s' % pdf_url: 'PDF BYTES', '%s' % docx_url: 'DOCX BYTES'}[url]
+
+        msgs, stats = assemble_history_from_rows(
+            rows,
+            available_count=1,
+            history_mode='legacy_block',
+            static_dir='/tmp',
+            read_file_fn=read_file,
+            img_block_fn=lambda *_a, **_k: None,
+            is_ai_author=lambda a: a in ('assistant', 'fyodor', 'claude'),
+        )
+        visible = json.dumps(msgs, ensure_ascii=False)
+        self.assertEqual(read_urls, [text_url])
+        self.assertIn('SAFE TEXT', visible)
+        self.assertNotIn('PDF BYTES', visible)
+        self.assertNotIn('DOCX BYTES', visible)
+        self.assertEqual([item['url'] for item in stats.file_injections], [text_url])
+
+    def test_legacy_multi_attachments_inject_text_only(self):
+        text_url = '/static/uploads/files/abcd1234_readme.md'
+        pdf_url = '/static/uploads/files/abcd1234_plan.pdf'
+        rows = [_row(
+            'hayana',
+            'files',
+            id=5,
+            attachments=json.dumps([
+                {'type': 'file', 'url': text_url, 'name': 'readme.md'},
+                {'type': 'file', 'url': pdf_url, 'name': 'plan.pdf'},
+            ]),
+        )]
+        read_urls = []
+        with mock.patch('chat.history_legacy.persist_history_boundary'):
+            msgs, _stats = assemble_legacy_history(
+                rows,
+                available_count=1,
+                static_dir='/tmp',
+                read_file_fn=lambda _static, url: read_urls.append(url) or 'SAFE TEXT',
+                img_block_fn=lambda *_a, **_k: None,
+                format_tool_history_fn=lambda _raw: '',
+                is_ai_author=lambda a: a in ('assistant', 'fyodor', 'claude'),
+            )
+        visible = json.dumps(msgs, ensure_ascii=False)
+        self.assertEqual(read_urls, [text_url])
+        self.assertIn('SAFE TEXT', visible)
+        self.assertNotIn('plan.pdf', visible)
 
     def test_trimmed_file_block_not_committed(self):
         body = 'x' * 800
