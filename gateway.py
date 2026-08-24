@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging
 # Repo root must outrank tools/: tools/internal_state_shadow.py is a CLI stub and
 # must never shadow the authoritative root internal_state_shadow module (Stage C).
 if '/opt/frontend' not in _sys.path:
@@ -17,6 +17,17 @@ from tools.workspace_apps import WorkspaceAppError, verified_proxy_upstream, pro
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
 _tool_ctx = threading.local()
+
+
+def _chat_stream_exception_text(exc):
+    """Return bounded, secret-redacted exception text for chat stream logs."""
+    text = str(exc).replace('\r', ' ').replace('\n', ' ').strip()
+    text = re.sub(r'(?i)(bearer\s+)[^\s,;]+', r'\1<redacted>', text)
+    for secret_name in ('CC_TOKEN', 'API_KEY', 'GITHUB_TOKEN', 'TAVILY_KEY'):
+        secret = globals().get(secret_name) or ''
+        if secret:
+            text = text.replace(secret, '<redacted>')
+    return text[:1200] or '<empty>'
 
 def _warmup_ombre_brain():
     """Warm Ombre through the shared adapter without blocking gateway import."""
@@ -6532,6 +6543,7 @@ def chat_stream():
             _released = [False]
             _persisted = [False]
             _turn_data: dict = {}
+            phase = 'prepare_turn'
             try:
                 _request_data = request.get_json(silent=True) or {}
                 request_reality_context = _normalize_reality_context(
@@ -6559,6 +6571,7 @@ def chat_stream():
                     memories_db_path=DB_PATH,
                 )
                 _uc = (_turn_data.get('content') or '').strip()
+                phase = 'insert_user_message'
                 _turn_data = insert_user_message(
                     get_db, _turn_data, _uc, memories_db_path=DB_PATH, conversation_id=_conv,
                 )
@@ -6579,6 +6592,7 @@ def chat_stream():
                             _ee_s.apply_desire_delta_async(_d2['p_delta'], _d2['i_delta'])
                     except Exception:
                         pass
+                phase = 'acquire_generation_lock'
                 if _rewrite_id:
                     # Never reuse an unrelated prior result for staged rewrite.
                     while True:
@@ -6595,10 +6609,12 @@ def chat_stream():
                             yield 'data: ' + json.dumps({'t': 'text', 'd': text}) + SSE_END
                         yield 'data: ' + json.dumps({'t': 'done', 'ok': bool(text)}) + SSE_END
                         return
+                phase = 'activate_turn'
                 _turn_data = activate_turn(_turn_data, conversation_id=_conv, memories_db_path=DB_PATH)
                 from chat import daily_context as _daily_ctx
                 # Staged rewrite uses classic path so overlay + candidate persist stay atomic.
                 if _daily_ctx.enabled() and not _rewrite_id:
+                    phase = 'daily_soft_window'
                     _daily_out = None
                     try:
                         for _chunk in _stream_cc_daily_soft_window(
@@ -6636,6 +6652,7 @@ def chat_stream():
                 # 只 snapshot wake ids，避免 build_system() 先把 one_shot 反馈 drain 掉
                 _wake_claim_ids = capture_pending_wake_ids(get_db) if _is_user_turn else []
                 try:
+                    phase = 'resident_setup'
                     # 先确定 resident cold/hot，再按当前 generation 的已知文件集合构建 history
                     from chat.system_builder import build_cc_static_parts
                     _static_parts = build_cc_static_parts()
@@ -6687,6 +6704,7 @@ def chat_stream():
                         )
                         return _rebuilt_msgs, _rebuilt_stats
 
+                    phase = 'resident_stream'
                     cc_tool_calls = []
                     deferred_payload = None
                     # Regression ordering anchor: for evt, payload in _cc_resident_stream_gen
@@ -6796,6 +6814,7 @@ def chat_stream():
                                 one_shot_claims=_cc_one_shot_claims,
                                 conversation_id=_conv,
                             )
+                        phase = 'assistant_persist'
                         assistant_id = _persist_turn_assistant(
                             _turn_data,
                             content=_cc_text,
@@ -6857,6 +6876,15 @@ def chat_stream():
                     _fail_staged_rewrite(_turn_data, 'empty generation')
                 yield 'data: ' + json.dumps(_done) + SSE_END
             except Exception as e:
+                logging.getLogger('gateway').exception(
+                    'chat_stream_failed phase=%s user_message_id=%s turn_key=%s request_id=%s error_type=%s error=%s',
+                    phase,
+                    _turn_data.get('user_message_id'),
+                    _turn_data.get('turn_key'),
+                    _turn_data.get('request_id'),
+                    type(e).__name__,
+                    _chat_stream_exception_text(e),
+                )
                 if not _released[0]:
                     _released[0] = True
                     _gen_release(None)
