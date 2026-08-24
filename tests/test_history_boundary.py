@@ -64,7 +64,8 @@ class HistoryBoundaryTests(unittest.TestCase):
         conn.execute(
             '''CREATE TABLE chat_messages (
                 id INTEGER PRIMARY KEY, author TEXT, content TEXT, image_url TEXT,
-                created_at TEXT, tool_calls TEXT, file_url TEXT, file_name TEXT
+                created_at TEXT, tool_calls TEXT, file_url TEXT, file_name TEXT,
+                attachments TEXT DEFAULT '[]'
             )'''
         )
         for i in range(1, 11):
