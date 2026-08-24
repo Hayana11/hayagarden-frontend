@@ -44,7 +44,7 @@ class ToolDrawersToggleTests(unittest.TestCase):
             with mock.patch.object(tool_drawers, 'match_drawers', return_value=['light']):
                 selected, info = tool_drawers.select_tools('开灯', all_tools)
         names = {tool['name'] for tool in selected}
-        self.assertIn('memory.write', names)
+        self.assertIn('memory_write', names)
         self.assertNotIn('light_on', names)
         self.assertEqual(info['mode'], 'routed')
 
