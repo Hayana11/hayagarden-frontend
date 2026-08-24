@@ -317,6 +317,7 @@ export async function streamChatReply(
     approvalId?: string | null;
     pendingActionId?: string | null;
     confirmationDecision?: 'approve' | 'reject';
+    realityContext?: string | null;
   } = {},
 ): Promise<StreamResult> {
   let safety: ReturnType<typeof setTimeout> | undefined;
@@ -332,6 +333,9 @@ export async function streamChatReply(
     if (extra.approvalId) body.approval_id = extra.approvalId;
     if (extra.pendingActionId) body.pending_action_id = extra.pendingActionId;
     if (extra.confirmationDecision) body.confirmation_decision = extra.confirmationDecision;
+    if (typeof extra.realityContext === 'string' && extra.realityContext.trim()) {
+      body.reality_context = extra.realityContext;
+    }
     const resp = await fetch(sseUrl('/api/gw/chat/stream'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
