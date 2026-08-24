@@ -155,7 +155,7 @@ def fetch_history_rows(
             'SELECT COUNT(*) FROM chat_messages WHERE ' + _HISTORY_WHERE
         ).fetchone()[0] or 0
         rows = list(reversed(conn.execute(
-            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name '
+            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name, attachments '
             'FROM chat_messages WHERE ' + _HISTORY_WHERE + (
                 ' AND id >= ?' if min_id > 0 else ''
             ) + ' ORDER BY id DESC LIMIT ?',
@@ -258,10 +258,13 @@ def boundary_rows_for_summary(
         def read_file_fn(sd, url):
             try:
                 import os
-                from chat.attachment_contract import resolve_uploaded_file_url
+                from chat.attachment_contract import ALLOWED_TEXT_FILE_EXTENSIONS, resolve_uploaded_file_url
                 files_dir = os.path.join(sd, 'uploads', 'files')
                 path = resolve_uploaded_file_url(str(url or ''), files_dir)
-                if path is None or not path.is_file():
+                if (
+                    path is None or not path.is_file()
+                    or path.suffix.lower() not in ALLOWED_TEXT_FILE_EXTENSIONS
+                ):
                     return None
                 with path.open('r', encoding='utf-8', errors='replace') as ff:
                     return ff.read()
