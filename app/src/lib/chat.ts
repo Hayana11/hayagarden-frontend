@@ -69,6 +69,7 @@ export interface ChatMsg {
   imageUrl: string;
   fileUrl: string;
   fileName: string;
+  attachments: ChatAttachment[];
   choices: string[];
   /** HH:MM, local */
   ts: string;
