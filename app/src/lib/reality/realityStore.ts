@@ -31,6 +31,7 @@ export function getRealityFreshness(
 ): RealityFreshnessResult {
   const observedAt = snapshot.physical.observedAt;
   if (
+    observedAt === null ||
     !Number.isFinite(observedAt) ||
     !Number.isFinite(nowMs) ||
     !Number.isFinite(maxAgeMs) ||
