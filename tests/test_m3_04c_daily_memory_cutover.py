@@ -42,7 +42,7 @@ class DailyMemoryCutoverTests(unittest.TestCase):
                 "claude_code": INTERNAL_MEMORY,
                 "internal_mcp": INTERNAL_MEMORY,
                 "home_mcp": HOME_MEMORY,
-                            },
+            },
         )
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
