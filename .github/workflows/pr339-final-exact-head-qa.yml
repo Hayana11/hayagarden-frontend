@@ -14,7 +14,6 @@ jobs:
     timeout-minutes: 25
     env:
       TARGET_SHA: 86dbc84a77597f573aee9284b5291a5d42772a4a
-      HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/pr339-runtime-state.db
     steps:
       - name: Checkout exact target SHA
         uses: actions/checkout@v4
@@ -33,6 +32,9 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: package-lock.json
+
+      - name: Set isolated runtime DB path
+        run: echo "HAYAGARDEN_CONFIG_DB_PATH=$RUNNER_TEMP/pr339-runtime-state.db" >> "$GITHUB_ENV"
 
       - name: Verify exact checkout and clean worktree
         run: |
