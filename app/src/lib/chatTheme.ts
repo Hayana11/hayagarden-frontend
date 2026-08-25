@@ -4,8 +4,8 @@ import { beginThemePerfProbe, flushThemePerfProbe } from './themePerfProbe';
 
 export const CHAT_SETTINGS_KEY = 'fyodor-chat-settings';
 
-export type ThemeMode = 'light' | 'dark' | 'auto';
-export type EffectiveTheme = 'light' | 'dark';
+export type ThemeMode = 'light' | 'dark' | 'blue' | 'auto';
+export type EffectiveTheme = 'light' | 'dark' | 'blue';
 
 export interface FyodorChatSettings {
   theme: ThemeMode;
@@ -31,7 +31,7 @@ export function loadChatSettings(): FyodorChatSettings {
   try {
     const s = JSON.parse(localStorage.getItem(CHAT_SETTINGS_KEY) || '{}');
     return {
-      theme: (['light', 'dark', 'auto'] as const).includes(s.theme) ? s.theme : DEFAULTS.theme,
+      theme: (['light', 'dark', 'blue', 'auto'] as const).includes(s.theme) ? s.theme : DEFAULTS.theme,
       fontStep:
         typeof s.fontStep === 'number' && s.fontStep >= 0 && s.fontStep <= 4 ? s.fontStep : DEFAULTS.fontStep,
       thinkMode: (['auto', 'drawer', 'inline'] as const).includes(s.thinkMode) ? s.thinkMode : DEFAULTS.thinkMode,
@@ -79,8 +79,10 @@ export function subscribeChatTheme(listener: ChatThemeListener): () => void {
 
 export function applyChatThemeToRoot(root: HTMLElement, theme?: ThemeMode) {
   const mode = theme ?? loadChatSettings().theme;
-  root.setAttribute('data-chat-theme', resolveEffectiveTheme(mode));
+  const effective = resolveEffectiveTheme(mode);
+  root.setAttribute('data-chat-theme', effective);
   root.dataset.chatThemeMode = mode;
+  document.documentElement.setAttribute('data-theme', effective);
 }
 
 type Detach = () => void;
@@ -129,6 +131,6 @@ export function setChatTheme(root: HTMLElement | null, theme: ThemeMode): Effect
 
 export function toggleChatThemeQuick(root: HTMLElement | null): EffectiveTheme {
   const effective = resolveEffectiveTheme();
-  const next: EffectiveTheme = effective === 'dark' ? 'light' : 'dark';
+  const next: EffectiveTheme = effective === 'light' ? 'dark' : effective === 'dark' ? 'blue' : 'light';
   return setChatTheme(root, next);
 }

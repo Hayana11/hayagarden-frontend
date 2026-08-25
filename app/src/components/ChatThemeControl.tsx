@@ -20,6 +20,15 @@ function SvgMoon({ size = 16 }: { size?: number }) {
   );
 }
 
+function SvgPalette({ size = 16 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3a9 9 0 0 0 0 18h1.2a1.8 1.8 0 0 0 0-3.6h-.7a1.8 1.8 0 0 1 0-3.6H15a6 6 0 0 0 0-12h-3Z" />
+      <circle cx="7.5" cy="10" r=".8" fill="currentColor" /><circle cx="9" cy="6.5" r=".8" fill="currentColor" /><circle cx="14" cy="6" r=".8" fill="currentColor" />
+    </svg>
+  );
+}
+
 function SvgSun({ size = 16 }: { size?: number }) {
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
@@ -49,7 +58,7 @@ export function ChatThemeQuickToggle({
 
   return (
     <div onClick={onClick} style={style} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onClick(); }}>
-      {effective === 'light' ? <SvgMoon /> : <SvgSun />}
+      {effective === 'light' ? <SvgMoon /> : effective === 'dark' ? <SvgPalette /> : <SvgSun />}
     </div>
   );
 }
@@ -72,9 +81,9 @@ export function ChatThemeSegmented({
 
   return (
     <div className="hstack hstack-2" style={{ background: 'var(--card2)', borderRadius: 999, padding: 3 }}>
-      {(['light', 'dark', 'auto'] as const).map((t) => (
+      {(['light', 'dark', 'blue', 'auto'] as const).map((t) => (
         <div key={t} onClick={() => pick(t)} style={segStyle(mode === t)}>
-          {t === 'light' ? '浅色' : t === 'dark' ? '深色' : '跟随系统'}
+          {t === 'light' ? '浅色' : t === 'dark' ? '深色' : t === 'blue' ? '蓝色' : '跟随系统'}
         </div>
       ))}
     </div>

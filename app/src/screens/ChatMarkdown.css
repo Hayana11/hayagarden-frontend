@@ -8,6 +8,10 @@
   overflow-wrap: anywhere;
 }
 
+.chat-assistant-card .chat-markdown {
+  max-width: none;
+}
+
 .chat-markdown > :first-child {
   margin-top: 0;
 }
@@ -29,10 +33,11 @@
 .chat-markdown h1,
 .chat-markdown h2,
 .chat-markdown h3 {
-  margin: 1em 0 0.45em;
+  margin: 1.1em 0 0.5em;
   color: var(--ink);
+  font-family: var(--font-serif-cn, serif);
   line-height: 1.35;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.4px;
 }
 
 .chat-markdown h1 {
@@ -61,11 +66,12 @@
 }
 
 .chat-markdown blockquote {
-  padding: 0.45em 0.9em;
+  padding: 0.75em 1em;
+  border: 1px solid rgba(130, 85, 100, 0.09);
   border-left: 3px solid var(--rose);
-  border-radius: 0 9px 9px 0;
-  background: var(--card2);
-  color: var(--mut);
+  border-radius: 4px 16px 16px 4px;
+  background: rgba(255, 249, 247, 0.66);
+  color: var(--ink2);
 }
 
 .chat-markdown blockquote > :first-child {
@@ -99,12 +105,13 @@
 
 .chat-markdown pre {
   max-width: 100%;
-  padding: 12px 14px;
+  padding: 15px 17px;
   overflow-x: auto;
   border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--card2);
+  border-radius: 16px;
+  background: rgba(255, 249, 247, 0.72);
   color: var(--ink2);
+  box-shadow: 0 8px 24px rgba(100, 65, 75, 0.06);
   line-height: 1.65;
   white-space: pre;
 }

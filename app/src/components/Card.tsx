@@ -13,9 +13,9 @@ export function Card({
   return (
     <div
       onClick={onClick}
-      className={onClick ? 'card-hover' : undefined}
+      className={`soft-card${onClick ? ' card-hover' : ''}`}
       style={{
-        background: '#FFFFFF',
+        background: 'var(--color-surface)',
         borderRadius: 22,
         boxShadow: 'var(--shadow-card)',
         cursor: onClick ? 'pointer' : undefined,
