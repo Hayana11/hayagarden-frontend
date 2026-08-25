@@ -9446,6 +9446,28 @@ _monopoly_scheduler = _MonopolyAgentScheduler(
 app.register_blueprint(_create_monopoly_agent_blueprint(_monopoly_scheduler))
 from daily_context_routes import create_daily_context_blueprint
 app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))
+
+# 9A-R: owner-only production-equivalent replica.  It reads a SQLite snapshot,
+# never reuses/swaps the formal resident, and shares the existing debug token.
+from chat.daily_replica_manager import DailyReplicaManager as _DailyReplicaManager
+from chat.system_builder import build_cc_daily_static_parts as _build_daily_replica_static_parts
+from daily_replica_routes import create_daily_replica_blueprint as _create_daily_replica_blueprint
+_DAILY_REPLICA_MANAGER = _DailyReplicaManager(
+    source_db_path=DB_PATH,
+    cwd=CC_CWD,
+    claude_home=os.path.join(os.environ.get('HOME', '/root'), '.claude'),
+    allowed_tools=CC_ALLOWED_TOOLS,
+    mcp_config_path=CC_CWD + '/cc-tools.json',
+    cc_token=CC_TOKEN,
+    get_provider=_get_provider,
+    get_model=_get_model,
+    build_static_parts=_build_daily_replica_static_parts,
+)
+app.register_blueprint(_create_daily_replica_blueprint(
+    manager=_DAILY_REPLICA_MANAGER,
+    owner_token=CC_CLEAN_WINDOW_SHADOW_TOKEN,
+))
+
 from context_window_routes import create_context_window_blueprint
 app.register_blueprint(create_context_window_blueprint(db_path=DB_PATH))
 from daily_context_bff import create_daily_context_bff_blueprint
