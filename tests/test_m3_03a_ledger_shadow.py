@@ -108,7 +108,13 @@ class LedgerInternalShadowTests(unittest.TestCase):
                 first = physical_surface_fingerprint()
                 second = physical_surface_fingerprint()
 
-        self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, INTERNAL_MEMORY_SHADOW_TOOLS)
+        self.assertEqual(
+            set(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS),
+            set(INTERNAL_LEDGER_SHADOW_TOOLS + INTERNAL_MEMORY_SHADOW_TOOLS),
+        )
+        self.assertIn("mcp__internal__get_ledger", INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS)
+        self.assertIn("mcp__internal__get_ledger", disallowed)
+        self.assertNotIn("mcp__internal__get_ledger", allowed)
         self.assertTrue(first)
         self.assertNotEqual(first, BASE_FINGERPRINT)
         self.assertEqual(first, second)
