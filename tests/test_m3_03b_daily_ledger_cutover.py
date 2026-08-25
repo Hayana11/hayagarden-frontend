@@ -179,14 +179,18 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         )
 
     def test_chat_and_wake_ledger_read_are_allowed_on_shared_surface(self):
-        for mode in ("chat", "wake"):
-            result = execution_fence.evaluate_tool_call(
-                "mcp__capability__ledger_read",
-                {"month": "2026-08"},
-                self.lease(mode=mode),
-            )
-            self.assertEqual(result["capability_id"], "ledger.read")
-            self.assertEqual(result["lease_decision"], "ALLOW")
+        with mock.patch(
+            "tools.execution_fence.read_capability_state",
+            return_value=RUNTIME_STATE_INHERIT,
+        ):
+            for mode in ("chat", "wake"):
+                result = execution_fence.evaluate_tool_call(
+                    "mcp__capability__ledger_read",
+                    {"month": "2026-08"},
+                    self.lease(mode=mode),
+                )
+                self.assertEqual(result["capability_id"], "ledger.read")
+                self.assertEqual(result["lease_decision"], "ALLOW")
         plan = _plan()
         self.assertIn("mcp__capability__ledger_read", plan["surface_allowlist"])
         self.assertNotIn("mcp__internal__get_ledger", plan["surface_allowlist"])
