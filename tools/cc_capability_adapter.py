@@ -64,7 +64,6 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
 )
 
 INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
-    "todo.read",
     "ledger.read",
     "ledger.budget.read",
 )
@@ -72,6 +71,7 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
 CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
     "memory.write",
+    "todo.read",
     "todo.write",
     "ledger.write",
 )
@@ -89,6 +89,7 @@ INTERNAL_MCP_LEGACY_CAPABILITY_IDS: tuple[str, ...] = (
 # Legacy Internal MCP registrations remain available to other providers but
 # are explicitly denied from the Claude UH-A0 surface.
 INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "mcp__internal__get_todos",
     "mcp__internal__search_memories",
     "mcp__internal__write_memory",
     "mcp__internal__add_todo",

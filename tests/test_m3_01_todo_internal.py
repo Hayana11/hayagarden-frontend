@@ -54,7 +54,7 @@ class TodoInternalAdapterTests(unittest.TestCase):
         self.assertEqual(
             get_capability("todo.read")["provider_bindings"],
             {
-                "claude_code": "mcp__internal__get_todos",
+                "claude_code": "mcp__capability__todo_read",
                 "internal_mcp": "mcp__internal__get_todos",
                 "home_mcp": "mcp__home__get_todos",
                 "api_relay": "get_todos",
@@ -217,10 +217,22 @@ class TodoInternalAdapterTests(unittest.TestCase):
                     7,
                 )
 
-    def test_live_surface_uses_internal_todo_and_forbids_home_todo(self):
+    def test_capability_proxy_todo_read_is_typed_and_reuses_read_adapter(self):
+        root = Path(__file__).resolve().parents[1]
+        proxy_source = (root / "capability-proxy-mcp-server.js").read_text(encoding="utf-8")
+        adapter_source = (root / "tools" / "todo_internal_adapter.py").read_text(encoding="utf-8")
+        self.assertIn("todo_read: 'tools.todo_internal_adapter'", proxy_source)
+        self.assertIn("server.tool(\n    'todo_read',\n    {},", proxy_source)
+        self.assertIn("? 'get_todos'", proxy_source)
+        self.assertNotIn("SELECT", proxy_source)
+        self.assertIn('operation == "get_todos"', adapter_source)
+
+    def test_live_surface_uses_capability_todo_read_and_forbids_home_todo(self):
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
         self.assertEqual(set(plan["mcp_config"]["mcpServers"]), {"home", "internal", "capability"})
-        self.assertIn("mcp__internal__get_todos", plan["surface_allowlist"])
+        self.assertIn("mcp__capability__todo_read", plan["surface_allowlist"])
+        self.assertNotIn("mcp__internal__get_todos", plan["surface_allowlist"])
+        self.assertIn("mcp__internal__get_todos", plan["disallowed_tools"])
         self.assertIn("mcp__capability__todo_write", plan["surface_allowlist"])
         self.assertNotIn("mcp__home__get_todos", plan["surface_allowlist"])
         self.assertNotIn("mcp__home__add_todo", plan["surface_allowlist"])

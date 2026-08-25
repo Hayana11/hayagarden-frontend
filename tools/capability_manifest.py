@@ -102,7 +102,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前话题不需要待办事实，或已有充分上下文时。",
         "failure_behavior": "说明待办读取失败，不得声称看过未取得的数据。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__get_todos", "internal_mcp": "mcp__internal__get_todos", "home_mcp": "mcp__home__get_todos", "api_relay": "get_todos"},
+        "provider_bindings": {"claude_code": "mcp__capability__todo_read", "internal_mcp": "mcp__internal__get_todos", "home_mcp": "mcp__home__get_todos", "api_relay": "get_todos"},
     },
     {
         "capability_id": "todo.write",

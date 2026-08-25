@@ -9,6 +9,7 @@ const CAPABILITY_SERVER_NAME = 'capability';
 const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'memory_search',
   'memory_write',
+  'todo_read',
   'todo_write',
   'ledger_write',
 ]);
@@ -16,6 +17,7 @@ const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
 const ADAPTER_MODULES = Object.freeze({
   memory_search: 'tools.memory_internal_adapter',
   memory_write: 'tools.memory_write_adapter',
+  todo_read: 'tools.todo_internal_adapter',
   todo_write: 'tools.todo_internal_adapter',
   ledger_write: 'tools.ledger_internal_adapter',
 });
@@ -62,9 +64,11 @@ function callAdapter(toolName, input) {
       ? 'search_memories'
       : toolName === 'memory_write'
         ? 'write_memory'
-        : toolName === 'todo_write'
-          ? 'add_todo'
-          : 'add_ledger',
+        : toolName === 'todo_read'
+          ? 'get_todos'
+          : toolName === 'todo_write'
+            ? 'add_todo'
+            : 'add_ledger',
     ...input,
     db_path: dbPath,
   };
@@ -144,6 +148,11 @@ function buildServer() {
     'memory_write',
     { content: z.string().min(1).max(4000).describe('要保存的长期记忆正文') },
     async ({ content }) => runProxy('memory_write', { content }),
+  );
+  server.tool(
+    'todo_read',
+    {},
+    async () => runProxy('todo_read', {}),
   );
   server.tool(
     'todo_write',
