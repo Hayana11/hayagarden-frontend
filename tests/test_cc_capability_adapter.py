@@ -84,14 +84,14 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         conn.close()
 
     def test_a_bindings_come_from_capability_manifest(self):
-        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
+        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
             (),
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
+            ("memory.search", "memory.write", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
@@ -137,6 +137,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 "mcp__home__get_ledger_budget",
                 "mcp__home__add_ledger",
                 "mcp__home__search_memories",
+                "mcp__home__get_light_status",
             ),
         )
 
@@ -154,12 +155,11 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 3)
+        self.assertEqual(len(home), 2)
         self.assertEqual(
             set(home),
             {
                 "mcp__home__write_diary",
-                "mcp__home__get_light_status",
                 "mcp__home__get_countdowns",
             },
         )
