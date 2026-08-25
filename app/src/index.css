@@ -1371,6 +1371,18 @@ html[data-theme='dark'] .config-screen select {
 }
 
 
+
+html[data-theme='dark'] .global-bottom-nav__item,
+html[data-theme='dark'] .ni {
+  color: #cdb8a2;
+}
+
+html[data-theme='dark'] .global-bottom-nav__item.act,
+html[data-theme='dark'] .ni.act {
+  color: #d3a477;
+  background: rgba(211, 164, 119, 0.12);
+}
+
 /* Embedded placement — flex flow only; visuals live on __inner */
 .bnav-embedded,
 .global-bottom-nav--embedded {
@@ -1639,16 +1651,6 @@ html[data-theme='dark'] .global-bottom-nav__inner {
   box-shadow: 0 16px 42px rgba(18, 10, 8, 0.38);
 }
 
-html[data-theme='dark'] .global-bottom-nav__item,
-html[data-theme='dark'] .ni {
-  color: #cdb8a2;
-}
-
-html[data-theme='dark'] .global-bottom-nav__item.act,
-html[data-theme='dark'] .ni.act {
-  color: #d3a477;
-  background: rgba(211, 164, 119, 0.12);
-}
 
 /* Classical dark-brown palette: warm walnut surfaces with muted rose accents. */
 html[data-theme='dark'] {
