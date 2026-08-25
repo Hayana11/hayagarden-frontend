@@ -135,6 +135,10 @@ _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["content"],
     },
     "mcp__capability__todo_read": _EMPTY_SCHEMA,
+    "mcp__capability__ledger_read": {
+        "type": "object",
+        "properties": {"month": {"type": "string"}},
+    },
     "mcp__capability__todo_write": {
         "type": "object",
         "properties": {"content": {"type": "string"}, "due_date": {"type": "string"}},
