@@ -7,6 +7,7 @@ const { execSync, execFileSync }       = require('child_process');
 const { randomUUID }                     = require('crypto');
 const { readFileSync }                    = require('fs');
 const { z }                              = require('zod');
+const { readLightStatus }                = require('./light-status-adapter');
 
 function momentsOwnerToken() {
   const direct = (process.env.MOMENTS_OWNER_TOKEN || '').trim();
@@ -118,7 +119,9 @@ function buildServer({ uhA0Profile = false } = {}) {
 
   server.tool('light_on',  {}, () => callLight('/light/on',  'POST'));
   server.tool('light_off', {}, () => callLight('/light/off', 'POST'));
-  server.tool('get_light_status', {}, () => callLight('/light/status', 'GET'));
+  server.tool('get_light_status', {}, async () => ({
+    content: [{ type: 'text', text: await readLightStatus() }],
+  }));
   server.tool('light_bedside_warm',    {}, () => callLight('/light/bedside/warm',    'POST'));
   server.tool('light_bedside_neutral', {}, () => callLight('/light/bedside/neutral', 'POST'));
   server.tool(
