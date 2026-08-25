@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import internalServer from '../internal-mcp-server.js';
 
@@ -62,6 +63,24 @@ function textOf(result) {
 }
 
 seedDb();
+
+const proxyClient = new Client({ name: 'm3-01-capability-proxy', version: '1.0.0' });
+const proxyTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: [join(root, 'capability-proxy-mcp-server.js')],
+  env: {
+    ...process.env,
+    UH_A0_REPO_ROOT: root,
+    TODO_INTERNAL_DB_PATH: dbPath,
+    UH_A0_TURN_LEASE_PATH: leasePath,
+  },
+});
+await proxyClient.connect(proxyTransport);
+const proxyListed = await proxyClient.listTools();
+assert.ok(proxyListed.tools.some((tool) => tool.name === 'todo_read'));
+assert.ok(proxyListed.tools.some((tool) => tool.name === 'todo_write'));
+await proxyClient.close();
+
 const { listener, port } = await internalServer.startInternalMcpServer({
   port: 0,
   dbPath,

@@ -13,6 +13,7 @@ from tools.cc_capability_adapter import build_uh_a0_spawn_plan
 from tools.lease_signer import issue_turn_lease
 from tools.product_handlers import create_todo, list_todos
 from tools.todo_internal_adapter import add_todo, read_todos
+from wake.cc_tools import WAKE_TO_CC_MCP, cc_wake_allowed_tools
 
 
 def make_db(path: Path) -> None:
@@ -78,6 +79,14 @@ class TodoInternalAdapterTests(unittest.TestCase):
         self.assertEqual(
             execution_fence.capability_for_tool("mcp__internal__get_todos"),
             "todo.read",
+        )
+        self.assertEqual(
+            execution_fence.capability_for_tool("mcp__capability__todo_read"),
+            "todo.read",
+        )
+        self.assertEqual(
+            execution_fence.capability_for_tool("mcp__capability__todo_write"),
+            "todo.write",
         )
         self.assertEqual(
             execution_fence.capability_for_tool("mcp__home__add_todo"),
@@ -216,6 +225,32 @@ class TodoInternalAdapterTests(unittest.TestCase):
                     internal_conn.execute("SELECT COUNT(*) FROM todos").fetchone()[0],
                     7,
                 )
+
+    def test_chat_and_wake_leases_allow_todo_read_without_wake_surface_change(self):
+        chat_lease = self.lease(mode="chat")
+        wake_lease = self.lease(mode="wake")
+        for lease in (chat_lease, wake_lease):
+            self.assertEqual(
+                execution_fence.evaluate_tool_call(
+                    "mcp__capability__todo_read", {}, lease
+                )["lease_decision"],
+                "ALLOW",
+            )
+
+        chat_plan = build_uh_a0_spawn_plan(
+            write_mcp_config=False, turn_lease=chat_lease, env={}
+        )
+        wake_plan = build_uh_a0_spawn_plan(
+            write_mcp_config=False, turn_lease=wake_lease, env={}
+        )
+        self.assertEqual(chat_plan["surface_allowlist"], wake_plan["surface_allowlist"])
+        self.assertEqual(
+            chat_plan["physical_surface_fingerprint"],
+            wake_plan["physical_surface_fingerprint"],
+        )
+        self.assertIn("mcp__capability__todo_read", chat_plan["surface_allowlist"])
+        self.assertNotIn("mcp__capability__todo_read", cc_wake_allowed_tools())
+        self.assertEqual(WAKE_TO_CC_MCP["get_todos"], "mcp__home__get_todos")
 
     def test_capability_proxy_todo_read_is_typed_and_reuses_read_adapter(self):
         root = Path(__file__).resolve().parents[1]
