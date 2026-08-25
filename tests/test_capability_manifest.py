@@ -149,7 +149,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "todo.read": "mcp__capability__todo_read",
             "todo.write": "mcp__capability__todo_write",
             "countdown.read": "mcp__home__get_countdowns",
-            "ledger.read": "mcp__internal__get_ledger",
+            "ledger.read": "mcp__capability__ledger_read",
             "ledger.budget.read": "mcp__internal__get_ledger_budget",
             "ledger.write": "mcp__capability__ledger_write",
             "files.read": "Read",
