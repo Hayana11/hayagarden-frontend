@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -182,6 +183,47 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertIn("mcp__capability__ledger_read", plan["surface_allowlist"])
         self.assertNotIn("mcp__internal__get_ledger", plan["surface_allowlist"])
         self.assertIn("mcp__internal__get_ledger", plan["disallowed_tools"])
+
+    def test_ledger_adapter_preserves_default_and_result_contract(self):
+        from tools.ledger_internal_adapter import get_ledger
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "ledger.db"
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "CREATE TABLE ledger ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL NOT NULL, "
+                "category TEXT, note TEXT, date TEXT, author TEXT, meta TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO ledger (amount, category, note, date, author, meta) "
+                "VALUES (?,?,?,?,?,?)",
+                [
+                    (100, "工资", "八月收入", "2026-08-20", "alice", None),
+                    (-35, "餐饮", "晚饭", "2026-08-18", "alice", None),
+                    (-20, "交通", "七月交通", "2026-07-28", "alice", None),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            with mock.patch(
+                "tools.ledger_internal_adapter._utc_month",
+                return_value="2026-08",
+            ):
+                explicit = get_ledger(path, month="2026-08")
+                defaulted = get_ledger(path)
+
+        self.assertEqual(defaulted, explicit)
+        self.assertEqual(
+            set(explicit),
+            {"records", "summary"},
+        )
+        self.assertEqual(
+            explicit["summary"],
+            {"income": 100, "expense": -35, "balance": 65, "prev_expense": -20},
+        )
+        self.assertEqual([row["amount"] for row in explicit["records"]], [-35, 100])
 
     def test_stale_home_pending_is_cleared_before_spawn(self):
         action = {"amount": -12, "category": "餐饮"}
