@@ -50,7 +50,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前对话已经有充分事实，或只是为了展示工具能力时。",
         "failure_behavior": "明确说明未能查询或未找到，不得假装记得或查到。",
         "loading_policy": "always_load",
-        "provider_bindings": {"claude_code": "mcp__internal__search_memories", "internal_mcp": "mcp__internal__search_memories", "home_mcp": "mcp__home__search_memories"},
+        "provider_bindings": {"claude_code": "mcp__capability__memory_search", "internal_mcp": "mcp__internal__search_memories", "home_mcp": "mcp__home__search_memories"},
     },
     {
         "capability_id": "memory.write",
@@ -63,7 +63,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "内容为空、只是临时上下文，或当前没有值得保留的长期事实时。",
         "failure_behavior": "明确说明没有写入；不得伪造成功，也不得把失败内容写入其他存储。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__write_memory", "internal_mcp": "mcp__internal__write_memory", "api_relay": "memory_write"},
+        "provider_bindings": {"claude_code": "mcp__capability__memory_write", "internal_mcp": "mcp__internal__write_memory", "api_relay": "memory_write"},
     },
     {
         "capability_id": "diary.write",
@@ -115,7 +115,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "只是讨论计划、没有明确写入意图且未取得 ASK 确认时。",
         "failure_behavior": "明确说明没有写入；不得说“记好了”或伪造成功。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__add_todo", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo", "api_relay": "add_todo"},
+        "provider_bindings": {"claude_code": "mcp__capability__todo_write", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo", "api_relay": "add_todo"},
     },
     {
         "capability_id": "countdown.read",
@@ -167,7 +167,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "金额、用途或写入意图不明确，且没有完成 ASK 确认时。",
         "failure_behavior": "明确说明没有写入；不得说“已经记账”或伪造结果。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__add_ledger", "internal_mcp": "mcp__internal__add_ledger", "home_mcp": "mcp__home__add_ledger"},
+        "provider_bindings": {"claude_code": "mcp__capability__ledger_write", "internal_mcp": "mcp__internal__add_ledger", "home_mcp": "mcp__home__add_ledger"},
     },
     {
         "capability_id": "files.read",

@@ -17,6 +17,7 @@ from tools.cc_capability_adapter import (
     uh_a0_home_legacy_tools,
     uh_a0_home_mcp_tools,
     uh_a0_internal_mcp_tools,
+    uh_a0_capability_proxy_tools,
 )
 from tools.cc_tool_surface import _static_schema_registry
 import cc_resident
@@ -24,9 +25,10 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
-TARGET_FINGERPRINT = "d37ffa3da77cbbe5added332b433f541974f6c0dd2251510da89610b2f18cb7a"
+TARGET_FINGERPRINT = "7344a43bbb3163e8a7b4b46e568f05fd8a4f1b973a367b5e46c030d52df4a397"
 HOME_MEMORY = "mcp__home__search_memories"
-INTERNAL_MEMORY = "mcp__internal__search_memories"
+INTERNAL_MEMORY = "mcp__capability__memory_search"
+LEGACY_INTERNAL_MEMORY = "mcp__internal__search_memories"
 
 
 class DailyMemoryCutoverTests(unittest.TestCase):
@@ -40,16 +42,24 @@ class DailyMemoryCutoverTests(unittest.TestCase):
             get_capability("memory.search")["provider_bindings"],
             {
                 "claude_code": INTERNAL_MEMORY,
-                "internal_mcp": INTERNAL_MEMORY,
+                "internal_mcp": LEGACY_INTERNAL_MEMORY,
                 "home_mcp": HOME_MEMORY,
             },
         )
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "memory.search", "memory.write"),
+            ("todo.read", "ledger.read", "ledger.budget.read"),
         )
-        self.assertEqual(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS, ())
+        self.assertEqual(
+            INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
+            (
+                "mcp__internal__search_memories",
+                "mcp__internal__write_memory",
+                "mcp__internal__add_todo",
+                "mcp__internal__add_ledger",
+            ),
+        )
         item = get_capability("memory.search")
         self.assertEqual(item["kind"], "read")
         self.assertEqual(item["side_effect"], "none")
@@ -63,11 +73,12 @@ class DailyMemoryCutoverTests(unittest.TestCase):
             "mcp__home__get_light_status",
             "mcp__home__get_countdowns",
         })
-        self.assertIn(INTERNAL_MEMORY, uh_a0_internal_mcp_tools())
+        self.assertIn(INTERNAL_MEMORY, uh_a0_capability_proxy_tools())
         self.assertIn(INTERNAL_MEMORY, plan["surface_allowlist"])
         self.assertNotIn(HOME_MEMORY, plan["surface_allowlist"])
         self.assertIn(HOME_MEMORY, plan["disallowed_tools"])
         self.assertNotIn(INTERNAL_MEMORY, plan["disallowed_tools"])
+        self.assertIn(LEGACY_INTERNAL_MEMORY, plan["disallowed_tools"])
         self.assertEqual(plan["physical_surface_fingerprint"], TARGET_FINGERPRINT)
         self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
         self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
@@ -75,16 +86,19 @@ class DailyMemoryCutoverTests(unittest.TestCase):
     def test_home_legacy_and_fence_lookup_remain_explicit(self):
         self.assertEqual(uh_a0_home_legacy_tools()[-1], HOME_MEMORY)
         self.assertEqual(execution_fence.capability_for_tool(INTERNAL_MEMORY), "memory.search")
+        self.assertEqual(execution_fence.capability_for_tool(LEGACY_INTERNAL_MEMORY), "memory.search")
         self.assertEqual(execution_fence.capability_for_tool(HOME_MEMORY), "memory.search")
         self.assertEqual(WAKE_TO_CC_MCP["search_memories"], HOME_MEMORY)
         registry = _static_schema_registry()
         self.assertEqual(registry[INTERNAL_MEMORY], registry[HOME_MEMORY])
+        self.assertEqual(registry[INTERNAL_MEMORY], registry[LEGACY_INTERNAL_MEMORY])
 
     def test_runtime_off_denies_both_memory_providers(self):
         plan = self.plan(RUNTIME_STATE_OFF)
         self.assertNotIn(INTERNAL_MEMORY, plan["surface_allowlist"])
         self.assertNotIn(HOME_MEMORY, plan["surface_allowlist"])
         self.assertIn(INTERNAL_MEMORY, plan["disallowed_tools"])
+        self.assertIn(LEGACY_INTERNAL_MEMORY, plan["disallowed_tools"])
         self.assertIn(HOME_MEMORY, plan["disallowed_tools"])
 
     def test_generation_change_is_lazy(self):

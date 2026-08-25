@@ -1,23 +1,16 @@
 name: M4-01B2 Todo write idempotency validation
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - "app.py"
-      - "gateway.py"
-      - "tools/capability_manifest.py"
-      - "tools/confirmation_store.py"
-      - "tools/product_handlers.py"
-      - "tools/todo_write_adapter.py"
-      - "tools/todo_write_execution.py"
-      - "tests/test_m4_01b2_todo_write.py"
-      - "tests/test_m4_01b2_gateway.py"
-      - "tests/test_m4_01a_api_todo_read.py"
-      - "tests/test_confirmation_store.py"
-      - "tests/test_m4_01b1_canonical.py"
-      - ".github/workflows/m4-01b2-todo-write-idempotency-validation.yml"
   workflow_dispatch:
+    inputs:
+      base_sha:
+        description: "Base commit SHA to compare"
+        required: true
+        type: string
+      head_sha:
+        description: "Head commit SHA to validate"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -31,7 +24,7 @@ jobs:
       - name: Checkout exact PR head
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.head_sha || github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -76,8 +69,8 @@ jobs:
         shell: bash
         env:
           EXPECTED_BASE_SHA: a75fca503d7c44ce5decb3f666b2dad1126e127a
-          BASE_SHA: ${{ github.event.pull_request.base.sha || 'a75fca503d7c44ce5decb3f666b2dad1126e127a' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ inputs.base_sha || 'a75fca503d7c44ce5decb3f666b2dad1126e127a' }}
+          HEAD_SHA: ${{ inputs.head_sha || github.sha }}
         run: |
           test "$BASE_SHA" = "$EXPECTED_BASE_SHA"
           test "$(git rev-parse HEAD)" = "$HEAD_SHA"

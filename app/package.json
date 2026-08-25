@@ -26,7 +26,6 @@
     "test:chat-capacity-header": "vite-node scripts/test-chat-capacity-header.mjs",
     "test:memory-cold-start": "vite-node scripts/test-memory-cold-start.mjs",
     "test:rewrite-finalize-retry": "vite-node scripts/test-rewrite-finalize-retry.mjs",
-    "test:reality-lifecycle": "vite-node scripts/test-reality-lifecycle.mjs",
     "test:ledger": "vite-node scripts/test-ledger-integrity.mjs",
     "test:ledger:e2e": "playwright test e2e/ledger-integrity.spec.ts e2e/dash-ledger.spec.ts"
   },

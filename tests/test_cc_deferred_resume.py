@@ -63,7 +63,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                 "content": [{
                     "type": "tool_use",
                     "id": "toolu-1",
-                    "name": "mcp__internal__add_todo",
+                    "name": "mcp__capability__todo_write",
                     "input": action,
                 }],
             },
@@ -74,7 +74,7 @@ class DeferredResumeContractTests(unittest.TestCase):
             "session_id": "session-abc",
             "deferred_tool_use": {
                 "id": "toolu-1",
-                "name": "mcp__internal__add_todo",
+                "name": "mcp__capability__todo_write",
                 "input": action,
             },
         }
@@ -85,7 +85,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                     "content": [{
                         "type": "tool_use",
                         "id": "toolu-1",
-                        "name": "mcp__internal__add_todo",
+                        "name": "mcp__capability__todo_write",
                         "input": action,
                     }],
                 },
@@ -143,7 +143,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                 self.assertTrue(first_payload["deferred_tool_use"])
                 self.assertEqual(first_payload["status"], "waiting_for_confirmation")
                 self.assertEqual(first_payload["id"], "toolu-1")
-                self.assertEqual(first_payload["name"], "mcp__internal__add_todo")
+                self.assertEqual(first_payload["name"], "mcp__capability__todo_write")
                 self.assertEqual(first_payload["args"], action)
                 # The first externally visible waiting event is authoritative:
                 # pending state exists and the default lease is already gone.
@@ -153,7 +153,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                     {
                         "session_id": "session-abc",
                         "tool_use_id": "toolu-1",
-                        "tool_name": "mcp__internal__add_todo",
+                        "tool_name": "mcp__capability__todo_write",
                         "tool_input": action,
                         "approval_id": first_payload["approval_id"],
                     },
@@ -212,7 +212,7 @@ class DeferredResumeContractTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(resumed_tool_uses), 1)
                 self.assertEqual(resumed_tool_uses[0]["id"], "toolu-1")
-                self.assertEqual(resumed_tool_uses[0]["name"], "mcp__internal__add_todo")
+                self.assertEqual(resumed_tool_uses[0]["name"], "mcp__capability__todo_write")
                 self.assertEqual(resumed_tool_uses[0]["args"], action)
                 self.assertEqual(resumed_tool_uses[0]["lease_decision"], "ALLOW")
                 self.assertIsNone(session.pending_deferred)
@@ -223,7 +223,7 @@ class DeferredResumeContractTests(unittest.TestCase):
     def test_stale_home_pending_is_rejected_after_provider_cutover(self):
         action = {"content": "明天寄快递"}
         old_tool = "mcp__home__add_todo"
-        current_tool = "mcp__internal__add_todo"
+        current_tool = "mcp__capability__todo_write"
         self.assertEqual(capability_for_tool(old_tool), "todo.write")
 
         with tempfile.TemporaryDirectory() as tmp:
