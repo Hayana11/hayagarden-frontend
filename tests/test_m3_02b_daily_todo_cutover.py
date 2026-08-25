@@ -20,8 +20,8 @@ class M302BTodoCutoverTests(unittest.TestCase):
                 return build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
 
     def test_manifest_bindings(self):
-        self.assertEqual(get_capability("todo.read")["provider_bindings"], {"claude_code": "mcp__internal__get_todos", "internal_mcp": "mcp__internal__get_todos", "home_mcp": "mcp__home__get_todos"})
-        self.assertEqual(get_capability("todo.write")["provider_bindings"], {"claude_code": "mcp__capability__todo_write", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo"})
+        self.assertEqual(get_capability("todo.read")["provider_bindings"], {"claude_code": "mcp__internal__get_todos", "internal_mcp": "mcp__internal__get_todos", "home_mcp": "mcp__home__get_todos", "api_relay": "get_todos"})
+        self.assertEqual(get_capability("todo.write")["provider_bindings"], {"claude_code": "mcp__capability__todo_write", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo", "api_relay": "add_todo"})
 
     def test_config_and_surface(self):
         plan = self.plan()
