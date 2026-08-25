@@ -330,7 +330,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__home__get_countdowns",
                 "mcp__internal__get_ledger",
                 "mcp__internal__get_ledger_budget",
-                "mcp__internal__get_todos",
+                "mcp__capability__todo_read",
                 "mcp__capability__todo_write", "mcp__capability__ledger_write",
             },
         )
