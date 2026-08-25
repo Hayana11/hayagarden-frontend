@@ -116,8 +116,8 @@ try {
     prev_expense: -20,
   });
   assert.equal(payload.records.length, 2);
-  assert.equal(payload.records[0].amount, -35);
-  assert.equal(payload.records[1].amount, 100);
+  assert.equal(payload.records[0].amount, 100);
+  assert.equal(payload.records[1].amount, -35);
   assert.equal(countRows(), before);
 } finally {
   await client.close();
