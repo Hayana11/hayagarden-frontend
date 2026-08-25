@@ -71,6 +71,7 @@ CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "todo.read",
     "todo.write",
     "ledger.read",
+    "ledger.budget.read",
     "ledger.write",
 )
 
