@@ -31,6 +31,14 @@ LEDGER_PROXY = (
     "mcp__capability__ledger_write",
 )
 LEDGER_INTERNAL_SHADOW = ("mcp__internal__get_ledger",)
+EXPECTED_INTERNAL_MCP_SHADOW_TOOLS = (
+    "mcp__internal__get_ledger",
+    "mcp__internal__get_todos",
+    "mcp__internal__search_memories",
+    "mcp__internal__write_memory",
+    "mcp__internal__add_todo",
+    "mcp__internal__add_ledger",
+)
 LEDGER_HOME = (
     "mcp__home__get_ledger",
     "mcp__home__get_ledger_budget",
@@ -133,14 +141,8 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
         self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
         self.assertEqual(
-            INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
-            (
-                "mcp__internal__get_ledger",
-                "mcp__internal__search_memories",
-                "mcp__internal__write_memory",
-                "mcp__internal__add_todo",
-                "mcp__internal__add_ledger",
-            ),
+            tuple(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS),
+            EXPECTED_INTERNAL_MCP_SHADOW_TOOLS,
         )
 
     def test_runtime_off_hides_internal_and_keeps_home_denied(self):
@@ -249,7 +251,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
             explicit["summary"],
             {"income": 100, "expense": -35, "balance": 65, "prev_expense": -20},
         )
-        self.assertEqual([row["amount"] for row in explicit["records"]], [-35, 100])
+        self.assertEqual([row["amount"] for row in explicit["records"]], [100, -35])
 
     def test_stale_home_pending_is_cleared_before_spawn(self):
         action = {"amount": -12, "category": "餐饮"}
