@@ -1159,23 +1159,23 @@ body[data-legacy-native-compat='true'] .global-bottom-nav__icon {
 }
 
 html[data-theme='dark'] {
-  --color-bg: #171b22;
-  --color-bg-secondary: #202630;
-  --color-surface: #252c35;
-  --color-surface-rose: #3a2c31;
-  --color-card: #252c35;
-  --color-border: rgba(211, 172, 93, 0.22);
-  --color-primary: #c9a45c;
-  --color-text: #f1eadb;
-  --color-text-soft: #d2c7b2;
-  --color-text-mute: #a69a87;
-  --color-text-faint: #817969;
-  --color-text-fainter: #635b51;
-  --color-rose: #b76e79;
-  --color-rose-deep: #d1aa62;
-  --color-rose-pink: #7c424d;
-  --color-track: #303844;
-  --color-nav-inactive: #9a907f;
+  --color-bg: #211a18;
+  --color-bg-secondary: #2a211f;
+  --color-surface: #302522;
+  --color-surface-rose: #3c2b2a;
+  --color-card: #302522;
+  --color-border: rgba(218, 177, 132, 0.2);
+  --color-primary: #d3a477;
+  --color-text: #f0e3d1;
+  --color-text-soft: #cdb8a2;
+  --color-text-mute: #a88f7d;
+  --color-text-faint: #806b5c;
+  --color-text-fainter: #624e45;
+  --color-rose: #b85f6d;
+  --color-rose-deep: #d3a477;
+  --color-rose-pink: #70414a;
+  --color-track: #493433;
+  --color-nav-inactive: #b7a295;
 }
 
 html[data-theme='dark'] body {
@@ -1193,22 +1193,22 @@ html[data-theme='dark'] .soft-card {
 
 
 html[data-theme='dark'] .chat-root {
-  --bg: #171b22;
-  --card: #252c35;
-  --card2: #303844;
-  --bubble: #332a2d;
-  --rose: #b76e79;
-  --deep: #d1aa62;
-  --rosebg: #3a2c31;
-  --ink: #f1eadb;
-  --ink2: #d2c7b2;
-  --mut: #a69a87;
-  --faint: #817969;
-  --ghost: #635b51;
-  --line: rgba(211, 172, 93, 0.22);
-  --shadow: rgba(0, 0, 0, 0.24);
-  --shadow2: rgba(0, 0, 0, 0.44);
-  --gold: #d1aa62;
+  --bg: #211a18;
+  --card: #302522;
+  --card2: #493433;
+  --bubble: #382b29;
+  --rose: #b85f6d;
+  --deep: #d3a477;
+  --rosebg: #3c2b2a;
+  --ink: #f0e3d1;
+  --ink2: #cdb8a2;
+  --mut: #a88f7d;
+  --faint: #806b5c;
+  --ghost: #624e45;
+  --line: rgba(218, 177, 132, 0.2);
+  --shadow: rgba(18, 10, 8, 0.26);
+  --shadow2: rgba(18, 10, 8, 0.48);
+  --gold: #d3a477;
 }
 
 html[data-theme='dark'] .chat-header-surface,
@@ -1530,17 +1530,18 @@ textarea:focus-visible {
 }
 
 html[data-theme='dark'] .global-bottom-nav__inner {
-  background: rgba(48, 38, 41, 0.94);
-  border-color: rgba(232, 182, 195, 0.12);
+  background: rgba(255, 248, 244, 0.97);
+  border-color: rgba(115, 77, 67, 0.12);
+  box-shadow: 0 16px 42px rgba(18, 10, 8, 0.38);
 }
 
-/* Classical dark-brown palette: the bottom navigation intentionally keeps its original surface. */
+/* Classical dark-brown palette: warm walnut surfaces with muted rose accents. */
 html[data-theme='dark'] {
-  --color-bg: #241b18;
-  --color-bg-secondary: #30231f;
-  --color-surface: #332724;
-  --color-surface-rose: #493433;
-  --color-card: #332724;
+  --color-bg: #211a18;
+  --color-bg-secondary: #2a211f;
+  --color-surface: #302522;
+  --color-surface-rose: #3c2b2a;
+  --color-card: #302522;
   --color-border: rgba(218, 177, 132, 0.2);
   --color-primary: #d3a477;
   --color-text: #f0e3d1;
@@ -1569,10 +1570,10 @@ html[data-theme='dark'] .soft-card {
 }
 
 html[data-theme='dark'] .chat-root {
-  --bg: #241b18;
-  --card: #332724;
+  --bg: #211a18;
+  --card: #302522;
   --card2: #493433;
-  --bubble: #3d2d29;
+  --bubble: #382b29;
   --rose: #b85f6d;
   --deep: #d3a477;
   --rosebg: #493433;
