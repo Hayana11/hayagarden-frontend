@@ -35,3 +35,5 @@ static/uploads/
 memories.db.bak*
 # B1-1B Planner Shadow observations (non-authoritative JSONL)
 planner_shadow.jsonl
+# Generated TreeGPT probe reports
+artifacts/treegpt-cache-probe-*.json
