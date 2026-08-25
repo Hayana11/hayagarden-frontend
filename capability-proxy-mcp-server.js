@@ -4,11 +4,13 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
 const { execFileSync } = require('child_process');
 const { z } = require('zod');
+const { readLightStatus } = require('./light-status-adapter');
 
 const CAPABILITY_SERVER_NAME = 'capability';
 const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'memory_search',
   'memory_write',
+  'home_light_status',
   'todo_read',
   'todo_write',
   'ledger_read',
@@ -141,6 +143,19 @@ function runProxy(toolName, input) {
   }
 }
 
+async function runLightStatusProxy(input = {}) {
+  const decision = verifyCapabilityAction('home_light_status', input);
+  if (!decision || decision.lease_decision !== 'ALLOW') {
+    return gateFailure(decision);
+  }
+  return {
+    content: [{
+      type: 'text',
+      text: await readLightStatus(),
+    }],
+  };
+}
+
 function buildServer() {
   const server = new McpServer({
     name: CAPABILITY_SERVER_NAME,
@@ -156,6 +171,11 @@ function buildServer() {
     'memory_write',
     { content: z.string().min(1).max(4000).describe('要保存的长期记忆正文') },
     async ({ content }) => runProxy('memory_write', { content }),
+  );
+  server.tool(
+    'home_light_status',
+    {},
+    async () => runLightStatusProxy({}),
   );
   server.tool(
     'todo_read',
@@ -224,5 +244,6 @@ module.exports = {
   CAPABILITY_PROXY_TOOL_NAMES,
   buildServer,
   callAdapter,
+  runLightStatusProxy,
   verifyCapabilityAction,
 };
