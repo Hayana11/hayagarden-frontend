@@ -9,9 +9,11 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const root = process.cwd();
 const tempRoot = mkdtempSync(join(tmpdir(), 'm3-03b-ledger-capability-'));
 const dbPath = join(tempRoot, 'ledger.db');
+const runtimeStateDbPath = join(tempRoot, 'runtime-state.db');
 const leasePath = join(tempRoot, 'turn-lease.json');
 
 process.env.UH_A0_REPO_ROOT = root;
+process.env.HAYAGARDEN_CONFIG_DB_PATH = runtimeStateDbPath;
 process.env.UH_A0_TURN_LEASE_PATH = leasePath;
 
 function python(code, args = []) {
@@ -20,10 +22,24 @@ function python(code, args = []) {
     env: {
       ...process.env,
       UH_A0_REPO_ROOT: root,
+      HAYAGARDEN_CONFIG_DB_PATH: runtimeStateDbPath,
       UH_A0_TURN_LEASE_PATH: leasePath,
     },
     encoding: 'utf8',
   }).trim();
+}
+
+function seedRuntimeStateDb() {
+  python(
+    [
+      'import sqlite3, sys',
+      'conn = sqlite3.connect(sys.argv[1])',
+      'conn.execute("CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)")',
+      'conn.commit()',
+      'conn.close()',
+    ].join('; '),
+    [runtimeStateDbPath],
+  );
 }
 
 function seedDb() {
@@ -62,6 +78,7 @@ function textOf(result) {
   return result?.content?.find((item) => item.type === 'text')?.text ?? '';
 }
 
+seedRuntimeStateDb();
 seedDb();
 const before = countRows();
 const client = new Client({ name: 'm3-03b-ledger-capability', version: '1.0.0' });
@@ -71,6 +88,7 @@ const transport = new StdioClientTransport({
   env: {
     ...process.env,
     UH_A0_REPO_ROOT: root,
+    HAYAGARDEN_CONFIG_DB_PATH: runtimeStateDbPath,
     TODO_INTERNAL_DB_PATH: dbPath,
     UH_A0_TURN_LEASE_PATH: leasePath,
   },
