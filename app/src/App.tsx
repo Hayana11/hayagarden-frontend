@@ -65,13 +65,35 @@ export default function App() {
     };
   }, []);
 
-  const basename = import.meta.env.BASE_URL.replace(/\/$/, '') || '/';
+  const basename = import.meta.env.BASE_URL.replace(/\/$/, '') || undefined;
+  const isPreview = import.meta.env.BASE_URL === '/preview/';
 
   return (
-    <BrowserRouter basename={basename}>
-      <AppFrame>
-        <AppRoutes />
-      </AppFrame>
-    </BrowserRouter>
+    <>
+      {isPreview ? (
+        <div
+          style={{
+            position: 'fixed',
+            right: 12,
+            bottom: 12,
+            zIndex: 1000,
+            padding: '4px 8px',
+            borderRadius: 4,
+            background: '#7c2d12',
+            color: '#ffedd5',
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: 1,
+          }}
+        >
+          PREVIEW
+        </div>
+      ) : null}
+      <BrowserRouter basename={basename}>
+        <AppFrame>
+          <AppRoutes />
+        </AppFrame>
+      </BrowserRouter>
+    </>
   );
 }
