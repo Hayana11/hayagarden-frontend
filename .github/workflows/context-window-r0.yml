@@ -8,12 +8,9 @@ on:
       - 'chat/daily_runtime.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
-      - 'gateway.py'
-      - 'app.py'
       - 'tests/test_context_window*.py'
       - 'tests/test_manual_context_runtime.py'
       - 'docs/context-window-manual-r0.md'
-      - '.github/workflows/context-window-r0.yml'
   push:
     branches: [main]
     paths:
@@ -22,12 +19,10 @@ on:
       - 'chat/daily_runtime.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
-      - 'gateway.py'
-      - 'app.py'
       - 'tests/test_context_window*.py'
       - 'tests/test_manual_context_runtime.py'
       - 'docs/context-window-manual-r0.md'
-      - '.github/workflows/context-window-r0.yml'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

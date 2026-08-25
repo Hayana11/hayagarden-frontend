@@ -1,18 +1,16 @@
 name: M3-02B Daily Todo provider cutover validation
 on:
-  pull_request:
-    paths:
-      - "tools/capability_manifest.py"
-      - "tools/cc_capability_adapter.py"
-      - "tools/cc_tool_surface.py"
-      - "tests/test_capability_manifest.py"
-      - "tests/test_cc_capability_adapter.py"
-      - "tests/test_cc_deferred_resume.py"
-      - "tests/test_m3_01_todo_internal.py"
-      - "cc_resident.py"
-      - "tests/test_execution_fence.py"
-      - "tests/test_m3_02b_daily_todo_cutover.py"
-      - ".github/workflows/m3-02b-daily-todo-provider-cutover.yml"
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        description: "Base commit SHA to compare"
+        required: true
+        type: string
+      head_sha:
+        description: "Head commit SHA to validate"
+        required: true
+        type: string
+
 permissions:
   contents: read
 jobs:
@@ -25,9 +23,9 @@ jobs:
       matrix:
         include:
           - label: base
-            ref: ${{ github.event.pull_request.base.sha }}
+            ref: ${{ inputs.base_sha }}
           - label: head
-            ref: ${{ github.event.pull_request.head.sha }}
+            ref: ${{ inputs.head_sha }}
     steps:
       - name: Checkout exact ${{ matrix.label }} SHA
         uses: actions/checkout@v4
@@ -89,7 +87,7 @@ jobs:
         if: matrix.label == 'head'
         shell: bash
         run: |
-          actual="$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | sort)"
+          actual="$(git diff --name-only ${{ inputs.base_sha }} ${{ inputs.head_sha }} | sort)"
           expected="$(printf '%s\n' \
             '.github/workflows/m3-02b-daily-todo-provider-cutover.yml' \
             '.github/workflows/m3-03a-ledger-internal-validation.yml' \
@@ -104,4 +102,4 @@ jobs:
             'tools/cc_tool_surface.py' | sort)"
           test "$actual" = "$expected"
           if printf '%s\n' "$actual" | grep -E '^(tools/execution_fence.py$|chat/daily_runtime.py$|wake/|tools/product_handlers.py$|internal-mcp-server.js$|app.py$|app/|deploy/systemd/|scripts/)' ; then exit 1; fi
-          git diff --check ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }}
+          git diff --check ${{ inputs.base_sha }} ${{ inputs.head_sha }}
