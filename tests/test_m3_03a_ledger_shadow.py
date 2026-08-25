@@ -38,6 +38,14 @@ CAPABILITY_LEDGER_TOOLS = (
     "mcp__capability__ledger_write",
 )
 INTERNAL_LEDGER_SHADOW_TOOLS = ("mcp__internal__get_ledger",)
+EXPECTED_INTERNAL_MCP_SHADOW_TOOLS = (
+    "mcp__internal__get_ledger",
+    "mcp__internal__get_todos",
+    "mcp__internal__search_memories",
+    "mcp__internal__write_memory",
+    "mcp__internal__add_todo",
+    "mcp__internal__add_ledger",
+)
 
 
 class LedgerInternalShadowTests(unittest.TestCase):
@@ -109,8 +117,8 @@ class LedgerInternalShadowTests(unittest.TestCase):
                 second = physical_surface_fingerprint()
 
         self.assertEqual(
-            set(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS),
-            set(INTERNAL_LEDGER_SHADOW_TOOLS + INTERNAL_MEMORY_SHADOW_TOOLS),
+            tuple(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS),
+            EXPECTED_INTERNAL_MCP_SHADOW_TOOLS,
         )
         self.assertIn("mcp__internal__get_ledger", INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS)
         self.assertEqual(first, TARGET_FINGERPRINT)
