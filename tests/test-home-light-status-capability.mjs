@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { Socket } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,7 +60,7 @@ function waitForPort(port) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + 10_000;
     const attempt = () => {
-      const socket = new (require('node:net').Socket)();
+      const socket = new Socket();
       socket.setTimeout(250);
       socket.once('connect', () => {
         socket.destroy();
