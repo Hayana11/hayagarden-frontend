@@ -134,6 +134,7 @@ _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"content": {"type": "string", "maxLength": 4000}},
         "required": ["content"],
     },
+    "mcp__capability__home_light_status": _EMPTY_SCHEMA,
     "mcp__capability__todo_read": _EMPTY_SCHEMA,
     "mcp__capability__ledger_read": {
         "type": "object",
