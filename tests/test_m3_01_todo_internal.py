@@ -13,6 +13,7 @@ from tools.cc_capability_adapter import build_uh_a0_spawn_plan
 from tools.lease_signer import issue_turn_lease
 from tools.product_handlers import create_todo, list_todos
 from tools.todo_internal_adapter import add_todo, read_todos
+from wake.cc_tools import WAKE_TO_CC_MCP, cc_wake_allowed_tools
 
 
 def make_db(path: Path) -> None:
@@ -54,7 +55,7 @@ class TodoInternalAdapterTests(unittest.TestCase):
         self.assertEqual(
             get_capability("todo.read")["provider_bindings"],
             {
-                "claude_code": "mcp__internal__get_todos",
+                "claude_code": "mcp__capability__todo_read",
                 "internal_mcp": "mcp__internal__get_todos",
                 "home_mcp": "mcp__home__get_todos",
                 "api_relay": "get_todos",
@@ -78,6 +79,14 @@ class TodoInternalAdapterTests(unittest.TestCase):
         self.assertEqual(
             execution_fence.capability_for_tool("mcp__internal__get_todos"),
             "todo.read",
+        )
+        self.assertEqual(
+            execution_fence.capability_for_tool("mcp__capability__todo_read"),
+            "todo.read",
+        )
+        self.assertEqual(
+            execution_fence.capability_for_tool("mcp__capability__todo_write"),
+            "todo.write",
         )
         self.assertEqual(
             execution_fence.capability_for_tool("mcp__home__add_todo"),
@@ -217,10 +226,48 @@ class TodoInternalAdapterTests(unittest.TestCase):
                     7,
                 )
 
-    def test_live_surface_uses_internal_todo_and_forbids_home_todo(self):
+    def test_chat_and_wake_leases_allow_todo_read_without_wake_surface_change(self):
+        chat_lease = self.lease(mode="chat")
+        wake_lease = self.lease(mode="wake")
+        for lease in (chat_lease, wake_lease):
+            self.assertEqual(
+                execution_fence.evaluate_tool_call(
+                    "mcp__capability__todo_read", {}, lease
+                )["lease_decision"],
+                "ALLOW",
+            )
+
+        chat_plan = build_uh_a0_spawn_plan(
+            write_mcp_config=False, turn_lease=chat_lease, env={}
+        )
+        wake_plan = build_uh_a0_spawn_plan(
+            write_mcp_config=False, turn_lease=wake_lease, env={}
+        )
+        self.assertEqual(chat_plan["surface_allowlist"], wake_plan["surface_allowlist"])
+        self.assertEqual(
+            chat_plan["physical_surface_fingerprint"],
+            wake_plan["physical_surface_fingerprint"],
+        )
+        self.assertIn("mcp__capability__todo_read", chat_plan["surface_allowlist"])
+        self.assertNotIn("mcp__capability__todo_read", cc_wake_allowed_tools())
+        self.assertEqual(WAKE_TO_CC_MCP["get_todos"], "mcp__home__get_todos")
+
+    def test_capability_proxy_todo_read_is_typed_and_reuses_read_adapter(self):
+        root = Path(__file__).resolve().parents[1]
+        proxy_source = (root / "capability-proxy-mcp-server.js").read_text(encoding="utf-8")
+        adapter_source = (root / "tools" / "todo_internal_adapter.py").read_text(encoding="utf-8")
+        self.assertIn("todo_read: 'tools.todo_internal_adapter'", proxy_source)
+        self.assertIn("server.tool(\n    'todo_read',\n    {},", proxy_source)
+        self.assertIn("? 'get_todos'", proxy_source)
+        self.assertNotIn("SELECT", proxy_source)
+        self.assertIn('operation == "get_todos"', adapter_source)
+
+    def test_live_surface_uses_capability_todo_read_and_forbids_home_todo(self):
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
         self.assertEqual(set(plan["mcp_config"]["mcpServers"]), {"home", "internal", "capability"})
-        self.assertIn("mcp__internal__get_todos", plan["surface_allowlist"])
+        self.assertIn("mcp__capability__todo_read", plan["surface_allowlist"])
+        self.assertNotIn("mcp__internal__get_todos", plan["surface_allowlist"])
+        self.assertIn("mcp__internal__get_todos", plan["disallowed_tools"])
         self.assertIn("mcp__capability__todo_write", plan["surface_allowlist"])
         self.assertNotIn("mcp__home__get_todos", plan["surface_allowlist"])
         self.assertNotIn("mcp__home__add_todo", plan["surface_allowlist"])

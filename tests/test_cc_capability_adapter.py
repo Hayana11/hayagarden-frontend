@@ -39,6 +39,7 @@ from tools.cc_capability_adapter import (
     physical_surface_fingerprint,
     physical_surface_names,
     uh_a0_home_mcp_tools,
+    uh_a0_internal_mcp_tools,
     uh_a0_capability_proxy_tools,
     uh_a0_home_legacy_tools,
     uh_a0_external_read_tools,
@@ -86,11 +87,20 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "ledger.read", "ledger.budget.read"),
+            ("ledger.read", "ledger.budget.read"),
+        )
+        self.assertEqual(
+            CAPABILITY_PROXY_CAPABILITY_IDS,
+            ("memory.search", "memory.write", "todo.read", "todo.write", "ledger.write"),
+        )
+        self.assertEqual(
+            uh_a0_internal_mcp_tools(),
+            ("mcp__internal__get_ledger", "mcp__internal__get_ledger_budget"),
         )
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
             (
+                "mcp__internal__get_todos",
                 "mcp__internal__search_memories",
                 "mcp__internal__write_memory",
                 "mcp__internal__add_todo",
@@ -341,7 +351,11 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertIn("Read", allowed)
             self.assertNotIn("mcp__home__search_memories", allowed)
             self.assertIn("mcp__capability__memory_search", allowed)
-            self.assertIn("mcp__internal__get_todos", allowed)
+            self.assertNotIn("mcp__internal__get_todos", allowed)
+            deny_idx = flags["extra"].index("--disallowedTools") + 1
+            disallowed = flags["extra"][deny_idx]
+            self.assertIn("mcp__internal__get_todos", disallowed)
+            self.assertIn("mcp__capability__todo_read", allowed)
             self.assertIn("mcp__capability__todo_write", allowed)
             self.assertNotIn("mcp__brain__", allowed)
             self.assertNotIn("mcp__home__get_todos", allowed)

@@ -146,7 +146,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "memory.write": "mcp__capability__memory_write",
             "diary.write": "mcp__home__write_diary",
             "home.light.status": "mcp__home__get_light_status",
-            "todo.read": "mcp__internal__get_todos",
+            "todo.read": "mcp__capability__todo_read",
             "todo.write": "mcp__capability__todo_write",
             "countdown.read": "mcp__home__get_countdowns",
             "ledger.read": "mcp__internal__get_ledger",
