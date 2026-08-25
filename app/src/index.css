@@ -1312,7 +1312,7 @@ body {
   color: var(--color-text);
   background-color: var(--color-bg);
   background-image:
-    radial-gradient(ellipse 62% 46% at 2% 7%, rgba(226, 165, 181, 0.14), transparent 78%),
+    radial-gradient(ellipse 48% 34% at 6% 10%, rgba(226, 165, 181, 0.15), transparent 76%),
     radial-gradient(ellipse 42% 38% at 94% 23%, rgba(236, 190, 201, 0.13), transparent 78%),
     radial-gradient(ellipse 56% 34% at 52% 78%, rgba(216, 145, 166, 0.09), transparent 82%),
     radial-gradient(ellipse 34% 28% at 18% 92%, rgba(242, 204, 211, 0.12), transparent 80%);
@@ -1343,7 +1343,7 @@ textarea:focus-visible {
   width: 100%;
   background-color: transparent;
   background-image:
-    radial-gradient(ellipse 62% 44% at 2% 6%, rgba(229, 170, 185, 0.1), transparent 80%),
+    radial-gradient(ellipse 48% 32% at 7% 8%, rgba(229, 170, 185, 0.11), transparent 78%),
     radial-gradient(ellipse 42% 36% at 94% 24%, rgba(238, 190, 201, 0.09), transparent 80%),
     radial-gradient(ellipse 54% 30% at 52% 88%, rgba(219, 148, 168, 0.065), transparent 82%);
   box-shadow: 0 0 0 1px rgba(130, 85, 100, 0.05), 0 24px 80px rgba(100, 65, 75, 0.06);
@@ -1352,7 +1352,7 @@ textarea:focus-visible {
 html[data-theme='dark'] .app-shell {
   background-color: transparent;
   background-image:
-    radial-gradient(ellipse 62% 44% at 2% 6%, rgba(130, 67, 68, 0.1), transparent 80%),
+    radial-gradient(ellipse 48% 32% at 7% 8%, rgba(130, 67, 68, 0.11), transparent 78%),
     radial-gradient(ellipse 42% 36% at 94% 24%, rgba(124, 78, 57, 0.09), transparent 80%),
     radial-gradient(ellipse 54% 30% at 52% 88%, rgba(126, 60, 72, 0.06), transparent 82%);
 }
