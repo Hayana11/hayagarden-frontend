@@ -145,7 +145,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "memory.search": "mcp__capability__memory_search",
             "memory.write": "mcp__capability__memory_write",
             "diary.write": "mcp__home__write_diary",
-            "home.light.status": "mcp__home__get_light_status",
+            "home.light.status": "mcp__capability__home_light_status",
             "todo.read": "mcp__capability__todo_read",
             "todo.write": "mcp__capability__todo_write",
             "countdown.read": "mcp__home__get_countdowns",
@@ -163,6 +163,10 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 get_capability(capability_id)["provider_bindings"].get("claude_code"),
                 binding,
             )
+        self.assertEqual(
+            get_capability("home.light.status")["provider_bindings"].get("home_mcp"),
+            "mcp__home__get_light_status",
+        )
 
     def test_lookup_and_p1_enabled_order_do_not_expand_scope(self):
         self.assertIsNone(get_capability("unknown.capability"))

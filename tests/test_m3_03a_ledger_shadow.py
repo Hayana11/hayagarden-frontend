@@ -20,7 +20,7 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
-TARGET_FINGERPRINT = "f41485f60606637e40665fe6bafd8bb9880696a56c196f8223ba927eb1e95a93"
+TARGET_FINGERPRINT = "3abed02e09b88156dbb61e49205aaa4302973625da6952e6b17156c0a20fe142"
 INTERNAL_MEMORY_SHADOW_TOOLS = (
     "mcp__internal__search_memories",
     "mcp__internal__write_memory",
