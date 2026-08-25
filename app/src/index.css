@@ -1250,7 +1250,10 @@ textarea:focus-visible {
 
 .bnav-inner,
 .global-bottom-nav__inner {
-  max-width: 430px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 452px;
+  min-height: 64px;
   border: 1px solid rgba(130, 85, 100, 0.1);
   border-radius: 24px;
   background: rgba(255, 249, 247, 0.92);
@@ -1343,8 +1346,18 @@ textarea:focus-visible {
 }
 
 .chat-composer-dock {
+  box-sizing: border-box;
+  width: 100%;
   padding: 8px 14px 16px !important;
   background: linear-gradient(180deg, transparent, var(--bg) 30%);
+}
+
+.app-frame--standard-nav {
+  padding-bottom: 64px;
+}
+
+.app-frame--fullscreen-embedded .chat-root {
+  min-height: 0;
 }
 
 .chat-composer-dock > div {
@@ -1377,12 +1390,19 @@ textarea:focus-visible {
     max-width: 452px !important;
   }
 
-  .chat-root {
+  .app-frame--fullscreen-embedded {
+    width: 100%;
     max-width: 480px;
     margin: 0 auto;
-    border-left: 1px solid rgba(130, 85, 100, 0.06);
-    border-right: 1px solid rgba(130, 85, 100, 0.06);
-    box-shadow: 0 24px 90px rgba(100, 65, 75, 0.08);
+  }
+
+  .chat-root {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    border-left: 0;
+    border-right: 0;
+    box-shadow: none;
   }
 }
 
