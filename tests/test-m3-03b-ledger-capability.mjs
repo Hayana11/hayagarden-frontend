@@ -34,7 +34,7 @@ function seedRuntimeStateDb() {
     [
       'import sqlite3, sys',
       'conn = sqlite3.connect(sys.argv[1])',
-      'conn.execute("CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at DATETIME DEFAULT (datetime('now')))")',
+      `conn.execute("CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at DATETIME DEFAULT (datetime('now')))")`,
       'conn.commit()',
       'conn.close()',
     ].join('; '),
