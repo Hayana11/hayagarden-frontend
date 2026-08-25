@@ -26,6 +26,20 @@ TOOL_PROFILE_LEGACY = 'legacy'
 TOOL_PROFILE_TEXT_ONLY = 'text_only'
 TOOL_PROFILE_UH_A0 = 'uh_a0'
 
+UH_A0_MCP_CONNECTION_NONBLOCKING = '0'
+UH_A0_MCP_CONNECT_TIMEOUT_MS = '15000'
+
+
+def _prepare_spawn_env(env, tool_profile):
+    """Apply readiness-only overrides to the UH-A0 Claude child."""
+    profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+    if profile != TOOL_PROFILE_UH_A0:
+        return env
+    spawn_env = dict(os.environ if env is None else env)
+    spawn_env['MCP_CONNECTION_NONBLOCKING'] = UH_A0_MCP_CONNECTION_NONBLOCKING
+    spawn_env['MCP_CONNECT_TIMEOUT_MS'] = UH_A0_MCP_CONNECT_TIMEOUT_MS
+    return spawn_env
+
 # Claude stdout events that refresh the stall / inactivity deadline.
 # Gateway/SSE heartbeats are synthetic and must NOT be listed here.
 _CLAUDE_ACTIVITY_STREAM_EVENTS = frozenset({
@@ -414,6 +428,7 @@ class ResidentSession:
         from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         self._kill(quiet=True)
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+        env = _prepare_spawn_env(env, self._tool_profile)
         try:
             require_pinned_claude_version(env=env, cwd=self._cwd)
         except ClaudeRuntimeError as exc:
@@ -607,6 +622,7 @@ class ResidentSession:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            env = _prepare_spawn_env(env, self._tool_profile)
             try:
                 require_pinned_claude_version(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
@@ -822,6 +838,7 @@ class ResidentSession:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            env = _prepare_spawn_env(env, self._tool_profile)
             try:
                 require_pinned_claude_version(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
