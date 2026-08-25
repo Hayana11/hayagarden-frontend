@@ -1,0 +1,128 @@
+name: PR337 independent exact-head ledger QA
+
+on:
+  push:
+    branches:
+      - qa/pr337-exact-head-ledger-read
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact target SHA
+        uses: actions/checkout@v4
+        with:
+          ref: 622950fcba7da45e33cb46e79b4c8511ce499823
+          fetch-depth: 0
+
+      - name: Verify exact HEAD and clean worktree before
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "622950fcba7da45e33cb46e79b4c8511ce499823"
+          test -z "$(git status --porcelain)"
+          echo "ACTUAL_HEAD=$(git rev-parse HEAD)"
+          echo "HEAD_VERIFIED=YES"
+          echo "WORKTREE_CLEAN_BEFORE=YES"
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies and prepare isolated runtime state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python --version
+          node --version
+          python -m pip install Flask Pillow Markdown
+          npm ci
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -s "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          test -e /opt/frontend/.env || sudo touch /opt/frontend/.env
+          export HAYAGARDEN_CONFIG_DB_PATH="$RUNNER_TEMP/pr337-runtime-state.db"
+          python - <<'PY'
+          import os
+          import sqlite3
+          path = os.environ["HAYAGARDEN_CONFIG_DB_PATH"]
+          conn = sqlite3.connect(path)
+          conn.execute(
+              "CREATE TABLE runtime_config ("
+              "key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+              "updated_at DATETIME DEFAULT (datetime('now')))"
+          )
+          conn.commit()
+          conn.close()
+          PY
+
+      - name: Run Python focused tests
+        shell: bash
+        env:
+          HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/pr337-runtime-state.db
+        run: |
+          set -euo pipefail
+          python -m unittest             tests.test_m3_03a_ledger_shadow             tests.test_m3_03b_daily_ledger_cutover             tests.test_execution_fence             tests.test_cc_capability_adapter             tests.test_capability_manifest             -v
+
+      - name: Run real capability proxy ledger test
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/test-m3-03b-ledger-capability.mjs
+
+      - name: Independently verify exact fingerprint twice
+        shell: bash
+        env:
+          HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/pr337-runtime-state.db
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from tools.capability_state import RUNTIME_STATE_INHERIT, read_capability_state
+          from tools.cc_capability_adapter import physical_surface_fingerprint
+          target = "14af347b613d763a90effcaa81c4d2362162c404406cb673e2c8580e562b71f2"
+          state = read_capability_state("ledger.read")
+          first = physical_surface_fingerprint()
+          second = physical_surface_fingerprint()
+          print(f"RUNTIME_STATE={state}")
+          print(f"FINGERPRINT_FIRST={first}")
+          print(f"FINGERPRINT_SECOND={second}")
+          print(f"TARGET_FINGERPRINT={target}")
+          assert state == RUNTIME_STATE_INHERIT
+          assert first == target
+          assert second == target
+          assert first == second
+          PY
+
+      - name: Verify narrow static scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from tools.capability_manifest import get_capability
+          assert get_capability("ledger.read")["provider_bindings"]["claude_code"] == "mcp__capability__ledger_read"
+          assert get_capability("ledger.read")["provider_bindings"]["internal_mcp"] == "mcp__internal__get_ledger"
+          assert get_capability("ledger.read")["provider_bindings"]["home_mcp"] == "mcp__home__get_ledger"
+          assert get_capability("ledger.budget.read")["provider_bindings"]["claude_code"] == "mcp__internal__get_ledger_budget"
+          assert get_capability("ledger.write")["provider_bindings"]["claude_code"] == "mcp__capability__ledger_write"
+          print("STATIC_SCOPE=PASS")
+          PY
+
+      - name: Verify clean worktree after
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          echo "WORKTREE_CLEAN_AFTER=YES"
