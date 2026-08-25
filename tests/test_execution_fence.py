@@ -59,6 +59,27 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(result["capability_id"], "memory.search")
         self.assertEqual(result["lease_decision"], "ALLOW")
 
+    def test_a_ledger_read_is_allowed_for_chat_and_wake(self):
+        for mode in ("chat", "wake"):
+            result = evaluate_tool_call(
+                "mcp__capability__ledger_read",
+                {"month": "2026-08"},
+                self.lease(mode=mode),
+            )
+            self.assertEqual(result["capability_id"], "ledger.read")
+            self.assertEqual(result["lease_decision"], "ALLOW")
+
+        chat_plan = build_uh_a0_spawn_plan(
+            write_mcp_config=False, turn_lease=self.lease(mode="chat"), env={}
+        )
+        wake_plan = build_uh_a0_spawn_plan(
+            write_mcp_config=False, turn_lease=self.lease(mode="wake"), env={}
+        )
+        self.assertEqual(chat_plan["surface_allowlist"], wake_plan["surface_allowlist"])
+        self.assertIn("mcp__capability__ledger_read", chat_plan["surface_allowlist"])
+        self.assertNotIn("mcp__internal__get_ledger", chat_plan["surface_allowlist"])
+        self.assertIn("mcp__internal__get_ledger", chat_plan["disallowed_tools"])
+
     def test_b_task_native_reads_allowed(self):
         lease = self.lease(mode="task")
         for tool, capability in (
@@ -328,10 +349,10 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__home__write_diary",
                 "mcp__home__get_light_status",
                 "mcp__home__get_countdowns",
-                "mcp__internal__get_ledger",
                 "mcp__internal__get_ledger_budget",
                 "mcp__capability__todo_read",
-                "mcp__capability__todo_write", "mcp__capability__ledger_write",
+                "mcp__capability__todo_write", "mcp__capability__ledger_read",
+                "mcp__capability__ledger_write",
             },
         )
 
