@@ -1428,6 +1428,8 @@ html[data-theme='dark'] .app-shell {
   --line: rgba(130, 85, 100, 0.12);
   --shadow: rgba(100, 65, 75, 0.08);
   --shadow2: rgba(100, 65, 75, 0.16);
+  position: relative;
+  z-index: 0;
   background: var(--bg) !important;
 }
 
@@ -1438,6 +1440,7 @@ html[data-theme='dark'] .app-shell {
   right: 0;
   bottom: 0;
   left: 0;
+  z-index: -1;
   pointer-events: none;
   background:
     radial-gradient(ellipse 62% 42% at var(--haze-left-x, 4%) var(--haze-left-y, 8%), rgba(224, 145, 168, 0.18), transparent 82%),
