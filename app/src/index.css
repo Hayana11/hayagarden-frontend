@@ -1312,10 +1312,10 @@ body {
   color: var(--color-text);
   background-color: var(--color-bg);
   background-image:
-    radial-gradient(ellipse 48% 34% at 6% 10%, rgba(226, 165, 181, 0.15), transparent 76%),
-    radial-gradient(ellipse 42% 38% at 94% 23%, rgba(236, 190, 201, 0.13), transparent 78%),
-    radial-gradient(ellipse 56% 34% at 52% 78%, rgba(216, 145, 166, 0.09), transparent 82%),
-    radial-gradient(ellipse 34% 28% at 18% 92%, rgba(242, 204, 211, 0.12), transparent 80%);
+    radial-gradient(ellipse 64% 46% at var(--haze-left-x, 2%) var(--haze-left-y, 4%), rgba(226, 145, 168, 0.23), transparent 80%),
+    radial-gradient(ellipse 48% 40% at var(--haze-right-x, 94%) var(--haze-right-y, 23%), rgba(236, 176, 193, 0.18), transparent 82%),
+    radial-gradient(ellipse 58% 36% at var(--haze-low-x, 52%) var(--haze-low-y, 78%), rgba(216, 125, 153, 0.13), transparent 84%),
+    radial-gradient(ellipse 38% 30% at 18% 92%, rgba(242, 185, 199, 0.16), transparent 82%);
   background-attachment: fixed;
 }
 
@@ -1352,9 +1352,9 @@ textarea:focus-visible {
 html[data-theme='dark'] .app-shell {
   background-color: transparent;
   background-image:
-    radial-gradient(ellipse 64% 46% at 2% 4%, rgba(130, 67, 68, 0.11), transparent 80%),
-    radial-gradient(ellipse 42% 36% at 94% 24%, rgba(124, 78, 57, 0.09), transparent 80%),
-    radial-gradient(ellipse 54% 30% at 52% 88%, rgba(126, 60, 72, 0.06), transparent 82%);
+    radial-gradient(ellipse 64% 46% at var(--haze-left-x, 2%) var(--haze-left-y, 4%), rgba(130, 67, 68, 0.16), transparent 82%),
+    radial-gradient(ellipse 42% 36% at var(--haze-right-x, 94%) var(--haze-right-y, 24%), rgba(124, 78, 57, 0.12), transparent 84%),
+    radial-gradient(ellipse 54% 30% at var(--haze-low-x, 52%) var(--haze-low-y, 88%), rgba(126, 60, 72, 0.09), transparent 86%);
 }
 
 .soft-card {
@@ -1414,9 +1414,9 @@ html[data-theme='dark'] .app-shell {
   left: 0;
   pointer-events: none;
   background:
-    radial-gradient(ellipse 52% 30% at 4% 8%, rgba(224, 157, 177, 0.12), transparent 78%),
-    radial-gradient(ellipse 46% 34% at 98% 30%, rgba(239, 187, 200, 0.1), transparent 80%),
-    radial-gradient(ellipse 58% 28% at 48% 88%, rgba(214, 137, 161, 0.07), transparent 82%);
+    radial-gradient(ellipse 62% 42% at var(--haze-left-x, 4%) var(--haze-left-y, 8%), rgba(224, 145, 168, 0.18), transparent 82%),
+    radial-gradient(ellipse 48% 36% at var(--haze-right-x, 98%) var(--haze-right-y, 30%), rgba(239, 176, 193, 0.14), transparent 84%),
+    radial-gradient(ellipse 58% 30% at var(--haze-low-x, 48%) var(--haze-low-y, 88%), rgba(214, 125, 153, 0.1), transparent 86%);
 }
 
 .chat-header-surface {

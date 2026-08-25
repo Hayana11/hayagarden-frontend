@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { AppFrame } from './components/AppFrame';
 import { DashScreen } from './screens/DashScreen';
@@ -44,6 +45,26 @@ function AppRoutes() {
 
 export default function App() {
   useLegacyNativeCompat();
+
+  useEffect(() => {
+    const random = (min: number, max: number) => Math.round(min + Math.random() * (max - min));
+    const root = document.documentElement;
+    root.style.setProperty('--haze-left-x', `${random(0, 16)}%`);
+    root.style.setProperty('--haze-left-y', `${random(0, 14)}%`);
+    root.style.setProperty('--haze-right-x', `${random(78, 100)}%`);
+    root.style.setProperty('--haze-right-y', `${random(16, 38)}%`);
+    root.style.setProperty('--haze-low-x', `${random(28, 70)}%`);
+    root.style.setProperty('--haze-low-y', `${random(70, 94)}%`);
+    return () => {
+      root.style.removeProperty('--haze-left-x');
+      root.style.removeProperty('--haze-left-y');
+      root.style.removeProperty('--haze-right-x');
+      root.style.removeProperty('--haze-right-y');
+      root.style.removeProperty('--haze-low-x');
+      root.style.removeProperty('--haze-low-y');
+    };
+  }, []);
+
   const basename = import.meta.env.BASE_URL.replace(/\/$/, '') || '/';
 
   return (
