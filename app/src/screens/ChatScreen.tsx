@@ -1702,6 +1702,7 @@ export function ChatScreen() {
   const canShowNewerLoaded = legacyCompat && !atLatestWindow;
 
   const rendered: ReactElement[] = [];
+  const showChatExamples = msgs.length === 0 && !live && !chatError && !loadingMore;
   let lastDate = '';
   visibleMsgs.forEach((m) => {
     // First visible message always gets a date separator (even mid-day slice).
@@ -1951,6 +1952,23 @@ export function ChatScreen() {
                   : '‹ 加载更早的对话 ›'}
             </div>
           )}
+          {showChatExamples && (
+            <div className="vstack vstack-12" aria-label="对话示例">
+              <div style={{ textAlign: 'center', fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0 6px' }}>
+                今日 · 对话示例
+              </div>
+              <div className="chat-user-bubble vstack vstack-8" style={{ alignSelf: 'flex-end', maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)' }}>
+                <span style={{ fontSize: '1em', lineHeight: 1.75, letterSpacing: 0.3, color: 'var(--ink)' }}>今天想从哪里开始？</span>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1 }}>09:18</span>
+              </div>
+              <div className="chat-msg chat-assistant-card vstack vstack-12" style={{ borderRadius: 16 }}>
+                <div style={{ fontSize: '1em', lineHeight: 1.75, letterSpacing: 0.3, color: 'var(--ink2)' }}>
+                  先不用急着回答。我们可以把今天的心情放在桌面上，慢慢看一会儿，再决定下一步。
+                </div>
+                <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1 }}>09:19</span>
+              </div>
+            </div>
+          )}
           {rendered}
           {live && renderLive(live)}
           {pendingConfirmation && renderToolCard('pending-confirmation', pendingConfirmation)}
@@ -2195,7 +2213,7 @@ export function ChatScreen() {
         </div>
       )}
 
-      {/* ══ sidebar ══ */}
+      {/* ══ sidebar ═�� */}
       {sidebarOpen && (
         <div className="c78-fill-fixed" style={{ zIndex: 70 }}>
           <div onClick={() => setSidebarOpen(false)} className="c78-fill-absolute" style={{ background: 'rgba(30,20,18,0.42)', animation: 'chatFadeIn .2s ease' }} />
