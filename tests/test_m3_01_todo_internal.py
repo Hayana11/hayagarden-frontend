@@ -66,6 +66,7 @@ class TodoInternalAdapterTests(unittest.TestCase):
                 "claude_code": "mcp__capability__todo_write",
                 "internal_mcp": "mcp__internal__add_todo",
                 "home_mcp": "mcp__home__add_todo",
+                "api_relay": "add_todo",
             },
         )
 
