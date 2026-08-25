@@ -24,7 +24,7 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
-TARGET_FINGERPRINT = "7344a43bbb3163e8a7b4b46e568f05fd8a4f1b973a367b5e46c030d52df4a397"
+TARGET_FINGERPRINT = "14af347b613d763a90effcaa81c4d2362162c404406cb673e2c8580e562b71f2"
 LEDGER_INTERNAL = ("mcp__internal__get_ledger_budget",)
 LEDGER_PROXY = (
     "mcp__capability__ledger_read",
@@ -93,7 +93,22 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         )
 
     def test_daily_allow_disallow_and_fingerprint(self):
-        plan = _plan()
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch(
+                "tools.cc_capability_adapter.read_capability_state",
+                return_value=RUNTIME_STATE_INHERIT,
+            ):
+                plan = build_uh_a0_spawn_plan(
+                    cwd=root,
+                    write_mcp_config=False,
+                    env={},
+                )
+                first = physical_surface_fingerprint()
+                second = physical_surface_fingerprint()
+        self.assertEqual(plan["physical_surface_fingerprint"], TARGET_FINGERPRINT)
+        self.assertEqual(first, TARGET_FINGERPRINT)
+        self.assertEqual(second, TARGET_FINGERPRINT)
+        self.assertEqual(first, second)
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
         self.assertTrue(set(LEDGER_INTERNAL) <= allowed)
@@ -111,13 +126,12 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertIn("mcp__internal__get_todos", disallowed)
         self.assertNotIn("mcp__home__get_todos", allowed)
         self.assertNotIn("mcp__home__add_todo", allowed)
-        self.assertTrue(plan["physical_surface_fingerprint"])
         self.assertIn("mcp__capability__memory_search", allowed)
         self.assertNotIn("mcp__home__search_memories", allowed)
         self.assertIn("mcp__home__search_memories", disallowed)
         self.assertIn("mcp__internal__search_memories", disallowed)
         self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
-        self.assertNotEqual(BASE_FINGERPRINT, plan["physical_surface_fingerprint"])
+        self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
             (
