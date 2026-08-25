@@ -16,14 +16,14 @@ jobs:
       - name: Checkout exact target SHA
         uses: actions/checkout@v4
         with:
-          ref: 622950fcba7da45e33cb46e79b4c8511ce499823
+          ref: 60ddb93a4c913f732ebf8e6dd42c49304d22a197
           fetch-depth: 0
 
       - name: Verify exact HEAD and clean worktree before
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "622950fcba7da45e33cb46e79b4c8511ce499823"
+          test "$(git rev-parse HEAD)" = "60ddb93a4c913f732ebf8e6dd42c49304d22a197"
           test -z "$(git status --porcelain)"
           echo "ACTUAL_HEAD=$(git rev-parse HEAD)"
           echo "HEAD_VERIFIED=YES"
