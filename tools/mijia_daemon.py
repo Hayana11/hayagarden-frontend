@@ -7,7 +7,7 @@
   POST /light/off           — 关主灯（向后兼容）
   POST /light/brightness    {"value": 50}  — 主灯亮度
   POST /light/color_temp    {"value": 4000}  — 主灯色温
-  GET  /light/status        — 两个灯的状态
+  GET  /light/status        — 床头灯状态（主灯与床头灯为同一物理设备）
 
   POST /light/main/on       — 开主灯
   POST /light/main/off      — 关主灯
@@ -133,14 +133,13 @@ def all_off():
         return {"main": r1, "bedside": r2}
     return _wrap(_fn)
 
-# ── 状态（两个灯）────────────────────────────────────────────────────────────
+# ── 状态（单一物理灯：只读床头灯）────────────────────────────────────────────
 
 @app.route('/light/status', methods=['GET'])
 def status():
     def _fn():
-        m, b = _load_dids()
+        b = bedside_did()
         return {
-            "main":    lc.light_status(m, zone="main"),
             "bedside": lc.light_status(b, zone="bedside"),
         }
     return _wrap(_fn)
