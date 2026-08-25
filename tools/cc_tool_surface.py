@@ -139,6 +139,10 @@ _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {"month": {"type": "string"}},
     },
+    "mcp__capability__ledger_budget_read": {
+        "type": "object",
+        "properties": {"month": {"type": "string"}},
+    },
     "mcp__capability__todo_write": {
         "type": "object",
         "properties": {"content": {"type": "string"}, "due_date": {"type": "string"}},
