@@ -1863,7 +1863,7 @@ export function ChatScreen() {
                               </div>
                             ))}
                           </div>
-                          <span style={{ fontSize: 11.5, color: 'var(--ghost)' }}>移动端默认抽屉��桌面端默认原地展开</span>
+                          <span style={{ fontSize: 11.5, color: 'var(--ghost)' }}>移动端默认抽屉；桌面端默认原地展开</span>
                         </div>
                       </div>
                       <div style={{ height: 1, background: 'var(--line)' }} />
@@ -2195,7 +2195,7 @@ export function ChatScreen() {
         </div>
       )}
 
-      {/* ══ sidebar ═�� */}
+      {/* ══ sidebar ══ */}
       {sidebarOpen && (
         <div className="c78-fill-fixed" style={{ zIndex: 70 }}>
           <div onClick={() => setSidebarOpen(false)} className="c78-fill-absolute" style={{ background: 'rgba(30,20,18,0.42)', animation: 'chatFadeIn .2s ease' }} />
