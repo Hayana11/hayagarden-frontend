@@ -350,8 +350,8 @@ class ExecutionFenceTests(unittest.TestCase):
             {
                 "Read", "Glob", "Grep", "WebSearch", "WebFetch",
                 "mcp__capability__memory_search", "mcp__capability__memory_write",
+                "mcp__capability__home_light_status",
                 "mcp__home__write_diary",
-                "mcp__home__get_light_status",
                 "mcp__home__get_countdowns",
                 "mcp__capability__ledger_budget_read",
                 "mcp__capability__todo_read",
