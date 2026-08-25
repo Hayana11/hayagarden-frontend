@@ -57,6 +57,7 @@ class TodoInternalAdapterTests(unittest.TestCase):
                 "claude_code": "mcp__internal__get_todos",
                 "internal_mcp": "mcp__internal__get_todos",
                 "home_mcp": "mcp__home__get_todos",
+                "api_relay": "get_todos",
             },
         )
         self.assertEqual(
