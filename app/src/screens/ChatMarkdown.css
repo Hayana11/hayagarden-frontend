@@ -6,7 +6,6 @@
   line-height: 1.85;
   letter-spacing: 0.3px;
   overflow-wrap: anywhere;
-  text-wrap: pretty;
 }
 
 .chat-assistant-card .chat-markdown {
@@ -39,7 +38,6 @@
   font-family: var(--font-serif-cn, serif);
   line-height: 1.35;
   letter-spacing: 0.4px;
-  text-wrap: balance;
 }
 
 .chat-markdown h1 {
