@@ -69,6 +69,31 @@
     sans-serif;
 }
 
+html[data-theme='dark'] {
+  --window-overlay: rgba(5, 7, 10, 0.76);
+  --window-surface: #252c35;
+  --window-surface-soft: #202630;
+  --window-surface-muted: #303844;
+  --window-border: rgba(211, 172, 93, 0.22);
+  --window-border-soft: rgba(183, 110, 121, 0.4);
+  --window-border-active: #d1aa62;
+  --window-title: #f1eadb;
+  --window-body: #d2c7b2;
+  --window-muted: #a69a87;
+  --window-faint: #817969;
+  --window-ghost: #635b51;
+  --window-accent: #b76e79;
+  --window-accent-strong: #d1aa62;
+  --window-accent-soft: #7c424d;
+  --window-numeral: #d1aa62;
+  --window-secondary-bg: #303844;
+  --window-secondary-text: #d2c7b2;
+  --window-primary-text: #171b22;
+  --window-inner-line: rgba(211, 172, 93, 0.38);
+  --window-shadow: 0 20px 50px rgba(0, 0, 0, 0.46), inset 0 0 0 1px var(--window-inner-line);
+}
+
+
 /* ── chat-day soft separator + composer card ── */
 
 .dsw-boundary {
@@ -787,6 +812,38 @@
 /* =========================================================
    手机窄屏
    ========================================================= */
+
+html[data-theme='dark'] .dsw-card {
+  background: var(--window-surface);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+}
+
+html[data-theme='dark'] .daily-window-dialog.is-loading::after {
+  background: rgba(23, 27, 34, 0.62);
+}
+
+html[data-theme='dark'] .daily-window-close {
+  color: var(--window-muted);
+  background: var(--window-surface-muted);
+}
+
+html[data-theme='dark'] .daily-window-button--secondary:hover {
+  background: #3a424e;
+}
+
+html[data-theme='dark'] .daily-window-button--primary:hover {
+  background: #b89452;
+}
+
+html[data-theme='dark'] .daily-window-empty {
+  background: rgba(32, 38, 48, 0.78);
+}
+
+html[data-theme='dark'] .daily-window-toast {
+  color: var(--window-title);
+  background: rgba(24, 28, 35, 0.96);
+  border: 1px solid var(--window-border);
+}
 
 @media (max-width: 374px) {
   .daily-window-dialog {

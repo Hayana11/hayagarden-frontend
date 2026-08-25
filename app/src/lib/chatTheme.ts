@@ -79,8 +79,10 @@ export function subscribeChatTheme(listener: ChatThemeListener): () => void {
 
 export function applyChatThemeToRoot(root: HTMLElement, theme?: ThemeMode) {
   const mode = theme ?? loadChatSettings().theme;
-  root.setAttribute('data-chat-theme', resolveEffectiveTheme(mode));
+  const effective = resolveEffectiveTheme(mode);
+  root.setAttribute('data-chat-theme', effective);
   root.dataset.chatThemeMode = mode;
+  document.documentElement.setAttribute('data-theme', effective);
 }
 
 type Detach = () => void;
