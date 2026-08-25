@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { readLightStatus } from '../light-status-adapter.js';
 
@@ -123,7 +124,7 @@ try {
   };
 
   proxyClient = new Client({ name: 's4-capability-proxy', version: '1.0.0' });
-  const proxyTransport = new (await import('@modelcontextprotocol/sdk/client/stdio.js')).StdioClientTransport({
+  const proxyTransport = new StdioClientTransport({
     command: process.execPath,
     args: [join(root, 'capability-proxy-mcp-server.js')],
     env: { ...commonEnv, TODO_INTERNAL_DB_PATH: join(tempRoot, 'unused.db') },
