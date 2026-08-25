@@ -20,7 +20,7 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
-TARGET_FINGERPRINT = "14af347b613d763a90effcaa81c4d2362162c404406cb673e2c8580e562b71f2"
+TARGET_FINGERPRINT = "f41485f60606637e40665fe6bafd8bb9880696a56c196f8223ba927eb1e95a93"
 INTERNAL_MEMORY_SHADOW_TOOLS = (
     "mcp__internal__search_memories",
     "mcp__internal__write_memory",
@@ -32,14 +32,16 @@ LEDGER_HOME_TOOLS = (
     "mcp__home__get_ledger_budget",
     "mcp__home__add_ledger",
 )
-INTERNAL_LEDGER_TOOLS = ("mcp__internal__get_ledger_budget",)
+INTERNAL_LEDGER_TOOLS = ()
 CAPABILITY_LEDGER_TOOLS = (
     "mcp__capability__ledger_read",
+    "mcp__capability__ledger_budget_read",
     "mcp__capability__ledger_write",
 )
-INTERNAL_LEDGER_SHADOW_TOOLS = ("mcp__internal__get_ledger",)
+INTERNAL_LEDGER_SHADOW_TOOLS = ("mcp__internal__get_ledger", "mcp__internal__get_ledger_budget")
 EXPECTED_INTERNAL_MCP_SHADOW_TOOLS = (
     "mcp__internal__get_ledger",
+    "mcp__internal__get_ledger_budget",
     "mcp__internal__get_todos",
     "mcp__internal__search_memories",
     "mcp__internal__write_memory",
@@ -52,7 +54,7 @@ class LedgerInternalShadowTests(unittest.TestCase):
     def test_manifest_and_fence_bindings(self):
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("ledger.budget.read",),
+            (),
         )
         self.assertEqual(
             get_capability("ledger.read")["provider_bindings"],
@@ -65,7 +67,7 @@ class LedgerInternalShadowTests(unittest.TestCase):
         self.assertEqual(
             get_capability("ledger.budget.read")["provider_bindings"],
             {
-                "claude_code": "mcp__internal__get_ledger_budget",
+                "claude_code": "mcp__capability__ledger_budget_read",
                 "internal_mcp": "mcp__internal__get_ledger_budget",
                 "home_mcp": "mcp__home__get_ledger_budget",
             },
@@ -127,8 +129,9 @@ class LedgerInternalShadowTests(unittest.TestCase):
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
         self.assertIn("mcp__internal__get_ledger", disallowed)
+        self.assertIn("mcp__internal__get_ledger_budget", disallowed)
         self.assertNotIn("mcp__internal__get_ledger", allowed)
-        self.assertTrue(set(INTERNAL_LEDGER_TOOLS).issubset(allowed))
+        self.assertNotIn("mcp__internal__get_ledger_budget", allowed)
         self.assertTrue(set(CAPABILITY_LEDGER_TOOLS).issubset(allowed))
         self.assertTrue(set(INTERNAL_LEDGER_SHADOW_TOOLS).issubset(disallowed))
         self.assertTrue(set(INTERNAL_LEDGER_SHADOW_TOOLS).isdisjoint(allowed))
