@@ -19,6 +19,7 @@ import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewSc
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
 import { useLegacyNativeCompat } from './hooks/useLegacyNativeCompat';
 import { MONOPOLY_ROOM_PATH, ROUTES } from './navigation';
+import { resolveRouterBasename } from './routerBasename';
 
 function AppRoutes() {
   return (
@@ -65,7 +66,7 @@ export default function App() {
     };
   }, []);
 
-  const basename = import.meta.env.BASE_URL.replace(/\/$/, '') || undefined;
+  const basename = resolveRouterBasename(window.location.pathname);
   const isPreview = import.meta.env.BASE_URL === '/preview/';
 
   return (
