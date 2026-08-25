@@ -61,13 +61,17 @@ class ExecutionFenceTests(unittest.TestCase):
 
     def test_a_ledger_read_is_allowed_for_chat_and_wake(self):
         for mode in ("chat", "wake"):
-            result = evaluate_tool_call(
-                "mcp__capability__ledger_read",
-                {"month": "2026-08"},
-                self.lease(mode=mode),
-            )
-            self.assertEqual(result["capability_id"], "ledger.read")
-            self.assertEqual(result["lease_decision"], "ALLOW")
+            for tool_name, capability_id in (
+                ("mcp__capability__ledger_read", "ledger.read"),
+                ("mcp__capability__ledger_budget_read", "ledger.budget.read"),
+            ):
+                result = evaluate_tool_call(
+                    tool_name,
+                    {"month": "2026-08"},
+                    self.lease(mode=mode),
+                )
+                self.assertEqual(result["capability_id"], capability_id)
+                self.assertEqual(result["lease_decision"], "ALLOW")
 
         chat_plan = build_uh_a0_spawn_plan(
             write_mcp_config=False, turn_lease=self.lease(mode="chat"), env={}
@@ -349,7 +353,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__home__write_diary",
                 "mcp__home__get_light_status",
                 "mcp__home__get_countdowns",
-                "mcp__internal__get_ledger_budget",
+                "mcp__capability__ledger_budget_read",
                 "mcp__capability__todo_read",
                 "mcp__capability__todo_write", "mcp__capability__ledger_read",
                 "mcp__capability__ledger_write",
