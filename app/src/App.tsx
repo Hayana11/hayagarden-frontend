@@ -44,7 +44,7 @@ function AppRoutes() {
 
 export default function App() {
   useLegacyNativeCompat();
-  const basename = window.location.pathname.startsWith('/dash') ? '/dash' : undefined;
+  const basename = import.meta.env.BASE_URL.replace(/\/$/, '') || '/';
 
   return (
     <BrowserRouter basename={basename}>
