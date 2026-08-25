@@ -141,7 +141,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前问题不依赖账本事实，或用户已经给出足够数据时。",
         "failure_behavior": "说明账本读取失败，不得编造金额或记录。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__get_ledger", "internal_mcp": "mcp__internal__get_ledger", "home_mcp": "mcp__home__get_ledger"},
+        "provider_bindings": {"claude_code": "mcp__capability__ledger_read", "internal_mcp": "mcp__internal__get_ledger", "home_mcp": "mcp__home__get_ledger"},
     },
     {
         "capability_id": "ledger.budget.read",
