@@ -138,7 +138,7 @@ jobs:
           } <= allowed
           assert {
               "mcp__internal__get_ledger_budget",
-              "mcp__internal__get_ledger,
+              "mcp__internal__get_ledger",
               "mcp__internal__get_todos",
           } <= disallowed
           assert "mcp__internal__get_ledger_budget" not in allowed
