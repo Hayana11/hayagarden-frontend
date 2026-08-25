@@ -204,6 +204,12 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for good in ("WebSearch", "WebFetch"):
             self.assertIn(good, surface)
 
+    def test_e_exact_inherit_fingerprint_is_stable(self):
+        first = physical_surface_fingerprint()
+        second = physical_surface_fingerprint()
+        self.assertEqual(first, second)
+        print("S4_PHYSICAL_SURFACE_FINGERPRINT=" + first)
+
     def test_e_physical_surface_stable_across_leases(self):
         chat_lease = issue_turn_lease(
             turn_id="chat-1",
