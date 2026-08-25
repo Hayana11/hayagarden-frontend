@@ -59,7 +59,6 @@ NON_P3_HOME_MCP_TOOLS: tuple[str, ...] = (
 
 HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "diary.write",
-    "home.light.status",
     "countdown.read",
 )
 
@@ -68,6 +67,7 @@ INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ()
 CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
     "memory.write",
+    "home.light.status",
     "todo.read",
     "todo.write",
     "ledger.read",
@@ -83,6 +83,7 @@ INTERNAL_MCP_LEGACY_CAPABILITY_IDS: tuple[str, ...] = (
     "ledger.write",
     "memory.search",
     "memory.write",
+    "home.light.status",
 )
 
 # Legacy Internal MCP registrations remain available to other providers but
