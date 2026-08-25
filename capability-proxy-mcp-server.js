@@ -70,7 +70,9 @@ function callAdapter(toolName, input) {
           ? 'get_todos'
           : toolName === 'todo_write'
             ? 'add_todo'
-            : 'add_ledger',
+            : toolName === 'ledger_read'
+              ? 'get_ledger'
+              : 'add_ledger',
     ...input,
     db_path: dbPath,
   };
