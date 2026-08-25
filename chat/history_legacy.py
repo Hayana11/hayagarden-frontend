@@ -5,6 +5,7 @@ import datetime
 import os
 from typing import Any, Callable, Optional
 
+from chat.attachment_contract import image_attachment_urls, text_file_attachments
 from chat.history_boundary import compute_boundary_ids, legacy_block_limit, persist_history_boundary
 
 
@@ -18,6 +19,22 @@ def _has_file_marker(blocks: list[dict[str, Any]], filename: str) -> bool:
     return any(
         any(marker in str(block.get('text') or '') for marker in markers)
         for block in blocks if block.get('type') == 'text'
+    )
+
+
+
+def _row_text_files(row: Any) -> list[dict[str, str]]:
+    return text_file_attachments(
+        _legacy_row_get(row, 'attachments'),
+        legacy_file_url=_legacy_row_get(row, 'file_url'),
+        legacy_file_name=_legacy_row_get(row, 'file_name'),
+    )
+
+
+def _row_image_urls(row: Any) -> list[str]:
+    return image_attachment_urls(
+        _legacy_row_get(row, 'attachments'),
+        legacy_image_url=_legacy_row_get(row, 'image_url'),
     )
 
 
@@ -39,10 +56,12 @@ def assemble_legacy_history(
         rows = rows[-limit:]
 
     total = len(rows)
-    img_indices = [i for i, r in enumerate(rows) if _legacy_row_get(r, 'image_url')]
-    keep_img_indices = set(img_indices[-2:])
+    row_image_urls = [_row_image_urls(r) for r in rows]
+    image_count = sum(len(urls) for urls in row_image_urls)
+    keep_image_positions = set(range(max(0, image_count - 2), image_count))
 
     msgs: list[dict[str, Any]] = []
+    image_position = 0
     prev_dt = None
     retained_ids: list[int] = []
 
@@ -71,30 +90,32 @@ def assemble_legacy_history(
             prev_dt = cur_dt
 
         blocks = []
-        if _legacy_row_get(r, 'image_url'):
-            if ri in keep_img_indices:
-                blk = img_block_fn(_legacy_row_get(r, 'image_url'))
+        for image_url in row_image_urls[ri]:
+            if image_position in keep_image_positions:
+                blk = img_block_fn(image_url)
                 if blk:
                     blocks.append(blk)
             else:
                 blocks.append({'type': 'text', 'text': '[一张较早发送的图片，内容已不在上下文中]'})
+            image_position += 1
 
         if _legacy_row_get(r, 'content'):
             blocks.append({'type': 'text', 'text': note + _legacy_row_get(r, 'content')})
 
-        fu = _legacy_row_get(r, 'file_url')
-        if fu and not is_ai and str(fu).startswith('/static/'):
-            fname = _legacy_row_get(r, 'file_name') or '附件'
-            body = read_file_fn(static_dir, str(fu)) if ri >= total - 6 else None
-            if body is not None:
-                if len(body) > 30000:
-                    body = body[:30000] + '\n...(文件过长已截断)'
-                blocks.append({
-                    'type': 'text',
-                    'text': '[用户发来文件: %s]\n```\n%s\n```' % (fname, body),
-                })
-            elif not _has_file_marker(blocks, fname):
-                blocks.append({'type': 'text', 'text': _file_marker(fname)})
+        if not is_ai:
+            for file_ref in _row_text_files(r):
+                fu = file_ref['url']
+                fname = file_ref['name'] or '附件'
+                body = read_file_fn(static_dir, fu) if ri >= total - 6 else None
+                if body is not None:
+                    if len(body) > 30000:
+                        body = body[:30000] + '\n...(文件过长已截断)'
+                    blocks.append({
+                        'type': 'text',
+                        'text': '[用户发来文件: %s]\n```\n%s\n```' % (fname, body),
+                    })
+                elif not _has_file_marker(blocks, fname):
+                    blocks.append({'type': 'text', 'text': _file_marker(fname)})
 
         if is_ai and _legacy_row_get(r, 'tool_calls'):
             th = format_tool_history_fn(_legacy_row_get(r, 'tool_calls'))

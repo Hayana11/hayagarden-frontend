@@ -823,6 +823,7 @@ def apply_history_overlay(rows: list[Any], staging: Mapping[str, Any]) -> list[A
             'tool_calls': '',
             'file_url': snap.get('file_url') or '',
             'file_name': snap.get('file_name') or '',
+            'attachments': snap.get('attachments') or '[]',
         }
         return kept + [edited]
     return list(rows)
@@ -1038,6 +1039,7 @@ def activate_edit(conn, rewrite_id: str) -> dict:
         image_url = snap.get('image_url') or ''
         file_url = snap.get('file_url') or ''
         file_name = snap.get('file_name') or ''
+        attachments = snap.get('attachments') or '[]'
         edited = (row.get('edited_content') or '').strip()
 
         previous_user_at = None
@@ -1062,6 +1064,7 @@ def activate_edit(conn, rewrite_id: str) -> dict:
             ('image_url', image_url),
             ('file_url', file_url),
             ('file_name', file_name),
+            ('attachments', attachments),
         ):
             if col in cols:
                 user_cols.append(col)
