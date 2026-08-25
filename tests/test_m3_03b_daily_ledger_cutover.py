@@ -150,7 +150,15 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         registry = _static_schema_registry()
         for internal, home in zip(LEDGER_INTERNAL, ("mcp__home__get_ledger_budget",)):
             self.assertEqual(registry[internal], registry[home])
-        self.assertEqual(registry[LEDGER_PROXY[0]], registry["mcp__internal__get_ledger"])
+        capability_read_schema = registry[LEDGER_PROXY[0]]
+        legacy_read_schema = registry["mcp__internal__get_ledger"]
+        self.assertEqual(capability_read_schema["type"], legacy_read_schema["type"])
+        self.assertEqual(
+            capability_read_schema["properties"],
+            legacy_read_schema["properties"],
+        )
+        self.assertEqual(set(capability_read_schema["properties"]), {"month"})
+        self.assertNotEqual(LEDGER_PROXY[0], "mcp__internal__get_ledger")
         self.assertEqual(registry[LEDGER_PROXY[1]], registry["mcp__home__add_ledger"])
 
     def test_execution_fence_and_approval_identity(self):
