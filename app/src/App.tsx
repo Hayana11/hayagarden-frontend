@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { AppFrame } from './components/AppFrame';
 import { DashScreen } from './screens/DashScreen';
 import { MemoryScreen } from './screens/MemoryScreen';
@@ -19,6 +19,19 @@ import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewSc
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
 import { useLegacyNativeCompat } from './hooks/useLegacyNativeCompat';
 import { MONOPOLY_ROOM_PATH, ROUTES } from './navigation';
+
+function RouterProbe() {
+  const location = useLocation();
+  const reportedPath = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (reportedPath.current === location.pathname) return;
+    reportedPath.current = location.pathname;
+    window.__dashProbe?.(`ROUTER_LOCATION:${location.pathname}`);
+  }, [location.pathname]);
+
+  return null;
+}
 
 function AppRoutes() {
   return (
@@ -45,6 +58,11 @@ function AppRoutes() {
 
 export default function App() {
   useLegacyNativeCompat();
+
+  useEffect(() => {
+    window.__dashProbe?.('APP_EFFECT_MOUNTED');
+    return () => window.__dashProbe?.('APP_EFFECT_UNMOUNTED');
+  }, []);
 
   useEffect(() => {
     const random = (min: number, max: number) => Math.round(min + Math.random() * (max - min));
@@ -90,6 +108,7 @@ export default function App() {
         </div>
       ) : null}
       <BrowserRouter basename={basename}>
+        <RouterProbe />
         <AppFrame>
           <AppRoutes />
         </AppFrame>
