@@ -1,0 +1,124 @@
+name: PR339 final exact-head QA
+
+on:
+  push:
+    branches:
+      - qa/pr339-final-exact-head-r1
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_SHA: 86dbc84a77597f573aee9284b5291a5d42772a4a
+      HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/pr339-runtime-state.db
+    steps:
+      - name: Checkout exact target SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 1
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Verify exact checkout and clean worktree
+        run: |
+          actual="$(git rev-parse HEAD)"
+          printf 'ACTUAL_HEAD=%s\n' "$actual"
+          test "$actual" = "$TARGET_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Install Python dependencies
+        run: python -m pip install Flask Pillow Markdown
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Prepare isolated runtime paths
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+          python - <<'PY'
+          import os
+          import sqlite3
+          path = os.environ["HAYAGARDEN_CONFIG_DB_PATH"]
+          conn = sqlite3.connect(path)
+          conn.execute("CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at DATETIME DEFAULT (datetime('now')))")
+          conn.commit()
+          conn.close()
+          PY
+
+      - name: Run Python focused contracts
+        run: |
+          python -m unittest \
+            tests.test_m3_03a_ledger_shadow \
+            tests.test_m3_03b_daily_ledger_cutover \
+            tests.test_capability_manifest \
+            tests.test_cc_capability_adapter \
+            tests.test_execution_fence \
+            tests.test_mijia_daemon_light_status -v
+
+      - name: Verify Chat and normal Wake fence identity
+        run: |
+          python - <<'PY'
+          from tools.execution_fence import capability_for_tool, evaluate_tool_call
+          from tools.lease_signer import issue_turn_lease
+
+          expected = "home.light.status"
+          assert capability_for_tool("mcp__capability__home_light_status") == expected
+          assert capability_for_tool("mcp__home__get_light_status") == expected
+
+          for mode in ("chat", "wake"):
+              lease = issue_turn_lease(
+                  turn_id="pr339-fence-" + mode,
+                  turn_mode=mode,
+                  issued_from="explicit_user_intent",
+                  requested_capabilities=(expected,),
+                  approval_ids=(),
+                  issued_at="2026-08-25T00:00:00Z",
+              )
+              for tool_name in (
+                  "mcp__capability__home_light_status",
+                  "mcp__home__get_light_status",
+              ):
+                  result = evaluate_tool_call(tool_name, {}, lease)
+                  assert result["lease_decision"] == "ALLOW", (mode, tool_name, result)
+          print("fence identity and Chat/Wake ALLOW: PASS")
+          PY
+
+      - name: Run real fake-daemon MCP runtime
+        run: node tests/test-home-light-status-capability.mjs
+
+      - name: Recalculate exact fingerprint twice under INHERIT
+        run: |
+          python - <<'PY'
+          from tools.cc_capability_adapter import physical_surface_fingerprint
+
+          first = physical_surface_fingerprint()
+          second = physical_surface_fingerprint()
+          target = "3abed02e09b88156dbb61e49205aaa4302973625da6952e6b17156c0a20fe142"
+          print("FINGERPRINT_FIRST=" + first)
+          print("FINGERPRINT_SECOND=" + second)
+          assert first == second == target
+          PY
+
+      - name: Verify clean worktree after tests
+        run: |
+          test -z "$(git status --porcelain)"
+          printf 'WORKTREE_CLEAN_AFTER=YES\n'
