@@ -89,7 +89,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前状态已明确，或与当前话题无关时。",
         "failure_behavior": "说明状态读取失败，不得猜测灯光当前状态。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__home__get_light_status"},
+        "provider_bindings": {"claude_code": "mcp__capability__home_light_status", "home_mcp": "mcp__home__get_light_status"},
     },
     {
         "capability_id": "todo.read",
