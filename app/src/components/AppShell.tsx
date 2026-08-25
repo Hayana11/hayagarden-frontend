@@ -7,6 +7,7 @@ import type { ReactNode } from 'react';
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div
+      className="app-shell"
       style={{
         maxWidth: 452,
         margin: '0 auto',

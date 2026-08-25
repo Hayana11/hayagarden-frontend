@@ -1175,3 +1175,258 @@ html[data-theme='dark'] .global-bottom-nav__item.act {
 .global-bottom-nav--embedded {
   flex-shrink: 0;
 }
+
+/* 2026 rose-cream visual system */
+:root {
+  --color-bg: #f8eeee;
+  --color-bg-secondary: #f5e8e9;
+  --color-surface: #fff9f7;
+  --color-surface-rose: #f3dde2;
+  --color-card: var(--color-surface);
+  --color-border: rgba(130, 85, 100, 0.12);
+  --color-primary: #bc5877;
+  --color-text: #3c3033;
+  --color-text-soft: #68565b;
+  --color-text-mute: #9d858b;
+  --color-text-faint: #b29ba1;
+  --color-text-fainter: #ccb9be;
+  --color-rose: #d3748e;
+  --color-rose-deep: #bc5877;
+  --color-rose-pink: #e8b6c3;
+  --color-track: #f5e8e9;
+  --color-nav-inactive: #aa9299;
+  --radius-card: 26px;
+  --shadow-card: 0 12px 36px rgba(100, 65, 75, 0.08), 0 1px 0 rgba(255,255,255,.75) inset;
+  --shadow-fab: 0 10px 28px rgba(120, 69, 86, 0.14);
+  --nav-active: var(--color-rose-deep);
+}
+
+html,
+body {
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+body {
+  font-family: var(--font-serif-cn);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button:focus-visible,
+a:focus-visible,
+[role='button']:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--color-rose);
+  outline-offset: 3px;
+}
+
+.app-shell {
+  width: 100%;
+  box-shadow: 0 0 0 1px rgba(130, 85, 100, 0.05), 0 24px 80px rgba(100, 65, 75, 0.06);
+}
+
+.soft-card {
+  border: 1px solid rgba(130, 85, 100, 0.08);
+  color: var(--color-text);
+  overflow: hidden;
+}
+
+.card-hover:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 18px 42px rgba(100, 65, 75, 0.12);
+}
+
+.bnav,
+.global-bottom-nav--fixed {
+  padding: 0 12px 10px;
+}
+
+.bnav-inner,
+.global-bottom-nav__inner {
+  max-width: 430px;
+  border: 1px solid rgba(130, 85, 100, 0.1);
+  border-radius: 24px;
+  background: rgba(255, 249, 247, 0.92);
+  box-shadow: 0 14px 40px rgba(100, 65, 75, 0.14);
+  padding: 9px 6px calc(9px + env(safe-area-inset-bottom, 0px));
+}
+
+.ni,
+.global-bottom-nav__item {
+  color: var(--color-nav-inactive);
+  border-radius: 16px;
+  padding: 4px 0;
+}
+
+.ni.act,
+.global-bottom-nav__item.act {
+  color: var(--color-rose-deep);
+  background: rgba(211, 116, 142, 0.1);
+}
+
+.chat-root {
+  --bg: #f8eeee;
+  --card: #fff9f7;
+  --card2: #f5e8e9;
+  --bubble: #fff9f7;
+  --rose: #d3748e;
+  --deep: #bc5877;
+  --rosebg: #f3dde2;
+  --ink: #3c3033;
+  --ink2: #68565b;
+  --mut: #9d858b;
+  --faint: #aa9299;
+  --ghost: #c0abb1;
+  --line: rgba(130, 85, 100, 0.12);
+  --shadow: rgba(100, 65, 75, 0.08);
+  --shadow2: rgba(100, 65, 75, 0.16);
+  background: var(--bg) !important;
+}
+
+.chat-root::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255,249,247,.45), transparent 32%);
+}
+
+.chat-header-surface {
+  margin: 10px 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(255, 249, 247, 0.92) !important;
+  box-shadow: 0 12px 34px var(--shadow) !important;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.chat-transcript > div {
+  max-width: 720px !important;
+  padding: 28px 18px 34px !important;
+}
+
+.chat-msg {
+  position: relative;
+}
+
+.chat-user-bubble {
+  border: 1px solid rgba(130, 85, 100, 0.09);
+  background: var(--card) !important;
+  border-radius: 24px 24px 8px 24px !important;
+  box-shadow: 0 10px 30px var(--shadow) !important;
+}
+
+.chat-assistant-card {
+  max-width: 650px;
+  padding: 20px 22px;
+  border: 1px solid rgba(130, 85, 100, 0.08);
+  border-radius: 26px !important;
+  background: rgba(243, 221, 226, 0.72);
+  box-shadow: 0 14px 38px rgba(100, 65, 75, 0.08);
+}
+
+.chat-tool-card,
+.chat-artifact-card {
+  border: 1px solid var(--line);
+  border-radius: 18px !important;
+  box-shadow: 0 8px 24px var(--shadow) !important;
+}
+
+.chat-msg-acts > div,
+.chat-assistant-card .flex-wrap-gap-2 > div {
+  transition: background-color .18s ease, color .18s ease, transform .18s ease;
+}
+
+.chat-msg-acts > div:hover,
+.chat-assistant-card .flex-wrap-gap-2 > div:hover {
+  color: var(--deep) !important;
+  background: rgba(255, 249, 247, 0.72);
+  transform: translateY(-1px);
+}
+
+.chat-composer-dock {
+  padding: 8px 14px 16px !important;
+  background: linear-gradient(180deg, transparent, var(--bg) 30%);
+}
+
+.chat-composer-dock > div {
+  max-width: 620px !important;
+}
+
+.chat-composer {
+  border: 1px solid rgba(130, 85, 100, 0.1);
+  border-radius: 28px !important;
+  background: rgba(255, 249, 247, 0.96) !important;
+  box-shadow: 0 18px 50px rgba(100, 65, 75, 0.14) !important;
+}
+
+.chat-composer textarea::placeholder {
+  color: var(--ghost);
+}
+
+.chat-model-pop,
+.chat-sidebar-panel {
+  border: 1px solid var(--line);
+  background: var(--card) !important;
+}
+
+.chat-sidebar-panel {
+  border-radius: 0 28px 28px 0;
+}
+
+@media (min-width: 900px) {
+  .app-shell {
+    max-width: 760px !important;
+  }
+
+  .chat-root {
+    max-width: 860px;
+    margin: 0 auto;
+    border-left: 1px solid rgba(130, 85, 100, 0.06);
+    border-right: 1px solid rgba(130, 85, 100, 0.06);
+    box-shadow: 0 24px 90px rgba(100, 65, 75, 0.08);
+  }
+}
+
+@media (max-width: 520px) {
+  .chat-header-surface {
+    margin: 6px 8px 0;
+    border-radius: 19px;
+  }
+
+  .chat-transcript > div {
+    padding: 22px 13px 26px !important;
+  }
+
+  .chat-assistant-card {
+    padding: 17px 16px;
+    border-radius: 22px !important;
+  }
+
+  .global-bottom-nav--fixed {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+}
+
+html[data-theme='dark'] .global-bottom-nav__inner {
+  background: rgba(48, 38, 41, 0.94);
+  border-color: rgba(232, 182, 195, 0.12);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-hover,
+  .chat-root *,
+  .global-bottom-nav__item {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}

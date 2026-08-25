@@ -9,23 +9,23 @@
   --window-overlay: rgba(40, 28, 26, 0.35);
   --window-overlay-blur: 0px;
 
-  --window-surface: #fcf0f2;
-  --window-surface-soft: #fff8f8;
-  --window-surface-muted: #fff8f8;
+  --window-surface: #fff9f7;
+  --window-surface-soft: #f8eeee;
+  --window-surface-muted: #f5e8e9;
 
-  --window-border: #f0e6e2;
-  --window-border-soft: rgba(215, 143, 163, 0.35);
-  --window-border-active: #c1587a;
+  --window-border: rgba(130, 85, 100, 0.12);
+  --window-border-soft: rgba(211, 116, 142, 0.28);
+  --window-border-active: #bc5877;
 
-  --window-title: #4a3f3c;
-  --window-body: #6b5a55;
-  --window-muted: #8c7b76;
-  --window-faint: #a99590;
-  --window-ghost: #c4b4af;
+  --window-title: #3c3033;
+  --window-body: #68565b;
+  --window-muted: #9d858b;
+  --window-faint: #aa9299;
+  --window-ghost: #c0abb1;
 
-  --window-accent: #d48a9e;
-  --window-accent-strong: #ce637f;
-  --window-accent-soft: #d78fa3;
+  --window-accent: #d3748e;
+  --window-accent-strong: #bc5877;
+  --window-accent-soft: #e8b6c3;
 
   --window-numeral: #6b5a55;
 

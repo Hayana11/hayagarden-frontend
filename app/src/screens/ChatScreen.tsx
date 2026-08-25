@@ -1417,7 +1417,7 @@ export function ChatScreen() {
     const outStr = typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result ?? '', null, 2);
     const inStr = typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}, null, 2);
     return (
-      <div key={key} style={{ background: 'var(--card)', borderRadius: 14, boxShadow: '0 6px 16px var(--shadow)', overflow: 'hidden' }}>
+      <div key={key} className="chat-tool-card" style={{ background: 'var(--card)', borderRadius: 14, boxShadow: '0 6px 16px var(--shadow)', overflow: 'hidden' }}>
         <div onClick={() => setOpenTools((o) => ({ ...o, [key]: !o[key] }))} className="hstack hstack-10" style={{ cursor: 'pointer', padding: '11px 14px' }}>
           <span style={{ color: 'var(--faint)', flexShrink: 0, display: 'flex' }}>
             <Svg d={IC.tool} size={14} sw={1.8} />
@@ -1507,7 +1507,7 @@ export function ChatScreen() {
           </div>
         ) : (
           <>
-            <div className="vstack vstack-8" style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)' }}>
+            <div className="chat-user-bubble vstack vstack-8" style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)' }}>
               {attachments.length > 0 && (
                 <div className="flex-wrap-gap-6">
                   {attachments.map((attachment, index) => {
@@ -1569,7 +1569,7 @@ export function ChatScreen() {
     const usage = m.cacheInfo;
     const cache = cacheLabel(usage);
     return (
-      <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ borderRadius: 16 }}>
+      <div id={`msg-${m.id}`} className={`chat-msg chat-assistant-card vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ borderRadius: 16 }}>
         {renderThinkBlock(m)}
         {renderToolItems(String(m.id), m.toolCalls)}
         {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
@@ -1743,7 +1743,7 @@ export function ChatScreen() {
       <div id="c78-layout-test-100" aria-hidden style={{ position: 'absolute', width: 100, height: 1, visibility: 'hidden', pointerEvents: 'none' }} />
       {/* ══ top nav ══ */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 40 }}>
-        <div style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
+        <div className="chat-header-surface" style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
           <div className="page-header-toolbar">
             <div onClick={() => setSidebarOpen(true)} style={{ cursor: 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'linear-gradient(135deg,#B76E79,#9C3B4A)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 6px 14px var(--shadow2)' }}>
               <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 17, color: '#F7F1EE' }}>Θ</span>
@@ -1863,7 +1863,7 @@ export function ChatScreen() {
                               </div>
                             ))}
                           </div>
-                          <span style={{ fontSize: 11.5, color: 'var(--ghost)' }}>移动端默认抽屉，桌面端默认原地展开</span>
+                          <span style={{ fontSize: 11.5, color: 'var(--ghost)' }}>移动端默认抽屉��桌面端默认原地展开</span>
                         </div>
                       </div>
                       <div style={{ height: 1, background: 'var(--line)' }} />
@@ -1937,7 +1937,7 @@ export function ChatScreen() {
       </div>
 
       {/* ══ message stream ══ */}
-      <div ref={scrollRef} onScroll={handleTranscriptScroll} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
+      <div ref={scrollRef} onScroll={handleTranscriptScroll} className="chat-transcript hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
         <div className="vstack vstack-20" style={{ maxWidth: 430, margin: '0 auto', padding: '20px 16px 26px' }}>
           {(canShowEarlierLoaded || canFetchEarlier) && (
             <div
@@ -1991,7 +1991,7 @@ export function ChatScreen() {
       </div>
 
       {/* ══ input area ══ */}
-      <div style={{ flexShrink: 0, position: 'relative', zIndex: 30, padding: '8px 12px 14px' }}>
+      <div className="chat-composer-dock" style={{ flexShrink: 0, position: 'relative', zIndex: 30, padding: '8px 12px 14px' }}>
         <div style={{ maxWidth: 430, margin: '0 auto', position: 'relative' }}>
           {modelPopOpen && (
             <>
@@ -2125,7 +2125,7 @@ export function ChatScreen() {
             </div>
           )}
 
-          <div style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px' }}>
+          <div className="chat-composer" style={{ background: 'var(--card)', borderRadius: 26, boxShadow: '0 14px 40px var(--shadow2)', padding: '12px 12px 10px' }}>
             <textarea
               ref={taRef}
               value={input}
