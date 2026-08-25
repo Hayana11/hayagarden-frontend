@@ -1,7 +1,9 @@
 import { RealityStore } from "./realityStore";
 import type { RealitySnapshot } from "./realityStore";
+import { REALITY_BACKGROUND_POLL_MS } from "./realityStore";
 
 export const PHYSICAL_POLL_MS = 500;
+export const PHYSICAL_BACKGROUND_POLL_MS = REALITY_BACKGROUND_POLL_MS;
 
 export interface ElpisPhysicalBridge {
   getPhysicalState?: () => unknown;
@@ -40,6 +42,7 @@ function isSchemaV1Object(value: unknown): value is Record<string, unknown> {
 export class PhysicalRealityRuntime {
   private started = false;
   private intervalHandle: unknown = null;
+  private activePollIntervalMs: number | null = null;
   private listenersAttached = false;
   private readonly store: RealityStore;
   private readonly environment: RealityRuntimeEnvironment;
@@ -51,18 +54,18 @@ export class PhysicalRealityRuntime {
 
     if (this.environment.isVisible()) {
       this.refresh();
-      this.startPolling();
+      this.startPolling(PHYSICAL_POLL_MS);
       return;
     }
 
-    this.stopPolling();
-    this.resetIfNeeded();
+    this.refresh();
+    this.startPolling(REALITY_BACKGROUND_POLL_MS);
   };
 
   private readonly onPageShow = (): void => {
     if (this.started && this.environment.isVisible()) {
       this.refresh();
-      this.startPolling();
+      this.startPolling(PHYSICAL_POLL_MS);
     }
   };
 
@@ -71,8 +74,8 @@ export class PhysicalRealityRuntime {
       return;
     }
 
-    this.stopPolling();
-    this.resetIfNeeded();
+    this.refresh();
+    this.startPolling(REALITY_BACKGROUND_POLL_MS);
   };
 
   constructor(
@@ -93,11 +96,12 @@ export class PhysicalRealityRuntime {
 
     if (this.environment.isVisible()) {
       this.refresh();
-      this.startPolling();
+      this.startPolling(PHYSICAL_POLL_MS);
       return;
     }
 
-    this.resetIfNeeded();
+    this.refresh();
+    this.startPolling(REALITY_BACKGROUND_POLL_MS);
   }
 
   stop(): void {
@@ -135,15 +139,20 @@ export class PhysicalRealityRuntime {
     this.listenersAttached = false;
   }
 
-  private startPolling(): void {
-    if (this.intervalHandle !== null) {
+  private startPolling(intervalMs: number): void {
+    if (
+      this.intervalHandle !== null &&
+      this.activePollIntervalMs === intervalMs
+    ) {
       return;
     }
 
+    this.stopPolling();
     this.intervalHandle = this.environment.setInterval(
       () => this.refresh(),
-      PHYSICAL_POLL_MS,
+      intervalMs,
     );
+    this.activePollIntervalMs = intervalMs;
   }
 
   private stopPolling(): void {
@@ -153,6 +162,7 @@ export class PhysicalRealityRuntime {
 
     this.environment.clearInterval(this.intervalHandle);
     this.intervalHandle = null;
+    this.activePollIntervalMs = null;
   }
 
   private refresh(): void {

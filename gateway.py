@@ -2072,8 +2072,11 @@ def _get_location():
     return '\n'.join(lines)
 
 
+DEVICE_STATUS_STALE_AFTER_SEC = 10 * 60
+
+
 def _get_device_status():
-    """读手机侧最近一次设备状态上报（电量/充电/温度/今日屏幕时长）。"""
+    """读手机侧最近一次设备状态；过期状态不得伪装成当前事实。"""
     try:
         conn = get_db()
         row = conn.execute(
@@ -2087,6 +2090,12 @@ def _get_device_status():
         return '还没有设备状态记录——她手机 App 可能尚未上报（后台权限/联网/省电限制）。'
     d = dict(row)
     age = max(0, int(d.get('age_sec') or 0))
+    if age >= DEVICE_STATUS_STALE_AFTER_SEC:
+        return (
+            '设备状态已过期：最后观察时间 %s（约 %d 分钟前）。'
+            '未将旧电量、充电、温度或屏幕时长作为当前事实。'
+            % (d.get('created_at') or '未知', age // 60)
+        )
     if age < 60:
         ago = '刚刚'
     elif age < 3600:
