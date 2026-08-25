@@ -154,7 +154,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前话题不需要预算事实，或预算已经明确时。",
         "failure_behavior": "说明预算读取失败，不得伪造预算额度。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__get_ledger_budget", "internal_mcp": "mcp__internal__get_ledger_budget", "home_mcp": "mcp__home__get_ledger_budget"},
+        "provider_bindings": {"claude_code": "mcp__capability__ledger_budget_read", "internal_mcp": "mcp__internal__get_ledger_budget", "home_mcp": "mcp__home__get_ledger_budget"},
     },
     {
         "capability_id": "ledger.write",
