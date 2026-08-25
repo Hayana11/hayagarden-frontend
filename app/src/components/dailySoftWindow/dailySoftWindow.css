@@ -93,6 +93,29 @@ html[data-theme='dark'] {
   --window-shadow: 0 20px 50px rgba(18, 10, 8, 0.46), inset 0 0 0 1px var(--window-inner-line);
 }
 
+html[data-theme='blue'] {
+  --window-overlay: rgba(18, 28, 48, 0.7);
+  --window-surface: #53627f;
+  --window-surface-soft: #465570;
+  --window-surface-muted: #627393;
+  --window-border: rgba(218, 228, 241, 0.22);
+  --window-border-soft: rgba(207, 143, 163, 0.38);
+  --window-border-active: #e0aebe;
+  --window-title: #e8edf5;
+  --window-body: #c6d1e2;
+  --window-muted: #aebbd0;
+  --window-faint: #8e9db6;
+  --window-ghost: #71809a;
+  --window-accent: #cf8fa3;
+  --window-accent-strong: #e0aebe;
+  --window-accent-soft: #76556a;
+  --window-numeral: #e0aebe;
+  --window-secondary-bg: #627393;
+  --window-secondary-text: #d4ddeb;
+  --window-primary-text: #222b3d;
+  --window-inner-line: rgba(218, 228, 241, 0.26);
+  --window-shadow: 0 20px 50px rgba(18, 28, 48, 0.46), inset 0 0 0 1px var(--window-inner-line);
+}
 
 /* ── chat-day soft separator + composer card ── */
 
