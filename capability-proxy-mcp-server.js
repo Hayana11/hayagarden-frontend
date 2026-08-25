@@ -12,6 +12,7 @@ const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'todo_read',
   'todo_write',
   'ledger_read',
+  'ledger_budget_read',
   'ledger_write',
 ]);
 
@@ -21,6 +22,7 @@ const ADAPTER_MODULES = Object.freeze({
   todo_read: 'tools.todo_internal_adapter',
   todo_write: 'tools.todo_internal_adapter',
   ledger_read: 'tools.ledger_internal_adapter',
+  ledger_budget_read: 'tools.ledger_internal_adapter',
   ledger_write: 'tools.ledger_internal_adapter',
 });
 
@@ -72,7 +74,9 @@ function callAdapter(toolName, input) {
             ? 'add_todo'
             : toolName === 'ledger_read'
               ? 'get_ledger'
-              : 'add_ledger',
+              : toolName === 'ledger_budget_read'
+                ? 'get_ledger_budget'
+                : 'add_ledger',
     ...input,
     db_path: dbPath,
   };
@@ -176,6 +180,14 @@ function buildServer() {
       month: month ?? null,
     }),
   );
+  server.tool(
+    'ledger_budget_read',
+    { month: z.string().optional().describe('YYYY-MM，默认当月') },
+    async ({ month }) => runProxy('ledger_budget_read', {
+      month: month ?? null,
+    }),
+  );
+
   server.tool(
     'ledger_write',
     {
