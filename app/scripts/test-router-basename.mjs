@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { resolveRouterBasename } from '../src/routerBasename.ts';
 
-const cases: Array<[string, '/dash' | '/preview' | undefined]> = [
+const cases = [
   ['/', undefined],
   ['/anything-else', undefined],
   ['/dash', '/dash'],
