@@ -4,7 +4,7 @@ const DEFAULT_LIGHT_DAEMON_URL = 'http://127.0.0.1:5052';
 
 async function readLightStatus({
   fetchImpl = globalThis.fetch,
-  daemonUrl = DEFAULT_LIGHT_DAEMON_URL,
+  daemonUrl = process.env.HAYAGARDEN_LIGHT_DAEMON_URL || DEFAULT_LIGHT_DAEMON_URL,
 } = {}) {
   try {
     const response = await fetchImpl(daemonUrl + '/light/status', { method: 'GET' });
