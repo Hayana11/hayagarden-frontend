@@ -144,7 +144,11 @@ try {
     'ledger_write',
   ]) assert.ok(proxyNames.has(name), name);
   const homeStatusSchema = proxyListed.tools.find((tool) => tool.name === 'home_light_status').inputSchema;
-  assert.deepEqual(homeStatusSchema, { type: 'object', properties: {} });
+  assert.deepEqual(homeStatusSchema, {
+    type: 'object',
+    properties: {},
+    $schema: 'http://json-schema.org/draft-07/schema#',
+  });
 
   installLease();
   const proxyResult = await proxyClient.callTool({
