@@ -89,7 +89,7 @@ const daemon = createServer((request, response) => {
     return;
   }
   response.writeHead(200, { 'content-type': 'application/json' });
-  response.end('{"on":true,"brightness":37,"color_temp":4000}');
+  response.end('{"ok":true,"result":{"bedside":{"zone":"bedside","power":true}}}');
 });
 
 seedRuntimeStateDb();
@@ -149,7 +149,10 @@ try {
     name: 'home_light_status',
     arguments: {},
   });
-  assert.equal(textOf(proxyResult), '{"on":true,"brightness":37,"color_temp":4000}');
+  const proxyPayload = JSON.parse(textOf(proxyResult));
+  assert.equal(proxyPayload.ok, true);
+  assert.ok(proxyPayload.result.bedside);
+  assert.equal(Object.hasOwn(proxyPayload.result, 'main'), false);
 
   homeProcess = spawn(process.execPath, [join(root, 'mcp-http-server.js')], {
     cwd: root,
@@ -169,9 +172,13 @@ try {
     name: 'get_light_status',
     arguments: {},
   });
-  assert.equal(textOf(homeResult), '{"on":true,"brightness":37,"color_temp":4000}');
+  const homePayload = JSON.parse(textOf(homeResult));
+  assert.deepEqual(homePayload, proxyPayload);
+  assert.equal(homePayload.ok, true);
+  assert.ok(homePayload.result.bedside);
+  assert.equal(Object.hasOwn(homePayload.result, 'main'), false);
 
-  assert.ok(requests.length >= 2);
+  assert.equal(requests.length, 2);
   assert.ok(requests.every((request) => request.method === 'GET'));
   assert.ok(requests.every((request) => request.path === '/light/status'));
 
