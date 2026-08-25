@@ -63,9 +63,7 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "countdown.read",
 )
 
-INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = (
-    "ledger.budget.read",
-)
+INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ()
 
 CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
@@ -73,6 +71,7 @@ CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "todo.read",
     "todo.write",
     "ledger.read",
+    "ledger.budget.read",
     "ledger.write",
 )
 
@@ -90,6 +89,7 @@ INTERNAL_MCP_LEGACY_CAPABILITY_IDS: tuple[str, ...] = (
 # are explicitly denied from the Claude UH-A0 surface.
 INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__internal__get_ledger",
+    "mcp__internal__get_ledger_budget",
     "mcp__internal__get_todos",
     "mcp__internal__search_memories",
     "mcp__internal__write_memory",
