@@ -87,19 +87,20 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("ledger.read", "ledger.budget.read"),
+            ("ledger.budget.read",),
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "todo.read", "todo.write", "ledger.write"),
+            ("memory.search", "memory.write", "todo.read", "todo.write", "ledger.read", "ledger.write"),
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
-            ("mcp__internal__get_ledger", "mcp__internal__get_ledger_budget"),
+            ("mcp__internal__get_ledger_budget",),
         )
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
             (
+                "mcp__internal__get_ledger",
                 "mcp__internal__get_todos",
                 "mcp__internal__search_memories",
                 "mcp__internal__write_memory",
