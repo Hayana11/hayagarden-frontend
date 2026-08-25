@@ -24,15 +24,17 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
-TARGET_FINGERPRINT = "14af347b613d763a90effcaa81c4d2362162c404406cb673e2c8580e562b71f2"
-LEDGER_INTERNAL = ("mcp__internal__get_ledger_budget",)
+TARGET_FINGERPRINT = "f41485f60606637e40665fe6bafd8bb9880696a56c196f8223ba927eb1e95a93"
+LEDGER_INTERNAL = ()
 LEDGER_PROXY = (
     "mcp__capability__ledger_read",
+    "mcp__capability__ledger_budget_read",
     "mcp__capability__ledger_write",
 )
-LEDGER_INTERNAL_SHADOW = ("mcp__internal__get_ledger",)
+LEDGER_INTERNAL_SHADOW = ("mcp__internal__get_ledger", "mcp__internal__get_ledger_budget")
 EXPECTED_INTERNAL_MCP_SHADOW_TOOLS = (
     "mcp__internal__get_ledger",
+    "mcp__internal__get_ledger_budget",
     "mcp__internal__get_todos",
     "mcp__internal__search_memories",
     "mcp__internal__write_memory",
@@ -73,7 +75,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
     def test_manifest_provider_bindings_and_grouping(self):
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("ledger.budget.read",),
+            (),
         )
         self.assertEqual(
             get_capability("ledger.read")["provider_bindings"],
@@ -86,7 +88,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertEqual(
             get_capability("ledger.budget.read")["provider_bindings"],
             {
-                "claude_code": "mcp__internal__get_ledger_budget",
+                "claude_code": "mcp__capability__ledger_budget_read",
                 "internal_mcp": "mcp__internal__get_ledger_budget",
                 "home_mcp": "mcp__home__get_ledger_budget",
             },
@@ -119,7 +121,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertEqual(first, second)
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
-        self.assertTrue(set(LEDGER_INTERNAL) <= allowed)
+        self.assertNotIn("mcp__internal__get_ledger_budget", allowed)
         self.assertTrue(set(LEDGER_PROXY) <= allowed)
         self.assertTrue(set(LEDGER_INTERNAL_SHADOW) <= disallowed)
         self.assertTrue(set(LEDGER_INTERNAL_SHADOW).isdisjoint(allowed))
@@ -129,7 +131,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertIn("mcp__home__search_memories", disallowed)
         self.assertIn("mcp__internal__search_memories", disallowed)
         self.assertTrue(set(LEDGER_HOME).isdisjoint(allowed))
-        self.assertTrue(set(LEDGER_INTERNAL).isdisjoint(disallowed))
+        self.assertIn("mcp__internal__get_ledger_budget", disallowed)
         self.assertNotIn("mcp__internal__get_todos", allowed)
         self.assertIn("mcp__internal__get_todos", disallowed)
         self.assertNotIn("mcp__home__get_todos", allowed)
@@ -152,7 +154,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertTrue(set(LEDGER_INTERNAL).isdisjoint(allowed))
         self.assertTrue(set(LEDGER_PROXY).isdisjoint(allowed))
         self.assertTrue(set(LEDGER_HOME).isdisjoint(allowed))
-        self.assertTrue(set(LEDGER_INTERNAL) <= disallowed)
+        self.assertIn("mcp__internal__get_ledger_budget", disallowed)
         self.assertTrue(set(LEDGER_PROXY) <= disallowed)
         self.assertTrue(set(LEDGER_HOME) <= disallowed)
         self.assertTrue({
@@ -164,10 +166,14 @@ class DailyLedgerCutoverTests(unittest.TestCase):
 
     def test_internal_ledger_schema_matches_home_exactly(self):
         registry = _static_schema_registry()
-        for internal, home in zip(LEDGER_INTERNAL, ("mcp__home__get_ledger_budget",)):
-            self.assertEqual(registry[internal], registry[home])
+        self.assertEqual(
+            registry["mcp__internal__get_ledger_budget"],
+            registry["mcp__home__get_ledger_budget"],
+        )
         capability_read_schema = registry[LEDGER_PROXY[0]]
         legacy_read_schema = registry["mcp__internal__get_ledger"]
+        capability_budget_schema = registry["mcp__capability__ledger_budget_read"]
+        legacy_budget_schema = registry["mcp__internal__get_ledger_budget"]
         self.assertEqual(capability_read_schema["type"], legacy_read_schema["type"])
         self.assertEqual(
             capability_read_schema["properties"],
@@ -175,12 +181,13 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         )
         self.assertEqual(set(capability_read_schema["properties"]), {"month"})
         self.assertNotEqual(LEDGER_PROXY[0], "mcp__internal__get_ledger")
-        self.assertEqual(registry[LEDGER_PROXY[1]], registry["mcp__home__add_ledger"])
+        self.assertEqual(capability_budget_schema, legacy_budget_schema)
+        self.assertEqual(registry[LEDGER_PROXY[2]], registry["mcp__home__add_ledger"])
 
     def test_execution_fence_and_approval_identity(self):
         for tool_name, capability_id in (
             *zip(LEDGER_INTERNAL, ("ledger.budget.read",)),
-            *zip(LEDGER_PROXY, ("ledger.read", "ledger.write")),
+            *zip(LEDGER_PROXY, ("ledger.read", "ledger.budget.read", "ledger.write")),
             *zip(LEDGER_INTERNAL_SHADOW, ("ledger.read",)),
             *zip(LEDGER_HOME, ("ledger.read", "ledger.budget.read", "ledger.write")),
         ):
@@ -200,17 +207,24 @@ class DailyLedgerCutoverTests(unittest.TestCase):
             return_value=RUNTIME_STATE_INHERIT,
         ):
             for mode in ("chat", "wake"):
-                result = execution_fence.evaluate_tool_call(
-                    "mcp__capability__ledger_read",
-                    {"month": "2026-08"},
-                    self.lease(mode=mode),
-                )
-                self.assertEqual(result["capability_id"], "ledger.read")
-                self.assertEqual(result["lease_decision"], "ALLOW")
+                for tool_name, capability_id in (
+                    ("mcp__capability__ledger_read", "ledger.read"),
+                    ("mcp__capability__ledger_budget_read", "ledger.budget.read"),
+                ):
+                    result = execution_fence.evaluate_tool_call(
+                        tool_name,
+                        {"month": "2026-08"},
+                        self.lease(mode=mode),
+                    )
+                    self.assertEqual(result["capability_id"], capability_id)
+                    self.assertEqual(result["lease_decision"], "ALLOW")
         plan = _plan()
         self.assertIn("mcp__capability__ledger_read", plan["surface_allowlist"])
+        self.assertIn("mcp__capability__ledger_budget_read", plan["surface_allowlist"])
         self.assertNotIn("mcp__internal__get_ledger", plan["surface_allowlist"])
+        self.assertNotIn("mcp__internal__get_ledger_budget", plan["surface_allowlist"])
         self.assertIn("mcp__internal__get_ledger", plan["disallowed_tools"])
+        self.assertIn("mcp__internal__get_ledger_budget", plan["disallowed_tools"])
 
     def test_ledger_adapter_preserves_default_and_result_contract(self):
         from tools.ledger_internal_adapter import get_ledger
@@ -308,7 +322,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
 
     def test_internal_down_has_no_home_fallback(self):
         plan = _plan()
-        self.assertEqual(set(LEDGER_INTERNAL) & set(plan["surface_allowlist"]), set(LEDGER_INTERNAL))
+        self.assertNotIn("mcp__internal__get_ledger_budget", plan["surface_allowlist"])
         self.assertEqual(set(LEDGER_PROXY) & set(plan["surface_allowlist"]), set(LEDGER_PROXY))
         self.assertTrue(set(LEDGER_INTERNAL_SHADOW) <= set(plan["disallowed_tools"]))
         self.assertEqual(set(LEDGER_HOME) & set(plan["surface_allowlist"]), set())
