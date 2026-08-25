@@ -1,0 +1,178 @@
+name: PR338 independent exact-head ledger-budget QA
+
+on:
+  push:
+    branches:
+      - qa/pr338-exact-head-ledger-budget-read
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_SHA: 151a41286cab96dd424e670b6930d7feedf24854
+  BASE_SHA: 32d67390d6f9b40ce9f53ea3c0c5ee854df63f0e
+  TARGET_FINGERPRINT: f41485f60606637e40665fe6bafd8bb9880696a56c196f8223ba927eb1e95a93
+
+jobs:
+  exact-head-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact target SHA
+        uses: actions/checkout@v4
+        with:
+          ref: 151a41286cab96dd424e670b6930d7feedf24854
+          fetch-depth: 0
+
+      - name: Record exact head and clean worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          printf 'ACTUAL_HEAD=%s\n' "$actual"
+          test "$actual" = "$TARGET_SHA"
+          test -z "$(git status --porcelain)"
+          printf 'WORKTREE_CLEAN_BEFORE=YES\n'
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Record runtime versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python --version
+          node --version
+          npm --version
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Python test dependencies
+        run: python -m pip install Flask Pillow Markdown
+
+      - name: Prepare isolated runtime state
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+          export HAYAGARDEN_CONFIG_DB_PATH="$RUNNER_TEMP/pr338-runtime-state.db"
+          python - "$HAYAGARDEN_CONFIG_DB_PATH" <<'PY'
+          import sqlite3
+          import sys
+          conn = sqlite3.connect(sys.argv[1])
+          conn.execute("CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at DATETIME DEFAULT (datetime('now')))")
+          conn.commit()
+          conn.close()
+          PY
+          printf 'HAYAGARDEN_CONFIG_DB_PATH=%s\n' "$HAYAGARDEN_CONFIG_DB_PATH" >> "$GITHUB_ENV"
+          printf 'UH_A0_REPO_ROOT=%s\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          printf 'RUNTIME_STATE_ISOLATED=YES\n'
+
+      - name: Check exact changed-file scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t actual_files < <(git diff --name-only "$BASE_SHA" "$TARGET_SHA" | sort)
+          test "${#actual_files[@]}" -eq 10
+          forbidden="$(printf '%s\n' "${actual_files[@]}" | grep -E '^(tools/ledger_internal_adapter.py|tools/product_handlers.py|tools/execution_fence.py|wake/cc_tools.py|internal-mcp-server.js|mcp-http-server.js|scripts/|deploy/)' || true)"
+          test -z "$forbidden"
+          printf 'CHANGED_FILE_COUNT=%s\n' "${#actual_files[@]}"
+          printf '%s\n' "${actual_files[@]}"
+
+      - name: Run Python focused contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest \
+            tests.test_m3_03a_ledger_shadow \
+            tests.test_m3_03b_daily_ledger_cutover \
+            tests.test_execution_fence \
+            tests.test_cc_capability_adapter \
+            tests.test_capability_manifest \
+            -v 2>&1 | tee "$RUNNER_TEMP/pr338-python-focused.log"
+          grep -E 'Ran [0-9]+ tests|^OK$|^FAILED' "$RUNNER_TEMP/pr338-python-focused.log" || true
+
+      - name: Verify fence identity and final surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from tools.capability_manifest import get_capability
+          from tools.cc_capability_adapter import build_uh_a0_spawn_plan, physical_surface_names
+          from tools.execution_fence import capability_for_tool
+          from tools.capability_state import RUNTIME_STATE_INHERIT
+          
+          assert capability_for_tool("mcp__capability__ledger_budget_read") == "ledger.budget.read"
+          assert capability_for_tool("mcp__internal__get_ledger_budget") == "ledger.budget.read"
+          entry = get_capability("ledger.budget.read")
+          assert entry["provider_bindings"] == {
+              "claude_code": "mcp__capability__ledger_budget_read",
+              "internal_mcp": "mcp__internal__get_ledger_budget",
+              "home_mcp": "mcp__home__get_ledger_budget",
+          }
+          assert get_capability("ledger.read")["provider_bindings"]["claude_code"] == "mcp__capability__ledger_read"
+          assert get_capability("ledger.write")["provider_bindings"]["claude_code"] == "mcp__capability__ledger_write"
+          assert get_capability("todo.read")["provider_bindings"]["claude_code"] == "mcp__capability__todo_read"
+          plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
+          allowed = set(plan["surface_allowlist"])
+          disallowed = set(plan["disallowed_tools"])
+          assert {
+              "mcp__capability__ledger_budget_read",
+              "mcp__capability__ledger_read",
+              "mcp__capability__ledger_write",
+          } <= allowed
+          assert {
+              "mcp__internal__get_ledger_budget",
+              "mcp__internal__get_ledger,
+              "mcp__internal__get_todos",
+          } <= disallowed
+          assert "mcp__internal__get_ledger_budget" not in allowed
+          assert "mcp__internal__get_ledger" not in allowed
+          assert plan["runtime_state_status"] == "OK"
+          assert RUNTIME_STATE_INHERIT == "INHERIT"
+          print("fence identity and final surface: ok")
+          print("allowlist:", sorted(allowed))
+          print("disallowed:", sorted(disallowed))
+          PY
+
+      - name: Compute exact fingerprint twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from tools.cc_capability_adapter import physical_surface_fingerprint
+          first = physical_surface_fingerprint()
+          second = physical_surface_fingerprint()
+          target = "f41485f60606637e40665fe6bafd8bb9880696a56c196f8223ba927eb1e95a93"
+          print(f"FINGERPRINT_FIRST={first}")
+          print(f"FINGERPRINT_SECOND={second}")
+          print(f"TARGET_FINGERPRINT={target}")
+          assert first == second == target
+          PY
+
+      - name: Run real capability proxy stdio test
+        run: node tests/test-m3-03c-ledger-budget-capability.mjs
+
+      - name: Verify clean worktree after QA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          printf 'WORKTREE_CLEAN_AFTER=YES\n'
+          printf 'PR338_CHANGED=NO\n'
+          printf 'PRODUCTION_CHANGED=NO\n'
