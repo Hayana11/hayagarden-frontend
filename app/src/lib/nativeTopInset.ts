@@ -32,15 +32,6 @@ declare global {
 const attemptedRoots = new WeakSet<object>();
 const MAX_REASONABLE_TOP_INSET_CSS_PX = 200;
 
-type ValidNativeTopInsetPayload = NativeTopInsetPayload & {
-  schemaVersion: 1;
-  available: true;
-  edgeToEdgeTop: true;
-  topInsetPx: number;
-  density: number;
-  topInsetCssPx: number;
-};
-
 function parsePayload(raw: unknown): NativeTopInsetPayload | null {
   if (typeof raw === 'string') {
     try {
@@ -53,17 +44,18 @@ function parsePayload(raw: unknown): NativeTopInsetPayload | null {
   return raw as NativeTopInsetPayload;
 }
 
-function isValidPayload(payload: NativeTopInsetPayload | null): payload is ValidNativeTopInsetPayload {
+function readValidTopInsetCssPx(payload: NativeTopInsetPayload | null): number | null {
   if (!payload || payload.schemaVersion !== 1 || payload.available !== true || payload.edgeToEdgeTop !== true) {
-    return false;
+    return null;
   }
 
-  const values = [payload.topInsetPx, payload.density, payload.topInsetCssPx];
+  const { topInsetPx, density, topInsetCssPx } = payload;
+  const values = [topInsetPx, density, topInsetCssPx];
   if (!values.every((value) => typeof value === 'number' && Number.isFinite(value) && value > 0)) {
-    return false;
+    return null;
   }
 
-  return payload.topInsetCssPx <= MAX_REASONABLE_TOP_INSET_CSS_PX;
+  return topInsetCssPx <= MAX_REASONABLE_TOP_INSET_CSS_PX ? topInsetCssPx : null;
 }
 
 export function installNativeTopInset(runtime?: NativeTopInsetRuntime): boolean {
@@ -80,9 +72,11 @@ export function installNativeTopInset(runtime?: NativeTopInsetRuntime): boolean 
   } catch {
     return false;
   }
-  if (!isValidPayload(payload) || !root.style?.setProperty) return false;
 
-  root.style.setProperty('--elpis-safe-top', `${payload.topInsetCssPx}px`);
+  const topInsetCssPx = readValidTopInsetCssPx(payload);
+  if (topInsetCssPx === null || !root.style?.setProperty) return false;
+
+  root.style.setProperty('--elpis-safe-top', `${topInsetCssPx}px`);
   root.setAttribute?.('data-elpis-top-overlay', 'true');
   return true;
 }
