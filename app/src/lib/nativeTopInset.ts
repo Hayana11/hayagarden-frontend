@@ -32,10 +32,7 @@ declare global {
 const attemptedRoots = new WeakSet<object>();
 const MAX_REASONABLE_TOP_INSET_CSS_PX = 200;
 
-type ValidNativeTopInsetPayload = Omit<
-  NativeTopInsetPayload,
-  'schemaVersion' | 'available' | 'edgeToEdgeTop' | 'topInsetPx' | 'density' | 'topInsetCssPx'
-> & {
+type ValidNativeTopInsetPayload = NativeTopInsetPayload & {
   schemaVersion: 1;
   available: true;
   edgeToEdgeTop: true;
