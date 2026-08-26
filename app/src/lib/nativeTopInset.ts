@@ -50,10 +50,9 @@ function readValidTopInsetCssPx(payload: NativeTopInsetPayload | null): number |
   }
 
   const { topInsetPx, density, topInsetCssPx } = payload;
-  const values = [topInsetPx, density, topInsetCssPx];
-  if (!values.every((value) => typeof value === 'number' && Number.isFinite(value) && value > 0)) {
-    return null;
-  }
+  if (typeof topInsetPx !== 'number' || !Number.isFinite(topInsetPx) || topInsetPx <= 0) return null;
+  if (typeof density !== 'number' || !Number.isFinite(density) || density <= 0) return null;
+  if (typeof topInsetCssPx !== 'number' || !Number.isFinite(topInsetCssPx) || topInsetCssPx <= 0) return null;
 
   return topInsetCssPx <= MAX_REASONABLE_TOP_INSET_CSS_PX ? topInsetCssPx : null;
 }
