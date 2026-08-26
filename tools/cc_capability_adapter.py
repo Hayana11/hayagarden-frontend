@@ -67,6 +67,7 @@ CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
     "memory.write",
     "diary.write",
+    "task.timer.start",
     "home.light.status",
     "todo.read",
     "todo.write",
@@ -225,6 +226,21 @@ def _resolve_capability_proxy_db_path(
     return str(Path(repo_root) / "memories.db")
 
 
+def _resolve_task_timer_commands_db_path(
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve the separate commands DB used only by task.timer.start."""
+    environ = env or os.environ
+    configured = str(environ.get("TASK_TIMER_COMMANDS_DB_PATH") or "").strip()
+    if configured:
+        return configured
+    repo_root = str(
+        environ.get("UH_A0_REPO_ROOT")
+        or (Path(__file__).resolve().parent.parent)
+    ).strip()
+    return str(Path(repo_root) / "commands.db")
+
+
 def build_uh_a0_mcp_config(
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
@@ -250,6 +266,7 @@ def build_uh_a0_mcp_config(
                 "env": {
                     "UH_A0_REPO_ROOT": str(Path(__file__).resolve().parent.parent),
                     "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
+                    "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
                 },
             },
         }
