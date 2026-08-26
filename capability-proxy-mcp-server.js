@@ -10,6 +10,7 @@ const CAPABILITY_SERVER_NAME = 'capability';
 const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'memory_search',
   'memory_write',
+  'diary_write',
   'home_light_status',
   'todo_read',
   'todo_write',
@@ -21,6 +22,7 @@ const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
 const ADAPTER_MODULES = Object.freeze({
   memory_search: 'tools.memory_internal_adapter',
   memory_write: 'tools.memory_write_adapter',
+  diary_write: 'tools.diary_capability_adapter',
   todo_read: 'tools.todo_internal_adapter',
   todo_write: 'tools.todo_internal_adapter',
   ledger_read: 'tools.ledger_internal_adapter',
@@ -70,15 +72,17 @@ function callAdapter(toolName, input) {
       ? 'search_memories'
       : toolName === 'memory_write'
         ? 'write_memory'
-        : toolName === 'todo_read'
-          ? 'get_todos'
-          : toolName === 'todo_write'
-            ? 'add_todo'
-            : toolName === 'ledger_read'
-              ? 'get_ledger'
-              : toolName === 'ledger_budget_read'
-                ? 'get_ledger_budget'
-                : 'add_ledger',
+        : toolName === 'diary_write'
+          ? 'write_diary'
+          : toolName === 'todo_read'
+            ? 'get_todos'
+            : toolName === 'todo_write'
+              ? 'add_todo'
+              : toolName === 'ledger_read'
+                ? 'get_ledger'
+                : toolName === 'ledger_budget_read'
+                  ? 'get_ledger_budget'
+                  : 'add_ledger',
     ...input,
     db_path: dbPath,
   };
@@ -110,6 +114,11 @@ function resultText(toolName, result) {
   }
   if (toolName === 'memory_write') {
     return String(result.status || 'MEMORY_WRITE_FAILED');
+  }
+  if (toolName === 'diary_write') {
+    return result.status === 'CREATED'
+      ? 'DIARY_CREATED'
+      : String(result.status || 'DIARY_WRITE_FAILED');
   }
   return JSON.stringify(result);
 }
@@ -171,6 +180,11 @@ function buildServer() {
     'memory_write',
     { content: z.string().min(1).max(4000).describe('要保存的长期记忆正文') },
     async ({ content }) => runProxy('memory_write', { content }),
+  );
+  server.tool(
+    'diary_write',
+    { content: z.string().describe('要保存的日记正文') },
+    async ({ content }) => runProxy('diary_write', { content }),
   );
   server.tool(
     'home_light_status',

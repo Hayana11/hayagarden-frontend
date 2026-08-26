@@ -107,14 +107,21 @@ class ExecutionFenceTests(unittest.TestCase):
 
     def test_c_diary_chat_auto_allows_without_approval(self):
         result = evaluate_tool_call(
-            "mcp__home__write_diary", {"content": "今天值得留下的一页"}, self.lease()
+            "mcp__capability__diary_write", {"content": "今天值得留下的一页"}, self.lease()
         )
         self.assertEqual(result["capability_id"], "diary.write")
         self.assertEqual(result["lease_decision"], "ALLOW")
         self.assertNotIn("approval_id", result)
+        legacy = evaluate_tool_call(
+            "mcp__home__write_diary",
+            {"content": "兼容路径"},
+            self.lease(),
+        )
+        self.assertEqual(legacy["capability_id"], "diary.write")
+        self.assertEqual(legacy["lease_decision"], "ALLOW")
         self.assertEqual(
             evaluate_tool_call(
-                "mcp__home__write_diary",
+                "mcp__capability__diary_write",
                 {"content": "Wake 不应写入"},
                 self.lease(mode="wake"),
             )["lease_decision"],
@@ -351,7 +358,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 "Read", "Glob", "Grep", "WebSearch", "WebFetch",
                 "mcp__capability__memory_search", "mcp__capability__memory_write",
                 "mcp__capability__home_light_status",
-                "mcp__home__write_diary",
+                "mcp__capability__diary_write",
                 "mcp__home__get_countdowns",
                 "mcp__capability__ledger_budget_read",
                 "mcp__capability__todo_read",
