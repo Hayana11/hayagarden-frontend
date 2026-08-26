@@ -293,6 +293,18 @@ html, body {
   flex-shrink: 0;
 }
 
+
+/* Measured native top safe inset: consume at the unzoomed document boundary. */
+html[data-elpis-top-overlay='true'] {
+  padding-top: var(--elpis-safe-top);
+}
+
+html[data-elpis-top-overlay='true'] .c78-fill-fixed,
+html[data-elpis-top-overlay='true'] .app-frame--fullscreen-embedded,
+html[data-elpis-top-overlay='true'] .dash-fullscreen-page {
+  top: var(--elpis-safe-top);
+}
+
 /* AppFrame — unified React shell (no viewport scaling) */
 .app-frame--standard-nav {
   min-height: 100vh;
