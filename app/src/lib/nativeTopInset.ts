@@ -32,6 +32,15 @@ declare global {
 const attemptedRoots = new WeakSet<object>();
 const MAX_REASONABLE_TOP_INSET_CSS_PX = 200;
 
+type ValidNativeTopInsetPayload = NativeTopInsetPayload & {
+  schemaVersion: 1;
+  available: true;
+  edgeToEdgeTop: true;
+  topInsetPx: number;
+  density: number;
+  topInsetCssPx: number;
+};
+
 function parsePayload(raw: unknown): NativeTopInsetPayload | null {
   if (typeof raw === 'string') {
     try {
@@ -44,12 +53,8 @@ function parsePayload(raw: unknown): NativeTopInsetPayload | null {
   return raw as NativeTopInsetPayload;
 }
 
-function isValidPayload(payload: NativeTopInsetPayload | null): payload is Required<Pick<
-  NativeTopInsetPayload,
-  'schemaVersion' | 'available' | 'edgeToEdgeTop' | 'topInsetPx' | 'density' | 'topInsetCssPx'
->> {
-  if (!payload) return false;
-  if (payload.schemaVersion !== 1 || payload.available !== true || payload.edgeToEdgeTop !== true) {
+function isValidPayload(payload: NativeTopInsetPayload | null): payload is ValidNativeTopInsetPayload {
+  if (!payload || payload.schemaVersion !== 1 || payload.available !== true || payload.edgeToEdgeTop !== true) {
     return false;
   }
 
