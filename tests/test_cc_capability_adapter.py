@@ -11,7 +11,7 @@ from unittest import mock
 import cc_resident
 import chat.cc_history_rewrite
 import chat.daily_runtime as daily_runtime
-from tools.cc_tool_surface import _HOME_TOOL_SCHEMAS
+from tools.cc_tool_surface import _CAPABILITY_PROXY_TOOL_SCHEMAS, _HOME_TOOL_SCHEMAS
 from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
@@ -42,6 +42,7 @@ from tools.cc_capability_adapter import (
     uh_a0_internal_mcp_tools,
     uh_a0_capability_proxy_tools,
     uh_a0_home_legacy_tools,
+    uh_a0_home_compatibility_tools,
     uh_a0_external_read_tools,
     uh_a0_native_bindings,
 )
@@ -84,14 +85,14 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         conn.close()
 
     def test_a_bindings_come_from_capability_manifest(self):
-        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "countdown.read"))
+        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
             (),
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
+            ("memory.search", "memory.write", "diary.write", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
@@ -155,11 +156,10 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
-        self.assertEqual(len(home), 2)
+        self.assertEqual(len(home), 1)
         self.assertEqual(
             set(home),
             {
-                "mcp__home__write_diary",
                 "mcp__home__get_countdowns",
             },
         )
@@ -184,10 +184,22 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertNotIn("workspace", cfg["mcpServers"])
 
+    def test_c_home_compatibility_diary_is_hidden_but_registered(self):
+        self.assertEqual(
+            uh_a0_home_compatibility_tools(),
+            ("mcp__home__write_diary",),
+        )
+        plan = self._plan()
+        self.assertNotIn("mcp__home__write_diary", plan["surface_allowlist"])
+        self.assertIn("mcp__home__write_diary", plan["disallowed_tools"])
+        self.assertIn("mcp__capability__diary_write", plan["surface_allowlist"])
+
     def test_c_diary_surface_schema_is_content_only(self):
-        schema = _HOME_TOOL_SCHEMAS["mcp__home__write_diary"]
-        self.assertEqual(set(schema["properties"]), {"content"})
-        self.assertEqual(schema["required"], ["content"])
+        old_schema = _HOME_TOOL_SCHEMAS["mcp__home__write_diary"]
+        new_schema = _CAPABILITY_PROXY_TOOL_SCHEMAS["mcp__capability__diary_write"]
+        for schema in (old_schema, new_schema):
+            self.assertEqual(set(schema["properties"]), {"content"})
+            self.assertEqual(schema["required"], ["content"])
 
     def test_d_reserved_fail_closed(self):
         surface = physical_surface_names()
@@ -253,6 +265,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             if cid == "memory.search":
                 continue
             self.assertEqual(loading[cid], "deferred", cid)
+        self.assertEqual(loading["diary.write"], "deferred")
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
         self.assertEqual(plan["memory_search_loading"], "always_load")
         self.assertEqual(plan["loading_plan"]["memory.search"], "always_load")

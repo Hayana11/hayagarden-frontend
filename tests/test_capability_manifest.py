@@ -90,6 +90,10 @@ class CapabilityManifestContractTests(unittest.TestCase):
         self.assertEqual(item["loading_policy"], "deferred")
         self.assertEqual(
             item["provider_bindings"]["claude_code"],
+            "mcp__capability__diary_write",
+        )
+        self.assertEqual(
+            item["provider_bindings"]["home_mcp"],
             "mcp__home__write_diary",
         )
 
@@ -144,7 +148,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
         expected_cc_bindings = {
             "memory.search": "mcp__capability__memory_search",
             "memory.write": "mcp__capability__memory_write",
-            "diary.write": "mcp__home__write_diary",
+            "diary.write": "mcp__capability__diary_write",
             "home.light.status": "mcp__capability__home_light_status",
             "todo.read": "mcp__capability__todo_read",
             "todo.write": "mcp__capability__todo_write",

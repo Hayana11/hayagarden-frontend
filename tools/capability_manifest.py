@@ -76,7 +76,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前没有值得留下的内容，或内容不是 Fyodor 自己要写的日记时。",
         "failure_behavior": "明确说明没有写入；不得伪造成功。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__home__write_diary"},
+        "provider_bindings": {"claude_code": "mcp__capability__diary_write", "home_mcp": "mcp__home__write_diary"},
     },
     {
         "capability_id": "home.light.status",
