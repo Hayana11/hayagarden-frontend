@@ -92,7 +92,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "diary.write", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
+            ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
@@ -193,6 +193,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertNotIn("mcp__home__write_diary", plan["surface_allowlist"])
         self.assertIn("mcp__home__write_diary", plan["disallowed_tools"])
         self.assertIn("mcp__capability__diary_write", plan["surface_allowlist"])
+        self.assertIn("mcp__capability__task_timer_start", plan["surface_allowlist"])
 
     def test_c_diary_surface_schema_is_content_only(self):
         old_schema = _HOME_TOOL_SCHEMAS["mcp__home__write_diary"]

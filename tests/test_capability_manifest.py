@@ -40,6 +40,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "home.light.status",
                 "todo.read",
                 "todo.write",
+                "task.timer.start",
                 "countdown.read",
                 "ledger.read",
                 "ledger.budget.read",
@@ -152,6 +153,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "home.light.status": "mcp__capability__home_light_status",
             "todo.read": "mcp__capability__todo_read",
             "todo.write": "mcp__capability__todo_write",
+            "task.timer.start": "mcp__capability__task_timer_start",
             "countdown.read": "mcp__home__get_countdowns",
             "ledger.read": "mcp__capability__ledger_read",
             "ledger.budget.read": "mcp__capability__ledger_budget_read",
@@ -170,6 +172,18 @@ class CapabilityManifestContractTests(unittest.TestCase):
         self.assertEqual(
             get_capability("home.light.status")["provider_bindings"].get("home_mcp"),
             "mcp__home__get_light_status",
+        )
+
+    def test_task_timer_contract(self):
+        item = get_capability("task.timer.start")
+        self.assertEqual(item["display_name"], "开始行动计时")
+        self.assertEqual(item["kind"], "write")
+        self.assertEqual(item["side_effect"], "external_state")
+        self.assertEqual(item["autonomy_mode"], "explicit_or_ask")
+        self.assertEqual(item["loading_policy"], "deferred")
+        self.assertEqual(
+            item["provider_bindings"]["claude_code"],
+            "mcp__capability__task_timer_start",
         )
 
     def test_lookup_and_p1_enabled_order_do_not_expand_scope(self):

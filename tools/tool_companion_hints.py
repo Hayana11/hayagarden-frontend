@@ -27,7 +27,7 @@ _STATUS_LABELS = {
 _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("memory", "记忆", ("memory.search", "memory.write", "diary.write")),
     ("home", "家", ("home.light.status",)),
-    ("plans", "计划", ("todo.read", "todo.write", "countdown.read")),
+    ("plans", "计划", ("todo.read", "todo.write", "countdown.read", "task.timer.start")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
     ("external_read", "联网", ("web.search", "web.read")),
@@ -68,6 +68,11 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "查看倒计时",
         "companion_hint": "她问起某个正在倒数的日期或提醒时，可以看看真实倒计时，再一起确认还剩多少时间。",
         "physical_boundary": "只读取已有倒计时，不会创建、修改或删除倒计时。",
+    },
+    "task.timer.start": {
+        "display_label": "开始行动计时",
+        "companion_hint": "当她明确要开始一件具体行动，或者一个明确的行动适合马上计时时，可以创建行动计时；如果只是模糊建议，先自然地问一句。",
+        "physical_boundary": "只创建行动计时任务；不会写待办、日期倒计时或自主触发，也不会替代完成反馈和浮窗。",
     },
     "ledger.read": {
         "display_label": "查看账本",
