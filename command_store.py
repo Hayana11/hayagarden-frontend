@@ -21,20 +21,6 @@ DB_PATH = '/opt/frontend/commands.db'
 def _conn(db_path=None):
     c = sqlite3.connect(str(db_path or DB_PATH), timeout=5)
     c.row_factory = sqlite3.Row
-    c.execute('''CREATE TABLE IF NOT EXISTS commands (
-        id                INTEGER PRIMARY KEY AUTOINCREMENT,
-        title             TEXT NOT NULL,
-        countdown_seconds INTEGER,
-        created_at        INTEGER NOT NULL,
-        started_at        INTEGER,
-        done_at           INTEGER,
-        canceled          INTEGER DEFAULT 0,
-        duration_ms       INTEGER,
-        vs_countdown      INTEGER,
-        created_by        TEXT DEFAULT 'fyodor',
-        consumed         INTEGER DEFAULT 0
-    )''')
-    c.commit()
     return c
 
 
@@ -44,7 +30,24 @@ def _now_ms():
 
 def _init(db_path=None):
     c = _conn(db_path)
+    c.execute('''CREATE TABLE IF NOT EXISTS commands (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        title             TEXT NOT NULL,
+        countdown_seconds INTEGER,              -- 空 = 只计时不倒数
+        created_at        INTEGER NOT NULL,     -- 我下任务的时刻(ms)
+        started_at        INTEGER,              -- 前端首次显示浮窗时回写(ms)
+        done_at           INTEGER,              -- 她点完成的时刻(ms)
+        canceled          INTEGER DEFAULT 0,    -- 她取消了(我会知道)
+        duration_ms       INTEGER,              -- 实际用时
+        vs_countdown      INTEGER,              -- 比预设快/慢多少秒(正=超时)
+        created_by        TEXT DEFAULT 'fyodor',
+        consumed         INTEGER DEFAULT 0     -- feedback 是否已回流进我的 prompt
+    )''')
+    c.commit()
     c.close()
+
+
+_init()
 
 
 def issue(title, countdown_seconds=None, created_by='fyodor', db_path=None):
