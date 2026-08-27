@@ -57,6 +57,7 @@ assert.ok(source.includes("document.removeEventListener('visibilitychange'"));
 assert.ok(source.includes('if (!activeTask) return null;'));
 
 const runtimeDir = join(process.cwd(), '.tmp-task-timer-contract-runtime');
+const runtimeUrl = 'http://127.0.0.1:5174/preview/.tmp-task-timer-contract-runtime/index.html';
 const runtimeHtml = '<!doctype html><html><body><div id="root"></div><script type="module" src="/.tmp-task-timer-contract-runtime/entry.tsx"></script></body></html>';
 const runtimeEntry = `import React, { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -113,7 +114,7 @@ async function waitForServer(url) {
 }
 
 try {
-  await waitForServer('http://127.0.0.1:5174/.tmp-task-timer-contract-runtime/index.html');
+  await waitForServer(runtimeUrl);
   try {
     browser = await chromium.launch({ headless: true });
   } catch (error) {
@@ -165,7 +166,7 @@ try {
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
   });
 
-  await page.goto('http://127.0.0.1:5174/.tmp-task-timer-contract-runtime/index.html');
+  await page.goto(runtimeUrl);
   await page.locator('[data-task-timer-state]').waitFor();
   await page.locator('.task-timer-title').waitFor();
   assert.equal(await page.locator('.task-timer-queue').textContent(), '+1');
@@ -226,3 +227,4 @@ try {
   vite.kill();
   rmSync(runtimeDir, { recursive: true, force: true });
 }
+
