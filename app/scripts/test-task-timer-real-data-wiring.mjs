@@ -30,8 +30,8 @@ assert.equal(pendingTaskToSnapshot({ ...pending, countdown_seconds: 0 })?.mode, 
 assert.equal(pendingTaskToSnapshot({ ...pending, countdown_seconds: null })?.mode, 'elapsed');
 
 assert.equal(computeTaskTimerDisplay(snapshot, 31_000).primaryLabel, '01:00');
-assert.equal(computeTaskTimerDisplay(snapshot, 101_000).primaryLabel, '+00:40');
-assert.equal(computeTaskTimerDisplay(snapshot, 101_000).phase, 'overtime');
+assert.equal(computeTaskTimerDisplay(snapshot, 131_000).primaryLabel, '+00:40');
+assert.equal(computeTaskTimerDisplay(snapshot, 131_000).phase, 'overtime');
 assert.equal(TASK_TIMER_POLL_MS, 4000);
 
 for (const path of [
