@@ -254,13 +254,6 @@ export function useTaskTimerController(fixtureEnabled: boolean): TaskTimerContro
       });
   }, [activeTask, visible, visibilityRefresh, refreshPending]);
 
-  useEffect(() => {
-    if (!visible || !activeTask?.started_at) return;
-    // TaskTimerCard itself also refreshes from Date.now(); this update makes
-    // hidden -> visible recovery immediate even before the next card tick.
-    window.dispatchEvent(new Event('task-timer-clock-refresh'));
-  }, [visible, activeTask?.id, activeTask?.started_at]);
-
   const reconcileAfterMutation = useCallback(async (epoch: number, id: number) => {
     while (mountedRef.current && epoch === mutationEpochRef.current) {
       try {
