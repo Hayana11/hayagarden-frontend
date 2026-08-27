@@ -41,6 +41,8 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "todo.read",
                 "todo.write",
                 "task.timer.start",
+                "self_trigger.schedule",
+                "self_trigger.cancel",
                 "countdown.read",
                 "ledger.read",
                 "ledger.budget.read",
@@ -196,6 +198,20 @@ class CapabilityManifestContractTests(unittest.TestCase):
         self.assertTrue(
             all(item["capability_id"] not in P1_RESERVED_CAPABILITY_IDS for item in enabled)
         )
+
+
+    def test_self_trigger_capability_contract(self):
+        for capability_id, display_name, binding in (
+            ("self_trigger.schedule", "稍后主动联系", "mcp__capability__self_trigger_schedule"),
+            ("self_trigger.cancel", "取消稍后联系", "mcp__capability__self_trigger_cancel"),
+        ):
+            item = get_capability(capability_id)
+            self.assertEqual(item["display_name"], display_name)
+            self.assertEqual(item["kind"], "write")
+            self.assertEqual(item["side_effect"], "external_state")
+            self.assertEqual(item["autonomy_mode"], "explicit_or_ask")
+            self.assertEqual(item["loading_policy"], "deferred")
+            self.assertEqual(item["provider_bindings"]["claude_code"], binding)
 
     def test_github_read_stays_reserved_without_provider_proof(self):
         self.assertIn("github.read", P1_RESERVED_CAPABILITY_IDS)
