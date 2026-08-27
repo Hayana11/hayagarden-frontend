@@ -72,16 +72,28 @@ export function TaskTimerOverlay() {
   const startingIdRef = useRef<number | null>(null);
   const failedStartIdRef = useRef<number | null>(null);
   const cancelHoldRef = useRef<number | null>(null);
+  const mutationPhaseRef = useRef<'idle' | 'reconciling'>('idle');
+  const reconcileRetryTimerRef = useRef<number | null>(null);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    if (cancelHoldRef.current !== null) {
-      window.clearTimeout(cancelHoldRef.current);
-      cancelHoldRef.current = null;
-    }
+  useEffect(() => {
+    // StrictMode runs setup -> cleanup -> setup on the same mounted instance.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (cancelHoldRef.current !== null) {
+        window.clearTimeout(cancelHoldRef.current);
+        cancelHoldRef.current = null;
+      }
+      if (reconcileRetryTimerRef.current !== null) {
+        window.clearTimeout(reconcileRetryTimerRef.current);
+        reconcileRetryTimerRef.current = null;
+      }
+    };
   }, []);
 
   const refreshPending = useCallback(async (reason: 'visible' | 'poll' | 'mutation') => {
+    // Ordinary and visibility polls must not compete with a mandatory mutation reconciliation.
+    if (mutationPhaseRef.current !== 'idle') return false;
     const requestId = ++pendingRequestRef.current;
     const epoch = mutationEpochRef.current;
     try {
@@ -91,7 +103,8 @@ export function TaskTimerOverlay() {
       }
       setTasks(Array.isArray(response.commands) ? response.commands : []);
       setError(null);
-      if (reason === 'visible') {
+      if (reason === 'visible' || reason === 'poll') {
+        // A successful normal poll is the bounded retry opportunity after start failure.
         failedStartIdRef.current = null;
         setStartError(false);
       }
@@ -166,44 +179,62 @@ export function TaskTimerOverlay() {
   );
 
   const reconcileAfterMutation = useCallback(async (epoch: number, id: number) => {
-    const requestId = ++pendingRequestRef.current;
-    const response = await fetchPendingTaskTimers();
-    if (!mountedRef.current || requestId !== pendingRequestRef.current || epoch !== mutationEpochRef.current) {
-      return null;
+    // Reconciliation owns this GET. It retries only the GET; mutation POST is never repeated.
+    while (mountedRef.current && epoch === mutationEpochRef.current) {
+      try {
+        const response = await fetchPendingTaskTimers();
+        if (!mountedRef.current || epoch !== mutationEpochRef.current) return null;
+        const nextTasks = Array.isArray(response.commands) ? response.commands : [];
+        setTasks(nextTasks);
+        setError(null);
+        return nextTasks.some((task) => task.id === id);
+      } catch (reconcileError) {
+        if (!mountedRef.current || epoch !== mutationEpochRef.current) return null;
+        setError(errorText(reconcileError));
+        await new Promise<void>((resolve) => {
+          reconcileRetryTimerRef.current = window.setTimeout(() => {
+            reconcileRetryTimerRef.current = null;
+            resolve();
+          }, TASK_TIMER_POLL_MS);
+        });
+      }
     }
-    const nextTasks = Array.isArray(response.commands) ? response.commands : [];
-    setTasks(nextTasks);
-    setError(null);
-    return nextTasks.some((task) => task.id === id);
+    return null;
   }, []);
 
   const runMutation = useCallback(async (kind: 'done' | 'cancel') => {
     const task = selectActiveTask(tasks);
-    if (!task || mutationBusyRef.current) return;
+    if (!task || mutationBusyRef.current || mutationPhaseRef.current !== 'idle') return;
 
     mutationBusyRef.current = true;
+    mutationPhaseRef.current = 'reconciling';
     setMutationBusy(true);
     const id = task.id;
     const epoch = ++mutationEpochRef.current;
-    // Invalidate every older poll so it cannot resurrect this task.
+    // Invalidate every older poll so it cannot resurrect this task or compete with reconciliation.
     pendingRequestRef.current += 1;
+    let mutationError: unknown = null;
 
     try {
-      if (kind === 'done') await markTaskTimerDone(id);
-      else await markTaskTimerCanceled(id);
-      if (mountedRef.current) setTasks((current) => current.filter((item) => item.id !== id));
-      await reconcileAfterMutation(epoch, id);
-    } catch (mutationError) {
-      // The mutation result is uncertain: reconcile once, never auto-POST again.
       try {
-        const stillPending = await reconcileAfterMutation(epoch, id);
-        if (mountedRef.current && stillPending === true) setError(errorText(mutationError));
-      } catch (reconcileError) {
-        if (mountedRef.current) setError(errorText(reconcileError));
+        if (kind === 'done') await markTaskTimerDone(id);
+        else await markTaskTimerCanceled(id);
+        if (mountedRef.current && epoch === mutationEpochRef.current) {
+          setTasks((current) => current.filter((item) => item.id !== id));
+        }
+      } catch (error) {
+        mutationError = error;
       }
-    } finally {
+
+      // The controls stay locked until one successful pending GET confirms the result.
+      const stillPending = await reconcileAfterMutation(epoch, id);
+      if (!mountedRef.current || epoch !== mutationEpochRef.current || stillPending === null) return;
+      if (mutationError && stillPending === true) setError(errorText(mutationError));
+      mutationPhaseRef.current = 'idle';
       mutationBusyRef.current = false;
-      if (mountedRef.current) setMutationBusy(false);
+      setMutationBusy(false);
+    } finally {
+      // If reconciliation is still pending or the component unmounted, never unlock here.
     }
   }, [tasks, reconcileAfterMutation]);
 
