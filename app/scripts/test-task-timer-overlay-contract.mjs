@@ -56,9 +56,10 @@ assert.ok(source.includes('window.clearInterval'));
 assert.ok(source.includes("document.removeEventListener('visibilitychange'"));
 assert.ok(source.includes('if (!activeTask) return null;'));
 
-const runtimeDir = join(process.cwd(), '.tmp-task-timer-contract-runtime');
-const runtimeUrl = 'http://127.0.0.1:5174/preview/.tmp-task-timer-contract-runtime/index.html';
-const runtimeHtml = '<!doctype html><html><body><div id="root"></div><script type="module" src="/.tmp-task-timer-contract-runtime/entry.tsx"></script></body></html>';
+const runtimeDir = join(process.cwd(), 'task-timer-contract-runtime');
+const runtimeUrl = 'http://127.0.0.1:5174/preview/task-timer-contract-runtime/index.html';
+const runtimeIdentity = 'data-task-timer-contract-runtime="1"';
+const runtimeHtml = `<!doctype html><html ${runtimeIdentity}><body><div id="root"></div><script type="module" src="./entry.tsx"></script></body></html>`;
 const runtimeEntry = `import React, { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { TaskTimerOverlay } from '../src/components/TaskTimerOverlay';
@@ -90,11 +91,15 @@ let reconciliationStarted = false;
 let reconciliationAttempts = 0;
 let unmountPendingStarted = false;
 let holdNextPending = false;
+let pendingIntercepted = false;
+let pendingResponseStatus = null;
 const startedAt = Date.now() - 120_000;
 const initialTask = { id: 7, title: '严格模式任务', countdown_seconds: 60, created_at: startedAt, started_at: null };
 const persistedTask = { ...initialTask, started_at: startedAt };
 const queueTask = { id: 11, title: '排队任务', countdown_seconds: null, created_at: startedAt, started_at: null };
 const taskResponse = () => ({ commands: startedCalls >= 2 ? [persistedTask, queueTask] : [initialTask, queueTask] });
+const bootOnly = process.env.TASK_TIMER_BOOT_ONLY === '1';
+const bootPass = Symbol('task-timer-boot-pass');
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -104,8 +109,13 @@ async function waitForServer(url) {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     try {
       const response = await fetch(url);
-      if (response.ok) return;
-    } catch {
+      if (response.status === 200) {
+        const body = await response.text();
+        if (!body.includes(runtimeIdentity)) throw new Error('RUNTIME_HTML_IDENTITY_MISMATCH');
+        return;
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'RUNTIME_HTML_IDENTITY_MISMATCH') throw error;
       // Vite is still starting.
     }
     await wait(100);
@@ -125,7 +135,9 @@ try {
   page.on('pageerror', (error) => pageErrors.push(String(error)));
 
   await page.route('**/api/commands/pending', async (route) => {
+    pendingIntercepted = true;
     pendingCalls += 1;
+    pendingResponseStatus = 200;
     if (holdNextPending) {
       unmountPendingStarted = true;
       await new Promise((resolve) => { unmountPendingRelease = resolve; });
@@ -167,9 +179,19 @@ try {
   });
 
   await page.goto(runtimeUrl);
+  const hasRuntimeIdentity = await page.locator(`html[${runtimeIdentity}]`).count() === 1;
+  console.log(`RUNTIME_HTML_IDENTITY: ${hasRuntimeIdentity ? 'PASS' : 'FAIL'}`);
+  console.log(`ROOT_INITIAL_IDENTITY: ${hasRuntimeIdentity ? 'CONTRACT' : 'PREVIEW_APP'}`);
+  assert.equal(hasRuntimeIdentity, true, 'RUNTIME_HTML_IDENTITY_MISMATCH');
   await page.locator('[data-task-timer-state]').waitFor();
   await page.locator('.task-timer-title').waitFor();
   assert.equal(await page.locator('.task-timer-queue').textContent(), '+1');
+  assert.equal(pendingIntercepted, true, 'pending request must be intercepted');
+  assert.ok(pendingCalls > 0, 'pending request must be sent');
+  assert.equal(pendingResponseStatus, 200, 'pending response must be fulfilled');
+  assert.deepEqual(pageErrors, [], 'React bootstrap must not emit pageerror');
+  console.log('TASK_TIMER_OVERLAY_RUNTIME_BOOT_PASS');
+  if (bootOnly) throw bootPass;
   await page.waitForFunction(() => document.querySelector('.task-timer-status')?.textContent === '开始未确认');
   assert.equal(startedCalls, 1, 'StrictMode must not duplicate the first started POST');
   await wait(1500);
@@ -222,9 +244,12 @@ try {
   assert.deepEqual(pageErrors, []);
 
   console.log('TASK_TIMER_OVERLAY_RUNTIME_CONTRACT_PASS');
+} catch (error) {
+  if (error !== bootPass) throw error;
 } finally {
   if (browser) await browser.close();
   vite.kill();
   rmSync(runtimeDir, { recursive: true, force: true });
 }
+
 
