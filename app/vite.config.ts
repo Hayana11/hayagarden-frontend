@@ -3,7 +3,12 @@ import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
-  base: command === 'serve' ? '/preview/' : '/dash/',
+  base:
+    command === 'build'
+      ? '/dash/'
+      : process.env.HAYAGARDEN_PREVIEW === '1'
+        ? '/preview/'
+        : '/',
   server: {
     host: '127.0.0.1',
     port: 5174,
