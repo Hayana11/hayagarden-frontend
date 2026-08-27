@@ -897,3 +897,33 @@ export function fetchPeriodStats(): Promise<PeriodStats> {
     });
 }
 
+
+
+export type TaskTimerPendingCommand = {
+  id: number;
+  title: string;
+  countdown_seconds: number | null;
+  created_at: number;
+  started_at: number | null;
+};
+
+export type TaskTimerPendingResponse = {
+  commands: TaskTimerPendingCommand[];
+};
+
+// Command task APIs deliberately do not use the UI mock fallback.
+export function fetchPendingTaskTimers(): Promise<TaskTimerPendingResponse> {
+  return http.get<TaskTimerPendingResponse>('/api/commands/pending');
+}
+
+export function markTaskTimerStarted(id: number): Promise<{ ok: boolean }> {
+  return http.post<{ ok: boolean }>(`/api/commands/${id}/started`);
+}
+
+export function markTaskTimerDone(id: number): Promise<{ ok: boolean; duration_ms?: number; vs_countdown?: number | null }> {
+  return http.post<{ ok: boolean; duration_ms?: number; vs_countdown?: number | null }>(`/api/commands/${id}/done`);
+}
+
+export function markTaskTimerCanceled(id: number): Promise<{ ok: boolean }> {
+  return http.post<{ ok: boolean }>(`/api/commands/${id}/cancel`);
+}
