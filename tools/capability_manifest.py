@@ -157,6 +157,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "mcp__capability__self_trigger_cancel"},
     },
+    {
         "capability_id": "countdown.read",
         "display_name": "查看倒计时",
         "kind": "read",
