@@ -3037,6 +3037,16 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_interrupt_and_partial_rescue_do_not_consume(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(db, feedback=(['「任务」用时 3秒'], [81]))
+            with mock.patch.object(dr, 'persist_daily_assistant_for_plan', return_value=103):
+                dr.persist_partial_daily_stream_rescue(plan, content='部分回复')
+            self.assertFalse(store.consume_feedback.called)
+        finally:
+            os.unlink(db)
+
     def test_consume_failure_is_fail_open_and_manifested(self):
         db = _tmp_db()
         try:
