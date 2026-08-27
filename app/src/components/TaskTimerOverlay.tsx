@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   fetchPendingTaskTimers,
   markTaskTimerCanceled,
@@ -215,7 +215,7 @@ export function TaskTimerOverlay() {
     }
   }, []);
 
-  const startCancelHold = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+  const startCancelHold = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
     clearCancelHold();
     if (!activeTask || mutationBusyRef.current) return;
