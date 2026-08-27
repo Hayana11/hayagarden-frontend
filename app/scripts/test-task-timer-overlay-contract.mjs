@@ -74,6 +74,7 @@ const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const vite = spawn(npmCommand, ['run', 'dev', '--', '--host', '127.0.0.1', '--port', '5174'], {
   cwd: process.cwd(),
   stdio: 'ignore',
+  shell: process.platform === 'win32',
 });
 let browser = null;
 let page = null;
