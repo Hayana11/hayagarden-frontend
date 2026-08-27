@@ -2883,10 +2883,6 @@ class SendTurnStdinFlushAckTests(unittest.TestCase):
         self.assertIsNone(rs._proc)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
     def setUp(self):
         dr.reset_bindings_for_tests()
@@ -3059,3 +3055,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             self.assertEqual(out['feedback_consume_error'], 'RuntimeError')
         finally:
             os.unlink(db)
+
+
+if __name__ == '__main__':
+    unittest.main()
