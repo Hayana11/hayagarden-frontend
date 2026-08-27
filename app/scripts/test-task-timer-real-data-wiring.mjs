@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-
 const apiSource = readFileSync(new URL('../src/lib/api.ts', import.meta.url), 'utf8');
 const timerSource = readFileSync(new URL('../src/lib/taskTimer.ts', import.meta.url), 'utf8');
 const chatSource = readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');

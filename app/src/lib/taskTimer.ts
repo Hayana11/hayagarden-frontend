@@ -254,7 +254,7 @@ export function useTaskTimerController(fixtureEnabled: boolean): TaskTimerContro
       });
   }, [activeTask, visible, visibilityRefresh, refreshPending]);
 
-  const reconcileAfterMutation = useCallback(async (epoch: number, id: number) => {
+  const reconcileAfterMutation = useCallback(async (epoch: number) => {
     while (mountedRef.current && epoch === mutationEpochRef.current) {
       try {
         const response = await fetchPendingTaskTimers();
@@ -294,7 +294,7 @@ export function useTaskTimerController(fixtureEnabled: boolean): TaskTimerContro
         // The POST outcome is intentionally not retried; only pending GET reconciliation follows.
       }
 
-      await reconcileAfterMutation(epoch, id);
+      await reconcileAfterMutation(epoch);
       if (!mountedRef.current || epoch !== mutationEpochRef.current) return;
       mutationPhaseRef.current = 'idle';
       mutationBusyRef.current = false;
