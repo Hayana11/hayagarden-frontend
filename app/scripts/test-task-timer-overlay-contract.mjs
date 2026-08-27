@@ -70,11 +70,10 @@ mkdirSync(runtimeDir, { recursive: true });
 writeFileSync(join(runtimeDir, 'index.html'), runtimeHtml);
 writeFileSync(join(runtimeDir, 'entry.tsx'), runtimeEntry);
 
-const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const vite = spawn(npmCommand, ['run', 'dev', '--', '--host', '127.0.0.1', '--port', '5174'], {
+const viteCli = join(process.cwd(), 'node_modules', 'vite', 'bin', 'vite.js');
+const vite = spawn(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', '5174'], {
   cwd: process.cwd(),
   stdio: 'ignore',
-  shell: process.platform === 'win32',
 });
 let browser = null;
 let page = null;
