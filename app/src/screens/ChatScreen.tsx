@@ -42,6 +42,7 @@ import {
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
+import { TaskTimerOverlay } from '../components/TaskTimerOverlay';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { ComposerUploadCoordinator } from '../lib/composerUpload';
@@ -1935,6 +1936,8 @@ export function ChatScreen() {
           </>
         )}
       </div>
+
+      <TaskTimerOverlay />
 
       {/* ══ message stream ══ */}
       <div ref={scrollRef} onScroll={handleTranscriptScroll} className="hide-scrollbar" style={{ flex: 1, minHeight: 0, overflowY: 'auto', position: 'relative' }}>
