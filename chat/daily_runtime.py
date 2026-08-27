@@ -153,6 +153,8 @@ class DailyTurnPlan:
     cursor_before: Optional[int]
     assembly: dict[str, Any]
     manifest: dict[str, Any]
+    feedback_lines: tuple[str, ...] = ()
+    feedback_ids: tuple[int, ...] = ()
     user_content: str = ''
     user_image_url: str = ''
     provider_display_thinking_suffix: str = field(default='', repr=False)
@@ -279,6 +281,41 @@ def _format_carryover_messages(messages: list[dict[str, Any]]) -> str:
     return NL.join(lines)
 
 
+def _normalize_feedback_snapshot(lines: Any, ids: Any) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    clean_lines = tuple(
+        str(line).strip() for line in (lines or ()) if str(line).strip()
+    )
+    clean_ids = []
+    for value in ids or ():
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in clean_ids:
+            clean_ids.append(value)
+    return clean_lines, tuple(clean_ids)
+
+
+def _peek_feedback_snapshot() -> tuple[tuple[str, ...], tuple[int, ...]]:
+    try:
+        import command_store
+        return _normalize_feedback_snapshot(*command_store.peek_feedback())
+    except Exception:
+        logger.warning('daily feedback peek failed; continuing without feedback', exc_info=True)
+        return (), ()
+
+
+def _format_task_feedback(lines: tuple[str, ...]) -> str:
+    if not lines:
+        return ''
+    return (
+        '\n## 任务完成反馈\n'
+        + '\n'.join('- ' + line for line in lines)
+        + '\n（这是浮窗自己记录回传的，不是她手动告诉你的。她这次开口了，'
+          '你可以顺嘴提一句——用时、快慢、有没有取消，按你的性子说，别像报数据。）'
+    )
+
+
 def format_resident_turn_content(
     *,
     assembly: dict[str, Any],
@@ -314,6 +351,9 @@ def format_resident_turn_content(
     state_text = str(assembly.get('state') or '').strip()
     if state_text:
         prefix_parts.append(state_text)
+    task_feedback = str(assembly.get('task_feedback') or '').strip()
+    if task_feedback:
+        prefix_parts.append(task_feedback)
     history = assembly.get('current_day_history') or []
     prefix = NL.join(p for p in prefix_parts if p)
     if cold_like and history:
@@ -987,6 +1027,7 @@ def _assemble_plan(
     turn_started_at: Optional[datetime.datetime] = None,
     history_token_budget: Optional[int] = None,
     user_image_url: str = '',
+    feedback_snapshot: Optional[tuple[tuple[str, ...], tuple[int, ...]]] = None,
 ) -> DailyTurnPlan:
     context_id = int(refreshed['id'])
     context_epoch = int(refreshed['context_epoch'])
@@ -1009,6 +1050,9 @@ def _assemble_plan(
     provider_sid = None
     if resident is not None and _resident_is_alive(resident):
         provider_sid = str(getattr(resident, 'session_id', None) or '').strip() or None
+    if feedback_snapshot is None:
+        feedback_snapshot = _peek_feedback_snapshot()
+    feedback_lines, feedback_ids = feedback_snapshot
     assembly = dh.build_daily_window_context(
         chat_id=chat_id,
         daily_context=refreshed,
@@ -1044,6 +1088,10 @@ def _assemble_plan(
         model=model,
     )
     manifest['lease_acquired'] = lease_acquired
+    manifest['feedback_ids'] = list(feedback_ids)
+    task_feedback = _format_task_feedback(feedback_lines)
+    if task_feedback:
+        assembly['task_feedback'] = task_feedback
     return DailyTurnPlan(
         request_id=req_id,
         chat_id=chat_id,
@@ -1060,6 +1108,8 @@ def _assemble_plan(
         cursor_before=cursor_before,
         assembly=assembly,
         manifest=manifest,
+        feedback_lines=tuple(feedback_lines),
+        feedback_ids=tuple(feedback_ids),
         user_content=user_content,
         user_image_url=str(user_image_url or ''),
         lease_acquired=lease_acquired,
@@ -1088,12 +1138,18 @@ def prepare_daily_turn(
     provider: str = 'claude_code',
     model: str = '',
     _turn_lease: Optional[dict[str, Any]] = None,
+    _feedback_snapshot: Optional[tuple[tuple[str, ...], tuple[int, ...]]] = None,
     _cold_reprepare: bool = False,
     _capacity_swap_reprepare: bool = False,
 ) -> DailyTurnPlan:
     if not dc.enabled():
         raise DailyRuntimeError('DAILY_SOFT_WINDOW_ENABLED=0', error_code='daily_disabled')
 
+    feedback_snapshot = (
+        _feedback_snapshot
+        if _feedback_snapshot is not None
+        else _peek_feedback_snapshot()
+    )
     req_id = str(request_id or uuid.uuid4())
     owner = str(lease_owner or req_id)
     turn_lease = (
@@ -1300,6 +1356,7 @@ def prepare_daily_turn(
             user_created_at=user_created_at,
             origin_local_day=origin_day,
             turn_started_at=turn_started_at,
+            feedback_snapshot=feedback_snapshot,
         )
         verify_epoch_token(plan)
         return plan
@@ -1467,6 +1524,7 @@ def reprepare_after_capacity_swap(
         lease_owner=plan.lease_owner,
         resident=resident,
         _turn_lease=plan.turn_lease,
+        _feedback_snapshot=(tuple(plan.feedback_lines), tuple(plan.feedback_ids)),
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,
@@ -1738,6 +1796,7 @@ def reprepare_after_registered_session_change(
         lease_owner=plan.lease_owner,
         resident=resident,
         _turn_lease=plan.turn_lease,
+        _feedback_snapshot=(tuple(plan.feedback_lines), tuple(plan.feedback_ids)),
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,
@@ -2031,6 +2090,14 @@ def _rebuild_daily_assembly_with_history_budget(
         history_token_budget=history_token_budget,
         provider_claude_session_id=provider_sid,
     )
+    # Fence B must reuse the plan's frozen snapshot.  The rebuild is allowed to
+    # trim history, but it must not re-peek or silently drop feedback that was
+    # already selected for this logical turn.
+    task_feedback = _format_task_feedback(tuple(plan.feedback_lines))
+    if task_feedback:
+        assembly['task_feedback'] = task_feedback
+    else:
+        assembly.pop('task_feedback', None)
     return assembly
 
 
@@ -2889,6 +2956,26 @@ def persist_daily_assistant_for_plan(
     )
 
 
+def _consume_feedback_after_success(plan: DailyTurnPlan) -> None:
+    ids = list(plan.feedback_ids)
+    if not ids:
+        return
+    try:
+        import command_store
+        count = command_store.consume_feedback(ids)
+    except Exception as exc:
+        plan.manifest['feedback_consume_status'] = 'FAILED'
+        plan.manifest['feedback_consume_error'] = type(exc).__name__
+        logger.warning(
+            'daily feedback consume failed; preserving at-least-once feedback ids=%s',
+            ids,
+            exc_info=True,
+        )
+        return
+    plan.manifest['feedback_consume_status'] = 'CONSUMED'
+    plan.manifest['feedback_consumed_count'] = int(count or 0)
+
+
 def handle_provider_success(
     plan: DailyTurnPlan,
     *,
@@ -2937,7 +3024,8 @@ def handle_provider_success(
             source=resolve_finalize_registry_source(existing, default='daily_runtime'),
             transcript_end_offset=int(end_off) if end_off is not None else None,
         )
-    return manifest
+    _consume_feedback_after_success(plan)
+    return dict(plan.manifest)
 
 
 def handle_provider_failure(
@@ -2975,6 +3063,7 @@ def reprepare_after_hot_cold_mismatch(
         lease_owner=plan.lease_owner,
         resident=resident,
         _turn_lease=plan.turn_lease,
+        _feedback_snapshot=(tuple(plan.feedback_lines), tuple(plan.feedback_ids)),
         static_system=static_system,
         static_system_sha256=static_system_sha256,
         persona_sha256=persona_sha256,

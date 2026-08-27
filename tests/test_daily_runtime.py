@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import types
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -2880,6 +2881,348 @@ class SendTurnStdinFlushAckTests(unittest.TestCase):
         self.assertNotIn('commit', order)
         self.assertNotIn('stdout_read', order)
         self.assertIsNone(rs._proc)
+
+
+class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
+    def setUp(self):
+        dr.reset_bindings_for_tests()
+
+    def _prepare(self, db, *, feedback=([], [])):
+        _init_chat_messages(db)
+        uid = _insert(db, 'hayana', 'feedback turn', '2026-07-27 10:00:00')
+        fake_store = types.SimpleNamespace(
+            peek_feedback=mock.Mock(return_value=feedback),
+            consume_feedback=mock.Mock(return_value=len(feedback[1])),
+        )
+        with mock.patch.dict(sys.modules, {'command_store': fake_store}):
+            plan = _prepare_turn(db, uid, static_system='STATIC')
+        return plan, fake_store
+
+    def test_peek_only_and_daily_injection_for_hot_cold_respawn(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(
+                db,
+                feedback=(['「阅读」用时 2分3秒（比预设快 7 秒）'], [11]),
+            )
+            store.peek_feedback.assert_called_once_with()
+            store.consume_feedback.assert_not_called()
+            for is_cold, is_respawn in ((False, False), (True, False), (False, True)):
+                content = dr.format_resident_turn_content(
+                    assembly=plan.assembly,
+                    user_content=plan.user_content,
+                    is_cold=is_cold,
+                    is_respawn=is_respawn,
+                )
+                self.assertIn('## 任务完成反馈', content)
+                self.assertIn('「阅读」用时 2分3秒（比预设快 7 秒）', content)
+        finally:
+            os.unlink(db)
+
+    def test_empty_feedback_has_no_empty_section(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(db, feedback=([], []))
+            content = dr.format_resident_turn_content(
+                assembly=plan.assembly,
+                user_content=plan.user_content,
+                is_cold=False,
+                is_respawn=False,
+            )
+            self.assertNotIn('## 任务完成反馈', content)
+            store.consume_feedback.assert_not_called()
+        finally:
+            os.unlink(db)
+
+    def test_snapshot_is_stable_across_reprepare(self):
+        db = _tmp_db()
+        try:
+            first = (['「第一批」用时 1秒'], [21])
+            second = (['「后来完成」用时 2秒'], [22])
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'reprepare', '2026-07-27 10:00:00')
+            fake_store = types.SimpleNamespace(
+                peek_feedback=mock.Mock(side_effect=[first, second]),
+                consume_feedback=mock.Mock(return_value=1),
+            )
+            with mock.patch.dict(sys.modules, {'command_store': fake_store}), \
+                 mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('STATE', 'snapshot', {})):
+                plan = _prepare_turn(db, uid, static_system='STATIC')
+                replacement = dr.reprepare_after_hot_cold_mismatch(
+                    plan, resident=None, static_system='STATIC',
+                )
+            self.assertEqual(replacement.feedback_lines, ('「第一批」用时 1秒',))
+            self.assertEqual(replacement.feedback_ids, (21,))
+            fake_store.peek_feedback.assert_called_once_with()
+        finally:
+            os.unlink(db)
+
+    def test_fence_b_rebuild_preserves_frozen_feedback_snapshot(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'Fence B feedback', '2026-07-27 10:00:00')
+            original = (['「原反馈」用时 3秒'], [91])
+            new_snapshot = (['「重建期间新反馈」用时 4秒'], [92])
+            fake_store = types.SimpleNamespace(
+                peek_feedback=mock.Mock(return_value=original),
+                consume_feedback=mock.Mock(return_value=1),
+            )
+            with mock.patch.dict(sys.modules, {'command_store': fake_store}), \
+                 mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                plan = _REAL_PREPARE_DAILY_TURN(
+                    user_message_id=uid,
+                    db_path=db,
+                    now=_FIXED_NOW,
+                    wall_now=_FIXED_NOW,
+                    static_system='STATIC',
+                )
+            frozen_ids = plan.feedback_ids
+            self.assertEqual(fake_store.peek_feedback.call_count, 1)
+
+            def _build_rebuilt_assembly(**kwargs):
+                # A new command completes while Fence B is rebuilding.  It is
+                # deliberately made visible to any illegal second peek.
+                fake_store.peek_feedback.return_value = new_snapshot
+                return {'current_day_history': [], 'manifest': {}}
+
+            with mock.patch.dict(sys.modules, {'command_store': fake_store}), \
+                 mock.patch.object(
+                     dr.dh,
+                     'build_daily_window_context',
+                     side_effect=_build_rebuilt_assembly,
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.cold_prompt_target',
+                     return_value=50,
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.estimate_whole_prompt',
+                     side_effect=[100, 10],
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.estimate_text_tokens',
+                     return_value=0,
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.effective_history_budget',
+                     return_value=1,
+                 ), \
+                 mock.patch(
+                     'chat.context_lean.cc_history_token_budget',
+                     return_value=10,
+                 ):
+                rebuilt_content = dr._apply_daily_cold_prompt_fence(
+                    plan,
+                    resident=None,
+                    static_system='STATIC',
+                    content='over-budget prompt',
+                    is_cold=True,
+                    is_respawn=False,
+                )
+
+                self.assertIn('## 任务完成反馈', rebuilt_content)
+                self.assertIn('「原反馈」用时 3秒', rebuilt_content)
+                self.assertNotIn('「重建期间新反馈」用时 4秒', rebuilt_content)
+                self.assertEqual(plan.feedback_ids, frozen_ids)
+                self.assertEqual(plan.feedback_ids, (91,))
+                self.assertEqual(
+                    plan.assembly.get('task_feedback'),
+                    dr._format_task_feedback(plan.feedback_lines),
+                )
+
+                # The rebuild itself must not create another peek.
+                fake_store.peek_feedback.assert_called_once_with()
+
+                with mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
+                     mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                    out = dr.handle_provider_success(
+                        plan, assistant_message_id=191, raw_text='成功回复',
+                    )
+                fake_store.consume_feedback.assert_called_once_with([91])
+                self.assertEqual(out['feedback_consume_status'], 'CONSUMED')
+
+            # A failure after the same rebuild boundary still preserves the
+            # frozen snapshot and cannot consume it.
+            db2 = _tmp_db()
+            try:
+                _init_chat_messages(db2)
+                uid2 = _insert(db2, 'hayana', 'Fence B failed feedback', '2026-07-27 10:00:00')
+                failing_store = types.SimpleNamespace(
+                    peek_feedback=mock.Mock(return_value=original),
+                    consume_feedback=mock.Mock(return_value=1),
+                )
+                with mock.patch.dict(sys.modules, {'command_store': failing_store}), \
+                     mock.patch.object(config_store, 'get_bool', return_value=True), \
+                     mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                    failed_plan = _REAL_PREPARE_DAILY_TURN(
+                        user_message_id=uid2,
+                        db_path=db2,
+                        now=_FIXED_NOW,
+                        wall_now=_FIXED_NOW,
+                        static_system='STATIC',
+                    )
+                with mock.patch.dict(sys.modules, {'command_store': failing_store}), \
+                     mock.patch.object(
+                         dr.dh,
+                         'build_daily_window_context',
+                         return_value={'current_day_history': [], 'manifest': {}},
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.cold_prompt_target',
+                         return_value=50,
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.estimate_whole_prompt',
+                         side_effect=[100, 10],
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.estimate_text_tokens',
+                         return_value=0,
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.effective_history_budget',
+                         return_value=1,
+                     ), \
+                     mock.patch(
+                         'chat.context_lean.cc_history_token_budget',
+                         return_value=10,
+                     ):
+                    dr._apply_daily_cold_prompt_fence(
+                        failed_plan,
+                        resident=None,
+                        static_system='STATIC',
+                        content='over-budget prompt',
+                        is_cold=True,
+                        is_respawn=False,
+                    )
+                    self.assertEqual(failed_plan.feedback_ids, (91,))
+                    with mock.patch.object(
+                        dr,
+                        'complete_daily_turn',
+                        side_effect=RuntimeError('commit failed'),
+                    ):
+                        with self.assertRaises(RuntimeError):
+                            dr.handle_provider_success(
+                                failed_plan,
+                                assistant_message_id=192,
+                                raw_text='回复',
+                            )
+                failing_store.consume_feedback.assert_not_called()
+            finally:
+                os.unlink(db2)
+        finally:
+            os.unlink(db)
+
+    def test_success_consumes_snapshot_once_after_full_success(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(
+                db,
+                feedback=(['「任务」用时 3秒'], [31]),
+            )
+            with mock.patch.dict(sys.modules, {'command_store': store}), \
+                 mock.patch.object(dr, 'complete_daily_turn', return_value={}) as complete, \
+                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                out = dr.handle_provider_success(
+                    plan, assistant_message_id=99, raw_text='成功回复',
+                )
+            complete.assert_called_once()
+            store.consume_feedback.assert_called_once_with([31])
+            self.assertEqual(out['feedback_consume_status'], 'CONSUMED')
+            self.assertEqual(out['feedback_consumed_count'], 1)
+        finally:
+            os.unlink(db)
+
+    def test_success_never_repeeks_and_does_not_overconsume_new_feedback(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(
+                db,
+                feedback=(['「旧任务」用时 3秒'], [41]),
+            )
+            with mock.patch.dict(sys.modules, {'command_store': store}), \
+                 mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
+                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                dr.handle_provider_success(
+                    plan, assistant_message_id=100, raw_text='成功回复',
+                )
+            store.peek_feedback.assert_called_once_with()
+            store.consume_feedback.assert_called_once_with([41])
+        finally:
+            os.unlink(db)
+
+    def test_provider_empty_and_cursor_failures_do_not_consume(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(db, feedback=(['「任务」用时 3秒'], [51]))
+            with mock.patch.dict(sys.modules, {'command_store': store}), \
+                 mock.patch.object(dr, 'abort_daily_turn', return_value={}):
+                with self.assertRaises(dr.DailyRuntimeError):
+                    dr.handle_provider_success(
+                        plan, assistant_message_id=101, raw_text='',
+                    )
+            self.assertFalse(store.consume_feedback.called)
+
+            exc = dr.CursorCASConflictAfterPersist(
+                'cursor conflict', assistant_message_id=101, manifest={},
+            )
+            with mock.patch.dict(sys.modules, {'command_store': store}), \
+                 mock.patch.object(dr, 'complete_daily_turn', side_effect=exc), \
+                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                    dr.handle_provider_success(
+                        plan, assistant_message_id=101, raw_text='回复',
+                    )
+            self.assertFalse(store.consume_feedback.called)
+        finally:
+            os.unlink(db)
+
+    def test_provider_failure_and_persist_failure_do_not_consume(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(db, feedback=(['「任务」用时 3秒'], [61]))
+            with mock.patch.object(dr, 'abort_daily_turn', return_value={}):
+                dr.handle_provider_failure(plan, error_code='provider_failure')
+            self.assertFalse(store.consume_feedback.called)
+
+            with mock.patch.object(dr, 'persist_daily_assistant_for_plan', side_effect=RuntimeError('persist failed')):
+                with self.assertRaises(RuntimeError):
+                    dr.persist_daily_assistant_for_plan(plan, content='回复')
+            self.assertFalse(store.consume_feedback.called)
+        finally:
+            os.unlink(db)
+
+    def test_interrupt_and_partial_rescue_do_not_consume(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(db, feedback=(['「任务」用时 3秒'], [81]))
+            with mock.patch.object(dr, 'persist_daily_assistant_for_plan', return_value=103):
+                dr.persist_partial_daily_stream_rescue(plan, content='部分回复')
+            self.assertFalse(store.consume_feedback.called)
+        finally:
+            os.unlink(db)
+
+    def test_consume_failure_is_fail_open_and_manifested(self):
+        db = _tmp_db()
+        try:
+            plan, store = self._prepare(
+                db,
+                feedback=(['「任务」用时 3秒'], [71]),
+            )
+            store.consume_feedback.side_effect = RuntimeError('bookkeeping failed')
+            with mock.patch.dict(sys.modules, {'command_store': store}), \
+                 mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
+                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                out = dr.handle_provider_success(
+                    plan, assistant_message_id=102, raw_text='成功回复',
+                )
+            self.assertEqual(out['feedback_consume_status'], 'FAILED')
+            self.assertEqual(out['feedback_consume_error'], 'RuntimeError')
+        finally:
+            os.unlink(db)
 
 
 if __name__ == '__main__':
