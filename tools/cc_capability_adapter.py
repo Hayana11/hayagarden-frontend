@@ -68,6 +68,8 @@ CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.write",
     "diary.write",
     "task.timer.start",
+    "self_trigger.schedule",
+    "self_trigger.cancel",
     "home.light.status",
     "todo.read",
     "todo.write",
