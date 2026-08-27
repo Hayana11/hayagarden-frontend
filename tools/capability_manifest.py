@@ -132,7 +132,6 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "provider_bindings": {"claude_code": "mcp__capability__task_timer_start"},
     },
     {
-    {
         "capability_id": "self_trigger.schedule",
         "display_name": "稍后主动联系",
         "kind": "write",
