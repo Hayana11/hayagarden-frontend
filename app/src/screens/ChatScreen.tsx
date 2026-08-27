@@ -105,6 +105,8 @@ import remarkBreaks from 'remark-breaks';
 import './ChatMarkdown.css';
 import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
+import { TaskTimerCard } from '../components/TaskTimerCard';
+import { isTaskTimerFixtureEnabled, useTaskTimerFixtureSnapshot } from '../lib/taskTimer';
 
 installObjectHasOwnCompat();
 
@@ -336,6 +338,19 @@ export function ChatScreen() {
   const [wide, setWide] = useState(() => window.innerWidth >= 900);
   const [compactToolbar, setCompactToolbar] = useState(() => window.innerWidth <= 360);
   const [genLockBusy, setGenLockBusy] = useState(false);
+
+  // Dev-only fixture for TaskTimerCard — no real task.timer.start feed exists in the
+  // frontend yet (see lib/taskTimer.ts header). Disabled in production builds.
+  const timerFixtureEnabled = useMemo(() => isTaskTimerFixtureEnabled(), []);
+  const taskTimerFixtureSnapshot = useTaskTimerFixtureSnapshot(timerFixtureEnabled);
+  const [taskTimerCompleting, setTaskTimerCompleting] = useState(false);
+  const handleTaskTimerComplete = () => {
+    // TODO: wire to the real task.timer.start completion callback once the backend
+    // exposes task_id + completion fields to the frontend. For now this only
+    // acknowledges the fixture locally.
+    setTaskTimerCompleting(true);
+    setTimeout(() => setTaskTimerCompleting(false), 600);
+  };
 
   const [msgs, setMsgs] = useState<ChatMsg[]>(() => warmSnapshot ? warmSnapshot.messages : []);
   const [hasMoreBefore, setHasMoreBefore] = useState(() => warmSnapshot ? warmSnapshot.hasMoreBefore : false);
@@ -1740,7 +1755,15 @@ export function ChatScreen() {
         fontSize: FONT_SIZES[settings.fontStep],
       }}
     >
-      <div id="c78-layout-test-100" aria-hidden style={{ position: 'absolute', width: 100, height: 1, visibility: 'hidden', pointerEvents: 'none' }} />
+          <div id="c78-layout-test-100" aria-hidden style={{ position: 'absolute', width: 100, height: 1, visibility: 'hidden', pointerEvents: 'none' }} />
+          {wide && taskTimerFixtureSnapshot && (
+            <TaskTimerCard
+              placement="floating-desktop"
+              snapshot={taskTimerFixtureSnapshot}
+              onComplete={handleTaskTimerComplete}
+              completing={taskTimerCompleting}
+            />
+          )}
       {/* ══ top nav ══ */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 40 }}>
         <div className="chat-header-surface" style={{ background: 'rgba(255,255,255,0.97)', boxShadow: '0 6px 18px var(--shadow)', position: 'relative', zIndex: 3 }}>
@@ -1993,6 +2016,14 @@ export function ChatScreen() {
       {/* ══ input area ══ */}
       <div style={{ flexShrink: 0, position: 'relative', zIndex: 30, padding: '8px 12px 14px' }}>
         <div style={{ maxWidth: 430, margin: '0 auto', position: 'relative' }}>
+          {!wide && taskTimerFixtureSnapshot && (
+            <TaskTimerCard
+              placement="inline-mobile"
+              snapshot={taskTimerFixtureSnapshot}
+              onComplete={handleTaskTimerComplete}
+              completing={taskTimerCompleting}
+            />
+          )}
           {modelPopOpen && (
             <>
               <div onClick={() => setModelPopOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
