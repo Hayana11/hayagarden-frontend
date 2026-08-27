@@ -124,7 +124,6 @@ export function TaskTimerOverlay() {
   }, [visible, visibilityRefresh, refreshPending]);
 
   const activeTask = selectActiveTask(tasks);
-  const activeId = activeTask?.id ?? null;
 
   useEffect(() => {
     if (!visible || !activeTask || activeTask.started_at != null) return;
