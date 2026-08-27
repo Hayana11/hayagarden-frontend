@@ -117,6 +117,20 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "mcp__capability__todo_write", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo", "api_relay": "add_todo"},
     },
+
+    {
+        "capability_id": "task.timer.start",
+        "display_name": "开始行动计时",
+        "kind": "write",
+        "side_effect": "external_state",
+        "autonomy_mode": "explicit_or_ask",
+        "trigger": "用户明确要求开始计时、安排一个立即行动任务，或者当前有一个具体行动明显适合使用计时器但尚未取得授权时。",
+        "purpose": "创建一个面向用户的行动计时任务，由聊天界面展示并记录实际完成用时，而不是写待办、日期倒计时或自主触发。",
+        "deny_when": "任务标题为空；当前只有模糊建议而没有具体行动；用户没有明确要求，且尚未完成现有 ASK 授权合同。",
+        "failure_behavior": "明确说明没有创建行动计时任务；不得伪造成功；不得退化写入 todo.write、countdown.read 或 set_self_trigger。",
+        "loading_policy": "deferred",
+        "provider_bindings": {"claude_code": "mcp__capability__task_timer_start"},
+    },
     {
         "capability_id": "countdown.read",
         "display_name": "查看倒计时",
@@ -297,6 +311,7 @@ P1_ENABLED_CAPABILITY_IDS = frozenset(
         "home.light.status",
         "todo.read",
         "todo.write",
+        "task.timer.start",
         "countdown.read",
         "ledger.read",
         "ledger.budget.read",

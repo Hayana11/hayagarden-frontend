@@ -11,6 +11,7 @@ const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'memory_search',
   'memory_write',
   'diary_write',
+  'task_timer_start',
   'home_light_status',
   'todo_read',
   'todo_write',
@@ -23,6 +24,7 @@ const ADAPTER_MODULES = Object.freeze({
   memory_search: 'tools.memory_internal_adapter',
   memory_write: 'tools.memory_write_adapter',
   diary_write: 'tools.diary_capability_adapter',
+  task_timer_start: 'tools.task_timer_capability_adapter',
   todo_read: 'tools.todo_internal_adapter',
   todo_write: 'tools.todo_internal_adapter',
   ledger_read: 'tools.ledger_internal_adapter',
@@ -62,9 +64,12 @@ function callAdapter(toolName, input) {
   if (!moduleName) {
     throw new Error('unknown capability proxy tool');
   }
-  const dbPath = String(process.env.TODO_INTERNAL_DB_PATH || '').trim();
+  const dbEnvName = toolName === 'task_timer_start'
+    ? 'TASK_TIMER_COMMANDS_DB_PATH'
+    : 'TODO_INTERNAL_DB_PATH';
+  const dbPath = String(process.env[dbEnvName] || '').trim();
   if (!dbPath) {
-    throw new Error('TODO_INTERNAL_DB_PATH is required');
+    throw new Error(dbEnvName + ' is required');
   }
   const command = adapterCommand();
   const payload = {
@@ -74,7 +79,9 @@ function callAdapter(toolName, input) {
         ? 'write_memory'
         : toolName === 'diary_write'
           ? 'write_diary'
-          : toolName === 'todo_read'
+          : toolName === 'task_timer_start'
+            ? 'start_task_timer'
+            : toolName === 'todo_read'
             ? 'get_todos'
             : toolName === 'todo_write'
               ? 'add_todo'
@@ -114,6 +121,11 @@ function resultText(toolName, result) {
   }
   if (toolName === 'memory_write') {
     return String(result.status || 'MEMORY_WRITE_FAILED');
+  }
+  if (toolName === 'task_timer_start') {
+    return result.status === 'CREATED'
+      ? 'TASK_TIMER_CREATED'
+      : String(result.status || 'TASK_TIMER_FAILED');
   }
   if (toolName === 'diary_write') {
     return result.status === 'CREATED'
@@ -185,6 +197,17 @@ function buildServer() {
     'diary_write',
     { content: z.string().describe('要保存的日记正文') },
     async ({ content }) => runProxy('diary_write', { content }),
+  );
+  server.tool(
+    'task_timer_start',
+    {
+      title: z.string().describe('行动任务标题'),
+      countdown_seconds: z.number().int().optional().describe('倒计时秒数；省略或 0 表示正计时'),
+    },
+    async ({ title, countdown_seconds }) => runProxy('task_timer_start', {
+      title,
+      countdown_seconds: countdown_seconds ?? null,
+    }),
   );
   server.tool(
     'home_light_status',

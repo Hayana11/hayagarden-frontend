@@ -34,7 +34,7 @@ class ToolCompanionHintsTest(unittest.TestCase):
     def test_catalog_is_exactly_the_enabled_manifest(self):
         grouped = [cid for _, _, ids in hints._EXPECTED_GROUPS for cid in ids]
         self.assertEqual(set(grouped), set(P1_ENABLED_CAPABILITY_IDS))
-        self.assertEqual(len(grouped), 15)
+        self.assertEqual(len(grouped), 16)
         self.assertEqual(len(grouped), len(set(grouped)))
         self.assertEqual(set(hints._DEFAULTS), set(P1_ENABLED_CAPABILITY_IDS))
 

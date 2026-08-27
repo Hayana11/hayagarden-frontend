@@ -18,8 +18,8 @@ import sqlite3
 DB_PATH = '/opt/frontend/commands.db'
 
 
-def _conn():
-    c = sqlite3.connect(DB_PATH, timeout=5)
+def _conn(db_path=None):
+    c = sqlite3.connect(str(db_path or DB_PATH), timeout=5)
     c.row_factory = sqlite3.Row
     return c
 
@@ -28,8 +28,8 @@ def _now_ms():
     return int(time.time() * 1000)
 
 
-def _init():
-    c = _conn()
+def _init(db_path=None):
+    c = _conn(db_path)
     c.execute('''CREATE TABLE IF NOT EXISTS commands (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
         title             TEXT NOT NULL,
@@ -41,7 +41,7 @@ def _init():
         duration_ms       INTEGER,              -- 实际用时
         vs_countdown      INTEGER,              -- 比预设快/慢多少秒(正=超时)
         created_by        TEXT DEFAULT 'fyodor',
-        consumed          INTEGER DEFAULT 0     -- feedback 是否已回流进我的 prompt
+        consumed         INTEGER DEFAULT 0     -- feedback 是否已回流进我的 prompt
     )''')
     c.commit()
     c.close()
@@ -50,13 +50,13 @@ def _init():
 _init()
 
 
-def issue(title, countdown_seconds=None, created_by='fyodor'):
+def issue(title, countdown_seconds=None, created_by='fyodor', db_path=None):
     """下一个任务，返回新 id。"""
     title = (title or '').strip()
     if not title:
         return None
     cs = int(countdown_seconds) if countdown_seconds else None
-    c = _conn()
+    c = _conn(db_path)
     cur = c.execute(
         'INSERT INTO commands (title, countdown_seconds, created_at, created_by) VALUES (?,?,?,?)',
         (title, cs, _now_ms(), created_by))

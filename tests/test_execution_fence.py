@@ -342,6 +342,24 @@ class ExecutionFenceTests(unittest.TestCase):
                 payload["hookSpecificOutput"]["permissionDecision"], expected
             )
 
+    def test_task_timer_uses_explicit_or_ask(self):
+        action = {"title": "收拾桌子", "countdown_seconds": 600}
+        asked = evaluate_tool_call(
+            "mcp__capability__task_timer_start", action, self.lease()
+        )
+        self.assertEqual(asked["capability_id"], "task.timer.start")
+        self.assertEqual(asked["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+        allowed = evaluate_tool_call(
+            "mcp__capability__task_timer_start",
+            action,
+            self.lease(
+                source="explicit_user_intent",
+                requested=("task.timer.start",),
+            ),
+        )
+        self.assertEqual(allowed["lease_decision"], "ALLOW")
+        self.assertNotEqual(allowed["lease_decision"], "self_write_auto")
+
     def test_o_surface_is_generation_stable(self):
         first = self.lease(turn_id="a")
         second = self.lease(
@@ -359,6 +377,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__capability__memory_search", "mcp__capability__memory_write",
                 "mcp__capability__home_light_status",
                 "mcp__capability__diary_write",
+                "mcp__capability__task_timer_start",
                 "mcp__home__get_countdowns",
                 "mcp__capability__ledger_budget_read",
                 "mcp__capability__todo_read",
