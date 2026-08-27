@@ -378,6 +378,8 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__capability__home_light_status",
                 "mcp__capability__diary_write",
                 "mcp__capability__task_timer_start",
+                "mcp__capability__self_trigger_schedule",
+                "mcp__capability__self_trigger_cancel",
                 "mcp__home__get_countdowns",
                 "mcp__capability__ledger_budget_read",
                 "mcp__capability__todo_read",
