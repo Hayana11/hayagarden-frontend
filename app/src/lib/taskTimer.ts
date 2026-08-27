@@ -1,40 +1,29 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  fetchPendingTaskTimers,
+  markTaskTimerDone,
+  markTaskTimerStarted,
+  type TaskTimerPendingCommand,
+} from './api';
 
-/**
- * Task timer state — presentation-layer only.
- *
- * NOTE (real-data gap, reported and intentionally not worked around):
- * The current frontend has no `task.timer.start` runtime state surface.
- * `ChatToolCall` (lib/chat.ts) only carries generic tool-call fields
- * (name/id/args/tool_input/result/success/running) — there is no
- * started_at/deadline/task_id/title flowing from the SSE stream into
- * ChatScreen state, and lib/api.ts has no timer/task/capability
- * completion endpoint. Until those real fields exist, this module is
- * driven either by an explicit `TaskTimerSnapshot` passed in by a future
- * caller, or by the dev-only fixture below.
- */
+export const TASK_TIMER_POLL_MS = 4000;
 
 export type TaskTimerMode = 'countdown' | 'elapsed';
 export type TaskTimerPhase = 'active' | 'overtime' | 'completed';
 
 export interface TaskTimerSnapshot {
   taskId: string;
-  /** Only render when a real contract actually supplies a title. */
   title?: string;
   mode: TaskTimerMode;
-  /** Date.now() base the timer counts from. */
   startedAtMs: number;
-  /** Only meaningful when mode === 'countdown'. */
   countdownSeconds?: number;
   completed?: boolean;
 }
 
 export interface TaskTimerDisplay {
   phase: TaskTimerPhase;
-  /** "12:48" / "+00:37" / "00:07:14" */
   primaryLabel: string;
   statusText: string;
-  /** 0..1 for the countdown progress hairline; null when not applicable. */
   progressRatio: number | null;
 }
 
@@ -46,7 +35,7 @@ function formatMMSS(totalSeconds: number): string {
   const s = Math.max(0, Math.round(totalSeconds));
   const m = Math.floor(s / 60);
   const sec = s % 60;
-  return `${pad2(m)}:${pad2(sec)}`;
+  return String(pad2(m)) + ':' + String(pad2(sec));
 }
 
 function formatHHMMSS(totalSeconds: number): string {
@@ -54,7 +43,7 @@ function formatHHMMSS(totalSeconds: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
-  return h > 0 ? `${pad2(h)}:${pad2(m)}:${pad2(sec)}` : `${pad2(m)}:${pad2(sec)}`;
+  return h > 0 ? pad2(h) + ':' + pad2(m) + ':' + pad2(sec) : pad2(m) + ':' + pad2(sec);
 }
 
 export function computeTaskTimerDisplay(snapshot: TaskTimerSnapshot, nowMs: number): TaskTimerDisplay {
@@ -83,19 +72,43 @@ export function computeTaskTimerDisplay(snapshot: TaskTimerSnapshot, nowMs: numb
       phase: 'active',
       primaryLabel: formatMMSS(remaining),
       statusText: '正在计时',
-      progressRatio: snapshot.countdownSeconds > 0 ? Math.min(1, Math.max(0, remaining / snapshot.countdownSeconds)) : null,
+      progressRatio: snapshot.countdownSeconds > 0
+        ? Math.min(1, Math.max(0, remaining / snapshot.countdownSeconds))
+        : null,
     };
   }
 
   return {
     phase: 'overtime',
-    primaryLabel: `+${formatMMSS(-remaining)}`,
+    primaryLabel: '+' + formatMMSS(-remaining),
     statusText: '已超时',
     progressRatio: null,
   };
 }
 
-/** Ticks once per second; pauses while the tab is hidden and catches up on visibility return. */
+export function selectActiveTask(tasks: TaskTimerPendingCommand[]): TaskTimerPendingCommand | null {
+  return tasks.length > 0 ? tasks[0] : null;
+}
+
+export function pendingTaskToSnapshot(task: TaskTimerPendingCommand | null): TaskTimerSnapshot | null {
+  if (!task || task.started_at == null) return null;
+
+  const startedAtMs = Number(task.started_at);
+  if (!Number.isFinite(startedAtMs)) return null;
+
+  const countdownSeconds = task.countdown_seconds == null ? null : Number(task.countdown_seconds);
+  const hasCountdown = countdownSeconds != null && Number.isFinite(countdownSeconds) && countdownSeconds > 0;
+
+  return {
+    taskId: String(task.id),
+    title: task.title,
+    mode: hasCountdown ? 'countdown' : 'elapsed',
+    startedAtMs,
+    countdownSeconds: hasCountdown ? countdownSeconds : undefined,
+  };
+}
+
+/** Ticks from Date.now(); it does not decrement a local counter. */
 export function useTaskTimerClock(snapshot: TaskTimerSnapshot | null, intervalMs = 1000): TaskTimerDisplay | null {
   const [now, setNow] = useState(() => Date.now());
 
@@ -132,6 +145,178 @@ export function useTaskTimerClock(snapshot: TaskTimerSnapshot | null, intervalMs
   return useMemo(() => (snapshot ? computeTaskTimerDisplay(snapshot, now) : null), [snapshot, now]);
 }
 
+function visibleNow(): boolean {
+  return typeof document === 'undefined' || document.visibilityState === 'visible';
+}
+
+export interface TaskTimerController {
+  snapshot: TaskTimerSnapshot | null;
+  onComplete: () => void;
+  completing: boolean;
+}
+
+export function useTaskTimerController(fixtureEnabled: boolean): TaskTimerController {
+  const [tasks, setTasks] = useState<TaskTimerPendingCommand[]>([]);
+  const [visible, setVisible] = useState(visibleNow);
+  const [visibilityRefresh, setVisibilityRefresh] = useState(0);
+  const [completing, setCompleting] = useState(false);
+
+  const mountedRef = useRef(false);
+  const pendingRequestRef = useRef(0);
+  const mutationEpochRef = useRef(0);
+  const mutationPhaseRef = useRef<'idle' | 'reconciling'>('idle');
+  const mutationBusyRef = useRef(false);
+  const startInFlightRef = useRef<number | null>(null);
+  const failedStartIdRef = useRef<number | null>(null);
+  const startedPostSucceededRef = useRef<number | null>(null);
+  const reconcileRetryTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (reconcileRetryTimerRef.current !== null) {
+        window.clearTimeout(reconcileRetryTimerRef.current);
+        reconcileRetryTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const refreshPending = useCallback(async (reason: 'visible' | 'poll' | 'start') => {
+    if (mutationPhaseRef.current !== 'idle') return false;
+
+    const requestId = ++pendingRequestRef.current;
+    const epoch = mutationEpochRef.current;
+    try {
+      const response = await fetchPendingTaskTimers();
+      if (!mountedRef.current || requestId !== pendingRequestRef.current || epoch !== mutationEpochRef.current) {
+        return false;
+      }
+      const nextTasks = Array.isArray(response.commands) ? response.commands : [];
+      setTasks(nextTasks);
+      if (reason === 'visible' || reason === 'poll') {
+        failedStartIdRef.current = null;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      const nextVisible = visibleNow();
+      setVisible(nextVisible);
+      if (nextVisible) setVisibilityRefresh((value) => value + 1);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    void refreshPending('visible');
+    const intervalId = window.setInterval(() => {
+      void refreshPending('poll');
+    }, TASK_TIMER_POLL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [visible, visibilityRefresh, refreshPending]);
+
+  const activeTask = selectActiveTask(tasks);
+  const realSnapshot = useMemo(() => pendingTaskToSnapshot(activeTask), [activeTask]);
+
+  useEffect(() => {
+    if (!visible || !activeTask || activeTask.started_at != null) return;
+
+    const id = activeTask.id;
+    if (
+      startInFlightRef.current === id
+      || failedStartIdRef.current === id
+      || startedPostSucceededRef.current === id
+    ) {
+      return;
+    }
+
+    startInFlightRef.current = id;
+    markTaskTimerStarted(id)
+      .then((response) => {
+        if (!response.ok) throw new Error('task timer start rejected');
+        if (!mountedRef.current || startInFlightRef.current !== id) return;
+        startedPostSucceededRef.current = id;
+        // The server-persisted started_at is the only clock authority.
+        void refreshPending('start');
+      })
+      .catch(() => {
+        if (mountedRef.current) failedStartIdRef.current = id;
+      })
+      .finally(() => {
+        if (startInFlightRef.current === id) startInFlightRef.current = null;
+      });
+  }, [activeTask, visible, visibilityRefresh, refreshPending]);
+
+  useEffect(() => {
+    if (!visible || !activeTask?.started_at) return;
+    // TaskTimerCard itself also refreshes from Date.now(); this update makes
+    // hidden -> visible recovery immediate even before the next card tick.
+    window.dispatchEvent(new Event('task-timer-clock-refresh'));
+  }, [visible, activeTask?.id, activeTask?.started_at]);
+
+  const reconcileAfterMutation = useCallback(async (epoch: number, id: number) => {
+    while (mountedRef.current && epoch === mutationEpochRef.current) {
+      try {
+        const response = await fetchPendingTaskTimers();
+        if (!mountedRef.current || epoch !== mutationEpochRef.current) return false;
+        const nextTasks = Array.isArray(response.commands) ? response.commands : [];
+        setTasks(nextTasks);
+        return true;
+      } catch {
+        if (!mountedRef.current || epoch !== mutationEpochRef.current) return false;
+        await new Promise<void>((resolve) => {
+          reconcileRetryTimerRef.current = window.setTimeout(() => {
+            reconcileRetryTimerRef.current = null;
+            resolve();
+          }, TASK_TIMER_POLL_MS);
+        });
+      }
+    }
+    return false;
+  }, []);
+
+  const activeTaskForMutation = activeTask;
+  const runComplete = useCallback(async () => {
+    if (!activeTaskForMutation || mutationBusyRef.current || mutationPhaseRef.current !== 'idle') return;
+
+    mutationBusyRef.current = true;
+    mutationPhaseRef.current = 'reconciling';
+    setCompleting(true);
+    const id = activeTaskForMutation.id;
+    const epoch = ++mutationEpochRef.current;
+    pendingRequestRef.current += 1;
+
+    try {
+      try {
+        const response = await markTaskTimerDone(id);
+        if (!response.ok) throw new Error('task timer done rejected');
+      } catch {
+        // The POST outcome is intentionally not retried; only pending GET reconciliation follows.
+      }
+
+      await reconcileAfterMutation(epoch, id);
+      if (!mountedRef.current || epoch !== mutationEpochRef.current) return;
+      mutationPhaseRef.current = 'idle';
+      mutationBusyRef.current = false;
+      setCompleting(false);
+    } finally {
+      // A component unmount or an endless reconciliation leaves the mutation locked.
+    }
+  }, [activeTaskForMutation, reconcileAfterMutation]);
+
+  const fixtureSnapshot = useTaskTimerFixtureSnapshot(fixtureEnabled);
+  const snapshot = realSnapshot || (!activeTask ? fixtureSnapshot : null);
+
+  return { snapshot, onComplete: runComplete, completing };
+}
+
 export function isTaskTimerFixtureEnabled(): boolean {
   if (!import.meta.env.DEV) return false;
   try {
@@ -142,11 +327,6 @@ export function isTaskTimerFixtureEnabled(): boolean {
   return import.meta.env.VITE_TASK_TIMER_FIXTURE === '1';
 }
 
-/**
- * Dev-only fixture: cycles a demo task through countdown → near-zero →
- * overtime → completed so the four TaskTimerCard phases can be reviewed
- * without a real task.timer.start feed. No-op (returns null) when disabled.
- */
 export function useTaskTimerFixtureSnapshot(enabled: boolean): TaskTimerSnapshot | null {
   const cycleStartRef = useRef(Date.now());
   const [snapshot, setSnapshot] = useState<TaskTimerSnapshot | null>(null);
@@ -166,7 +346,9 @@ export function useTaskTimerFixtureSnapshot(enabled: boolean): TaskTimerSnapshot
       const elapsed = (Date.now() - cycleStartRef.current) / 1000;
       const phaseElapsed = elapsed % CYCLE_SECONDS;
       if (phaseElapsed >= CYCLE_SECONDS - COMPLETED_HOLD_SECONDS) {
-        const completedAt = cycleStartRef.current + Math.floor(elapsed / CYCLE_SECONDS) * CYCLE_SECONDS * 1000 + FIXTURE_COUNTDOWN_SECONDS * 1000;
+        const completedAt = cycleStartRef.current
+          + Math.floor(elapsed / CYCLE_SECONDS) * CYCLE_SECONDS * 1000
+          + FIXTURE_COUNTDOWN_SECONDS * 1000;
         setSnapshot({
           taskId: 'fixture-task',
           title: '整理今天的对话摘要',
@@ -177,7 +359,8 @@ export function useTaskTimerFixtureSnapshot(enabled: boolean): TaskTimerSnapshot
         });
         return;
       }
-      const segmentStart = cycleStartRef.current + Math.floor(elapsed / CYCLE_SECONDS) * CYCLE_SECONDS * 1000;
+      const segmentStart = cycleStartRef.current
+        + Math.floor(elapsed / CYCLE_SECONDS) * CYCLE_SECONDS * 1000;
       setSnapshot({
         taskId: 'fixture-task',
         title: '整理今天的对话摘要',
