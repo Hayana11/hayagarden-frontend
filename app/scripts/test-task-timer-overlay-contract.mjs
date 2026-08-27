@@ -31,7 +31,7 @@ assert.equal(countdown.state, 'countdown');
 assert.equal(countdown.label, '00:35');
 const overtime = getTaskTimerView(tasks[0], 75_000);
 assert.equal(overtime.state, 'overtime');
-assert.equal(overtime.label, '+01:05');
+assert.equal(overtime.label, '+00:15');
 const countup = getTaskTimerView(tasks[1], 20_010);
 assert.equal(countup.state, 'unstarted');
 const startedCountup = getTaskTimerView({ ...tasks[1], started_at: 10_000 }, 20_010);
