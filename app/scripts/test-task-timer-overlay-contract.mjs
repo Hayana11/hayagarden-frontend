@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -56,10 +56,11 @@ assert.ok(source.includes('window.clearInterval'));
 assert.ok(source.includes("document.removeEventListener('visibilitychange'"));
 assert.ok(source.includes('if (!activeTask) return null;'));
 
-const runtimeDir = join(process.cwd(), 'task-timer-contract-runtime');
-const runtimeUrl = 'http://127.0.0.1:5174/preview/task-timer-contract-runtime/index.html';
+const runtimeHtmlPath = join(process.cwd(), 'task-timer-contract-runtime.html');
+const runtimeEntryPath = join(process.cwd(), 'task-timer-contract-runtime-entry.tsx');
+const runtimeUrl = 'http://127.0.0.1:5174/preview/task-timer-contract-runtime.html';
 const runtimeIdentity = 'data-task-timer-contract-runtime="1"';
-const runtimeHtml = `<!doctype html><html ${runtimeIdentity}><body><div id="root"></div><script type="module" src="./entry.tsx"></script></body></html>`;
+const runtimeHtml = `<!doctype html><html ${runtimeIdentity}><body><div id="root"></div><script type="module" src="./task-timer-contract-runtime-entry.tsx"></script></body></html>`;
 const runtimeEntry = `import React, { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { TaskTimerOverlay } from '../src/components/TaskTimerOverlay';
@@ -68,9 +69,8 @@ const root = createRoot(document.getElementById('root'));
 root.render(<StrictMode><TaskTimerOverlay /></StrictMode>);
 window.__taskTimerUnmount = () => root.unmount();
 `;
-mkdirSync(runtimeDir, { recursive: true });
-writeFileSync(join(runtimeDir, 'index.html'), runtimeHtml);
-writeFileSync(join(runtimeDir, 'entry.tsx'), runtimeEntry);
+writeFileSync(runtimeHtmlPath, runtimeHtml);
+writeFileSync(runtimeEntryPath, runtimeEntry);
 
 const viteCli = join(process.cwd(), 'node_modules', 'vite', 'bin', 'vite.js');
 const vite = spawn(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', '5174'], {
@@ -190,7 +190,7 @@ try {
   assert.ok(pendingCalls > 0, 'pending request must be sent');
   assert.equal(pendingResponseStatus, 200, 'pending response must be fulfilled');
   assert.deepEqual(pageErrors, [], 'React bootstrap must not emit pageerror');
-  console.log('TASK_TIMER_OVERLAY_RUNTIME_BOOT_PASS');
+  console.log('TASK_TIMER_OVERLAY_BOOT_PASS');
   if (bootOnly) throw bootPass;
   await page.waitForFunction(() => document.querySelector('.task-timer-status')?.textContent === '开始未确认');
   assert.equal(startedCalls, 1, 'StrictMode must not duplicate the first started POST');
@@ -249,7 +249,9 @@ try {
 } finally {
   if (browser) await browser.close();
   vite.kill();
-  rmSync(runtimeDir, { recursive: true, force: true });
+  rmSync(runtimeHtmlPath, { force: true });
+  rmSync(runtimeEntryPath, { force: true });
 }
+
 
 
