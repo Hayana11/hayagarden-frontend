@@ -86,6 +86,7 @@ let maxStartedConcurrent = 0;
 let doneCalls = 0;
 let cancelCalls = 0;
 let reconciliationStarted = false;
+let reconciliationAttempts = 0;
 let unmountPendingStarted = false;
 let holdNextPending = false;
 const startedAt = Date.now() - 120_000;
@@ -128,6 +129,11 @@ try {
       unmountPendingStarted = true;
       await new Promise((resolve) => { unmountPendingRelease = resolve; });
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(taskResponse()) });
+      return;
+    }
+    if (doneCalls === 1 && reconciliationAttempts === 0) {
+      reconciliationAttempts += 1;
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'simulated reconciliation failure' }) });
       return;
     }
     if (doneCalls === 1 && !reconciliationStarted) {
@@ -176,10 +182,14 @@ try {
 
   const doneButton = page.locator('.task-timer-done');
   await doneButton.click();
-  const reconcileDeadline = Date.now() + 3000;
+  const failedReconcileDeadline = Date.now() + 3000;
+  while (reconciliationAttempts < 1 && Date.now() < failedReconcileDeadline) await wait(50);
+  assert.equal(reconciliationAttempts, 1, 'reconciliation GET failure is observed');
+  assert.equal(await doneButton.isDisabled(), true, 'controls stay locked after reconciliation failure');
+  const reconcileDeadline = Date.now() + TASK_TIMER_POLL_MS + 3000;
   while (!reconciliationStarted && Date.now() < reconcileDeadline) await wait(50);
   assert.equal(doneCalls, 1, 'one done gesture sends one POST');
-  assert.equal(reconciliationStarted, true, 'uncertain done starts reconciliation');
+  assert.equal(reconciliationStarted, true, 'uncertain done retries reconciliation GET');
   const pendingAtReconcile = pendingCalls;
   assert.equal(await doneButton.isDisabled(), true, 'controls stay locked during reconciliation');
   await wait(TASK_TIMER_POLL_MS + 500);
