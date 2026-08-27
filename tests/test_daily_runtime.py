@@ -2958,6 +2958,164 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_fence_b_rebuild_preserves_frozen_feedback_snapshot(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'Fence B feedback', '2026-07-27 10:00:00')
+            original = (['「原反馈」用时 3秒'], [91])
+            new_snapshot = (['「重建期间新反馈」用时 4秒'], [92])
+            fake_store = types.SimpleNamespace(
+                peek_feedback=mock.Mock(return_value=original),
+                consume_feedback=mock.Mock(return_value=1),
+            )
+            with mock.patch.dict(sys.modules, {'command_store': fake_store}), \
+                 mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                plan = _REAL_PREPARE_DAILY_TURN(
+                    user_message_id=uid,
+                    db_path=db,
+                    now=_FIXED_NOW,
+                    wall_now=_FIXED_NOW,
+                    static_system='STATIC',
+                )
+            frozen_ids = plan.feedback_ids
+            self.assertEqual(fake_store.peek_feedback.call_count, 1)
+
+            def _build_rebuilt_assembly(**kwargs):
+                # A new command completes while Fence B is rebuilding.  It is
+                # deliberately made visible to any illegal second peek.
+                fake_store.peek_feedback.return_value = new_snapshot
+                return {'current_day_history': [], 'manifest': {}}
+
+            with mock.patch.dict(sys.modules, {'command_store': fake_store}), \
+                 mock.patch.object(
+                     dr.dh,
+                     'build_daily_window_context',
+                     side_effect=_build_rebuilt_assembly,
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.cold_prompt_target',
+                     return_value=50,
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.estimate_whole_prompt',
+                     side_effect=[100, 10],
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.estimate_text_tokens',
+                     return_value=0,
+                 ), \
+                 mock.patch(
+                     'chat.cold_bootstrap_budget.effective_history_budget',
+                     return_value=1,
+                 ), \
+                 mock.patch(
+                     'chat.context_lean.cc_history_token_budget',
+                     return_value=10,
+                 ):
+                rebuilt_content = dr._apply_daily_cold_prompt_fence(
+                    plan,
+                    resident=None,
+                    static_system='STATIC',
+                    content='over-budget prompt',
+                    is_cold=True,
+                    is_respawn=False,
+                )
+
+                self.assertIn('## 任务完成反馈', rebuilt_content)
+                self.assertIn('「原反馈」用时 3秒', rebuilt_content)
+                self.assertNotIn('「重建期间新反馈」用时 4秒', rebuilt_content)
+                self.assertEqual(plan.feedback_ids, frozen_ids)
+                self.assertEqual(plan.feedback_ids, (91,))
+                self.assertEqual(
+                    plan.assembly.get('task_feedback'),
+                    dr._format_task_feedback(plan.feedback_lines),
+                )
+
+                # The rebuild itself must not create another peek.
+                fake_store.peek_feedback.assert_called_once_with()
+
+                with mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
+                     mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                    out = dr.handle_provider_success(
+                        plan, assistant_message_id=191, raw_text='成功回复',
+                    )
+                fake_store.consume_feedback.assert_called_once_with([91])
+                self.assertEqual(out['feedback_consume_status'], 'CONSUMED')
+
+            # A failure after the same rebuild boundary still preserves the
+            # frozen snapshot and cannot consume it.
+            db2 = _tmp_db()
+            try:
+                _init_chat_messages(db2)
+                uid2 = _insert(db2, 'hayana', 'Fence B failed feedback', '2026-07-27 10:00:00')
+                failing_store = types.SimpleNamespace(
+                    peek_feedback=mock.Mock(return_value=original),
+                    consume_feedback=mock.Mock(return_value=1),
+                )
+                with mock.patch.dict(sys.modules, {'command_store': failing_store}), \
+                     mock.patch.object(config_store, 'get_bool', return_value=True), \
+                     mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                    failed_plan = _REAL_PREPARE_DAILY_TURN(
+                        user_message_id=uid2,
+                        db_path=db2,
+                        now=_FIXED_NOW,
+                        wall_now=_FIXED_NOW,
+                        static_system='STATIC',
+                    )
+                with mock.patch.dict(sys.modules, {'command_store': failing_store}), \
+                     mock.patch.object(
+                         dr.dh,
+                         'build_daily_window_context',
+                         return_value={'current_day_history': [], 'manifest': {}},
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.cold_prompt_target',
+                         return_value=50,
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.estimate_whole_prompt',
+                         side_effect=[100, 10],
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.estimate_text_tokens',
+                         return_value=0,
+                     ), \
+                     mock.patch(
+                         'chat.cold_bootstrap_budget.effective_history_budget',
+                         return_value=1,
+                     ), \
+                     mock.patch(
+                         'chat.context_lean.cc_history_token_budget',
+                         return_value=10,
+                     ):
+                    dr._apply_daily_cold_prompt_fence(
+                        failed_plan,
+                        resident=None,
+                        static_system='STATIC',
+                        content='over-budget prompt',
+                        is_cold=True,
+                        is_respawn=False,
+                    )
+                    self.assertEqual(failed_plan.feedback_ids, (91,))
+                    with mock.patch.object(
+                        dr,
+                        'complete_daily_turn',
+                        side_effect=RuntimeError('commit failed'),
+                    ):
+                        with self.assertRaises(RuntimeError):
+                            dr.handle_provider_success(
+                                failed_plan,
+                                assistant_message_id=192,
+                                raw_text='回复',
+                            )
+                failing_store.consume_feedback.assert_not_called()
+            finally:
+                os.unlink(db2)
+        finally:
+            os.unlink(db)
+
     def test_success_consumes_snapshot_once_after_full_success(self):
         db = _tmp_db()
         try:

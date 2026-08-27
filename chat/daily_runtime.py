@@ -2090,6 +2090,14 @@ def _rebuild_daily_assembly_with_history_budget(
         history_token_budget=history_token_budget,
         provider_claude_session_id=provider_sid,
     )
+    # Fence B must reuse the plan's frozen snapshot.  The rebuild is allowed to
+    # trim history, but it must not re-peek or silently drop feedback that was
+    # already selected for this logical turn.
+    task_feedback = _format_task_feedback(tuple(plan.feedback_lines))
+    if task_feedback:
+        assembly['task_feedback'] = task_feedback
+    else:
+        assembly.pop('task_feedback', None)
     return assembly
 
 
