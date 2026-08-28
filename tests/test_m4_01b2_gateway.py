@@ -79,7 +79,8 @@ def gateway_fixture(tmp_path, monkeypatch):
     lease = issue_turn_lease(
         turn_id="api-turn-gateway",
         turn_mode="chat",
-        issued_from="default_policy",
+        issued_from="explicit_user_intent",
+        requested_capabilities=("todo.write",),
     )
     return get_db, lease, todo_path
 
