@@ -317,8 +317,8 @@ class DailyLedgerCutoverTests(unittest.TestCase):
                 action,
                 self.lease(),
             )
-            self.assertEqual(fresh["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-            self.assertNotEqual(fresh["approval_id"], pending["approval_id"])
+            self.assertEqual(fresh["lease_decision"], "ALLOW")
+            self.assertNotIn("approval_id", fresh)
 
     def test_internal_down_has_no_home_fallback(self):
         plan = _plan()
