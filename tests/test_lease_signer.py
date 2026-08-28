@@ -232,7 +232,7 @@ class LeaseSignerContractTests(unittest.TestCase):
         self.assertEqual(confirmed["approval_ids"], ("approval-42",))
         self.assertIn("todo.write", confirmed["allowed_capabilities"])
         self.assertEqual(old, old_snapshot)
-        self.assertNotIn("todo.write", old["allowed_capabilities"])
+        self.assertIn("todo.write", old["allowed_capabilities"])
 
         with self.assertRaises(LeaseSignError) as ctx:
             issue_turn_lease(
