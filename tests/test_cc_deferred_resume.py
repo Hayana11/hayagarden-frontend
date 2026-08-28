@@ -135,7 +135,10 @@ class DeferredResumeContractTests(unittest.TestCase):
             ) as popen:
                 first_stream = session.send_turn(
                     "请判断是否记入待办",
-                    turn_lease=self.lease(),
+                    turn_lease=self.lease(
+                        source="explicit_user_intent",
+                        requested=("todo.write",),
+                    ),
                     turn_runtime=runtime,
                 )
                 first_event, first_payload = next(first_stream)
@@ -282,7 +285,14 @@ class DeferredResumeContractTests(unittest.TestCase):
             spawn.assert_not_called()
             self.assertEqual(home_tool_calls, [])
 
-            new_action = evaluate_tool_call(current_tool, action, self.lease())
+            new_action = evaluate_tool_call(
+                current_tool,
+                action,
+                self.lease(
+                    source="explicit_user_intent",
+                    requested=("todo.write",),
+                ),
+            )
             self.assertEqual(new_action["capability_id"], "todo.write")
             self.assertEqual(new_action["lease_decision"], "ALLOW")
             self.assertNotIn("approval_id", new_action)
