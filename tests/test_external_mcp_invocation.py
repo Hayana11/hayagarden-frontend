@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import tempfile
+import threading
+import unittest
+
+from tools.external_mcp_invocation import (
+    FAILED_PRE_CALL,
+    OUTCOME_UNKNOWN,
+    STARTED,
+    SUCCEEDED,
+    TOOL_ERROR,
+    ExternalInvocationInitializationError,
+    ExternalMcpInvocation,
+    MAX_TOOL_INPUT_BYTES,
+)
+from tools.external_server_registry import ExternalServerRegistry
+from tools.external_tool_execution_fence import ExternalToolExecutionFence, build_external_action_id
+from tools.external_tool_registry import ExternalToolCandidateRegistry
+from tools.external_tool_side_effect_policy import EXTERNAL_STATE, NONE, ExternalToolSideEffectPolicy
+
+
+def tool(name="calendar.list", **extra):
+    value = {"name": name, "description": "Calendar", "inputSchema": {"type": "object"}, "outputSchema": {"type": "object"}}
+    value.update(extra)
+    return value
+
+
+class ExternalMcpInvocationTests(unittest.TestCase):
+    def setUp(self):
+        self.connection = sqlite3.connect(":memory:", check_same_thread=False)
+        self.server_registry = ExternalServerRegistry(self.connection, id_factory=lambda: "server-1")
+        self.server = self.server_registry.register(display_name="Calendar", endpoint="https://calendar.example/mcp", provenance="owner-admin")
+        self.candidates = ExternalToolCandidateRegistry(self.connection, server_registry=self.server_registry)
+        self.policy = ExternalToolSideEffectPolicy(self.connection, candidate_registry=self.candidates, server_registry=self.server_registry)
+        self.fence = ExternalToolExecutionFence(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy)
+        self.ids = iter(f"id-{number}" for number in range(1, 1000))
+        self.invocation = ExternalMcpInvocation(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy, execution_fence=self.fence, id_factory=lambda: next(self.ids))
+        self.calls = 0
+
+    def tearDown(self):
+        self.connection.close()
+
+    def discovery(self, records, revision=None):
+        return {"status": "SUCCESS", "catalog_complete": True, "server_id": self.server.server_id, "registry_revision": self.server.revision if revision is None else revision, "tool_record_boundary": "SDK_VISIBLE_RAW", "tools": records, "diagnostics": {"registry_changed_during_attempt": False}, "model_visible": False, "execution_allowed": False}
+
+    def prepare(self, side_effect_class=NONE):
+        self.candidates.ingest(self.discovery([tool()]))
+        candidate = self.candidates.get_candidate(self.server.server_id, "calendar.list")
+        self.candidates.approve_candidate(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], actor="owner", provenance="settings-admin")
+        self.policy.classify(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], side_effect_class=side_effect_class, actor="owner", provenance="settings-admin")
+        return self.candidates.get_candidate(self.server.server_id, "calendar.list")
+
+    def lease(self, approval_ids=(), turn_id="turn-1"):
+        return {"lease_version": 1, "turn_id": turn_id, "turn_mode": "chat", "issued_from": "user_confirmation", "allowed_capabilities": (), "approval_ids": tuple(approval_ids), "task_contract_id": None, "issued_at": "2026-08-29T00:00:00Z"}
+
+    def allowed_lease(self, candidate, value=None, turn_id="turn-1", side_effect_class=NONE):
+        action = build_external_action_id(candidate["control_id"], candidate["current_fingerprint"], candidate["current_source_registry_revision"], side_effect_class, value or {"q": "today"})
+        return self.lease((action,), turn_id), action
+
+    def runner(self, status="SUCCESS"):
+        def run(snapshot):
+            self.calls += 1
+            return {"status": status}
+        return run
+
+    def invoke(self, lease, runner=None, value=None, expected_turn_id="turn-1"):
+        return self.invocation.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"} if value is None else value, lease, expected_turn_id=expected_turn_id, runner=runner or self.runner())
+
+    def test_shared_authority_and_no_default_db(self):
+        self.assertIs(self.invocation._connection, self.connection)
+        other = sqlite3.connect(":memory:")
+        try:
+            servers = ExternalServerRegistry(other)
+            candidates = ExternalToolCandidateRegistry(other, server_registry=servers)
+            policy = ExternalToolSideEffectPolicy(other, candidate_registry=candidates, server_registry=servers)
+            fence = ExternalToolExecutionFence(other, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
+            with self.assertRaises(ExternalInvocationInitializationError):
+                ExternalMcpInvocation(self.connection, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence)
+        finally:
+            other.close()
+
+    def test_ask_deny_and_invalid_turn_never_run(self):
+        candidate = self.prepare()
+        self.assertEqual(self.invoke(self.lease())["status"], FAILED_PRE_CALL)
+        self.policy.classify(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], side_effect_class="unknown", actor="owner", provenance="settings-admin")
+        self.assertEqual(self.invoke(self.lease())["status"], FAILED_PRE_CALL)
+        self.assertEqual(self.calls, 0)
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate)
+        self.assertEqual(self.invoke(lease, expected_turn_id="wrong")["status"], FAILED_PRE_CALL)
+        self.assertEqual(self.calls, 0)
+
+    def test_final_fence_invalidation_paths_never_run(self):
+        candidate = self.prepare()
+        lease, action = self.allowed_lease(candidate)
+        self.candidates.reject_candidate(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], actor="owner", provenance="settings-admin")
+        self.assertEqual(self.invoke(lease)["status"], FAILED_PRE_CALL)
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate)
+        self.policy.classify(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], side_effect_class="unknown", actor="owner", provenance="settings-admin")
+        self.assertEqual(self.invoke(lease)["status"], FAILED_PRE_CALL)
+        candidate = self.prepare()
+        self.server_registry.rename(self.server.server_id, "Calendar changed")
+        self.assertEqual(self.invoke(self.lease((action,)))["status"], FAILED_PRE_CALL)
+        self.assertEqual(self.calls, 0)
+
+    def test_allow_commits_started_before_runner_and_audits_order(self):
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate)
+        observed = []
+        def runner(snapshot):
+            self.calls += 1
+            row = self.connection.execute("SELECT status FROM external_tool_invocation_attempts").fetchone()
+            observed.append(row[0])
+            self.assertEqual(snapshot, {"q": "today"})
+            return {"status": "SUCCESS"}
+        result = self.invoke(lease, runner)
+        self.assertEqual(result["status"], SUCCEEDED)
+        self.assertEqual(observed, [STARTED])
+        attempt = self.invocation.get_attempt(result["attempt_id"])
+        self.assertEqual(attempt["fingerprint"], candidate["current_fingerprint"])
+        self.assertEqual([event["status"] for event in self.invocation.list_audit(result["attempt_id"])], ["PRE_CALL", STARTED, SUCCEEDED])
+
+    def test_snapshot_limits_and_no_plaintext_persistence(self):
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate, {"nested": {"value": 1}})
+        input_value = {"nested": {"value": 1}}
+        seen = []
+        def runner(snapshot):
+            input_value["nested"]["value"] = 2
+            seen.append(snapshot)
+            return {"status": "SUCCESS"}
+        result = self.invoke(lease, runner, input_value)
+        self.assertEqual(seen, [{"nested": {"value": 1}}])
+        dump = "\n".join(self.connection.iterdump())
+        self.assertNotIn("nested", dump)
+        self.assertNotIn("today", dump)
+        self.assertEqual(self.invoke(lease, value={"n": float("nan")})["status"], FAILED_PRE_CALL)
+        self.assertEqual(self.invoke(lease, value={"data": "x" * (MAX_TOOL_INPUT_BYTES + 1)})["status"], FAILED_PRE_CALL)
+
+    def test_duplicate_and_concurrent_duplicate_only_invoke_once(self):
+        candidate = self.prepare(EXTERNAL_STATE)
+        lease, _ = self.allowed_lease(candidate, side_effect_class=EXTERNAL_STATE)
+        first = self.invoke(lease)
+        second = self.invoke(lease)
+        self.assertEqual(first["status"], SUCCEEDED)
+        self.assertEqual(second["reason_code"], "DUPLICATE_EXTERNAL_ACTION")
+        self.assertEqual(self.calls, 1)
+
+        # Two connection objects against a durable temporary DB prove the unique key,
+        # rather than a process-local flag, owns the race.
+        handle = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False); handle.close()
+        try:
+            seed = sqlite3.connect(handle.name); self.connection.backup(seed); seed.close()
+            left, right = sqlite3.connect(handle.name, timeout=5, check_same_thread=False), sqlite3.connect(handle.name, timeout=5, check_same_thread=False)
+            def owner(conn):
+                servers = ExternalServerRegistry(conn); candidates = ExternalToolCandidateRegistry(conn, server_registry=servers); policy = ExternalToolSideEffectPolicy(conn, candidate_registry=candidates, server_registry=servers); fence = ExternalToolExecutionFence(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
+                return ExternalMcpInvocation(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence)
+            one, two = owner(left), owner(right)
+            # Use a fresh turn; initial attempt is deliberately already terminal.
+            fresh_lease = dict(lease); fresh_lease["turn_id"] = "turn-race"
+            fresh_lease["approval_ids"] = (build_external_action_id(candidate["control_id"], candidate["current_fingerprint"], candidate["current_source_registry_revision"], EXTERNAL_STATE, {"q": "today"}),)
+            calls = []; start = threading.Barrier(2)
+            def race(inv):
+                start.wait(); result = inv.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, fresh_lease, expected_turn_id="turn-race", runner=lambda _: calls.append(1) or {"status": "SUCCESS"}); self.assertIn(result["status"], {SUCCEEDED, STARTED})
+            threads = [threading.Thread(target=race, args=(owner_,)) for owner_ in (one, two)]
+            [thread.start() for thread in threads]; [thread.join(5) for thread in threads]
+            self.assertEqual(len(calls), 1)
+            left.close(); right.close()
+        finally:
+            os.unlink(handle.name)
+
+    def test_all_outcomes_exception_and_recovery_are_unknown_without_replay(self):
+        for runner_outcome, expected in (("SUCCESS", SUCCEEDED), ("TOOL_ERROR", TOOL_ERROR), ("NOT_INVOKED", FAILED_PRE_CALL), ("OUTCOME_UNKNOWN", OUTCOME_UNKNOWN)):
+            with self.subTest(runner_outcome=runner_outcome):
+                candidate = self.prepare(); lease, _ = self.allowed_lease(candidate, turn_id=f"turn-{runner_outcome}")
+                self.assertEqual(self.invoke(lease, self.runner(runner_outcome), expected_turn_id=f"turn-{runner_outcome}")["status"], expected)
+        candidate = self.prepare(); lease, _ = self.allowed_lease(candidate, turn_id="turn-exception")
+        self.assertEqual(self.invoke(lease, lambda _: (_ for _ in ()).throw(RuntimeError("lost")), expected_turn_id="turn-exception")["status"], OUTCOME_UNKNOWN)
+        candidate = self.prepare(); lease, _ = self.allowed_lease(candidate, turn_id="turn-malformed")
+        self.assertEqual(self.invoke(lease, lambda _: {"not_status": "bad"}, expected_turn_id="turn-malformed")["status"], OUTCOME_UNKNOWN)
+        candidate = self.prepare(); lease, _ = self.allowed_lease(candidate, turn_id="turn-recover")
+        self.connection.execute("BEGIN IMMEDIATE")
+        decision = self.fence.evaluate(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, lease, expected_turn_id="turn-recover")
+        self.invocation._insert_attempt("stranded", decision, "a" * 64, 1, "PRE_CALL", "PRE_CALL")
+        self.invocation._audit("stranded", decision, "PRE_CALL", "PRE_CALL")
+        self.invocation._transition("stranded", decision, STARTED, "RUNNER_STARTED")
+        self.connection.commit()
+        recovered = self.invocation.recover_unknown("stranded")
+        self.assertEqual(recovered["status"], OUTCOME_UNKNOWN)
+        self.assertEqual(self.invocation.recover_unknown("stranded")["reason_code"], "RECOVERY_NOT_ALLOWED")
+        self.assertEqual(self.calls, 4)
+
+    def test_post_call_persistence_failure_is_unknown_and_leaves_started(self):
+        candidate = self.prepare(); lease, _ = self.allowed_lease(candidate)
+        self.connection.execute("CREATE TRIGGER fail_terminal BEFORE UPDATE ON external_tool_invocation_attempts WHEN OLD.status='STARTED' BEGIN SELECT RAISE(ABORT, 'fail finalization'); END")
+        result = self.invoke(lease)
+        self.assertEqual(result["status"], OUTCOME_UNKNOWN)
+        self.assertEqual(result["reason_code"], "POST_CALL_PERSISTENCE_FAILED")
+        self.assertEqual(self.connection.execute("SELECT status FROM external_tool_invocation_attempts").fetchone()[0], STARTED)
+        self.assertEqual(self.calls, 1)
+
+    def test_audit_is_append_only(self):
+        candidate = self.prepare(); lease, _ = self.allowed_lease(candidate)
+        result = self.invoke(lease)
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.connection.execute("UPDATE external_tool_invocation_audit SET status='x' WHERE attempt_id=?", (result["attempt_id"],))
+        with self.assertRaises(sqlite3.DatabaseError):
+            self.connection.execute("DELETE FROM external_tool_invocation_audit WHERE attempt_id=?", (result["attempt_id"],))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
