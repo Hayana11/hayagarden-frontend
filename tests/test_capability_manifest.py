@@ -137,7 +137,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             item = get_capability(capability_id)
             self.assertEqual(item["kind"], "write")
             self.assertEqual(item["side_effect"], "external_state")
-            self.assertEqual(item["autonomy_mode"], "explicit_or_ask")
+            self.assertEqual(item["autonomy_mode"], "self_write_auto")
 
         for capability_id in ("files.read", "files.find", "code.search"):
             item = get_capability(capability_id)
@@ -179,7 +179,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
         self.assertEqual(item["display_name"], "开始行动计时")
         self.assertEqual(item["kind"], "write")
         self.assertEqual(item["side_effect"], "external_state")
-        self.assertEqual(item["autonomy_mode"], "explicit_or_ask")
+        self.assertEqual(item["autonomy_mode"], "self_write_auto")
         self.assertEqual(item["loading_policy"], "deferred")
         self.assertEqual(
             item["provider_bindings"]["claude_code"],

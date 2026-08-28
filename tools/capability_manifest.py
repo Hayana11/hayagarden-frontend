@@ -33,7 +33,7 @@ CAPABILITY_FIELDS = (
 CAPABILITY_KINDS = frozenset({"read", "write", "execute"})
 CAPABILITY_SIDE_EFFECTS = frozenset({"none", "external_state", "code_or_process"})
 CAPABILITY_AUTONOMY_MODES = frozenset(
-    {"read_auto", "explicit_or_ask", "task_only", "never_auto", "self_write_auto"}
+    {"read_auto", "task_only", "never_auto", "self_write_auto"}
 )
 CAPABILITY_LOADING_POLICIES = frozenset({"always_load", "deferred", "task_scoped"})
 
@@ -109,10 +109,10 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "display_name": "新增待办",
         "kind": "write",
         "side_effect": "external_state",
-        "autonomy_mode": "explicit_or_ask",
-        "trigger": "用户明确要求记录待办，或一个具体待办明显有帮助但尚未获授权时。",
-        "purpose": "把用户确认的具体事项写入待办，而不是只口头承诺。",
-        "deny_when": "只是讨论计划、没有明确写入意图且未取得 ASK 确认时。",
+        "autonomy_mode": "self_write_auto",
+        "trigger": "对话上下文表明新增一条具体待办能帮助推进事情时。",
+        "purpose": "把具体事项写入待办，避免只在对话中复述而不落地。",
+        "deny_when": "只是讨论计划、信息不足，或待办内容不明确时。",
         "failure_behavior": "明确说明没有写入；不得说“记好了”或伪造成功。",
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "mcp__capability__todo_write", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo", "api_relay": "add_todo"},
@@ -123,10 +123,10 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "display_name": "开始行动计时",
         "kind": "write",
         "side_effect": "external_state",
-        "autonomy_mode": "explicit_or_ask",
-        "trigger": "用户明确要求开始计时、安排一个立即行动任务，或者当前有一个具体行动明显适合使用计时器但尚未取得授权时。",
+        "autonomy_mode": "self_write_auto",
+        "trigger": "对话上下文表明一个具体行动适合立即开始计时时。",
         "purpose": "创建一个面向用户的行动计时任务，由聊天界面展示并记录实际完成用时，而不是写待办、日期倒计时或自主触发。",
-        "deny_when": "任务标题为空；当前只有模糊建议而没有具体行动；用户没有明确要求，且尚未完成现有 ASK 授权合同。",
+        "deny_when": "任务标题为空、只有模糊建议、信息不足，或没有具体行动时。",
         "failure_behavior": "明确说明没有创建行动计时任务；不得伪造成功；不得退化写入 todo.write、countdown.read 或 set_self_trigger。",
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "mcp__capability__task_timer_start"},
@@ -175,10 +175,10 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "display_name": "新增账目",
         "kind": "write",
         "side_effect": "external_state",
-        "autonomy_mode": "explicit_or_ask",
-        "trigger": "用户明确要求记账，或一个具体账目明显需要记录但尚未获授权时。",
-        "purpose": "把用户确认的具体账目写入账本，而不是只在对话中复述。",
-        "deny_when": "金额、用途或写入意图不明确，且没有完成 ASK 确认时。",
+        "autonomy_mode": "self_write_auto",
+        "trigger": "对话上下文表明一笔具体账目需要记录时。",
+        "purpose": "把具体账目写入账本，而不是只在对话中复述。",
+        "deny_when": "金额、用途、日期或记账内容不明确，无法形成具体账目时。",
         "failure_behavior": "明确说明没有写入；不得说“已经记账”或伪造结果。",
         "loading_policy": "deferred",
         "provider_bindings": {"claude_code": "mcp__capability__ledger_write", "internal_mcp": "mcp__internal__add_ledger", "home_mcp": "mcp__home__add_ledger"},
@@ -266,7 +266,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "display_name": "控制灯光",
         "kind": "write",
         "side_effect": "external_state",
-        "autonomy_mode": "explicit_or_ask",
+        "autonomy_mode": "never_auto",
         "trigger": "用户明确要求改变灯光，或具体控制动作明显有帮助但尚未获授权时。",
         "purpose": "在得到当前动作授权后改变家庭灯光状态。",
         "deny_when": "P1 尚未启用该能力，或当前具体控制动作未获授权时。",

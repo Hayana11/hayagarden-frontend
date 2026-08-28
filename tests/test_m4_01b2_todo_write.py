@@ -41,12 +41,16 @@ def _approved_action(tmp_path, monkeypatch, *, content="明天寄快递", due_da
     db_path = tmp_path / "todos.sqlite"
     conn = _todo_db(db_path)
     default_lease = issue_turn_lease(
-        turn_id="api-turn-1", turn_mode="chat", issued_from="default_policy",
+        turn_id="api-turn-1",
+        turn_mode="chat",
+        issued_from="explicit_user_intent",
+        requested_capabilities=("todo.write",),
     )
     decision = evaluate_tool_call(
         "add_todo", {"content": content, "due_date": due_date}, default_lease,
     )
-    assert decision["lease_decision"] == "CAPABILITY_ASK_REQUIRED"
+    assert decision["lease_decision"] == "ALLOW"
+    assert "approval_id" not in decision
     store = PendingActionStore(
         conn, lease_issuer=issue_turn_lease, runtime_evaluator=evaluate_tool_call,
     )
@@ -66,7 +70,7 @@ def _approved_action(tmp_path, monkeypatch, *, content="明天寄快递", due_da
     return conn, context.action, request
 
 
-def test_default_policy_asks_and_does_not_insert(tmp_path, monkeypatch):
+def test_explicit_intent_allows_without_inserting_until_adapter_runs(tmp_path, monkeypatch):
     conn, action, _request = _approved_action(tmp_path, monkeypatch)
     assert action.state == "approved"
     assert conn.execute("SELECT COUNT(*) FROM todos").fetchone()[0] == 0

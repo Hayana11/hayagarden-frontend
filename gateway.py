@@ -2983,39 +2983,19 @@ def _dispatch_api_chat_tool(name, args, turn_lease, tool_use_id=None):
 
     if name == 'add_todo':
         from tools.execution_fence import evaluate_tool_call
-        from tools.todo_write_adapter import (
-            API_OWNER_ID,
-            CAPABILITY_ID,
-            deferred_todo_payload,
-        )
         decision = evaluate_tool_call(
             tool_name='add_todo',
             tool_input=args,
             turn_lease=turn_lease,
         )
         lease_decision = decision.get('lease_decision')
-        if lease_decision == 'CAPABILITY_ASK_REQUIRED':
-            conn = get_db()
-            try:
-                from tools.confirmation_store import PendingActionStore
-                action = PendingActionStore(conn).create_pending_action(
-                    capability_id=CAPABILITY_ID,
-                    tool_name='add_todo',
-                    tool_input=args,
-                    owner_id=API_OWNER_ID,
-                    turn_id=str((turn_lease or {}).get('turn_id') or ''),
-                    tool_use_id=tool_use_id,
-                )
-                return deferred_todo_payload(action)
-            finally:
-                conn.close()
         if lease_decision != 'ALLOW':
             diagnostic = str(decision.get('diagnostic') or 'no diagnostic')
             return (
                 f'工具执行失败：{lease_decision or "DENIED_CAPABILITY"}'
                 f'（add_todo；{diagnostic}）'
             )
-        return '工具执行失败：LEASE_MISMATCH（add_todo；confirmed execution context required）'
+        return run_tool('add_todo', args)
 
     if name != 'get_todos':
         # Legacy API tools retain their existing run_tool behavior.

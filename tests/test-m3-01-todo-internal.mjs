@@ -46,16 +46,16 @@ function countRows() {
   ));
 }
 
-function installLease(capability) {
+function installLease(capability, mode = 'chat') {
   python(
     [
       'import sys',
       'from tools.lease_signer import issue_turn_lease',
       'from tools.execution_fence import write_current_turn_lease',
-      'lease = issue_turn_lease(turn_id="m3-01-turn", turn_mode="chat", issued_from="explicit_user_intent", requested_capabilities=(sys.argv[2],), issued_at="2026-08-21T00:00:00Z")',
+      'lease = issue_turn_lease(turn_id="m3-01-turn", turn_mode=sys.argv[3], issued_from="explicit_user_intent", requested_capabilities=(sys.argv[2],), issued_at="2026-08-21T00:00:00Z")',
       'write_current_turn_lease(sys.argv[1], lease)',
     ].join('; '),
-    [leasePath, capability],
+    [leasePath, capability, mode],
   );
 }
 function textOf(result) {
@@ -136,12 +136,12 @@ const written = await withProfile.client.callTool({
 assert.deepEqual(JSON.parse(textOf(written)), { ok: true });
 assert.equal(countRows(), 3);
 
-installLease('todo.read');
+installLease('todo.read', 'task');
 const badLease = await withProfile.client.callTool({
   name: 'add_todo',
   arguments: { content: '坏 lease 不得写入' },
 });
-assert.match(textOf(badLease), /UH-A0 (?:LEASE_MISMATCH|CAPABILITY_ASK_REQUIRED)/);
+assert.match(textOf(badLease), /UH-A0 DENIED_CAPABILITY/);
 assert.equal(countRows(), 3);
 
 await noProfile.client.close();

@@ -128,11 +128,16 @@ class TodoInternalAdapterTests(unittest.TestCase):
             execution_fence.approval_prompt("mcp__internal__add_todo", action),
             "我顺手给你记进待办里？",
         )
-        asked = execution_fence.evaluate_tool_call(
-            "mcp__internal__add_todo", action, self.lease()
+        direct = execution_fence.evaluate_tool_call(
+            "mcp__internal__add_todo",
+            action,
+            self.lease(
+                source="explicit_user_intent",
+                requested=("todo.write",),
+            ),
         )
-        self.assertEqual(asked["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-        self.assertEqual(asked["approval_id"], internal_id)
+        self.assertEqual(direct["lease_decision"], "ALLOW")
+        self.assertNotIn("approval_id", direct)
         confirmed = self.lease(
             source="user_confirmation",
             requested=("todo.write",),

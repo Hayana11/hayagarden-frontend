@@ -106,8 +106,9 @@ class ExecutionFenceTests(unittest.TestCase):
             self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
 
     def test_c_diary_chat_auto_allows_without_approval(self):
+        lease = self.lease()
         result = evaluate_tool_call(
-            "mcp__capability__diary_write", {"content": "今天值得留下的一页"}, self.lease()
+            "mcp__capability__diary_write", {"content": "今天值得留下的一页"}, lease
         )
         self.assertEqual(result["capability_id"], "diary.write")
         self.assertEqual(result["lease_decision"], "ALLOW")
@@ -115,7 +116,7 @@ class ExecutionFenceTests(unittest.TestCase):
         legacy = evaluate_tool_call(
             "mcp__home__write_diary",
             {"content": "兼容路径"},
-            self.lease(),
+            lease,
         )
         self.assertEqual(legacy["capability_id"], "diary.write")
         self.assertEqual(legacy["lease_decision"], "ALLOW")
@@ -134,15 +135,37 @@ class ExecutionFenceTests(unittest.TestCase):
             "DENIED_CAPABILITY",
         )
 
-    def test_d_ungranted_write_asks_with_action_id(self):
-        action = {"content": "明天寄快递", "due_date": "2026-08-13"}
-        result = evaluate_tool_call("mcp__home__add_todo", action, self.lease())
-        self.assertEqual(result["capability_id"], "todo.write")
-        self.assertEqual(result["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-        self.assertEqual(
-            result["approval_id"],
-            build_approval_id("todo.write", "mcp__home__add_todo", action),
+    def test_d_enabled_writes_allow_without_confirmation(self):
+        for tool_name, capability_id, action in (
+            ("mcp__capability__memory_write", "memory.write", {"content": "长期事实"}),
+            ("mcp__capability__diary_write", "diary.write", {"content": "今天值得留下的一页"}),
+            ("mcp__home__add_todo", "todo.write", {"content": "明天寄快递"}),
+            ("mcp__capability__task_timer_start", "task.timer.start", {"title": "收拾桌子"}),
+            ("mcp__capability__ledger_write", "ledger.write", {"amount": -68}),
+        ):
+            with self.subTest(capability_id=capability_id):
+                result = evaluate_tool_call(tool_name, action, self.lease())
+                self.assertEqual(result["capability_id"], capability_id)
+                self.assertEqual(result["lease_decision"], "ALLOW")
+                self.assertNotIn("approval_id", result)
+
+    def test_default_chat_autonomous_writes_deny_when_runtime_off(self):
+        actions = (
+            ("mcp__capability__memory_write", "memory.write", {"content": "x"}),
+            ("mcp__capability__diary_write", "diary.write", {"content": "x"}),
+            ("mcp__home__add_todo", "todo.write", {"content": "x"}),
+            ("mcp__capability__task_timer_start", "task.timer.start", {"title": "x"}),
+            ("mcp__capability__ledger_write", "ledger.write", {"amount": -1}),
         )
+        for tool_name, capability_id, action in actions:
+            with self.subTest(capability_id=capability_id):
+                with patch(
+                    "tools.execution_fence.read_capability_state",
+                    return_value=capability_state.RUNTIME_STATE_OFF,
+                ):
+                    result = evaluate_tool_call(tool_name, action, self.lease())
+                self.assertEqual(result["capability_id"], capability_id)
+                self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
 
     def test_e_explicit_write_allows(self):
         lease = self.lease(source="explicit_user_intent", requested=("todo.write",))
@@ -153,33 +176,26 @@ class ExecutionFenceTests(unittest.TestCase):
             "ALLOW",
         )
 
-    def test_f_confirmation_exact_match_allows(self):
+    def test_f_legacy_confirmation_exact_match_still_checks_action_identity(self):
         action = {"content": "明天寄快递", "due_date": "2026-08-13"}
-        asked = evaluate_tool_call("mcp__home__add_todo", action, self.lease())
+        approval_id = build_approval_id("todo.write", "mcp__home__add_todo", action)
         lease = self.lease(
             source="user_confirmation", requested=("todo.write",),
-            approvals=(asked["approval_id"],), turn_id="turn-2",
+            approvals=(approval_id,), turn_id="turn-2",
         )
-        self.assertEqual(
-            evaluate_tool_call("mcp__home__add_todo", action, lease)["lease_decision"],
-            "ALLOW",
-        )
+        result = evaluate_tool_call("mcp__home__add_todo", action, lease)
+        self.assertEqual(result["lease_decision"], "ALLOW")
+        self.assertEqual(result["approval_id"], approval_id)
 
-    def test_g_confirmation_changed_input_mismatches(self):
-        asked = evaluate_tool_call(
-            "mcp__home__add_todo",
-            {"content": "明天寄快递", "due_date": "2026-08-13"},
-            self.lease(),
-        )
+    def test_g_legacy_confirmation_changed_input_mismatches(self):
+        action = {"content": "明天寄快递", "due_date": "2026-08-13"}
+        approval_id = build_approval_id("todo.write", "mcp__home__add_todo", action)
         lease = self.lease(
             source="user_confirmation", requested=("todo.write",),
-            approvals=(asked["approval_id"],), turn_id="turn-2",
+            approvals=(approval_id,), turn_id="turn-2",
         )
-        result = evaluate_tool_call(
-            "mcp__home__add_todo",
-            {"content": "明天买牛奶", "due_date": "2026-08-13"},
-            lease,
-        )
+        changed = {"content": "明天买牛奶", "due_date": "2026-08-13"}
+        result = evaluate_tool_call("mcp__home__add_todo", changed, lease)
         self.assertEqual(result["lease_decision"], "LEASE_MISMATCH")
 
     def test_h_previous_turn_write_does_not_inherit(self):
@@ -195,7 +211,7 @@ class ExecutionFenceTests(unittest.TestCase):
             evaluate_tool_call(
                 "mcp__home__add_todo", action, self.lease(turn_id="101")
             )["lease_decision"],
-            "CAPABILITY_ASK_REQUIRED",
+            "ALLOW",
         )
 
     def test_i_missing_lease_fails_closed(self):
@@ -224,21 +240,17 @@ class ExecutionFenceTests(unittest.TestCase):
         )
         self.assertTrue(P1_RESERVED_CAPABILITY_IDS)
 
-    def test_k_l_server_side_gate_has_zero_bypass_posts(self):
-        action = {"content": "不应写入"}
-        post_calls = []
-        denied = evaluate_tool_call("mcp__home__add_todo", action, self.lease())
-        if denied["lease_decision"] == "ALLOW":
-            post_calls.append(action)
-        self.assertEqual(denied["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-        self.assertEqual(post_calls, [])
+    def test_k_l_server_side_gate_allows_only_fenced_execution(self):
+        action = {"content": "应写入"}
         allowed = evaluate_tool_call(
-            "mcp__home__add_todo", action,
+            "mcp__home__add_todo",
+            action,
             self.lease(source="explicit_user_intent", requested=("todo.write",)),
         )
-        if allowed["lease_decision"] == "ALLOW":
-            post_calls.append(action)
+        self.assertEqual(allowed["lease_decision"], "ALLOW")
+        post_calls = [action] if allowed["lease_decision"] == "ALLOW" else []
         self.assertEqual(post_calls, [action])
+        self.assertNotIn("approval_id", allowed)
 
     def test_m_atomic_lease_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,20 +282,9 @@ class ExecutionFenceTests(unittest.TestCase):
 
             turn101 = self.lease(turn_id="101")
             runtime.start_turn(turn101)
-            denied = runtime.evaluate("mcp__home__add_todo", action)
-            self.assertEqual(denied["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-            deferred = runtime.deferred_tool_use("mcp__home__add_todo", action)
-            self.assertEqual(deferred["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-            self.assertEqual(deferred["event"], "deferred_tool_use")
-            self.assertEqual(deferred["tool_name"], "mcp__home__add_todo")
-            self.assertEqual(deferred["tool_input"], action)
-            self.assertEqual(
-                deferred["approval_id"], denied["approval_id"],
-            )
-            self.assertEqual(
-                deferred["approval_prompt"], "我顺手给你记进待办里？",
-            )
-            self.assertNotIn("是否授权", deferred["approval_prompt"])
+            allowed = runtime.evaluate("mcp__home__add_todo", action)
+            self.assertEqual(allowed["lease_decision"], "ALLOW")
+            self.assertNotIn("approval_id", allowed)
             self.assertTrue(runtime.abort_turn(turn_id="101"))
             self.assertIsNone(read_current_turn_lease(path)[0])
 
@@ -305,14 +306,13 @@ class ExecutionFenceTests(unittest.TestCase):
             runtime = UH_A0TurnRuntime(path, session_id="cc-runtime")
             turn100 = self.lease(turn_id="100")
             runtime.start_turn(turn100)
-            asked = runtime.evaluate("mcp__home__add_ledger", action)
-            self.assertEqual(asked["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+            runtime.evaluate("mcp__home__add_ledger", action)
             runtime.end_turn(turn_id="100")
 
             confirmed = self.lease(
                 source="user_confirmation",
                 requested=("ledger.write",),
-                approvals=(asked["approval_id"],),
+                approvals=(build_approval_id("ledger.write", "mcp__home__add_ledger", action),),
                 turn_id="101",
             )
             runtime.start_turn(confirmed)
@@ -333,7 +333,6 @@ class ExecutionFenceTests(unittest.TestCase):
             ("ALLOW", "allow"),
             ("DENIED_CAPABILITY", "deny"),
             ("LEASE_MISMATCH", "deny"),
-            ("CAPABILITY_ASK_REQUIRED", "defer"),
         ):
             payload = pretooluse_payload(
                 {"capability_id": "todo.write", "lease_decision": status}
@@ -342,13 +341,8 @@ class ExecutionFenceTests(unittest.TestCase):
                 payload["hookSpecificOutput"]["permissionDecision"], expected
             )
 
-    def test_task_timer_uses_explicit_or_ask(self):
+    def test_task_timer_allows_without_generic_confirmation(self):
         action = {"title": "收拾桌子", "countdown_seconds": 600}
-        asked = evaluate_tool_call(
-            "mcp__capability__task_timer_start", action, self.lease()
-        )
-        self.assertEqual(asked["capability_id"], "task.timer.start")
-        self.assertEqual(asked["lease_decision"], "CAPABILITY_ASK_REQUIRED")
         allowed = evaluate_tool_call(
             "mcp__capability__task_timer_start",
             action,
@@ -357,8 +351,9 @@ class ExecutionFenceTests(unittest.TestCase):
                 requested=("task.timer.start",),
             ),
         )
+        self.assertEqual(allowed["capability_id"], "task.timer.start")
         self.assertEqual(allowed["lease_decision"], "ALLOW")
-        self.assertNotEqual(allowed["lease_decision"], "self_write_auto")
+        self.assertNotIn("approval_id", allowed)
 
     def test_o_surface_is_generation_stable(self):
         first = self.lease(turn_id="a")

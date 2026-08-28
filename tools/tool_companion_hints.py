@@ -19,7 +19,6 @@ VERSION = "0.2"
 
 _STATUS_LABELS = {
     "read_auto": "只读 · 可主动查",
-    "explicit_or_ask": "可写 · 明确要求或先问",
     "task_only": "任务内可用",
     "self_write_auto": "可主动写",
 }
@@ -61,7 +60,7 @@ _DEFAULTS: dict[str, dict[str, str]] = {
     },
     "todo.write": {
         "display_label": "记录待办",
-        "companion_hint": "她明确说要记下来时，可以直接记录；如果只是你自己觉得替她写会有帮助，先自然地问一句。",
+        "companion_hint": "当对话上下文表明一个具体事项值得记录时，可以直接记录；只是讨论计划、信息不足或内容不明确时不要新增。",
         "physical_boundary": "只在明确记录意图下写入待办；不会因为聊天推测就自动新增。",
     },
     "countdown.read": {
@@ -71,7 +70,7 @@ _DEFAULTS: dict[str, dict[str, str]] = {
     },
     "task.timer.start": {
         "display_label": "开始行动计时",
-        "companion_hint": "当她明确要开始一件具体行动，或者一个明确的行动适合马上计时时，可以创建行动计时；如果只是模糊建议，先自然地问一句。",
+        "companion_hint": "当对话上下文表明一个具体行动适合马上计时时，可以创建行动计时；模糊建议、信息不足或没有具体动作时不创建。",
         "physical_boundary": "只创建行动计时任务；不会写待办、日期倒计时或自主触发，也不会替代完成反馈和浮窗。",
     },
     "ledger.read": {
@@ -86,7 +85,7 @@ _DEFAULTS: dict[str, dict[str, str]] = {
     },
     "ledger.write": {
         "display_label": "记一笔账",
-        "companion_hint": "她明确要把一笔花销记到账本时，可以直接记录；如果只是你主动想到替她写，先自然地问一句。",
+        "companion_hint": "当对话上下文表明一笔具体账目需要记录时，可以直接记录；金额、用途或内容不明确时不要新增。",
         "physical_boundary": "只在明确记录意图下写入账本；不会因为对话内容推测就自动记账。",
     },
     "files.read": {

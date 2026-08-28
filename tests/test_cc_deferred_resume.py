@@ -135,29 +135,19 @@ class DeferredResumeContractTests(unittest.TestCase):
             ) as popen:
                 first_stream = session.send_turn(
                     "请判断是否记入待办",
-                    turn_lease=self.lease(),
+                    turn_lease=self.lease(
+                        source="explicit_user_intent",
+                        requested=("todo.write",),
+                    ),
                     turn_runtime=runtime,
                 )
                 first_event, first_payload = next(first_stream)
                 self.assertEqual(first_event, "tool_use")
-                self.assertTrue(first_payload["deferred_tool_use"])
-                self.assertEqual(first_payload["status"], "waiting_for_confirmation")
+                self.assertEqual(first_payload["lease_decision"], "ALLOW")
                 self.assertEqual(first_payload["id"], "toolu-1")
                 self.assertEqual(first_payload["name"], "mcp__capability__todo_write")
                 self.assertEqual(first_payload["args"], action)
-                # The first externally visible waiting event is authoritative:
-                # pending state exists and the default lease is already gone.
-                self.assertIsNone(read_current_turn_lease(lease_path)[0])
-                self.assertEqual(
-                    session.pending_deferred,
-                    {
-                        "session_id": "session-abc",
-                        "tool_use_id": "toolu-1",
-                        "tool_name": "mcp__capability__todo_write",
-                        "tool_input": action,
-                        "approval_id": first_payload["approval_id"],
-                    },
-                )
+
                 first_events = [(first_event, first_payload)] + list(first_stream)
                 waiting = [
                     payload for event, payload in first_events
@@ -167,12 +157,29 @@ class DeferredResumeContractTests(unittest.TestCase):
                     and payload.get("status") == "waiting_for_confirmation"
                 ]
                 self.assertEqual(len(waiting), 1)
+                deferred_payload = waiting[0]
+                self.assertEqual(deferred_payload["id"], "toolu-1")
+                self.assertEqual(deferred_payload["name"], "mcp__capability__todo_write")
+                self.assertEqual(deferred_payload["args"], action)
+                # A provider-deferred result remains compatible, but ordinary
+                # capability execution has already passed the fence without ASK.
+                self.assertIsNone(read_current_turn_lease(lease_path)[0])
+                self.assertEqual(
+                    session.pending_deferred,
+                    {
+                        "session_id": "session-abc",
+                        "tool_use_id": "toolu-1",
+                        "tool_name": "mcp__capability__todo_write",
+                        "tool_input": action,
+                        "approval_id": deferred_payload["approval_id"],
+                    },
+                )
                 self.assertFalse(any(event == "tool_result" for event, _ in first_events))
 
                 confirmation = self.lease(
                     source="user_confirmation",
                     requested=("todo.write",),
-                    approvals=(first_payload["approval_id"],),
+                    approvals=(deferred_payload["approval_id"],),
                     turn_id="101",
                 )
                 confirmation_leases = []
@@ -278,10 +285,17 @@ class DeferredResumeContractTests(unittest.TestCase):
             spawn.assert_not_called()
             self.assertEqual(home_tool_calls, [])
 
-            new_action = evaluate_tool_call(current_tool, action, self.lease())
+            new_action = evaluate_tool_call(
+                current_tool,
+                action,
+                self.lease(
+                    source="explicit_user_intent",
+                    requested=("todo.write",),
+                ),
+            )
             self.assertEqual(new_action["capability_id"], "todo.write")
-            self.assertEqual(new_action["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-            self.assertNotEqual(new_action["approval_id"], old_approval_id)
+            self.assertEqual(new_action["lease_decision"], "ALLOW")
+            self.assertNotIn("approval_id", new_action)
 
 if __name__ == "__main__":
     unittest.main()
