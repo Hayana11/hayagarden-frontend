@@ -329,7 +329,12 @@ class ExecutionFenceTests(unittest.TestCase):
     def test_task_timer_allows_without_generic_confirmation(self):
         action = {"title": "收拾桌子", "countdown_seconds": 600}
         allowed = evaluate_tool_call(
-            "mcp__capability__task_timer_start", action, self.lease()
+            "mcp__capability__task_timer_start",
+            action,
+            self.lease(
+                source="explicit_user_intent",
+                requested=("task.timer.start",),
+            ),
         )
         self.assertEqual(allowed["capability_id"], "task.timer.start")
         self.assertEqual(allowed["lease_decision"], "ALLOW")
