@@ -77,4 +77,3 @@ jobs:
         run: node --test tests/test_external_mcp_call_transport.mjs
       - name: Run M5-03A discovery transport regression
         run: node --test tests/test_external_mcp_discovery_transport.mjs
-
