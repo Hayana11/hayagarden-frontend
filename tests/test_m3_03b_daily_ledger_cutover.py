@@ -24,7 +24,7 @@ from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
-TARGET_FINGERPRINT = "3abed02e09b88156dbb61e49205aaa4302973625da6952e6b17156c0a20fe142"
+TARGET_FINGERPRINT = "1112772eefff74a18b71bf692a9161b3b4b72b3a0b361dbe523052b30201a26c"
 LEDGER_INTERNAL = ()
 LEDGER_PROXY = (
     "mcp__capability__ledger_read",
@@ -315,7 +315,10 @@ class DailyLedgerCutoverTests(unittest.TestCase):
             fresh = execution_fence.evaluate_tool_call(
                 "mcp__capability__ledger_write",
                 action,
-                self.lease(),
+                self.lease(
+                    source="explicit_user_intent",
+                    requested=("ledger.write",),
+                ),
             )
             self.assertEqual(fresh["lease_decision"], "ALLOW")
             self.assertNotIn("approval_id", fresh)
