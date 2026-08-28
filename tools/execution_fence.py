@@ -24,7 +24,7 @@ from tools.capability_state import (
 from tools.lease_signer import ISSUED_FROM_VALUES, TURN_LEASE_FIELDS, TURN_MODES
 
 LEASE_DECISIONS = frozenset(
-    {"ALLOW", "DENIED_CAPABILITY", "CAPABILITY_ASK_REQUIRED", "LEASE_MISMATCH"}
+    {"ALLOW", "DENIED_CAPABILITY", "LEASE_MISMATCH"}
 )
 EXTERNAL_READ_AUTO_CAPABILITY_IDS = frozenset({"web.search", "web.read"})
 DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
@@ -181,7 +181,6 @@ def evaluate_tool_call(
             diagnostic="capability is explicitly disabled at runtime",
         )
 
-    action_id = build_approval_id(capability_id, tool_name, tool_input)
     allowed = tuple(turn_lease["allowed_capabilities"])
     approvals = tuple(turn_lease["approval_ids"])
     is_write = entry.get("side_effect") == "external_state"
@@ -208,27 +207,23 @@ def evaluate_tool_call(
         )
 
     if capability_id in allowed:
+        # Keep exact action identity checks only for legacy confirmation leases;
+        # ordinary capability execution never depends on approval metadata.
+        result = _decision(
+            capability_id=capability_id,
+            turn_mode=turn_mode,
+            lease_decision="ALLOW",
+        )
         if is_write and turn_lease["issued_from"] == "user_confirmation":
+            action_id = build_approval_id(capability_id, tool_name, tool_input)
             if action_id not in approvals:
                 return _decision(
                     capability_id=capability_id, turn_mode=turn_mode,
                     lease_decision="LEASE_MISMATCH", approval_id=action_id,
                     diagnostic="confirmation action mismatch",
                 )
-        result = _decision(
-            capability_id=capability_id,
-            turn_mode=turn_mode,
-            lease_decision="ALLOW",
-        )
-        if is_write:
             result["approval_id"] = action_id
         return result
-    if entry.get("autonomy_mode") == "explicit_or_ask":
-        return _decision(
-            capability_id=capability_id, turn_mode=turn_mode,
-            lease_decision="CAPABILITY_ASK_REQUIRED", approval_id=action_id,
-            diagnostic="capability requires explicit user confirmation",
-        )
     return _decision(
         capability_id=capability_id, turn_mode=turn_mode,
         lease_decision="DENIED_CAPABILITY",
@@ -386,11 +381,7 @@ def approval_prompt(tool_name, tool_input):
 
 def pretooluse_payload(result):
     decision = str(result.get("lease_decision") or "LEASE_MISMATCH")
-    provider_decision = (
-        "allow" if decision == "ALLOW"
-        else "defer" if decision == "CAPABILITY_ASK_REQUIRED"
-        else "deny"
-    )
+    provider_decision = "allow" if decision == "ALLOW" else "deny"
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
