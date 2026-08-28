@@ -160,7 +160,7 @@ try {
     name: 'add_ledger',
     arguments: { amount: -12 },
   });
-  assert.match(textOf(badLease), /UH-A0 LEASE_MISMATCH/);
+  assert.match(textOf(badLease), /UH-A0 DENIED_CAPABILITY/);
   assert.equal(countLedgerRows(), before);
 
   installLease('ledger.write');
