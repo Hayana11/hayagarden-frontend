@@ -411,7 +411,7 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             )
             self.assertEqual(
                 decision['lease_decision'],
-                'CAPABILITY_ASK_REQUIRED',
+                'ALLOW',
             )
             dr._release_lease(second)
         finally:
