@@ -140,24 +140,11 @@ class DeferredResumeContractTests(unittest.TestCase):
                 )
                 first_event, first_payload = next(first_stream)
                 self.assertEqual(first_event, "tool_use")
-                self.assertTrue(first_payload["deferred_tool_use"])
-                self.assertEqual(first_payload["status"], "waiting_for_confirmation")
+                self.assertEqual(first_payload["lease_decision"], "ALLOW")
                 self.assertEqual(first_payload["id"], "toolu-1")
                 self.assertEqual(first_payload["name"], "mcp__capability__todo_write")
                 self.assertEqual(first_payload["args"], action)
-                # The first externally visible waiting event is authoritative:
-                # pending state exists and the default lease is already gone.
-                self.assertIsNone(read_current_turn_lease(lease_path)[0])
-                self.assertEqual(
-                    session.pending_deferred,
-                    {
-                        "session_id": "session-abc",
-                        "tool_use_id": "toolu-1",
-                        "tool_name": "mcp__capability__todo_write",
-                        "tool_input": action,
-                        "approval_id": first_payload["approval_id"],
-                    },
-                )
+
                 first_events = [(first_event, first_payload)] + list(first_stream)
                 waiting = [
                     payload for event, payload in first_events
@@ -167,12 +154,29 @@ class DeferredResumeContractTests(unittest.TestCase):
                     and payload.get("status") == "waiting_for_confirmation"
                 ]
                 self.assertEqual(len(waiting), 1)
+                deferred_payload = waiting[0]
+                self.assertEqual(deferred_payload["id"], "toolu-1")
+                self.assertEqual(deferred_payload["name"], "mcp__capability__todo_write")
+                self.assertEqual(deferred_payload["args"], action)
+                # A provider-deferred result remains compatible, but ordinary
+                # capability execution has already passed the fence without ASK.
+                self.assertIsNone(read_current_turn_lease(lease_path)[0])
+                self.assertEqual(
+                    session.pending_deferred,
+                    {
+                        "session_id": "session-abc",
+                        "tool_use_id": "toolu-1",
+                        "tool_name": "mcp__capability__todo_write",
+                        "tool_input": action,
+                        "approval_id": deferred_payload["approval_id"],
+                    },
+                )
                 self.assertFalse(any(event == "tool_result" for event, _ in first_events))
 
                 confirmation = self.lease(
                     source="user_confirmation",
                     requested=("todo.write",),
-                    approvals=(first_payload["approval_id"],),
+                    approvals=(deferred_payload["approval_id"],),
                     turn_id="101",
                 )
                 confirmation_leases = []
