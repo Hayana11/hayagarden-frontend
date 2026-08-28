@@ -35,3 +35,6 @@ static/uploads/
 memories.db.bak*
 # B1-1B Planner Shadow observations (non-authoritative JSONL)
 planner_shadow.jsonl
+
+# Local compatibility only; production Task Timer DB lives outside the source worktree.
+/commands.db
