@@ -1,7 +1,7 @@
 """Durable, fail-closed ownership of one external MCP invocation attempt.
 
-This module deliberately stops at an injected runner seam.  It neither
-materializes secrets nor knows how a production Node transport is launched.
+This module deliberately stops at an injected runner seam. It never reads
+secret values and knows nothing about a production Node transport.
 """
 
 from __future__ import annotations
