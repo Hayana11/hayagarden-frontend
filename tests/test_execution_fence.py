@@ -106,9 +106,7 @@ class ExecutionFenceTests(unittest.TestCase):
             self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
 
     def test_c_diary_chat_auto_allows_without_approval(self):
-        lease = self.lease(
-            source="explicit_user_intent", requested=("diary.write",)
-        )
+        lease = self.lease()
         result = evaluate_tool_call(
             "mcp__capability__diary_write", {"content": "今天值得留下的一页"}, lease
         )
@@ -139,18 +137,35 @@ class ExecutionFenceTests(unittest.TestCase):
 
     def test_d_enabled_writes_allow_without_confirmation(self):
         for tool_name, capability_id, action in (
+            ("mcp__capability__memory_write", "memory.write", {"content": "长期事实"}),
+            ("mcp__capability__diary_write", "diary.write", {"content": "今天值得留下的一页"}),
             ("mcp__home__add_todo", "todo.write", {"content": "明天寄快递"}),
             ("mcp__capability__task_timer_start", "task.timer.start", {"title": "收拾桌子"}),
             ("mcp__capability__ledger_write", "ledger.write", {"amount": -68}),
         ):
             with self.subTest(capability_id=capability_id):
-                lease = self.lease(
-                    source="explicit_user_intent", requested=(capability_id,)
-                )
-                result = evaluate_tool_call(tool_name, action, lease)
+                result = evaluate_tool_call(tool_name, action, self.lease())
                 self.assertEqual(result["capability_id"], capability_id)
                 self.assertEqual(result["lease_decision"], "ALLOW")
                 self.assertNotIn("approval_id", result)
+
+    def test_default_chat_autonomous_writes_deny_when_runtime_off(self):
+        actions = (
+            ("mcp__capability__memory_write", "memory.write", {"content": "x"}),
+            ("mcp__capability__diary_write", "diary.write", {"content": "x"}),
+            ("mcp__home__add_todo", "todo.write", {"content": "x"}),
+            ("mcp__capability__task_timer_start", "task.timer.start", {"title": "x"}),
+            ("mcp__capability__ledger_write", "ledger.write", {"amount": -1}),
+        )
+        for tool_name, capability_id, action in actions:
+            with self.subTest(capability_id=capability_id):
+                with patch(
+                    "tools.execution_fence.read_capability_state",
+                    return_value=capability_state.RUNTIME_STATE_OFF,
+                ):
+                    result = evaluate_tool_call(tool_name, action, self.lease())
+                self.assertEqual(result["capability_id"], capability_id)
+                self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
 
     def test_e_explicit_write_allows(self):
         lease = self.lease(source="explicit_user_intent", requested=("todo.write",))
@@ -196,7 +211,7 @@ class ExecutionFenceTests(unittest.TestCase):
             evaluate_tool_call(
                 "mcp__home__add_todo", action, self.lease(turn_id="101")
             )["lease_decision"],
-            "DENIED_CAPABILITY",
+            "ALLOW",
         )
 
     def test_i_missing_lease_fails_closed(self):
@@ -268,7 +283,7 @@ class ExecutionFenceTests(unittest.TestCase):
             turn101 = self.lease(turn_id="101")
             runtime.start_turn(turn101)
             allowed = runtime.evaluate("mcp__home__add_todo", action)
-            self.assertEqual(allowed["lease_decision"], "DENIED_CAPABILITY")
+            self.assertEqual(allowed["lease_decision"], "ALLOW")
             self.assertNotIn("approval_id", allowed)
             self.assertTrue(runtime.abort_turn(turn_id="101"))
             self.assertIsNone(read_current_turn_lease(path)[0])
