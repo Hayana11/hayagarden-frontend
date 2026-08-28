@@ -199,17 +199,6 @@ def evaluate_tool_call(
             lease_decision="ALLOW",
         )
 
-    if (
-        entry.get("autonomy_mode") == "self_write_auto"
-        and turn_mode == "chat"
-        and turn_lease["issued_from"] != "user_confirmation"
-    ):
-        return _decision(
-            capability_id=capability_id,
-            turn_mode=turn_mode,
-            lease_decision="ALLOW",
-        )
-
     if capability_id in allowed:
         # Keep exact action identity checks only for legacy confirmation leases;
         # ordinary capability execution never depends on approval metadata.
