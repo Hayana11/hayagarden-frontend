@@ -86,29 +86,40 @@ def gateway_fixture(tmp_path, monkeypatch):
 
 def _make_pending(helpers, get_db, lease):
     helpers["get_db"] = get_db
-    helpers["run_tool"] = lambda name, args: "unexpected legacy execution"
-    deferred = helpers["_dispatch_api_chat_tool"](
+    conn = get_db()
+    try:
+        action = PendingActionStore(conn).create_pending_action(
+            capability_id="todo.write",
+            tool_name="add_todo",
+            tool_input={"content": "gateway seam test", "due_date": None},
+            owner_id="api-chat",
+            turn_id=lease["turn_id"],
+            tool_use_id="toolu-gateway-1",
+        )
+    finally:
+        conn.close()
+    return {
+        "deferred_tool_use": True,
+        "pending_action_id": action.pending_action_id,
+        "approval_id": action.approval_id,
+        "tool_use_id": action.tool_use_id,
+    }
+
+
+def test_dispatch_allows_direct_todo_write(gateway_fixture):
+    get_db, lease, todo_path = gateway_fixture
+    helpers = _gateway_functions("_dispatch_api_chat_tool")
+    calls = []
+    helpers["run_tool"] = lambda name, args: calls.append((name, args)) or "direct todo result"
+    result = helpers["_dispatch_api_chat_tool"](
         "add_todo",
         {"content": "gateway seam test", "due_date": None},
         lease,
-        tool_use_id="toolu-gateway-1",
     )
-    assert deferred["deferred_tool_use"] is True
-    assert deferred["pending_action_id"]
-    assert deferred["approval_id"]
-    return deferred
-
-
-def test_dispatch_creates_durable_ask_without_todo_write(gateway_fixture):
-    get_db, lease, todo_path = gateway_fixture
-    helpers = _gateway_functions("_dispatch_api_chat_tool")
-    deferred = _make_pending(helpers, get_db, lease)
-
+    assert result == "direct todo result"
+    assert calls == [("add_todo", {"content": "gateway seam test", "due_date": None})]
     check = sqlite3.connect(todo_path)
     assert check.execute("SELECT COUNT(*) FROM todos").fetchone()[0] == 0
-    action = PendingActionStore(check).get(deferred["pending_action_id"])
-    assert action.state == "pending"
-    assert action.tool_use_id == "toolu-gateway-1"
     check.close()
 
 
