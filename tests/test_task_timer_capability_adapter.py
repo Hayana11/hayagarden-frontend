@@ -63,12 +63,18 @@ class TaskTimerCapabilityAdapterTests(unittest.TestCase):
     def test_default_issue_path_is_mocked_and_preserved(self):
         fake = MagicMock()
         fake.execute.return_value.lastrowid = 7
-        with patch.object(self.command_store.sqlite3, "connect", return_value=fake) as connect:
-            self.command_store.issue("mocked task")
-        expected = (str(self.command_store.DB_PATH),)
+        with tempfile.TemporaryDirectory() as tmp:
+            original_path = self.command_store.DB_PATH
+            self.command_store.DB_PATH = str(Path(tmp) / "commands.db")
+            try:
+                with patch.object(self.command_store.sqlite3, "connect", return_value=fake) as connect:
+                    self.command_store.issue("mocked task")
+            finally:
+                self.command_store.DB_PATH = original_path
+        expected = str(Path(tmp) / "commands.db")
         self.assertEqual(
             connect.call_args_list,
-            [((expected[0],), {"timeout": 5}), ((expected[0],), {"timeout": 5})],
+            [((expected,), {"timeout": 5}), ((expected,), {"timeout": 5})],
         )
         fake.commit.assert_called_once()
         fake.close.assert_called_once()
