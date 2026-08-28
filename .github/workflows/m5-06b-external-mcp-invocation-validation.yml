@@ -1,0 +1,81 @@
+name: M5-06B External MCP invocation validation
+
+on:
+  pull_request:
+    paths:
+      - tools/external_mcp_invocation.py
+      - tests/test_external_mcp_invocation.py
+      - .github/workflows/m5-06b-external-mcp-invocation-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify frozen base, head, merge-base, and changed-file fence
+        shell: bash
+        env:
+          BASE_SHA: 62cce1fb32b5786cab54b0c8e2b19ebce8cf0b02
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base "$BASE_SHA" "$HEAD_SHA")" = "$BASE_SHA"
+          expected=$(printf '%s\n' \
+            .github/workflows/m5-06b-external-mcp-invocation-validation.yml \
+            tests/test_external_mcp_invocation.py \
+            tools/external_mcp_invocation.py)
+          actual=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Verify source boundary
+        shell: bash
+        env:
+          BASE_SHA: 62cce1fb32b5786cab54b0c8e2b19ebce8cf0b02
+        run: |
+          set -euo pipefail
+          product=tools/external_mcp_invocation.py
+          forbidden='external_mcp_call_transport|external_mcp_discovery_transport|external_secret_store|decrypt_secret|materialize|Authorization|Bearer|cookie|headers|capability_manifest|gateway|app.py|requests|httpx|urllib|subprocess|socket|os\.environ'
+          if grep -nEi "$forbidden" "$product"; then
+            echo "forbidden product boundary found" >&2
+            exit 1
+          fi
+          test -z "$(git diff --name-only "$BASE_SHA" HEAD -- \
+            tools/external_mcp_call_transport.mjs \
+            tools/external_mcp_discovery_transport.mjs \
+            tools/external_server_registry.py \
+            tools/external_secret_store.py \
+            tools/external_tool_registry.py \
+            tools/external_tool_side_effect_policy.py \
+            tools/external_tool_execution_fence.py \
+            tools/lease_signer.py \
+            tools/capability_manifest.py)"
+
+      - name: Run M5-06B focused tests
+        run: python -m unittest -v tests.test_external_mcp_invocation
+
+      - name: Run M5-05B fence regression
+        run: python -m unittest tests.test_external_tool_execution_fence
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run M5-06A transport regression
+        run: node --test tests/test_external_mcp_call_transport.mjs
+      - name: Run M5-03A discovery transport regression
+        run: node --test tests/test_external_mcp_discovery_transport.mjs
