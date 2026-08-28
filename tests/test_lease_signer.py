@@ -160,7 +160,7 @@ class LeaseSignerContractTests(unittest.TestCase):
             issued_from="default_policy",
         )
         self.assertIn("todo.write", turn_n1["allowed_capabilities"])
-        self.assertEqual(turn_n1["allowed_capabilities"], CHAT_WAKE_DEFAULTS)
+        self.assertEqual(turn_n1["allowed_capabilities"], CHAT_DEFAULTS)
 
         with self.assertRaises(LeaseSignError) as ctx:
             issue_turn_lease(
@@ -177,7 +177,7 @@ class LeaseSignerContractTests(unittest.TestCase):
             issued_from="default_policy",
         )
         self.assertNotIn("todo.write", wake["allowed_capabilities"])
-        self.assertEqual(wake["allowed_capabilities"], CHAT_WAKE_DEFAULTS)
+        self.assertEqual(wake["allowed_capabilities"], WAKE_DEFAULTS)
 
     def test_e_explicit_user_intent_signs_write_without_ask(self):
         lease = issue_turn_lease(
