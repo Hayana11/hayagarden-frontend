@@ -13,19 +13,12 @@ from unittest.mock import MagicMock, patch
 class TaskTimerCapabilityAdapterTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # command_store preserves its production-time _init() call. Mock only
-        # that import-time connection so this test suite never opens production DB.
-        with patch("sqlite3.connect") as connect:
-            fake = MagicMock()
-            connect.return_value = fake
-            importlib.invalidate_caches()
-            cls.command_store = importlib.import_module("command_store")
-            cls.adapter = importlib.import_module(
-                "tools.task_timer_capability_adapter"
-            )
-        fake.execute.assert_called_once()
-        fake.commit.assert_called_once()
-        fake.close.assert_called_once()
+        # Import must be side-effect free; all lifecycle tests use temporary DBs.
+        importlib.invalidate_caches()
+        cls.command_store = importlib.import_module("command_store")
+        cls.adapter = importlib.import_module(
+            "tools.task_timer_capability_adapter"
+        )
 
     def test_conn_is_pure_connection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,9 +65,10 @@ class TaskTimerCapabilityAdapterTests(unittest.TestCase):
         fake.execute.return_value.lastrowid = 7
         with patch.object(self.command_store.sqlite3, "connect", return_value=fake) as connect:
             self.command_store.issue("mocked task")
-        connect.assert_called_once_with(
-            str(self.command_store.DB_PATH),
-            timeout=5,
+        expected = (str(self.command_store.DB_PATH),)
+        self.assertEqual(
+            connect.call_args_list,
+            [((expected[0],), {"timeout": 5}), ((expected[0],), {"timeout": 5})],
         )
         fake.commit.assert_called_once()
         fake.close.assert_called_once()
