@@ -220,15 +220,15 @@ def _assert_grantable(capability_id: str, *, issued_from: str) -> None:
                 "DENIED_CAPABILITY",
                 f"task_only capability requires task_contract: {capability_id!r}",
             )
-        if autonomy not in {"explicit_or_ask", "read_auto"}:
+        if autonomy not in {"self_write_auto", "read_auto"}:
             raise LeaseSignError(
                 "DENIED_CAPABILITY",
                 f"capability autonomy incompatible with {issued_from}: {capability_id!r}",
             )
     elif issued_from == "task_contract":
-        # task_only / read_auto / explicit_or_ask may be appended by contract;
+        # task_only / read_auto / self_write_auto may be appended by contract;
         # RESERVED (including code.write / workspace.execute) already failed above.
-        if autonomy not in {"task_only", "read_auto", "explicit_or_ask"}:
+        if autonomy not in {"task_only", "read_auto", "self_write_auto"}:
             raise LeaseSignError(
                 "DENIED_CAPABILITY",
                 f"capability autonomy incompatible with task_contract: {capability_id!r}",
