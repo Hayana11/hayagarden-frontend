@@ -43,6 +43,8 @@ jobs:
 
       - name: Verify source boundary
         shell: bash
+        env:
+          BASE_SHA: 62cce1fb32b5786cab54b0c8e2b19ebce8cf0b02
         run: |
           set -euo pipefail
           product=tools/external_mcp_invocation.py
