@@ -388,7 +388,7 @@ class DailyRuntimeTurnTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
-    def test_default_chat_leases_are_fresh_and_write_stays_ask(self):
+    def test_default_chat_leases_are_fresh_and_write_is_in_scope(self):
         db = _tmp_db()
         try:
             _init_chat_messages(db)
@@ -397,7 +397,7 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             self.assertEqual(first.turn_lease['turn_mode'], 'chat')
             self.assertEqual(first.turn_lease['issued_from'], 'default_policy')
             self.assertIn('home.light.status', first.turn_lease['allowed_capabilities'])
-            self.assertNotIn('todo.write', first.turn_lease['allowed_capabilities'])
+            self.assertIn('todo.write', first.turn_lease['allowed_capabilities'])
             dr._release_lease(first)
 
             uid2 = _insert(db, 'hayana', 'second', '2026-07-27 10:01:00')
