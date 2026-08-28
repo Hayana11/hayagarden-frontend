@@ -11,11 +11,13 @@
 时间戳全用毫秒 epoch（前端 Date.now() 对齐，避免时区/北京时间那套换算）。
 独立 commands.db，不碰 memories.db。
 """
-import os
 import time
 import sqlite3
+from pathlib import Path
 
-DB_PATH = '/opt/frontend/commands.db'
+from tools.task_timer_db import resolve_task_timer_commands_db_path
+
+DB_PATH = resolve_task_timer_commands_db_path()
 
 
 def _conn(db_path=None):
@@ -29,7 +31,9 @@ def _now_ms():
 
 
 def _init(db_path=None):
-    c = _conn(db_path)
+    path = Path(db_path or DB_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    c = _conn(path)
     c.execute('''CREATE TABLE IF NOT EXISTS commands (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
         title             TEXT NOT NULL,
@@ -47,7 +51,9 @@ def _init(db_path=None):
     c.close()
 
 
-_init()
+def _open_for_use(db_path=None):
+    _init(db_path)
+    return _conn(db_path)
 
 
 def issue(title, countdown_seconds=None, created_by='fyodor', db_path=None):
@@ -56,7 +62,7 @@ def issue(title, countdown_seconds=None, created_by='fyodor', db_path=None):
     if not title:
         return None
     cs = int(countdown_seconds) if countdown_seconds else None
-    c = _conn(db_path)
+    c = _open_for_use(db_path)
     cur = c.execute(
         'INSERT INTO commands (title, countdown_seconds, created_at, created_by) VALUES (?,?,?,?)',
         (title, cs, _now_ms(), created_by))
@@ -68,7 +74,7 @@ def issue(title, countdown_seconds=None, created_by='fyodor', db_path=None):
 
 def list_pending():
     """未完成、未取消的任务（前端要显示的，含 started_at 供刷新恢复）。"""
-    c = _conn()
+    c = _open_for_use()
     rows = c.execute(
         'SELECT id, title, countdown_seconds, created_at, started_at '
         'FROM commands WHERE done_at IS NULL AND canceled=0 ORDER BY id ASC').fetchall()
@@ -78,7 +84,7 @@ def list_pending():
 
 def mark_started(cid):
     """前端首次显示浮窗时回写 started_at（只写一次）。"""
-    c = _conn()
+    c = _open_for_use()
     c.execute('UPDATE commands SET started_at=? WHERE id=? AND started_at IS NULL',
               (_now_ms(), cid))
     c.commit()
@@ -87,7 +93,7 @@ def mark_started(cid):
 
 def mark_done(cid):
     """她点完成：算 duration 和 vs_countdown。"""
-    c = _conn()
+    c = _open_for_use()
     row = c.execute('SELECT started_at, created_at, countdown_seconds FROM commands WHERE id=?',
                     (cid,)).fetchone()
     if not row:
@@ -108,7 +114,7 @@ def mark_done(cid):
 
 def mark_canceled(cid):
     """她取消：我会知道（不美化）。"""
-    c = _conn()
+    c = _open_for_use()
     c.execute('UPDATE commands SET canceled=1 WHERE id=?', (cid,))
     c.commit()
     c.close()
@@ -143,7 +149,7 @@ def _format_feedback_rows(rows):
 
 def peek_feedback():
     """只读待回流反馈，不标记消费。返回 (文本行列表, id 列表)。"""
-    c = _conn()
+    c = _open_for_use()
     rows = c.execute(
         'SELECT id, title, countdown_seconds, done_at, canceled, duration_ms, vs_countdown '
         'FROM commands WHERE consumed=0 AND (done_at IS NOT NULL OR canceled=1) '
@@ -164,7 +170,7 @@ def consume_feedback(ids):
             clean.append(value)
     if not clean:
         return 0
-    c = _conn()
+    c = _open_for_use()
     placeholders = ','.join('?' for _ in clean)
     cur = c.execute(
         'UPDATE commands SET consumed=1 '
