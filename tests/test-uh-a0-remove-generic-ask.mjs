@@ -49,7 +49,7 @@ try {
       'import sys',
       'from tools.lease_signer import issue_turn_lease',
       'from tools.execution_fence import write_current_turn_lease',
-      'lease = issue_turn_lease(turn_id="uh-a0-real-chat", turn_mode="chat", issued_from="default_policy", issued_at="2026-08-28T00:00:00Z")',
+      'lease = issue_turn_lease(turn_id="uh-a0-real-chat", turn_mode="chat", issued_from="explicit_user_intent", requested_capabilities=("task.timer.start",), issued_at="2026-08-28T00:00:00Z")',
       'write_current_turn_lease(sys.argv[1], lease)',
     ].join('; '),
     [leasePath],
