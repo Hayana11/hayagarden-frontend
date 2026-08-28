@@ -61,7 +61,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         return self.lease((action,), turn_id), action
 
     def runner(self, status="SUCCESS"):
-        def run(snapshot):
+        def run(envelope):
             self.calls += 1
             return {"status": status}
         return run
@@ -111,11 +111,16 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         candidate = self.prepare()
         lease, _ = self.allowed_lease(candidate)
         observed = []
-        def runner(snapshot):
+        def runner(envelope):
             self.calls += 1
             row = self.connection.execute("SELECT status FROM external_tool_invocation_attempts").fetchone()
             observed.append(row[0])
-            self.assertEqual(snapshot, {"q": "today"})
+            self.assertEqual(envelope["server_id"], self.server.server_id)
+            self.assertEqual(envelope["tool_name"], "calendar.list")
+            self.assertEqual(envelope["endpoint"], self.server.endpoint)
+            self.assertEqual(envelope["transport"], self.server.transport)
+            self.assertEqual(envelope["source_registry_revision"], candidate["current_source_registry_revision"])
+            self.assertEqual(envelope["tool_input"], {"q": "today"})
             return {"status": "SUCCESS"}
         result = self.invoke(lease, runner)
         self.assertEqual(result["status"], SUCCEEDED)
@@ -129,9 +134,9 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         lease, _ = self.allowed_lease(candidate, {"nested": {"value": 1}})
         input_value = {"nested": {"value": 1}}
         seen = []
-        def runner(snapshot):
+        def runner(envelope):
             input_value["nested"]["value"] = 2
-            seen.append(snapshot)
+            seen.append(envelope["tool_input"])
             return {"status": "SUCCESS"}
         result = self.invoke(lease, runner, input_value)
         self.assertEqual(seen, [{"nested": {"value": 1}}])
@@ -210,6 +215,39 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             self.connection.execute("UPDATE external_tool_invocation_audit SET status='x' WHERE attempt_id=?", (result["attempt_id"],))
         with self.assertRaises(sqlite3.DatabaseError):
             self.connection.execute("DELETE FROM external_tool_invocation_audit WHERE attempt_id=?", (result["attempt_id"],))
+
+    def test_call_envelope_is_exact_immutable_allow_descriptor(self):
+        candidate = self.prepare()
+        lease, action = self.allowed_lease(candidate)
+        seen = []
+        def runner(envelope):
+            seen.append(envelope)
+            with self.assertRaises(TypeError):
+                envelope["endpoint"] = "https://attacker.invalid/mcp"
+            self.server_registry.rename(self.server.server_id, "changed after STARTED")
+            return {"status": "OUTCOME_UNKNOWN"}
+        result = self.invoke(lease, runner)
+        self.assertEqual(result["status"], "OUTCOME_UNKNOWN")
+        envelope = seen[0]
+        self.assertEqual(envelope["server_id"], self.server.server_id)
+        self.assertEqual(envelope["tool_name"], "calendar.list")
+        self.assertEqual(envelope["fingerprint"], candidate["current_fingerprint"])
+        self.assertEqual(envelope["source_registry_revision"], candidate["current_source_registry_revision"])
+        self.assertEqual(envelope["external_action_id"], action)
+        self.assertEqual(envelope["endpoint"], "https://calendar.example/mcp")
+        self.assertEqual(envelope["transport"], "streamable_http")
+        self.assertEqual(envelope["tool_input"], {"q": "today"})
+
+    def test_denial_identity_binds_control_and_reason(self):
+        runner = self.runner()
+        lease = self.lease()
+        first = self.invocation.invoke("ext:server-1:missing-a", {"q": "same"}, lease, expected_turn_id="turn-1", runner=runner)
+        second = self.invocation.invoke("ext:server-1:missing-b", {"q": "same"}, lease, expected_turn_id="turn-1", runner=runner)
+        self.assertEqual(first["status"], FAILED_PRE_CALL)
+        self.assertEqual(second["status"], FAILED_PRE_CALL)
+        self.assertNotEqual(first["attempt_id"], second["attempt_id"])
+        self.assertEqual(self.calls, 0)
+        self.assertEqual(self.connection.execute("SELECT COUNT(*) FROM external_tool_invocation_audit").fetchone()[0], 4)
 
 
 if __name__ == "__main__":
