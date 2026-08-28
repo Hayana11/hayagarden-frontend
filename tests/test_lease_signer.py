@@ -22,7 +22,20 @@ from tools.lease_signer import (
 )
 
 
-CHAT_WAKE_DEFAULTS = (
+CHAT_DEFAULTS = (
+    "memory.search",
+    "memory.write",
+    "diary.write",
+    "home.light.status",
+    "todo.read",
+    "todo.write",
+    "countdown.read",
+    "task.timer.start",
+    "ledger.read",
+    "ledger.budget.read",
+    "ledger.write",
+)
+WAKE_DEFAULTS = (
     "memory.search",
     "home.light.status",
     "todo.read",
@@ -99,13 +112,13 @@ class LeaseSignerContractTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, "DENIED_CAPABILITY")
 
     def test_c_default_policy_matches_section_5_3(self):
-        self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["chat"], CHAT_WAKE_DEFAULTS)
-        self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["wake"], CHAT_WAKE_DEFAULTS)
+        self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["chat"], CHAT_DEFAULTS)
+        self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["wake"], WAKE_DEFAULTS)
         self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["task"], TASK_DEFAULTS)
 
         for mode, expected in (
-            ("chat", CHAT_WAKE_DEFAULTS),
-            ("wake", CHAT_WAKE_DEFAULTS),
+            ("chat", CHAT_DEFAULTS),
+            ("wake", WAKE_DEFAULTS),
             ("task", TASK_DEFAULTS),
         ):
             lease = issue_turn_lease(
@@ -115,8 +128,12 @@ class LeaseSignerContractTests(unittest.TestCase):
             )
             self.assertEqual(lease["allowed_capabilities"], expected)
             self.assertEqual(default_allowed_capabilities(mode), expected)
-            self.assertNotIn("todo.write", lease["allowed_capabilities"])
-            self.assertNotIn("ledger.write", lease["allowed_capabilities"])
+            if mode == "chat":
+                self.assertIn("todo.write", lease["allowed_capabilities"])
+                self.assertIn("ledger.write", lease["allowed_capabilities"])
+            else:
+                self.assertNotIn("todo.write", lease["allowed_capabilities"])
+                self.assertNotIn("ledger.write", lease["allowed_capabilities"])
             self.assertNotIn("code.write", lease["allowed_capabilities"])
             self.assertNotIn("workspace.execute", lease["allowed_capabilities"])
 
@@ -142,7 +159,7 @@ class LeaseSignerContractTests(unittest.TestCase):
             turn_mode="chat",
             issued_from="default_policy",
         )
-        self.assertNotIn("todo.write", turn_n1["allowed_capabilities"])
+        self.assertIn("todo.write", turn_n1["allowed_capabilities"])
         self.assertEqual(turn_n1["allowed_capabilities"], CHAT_WAKE_DEFAULTS)
 
         with self.assertRaises(LeaseSignError) as ctx:
@@ -171,7 +188,7 @@ class LeaseSignerContractTests(unittest.TestCase):
         )
         self.assertEqual(lease["issued_from"], "explicit_user_intent")
         self.assertIn("todo.write", lease["allowed_capabilities"])
-        for capability_id in CHAT_WAKE_DEFAULTS:
+        for capability_id in CHAT_DEFAULTS:
             self.assertIn(capability_id, lease["allowed_capabilities"])
         self.assertEqual(lease["approval_ids"], ())
         self.assertIsNone(lease["task_contract_id"])
@@ -336,7 +353,7 @@ class LeaseSignerContractTests(unittest.TestCase):
             self.assertNotIn("issue_turn_lease", blob)
 
         # Signer only consumes the shared capability dictionary.
-        for capability_id in CHAT_WAKE_DEFAULTS + TASK_DEFAULTS + ("todo.write",):
+        for capability_id in CHAT_DEFAULTS + WAKE_DEFAULTS + TASK_DEFAULTS + ("todo.write",):
             self.assertIsNotNone(get_capability(capability_id))
             self.assertIn(capability_id, P1_ENABLED_CAPABILITY_IDS)
 
