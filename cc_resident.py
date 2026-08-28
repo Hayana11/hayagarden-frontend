@@ -1317,11 +1317,6 @@ class ResidentSession:
                                     })
                                     if fence.get('approval_id'):
                                         tool_payload['approval_id'] = fence['approval_id']
-                                    if fence.get('lease_decision') == 'CAPABILITY_ASK_REQUIRED':
-                                        # Claude Code's authoritative pending identity arrives
-                                        # only on result.stop_reason=tool_deferred. Do not expose
-                                        # an actionable confirmation from this assistant echo.
-                                        continue
                                 yield ('tool_use', tool_payload)
                     elif t == 'user':
                         for b in ((d.get('message') or {}).get('content') or []):
