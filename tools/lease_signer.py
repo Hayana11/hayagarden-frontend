@@ -51,11 +51,16 @@ TURN_MODES = frozenset({"chat", "wake", "task"})
 DEFAULT_ALLOWED_CAPABILITIES: dict[str, tuple[str, ...]] = {
     "chat": (
         "memory.search",
+        "memory.write",
+        "diary.write",
         "home.light.status",
         "todo.read",
+        "todo.write",
         "countdown.read",
+        "task.timer.start",
         "ledger.read",
         "ledger.budget.read",
+        "ledger.write",
     ),
     "wake": (
         "memory.search",
