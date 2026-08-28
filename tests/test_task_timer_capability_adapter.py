@@ -76,8 +76,8 @@ class TaskTimerCapabilityAdapterTests(unittest.TestCase):
             connect.call_args_list,
             [((expected,), {"timeout": 5}), ((expected,), {"timeout": 5})],
         )
-        fake.commit.assert_called_once()
-        fake.close.assert_called_once()
+        self.assertEqual(fake.commit.call_count, 2)
+        self.assertEqual(fake.close.call_count, 2)
 
     def test_explicit_temp_db_preserves_legacy_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
