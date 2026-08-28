@@ -141,7 +141,7 @@ const badLease = await withProfile.client.callTool({
   name: 'add_todo',
   arguments: { content: '坏 lease 不得写入' },
 });
-assert.match(textOf(badLease), /UH-A0 LEASE_MISMATCH/);
+assert.match(textOf(badLease), /UH-A0 DENIED_CAPABILITY/);
 assert.equal(countRows(), 3);
 
 await noProfile.client.close();
