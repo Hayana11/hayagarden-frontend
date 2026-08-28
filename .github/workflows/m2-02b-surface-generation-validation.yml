@@ -8,6 +8,7 @@ on:
       - "tests/test_cc_runtime.py"
       - "tests/test_cc_deferred_resume.py"
       - "tests/test_m2_02b_surface_generation.py"
+      - "tests/test_uh_a0_mcp_startup_readiness.py"
       - "tests/test_execution_fence.py"
       - "tests/test_capability_state.py"
       - "tests/test_cc_capability_adapter.py"
@@ -30,7 +31,7 @@ jobs:
             resident_tests: tests.test_cc_runtime tests.test_cc_deferred_resume
           - label: head
             ref: ${{ github.event.pull_request.head.sha }}
-            resident_tests: tests.test_cc_runtime tests.test_cc_deferred_resume tests.test_m2_02b_surface_generation
+            resident_tests: tests.test_cc_runtime tests.test_cc_deferred_resume tests.test_m2_02b_surface_generation tests.test_uh_a0_mcp_startup_readiness
     steps:
       - name: Checkout exact ${{ matrix.label }} SHA
         uses: actions/checkout@v4
