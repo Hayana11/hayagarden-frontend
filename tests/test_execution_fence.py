@@ -106,8 +106,11 @@ class ExecutionFenceTests(unittest.TestCase):
             self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
 
     def test_c_diary_chat_auto_allows_without_approval(self):
+        lease = self.lease(
+            source="explicit_user_intent", requested=("diary.write",)
+        )
         result = evaluate_tool_call(
-            "mcp__capability__diary_write", {"content": "今天值得留下的一页"}, self.lease()
+            "mcp__capability__diary_write", {"content": "今天值得留下的一页"}, lease
         )
         self.assertEqual(result["capability_id"], "diary.write")
         self.assertEqual(result["lease_decision"], "ALLOW")
@@ -141,7 +144,10 @@ class ExecutionFenceTests(unittest.TestCase):
             ("mcp__capability__ledger_write", "ledger.write", {"amount": -68}),
         ):
             with self.subTest(capability_id=capability_id):
-                result = evaluate_tool_call(tool_name, action, self.lease())
+                lease = self.lease(
+                    source="explicit_user_intent", requested=(capability_id,)
+                )
+                result = evaluate_tool_call(tool_name, action, lease)
                 self.assertEqual(result["capability_id"], capability_id)
                 self.assertEqual(result["lease_decision"], "ALLOW")
                 self.assertNotIn("approval_id", result)
@@ -258,7 +264,7 @@ class ExecutionFenceTests(unittest.TestCase):
             turn101 = self.lease(turn_id="101")
             runtime.start_turn(turn101)
             allowed = runtime.evaluate("mcp__home__add_todo", action)
-            self.assertEqual(allowed["lease_decision"], "ALLOW")
+            self.assertEqual(allowed["lease_decision"], "DENIED_CAPABILITY")
             self.assertNotIn("approval_id", allowed)
             self.assertTrue(runtime.abort_turn(turn_id="101"))
             self.assertIsNone(read_current_turn_lease(path)[0])
