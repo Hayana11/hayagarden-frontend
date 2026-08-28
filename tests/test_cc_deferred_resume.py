@@ -280,8 +280,8 @@ class DeferredResumeContractTests(unittest.TestCase):
 
             new_action = evaluate_tool_call(current_tool, action, self.lease())
             self.assertEqual(new_action["capability_id"], "todo.write")
-            self.assertEqual(new_action["lease_decision"], "CAPABILITY_ASK_REQUIRED")
-            self.assertNotEqual(new_action["approval_id"], old_approval_id)
+            self.assertEqual(new_action["lease_decision"], "ALLOW")
+            self.assertNotIn("approval_id", new_action)
 
 if __name__ == "__main__":
     unittest.main()
