@@ -199,7 +199,11 @@ def evaluate_tool_call(
             lease_decision="ALLOW",
         )
 
-    if (\n        entry.get("autonomy_mode") == "self_write_auto"\n        and turn_mode == "chat"\n        and turn_lease["issued_from"] != "user_confirmation"\n    ):
+    if (
+        entry.get("autonomy_mode") == "self_write_auto"
+        and turn_mode == "chat"
+        and turn_lease["issued_from"] != "user_confirmation"
+    ):
         return _decision(
             capability_id=capability_id,
             turn_mode=turn_mode,
