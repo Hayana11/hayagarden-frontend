@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any, Optional
 
 from .external_server_registry import ExternalServerRegistry, REVOKED_STATE
@@ -70,6 +71,15 @@ def _snapshot_tool_input(value: Any) -> tuple[dict[str, Any], bytes]:
     if len(encoded) > MAX_TOOL_INPUT_BYTES:
         raise ExternalInvocationError("tool_input exceeds the byte limit", code="TOOL_INPUT_TOO_LARGE")
     return snapshot, encoded
+
+
+def _freeze(value: Any) -> Any:
+    """Recursively freeze an already JSON-safe snapshot for the runner seam."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
 
 
 class ExternalMcpInvocation:
@@ -161,7 +171,7 @@ class ExternalMcpInvocation:
         turn_lease: Any,
         *,
         expected_turn_id: Any,
-        runner: Callable[[dict[str, Any]], Any],
+        runner: Callable[[Mapping[str, Any]], Any],
     ) -> dict[str, Any]:
         try:
             frozen_input, encoded_input = _snapshot_tool_input(tool_input)
@@ -185,7 +195,8 @@ class ExternalMcpInvocation:
                     attempt_id=attempt_id,
                     reason_code=str(decision.get("reason_code", "FENCE_DENIED")),
                 )
-            if not self._server_matches_allow(decision):
+            server = self._server_snapshot(decision)
+            if server is None:
                 self._connection.rollback()
                 return self._result(FAILED_PRE_CALL, reason_code="SERVER_AUTHORITY_CHANGED")
             existing = self._existing(decision["turn_id"], decision["external_action_id"])
@@ -197,6 +208,19 @@ class ExternalMcpInvocation:
             self._insert_attempt(attempt_id, decision, input_hash, len(encoded_input), PRE_CALL, "PRE_CALL")
             self._audit(attempt_id, decision, PRE_CALL, "PRE_CALL")
             self._transition(attempt_id, decision, STARTED, "RUNNER_STARTED")
+            call_envelope = MappingProxyType(
+                {
+                    "server_id": decision["server_id"],
+                    "tool_name": decision["tool_name"],
+                    "endpoint": server.endpoint,
+                    "transport": server.transport,
+                    "fingerprint": decision["fingerprint"],
+                    "source_registry_revision": decision["source_registry_revision"],
+                    "side_effect_class": decision["side_effect_class"],
+                    "external_action_id": decision["external_action_id"],
+                    "tool_input": _freeze(frozen_input),
+                }
+            )
             self._connection.commit()
         except sqlite3.IntegrityError:
             self._connection.rollback()
@@ -207,7 +231,7 @@ class ExternalMcpInvocation:
             return self._result(FAILED_PRE_CALL, reason_code="AUTHORITY_WRITE_FAILED")
 
         try:
-            runner_result = runner(frozen_input)
+            runner_result = runner(call_envelope)
             outcome = runner_result.get("status") if isinstance(runner_result, Mapping) else None
             terminal_status = _OUTCOME_STATUS.get(outcome) if outcome in _RUNNER_OUTCOMES else OUTCOME_UNKNOWN
             reason = str(outcome) if outcome in _RUNNER_OUTCOMES else "RUNNER_MALFORMED"
@@ -271,17 +295,19 @@ class ExternalMcpInvocation:
         keys = ("audit_sequence", "event_id", "attempt_id", "turn_id", "control_id", "server_id", "tool_name", "external_action_id", "status", "reason_code", "event_at")
         return tuple(dict(zip(keys, row)) for row in rows)
 
-    def _server_matches_allow(self, decision: Mapping[str, Any]) -> bool:
+    def _server_snapshot(self, decision: Mapping[str, Any]):
         try:
             server = self._server_registry.get(decision["server_id"])
-            return (
+            if (
                 server.revision == decision["source_registry_revision"]
                 and server.lifecycle_state != REVOKED_STATE
                 and bool(server.endpoint)
                 and server.server_id == decision["server_id"]
-            )
+            ):
+                return server
+            return None
         except Exception:
-            return False
+            return None
 
     def _insert_attempt(self, attempt_id: str, decision: Mapping[str, Any], input_hash: str, byte_length: int, status: str, reason: str) -> None:
         self._connection.execute(
@@ -298,17 +324,28 @@ class ExternalMcpInvocation:
         tool_name = decision.get("tool_name") or (parts[2] if len(parts) == 3 else "unknown")
         turn_id = decision.get("turn_id") or (expected_turn_id if isinstance(expected_turn_id, str) and expected_turn_id else "unknown")
         attempt_id = self._new_id()
+        reason = str(decision.get("reason_code", "FENCE_DENIED"))
+        denial_identity = hashlib.sha256(
+            json.dumps(
+                {
+                    "control_id": str(control_id),
+                    "tool_input_sha256": hashlib.sha256(encoded_input).hexdigest(),
+                    "reason_code": reason,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         safe_decision = {
             "turn_id": turn_id,
             "control_id": decision.get("control_id") or str(control_id)[:500],
             "server_id": server_id,
             "tool_name": tool_name,
-            "external_action_id": decision.get("external_action_id") or "failed:" + hashlib.sha256(encoded_input).hexdigest(),
+            "external_action_id": decision.get("external_action_id") or "failed:" + denial_identity,
             "fingerprint": decision.get("fingerprint") or "unknown",
             "source_registry_revision": decision.get("source_registry_revision") or 0,
             "side_effect_class": decision.get("side_effect_class") or "unknown",
         }
-        reason = str(decision.get("reason_code", "FENCE_DENIED"))
         self._insert_attempt(
             attempt_id, safe_decision, hashlib.sha256(encoded_input).hexdigest(), len(encoded_input), PRE_CALL, "PRE_CALL"
         )
