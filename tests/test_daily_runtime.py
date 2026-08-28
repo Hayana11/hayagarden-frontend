@@ -411,8 +411,9 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             )
             self.assertEqual(
                 decision['lease_decision'],
-                'DENIED_CAPABILITY',
+                'ALLOW',
             )
+            self.assertNotIn('approval_id', decision)
             dr._release_lease(second)
         finally:
             os.unlink(db)
