@@ -129,7 +129,12 @@ class TodoInternalAdapterTests(unittest.TestCase):
             "我顺手给你记进待办里？",
         )
         direct = execution_fence.evaluate_tool_call(
-            "mcp__internal__add_todo", action, self.lease()
+            "mcp__internal__add_todo",
+            action,
+            self.lease(
+                source="explicit_user_intent",
+                requested=("todo.write",),
+            ),
         )
         self.assertEqual(direct["lease_decision"], "ALLOW")
         self.assertNotIn("approval_id", direct)
