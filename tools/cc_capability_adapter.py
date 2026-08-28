@@ -22,6 +22,7 @@ from tools.capability_manifest import (
     get_capability,
 )
 from tools.cc_usage_observability import sha256_canonical_json
+from tools.task_timer_db import resolve_task_timer_commands_db_path
 from tools.capability_state import (
     CapabilityStateError,
     RUNTIME_STATE_DENY,
@@ -238,14 +239,7 @@ def _resolve_task_timer_commands_db_path(
 ) -> str:
     """Resolve the separate commands DB used only by task.timer.start."""
     environ = env or os.environ
-    configured = str(environ.get("TASK_TIMER_COMMANDS_DB_PATH") or "").strip()
-    if configured:
-        return configured
-    repo_root = str(
-        environ.get("UH_A0_REPO_ROOT")
-        or (Path(__file__).resolve().parent.parent)
-    ).strip()
-    return str(Path(repo_root) / "commands.db")
+    return resolve_task_timer_commands_db_path(env=environ)
 
 
 def build_uh_a0_mcp_config(
