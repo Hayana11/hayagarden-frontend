@@ -118,7 +118,7 @@ class ExecutionFenceTests(unittest.TestCase):
         legacy = evaluate_tool_call(
             "mcp__home__write_diary",
             {"content": "兼容路径"},
-            self.lease(),
+            lease,
         )
         self.assertEqual(legacy["capability_id"], "diary.write")
         self.assertEqual(legacy["lease_decision"], "ALLOW")
@@ -196,7 +196,7 @@ class ExecutionFenceTests(unittest.TestCase):
             evaluate_tool_call(
                 "mcp__home__add_todo", action, self.lease(turn_id="101")
             )["lease_decision"],
-            "ALLOW",
+            "DENIED_CAPABILITY",
         )
 
     def test_i_missing_lease_fails_closed(self):
@@ -227,7 +227,11 @@ class ExecutionFenceTests(unittest.TestCase):
 
     def test_k_l_server_side_gate_allows_only_fenced_execution(self):
         action = {"content": "应写入"}
-        allowed = evaluate_tool_call("mcp__home__add_todo", action, self.lease())
+        allowed = evaluate_tool_call(
+            "mcp__home__add_todo",
+            action,
+            self.lease(source="explicit_user_intent", requested=("todo.write",)),
+        )
         self.assertEqual(allowed["lease_decision"], "ALLOW")
         post_calls = [action] if allowed["lease_decision"] == "ALLOW" else []
         self.assertEqual(post_calls, [action])
