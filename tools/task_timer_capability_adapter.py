@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 import command_store
+from tools.task_timer_db import resolve_task_timer_commands_db_path
 
 
 def start_task_timer(
@@ -18,7 +19,7 @@ def start_task_timer(
     title: Any,
     countdown_seconds: Any = None,
 ) -> dict[str, Any]:
-    path = str(db_path or "").strip()
+    path = resolve_task_timer_commands_db_path(explicit_path=db_path)
     if not path:
         return {"status": "INVALID_DB_PATH"}
 
