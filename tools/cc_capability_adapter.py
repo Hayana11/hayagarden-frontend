@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -122,8 +123,14 @@ def resolve_uh_a0_turn_lease_path(cwd=None, *, env=None):
     return str(Path(cwd or Path.cwd()) / DEFAULT_TURN_LEASE_FILENAME)
 
 
-def build_uh_a0_settings():
-    return {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": "python3 -m tools.execution_fence pretooluse"}]}]}}
+def build_uh_a0_settings(repo_root=None):
+    """Build hook settings with an explicit, stable Python import root."""
+    root = Path(repo_root or Path(__file__).resolve().parent.parent).resolve()
+    hook_command = (
+        f"PYTHONPATH={shlex.quote(str(root))} "
+        "python3 -m tools.execution_fence pretooluse"
+    )
+    return {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": hook_command}]}]}}
 
 
 def write_uh_a0_settings(cwd):
