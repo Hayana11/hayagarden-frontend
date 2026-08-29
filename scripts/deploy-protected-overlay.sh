@@ -140,9 +140,17 @@ protected_overlay_verify() {
   staged="$(git -C "$root" diff --cached --name-status --no-renames)"
   unstaged="$(git -C "$root" diff --name-status --no-renames)"
   expected=$'D\tartifacts/treegpt-cache-probe-baseline.json\nD\tartifacts/treegpt-cache-probe-live.json'
-  [[ -z "$staged" && "$unstaged" == "$expected" ]] ||
+  if [[ -z "$staged" && "$unstaged" == "$expected" ]]; then
+    :
+  else
     _protected_overlay_error 'PROTECTED_OVERLAY_POSTCHECK_FAILED'
-  [[ ! -e "$root/$PROTECTED_OVERLAY_PATH_A" && ! -L "$root/$PROTECTED_OVERLAY_PATH_A" &&
-     ! -e "$root/$PROTECTED_OVERLAY_PATH_B" && ! -L "$root/$PROTECTED_OVERLAY_PATH_B" ]] ||
+    return 1
+  fi
+  if [[ ! -e "$root/$PROTECTED_OVERLAY_PATH_A" && ! -L "$root/$PROTECTED_OVERLAY_PATH_A" &&
+      ! -e "$root/$PROTECTED_OVERLAY_PATH_B" && ! -L "$root/$PROTECTED_OVERLAY_PATH_B" ]]; then
+    :
+  else
     _protected_overlay_error 'PROTECTED_OVERLAY_POSTCHECK_FAILED'
+    return 1
+  fi
 }

@@ -148,7 +148,6 @@ class OverlayBehaviorTests(unittest.TestCase):
         self.assertIn("classification=NORMAL_RUNTIME_DRIFT", text)
 
     def test_no_arbitrary_paths_or_environment_allowlist(self):
-        self.remove_overlay()
         target = self.empty_target()
         self.git("checkout", "-q", "--detach", target)
         extra = self.repo / "third.txt"
