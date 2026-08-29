@@ -417,6 +417,27 @@ class ExternalServerRegistry:
             self._connection.rollback()
             raise
 
+    def mark_auth_binding_changed_in_transaction(
+        self, server_id: object, *, now: Optional[datetime] = None
+    ) -> ExternalServerRecord:
+        """Bump server trust while the caller's transaction is still held."""
+        if not self._connection.in_transaction:
+            raise InvalidStateTransitionError(
+                "auth binding trust invalidation requires an active transaction",
+                code="AUTH_BINDING_TRANSACTION_REQUIRED",
+            )
+        current = self.get(server_id)
+        if current.lifecycle_state == REVOKED_STATE:
+            raise InvalidStateTransitionError(
+                "revoked servers cannot change auth trust", code="SERVER_REVOKED"
+            )
+        self._connection.execute(
+            "UPDATE external_server_registry SET lifecycle_state=?, master_state=?, "
+            "updated_at=?, revision=revision+1 WHERE server_id=?",
+            (REVIEW_REQUIRED_STATE, MASTER_OFF, _timestamp(now), current.server_id),
+        )
+        return self._record(self._select_row(current.server_id))
+
     register_server = register
     get_server = get
     rename_server = rename
