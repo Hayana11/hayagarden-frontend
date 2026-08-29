@@ -87,7 +87,7 @@ assert.match(screen, /<option value="bearer">bearer<\/option>/);
 assert.doesNotMatch(screen, /http\.post<.*external|fetch\([^)]*external-mcp/i);
 assert.match(css, /\.toolroom-add-button\s*\{/);
 assert.match(css, /\.toolroom-modal-backdrop\s*\{[\s\S]*?position:\s*fixed/);
-assert.match(css, /\.toolroom-mcp-dialog\s*\{[\s\S]*?max-width:\s*430px/);
+assert.match(css, /\.toolroom-mcp-dialog\s*\{[\s\S]*?max-width:\s*286px/);
 assert.match(css, /\.toolroom-mcp-icon-option\s*svg\s*\{[\s\S]*?stroke:\s*currentColor/);
 
 assert.match(screen, /'--toolroom-accent'/);
