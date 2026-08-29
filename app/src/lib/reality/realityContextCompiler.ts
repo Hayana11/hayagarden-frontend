@@ -52,11 +52,11 @@ function userActivityClause(
   }
 
   const labels: Record<Exclude<UserActivity, "unknown">, string> = {
-    still: "静止",
-    walking: "步行中",
-    running: "跑步中",
-    cycling: "骑行中",
-    in_vehicle: "乘车中",
+    still: "用户当前静止",
+    walking: "用户正在步行",
+    running: "用户正在跑步",
+    cycling: "用户正在骑行",
+    in_vehicle: "用户正在乘车",
   };
 
   return {
