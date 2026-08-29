@@ -2,6 +2,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
   background:
     radial-gradient(120% 80% at 15% 0%, #fdf2f3 0%, #f9e4e8 42%, #f3d4dc 100%);
   color: var(--color-text);
@@ -98,6 +99,14 @@
   padding: 14px 22px calc(env(safe-area-inset-bottom, 0px) + 24px);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.toolroom-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .toolroom-search {
@@ -315,6 +324,12 @@
   white-space: nowrap;
 }
 
+.toolroom-tool-divider {
+  height: 1px;
+  margin: 0 18px 0 40px;
+  background: rgba(183, 110, 121, 0.14);
+}
+
 .toolroom-tool-detail {
   margin: 0 18px 14px 40px;
   padding: 14px 16px;
@@ -327,6 +342,18 @@
   color: #bfa3a7;
   font: italic 11px/1.4 var(--font-serif-display);
   letter-spacing: 1.4px;
+}
+
+.toolroom-detail-divider {
+  margin: 13px 0 10px;
+  border-top: 1px dashed rgba(183, 110, 121, 0.18);
+}
+
+.toolroom-detail-label {
+  color: #c0839a;
+  font: 500 10px/1.4 var(--font-mono);
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
 }
 
 .toolroom-tool-detail p {
