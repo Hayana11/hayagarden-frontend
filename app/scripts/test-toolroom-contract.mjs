@@ -40,6 +40,14 @@ assert.match(css, /\.toolroom-detail-label\s*\{[\s\S]*?color:\s*#b7a29c;[\s\S]*?
 assert.match(css, /\.toolroom-detail-label\s*\{[\s\S]*?text-transform:\s*uppercase/);
 assert.match(css, /\.toolroom-tool-detail dt\s*\{[\s\S]*?color:\s*#b76e79;[\s\S]*?font-family:\s*'JetBrains Mono', monospace;[\s\S]*?font-size:\s*11\.5px;/);
 assert.match(css, /\.toolroom-tool-detail p\s*\{[\s\S]*?color:\s*#6b5a55;[\s\S]*?font-size:\s*12\.5px;/);
+assert.match(screen, /GROUP_ICON_PATHS/);
+assert.match(screen, /<ToolroomGroupIcon/);
+assert.match(screen, /transportLabel/);
+assert.match(screen, /工具：\{group\.available\}\/\{group\.total\}/);
+assert.doesNotMatch(screen, /🧠/);
+assert.match(css, /\.toolroom-group-icon svg\s*\{[\s\S]*?stroke:\s*currentColor/);
+assert.match(css, /\.toolroom-tool-copy > span\s*\{[\s\S]*?font-family:\s*'Noto Serif SC', serif;[\s\S]*?font-size:\s*11\.5px;[\s\S]*?line-height:\s*1\.2/);
+
 assert.match(screen, /GROUP_ACCENT_COLORS/);
 assert.match(screen, /'--toolroom-accent'/);
 assert.match(screen, /DISABLED_TOOL_ACCENT/);
