@@ -31,7 +31,7 @@ test('versioned envelope accepts only trusted endpoint and transport fields', as
     },
   );
   assert.equal(result.bridge_version, BRIDGE_VERSION);
-  assert.deepEqual(received, [{ endpoint: 'https://calendar.example/mcp', transport: 'streamable_http' }]);
+  assert.deepEqual(received, [{ endpoint: 'https://calendar.example/mcp', transport: 'streamable_http', auth: null }]);
   await assert.rejects(
     () => executeBridgeEnvelope(
       { bridge_version: BRIDGE_VERSION, endpoint: 'https://calendar.example/mcp', transport: 'streamable_http', tool_name: 'unexpected' },
@@ -45,6 +45,35 @@ test('versioned envelope accepts only trusted endpoint and transport fields', as
       { discover: async () => success },
     ),
     /unsupported/,
+  );
+});
+
+test('discovery bridge accepts only null or bearer auth and forwards frozen auth', async () => {
+  const received = [];
+  const result = await executeBridgeEnvelope(
+    {
+      bridge_version: BRIDGE_VERSION,
+      endpoint: 'https://calendar.example/mcp',
+      transport: 'streamable_http',
+      auth: { scheme: 'bearer', credential: 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13' },
+    },
+    { discover: async (input) => { received.push(input); return success; } },
+  );
+  assert.equal(result.bridge_version, BRIDGE_VERSION);
+  assert.deepEqual(received[0].auth, { scheme: 'bearer', credential: 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13' });
+  await assert.rejects(
+    () => executeBridgeEnvelope(
+      { bridge_version: BRIDGE_VERSION, endpoint: 'https://calendar.example/mcp', transport: 'streamable_http', auth: { scheme: 'basic', credential: 'x' } },
+      { discover: async () => success },
+    ),
+    /unsupported/,
+  );
+  await assert.rejects(
+    () => executeBridgeEnvelope(
+      { bridge_version: BRIDGE_VERSION, endpoint: 'https://calendar.example/mcp', transport: 'streamable_http', auth: null, headers: {} },
+      { discover: async () => success },
+    ),
+    /unsupported fields/,
   );
 });
 
@@ -63,3 +92,4 @@ test('bridge production entrypoint is bound to the completed discovery core', as
   assert.match(source, /import \{ discoverExternalMcp \} from '\.\/external_mcp_discovery_transport\.mjs'/);
   assert.match(source, /executeBridgeEnvelope\(input\)/);
 });
+

@@ -1,0 +1,127 @@
+name: M5-06C-B1 external auth runtime primitives validation
+
+on:
+  push:
+    branches:
+      - codex/m5-06c-b1-auth-runtime-primitives-r1
+    paths:
+      - .github/workflows/m5-06c-b1-external-auth-runtime-primitives-validation.yml
+      - tools/external_secret_store.py
+      - tools/external_mcp_secret_materializer.py
+      - tools/external_mcp_call_bridge.mjs
+      - tools/external_mcp_call_transport.mjs
+      - tools/external_mcp_discovery_bridge.mjs
+      - tools/external_mcp_discovery_transport.mjs
+      - tests/test_external_secret_store.py
+      - tests/test_external_mcp_secret_materializer.py
+      - tests/test_external_mcp_call_bridge.mjs
+      - tests/test_external_mcp_call_transport.mjs
+      - tests/test_external_mcp_discovery_bridge.mjs
+      - tests/test_external_mcp_discovery_transport.mjs
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE_SHA: 116d38f6b624b043882a79417d68aaba52157bcf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Verify exact pushed head, frozen base, and thirteen-file fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF_NAME" = "codex/m5-06c-b1-auth-runtime-primitives-r1"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base "$BASE_SHA" HEAD)" = "$BASE_SHA"
+          expected="$(printf '%s\n' \
+            '.github/workflows/m5-06c-b1-external-auth-runtime-primitives-validation.yml' \
+            'tests/test_external_mcp_call_bridge.mjs' \
+            'tests/test_external_mcp_call_transport.mjs' \
+            'tests/test_external_mcp_discovery_bridge.mjs' \
+            'tests/test_external_mcp_discovery_transport.mjs' \
+            'tests/test_external_mcp_secret_materializer.py' \
+            'tests/test_external_secret_store.py' \
+            'tools/external_mcp_call_bridge.mjs' \
+            'tools/external_mcp_call_transport.mjs' \
+            'tools/external_mcp_discovery_bridge.mjs' \
+            'tools/external_mcp_discovery_transport.mjs' \
+            'tools/external_mcp_secret_materializer.py' \
+            'tools/external_secret_store.py' | sort)"
+          actual="$(git diff --name-only "$BASE_SHA" HEAD | sort)"
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" HEAD
+          for path in \
+            tools/external_mcp_invocation.py \
+            tests/test_external_mcp_invocation.py \
+            tools/external_mcp_auth_binding.py \
+            tests/test_external_mcp_auth_binding.py \
+            tools/external_tool_execution_fence.py \
+            tools/external_tool_side_effect_policy.py \
+            tools/confirmation_store.py \
+            tools/lease_signer.py \
+            gateway.py
+          do
+            test -z "$(git diff --name-only "$BASE_SHA" HEAD -- "$path")"
+          done
+
+      - name: Verify static secret and runtime boundaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! rg -n -i 'get_plaintext|latest_secret_for_slot|find_active_secret|external_mcp_runtime\.py|secret.*(argv|process\.env)|console\.(log|error).*credential' \
+            tools/external_secret_store.py tools/external_mcp_secret_materializer.py \
+            tools/external_mcp_call_bridge.mjs tools/external_mcp_call_transport.mjs \
+            tools/external_mcp_discovery_bridge.mjs tools/external_mcp_discovery_transport.mjs
+          ! rg -n 'pull_request|github\.event\.pull_request|github\.head_ref|refs/pull/' \
+            .github/workflows/m5-06c-b1-external-auth-runtime-primitives-validation.yml
+          ! test -e tools/external_mcp_runtime.py
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install cryptography
+          npm ci --no-audit --no-fund
+
+      - name: Run Python B1 and autonomy matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m unittest -v \
+            tests.test_external_secret_store \
+            tests.test_external_mcp_secret_materializer \
+            tests.test_external_mcp_auth_binding \
+            tests.test_external_mcp_invocation \
+            tests.test_external_server_registry \
+            tests.test_external_tool_execution_fence \
+            tests.test_external_tool_side_effect_policy
+
+      - name: Run Node B1 transport and bridge matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node --test \
+            tests/test_external_mcp_call_transport.mjs \
+            tests/test_external_mcp_call_bridge.mjs \
+            tests/test_external_mcp_discovery_transport.mjs \
+            tests/test_external_mcp_discovery_bridge.mjs
+

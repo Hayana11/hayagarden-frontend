@@ -49,6 +49,20 @@ export class DiscoveryTimeoutError extends Error {
   }
 }
 
+class DiscoveryAuthError extends DiscoveryInputError {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+class DiscoveryReflectionError extends Error {
+  constructor() {
+    super('provider material contained the transient credential');
+    this.code = 'SECRET_REFLECTION_BLOCKED';
+  }
+}
+
 function byteLength(value) {
   return textEncoder.encode(JSON.stringify(value)).byteLength;
 }
@@ -196,6 +210,44 @@ function boundedSummary(value, limit) {
   return clean.slice(0, limit);
 }
 
+function validateAuth(auth) {
+  if (auth === null || typeof auth === 'undefined') return null;
+  if (!auth || typeof auth !== 'object' || Array.isArray(auth) || Object.getPrototypeOf(auth) !== Object.prototype) {
+    throw new DiscoveryAuthError('AUTH_SCHEME_UNSUPPORTED', 'MCP auth scheme is unsupported');
+  }
+  if (Object.keys(auth).sort().join(',') !== 'credential,scheme' || auth.scheme !== 'bearer' ||
+      typeof auth.credential !== 'string' || auth.credential.length === 0) {
+    throw new DiscoveryAuthError('AUTH_SCHEME_UNSUPPORTED', 'MCP auth scheme is unsupported');
+  }
+  if (new TextEncoder().encode(auth.credential).byteLength > 16 * 1024 || /[\u0000-\u001f\u007f]/.test(auth.credential)) {
+    throw new DiscoveryAuthError('AUTH_SCHEME_UNSUPPORTED', 'MCP auth scheme is unsupported');
+  }
+  return { scheme: 'bearer', credential: auth.credential };
+}
+
+function requestHeaders(initHeaders, auth) {
+  const headers = new Headers(initHeaders || {});
+  if (!auth) return headers;
+  if (headers.has('authorization')) {
+    throw new DiscoveryAuthError('AUTHORIZATION_HEADER_CONFLICT', 'authorization header is already present');
+  }
+  headers.set('authorization', `Bearer ${auth.credential}`);
+  return headers;
+}
+
+function containsCredential(value, credential, seen = new Set()) {
+  if (!credential || value === null || typeof value === 'undefined') return false;
+  if (typeof value === 'string') return value.includes(credential);
+  if (typeof value !== 'object' && !(value instanceof Error)) return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (value instanceof Error && (String(value.message).includes(credential) || String(value.stack || '').includes(credential))) return true;
+  for (const key of Object.keys(value)) {
+    if (containsCredential(value[key], credential, seen)) return true;
+  }
+  return false;
+}
+
 function boundedResponse(response, maxBytes) {
   const declared = Number(response.headers?.get?.('content-length') ?? 0);
   if (declared > maxBytes) throw new DiscoveryLimitError('MCP response exceeded the byte limit');
@@ -233,6 +285,8 @@ function resultSkeleton(diagnostics) {
 }
 
 function classifyFailure(error, limits) {
+  if (error instanceof DiscoveryAuthError) return { code: error.code, summary: error.message };
+  if (error instanceof DiscoveryReflectionError) return { code: 'SECRET_REFLECTION_BLOCKED', summary: 'provider material was suppressed' };
   if (error instanceof DiscoveryLimitError) return { code: DISCOVERY_STATUS.LIMIT_EXCEEDED, summary: error.message };
   if (error instanceof DiscoveryInputError) return { code: DISCOVERY_STATUS.PROTOCOL_ERROR, summary: error.message };
   if (error instanceof DiscoveryTimeoutError || error?.name === 'AbortError') return { code: DISCOVERY_STATUS.UNAVAILABLE, summary: 'discovery timed out' };
@@ -245,8 +299,8 @@ function classifyFailure(error, limits) {
   return { code: DISCOVERY_STATUS.PROTOCOL_ERROR, summary: boundedSummary('remote MCP discovery failed', limits.maxErrorSummaryBytes) };
 }
 
-async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostics, result }) {
-  const dispatcher = fetchImpl ? null : createSafeDispatcher({ resolver });
+async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostics, result, auth }) {
+  const dispatcher = createSafeDispatcher({ resolver });
   let requestIndex = 0;
   const fetcher = async (input, init = {}) => {
     requestIndex += 1;
@@ -259,6 +313,7 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
     try {
       const requestInit = {
         ...init,
+        headers: requestHeaders(init.headers, auth),
         redirect: 'error',
         signal,
         ...(dispatcher ? { dispatcher } : {}),
@@ -295,6 +350,7 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
       server_info: client.getServerVersion?.() ?? null,
       server_capabilities: client.getServerCapabilities?.() ?? null,
     };
+    if (auth?.credential && containsCredential(result.server_metadata, auth.credential)) throw new DiscoveryReflectionError();
     if (byteLength(result.server_metadata) > limits.maxCatalogBytes) throw new DiscoveryLimitError('MCP metadata exceeded the byte limit');
 
     const cursors = new Set();
@@ -309,6 +365,7 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
         client.listTools(cursor === undefined ? undefined : { cursor }),
         new Promise((_, reject) => overallController.signal.addEventListener('abort', () => reject(new DiscoveryTimeoutError('discovery timed out')), { once: true })),
       ]);
+      if (auth?.credential && containsCredential(page, auth.credential)) throw new DiscoveryReflectionError();
       diagnostics.page_count += 1;
       if (!page || !Array.isArray(page.tools)) throw new DiscoveryInputError('MCP tools/list returned no tool array');
       for (const tool of page.tools) {
@@ -340,16 +397,21 @@ export async function discoverExternalMcp({
   limits: suppliedLimits = {},
   resolver = defaultResolve,
   fetchImpl,
+  auth = null,
 } = {}) {
   const limits = { ...DEFAULT_LIMITS, ...suppliedLimits };
   const diagnostics = { request_count: 0, page_count: 0, tool_count: 0, catalog_bytes: 0, egress_policy: 'validated_lookup_at_actual_dial' };
   const result = resultSkeleton(diagnostics);
   let url;
+  let authBinding = null;
   try {
     url = validateEndpoint(endpoint, transport);
-    await discoverWithClient({ url, limits, fetchImpl, resolver, diagnostics, result });
+    authBinding = validateAuth(auth);
+    await discoverWithClient({ url, limits, fetchImpl, resolver, diagnostics, result, auth: authBinding });
   } catch (error) {
-    const failure = classifyFailure(error, limits);
+    const failure = authBinding?.credential && containsCredential(error, authBinding.credential)
+      ? { code: 'SECRET_REFLECTION_BLOCKED', summary: 'provider material was suppressed' }
+      : classifyFailure(error, limits);
     result.status = failure.code;
     result.error = { code: failure.code, summary: boundedSummary(failure.summary, limits.maxErrorSummaryBytes) };
     result.catalog_complete = false;
@@ -361,3 +423,4 @@ export async function discoverExternalMcp({
 }
 
 export { SUPPORTED_TRANSPORT };
+

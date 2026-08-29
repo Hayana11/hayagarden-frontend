@@ -79,6 +79,26 @@ class ExternalSecretStoreTests(unittest.TestCase):
         self.assertFalse(any("decrypt" in name or "plaintext" in name for name in public_names))
         self.assertNotIn("ciphertext", ExternalSecretStore.__annotations__)
 
+    def test_private_runtime_seam_is_exact_ref_and_hides_ciphertext_in_repr(self):
+        record = self.store.create(
+            server_id=self.server.server_id, slot="runtime", secret="runtime-marker"
+        )
+        runtime = self.store._load_runtime_record(record.secret_ref)
+        self.assertEqual(runtime.secret_ref, record.secret_ref)
+        self.assertEqual(runtime.server_id, self.server.server_id)
+        self.assertEqual(runtime.credential_slot, "runtime")
+        self.assertEqual(runtime.lifecycle, ACTIVE_STATE)
+        self.assertTrue(runtime.ciphertext)
+        self.assertNotIn(runtime.ciphertext, repr(runtime))
+        with self.assertRaises(SecretNotFoundError):
+            self.store._load_runtime_record("missing-ref")
+
+    def test_runtime_seam_does_not_create_slot_or_plaintext_public_apis(self):
+        public_names = set(dir(ExternalSecretStore))
+        for forbidden in ("get_plaintext", "decrypt_secret", "read_secret", "get_secret", "latest_secret_for_slot"):
+            self.assertNotIn(forbidden, public_names)
+        self.assertFalse(hasattr(self.store, "find_active_secret"))
+
     def test_ref_is_backend_generated_and_caller_ref_rejected(self):
         with self.assertRaises(SecretStoreValidationError) as caught:
             self.store.create(
@@ -312,3 +332,4 @@ class ExternalSecretStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
