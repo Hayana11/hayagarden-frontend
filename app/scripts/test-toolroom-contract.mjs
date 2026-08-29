@@ -72,6 +72,8 @@ assert.match(css, /\.toolroom-group-toggle\s*\{[\s\S]*?transition:\s*background-
 assert.match(css, /\.toolroom-tool\s*\{[\s\S]*?transition:\s*background-color 160ms ease/);
 assert.match(css, /\.toolroom-tool-copy > span\s*\{[\s\S]*?font-family:\s*'Noto Serif SC', serif;[\s\S]*?font-size:\s*11\.5px;[\s\S]*?line-height:\s*1\.2/);
 
+assert.match(css, /\.toolroom-mcp-eyebrow::before\s*\{[\s\S]*?color:\s*#c15b77[\s\S]*?content:\s*'✦'/);
+assert.match(css, /\.toolroom-mcp-close\s*\{[\s\S]*?width:\s*30px[\s\S]*?height:\s*30px[\s\S]*?color:\s*#a66f77[\s\S]*?font: 400 17px/);
 assert.match(screen, /GROUP_ACCENT_COLORS/);
 assert.match(screen, /className="toolroom-add-button"/);
 assert.match(screen, /aria-label="添加外部 MCP"/);
@@ -90,7 +92,7 @@ assert.match(css, /\.toolroom-modal-backdrop\s*\{[\s\S]*?position:\s*fixed/);
 assert.match(css, /\.toolroom-mcp-dialog\s*\{[\s\S]*?height:\s*507px[\s\S]*?max-height:\s*calc\(100% - 32px\)/);
 assert.match(css, /@media \(max-width: 360px\)[\s\S]*?\.toolroom-mcp-dialog\s*\{[\s\S]*?height:\s*calc\(133\.333vw - 43px\)/);
 assert.match(css, /\.toolroom-mcp-dialog::[-]webkit-scrollbar\s*\{[\s\S]*?display:\s*none/);
-assert.match(css, /\.toolroom-mcp-dialog::before\s*\{[\s\S]*?top:\s*10px[\s\S]*?right:\s*10px[\s\S]*?bottom:\s*10px[\s\S]*?left:\s*10px[\s\S]*?border:/);
+assert.match(css, /\.toolroom-mcp-dialog::before\s*\{[\s\S]*?top:\s*7px[\s\S]*?right:\s*7px[\s\S]*?bottom:\s*7px[\s\S]*?left:\s*7px[\s\S]*?border:/);
 assert.match(css, /\.toolroom-mcp-dialog\s*\{[\s\S]*?max-width:\s*380px/);
 assert.match(css, /\.toolroom-mcp-icon-option\s*svg\s*\{[\s\S]*?stroke:\s*currentColor/);
 
