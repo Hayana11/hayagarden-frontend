@@ -271,6 +271,14 @@ function boundedResponse(response, maxBytes) {
   });
 }
 
+async function responseWithReflectionGuard(response, credential, maxBytes) {
+  const bounded = boundedResponse(response, maxBytes);
+  if (!credential || typeof bounded.clone !== 'function') return bounded;
+  const reflectedBody = await bounded.clone().text();
+  if (reflectedBody.includes(credential)) throw new DiscoveryReflectionError();
+  return bounded;
+}
+
 function resultSkeleton(diagnostics) {
   return {
     status: DISCOVERY_STATUS.PROTOCOL_ERROR,
@@ -325,7 +333,7 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
         }),
       ]);
       if (!response || typeof response.body === 'undefined') throw new DiscoveryInputError('fetch returned an invalid response');
-      return boundedResponse(response, limits.maxResponseBytes);
+      return responseWithReflectionGuard(response, auth?.credential, limits.maxResponseBytes);
     } finally {
       clearTimeout(timer);
       clearTimeout(requestTimeoutHandle);
