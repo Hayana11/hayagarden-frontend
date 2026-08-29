@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Optional
 
+from .external_mcp_auth_binding import ExternalMcpAuthBindingRegistry
 from .external_server_registry import ExternalServerRegistry, REVOKED_STATE
 from .external_tool_execution_fence import ALLOW, ExternalToolExecutionFence
 from .external_tool_registry import ExternalToolCandidateRegistry
@@ -93,23 +94,27 @@ class ExternalMcpInvocation:
         candidate_registry: ExternalToolCandidateRegistry,
         side_effect_policy: ExternalToolSideEffectPolicy,
         execution_fence: ExternalToolExecutionFence,
+        auth_binding_registry: ExternalMcpAuthBindingRegistry,
         id_factory: Optional[Callable[[], str]] = None,
     ) -> None:
-        owners = (server_registry, candidate_registry, side_effect_policy, execution_fence)
+        owners = (server_registry, candidate_registry, side_effect_policy, execution_fence, auth_binding_registry)
         if (
             not isinstance(connection, sqlite3.Connection)
             or not isinstance(server_registry, ExternalServerRegistry)
             or not isinstance(candidate_registry, ExternalToolCandidateRegistry)
             or not isinstance(side_effect_policy, ExternalToolSideEffectPolicy)
             or not isinstance(execution_fence, ExternalToolExecutionFence)
+            or not isinstance(auth_binding_registry, ExternalMcpAuthBindingRegistry)
             or any(getattr(owner, "_connection", None) is not connection for owner in owners)
             or getattr(execution_fence, "_server_registry", None) is not server_registry
             or getattr(execution_fence, "_candidate_registry", None) is not candidate_registry
             or getattr(execution_fence, "_side_effect_policy", None) is not side_effect_policy
+            or getattr(auth_binding_registry, "_server_registry", None) is not server_registry
         ):
             raise ExternalInvocationInitializationError("owners must share one connection")
         self._connection = connection
         self._server_registry = server_registry
+        self._auth_binding_registry = auth_binding_registry
         self._execution_fence = execution_fence
         self._id_factory = id_factory or (lambda: secrets.token_hex(16))
         self.initialize()
@@ -199,6 +204,16 @@ class ExternalMcpInvocation:
             if server is None:
                 self._connection.rollback()
                 return self._result(FAILED_PRE_CALL, reason_code="SERVER_AUTHORITY_CHANGED")
+            binding = self._auth_binding_registry.get_binding(decision["server_id"])
+            if binding is None:
+                attempt_id = self._record_failed_pre_call(
+                    decision, control_id, expected_turn_id, encoded_input,
+                    reason_override="AUTH_BINDING_MISSING",
+                )
+                self._connection.commit()
+                return self._result(
+                    FAILED_PRE_CALL, attempt_id=attempt_id, reason_code="AUTH_BINDING_MISSING"
+                )
             existing = self._existing(decision["turn_id"], decision["external_action_id"])
             if existing is not None:
                 self._connection.commit()
@@ -218,6 +233,10 @@ class ExternalMcpInvocation:
                     "source_registry_revision": decision["source_registry_revision"],
                     "side_effect_class": decision["side_effect_class"],
                     "external_action_id": decision["external_action_id"],
+                    "auth_scheme": binding.auth_scheme,
+                    "auth_binding_revision": binding.revision,
+                    "secret_ref": binding.secret_ref,
+                    "credential_slot": binding.credential_slot,
                     "tool_input": _freeze(frozen_input),
                 }
             )
@@ -316,7 +335,8 @@ class ExternalMcpInvocation:
         )
 
     def _record_failed_pre_call(
-        self, decision: Mapping[str, Any], control_id: Any, expected_turn_id: Any, encoded_input: bytes
+        self, decision: Mapping[str, Any], control_id: Any, expected_turn_id: Any, encoded_input: bytes,
+        *, reason_override: Optional[str] = None,
     ) -> str:
         """Persist a bounded denial without retaining any caller payload."""
         parts = control_id.split(":", 2) if isinstance(control_id, str) else ()
@@ -324,7 +344,7 @@ class ExternalMcpInvocation:
         tool_name = decision.get("tool_name") or (parts[2] if len(parts) == 3 else "unknown")
         turn_id = decision.get("turn_id") or (expected_turn_id if isinstance(expected_turn_id, str) and expected_turn_id else "unknown")
         attempt_id = self._new_id()
-        reason = str(decision.get("reason_code", "FENCE_DENIED"))
+        reason = str(reason_override or decision.get("reason_code", "FENCE_DENIED"))
         denial_identity = hashlib.sha256(
             json.dumps(
                 {

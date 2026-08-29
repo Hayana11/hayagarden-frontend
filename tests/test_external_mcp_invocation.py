@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from cryptography.fernet import Fernet
 
 from tools.external_mcp_invocation import (
     FAILED_PRE_CALL,
@@ -16,6 +17,8 @@ from tools.external_mcp_invocation import (
     ExternalMcpInvocation,
     MAX_TOOL_INPUT_BYTES,
 )
+from tools.external_mcp_auth_binding import AUTH_NONE, ExternalMcpAuthBindingRegistry
+from tools.external_secret_store import ExternalSecretStore
 from tools.external_server_registry import ExternalServerRegistry
 from tools.external_tool_execution_fence import ExternalToolExecutionFence, build_external_action_id
 from tools.external_tool_registry import ExternalToolCandidateRegistry
@@ -33,15 +36,26 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.connection = sqlite3.connect(":memory:", check_same_thread=False)
         self.server_registry = ExternalServerRegistry(self.connection, id_factory=lambda: "server-1")
         self.server = self.server_registry.register(display_name="Calendar", endpoint="https://calendar.example/mcp", provenance="owner-admin")
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.key_path = os.path.join(self.tempdir.name, "key")
+        with open(self.key_path, "wb") as key_file:
+            key_file.write(Fernet.generate_key())
+        if os.name == "posix":
+            os.chmod(self.key_path, 0o600)
+        self.secret_store = ExternalSecretStore(self.connection, key_file=self.key_path, registry=self.server_registry)
+        self.auth_bindings = ExternalMcpAuthBindingRegistry(self.connection, server_registry=self.server_registry, secret_store=self.secret_store)
+        self.auth_bindings.set_binding(self.server.server_id, AUTH_NONE)
+        self.server = self.server_registry.get(self.server.server_id)
         self.candidates = ExternalToolCandidateRegistry(self.connection, server_registry=self.server_registry)
         self.policy = ExternalToolSideEffectPolicy(self.connection, candidate_registry=self.candidates, server_registry=self.server_registry)
         self.fence = ExternalToolExecutionFence(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy)
         self.ids = iter(f"id-{number}" for number in range(1, 1000))
-        self.invocation = ExternalMcpInvocation(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy, execution_fence=self.fence, id_factory=lambda: next(self.ids))
+        self.invocation = ExternalMcpInvocation(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy, execution_fence=self.fence, auth_binding_registry=self.auth_bindings, id_factory=lambda: next(self.ids))
         self.calls = 0
 
     def tearDown(self):
         self.connection.close()
+        self.tempdir.cleanup()
 
     def discovery(self, records, revision=None):
         return {"status": "SUCCESS", "catalog_complete": True, "server_id": self.server.server_id, "registry_revision": self.server.revision if revision is None else revision, "tool_record_boundary": "SDK_VISIBLE_RAW", "tools": records, "diagnostics": {"registry_changed_during_attempt": False}, "model_visible": False, "execution_allowed": False}
@@ -77,8 +91,10 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             candidates = ExternalToolCandidateRegistry(other, server_registry=servers)
             policy = ExternalToolSideEffectPolicy(other, candidate_registry=candidates, server_registry=servers)
             fence = ExternalToolExecutionFence(other, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
+            other_secret = ExternalSecretStore(other, key_file=tempfile.NamedTemporaryFile(delete=False).name, registry=servers)
+            other_auth = ExternalMcpAuthBindingRegistry(other, server_registry=servers, secret_store=other_secret)
             with self.assertRaises(ExternalInvocationInitializationError):
-                ExternalMcpInvocation(self.connection, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence)
+                ExternalMcpInvocation(self.connection, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence, auth_binding_registry=other_auth)
         finally:
             other.close()
 
@@ -89,7 +105,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.assertEqual(self.invoke(self.lease())["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
         candidate = self.prepare()
-        lease, _ = self.allowed_lease(candidate)
+        lease, action = self.allowed_lease(candidate)
         self.assertEqual(self.invoke(lease, expected_turn_id="wrong")["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
 
@@ -107,9 +123,44 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.assertEqual(self.invoke(self.lease((action,)))["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
 
+    def test_auth_binding_change_invalidates_old_approval_and_confirmation(self):
+        """A real binding mutation makes the previously confirmed action stale."""
+        old_server = self.server_registry.get(self.server.server_id)
+        candidate = self.prepare()
+        old_lease, old_action = self.allowed_lease(candidate)
+        old_candidate_revision = candidate["current_source_registry_revision"]
+
+        secret = self.secret_store.create(
+            server_id=self.server.server_id,
+            credential_slot="slot-a",
+            secret="opaque-test-value",
+        )
+        changed_binding = self.auth_bindings.set_binding(
+            self.server.server_id,
+            "bearer",
+            secret_ref=secret.secret_ref,
+        )
+        new_server = self.server_registry.get(self.server.server_id)
+        self.assertGreater(new_server.revision, old_server.revision)
+        self.assertEqual(new_server.lifecycle_state, "REVIEW_REQUIRED")
+        self.assertEqual(new_server.master_state, "OFF")
+        self.assertEqual(changed_binding.auth_scheme, "bearer")
+
+        result = self.invocation.invoke(
+            f"ext:{self.server.server_id}:calendar.list",
+            {"q": "today"},
+            old_lease,
+            expected_turn_id="turn-1",
+            runner=self.runner(),
+        )
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(self.calls, 0)
+        self.assertNotEqual(old_candidate_revision, new_server.revision)
+        self.assertTrue(old_action)
+
     def test_allow_commits_started_before_runner_and_audits_order(self):
         candidate = self.prepare()
-        lease, _ = self.allowed_lease(candidate)
+        lease, action = self.allowed_lease(candidate)
         observed = []
         def runner(envelope):
             self.calls += 1
@@ -120,7 +171,15 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             self.assertEqual(envelope["endpoint"], self.server.endpoint)
             self.assertEqual(envelope["transport"], self.server.transport)
             self.assertEqual(envelope["source_registry_revision"], candidate["current_source_registry_revision"])
+            self.assertEqual(envelope["fingerprint"], candidate["current_fingerprint"])
+            self.assertEqual(envelope["external_action_id"], action)
+            self.assertEqual(envelope["auth_scheme"], AUTH_NONE)
+            self.assertEqual(envelope["auth_binding_revision"], self.auth_bindings.get_binding(self.server.server_id).revision)
+            self.assertIsNone(envelope["secret_ref"])
+            self.assertIsNone(envelope["credential_slot"])
             self.assertEqual(envelope["tool_input"], {"q": "today"})
+            with self.assertRaises(TypeError):
+                envelope["server_id"] = "attacker"
             return {"status": "SUCCESS"}
         result = self.invoke(lease, runner)
         self.assertEqual(result["status"], SUCCEEDED)
@@ -128,6 +187,37 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         attempt = self.invocation.get_attempt(result["attempt_id"])
         self.assertEqual(attempt["fingerprint"], candidate["current_fingerprint"])
         self.assertEqual([event["status"] for event in self.invocation.list_audit(result["attempt_id"])], ["PRE_CALL", STARTED, SUCCEEDED])
+
+    def test_missing_binding_is_durable_denial_without_runner(self):
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate)
+        self.connection.execute("DELETE FROM external_mcp_auth_bindings WHERE server_id=?", (self.server.server_id,))
+        self.connection.commit()
+        result = self.invoke(lease)
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(result["reason_code"], "AUTH_BINDING_MISSING")
+        self.assertEqual(self.calls, 0)
+        attempt = self.invocation.get_attempt(result["attempt_id"])
+        self.assertEqual(attempt["reason_code"], "AUTH_BINDING_MISSING")
+
+    def test_started_runner_keeps_frozen_auth_envelope_after_binding_row_change(self):
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate)
+        seen = []
+        def runner(envelope):
+            seen.append(dict(envelope))
+            self.connection.execute(
+                "UPDATE external_mcp_auth_bindings SET auth_scheme='bearer', secret_ref='late-ref', credential_slot='late-slot', revision=revision+1 WHERE server_id=?",
+                (self.server.server_id,),
+            )
+            self.connection.commit()
+            return {"status": "SUCCESS"}
+        result = self.invoke(lease, runner)
+        self.assertEqual(result["status"], SUCCEEDED)
+        self.assertEqual(seen[0]["auth_scheme"], AUTH_NONE)
+        self.assertIsNone(seen[0]["secret_ref"])
+        self.assertIsNone(seen[0]["credential_slot"])
+        self.assertEqual(seen[0]["auth_binding_revision"], 1)
 
     def test_snapshot_limits_and_no_plaintext_persistence(self):
         candidate = self.prepare()
@@ -162,8 +252,8 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             seed = sqlite3.connect(handle.name); self.connection.backup(seed); seed.close()
             left, right = sqlite3.connect(handle.name, timeout=5, check_same_thread=False), sqlite3.connect(handle.name, timeout=5, check_same_thread=False)
             def owner(conn):
-                servers = ExternalServerRegistry(conn); candidates = ExternalToolCandidateRegistry(conn, server_registry=servers); policy = ExternalToolSideEffectPolicy(conn, candidate_registry=candidates, server_registry=servers); fence = ExternalToolExecutionFence(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
-                return ExternalMcpInvocation(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence)
+                servers = ExternalServerRegistry(conn); key = tempfile.NamedTemporaryFile(delete=False).name; secrets_store = ExternalSecretStore(conn, key_file=key, registry=servers); auth = ExternalMcpAuthBindingRegistry(conn, server_registry=servers, secret_store=secrets_store); candidates = ExternalToolCandidateRegistry(conn, server_registry=servers); policy = ExternalToolSideEffectPolicy(conn, candidate_registry=candidates, server_registry=servers); fence = ExternalToolExecutionFence(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
+                return ExternalMcpInvocation(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence, auth_binding_registry=auth)
             one, two = owner(left), owner(right)
             # Use a fresh turn; initial attempt is deliberately already terminal.
             fresh_lease = dict(lease); fresh_lease["turn_id"] = "turn-race"
