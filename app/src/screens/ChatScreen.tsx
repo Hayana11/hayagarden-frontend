@@ -5,6 +5,7 @@
 // Mounted at /dash/chat, parallel to the legacy /chat page.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
+import { ROUTES } from '../navigation';
 import { CarryoverModal } from '../components/dailySoftWindow';
 import { useManualContextWindow } from '../hooks/useManualContextWindow';
 import {
@@ -2261,6 +2262,14 @@ export function ChatScreen() {
                 <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>费佳档案</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>身份 · 关系 · 工具直觉</span>
+                </div>
+                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
+              </Link>
+              <Link to={ROUTES.toolroom} onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(249,228,232,.86),rgba(234,230,246,.72))' }}>
+                <div style={{ width: 34, height: 34, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, background: 'rgba(183,110,121,.10)', color: 'var(--rose)', fontSize: 17 }}>⌘</div>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
+                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>工具室</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>真实工具清单 · 当前活动</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
