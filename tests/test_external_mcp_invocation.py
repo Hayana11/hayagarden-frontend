@@ -123,6 +123,41 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.assertEqual(self.invoke(self.lease((action,)))["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
 
+    def test_auth_binding_change_invalidates_old_approval_and_confirmation(self):
+        """A real binding mutation makes the previously confirmed action stale."""
+        old_server = self.server_registry.get(self.server.server_id)
+        candidate = self.prepare()
+        old_lease, old_action = self.allowed_lease(candidate)
+        old_candidate_revision = candidate["current_source_registry_revision"]
+
+        secret = self.secret_store.create(
+            server_id=self.server.server_id,
+            credential_slot="slot-a",
+            secret="opaque-test-value",
+        )
+        changed_binding = self.auth_bindings.set_binding(
+            self.server.server_id,
+            "bearer",
+            secret_ref=secret.secret_ref,
+        )
+        new_server = self.server_registry.get(self.server.server_id)
+        self.assertGreater(new_server.revision, old_server.revision)
+        self.assertEqual(new_server.lifecycle_state, "REVIEW_REQUIRED")
+        self.assertEqual(new_server.master_state, "OFF")
+        self.assertEqual(changed_binding.auth_scheme, "bearer")
+
+        result = self.invocation.invoke(
+            f"ext:{self.server.server_id}:calendar.list",
+            {"q": "today"},
+            old_lease,
+            expected_turn_id="turn-1",
+            runner=self.runner(),
+        )
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(self.calls, 0)
+        self.assertNotEqual(old_candidate_revision, new_server.revision)
+        self.assertTrue(old_action)
+
     def test_allow_commits_started_before_runner_and_audits_order(self):
         candidate = self.prepare()
         lease, action = self.allowed_lease(candidate)
