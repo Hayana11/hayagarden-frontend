@@ -285,14 +285,12 @@ export class RealityStore {
 
   ingestActivity(raw: unknown): RealitySnapshot {
     const activity = normalizeActivity(raw);
-    if (sameActivity(this.snapshot.activity, activity)) {
-      return this.snapshot;
-    }
-
     this.snapshot = {
       ...this.snapshot,
       activity,
     };
+    // Runtime polling must also refresh the prompt when activitySampledAt
+    // crosses the TTL while the native values themselves remain unchanged.
     this.notify();
     return this.snapshot;
   }
