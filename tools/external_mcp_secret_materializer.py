@@ -11,9 +11,13 @@ from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from relay.credential_vault import CredentialVaultError, decrypt_secret
-
-from .external_secret_store import ACTIVE_STATE, ExternalSecretStore, SecretStoreError
+from .external_secret_store import (
+    ACTIVE_STATE,
+    CredentialVaultError,
+    ExternalSecretStore,
+    SecretStoreError,
+    decrypt_secret,
+)
 
 
 MAX_MATERIALIZED_CREDENTIAL_BYTES = 16 * 1024
