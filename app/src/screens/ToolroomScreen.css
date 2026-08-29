@@ -749,6 +749,7 @@
 }
 
 .toolroom-mcp-dialog {
+  position: relative;
   width: 100%;
   max-width: 380px;
   height: 507px;
@@ -760,6 +761,19 @@
   background: rgba(255, 249, 249, 0.98);
   box-shadow: 0 20px 56px rgba(89, 53, 64, 0.22);
   color: var(--color-text);
+}
+
+.toolroom-mcp-dialog::before {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  bottom: 10px;
+  left: 10px;
+  z-index: 0;
+  border: 1px solid rgba(183, 110, 121, 0.12);
+  border-radius: 20px;
+  content: '';
+  pointer-events: none;
 }
 
 .toolroom-mcp-dialog::-webkit-scrollbar {
