@@ -903,6 +903,13 @@
   margin: 9px -4px -4px;
 }
 
+.toolroom-mcp-icon-note {
+  display: block;
+  margin-top: 7px;
+  color: #b7a29c;
+  font: 400 10px/1.4 var(--font-mono);
+}
+
 .toolroom-mcp-icon-option {
   display: grid;
   place-items: center;
