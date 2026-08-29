@@ -16,6 +16,8 @@ from tools.external_mcp_invocation import (
     ExternalMcpInvocation,
     MAX_TOOL_INPUT_BYTES,
 )
+from tools.external_mcp_auth_binding import AUTH_NONE, ExternalMcpAuthBindingRegistry
+from tools.external_secret_store import ExternalSecretStore
 from tools.external_server_registry import ExternalServerRegistry
 from tools.external_tool_execution_fence import ExternalToolExecutionFence, build_external_action_id
 from tools.external_tool_registry import ExternalToolCandidateRegistry
@@ -33,15 +35,21 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.connection = sqlite3.connect(":memory:", check_same_thread=False)
         self.server_registry = ExternalServerRegistry(self.connection, id_factory=lambda: "server-1")
         self.server = self.server_registry.register(display_name="Calendar", endpoint="https://calendar.example/mcp", provenance="owner-admin")
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.secret_store = ExternalSecretStore(self.connection, key_file=os.path.join(self.tempdir.name, "key"), registry=self.server_registry)
+        self.auth_bindings = ExternalMcpAuthBindingRegistry(self.connection, server_registry=self.server_registry, secret_store=self.secret_store)
+        self.auth_bindings.set_binding(self.server.server_id, AUTH_NONE)
+        self.server = self.server_registry.get(self.server.server_id)
         self.candidates = ExternalToolCandidateRegistry(self.connection, server_registry=self.server_registry)
         self.policy = ExternalToolSideEffectPolicy(self.connection, candidate_registry=self.candidates, server_registry=self.server_registry)
         self.fence = ExternalToolExecutionFence(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy)
         self.ids = iter(f"id-{number}" for number in range(1, 1000))
-        self.invocation = ExternalMcpInvocation(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy, execution_fence=self.fence, id_factory=lambda: next(self.ids))
+        self.invocation = ExternalMcpInvocation(self.connection, server_registry=self.server_registry, candidate_registry=self.candidates, side_effect_policy=self.policy, execution_fence=self.fence, auth_binding_registry=self.auth_bindings, id_factory=lambda: next(self.ids))
         self.calls = 0
 
     def tearDown(self):
         self.connection.close()
+        self.tempdir.cleanup()
 
     def discovery(self, records, revision=None):
         return {"status": "SUCCESS", "catalog_complete": True, "server_id": self.server.server_id, "registry_revision": self.server.revision if revision is None else revision, "tool_record_boundary": "SDK_VISIBLE_RAW", "tools": records, "diagnostics": {"registry_changed_during_attempt": False}, "model_visible": False, "execution_allowed": False}
@@ -77,8 +85,10 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             candidates = ExternalToolCandidateRegistry(other, server_registry=servers)
             policy = ExternalToolSideEffectPolicy(other, candidate_registry=candidates, server_registry=servers)
             fence = ExternalToolExecutionFence(other, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
+            other_secret = ExternalSecretStore(other, key_file=tempfile.NamedTemporaryFile(delete=False).name, registry=servers)
+            other_auth = ExternalMcpAuthBindingRegistry(other, server_registry=servers, secret_store=other_secret)
             with self.assertRaises(ExternalInvocationInitializationError):
-                ExternalMcpInvocation(self.connection, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence)
+                ExternalMcpInvocation(self.connection, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence, auth_binding_registry=other_auth)
         finally:
             other.close()
 
@@ -162,8 +172,8 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             seed = sqlite3.connect(handle.name); self.connection.backup(seed); seed.close()
             left, right = sqlite3.connect(handle.name, timeout=5, check_same_thread=False), sqlite3.connect(handle.name, timeout=5, check_same_thread=False)
             def owner(conn):
-                servers = ExternalServerRegistry(conn); candidates = ExternalToolCandidateRegistry(conn, server_registry=servers); policy = ExternalToolSideEffectPolicy(conn, candidate_registry=candidates, server_registry=servers); fence = ExternalToolExecutionFence(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
-                return ExternalMcpInvocation(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence)
+                servers = ExternalServerRegistry(conn); key = tempfile.NamedTemporaryFile(delete=False).name; secrets_store = ExternalSecretStore(conn, key_file=key, registry=servers); auth = ExternalMcpAuthBindingRegistry(conn, server_registry=servers, secret_store=secrets_store); candidates = ExternalToolCandidateRegistry(conn, server_registry=servers); policy = ExternalToolSideEffectPolicy(conn, candidate_registry=candidates, server_registry=servers); fence = ExternalToolExecutionFence(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy)
+                return ExternalMcpInvocation(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence, auth_binding_registry=auth)
             one, two = owner(left), owner(right)
             # Use a fresh turn; initial attempt is deliberately already terminal.
             fresh_lease = dict(lease); fresh_lease["turn_id"] = "turn-race"
