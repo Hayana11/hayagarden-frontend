@@ -486,4 +486,3 @@ class ExternalSecretStore:
         return tuple(self._record(row) for row in self._connection.execute(query, params).fetchall())
 
     list = list_metadata
-

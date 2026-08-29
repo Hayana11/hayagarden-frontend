@@ -217,4 +217,3 @@ test('production defaults do not access secret material or expose execution meth
   assert.equal(DEFAULT_LIMITS.maxTools, 1000);
   assert.equal(DEFAULT_LIMITS.maxCatalogBytes, 2 * 1024 * 1024);
 });
-

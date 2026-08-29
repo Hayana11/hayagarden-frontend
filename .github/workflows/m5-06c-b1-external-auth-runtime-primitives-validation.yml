@@ -124,4 +124,3 @@ jobs:
             tests/test_external_mcp_call_bridge.mjs \
             tests/test_external_mcp_discovery_transport.mjs \
             tests/test_external_mcp_discovery_bridge.mjs
-

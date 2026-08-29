@@ -73,4 +73,3 @@ test('bridge rejects malformed transport result', async () => {
     /schema is incomplete/,
   );
 });
-

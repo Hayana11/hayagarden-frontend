@@ -467,4 +467,3 @@ test('only the shared endpoint and egress authorities are imported', async () =>
   assert.match(source, /Client/);
   assert.match(source, /StreamableHTTPClientTransport/);
 });
-
