@@ -99,7 +99,7 @@ test('credential reflection in catalog and remote errors suppresses all output',
     auth: { scheme: 'bearer', credential },
     fetchImpl: async (_url, init) => {
       const body = JSON.parse(init.body);
-      if (body.method === 'initialize') return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: {} } });
+      if (body.method === 'initialize') return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'fixture', version: '1.0.0' } } });
       if (body.method === 'notifications/initialized') return jsonResponse(undefined, 202);
       throw new Error(`remote error ${credential}`);
     },
