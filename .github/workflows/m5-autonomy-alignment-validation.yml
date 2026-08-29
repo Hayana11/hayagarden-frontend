@@ -113,6 +113,12 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Python test dependency
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install cryptography
+
       - name: Run focused tests
         shell: bash
         run: |
