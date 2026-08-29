@@ -12,12 +12,6 @@ _protected_overlay_error() {
   printf '%s\n' "$1" >&2
   return 1
 }
-_protected_overlay_arity() {
-  local expected="$1"
-  shift
-  [[ "$#" -eq "$expected" ]] || _protected_overlay_error 'PROTECTED_OVERLAY_ARGUMENTS'
-}
-
 _protected_overlay_sha() {
   [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]] || _protected_overlay_error 'PROTECTED_OVERLAY_ARGUMENTS'
 }
@@ -51,7 +45,7 @@ _protected_overlay_current_path() {
 }
 
 protected_overlay_validate_current() {
-  _protected_overlay_arity 2 "$@" || return
+  [[ "$#" -eq 2 ]] || { _protected_overlay_error 'PROTECTED_OVERLAY_ARGUMENTS'; return 1; }
   local root="$1"
   local current_sha="$2"
   _protected_overlay_repo "$root" || return
@@ -62,7 +56,7 @@ protected_overlay_validate_current() {
 }
 
 protected_overlay_validate_target() {
-  _protected_overlay_arity 3 "$@" || return
+  [[ "$#" -eq 3 ]] || { _protected_overlay_error 'PROTECTED_OVERLAY_ARGUMENTS'; return 1; }
   local root="$1"
   local current_sha="$2"
   local target_sha="$3"
@@ -80,7 +74,7 @@ protected_overlay_validate_target() {
 }
 
 protected_overlay_write_manifest() {
-  _protected_overlay_arity 4 "$@" || return
+  [[ "$#" -eq 4 ]] || { _protected_overlay_error 'PROTECTED_OVERLAY_ARGUMENTS'; return 1; }
   local root="$1"
   local current_sha="$2"
   local target_sha="$3"
@@ -122,7 +116,7 @@ protected_overlay_write_manifest() {
 }
 
 protected_overlay_apply() {
-  _protected_overlay_arity 1 "$@" || return
+  [[ "$#" -eq 1 ]] || { _protected_overlay_error 'PROTECTED_OVERLAY_ARGUMENTS'; return 1; }
   local root="$1"
   _protected_overlay_repo "$root" || return
   local path
@@ -139,7 +133,7 @@ protected_overlay_apply() {
 }
 
 protected_overlay_verify() {
-  _protected_overlay_arity 1 "$@" || return
+  [[ "$#" -eq 1 ]] || { _protected_overlay_error 'PROTECTED_OVERLAY_ARGUMENTS'; return 1; }
   local root="$1"
   _protected_overlay_repo "$root" || return
   local staged unstaged expected
