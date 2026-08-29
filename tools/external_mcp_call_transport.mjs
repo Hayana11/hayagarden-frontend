@@ -223,6 +223,14 @@ function boundedResponse(response, maxBytes) {
   });
 }
 
+async function responseWithReflectionGuard(response, credential, maxBytes) {
+  const bounded = boundedResponse(response, maxBytes);
+  if (!credential || typeof bounded.clone !== 'function') return bounded;
+  const reflectedBody = await bounded.clone().text();
+  if (reflectedBody.includes(credential)) throw new CallReflectionError();
+  return bounded;
+}
+
 function combineSignals(signals) {
   const active = signals.filter(Boolean);
   if (active.length === 0) return undefined;
@@ -327,7 +335,10 @@ export async function invokeExternalMcp({
         });
         const response = await Promise.race([request, timeout]);
         if (!response || typeof response.body === 'undefined') throw new CallInputError('fetch returned an invalid response');
-        return boundedResponse(response, limits.maxResponseBytes);
+        return responseWithReflectionGuard(response, authBinding?.credential, limits.maxResponseBytes);
+      } catch (error) {
+        if (authBinding?.credential && containsCredential(error, authBinding.credential)) throw new CallReflectionError();
+        throw error;
       } finally {
         clearTimeout(requestTimer);
       }
