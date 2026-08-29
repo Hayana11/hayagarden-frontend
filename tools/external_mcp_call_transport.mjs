@@ -335,7 +335,7 @@ export async function invokeExternalMcp({
         });
         const response = await Promise.race([request, timeout]);
         if (!response || typeof response.body === 'undefined') throw new CallInputError('fetch returned an invalid response');
-        return responseWithReflectionGuard(response, authBinding?.credential, limits.maxResponseBytes);
+        return await responseWithReflectionGuard(response, authBinding?.credential, limits.maxResponseBytes);
       } catch (error) {
         if (authBinding?.credential && containsCredential(error, authBinding.credential)) throw new CallReflectionError();
         throw error;
