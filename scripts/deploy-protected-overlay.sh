@@ -12,7 +12,6 @@ _protected_overlay_error() {
   printf '%s\n' "$1" >&2
   return 1
 }
-
 _protected_overlay_arity() {
   local expected="$1"
   shift
