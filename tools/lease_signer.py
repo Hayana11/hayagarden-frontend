@@ -24,6 +24,7 @@ from tools.capability_manifest import (
 )
 
 LEASE_VERSION = 1
+EXTERNAL_AUTONOMOUS_POLICY = "external_autonomous_policy"
 
 TURN_LEASE_FIELDS = (
     "lease_version",
@@ -41,6 +42,7 @@ ISSUED_FROM_VALUES = frozenset(
         "default_policy",
         "explicit_user_intent",
         "user_confirmation",
+        EXTERNAL_AUTONOMOUS_POLICY,
         "task_contract",
     }
 )
@@ -136,15 +138,15 @@ def issue_turn_lease(
     contract_id = _normalize_optional_id(task_contract_id)
     extras = _normalize_ids(requested_capabilities)
 
-    if source == "user_confirmation" and not approvals:
+    if source in {"user_confirmation", EXTERNAL_AUTONOMOUS_POLICY} and not approvals:
         raise LeaseSignError(
             "LEASE_MISMATCH",
-            "user_confirmation requires approval_ids",
+            f"{source} requires approval_ids",
         )
-    if source != "user_confirmation" and approvals:
+    if source not in {"user_confirmation", EXTERNAL_AUTONOMOUS_POLICY} and approvals:
         raise LeaseSignError(
             "LEASE_MISMATCH",
-            "approval_ids are only valid with issued_from=user_confirmation",
+            "approval_ids require a confirmation or autonomous external lease",
         )
 
     if source == "task_contract":
@@ -193,6 +195,29 @@ def issue_turn_lease(
     if set(lease) != set(TURN_LEASE_FIELDS):
         raise LeaseSignError("LEASE_MISMATCH", "turn_lease field set drifted")
     return lease
+
+
+def issue_external_autonomous_lease(
+    *,
+    turn_id: str,
+    external_action_id: str,
+    issued_at: str | None = None,
+) -> dict[str, Any]:
+    """Issue the only supported lease for an approved autonomous external action."""
+    if (
+        not isinstance(external_action_id, str)
+        or not external_action_id
+        or external_action_id != external_action_id.strip()
+    ):
+        raise LeaseSignError("LEASE_MISMATCH", "external_action_id is required")
+    return issue_turn_lease(
+        turn_id=turn_id,
+        turn_mode="chat",
+        issued_from=EXTERNAL_AUTONOMOUS_POLICY,
+        requested_capabilities=(),
+        approval_ids=(external_action_id,),
+        issued_at=issued_at,
+    )
 
 
 def _assert_grantable(capability_id: str, *, issued_from: str) -> None:
@@ -271,9 +296,11 @@ def _iter_module_export_names() -> Iterable[str]:
         "LEASE_VERSION",
         "TURN_LEASE_FIELDS",
         "ISSUED_FROM_VALUES",
+        "EXTERNAL_AUTONOMOUS_POLICY",
         "TURN_MODES",
         "DEFAULT_ALLOWED_CAPABILITIES",
         "LeaseSignError",
         "default_allowed_capabilities",
         "issue_turn_lease",
+        "issue_external_autonomous_lease",
     )

@@ -9,18 +9,25 @@ import threading
 import unittest
 
 import tools.external_tool_execution_fence as external_fence
-from tools.lease_signer import LeaseSignError, issue_turn_lease
+from tools.lease_signer import (
+    LeaseSignError,
+    issue_external_autonomous_lease,
+    issue_turn_lease,
+)
 from tools.external_server_registry import ExternalServerRegistry
 from tools.external_tool_registry import ExternalToolCandidateRegistry
 from tools.external_tool_side_effect_policy import (
+    AUTONOMOUS,
     CODE_OR_PROCESS,
     EXTERNAL_STATE,
     NONE,
+    OWNER_CONFIRMED,
     UNKNOWN,
     ExternalToolSideEffectPolicy,
 )
 from tools.external_tool_execution_fence import (
     ACTION_NOT_CONFIRMED,
+    AUTONOMOUS_LEASE_REQUIRED,
     ACTION_ID_PREFIX,
     ALLOW,
     ALLOW_CURRENT_ACTION,
@@ -116,7 +123,7 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
         value.update(extra)
         return value
 
-    def prepare(self, side_effect_class=NONE, record=None):
+    def prepare(self, side_effect_class=NONE, record=None, execution_mode=AUTONOMOUS):
         record = record or tool()
         self.candidates.ingest(self.result([record]))
         candidate = self.candidates.get_candidate(self.server.server_id, record["name"])
@@ -136,6 +143,7 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
             side_effect_class=side_effect_class,
             actor="owner",
             provenance="settings-admin",
+            execution_mode=execution_mode,
         )
         return self.candidates.get_candidate(self.server.server_id, record["name"])
 
@@ -152,10 +160,10 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
         )
 
     def allow_lease(self, action_id, *, turn_id="turn-1"):
-        return self.lease(
+        return issue_external_autonomous_lease(
             turn_id=turn_id,
-            issued_from="user_confirmation",
-            approval_ids=(action_id,),
+            external_action_id=action_id,
+            issued_at="2026-08-23T13:00:00Z",
         )
 
     def evaluate(self, lease=None, *, control_id=None, tool_input=None, expected_turn_id="turn-1"):
@@ -168,12 +176,11 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
 
     def test_valid_control_id_and_frozen_decisions(self):
         candidate = self.prepare(NONE)
-        ask = self.evaluate()
-        self.assertEqual(ask["decision"], ASK)
-        self.assertEqual(ask["reason_code"], ACTION_NOT_CONFIRMED)
-        self.assertEqual(ask["control_id"], candidate["control_id"])
-        self.assertTrue(ask["external_action_id"].startswith(ACTION_ID_PREFIX))
-        allow = self.evaluate(self.allow_lease(ask["external_action_id"]))
+        action = self.action_id(candidate)
+        missing = self.evaluate()
+        self.assertEqual(missing["decision"], DENY)
+        self.assertEqual(missing["reason_code"], AUTONOMOUS_LEASE_REQUIRED)
+        allow = self.evaluate(self.allow_lease(action))
         self.assertEqual(allow["decision"], ALLOW)
         self.assertEqual(allow["reason_code"], ALLOW_CURRENT_ACTION)
 
@@ -240,20 +247,15 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
         self.assertEqual(result["decision"], DENY)
         self.assertEqual(result["reason_code"], CODE_OR_PROCESS_DENIED)
 
-    def test_none_and_external_state_need_exact_current_action_grant(self):
+    def test_none_and_external_state_need_exact_autonomous_lease(self):
         for side_effect_class in (NONE, EXTERNAL_STATE):
             with self.subTest(side_effect_class=side_effect_class):
                 candidate = self.prepare(side_effect_class, tool(name=f"calendar.{side_effect_class}"))
-                control_id = candidate["control_id"]
-                ask = self.fence.evaluate(
-                    control_id, {"q": "today"}, self.lease(), expected_turn_id="turn-1"
-                )
-                self.assertEqual(ask["decision"], ASK)
-                self.assertEqual(ask["reason_code"], ACTION_NOT_CONFIRMED)
+                action = self.action_id(candidate, side_effect_class)
                 allowed = self.fence.evaluate(
-                    control_id,
+                    candidate["control_id"],
                     {"q": "today"},
-                    self.allow_lease(ask["external_action_id"]),
+                    self.allow_lease(action),
                     expected_turn_id="turn-1",
                 )
                 self.assertEqual(allowed["decision"], ALLOW)
@@ -298,7 +300,7 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
         self.assertIs(external_fence.ISSUED_FROM_VALUES, SIGNER_ISSUED_FROM_VALUES)
         self.assertIs(external_fence.LEASE_VERSION, SIGNER_LEASE_VERSION)
 
-        self.prepare(EXTERNAL_STATE)
+        self.prepare(EXTERNAL_STATE, execution_mode=OWNER_CONFIRMED)
         ask = self.evaluate()
         signed_confirmation = issue_turn_lease(
             turn_id="turn-1",
@@ -309,6 +311,13 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
             issued_at="2026-08-23T13:00:00Z",
         )
         self.assertEqual(self.evaluate(signed_confirmation)["decision"], ALLOW)
+
+        autonomous = issue_external_autonomous_lease(
+            turn_id="turn-1",
+            external_action_id=ask["external_action_id"],
+            issued_at="2026-08-23T13:00:00Z",
+        )
+        self.assertEqual(self.evaluate(autonomous)["reason_code"], ACTION_NOT_CONFIRMED)
 
         forged_confirmation = dict(signed_confirmation)
         forged_confirmation["task_contract_id"] = "forged-contract"
@@ -367,21 +376,69 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
             TURN_MODE_NOT_ALLOWED,
         )
 
-    def test_non_user_confirmation_lease_cannot_allow(self):
+    def test_wrong_lease_types_cannot_allow_autonomous_policy(self):
         candidate = self.prepare(NONE)
         action = self.action_id(candidate)
-        for source in ("default_policy", "explicit_user_intent", "task_contract"):
+        for source in ("default_policy", "explicit_user_intent", "user_confirmation"):
             lease = self.lease(
                 issued_from=source,
-                mode="task" if source == "task_contract" else "chat",
-                task_contract_id="contract-1" if source == "task_contract" else None,
+                approval_ids=(action,) if source == "user_confirmation" else (),
             )
             result = self.evaluate(lease)
-            self.assertNotEqual(result["decision"], ALLOW)
+            self.assertEqual(result["decision"], DENY)
+            self.assertEqual(result["reason_code"], AUTONOMOUS_LEASE_REQUIRED)
         self.assertEqual(
-            self.evaluate(self.lease(issued_from="user_confirmation", approval_ids=(action,)))["decision"],
+            self.evaluate(self.allow_lease(action))["decision"],
             ALLOW,
         )
+
+    def test_autonomous_lease_wrong_turn_and_action_fail_closed(self):
+        candidate = self.prepare(NONE)
+        action = self.action_id(candidate)
+        wrong_turn = issue_external_autonomous_lease(
+            turn_id="other-turn",
+            external_action_id=action,
+        )
+        self.assertEqual(
+            self.evaluate(wrong_turn)["reason_code"],
+            TURN_ID_MISMATCH,
+        )
+        wrong_action = issue_external_autonomous_lease(
+            turn_id="turn-1",
+            external_action_id=action + "-tampered",
+        )
+        result = self.evaluate(wrong_action)
+        self.assertEqual(result["decision"], DENY)
+        self.assertEqual(result["reason_code"], AUTONOMOUS_LEASE_REQUIRED)
+
+    def test_owner_confirmed_requires_structured_user_confirmation(self):
+        candidate = self.prepare(NONE, execution_mode=OWNER_CONFIRMED)
+        action = self.action_id(candidate)
+        autonomous = issue_external_autonomous_lease(
+            turn_id="turn-1",
+            external_action_id=action,
+        )
+        self.assertEqual(
+            self.evaluate(autonomous)["reason_code"],
+            ACTION_NOT_CONFIRMED,
+        )
+        confirmed = self.lease(
+            issued_from="user_confirmation",
+            approval_ids=(action,),
+        )
+        self.assertEqual(self.evaluate(confirmed)["decision"], ALLOW)
+
+    def test_autonomous_missing_and_forged_lease_deny(self):
+        candidate = self.prepare(EXTERNAL_STATE)
+        missing = self.evaluate()
+        self.assertEqual(missing["decision"], DENY)
+        self.assertEqual(missing["reason_code"], AUTONOMOUS_LEASE_REQUIRED)
+        forged = self.lease(
+            issued_from="external_autonomous_policy",
+            approval_ids=(self.action_id(candidate, EXTERNAL_STATE) + "-forged",),
+        )
+        self.assertEqual(self.evaluate(forged)["decision"], DENY)
+        self.assertEqual(self.evaluate(forged)["reason_code"], AUTONOMOUS_LEASE_REQUIRED)
 
     def test_action_id_is_canonical_and_binds_every_frozen_field(self):
         control = self.control_id()

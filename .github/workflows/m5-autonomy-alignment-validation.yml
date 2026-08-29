@@ -1,0 +1,76 @@
+name: M5 autonomy alignment validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/m5-autonomy-alignment-validation.yml
+      - tools/external_tool_side_effect_policy.py
+      - tools/lease_signer.py
+      - tools/external_tool_execution_fence.py
+      - tests/test_external_tool_side_effect_policy.py
+      - tests/test_lease_signer.py
+      - tests/test_external_tool_execution_fence.py
+      - tests/test_external_mcp_invocation.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE_SHA: fbaf6b10bd85846345d01a81a95be96235002793
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact head, base, merge-base, and eight-file fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          expected=$'.github/workflows/m5-autonomy-alignment-validation.yml
+tests/test_external_mcp_invocation.py
+tests/test_external_tool_execution_fence.py
+tests/test_external_tool_side_effect_policy.py
+tests/test_lease_signer.py
+tools/external_tool_execution_fence.py
+tools/external_tool_side_effect_policy.py
+tools/lease_signer.py'
+          actual="$(git diff --name-only "$BASE_SHA" HEAD | sort)"
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" HEAD
+
+      - name: Static autonomy boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if rg -n -i 'natural.?language|yes/no|consent|message.?text|prompt.?text|llm.?classifier|model.?decides'             tools/external_tool_side_effect_policy.py tools/lease_signer.py tools/external_tool_execution_fence.py; then
+            echo "NLP confirmation surface detected" >&2
+            exit 1
+          fi
+          ! rg -n 'execution_mode.*(request|caller|model|bridge|provider)'             tools/external_tool_side_effect_policy.py tools/lease_signer.py tools/external_tool_execution_fence.py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v             tests.test_external_tool_side_effect_policy             tests.test_lease_signer             tests.test_external_tool_execution_fence             tests.test_external_mcp_invocation
+
+      - name: Run M5 regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v             tests.test_external_server_registry             tests.test_external_tool_registry             tests.test_external_tool_execution_fence             tests.test_external_mcp_invocation             tests.test_external_mcp_auth_binding

@@ -17,15 +17,18 @@ from typing import Any, Optional
 from .external_server_registry import ExternalServerRegistry
 from .external_tool_registry import ExternalToolCandidateRegistry
 from .lease_signer import (
+    EXTERNAL_AUTONOMOUS_POLICY,
     ISSUED_FROM_VALUES,
     LEASE_VERSION,
     TURN_LEASE_FIELDS,
     TURN_MODES,
 )
 from .external_tool_side_effect_policy import (
+    AUTONOMOUS,
     CODE_OR_PROCESS,
     EXTERNAL_STATE,
     NONE,
+    OWNER_CONFIRMED,
     SIDE_EFFECT_CLASSES,
     UNKNOWN,
     ExternalToolSideEffectPolicy,
@@ -46,6 +49,8 @@ TURN_LEASE_INVALID = "TURN_LEASE_INVALID"
 TURN_ID_MISMATCH = "TURN_ID_MISMATCH"
 TURN_MODE_NOT_ALLOWED = "TURN_MODE_NOT_ALLOWED"
 ACTION_NOT_CONFIRMED = "ACTION_NOT_CONFIRMED"
+AUTONOMOUS_LEASE_REQUIRED = "AUTONOMOUS_LEASE_REQUIRED"
+EXECUTION_MODE_INVALID = "EXECUTION_MODE_INVALID"
 ALLOW_CURRENT_ACTION = "ALLOW_CURRENT_ACTION"
 AUTHORITY_READ_FAILED = "AUTHORITY_READ_FAILED"
 
@@ -208,10 +213,16 @@ def _lease_error(turn_lease: Any) -> Optional[str]:
     issued_at = turn_lease.get("issued_at")
     if not isinstance(issued_at, str) or not issued_at or issued_at != issued_at.strip():
         return "issued_at malformed"
-    if issued_from == "user_confirmation" and not turn_lease["approval_ids"]:
-        return "user_confirmation has no approval_ids"
-    if issued_from != "user_confirmation" and turn_lease["approval_ids"]:
-        return "approval_ids require user_confirmation"
+    if (
+        issued_from in {"user_confirmation", EXTERNAL_AUTONOMOUS_POLICY}
+        and not turn_lease["approval_ids"]
+    ):
+        return f"{issued_from} has no approval_ids"
+    if (
+        issued_from not in {"user_confirmation", EXTERNAL_AUTONOMOUS_POLICY}
+        and turn_lease["approval_ids"]
+    ):
+        return "approval_ids require a confirmation or autonomous external lease"
     if issued_from == "task_contract":
         if task_contract_id is None:
             return "task_contract requires task_contract_id"
@@ -310,10 +321,12 @@ class ExternalToolExecutionFence:
                 return _deny(CLASSIFICATION_NOT_EFFECTIVE, control_id=control_id)
 
             side_effect_class = classification.get("effective_side_effect_class")
+            execution_mode = classification.get("effective_execution_mode")
             fingerprint = classification.get("candidate_fingerprint")
             source_revision = classification.get("candidate_source_registry_revision")
             if (
                 side_effect_class not in SIDE_EFFECT_CLASSES
+                or execution_mode not in {AUTONOMOUS, OWNER_CONFIRMED}
                 or not _valid_fingerprint(fingerprint)
                 or isinstance(source_revision, bool)
                 or not isinstance(source_revision, int)
@@ -341,26 +354,36 @@ class ExternalToolExecutionFence:
             if side_effect_class not in (NONE, EXTERNAL_STATE):
                 return _deny(UNKNOWN_SIDE_EFFECT, **common)
 
-            if (
-                turn_lease["issued_from"] == "user_confirmation"
-                and external_action_id in tuple(turn_lease["approval_ids"])
-            ):
-                return {
-                    "decision": ALLOW,
-                    "reason_code": ALLOW_CURRENT_ACTION,
-                    "control_id": control_id,
-                    "server_id": server_id,
-                    "tool_name": tool_name,
-                    "fingerprint": fingerprint,
-                    "source_registry_revision": source_revision,
-                    "side_effect_class": side_effect_class,
-                    "external_action_id": external_action_id,
-                    "turn_id": turn_lease["turn_id"],
-                }
+            if execution_mode == AUTONOMOUS:
+                if (
+                    turn_lease["issued_from"] != EXTERNAL_AUTONOMOUS_POLICY
+                    or external_action_id not in tuple(turn_lease["approval_ids"])
+                ):
+                    return _deny(AUTONOMOUS_LEASE_REQUIRED, **common)
+            elif execution_mode == OWNER_CONFIRMED:
+                if (
+                    turn_lease["issued_from"] != "user_confirmation"
+                    or external_action_id not in tuple(turn_lease["approval_ids"])
+                ):
+                    return {
+                        "decision": ASK,
+                        "reason_code": ACTION_NOT_CONFIRMED,
+                        **common,
+                    }
+            else:
+                return _deny(EXECUTION_MODE_INVALID, **common)
+
             return {
-                "decision": ASK,
-                "reason_code": ACTION_NOT_CONFIRMED,
-                **common,
+                "decision": ALLOW,
+                "reason_code": ALLOW_CURRENT_ACTION,
+                "control_id": control_id,
+                "server_id": server_id,
+                "tool_name": tool_name,
+                "fingerprint": fingerprint,
+                "source_registry_revision": source_revision,
+                "side_effect_class": side_effect_class,
+                "external_action_id": external_action_id,
+                "turn_id": turn_lease["turn_id"],
             }
         except (sqlite3.Error, KeyError, TypeError, ValueError):
             return _deny(AUTHORITY_READ_FAILED, control_id=control_id)

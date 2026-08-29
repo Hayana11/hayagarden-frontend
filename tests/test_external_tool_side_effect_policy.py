@@ -17,9 +17,11 @@ from tools.external_tool_registry import (
     fingerprint_raw_tool,
 )
 from tools.external_tool_side_effect_policy import (
+    AUTONOMOUS,
     CODE_OR_PROCESS,
     EXTERNAL_STATE,
     NONE,
+    OWNER_CONFIRMED,
     UNKNOWN,
     ExternalToolSideEffectPolicy,
     SideEffectRejectedError,
@@ -88,7 +90,7 @@ class ExternalToolSideEffectPolicyTests(unittest.TestCase):
             provenance="settings-admin",
         )
 
-    def classify(self, side_effect_class=NONE, *, actor="owner", provenance="settings-admin"):
+    def classify(self, side_effect_class=NONE, *, actor="owner", provenance="settings-admin", execution_mode=AUTONOMOUS):
         candidate = self.candidates.get_candidate(self.server.server_id, "calendar.list")
         return self.policy.classify(
             server_id=self.server.server_id,
@@ -98,6 +100,7 @@ class ExternalToolSideEffectPolicyTests(unittest.TestCase):
             side_effect_class=side_effect_class,
             actor=actor,
             provenance=provenance,
+            execution_mode=execution_mode,
         )
 
     def assert_rejected(self, call, code):
@@ -143,6 +146,30 @@ class ExternalToolSideEffectPolicyTests(unittest.TestCase):
         with self.assertRaises(SideEffectValidationError) as raised:
             self.classify("readOnlyHint")
         self.assertEqual(raised.exception.code, "INVALID_SIDE_EFFECT_CLASS")
+
+    def test_allowed_classes_default_to_autonomous_and_owner_confirmed_is_explicit(self):
+        self.ingest_and_approve()
+        autonomous = self.classify(NONE)
+        self.assertEqual(autonomous["baseline"]["execution_mode"], AUTONOMOUS)
+        effective = self.policy.get_effective_classification(
+            self.server.server_id, "calendar.list"
+        )
+        self.assertTrue(effective["effective_classified"])
+        self.assertEqual(effective["effective_execution_mode"], AUTONOMOUS)
+
+        confirmed = self.classify(NONE, execution_mode=OWNER_CONFIRMED)
+        self.assertEqual(confirmed["baseline"]["execution_mode"], OWNER_CONFIRMED)
+        self.assertEqual(
+            self.policy.get_effective_classification(
+                self.server.server_id, "calendar.list"
+            )["effective_execution_mode"],
+            OWNER_CONFIRMED,
+        )
+
+        with self.assertRaises(SideEffectValidationError) as raised:
+            self.classify(NONE, execution_mode="model_decides")
+        self.assertEqual(raised.exception.code, "INVALID_EXECUTION_MODE")
+
 
     def test_classification_requires_current_effective_approval_and_presence(self):
         self.candidates.ingest(self.result([tool()]))

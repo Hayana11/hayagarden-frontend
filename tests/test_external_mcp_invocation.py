@@ -17,6 +17,7 @@ from tools.external_mcp_invocation import (
     ExternalMcpInvocation,
     MAX_TOOL_INPUT_BYTES,
 )
+from tools.lease_signer import issue_external_autonomous_lease
 from tools.external_mcp_auth_binding import AUTH_NONE, ExternalMcpAuthBindingRegistry
 from tools.external_secret_store import ExternalSecretStore
 from tools.external_server_registry import ExternalServerRegistry
@@ -72,7 +73,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
 
     def allowed_lease(self, candidate, value=None, turn_id="turn-1", side_effect_class=NONE):
         action = build_external_action_id(candidate["control_id"], candidate["current_fingerprint"], candidate["current_source_registry_revision"], side_effect_class, value or {"q": "today"})
-        return self.lease((action,), turn_id), action
+        return issue_external_autonomous_lease(turn_id=turn_id, external_action_id=action), action
 
     def runner(self, status="SUCCESS"):
         def run(envelope):
@@ -97,6 +98,24 @@ class ExternalMcpInvocationTests(unittest.TestCase):
                 ExternalMcpInvocation(self.connection, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence, auth_binding_registry=other_auth)
         finally:
             other.close()
+
+    def test_autonomous_path_never_reads_confirmation_store(self):
+        import tools.confirmation_store as confirmation_store
+
+        class Bomb:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("confirmation store touched")
+
+        candidate = self.prepare()
+        action_lease, _ = self.allowed_lease(candidate)
+        previous = confirmation_store.PendingActionStore
+        confirmation_store.PendingActionStore = Bomb
+        try:
+            result = self.invoke(action_lease)
+        finally:
+            confirmation_store.PendingActionStore = previous
+        self.assertEqual(result["status"], SUCCEEDED)
+        self.assertEqual(self.calls, 1)
 
     def test_ask_deny_and_invalid_turn_never_run(self):
         candidate = self.prepare()
