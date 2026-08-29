@@ -17,6 +17,8 @@
 }
 
 .toolroom-header-wrap .page-header {
+  position: relative;
+  min-height: 54px;
   align-items: flex-start;
 }
 
@@ -60,7 +62,7 @@
 
 .toolroom-tabs {
   flex: none;
-  width: auto;
+  width: calc(100% - 44px);
   max-width: 386px;
   margin: 16px auto 4px;
   padding: 5px;
