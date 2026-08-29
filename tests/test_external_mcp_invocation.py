@@ -105,7 +105,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.assertEqual(self.invoke(self.lease())["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
         candidate = self.prepare()
-        lease, _ = self.allowed_lease(candidate)
+        lease, action = self.allowed_lease(candidate)
         self.assertEqual(self.invoke(lease, expected_turn_id="wrong")["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
 
@@ -125,7 +125,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
 
     def test_allow_commits_started_before_runner_and_audits_order(self):
         candidate = self.prepare()
-        lease, _ = self.allowed_lease(candidate)
+        lease, action = self.allowed_lease(candidate)
         observed = []
         def runner(envelope):
             self.calls += 1
@@ -136,6 +136,8 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             self.assertEqual(envelope["endpoint"], self.server.endpoint)
             self.assertEqual(envelope["transport"], self.server.transport)
             self.assertEqual(envelope["source_registry_revision"], candidate["current_source_registry_revision"])
+            self.assertEqual(envelope["fingerprint"], candidate["current_fingerprint"])
+            self.assertEqual(envelope["external_action_id"], action)
             self.assertEqual(envelope["auth_scheme"], AUTH_NONE)
             self.assertEqual(envelope["auth_binding_revision"], self.auth_bindings.get_binding(self.server.server_id).revision)
             self.assertIsNone(envelope["secret_ref"])
