@@ -468,7 +468,7 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
     def test_allow_returns_frozen_execution_context(self):
         candidate = self.prepare(EXTERNAL_STATE)
         ask = self.evaluate()
-        result = self.evaluate(self.allow_lease(ask["external_action_id"]))
+        result = self.evaluate(self.allow_lease(current_action))
         self.assertEqual(
             set(result),
             {
@@ -613,9 +613,19 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
                 expected_source_registry_revision=current["current_source_registry_revision"],
                 side_effect_class=NONE, actor="owner", provenance="settings-admin",
             )
-            ask = first_fence.evaluate(candidate["control_id"], {"q": "today"}, self.lease(), expected_turn_id="turn-1")
-            self.assertEqual(ask["decision"], ASK)
-            allowed = first_fence.evaluate(candidate["control_id"], {"q": "today"}, self.allow_lease(ask["external_action_id"]), expected_turn_id="turn-1")
+            current_action = build_external_action_id(
+                current["control_id"],
+                current["current_fingerprint"],
+                current["current_source_registry_revision"],
+                NONE,
+                {"q": "today"},
+            )
+            allowed = first_fence.evaluate(
+                candidate["control_id"],
+                {"q": "today"},
+                self.allow_lease(current_action),
+                expected_turn_id="turn-1",
+            )
             self.assertEqual(allowed["decision"], ALLOW)
             committed.clear()
             def reject_current():
@@ -634,7 +644,7 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
             thread.start()
             self.assertTrue(committed.wait(5))
             thread.join(5)
-            self.assertEqual(first_fence.evaluate(candidate["control_id"], {"q": "today"}, self.allow_lease(ask["external_action_id"]), expected_turn_id="turn-1")["decision"], DENY)
+            self.assertEqual(first_fence.evaluate(candidate["control_id"], {"q": "today"}, self.allow_lease(current_action), expected_turn_id="turn-1")["decision"], DENY)
         finally:
             first.close()
             second.close()
