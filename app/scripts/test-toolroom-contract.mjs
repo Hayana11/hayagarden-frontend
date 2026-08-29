@@ -40,5 +40,10 @@ assert.match(css, /\.toolroom-detail-label\s*\{[\s\S]*?color:\s*#b7a29c;[\s\S]*?
 assert.match(css, /\.toolroom-detail-label\s*\{[\s\S]*?text-transform:\s*uppercase/);
 assert.match(css, /\.toolroom-tool-detail dt\s*\{[\s\S]*?color:\s*#b76e79;[\s\S]*?font-family:\s*'JetBrains Mono', monospace;[\s\S]*?font-size:\s*11\.5px;/);
 assert.match(css, /\.toolroom-tool-detail p\s*\{[\s\S]*?color:\s*#6b5a55;[\s\S]*?font-size:\s*12\.5px;/);
+assert.match(screen, /GROUP_ACCENT_COLORS/);
+assert.match(screen, /'--toolroom-accent'/);
+assert.match(screen, /DISABLED_TOOL_ACCENT/);
+assert.match(css, /background:\s*var\(--toolroom-accent/);
+assert.match(css, /border-left:\s*3px solid var\(--toolroom-accent/);
 
 console.log('test-toolroom-contract: ok');
