@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from relay.credential_vault import CredentialVaultError, decrypt_secret
 
-from .external_secret_store import ACTIVE_STATE, ExternalSecretStore
+from .external_secret_store import ACTIVE_STATE, ExternalSecretStore, SecretStoreError
 
 
 MAX_MATERIALIZED_CREDENTIAL_BYTES = 16 * 1024
@@ -145,7 +145,15 @@ class ExternalMcpSecretMaterializer:
                 raise ValueError("decrypted credential is unavailable")
         except ExternalMcpSecretMaterializerError:
             raise
-        except (CredentialVaultError, OSError, UnicodeError, ValueError, TypeError, AttributeError) as exc:
+        except (
+            CredentialVaultError,
+            SecretStoreError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            TypeError,
+            AttributeError,
+        ) as exc:
             raise ExternalMcpSecretMaterializerError(
                 "external MCP credential is unavailable", code=AUTH_SECRET_UNAVAILABLE
             ) from exc
