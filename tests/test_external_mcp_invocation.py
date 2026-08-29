@@ -40,6 +40,8 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.key_path = os.path.join(self.tempdir.name, "key")
         with open(self.key_path, "wb") as key_file:
             key_file.write(Fernet.generate_key())
+        if os.name == "posix":
+            os.chmod(self.key_path, 0o600)
         self.secret_store = ExternalSecretStore(self.connection, key_file=self.key_path, registry=self.server_registry)
         self.auth_bindings = ExternalMcpAuthBindingRegistry(self.connection, server_registry=self.server_registry, secret_store=self.secret_store)
         self.auth_bindings.set_binding(self.server.server_id, AUTH_NONE)
