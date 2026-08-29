@@ -3,7 +3,9 @@ import { pathToFileURL } from 'node:url';
 import { CALL_OUTCOME, invokeExternalMcp } from './external_mcp_call_transport.mjs';
 
 export const BRIDGE_VERSION = 1;
-export const MAX_BRIDGE_INPUT_BYTES = 16 * 1024;
+// 256 KiB is the canonical Python tool-input limit.  The additional bounded
+// room covers the semantic envelope and the materializer's 16 KiB bearer.
+export const MAX_BRIDGE_INPUT_BYTES = 320 * 1024;
 export const MAX_BRIDGE_OUTPUT_BYTES = 256 * 1024;
 export const MAX_BRIDGE_STDERR_BYTES = 4 * 1024;
 

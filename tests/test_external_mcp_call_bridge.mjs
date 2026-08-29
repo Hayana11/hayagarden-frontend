@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   BRIDGE_VERSION,
+  MAX_BRIDGE_INPUT_BYTES,
   executeBridgeEnvelope,
 } from '../tools/external_mcp_call_bridge.mjs';
 
@@ -72,4 +73,9 @@ test('bridge rejects malformed transport result', async () => {
     () => executeBridgeEnvelope(envelope(), { invoke: async () => ({ status: 'SUCCESS' }) }),
     /schema is incomplete/,
   );
+});
+
+test('finite call stdin bound covers canonical 256 KiB input plus bearer overhead', () => {
+  assert.ok(MAX_BRIDGE_INPUT_BYTES > 256 * 1024 + 16 * 1024);
+  assert.ok(MAX_BRIDGE_INPUT_BYTES < 1024 * 1024);
 });
