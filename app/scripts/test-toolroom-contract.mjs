@@ -65,6 +65,7 @@ assert.doesNotMatch(screen, /🧠/);
 assert.match(css, /\.toolroom-group-icon svg\s*\{[\s\S]*?stroke:\s*currentColor/);
 assert.match(css, /\.toolroom-card-title > svg\s*\{[\s\S]*?stroke:\s*currentColor/);
 assert.match(css, /\.toolroom-group-copy > strong \+ \.toolroom-badges\s*\{[\s\S]*?margin-top:\s*5px/);
+assert.match(css, /\.toolroom-group:hover,\s*\.toolroom-group:focus-within\s*\{[\s\S]*?background:\s*rgba\(255, 255, 255, 0\.98\)/);
 assert.match(css, /\.toolroom-tool-copy > span\s*\{[\s\S]*?font-family:\s*'Noto Serif SC', serif;[\s\S]*?font-size:\s*11\.5px;[\s\S]*?line-height:\s*1\.2/);
 
 assert.match(screen, /GROUP_ACCENT_COLORS/);
