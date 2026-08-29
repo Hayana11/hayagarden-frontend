@@ -467,8 +467,8 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
 
     def test_allow_returns_frozen_execution_context(self):
         candidate = self.prepare(EXTERNAL_STATE)
-        ask = self.evaluate()
-        result = self.evaluate(self.allow_lease(current_action))
+        action = self.action_id(candidate, EXTERNAL_STATE)
+        result = self.evaluate(self.allow_lease(action))
         self.assertEqual(
             set(result),
             {
