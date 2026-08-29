@@ -206,6 +206,44 @@ test ! -e "$ROOT/client_errors.log.1"
         result = subprocess.run(["bash", "-c", command], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_bootstrap_resolves_sibling_helper_not_production_root(self):
+        bootstrap = self.repo / "root-only-tmp"
+        old_production = self.repo / "old-production"
+        bootstrap.mkdir()
+        (old_production / "scripts").mkdir(parents=True)
+        (bootstrap / "deploy-frontend.sh").write_bytes(DEPLOY.read_bytes())
+        (bootstrap / "deploy-protected-overlay.sh").write_bytes(HELPER.read_bytes())
+        authority_block = "\n".join(
+            line
+            for line in DEPLOY.read_text(encoding="utf-8").splitlines()
+            if line.startswith("DEPLOY_SCRIPT_DIR=")
+            or line.startswith("OVERLAY_HELPER=")
+            or line.startswith('[[ -r "$OVERLAY_HELPER" ]]')
+            or line.startswith('source "$OVERLAY_HELPER"')
+        )
+        self.assertIn('dirname -- "${BASH_SOURCE[0]}"', authority_block)
+        self.assertNotIn('source "$ROOT/scripts/deploy-protected-overlay.sh"', DEPLOY.read_text(encoding="utf-8"))
+        probe = bootstrap / "resolve-helper.sh"
+        probe.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -Eeuo pipefail\n"
+            "ROOT=\"$1\"\n"
+            "fail() { printf '%s\\n' \"$*\" >&2; return 1; }\n"
+            f"{authority_block}\n"
+            "[[ -r \"$OVERLAY_HELPER\" ]]\n"
+            "[[ ! -e \"$ROOT/scripts/deploy-protected-overlay.sh\" ]]\n"
+            "declare -F protected_overlay_apply >/dev/null\n"
+            "[[ \"$PROTECTED_OVERLAY_PATH_A\" == \"artifacts/treegpt-cache-probe-baseline.json\" ]]\n",
+            encoding="utf-8",
+        )
+        probe.chmod(0o700)
+        result = subprocess.run(
+            ["bash", str(probe), str(old_production), str(bootstrap)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_unrelated_untracked_file_is_not_excluded(self):
         self.remove_overlay()
         (self.repo / "random-debug.txt").write_text("unexpected\n", encoding="utf-8")

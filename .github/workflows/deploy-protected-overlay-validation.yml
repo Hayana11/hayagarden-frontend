@@ -45,6 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           helper=scripts/deploy-protected-overlay.sh
+          deploy=scripts/deploy-frontend.sh
           test "$(grep -Fxc "readonly PROTECTED_OVERLAY_PATH_A='artifacts/treegpt-cache-probe-baseline.json'" "$helper")" = 1
           test "$(grep -Fxc "readonly PROTECTED_OVERLAY_PATH_B='artifacts/treegpt-cache-probe-live.json'" "$helper")" = 1
           if grep -nE '(^|[^[:alnum:]_])(eval|curl|systemctl|DEPLOYED_SHA|git[[:space:]]+(fetch|pull|push)|reset|restore|checkout)([^[:alnum:]_]|$)' "$helper"; then
@@ -53,6 +54,14 @@ jobs:
           fi
           if grep -nE '(^|[^[:alnum:]_])\$\@|PROTECTED_OVERLAY_PATH_[A-Z_]+[[:space:]]*=' "$helper" | grep -vE 'PROTECTED_OVERLAY_PATH_[AB][[:space:]]*='; then
             echo "caller-extensible path surface detected" >&2
+            exit 1
+          fi
+          test "$(grep -Fxc 'source "$ROOT/scripts/deploy-protected-overlay.sh"' "$deploy")" = 0
+          grep -Fq 'dirname -- "${BASH_SOURCE[0]}"' "$deploy"
+          grep -Fq 'OVERLAY_HELPER="$DEPLOY_SCRIPT_DIR/deploy-protected-overlay.sh"' "$deploy"
+          grep -Fq 'source "$OVERLAY_HELPER"' "$deploy"
+          if grep -nE 'OVERLAY_HELPER=.*ROOT|source[[:space:]]+.*ROOT' "$deploy"; then
+            echo "helper authority may use production ROOT" >&2
             exit 1
           fi
 

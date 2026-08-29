@@ -19,6 +19,11 @@ fail() {
   exit 1
 }
 
+DEPLOY_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+OVERLAY_HELPER="$DEPLOY_SCRIPT_DIR/deploy-protected-overlay.sh"
+[[ -r "$OVERLAY_HELPER" ]] || fail "protected overlay helper is unavailable"
+source "$OVERLAY_HELPER"
+
 [[ $EUID -eq 0 ]] || fail "run with sudo so service restart and rollback are reliable"
 [[ -d "$ROOT/.git" ]] || fail "$ROOT is not a git checkout"
 command -v git >/dev/null || fail "git is missing"
@@ -53,7 +58,6 @@ if ! git merge-base --is-ancestor "$current_sha" "$target_sha"; then
   fi
   echo "Using audited one-time recovery acknowledgement for $current_sha"
 fi
-source "$ROOT/scripts/deploy-protected-overlay.sh"
 protected_overlay_validate_current "$ROOT" "$current_sha"
 protected_overlay_validate_target "$ROOT" "$current_sha" "$target_sha"
 
