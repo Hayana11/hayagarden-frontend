@@ -39,6 +39,7 @@ def _load_credential_vault_primitive():
 
 _CREDENTIAL_VAULT = _load_credential_vault_primitive()
 CredentialVaultError = _CREDENTIAL_VAULT.CredentialVaultError
+decrypt_secret = _CREDENTIAL_VAULT.decrypt_secret
 encrypt_secret = _CREDENTIAL_VAULT.encrypt_secret
 
 
