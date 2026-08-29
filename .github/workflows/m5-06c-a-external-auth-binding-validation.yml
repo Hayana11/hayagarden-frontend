@@ -1,0 +1,100 @@
+name: M5-06C-A external auth binding validation
+
+on:
+  pull_request:
+    paths:
+      - tools/external_mcp_auth_binding.py
+      - tools/external_mcp_invocation.py
+      - tools/external_server_registry.py
+      - tests/test_external_mcp_auth_binding.py
+      - tests/test_external_mcp_invocation.py
+      - .github/workflows/m5-06c-a-external-auth-binding-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE_SHA: b60c7ec463fdd464af3390f8316370a13958b13b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact head, base, merge-base, and six-file fence
+        env:
+          BASE_SHA: b60c7ec463fdd464af3390f8316370a13958b13b
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          expected=$'.github/workflows/m5-06c-a-external-auth-binding-validation.yml\ntests/test_external_mcp_auth_binding.py\ntests/test_external_mcp_invocation.py\ntools/external_mcp_auth_binding.py\ntools/external_mcp_invocation.py\ntools/external_server_registry.py'
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Verify source boundary
+        env:
+          BASE_SHA: b60c7ec463fdd464af3390f8316370a13958b13b
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden=(
+            tools/external_mcp_call_transport.mjs
+            tools/external_mcp_discovery_transport.mjs
+            tools/external_mcp_discovery.py
+            tools/external_secret_store.py
+            tools/external_tool_registry.py
+            tools/external_tool_side_effect_policy.py
+            tools/external_tool_execution_fence.py
+            tools/lease_signer.py
+            relay/gateway.py
+            relay/app.py
+          )
+          for path in "${forbidden[@]}"; do
+            test "$(git diff --name-only "$BASE_SHA" HEAD -- "$path")" = ""
+          done
+          if git diff "$BASE_SHA" HEAD -- tools/external_mcp_auth_binding.py tools/external_mcp_invocation.py tools/external_server_registry.py | grep -nE 'decrypt_secret|Authorization|Bearer[[:space:]]|subprocess|socket|(^|[^[:alnum:]_])fetch([^[:alnum:]_]|$)|httpx|requests|external_mcp_call_transport|external_mcp_discovery_transport'; then
+            echo 'forbidden external execution or secret primitive detected' >&2
+            exit 1
+          fi
+
+      - name: Python focused and adjacent regressions
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Python focused and adjacent regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v \
+            tests.test_external_mcp_auth_binding \
+            tests.test_external_mcp_invocation \
+            tests.test_external_secret_store \
+            tests.test_external_server_registry \
+            tests.test_external_tool_execution_fence
+
+      - name: M5-06A and M5-03A regression
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run M5-06A transport regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test tests/test_external_mcp_call_transport.mjs
+
+      - name: Run M5-03A discovery regression
+        shell: bash
+        run: node --test tests/test_external_mcp_discovery_transport.mjs
