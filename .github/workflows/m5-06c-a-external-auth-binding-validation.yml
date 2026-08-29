@@ -94,6 +94,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
           node --test tests/test_external_mcp_call_transport.mjs
 
       - name: Run M5-03A discovery regression
