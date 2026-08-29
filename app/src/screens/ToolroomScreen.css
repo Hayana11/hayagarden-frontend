@@ -175,6 +175,7 @@
   display: flex;
   align-items: center;
   padding: 16px 18px;
+  transition: background-color 160ms ease;
 }
 
 .toolroom-group-toggle > * + * {
@@ -670,7 +671,7 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .toolroom-group:hover,
+  .toolroom-group-toggle:hover,
   .toolroom-tool:hover {
     background: rgba(255, 255, 255, 0.98);
   }
