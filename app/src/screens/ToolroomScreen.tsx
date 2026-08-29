@@ -95,6 +95,7 @@ function transportLabel(group: InventoryGroup): string {
   const providers = group.tools.map((tool) => tool.provider || '').join(' ');
   if (/\bsse\b/i.test(providers)) return 'SSE';
   if (/\bhttps?:\/\//i.test(providers) || /\bhttp\b/i.test(providers)) return 'HTTP';
+  if (/\bcanary\b/i.test(providers)) return 'Canary';
   return '其他';
 }
 
