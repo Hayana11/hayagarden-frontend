@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +27,8 @@ class ExternalMcpSecretMaterializerTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.key_file = root / "external.key"
         self.key_file.write_bytes(Fernet.generate_key())
+        if os.name == "posix":
+            self.key_file.chmod(0o600)
         self.connection = sqlite3.connect(root / "secrets.sqlite3")
         self.registry = ExternalServerRegistry(self.connection)
         self.server = self.registry.register(
