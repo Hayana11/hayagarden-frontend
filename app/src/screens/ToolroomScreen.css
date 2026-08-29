@@ -750,8 +750,9 @@
 
 .toolroom-mcp-dialog {
   width: 100%;
-  max-width: 430px;
-  max-height: calc(100% - 8px);
+  max-width: 286px;
+  height: 50vh;
+  max-height: 50vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   border: 1px solid rgba(183, 110, 121, 0.12);
