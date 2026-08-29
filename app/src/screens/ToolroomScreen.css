@@ -216,6 +216,16 @@
   color: var(--color-rose-pink);
 }
 
+.toolroom-group-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.35;
+}
+
 .toolroom-group-copy,
 .toolroom-tool-copy,
 .toolroom-native-panel > button > span:first-child {
@@ -228,7 +238,7 @@
 .toolroom-group-copy > * + *,
 .toolroom-tool-copy > * + *,
 .toolroom-native-panel > button > span:first-child > * + * {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .toolroom-group-copy > strong {
@@ -318,8 +328,11 @@
 
 .toolroom-tool-copy > span {
   overflow: hidden;
+  margin-top: 2px;
   color: #ac9a96;
+  font-family: 'Noto Serif SC', serif;
   font-size: 11.5px;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
