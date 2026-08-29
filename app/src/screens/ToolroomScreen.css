@@ -283,7 +283,7 @@
 }
 
 .toolroom-tool + .toolroom-tool {
-  border-top: 1px solid rgba(183, 110, 121, 0.06);
+  border-top: 1px solid rgba(183, 110, 121, 0.13);
 }
 
 .toolroom-tool-toggle {
@@ -333,9 +333,11 @@
 .toolroom-tool-detail {
   margin: 0 18px 14px 40px;
   padding: 14px 16px;
+  border: 1px solid rgba(183, 110, 121, 0.11);
   border-left: 3px solid var(--color-rose-pink);
   border-radius: 14px;
-  background: rgba(252, 242, 244, 0.90);
+  background: rgba(249, 228, 232, 0.68);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
 }
 
 .toolroom-detail-kicker {
