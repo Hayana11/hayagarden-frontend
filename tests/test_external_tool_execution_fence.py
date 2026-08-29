@@ -60,6 +60,9 @@ def tool(name: str = "calendar.list", **fields):
     return value
 
 
+_DEFAULT_LEASE = object()
+
+
 class ExternalToolExecutionFenceTests(unittest.TestCase):
     def setUp(self):
         self.connection = sqlite3.connect(":memory:")
@@ -162,11 +165,11 @@ class ExternalToolExecutionFenceTests(unittest.TestCase):
     def allow_lease(self, action_id, *, turn_id="turn-1"):
         return None
 
-    def evaluate(self, lease=None, *, control_id=None, tool_input=None, expected_turn_id="turn-1"):
+    def evaluate(self, lease=_DEFAULT_LEASE, *, control_id=None, tool_input=None, expected_turn_id="turn-1"):
         return self.fence.evaluate(
             control_id or self.control_id(),
             tool_input if tool_input is not None else {"q": "today"},
-            self.lease() if lease is None else lease,
+            self.lease() if lease is _DEFAULT_LEASE else lease,
             expected_turn_id=expected_turn_id,
         )
 
