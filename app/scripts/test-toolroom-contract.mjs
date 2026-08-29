@@ -29,5 +29,10 @@ assert.doesNotMatch(css, /\bzoom\s*:/);
 assert.doesNotMatch(css, /transform:\s*scale\(/);
 assert.doesNotMatch(css, /\binset\s*:/);
 assert.match(css, /\.toolroom-scroll\s*\{[\s\S]*?overflow-y:\s*auto/);
+assert.match(css, /\.toolroom-scroll::\-webkit-scrollbar/);
+assert.match(css, /scrollbar-width:\s*none/);
+assert.match(css, /\.toolroom-tool-divider/);
+assert.match(css, /\.toolroom-detail-divider/);
+assert.match(screen, /Prompt \/ Usage/);
 
 console.log('test-toolroom-contract: ok');
