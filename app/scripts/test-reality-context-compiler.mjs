@@ -146,7 +146,7 @@ assert.equal(
     rawCandidate: 7,
     rawPossibility: 92,
   }).text,
-  "设备当前静止，步行中。",
+  "设备当前静止，用户正在步行。",
 );
 assert.equal(
   compile({
@@ -155,7 +155,31 @@ assert.equal(
     activitySource: "hms",
     activitySampledAt: 0,
   }).text,
-  "设备当前移动中，静止。",
+  "设备当前移动中，用户当前静止。",
+);
+assert.equal(
+  compile({
+    userActivity: "running",
+    activitySource: "hms",
+    activitySampledAt: 0,
+  }).text,
+  "设备当前用户正在跑步。",
+);
+assert.equal(
+  compile({
+    userActivity: "cycling",
+    activitySource: "hms",
+    activitySampledAt: 0,
+  }).text,
+  "设备当前用户正在骑行。",
+);
+assert.equal(
+  compile({
+    userActivity: "in_vehicle",
+    activitySource: "hms",
+    activitySampledAt: 0,
+  }).text,
+  "设备当前用户正在乘车。",
 );
 assert.equal(
   compile({
@@ -165,7 +189,7 @@ assert.equal(
     activitySampledAt: 301000,
     now: 301000,
   }).text,
-  "设备当前静止，步行中。",
+  "设备当前静止，用户正在步行。",
 );
 assert.equal(
   compile({
