@@ -341,10 +341,10 @@ export function ToolroomScreen() {
                       <span className="toolroom-group-copy">
                         <strong>{group.label}</strong>
                         <span className="toolroom-badges">
-                          <em className={group.available > 0 ? 'is-live' : ''}>
+                          <em className={'toolroom-connection-badge' + (group.available > 0 ? ' is-live' : '')}>
                             {group.available > 0 ? '已连接' : '当前不可用'}
                           </em>
-                          <em>{transportLabel(group)}</em>
+                          <em className="toolroom-transport-badge">{transportLabel(group)}</em>
                           <em>工具：{group.available}/{group.total}</em>
                         </span>
                       </span>
