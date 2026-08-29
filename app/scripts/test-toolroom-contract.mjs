@@ -31,8 +31,9 @@ assert.doesNotMatch(css, /\binset\s*:/);
 assert.match(css, /\.toolroom-scroll\s*\{[\s\S]*?overflow-y:\s*auto/);
 assert.match(css, /\.toolroom-scroll::[-]webkit-scrollbar/);
 assert.match(css, /scrollbar-width:\s*none/);
-assert.match(css, /\.toolroom-tool-divider/);
+assert.doesNotMatch(css, /\.toolroom-tool-divider/);
 assert.match(css, /\.toolroom-detail-divider/);
 assert.match(screen, /Prompt \/ Usage/);
+assert.doesNotMatch(screen, /toolroom-tool-divider/);
 
 console.log('test-toolroom-contract: ok');
