@@ -159,11 +159,6 @@
   transition: background-color 160ms ease, box-shadow 160ms ease;
 }
 
-.toolroom-group:hover,
-.toolroom-group:focus-within {
-  background: rgba(255, 255, 255, 0.98);
-}
-
 .toolroom-group-toggle,
 .toolroom-tool-toggle,
 .toolroom-native-panel > button {
@@ -319,6 +314,10 @@
 .toolroom-chevron.is-open {
   transform: rotate(180deg) scaleY(0.62);
   transform-origin: center;
+}
+
+.toolroom-tool {
+  transition: background-color 160ms ease;
 }
 
 .toolroom-tool-list {
@@ -668,6 +667,13 @@
 @keyframes toolroomFadeIn {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .toolroom-group:hover,
+  .toolroom-tool:hover {
+    background: rgba(255, 255, 255, 0.98);
+  }
 }
 
 @media (max-width: 360px) {
