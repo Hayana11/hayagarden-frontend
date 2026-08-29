@@ -334,7 +334,7 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
         }),
       ]);
       if (!response || typeof response.body === 'undefined') throw new DiscoveryInputError('fetch returned an invalid response');
-      return responseWithReflectionGuard(response, auth?.credential, limits.maxResponseBytes);
+      return await responseWithReflectionGuard(response, auth?.credential, limits.maxResponseBytes);
     } catch (error) {
       if (auth?.credential && containsCredential(error, auth.credential)) {
         reflectedCredential = true;
