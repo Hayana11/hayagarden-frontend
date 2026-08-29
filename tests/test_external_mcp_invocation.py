@@ -136,7 +136,13 @@ class ExternalMcpInvocationTests(unittest.TestCase):
             self.assertEqual(envelope["endpoint"], self.server.endpoint)
             self.assertEqual(envelope["transport"], self.server.transport)
             self.assertEqual(envelope["source_registry_revision"], candidate["current_source_registry_revision"])
+            self.assertEqual(envelope["auth_scheme"], AUTH_NONE)
+            self.assertEqual(envelope["auth_binding_revision"], self.auth_bindings.get_binding(self.server.server_id).revision)
+            self.assertIsNone(envelope["secret_ref"])
+            self.assertIsNone(envelope["credential_slot"])
             self.assertEqual(envelope["tool_input"], {"q": "today"})
+            with self.assertRaises(TypeError):
+                envelope["server_id"] = "attacker"
             return {"status": "SUCCESS"}
         result = self.invoke(lease, runner)
         self.assertEqual(result["status"], SUCCEEDED)
@@ -144,6 +150,36 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         attempt = self.invocation.get_attempt(result["attempt_id"])
         self.assertEqual(attempt["fingerprint"], candidate["current_fingerprint"])
         self.assertEqual([event["status"] for event in self.invocation.list_audit(result["attempt_id"])], ["PRE_CALL", STARTED, SUCCEEDED])
+
+    def test_missing_binding_is_durable_denial_without_runner(self):
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate)
+        self.connection.execute("DELETE FROM external_mcp_auth_bindings WHERE server_id=?", (self.server.server_id,))
+        result = self.invoke(lease)
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(result["reason_code"], "AUTH_BINDING_MISSING")
+        self.assertEqual(self.calls, 0)
+        attempt = self.invocation.get_attempt(result["attempt_id"])
+        self.assertEqual(attempt["reason_code"], "AUTH_BINDING_MISSING")
+
+    def test_started_runner_keeps_frozen_auth_envelope_after_binding_row_change(self):
+        candidate = self.prepare()
+        lease, _ = self.allowed_lease(candidate)
+        seen = []
+        def runner(envelope):
+            seen.append(dict(envelope))
+            self.connection.execute(
+                "UPDATE external_mcp_auth_bindings SET auth_scheme='bearer', secret_ref='late-ref', credential_slot='late-slot', revision=revision+1 WHERE server_id=?",
+                (self.server.server_id,),
+            )
+            self.connection.commit()
+            return {"status": "SUCCESS"}
+        result = self.invoke(lease, runner)
+        self.assertEqual(result["status"], SUCCEEDED)
+        self.assertEqual(seen[0]["auth_scheme"], AUTH_NONE)
+        self.assertIsNone(seen[0]["secret_ref"])
+        self.assertIsNone(seen[0]["credential_slot"])
+        self.assertEqual(seen[0]["auth_binding_revision"], 1)
 
     def test_snapshot_limits_and_no_plaintext_persistence(self):
         candidate = self.prepare()
