@@ -73,6 +73,23 @@ assert.match(css, /\.toolroom-tool\s*\{[\s\S]*?transition:\s*background-color 16
 assert.match(css, /\.toolroom-tool-copy > span\s*\{[\s\S]*?font-family:\s*'Noto Serif SC', serif;[\s\S]*?font-size:\s*11\.5px;[\s\S]*?line-height:\s*1\.2/);
 
 assert.match(screen, /GROUP_ACCENT_COLORS/);
+assert.match(screen, /className="toolroom-add-button"/);
+assert.match(screen, /aria-label="添加外部 MCP"/);
+assert.match(screen, /添加外部 MCP/);
+assert.match(screen, /仅前端预览/);
+assert.match(screen, /EXTERNAL_MCP_ICON_PATHS/);
+assert.match(screen, /ExternalMcpIconView/);
+assert.match(screen, /name="description"/);
+assert.match(screen, /name="url"/);
+assert.match(screen, /name="auth"/);
+assert.match(screen, /<option value="none">none<\/option>/);
+assert.match(screen, /<option value="bearer">bearer<\/option>/);
+assert.doesNotMatch(screen, /http\.post<.*external|fetch\([^)]*external-mcp/i);
+assert.match(css, /\.toolroom-add-button\s*\{/);
+assert.match(css, /\.toolroom-modal-backdrop\s*\{[\s\S]*?position:\s*fixed/);
+assert.match(css, /\.toolroom-mcp-dialog\s*\{[\s\S]*?max-width:\s*430px/);
+assert.match(css, /\.toolroom-mcp-icon-option\s*svg\s*\{[\s\S]*?stroke:\s*currentColor/);
+
 assert.match(screen, /'--toolroom-accent'/);
 assert.match(screen, /DISABLED_TOOL_ACCENT/);
 assert.match(css, /background:\s*var\(--toolroom-accent/);
