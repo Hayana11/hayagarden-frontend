@@ -44,10 +44,17 @@ assert.match(screen, /GROUP_ICON_PATHS/);
 assert.match(screen, /<ToolroomGroupIcon/);
 assert.match(screen, /transportLabel/);
 assert.match(screen, /return 'Canary'/);
+assert.match(screen, /function ToolroomDeviceIcon/);
+assert.match(screen, /ToolroomDeviceIcon kind="phone"/);
+assert.match(screen, /ToolroomDeviceIcon kind="computer"/);
+assert.match(screen, /PROXIMITY_LABELS/);
+assert.match(screen, /系统配置 · Reality Prompt 预览/);
 assert.match(screen, /工具：\{group\.available\}\/\{group\.total\}/);
 assert.match(screen, /toolroom-connection-badge/);
 assert.match(screen, /toolroom-transport-badge/);
+assert.match(css, /\.toolroom-transport-badge\s*\{[\s\S]*?background:\s*rgba\(159, 182, 199, 0\.18\)/);
 assert.match(css, /\.toolroom-transport-badge\s*\{[\s\S]*?color:\s*#5e7f98/);
+assert.match(css, /\.toolroom-connection-badge:not\(\.is-live\)\s*\{[\s\S]*?background:\s*rgba\(199, 185, 181, 0\.18\)/);
 assert.match(css, /\.toolroom-connection-badge::before\s*\{[\s\S]*?background:\s*#c7b9b5/);
 assert.match(css, /\.toolroom-connection-badge\.is-live::before\s*\{[\s\S]*?background:\s*#8fbb86/);
 assert.match(css, /\.toolroom-chevron\.is-open\s*\{[\s\S]*?scaleY\(0\.62\)/);
@@ -56,6 +63,8 @@ assert.match(css, /\.toolroom-header-wrap \.page-header__subtitle\s*\{[\s\S]*?fo
 assert.match(css, /\.toolroom-header-wrap \.page-header__subtitle::before\s*\{[\s\S]*?display:\s*none/);
 assert.doesNotMatch(screen, /🧠/);
 assert.match(css, /\.toolroom-group-icon svg\s*\{[\s\S]*?stroke:\s*currentColor/);
+assert.match(css, /\.toolroom-card-title > svg\s*\{[\s\S]*?stroke:\s*currentColor/);
+assert.match(css, /\.toolroom-group-copy > strong \+ \.toolroom-badges\s*\{[\s\S]*?margin-top:\s*5px/);
 assert.match(css, /\.toolroom-tool-copy > span\s*\{[\s\S]*?font-family:\s*'Noto Serif SC', serif;[\s\S]*?font-size:\s*11\.5px;[\s\S]*?line-height:\s*1\.2/);
 
 assert.match(screen, /GROUP_ACCENT_COLORS/);
