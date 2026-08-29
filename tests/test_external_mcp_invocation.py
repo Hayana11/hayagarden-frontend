@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from cryptography.fernet import Fernet
 
 from tools.external_mcp_invocation import (
     FAILED_PRE_CALL,
@@ -36,7 +37,10 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.server_registry = ExternalServerRegistry(self.connection, id_factory=lambda: "server-1")
         self.server = self.server_registry.register(display_name="Calendar", endpoint="https://calendar.example/mcp", provenance="owner-admin")
         self.tempdir = tempfile.TemporaryDirectory()
-        self.secret_store = ExternalSecretStore(self.connection, key_file=os.path.join(self.tempdir.name, "key"), registry=self.server_registry)
+        self.key_path = os.path.join(self.tempdir.name, "key")
+        with open(self.key_path, "wb") as key_file:
+            key_file.write(Fernet.generate_key())
+        self.secret_store = ExternalSecretStore(self.connection, key_file=self.key_path, registry=self.server_registry)
         self.auth_bindings = ExternalMcpAuthBindingRegistry(self.connection, server_registry=self.server_registry, secret_store=self.secret_store)
         self.auth_bindings.set_binding(self.server.server_id, AUTH_NONE)
         self.server = self.server_registry.get(self.server.server_id)
