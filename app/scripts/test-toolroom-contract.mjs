@@ -37,7 +37,7 @@ assert.match(screen, /Prompt \/ Usage/);
 assert.doesNotMatch(screen, /toolroom-tool-divider/);
 assert.match(css, /\.toolroom-tool-detail\s*\{[\s\S]*?background:\s*rgba\(252, 242, 244, 0\.90\)/);
 assert.match(css, /\.toolroom-detail-label\s*\{[\s\S]*?color:\s*#b7a29c;[\s\S]*?font-family:\s*'JetBrains Mono', monospace;[\s\S]*?font-size:\s*10px;/);
-assert.doesNotMatch(css, /\.toolroom-detail-label\s*\{[\s\S]*?text-transform:/);
+assert.match(css, /\.toolroom-detail-label\s*\{[\s\S]*?text-transform:\s*uppercase/);
 assert.match(css, /\.toolroom-tool-detail dt\s*\{[\s\S]*?color:\s*#b76e79;[\s\S]*?font-size:\s*11\.5px;/);
 assert.match(css, /\.toolroom-tool-detail p\s*\{[\s\S]*?color:\s*#6b5a55;[\s\S]*?font-size:\s*12\.5px;/);
 
