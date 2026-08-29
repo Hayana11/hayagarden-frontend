@@ -678,6 +678,11 @@
 }
 
 @media (max-width: 360px) {
+  .toolroom-mcp-dialog {
+    height: calc(133.333vw - 43px);
+    max-height: calc(100% - 32px);
+  }
+
   .toolroom-header-wrap,
   .toolroom-scroll {
     padding-left: 16px;
@@ -751,8 +756,8 @@
 .toolroom-mcp-dialog {
   width: 100%;
   max-width: 380px;
-  height: 58vh;
-  max-height: 58vh;
+  height: 507px;
+  max-height: calc(100% - 32px);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   border: 1px solid rgba(183, 110, 121, 0.12);
