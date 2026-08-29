@@ -43,6 +43,7 @@ assert.match(css, /\.toolroom-tool-detail p\s*\{[\s\S]*?color:\s*#6b5a55;[\s\S]*
 assert.match(screen, /GROUP_ICON_PATHS/);
 assert.match(screen, /<ToolroomGroupIcon/);
 assert.match(screen, /transportLabel/);
+assert.match(screen, /return 'Canary'/);
 assert.match(screen, /工具：\{group\.available\}\/\{group\.total\}/);
 assert.match(screen, /toolroom-connection-badge/);
 assert.match(screen, /toolroom-transport-badge/);
