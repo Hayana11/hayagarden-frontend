@@ -42,23 +42,18 @@
 
 .toolroom-header-wrap .page-header__subtitle {
   position: absolute;
-  left: 74px;
+  left: 70px;
   top: 34px;
-  padding-left: 13px;
+  padding-left: 0;
   color: #c0839a;
+  font-family: var(--font-serif-cn);
   font-size: 11.5px;
+  font-style: normal;
   letter-spacing: 1.2px;
 }
 
 .toolroom-header-wrap .page-header__subtitle::before {
-  position: absolute;
-  left: 0;
-  top: 5px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #8fbb86;
-  content: '';
+  display: none;
 }
 
 .toolroom-tabs {
@@ -269,6 +264,28 @@
   font-weight: 400;
 }
 
+.toolroom-connection-badge {
+  display: inline-flex;
+  align-items: center;
+}
+
+.toolroom-connection-badge::before {
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #c7b9b5;
+  content: '';
+}
+
+.toolroom-connection-badge.is-live::before {
+  background: #8fbb86;
+}
+
+.toolroom-transport-badge {
+  color: #5e7f98 !important;
+}
+
 .toolroom-badges em.is-live,
 .toolroom-native-panel > button > em {
   background: rgba(143, 187, 134, 0.14);
@@ -284,7 +301,8 @@
 }
 
 .toolroom-chevron.is-open {
-  transform: rotate(180deg);
+  transform: rotate(180deg) scaleY(0.62);
+  transform-origin: center;
 }
 
 .toolroom-tool-list {
