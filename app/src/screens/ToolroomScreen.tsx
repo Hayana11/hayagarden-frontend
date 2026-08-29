@@ -36,25 +36,33 @@ type InventoryResponse = {
 
 type ToolroomTab = 'tools' | 'activity';
 
-const GROUP_ICONS: Record<string, string> = {
-  memory: '🧠',
-  web: '⌁',
-  pocket: '▣',
-  light: '☼',
-  shopping: '♢',
-  gallery: '▧',
-  code_files: '⌘',
-  workspace: '◇',
-  self_config: '⚙',
-  board: '☷',
-  life: '◌',
-  plans_ledger: '▤',
-  desire: '♡',
-  triggers: '⌁',
-  artifacts: '◇',
-  phone: '▯',
-  moments: '◫',
+const GROUP_ICON_PATHS: Record<string, string> = {
+  memory: 'M9.4 4.2c-2.2 0-3.8 1.6-3.8 3.7 0 .4.1.8.2 1.1-1.1.6-1.8 1.7-1.8 3 0 1.8 1.5 3.3 3.3 3.3h.4v2.1c0 1.3 1 2.4 2.4 2.4 1 0 1.8-.6 2.2-1.5.5.9 1.4 1.5 2.4 1.5 1.4 0 2.5-1.1 2.5-2.5v-1.9h.3c1.8 0 3.2-1.4 3.2-3.2 0-1.2-.6-2.2-1.6-2.8.1-.3.2-.7.2-1.1 0-2-1.5-3.5-3.5-3.5-.7 0-1.4.2-1.9.6-.7-.7-1.6-1.1-2.3-1.1Z M8.2 10.3h2.1m3.4 0h2.1m-5.5 3h2.8',
+  web: 'M8.4 12.8 6.7 14.5a2.8 2.8 0 0 1-4-4l2.2-2.2a2.8 2.8 0 0 1 4 0m2.4 2.4 1.7-1.7a2.8 2.8 0 0 1 4 4l-2.2 2.2a2.8 2.8 0 0 1-4 0m-3.7-1.8 5.5-5.5',
+  pocket: 'M4 4h16v16H4z M8 8h8v8H8z',
+  light: 'M12 4.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Zm0-3v2m0 12v2m9-6h-2m-14 0H3m15.4-6.4-1.4 1.4m-10 10-1.4 1.4m0-12.8 1.4 1.4m10 10 1.4 1.4',
+  shopping: 'm12 3 8 9-8 9-8-9 8-9Z',
+  gallery: 'M4 5h16v14H4z M7 16l3.5-3.5 2.5 2.5 2-2 2 3 M8 9.2h.01',
+  code_files: 'M7 12h10 M12 7v10 M5 5h.01M19 5h.01M5 19h.01M19 19h.01',
+  workspace: 'M12 3 20 12 12 21 4 12 12 3Z M8.5 12h7',
+  self_config: 'M12 3v3m0 12v3M3 12h3m12 0h3m-3.4-6.6-2.1 2.1m-7 7-2.1 2.1m0-11.2 2.1 2.1m7 7 2.1 2.1 M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z',
+  board: 'M5 5h14v14H5z M8 9h8M8 12h8M8 15h5',
+  life: 'M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10Z',
+  plans_ledger: 'M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V4Zm0 0v14a2 2 0 0 0 2 2m3-11h6m-6 4h6',
+  desire: 'M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10Z',
+  triggers: 'M13 2 5 13h6l-1 9 8-11h-6l1-9Z',
+  artifacts: 'M12 3 19.8 7.5v9L12 21l-7.8-4.5v-9L12 3Z',
+  phone: 'M7 3h10v18H7z M10 18h4',
+  moments: 'M4 5h10v12H4z M10 8h10v11H10z',
 };
+
+function ToolroomGroupIcon({ groupId }: { groupId: string }) {
+  return (
+    <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+      <path d={GROUP_ICON_PATHS[groupId] || GROUP_ICON_PATHS.workspace} />
+    </svg>
+  );
+}
 
 const DISABLED_TOOL_ACCENT = '#C7B9B5';
 
@@ -81,6 +89,13 @@ const GROUP_ACCENT_COLORS: Record<string, string> = {
 function toolAccent(groupId: string, available: boolean): string {
   if (!available) return DISABLED_TOOL_ACCENT;
   return GROUP_ACCENT_COLORS[groupId] || '#8EA5B8';
+}
+
+function transportLabel(group: InventoryGroup): string {
+  const providers = group.tools.map((tool) => tool.provider || '').join(' ');
+  if (/\\bsse\\b/i.test(providers)) return 'SSE';
+  if (/\\bhttps?:\\/\\//i.test(providers) || /\\bhttp\\b/i.test(providers)) return 'HTTP';
+  return '其他';
 }
 
 const ORIENTATION_LABELS = {
@@ -321,15 +336,16 @@ export function ToolroomScreen() {
                       }))}
                     >
                       <span className="toolroom-group-icon" data-group={group.id} aria-hidden="true">
-                        {GROUP_ICONS[group.id] || '◇'}
+                        <ToolroomGroupIcon groupId={group.id} />
                       </span>
                       <span className="toolroom-group-copy">
                         <strong>{group.label}</strong>
                         <span className="toolroom-badges">
                           <em className={group.available > 0 ? 'is-live' : ''}>
-                            {group.available > 0 ? String(group.available) + ' 可用' : '当前不可用'}
+                            {group.available > 0 ? '已连接' : '当前不可用'}
                           </em>
-                          <em>{group.total} 个工具</em>
+                          <em>{transportLabel(group)}</em>
+                          <em>工具：{group.available}/{group.total}</em>
                         </span>
                       </span>
                       <span className={'toolroom-chevron' + (open ? ' is-open' : '')} aria-hidden="true">⌄</span>
