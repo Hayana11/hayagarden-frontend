@@ -1,0 +1,74 @@
+name: Deploy protected overlay validation
+
+on:
+  pull_request:
+    paths:
+      - scripts/deploy-frontend.sh
+      - scripts/deploy-protected-overlay.sh
+      - tests/test_deploy_protected_overlay.py
+      - .github/workflows/deploy-protected-overlay-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE_SHA: 92c80759d9d57bffbf9afd39b6df5428cce8e3b3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact head, base, merge-base, and four-file fence
+        env:
+          BASE_SHA: 92c80759d9d57bffbf9afd39b6df5428cce8e3b3
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
+          expected=$'.github/workflows/deploy-protected-overlay-validation.yml\nscripts/deploy-frontend.sh\nscripts/deploy-protected-overlay.sh\ntests/test_deploy_protected_overlay.py'
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          test "$actual" = "$expected"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Verify source boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper=scripts/deploy-protected-overlay.sh
+          test "$(grep -Fxc "readonly PROTECTED_OVERLAY_PATH_A='artifacts/treegpt-cache-probe-baseline.json'" "$helper")" = 1
+          test "$(grep -Fxc "readonly PROTECTED_OVERLAY_PATH_B='artifacts/treegpt-cache-probe-live.json'" "$helper")" = 1
+          if grep -nE '(^|[^[:alnum:]_])(eval|curl|systemctl|DEPLOYED_SHA|git[[:space:]]+(fetch|pull|push)|reset|restore|checkout)([^[:alnum:]_]|$)' "$helper"; then
+            echo "forbidden deployment primitive in source-only helper" >&2
+            exit 1
+          fi
+          if grep -nE '(^|[^[:alnum:]_])\$\@|PROTECTED_OVERLAY_PATH_[A-Z_]+[[:space:]]*=' "$helper" | grep -vE 'PROTECTED_OVERLAY_PATH_[AB][[:space:]]*='; then
+            echo "caller-extensible path surface detected" >&2
+            exit 1
+          fi
+
+      - name: Shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/deploy-frontend.sh
+          bash -n scripts/deploy-protected-overlay.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run behavioral and runtime tests
+        shell: bash
+        run: python -m unittest -v tests.test_deploy_protected_overlay
+

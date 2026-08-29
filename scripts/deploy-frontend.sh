@@ -39,10 +39,30 @@ flock -n 9 || fail "another deployment is already running"
 cd "$ROOT"
 git fetch --prune "$REMOTE"
 
+target_sha="$(git rev-parse --verify "$REMOTE/$BRANCH^{commit}")"
+current_sha="$(git rev-parse --verify HEAD^{commit}")"
+if [[ -n "$EXPECTED_SHA" && "$EXPECTED_SHA" != "$target_sha" ]]; then
+  fail "origin/main moved: expected $EXPECTED_SHA but fetched $target_sha"
+fi
+if ! git merge-base --is-ancestor "$current_sha" "$target_sha"; then
+  recovered_manifest="$(git show "$target_sha:deploy/recovered-production-shas.txt" 2>/dev/null || true)"
+  if ! grep -Fxq "$current_sha" <<<"$recovered_manifest"; then
+    echo "Production-only commits:" >&2
+    git log --oneline "$target_sha..$current_sha" >&2 || true
+    fail "production HEAD is not contained in origin/main and has no audited recovery acknowledgement."
+  fi
+  echo "Using audited one-time recovery acknowledgement for $current_sha"
+fi
+source "$ROOT/scripts/deploy-protected-overlay.sh"
+protected_overlay_validate_current "$ROOT" "$current_sha"
+protected_overlay_validate_target "$ROOT" "$current_sha" "$target_sha"
+
 # Runtime state is preserved separately and intentionally excluded from code dirtiness.
 dirty="$(git status --porcelain --untracked-files=all -- . \
+  ':(exclude)artifacts/treegpt-cache-probe-baseline.json' \
+  ':(exclude)artifacts/treegpt-cache-probe-live.json' \
   ':(exclude)attachments.db' ':(exclude)attachments/**' \
-  ':(exclude)client_errors.log' ':(exclude)static/uploads/**' \
+  ':(exclude)client_errors.log' ':(exclude)client_errors.log.[0-9]*' ':(exclude)static/uploads/**' \
   ':(exclude)memories.db-shm' ':(exclude)memories.db-wal' \
   ':(exclude)memories.db.bak*' \
   ':(exclude).claude-runtime' ':(exclude).claude-runtime/**')"
@@ -105,7 +125,7 @@ git worktree add --detach "$staging" "$target_sha"
   "$PYTHON" -m unittest tests.test_user_profile
   "$PYTHON" -m unittest tests.test_monopoly_backend
   "$PYTHON" -m unittest tests.test_cc_runtime -v
-  bash -n scripts/deploy-frontend.sh scripts/ensure-claude-runtime.sh
+  bash -n scripts/deploy-frontend.sh scripts/deploy-protected-overlay.sh scripts/ensure-claude-runtime.sh
 )
 if [[ "$build_dashboard" -eq 1 ]]; then
   (
@@ -116,11 +136,18 @@ if [[ "$build_dashboard" -eq 1 ]]; then
 fi
 
 runtime_backup="/opt/backups/frontend/predeploy-runtime-$(date +%Y%m%d-%H%M%S)"
+protected_manifest="/opt/backups/frontend/protected-state-$(date +%Y%m%d-%H%M%S)/manifest.txt"
 snapshot_runtime() {
   mkdir -p "$runtime_backup/static" "$runtime_backup/app"
   [[ ! -f "$ROOT/attachments.db" ]] || cp -a "$ROOT/attachments.db" "$runtime_backup/"
   [[ ! -d "$ROOT/attachments" ]] || cp -a "$ROOT/attachments" "$runtime_backup/"
   [[ ! -f "$ROOT/client_errors.log" ]] || cp -a "$ROOT/client_errors.log" "$runtime_backup/"
+  shopt -s nullglob
+  for path in "$ROOT"/client_errors.log.[0-9]*; do
+    [[ -f "$path" && ! -L "$path" ]] || fail "rotated client log is not a regular file"
+    cp -a "$path" "$runtime_backup/"
+  done
+  shopt -u nullglob
   [[ ! -d "$ROOT/static/uploads" ]] || cp -a "$ROOT/static/uploads" "$runtime_backup/static/"
   [[ ! -d "$ROOT/app/dist" ]] || cp -a "$ROOT/app/dist" "$runtime_backup/app/"
   shopt -s nullglob
@@ -140,6 +167,9 @@ restore_dashboard() {
 }
 clear_runtime_for_checkout() {
   rm -f "$ROOT/attachments.db" "$ROOT/client_errors.log"
+  shopt -s nullglob
+  for path in "$ROOT"/client_errors.log.[0-9]*; do rm -f "$path"; done
+  shopt -u nullglob
   rm -rf "$ROOT/attachments" "$ROOT/static/uploads"
   find "$ROOT" -maxdepth 1 -type f -name 'memories.db.bak*' -delete
 }
@@ -150,6 +180,9 @@ restore_runtime() {
     cp -a "$runtime_backup/attachments/." "$ROOT/attachments/"
   fi
   [[ ! -f "$runtime_backup/client_errors.log" ]] || cp -a "$runtime_backup/client_errors.log" "$ROOT/"
+  shopt -s nullglob
+  for path in "$runtime_backup"/client_errors.log.[0-9]*; do cp -a "$path" "$ROOT/"; done
+  shopt -u nullglob
   if [[ -d "$runtime_backup/static/uploads" ]]; then
     mkdir -p "$ROOT/static/uploads"
     cp -a "$runtime_backup/static/uploads/." "$ROOT/static/uploads/"
@@ -160,6 +193,7 @@ restore_runtime() {
 }
 
 bash "$ROOT/tools/backup.sh"
+protected_overlay_write_manifest "$ROOT" "$current_sha" "$target_sha" "$protected_manifest"
 snapshot_runtime
 
 rollback() {
@@ -169,6 +203,9 @@ rollback() {
   git checkout --detach -f "$current_sha"
   restore_runtime
   restore_dashboard
+  if ! protected_overlay_apply "$ROOT" || ! protected_overlay_verify "$ROOT"; then
+    fail "ROLLBACK_PROTECTED_OVERLAY_FAILED"
+  fi
   systemctl restart "${SERVICES[@]}"
 }
 trap rollback ERR
@@ -176,6 +213,8 @@ trap rollback ERR
 clear_runtime_for_checkout
 git checkout --detach -f "$target_sha"
 restore_runtime
+protected_overlay_apply "$ROOT"
+protected_overlay_verify "$ROOT"
 install_dashboard
 # Project-local Claude Code pin (not PATH /usr/bin/claude). Fail closed before restart.
 bash "$ROOT/scripts/ensure-claude-runtime.sh" "$ROOT"
@@ -213,3 +252,4 @@ mkdir -p "$STATE_DIR"
 printf '%s\n' "$target_sha" > "$STATE_DIR/DEPLOYED_SHA"
 trap - ERR
 echo "Deployed $target_sha from $REMOTE/$BRANCH"
+
