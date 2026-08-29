@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { http } from '../lib/http';
@@ -71,6 +71,41 @@ function ToolroomDeviceIcon({ kind }: { kind: 'phone' | 'computer' }) {
   return (
     <svg viewBox="0 0 24 24" role="presentation" focusable="false">
       <path d={path} />
+    </svg>
+  );
+}
+
+type ExternalMcpAuthScheme = 'none' | 'bearer';
+
+type ExternalMcpIcon = 'server' | 'globe' | 'plug' | 'spark';
+
+type ExternalMcpForm = {
+  icon: ExternalMcpIcon;
+  name: string;
+  description: string;
+  url: string;
+  auth: ExternalMcpAuthScheme;
+};
+
+const DEFAULT_EXTERNAL_MCP_FORM: ExternalMcpForm = {
+  icon: 'server',
+  name: '',
+  description: '',
+  url: '',
+  auth: 'none',
+};
+
+const EXTERNAL_MCP_ICON_PATHS: Record<ExternalMcpIcon, string> = {
+  server: 'M4 5h16v14H4z M8 9h8M8 13h5 M7 19v2m10-2v2',
+  globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-8.4 6h16.8M3.6 15h16.8M12 3c2.1 2.4 3.2 5.4 3.2 9S14.1 18.6 12 21c-2.1-2.4-3.2-5.4-3.2-9S9.9 5.4 12 3Z',
+  plug: 'M9 3v6m6-6v6m-8 0h10v2a5 5 0 0 1-10 0V9Zm5 7v5',
+  spark: 'M12 3l1.8 6.2L20 11l-6.2 1.8L12 19l-1.8-6.2L4 11l6.2-1.8L12 3Z',
+};
+
+function ExternalMcpIconView({ icon }: { icon: ExternalMcpIcon }) {
+  return (
+    <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+      <path d={EXTERNAL_MCP_ICON_PATHS[icon]} />
     </svg>
   );
 }
@@ -175,6 +210,9 @@ export function ToolroomScreen() {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
   const [openPanels, setOpenPanels] = useState<Record<string, boolean>>({});
+  const [addMcpOpen, setAddMcpOpen] = useState(false);
+  const [externalMcpForm, setExternalMcpForm] = useState<ExternalMcpForm>(DEFAULT_EXTERNAL_MCP_FORM);
+  const [externalMcpNotice, setExternalMcpNotice] = useState('');
 
   const reality = useSyncExternalStore(
     (listener) => realityStore.subscribe(listener),
@@ -205,6 +243,26 @@ export function ToolroomScreen() {
   useEffect(() => {
     void loadInventory();
   }, [loadInventory]);
+
+  useEffect(() => {
+    if (!addMcpOpen) return undefined;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAddMcpOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [addMcpOpen]);
+
+  const openAddMcpDialog = () => {
+    setExternalMcpForm(DEFAULT_EXTERNAL_MCP_FORM);
+    setExternalMcpNotice('');
+    setAddMcpOpen(true);
+  };
+
+  const handleExternalMcpPreviewSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setExternalMcpNotice('已保留在当前页面预览中；尚未接入 External MCP Registry。');
+  };
 
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const filteredGroups = useMemo(() => {
@@ -322,6 +380,14 @@ export function ToolroomScreen() {
             {search ? (
               <button type="button" onClick={() => setSearch('')} aria-label="清空搜索">×</button>
             ) : null}
+            <button
+              type="button"
+              className="toolroom-add-button"
+              onClick={openAddMcpDialog}
+              aria-label="添加外部 MCP"
+            >
+              +
+            </button>
           </div>
 
           {loading ? <div className="toolroom-state">正在读取真实工具清单…</div> : null}
@@ -505,6 +571,123 @@ export function ToolroomScreen() {
           <div className="toolroom-signoff">Still becoming.</div>
         </section>
       )}
+
+      {addMcpOpen ? (
+        <div
+          className="toolroom-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setAddMcpOpen(false);
+          }}
+        >
+          <section
+            className="toolroom-mcp-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="toolroom-mcp-dialog-title"
+          >
+            <div className="toolroom-mcp-dialog-header">
+              <div>
+                <span className="toolroom-mcp-eyebrow">External MCP</span>
+                <h2 id="toolroom-mcp-dialog-title">添加外部 MCP</h2>
+              </div>
+              <button
+                type="button"
+                className="toolroom-mcp-close"
+                onClick={() => setAddMcpOpen(false)}
+                aria-label="关闭添加外部 MCP"
+              >
+                ×
+              </button>
+            </div>
+
+            <p className="toolroom-mcp-preview-note">
+              仅前端预览：填写后不会写入服务器，也不会执行任何工具。
+            </p>
+
+            <form className="toolroom-mcp-form" onSubmit={handleExternalMcpPreviewSubmit}>
+              <div className="toolroom-mcp-field">
+                <span className="toolroom-mcp-label">图标 <small>内置线条图标</small></span>
+                <div className="toolroom-mcp-icon-grid" role="group" aria-label="选择 MCP 图标">
+                  {(Object.keys(EXTERNAL_MCP_ICON_PATHS) as ExternalMcpIcon[]).map((icon) => (
+                    <button
+                      type="button"
+                      key={icon}
+                      className={'toolroom-mcp-icon-option' + (externalMcpForm.icon === icon ? ' is-selected' : '')}
+                      aria-label={'选择' + icon + '图标'}
+                      aria-pressed={externalMcpForm.icon === icon}
+                      onClick={() => setExternalMcpForm((current) => ({ ...current, icon }))}
+                    >
+                      <ExternalMcpIconView icon={icon} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <label className="toolroom-mcp-field">
+                <span className="toolroom-mcp-label">名称 <small>只是给你看的显示名</small></span>
+                <input
+                  name="name"
+                  value={externalMcpForm.name}
+                  onChange={(event) => setExternalMcpForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="例如：我的 MCP"
+                  autoComplete="off"
+                  required
+                />
+              </label>
+
+              <label className="toolroom-mcp-field">
+                <span className="toolroom-mcp-label">描述 <small>可选备注</small></span>
+                <textarea
+                  name="description"
+                  value={externalMcpForm.description}
+                  onChange={(event) => setExternalMcpForm((current) => ({ ...current, description: event.target.value }))}
+                  placeholder="用几句话说明它的用途"
+                  rows={3}
+                />
+              </label>
+
+              <label className="toolroom-mcp-field">
+                <span className="toolroom-mcp-label">服务器 URL</span>
+                <input
+                  name="url"
+                  type="url"
+                  value={externalMcpForm.url}
+                  onChange={(event) => setExternalMcpForm((current) => ({ ...current, url: event.target.value }))}
+                  placeholder="https://example.com/mcp"
+                  autoComplete="url"
+                  required
+                />
+              </label>
+
+              <label className="toolroom-mcp-field">
+                <span className="toolroom-mcp-label">身份认证 <small>仅选择认证方式</small></span>
+                <select
+                  name="auth"
+                  value={externalMcpForm.auth}
+                  onChange={(event) => setExternalMcpForm((current) => ({ ...current, auth: event.target.value as ExternalMcpAuthScheme }))}
+                >
+                  <option value="none">none</option>
+                  <option value="bearer">bearer</option>
+                </select>
+              </label>
+
+              <div className="toolroom-mcp-actions">
+                <button type="button" className="toolroom-mcp-secondary" onClick={() => setAddMcpOpen(false)}>
+                  取消
+                </button>
+                <button type="submit" className="toolroom-mcp-primary">
+                  保存配置（仅预览）
+                </button>
+              </div>
+
+              {externalMcpNotice ? (
+                <p className="toolroom-mcp-status" role="status">{externalMcpNotice}</p>
+              ) : null}
+            </form>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
