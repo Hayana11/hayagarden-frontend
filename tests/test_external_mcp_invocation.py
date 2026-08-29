@@ -155,6 +155,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         candidate = self.prepare()
         lease, _ = self.allowed_lease(candidate)
         self.connection.execute("DELETE FROM external_mcp_auth_bindings WHERE server_id=?", (self.server.server_id,))
+        self.connection.commit()
         result = self.invoke(lease)
         self.assertEqual(result["status"], FAILED_PRE_CALL)
         self.assertEqual(result["reason_code"], "AUTH_BINDING_MISSING")
