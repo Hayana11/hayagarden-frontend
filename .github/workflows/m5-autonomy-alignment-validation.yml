@@ -1,12 +1,9 @@
 name: M5 autonomy alignment validation
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
+  push:
+    branches:
+      - codex/m5-autonomy-alignment-r1
     paths:
       - .github/workflows/m5-autonomy-alignment-validation.yml
       - tools/external_tool_side_effect_policy.py
@@ -29,33 +26,90 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: \${{ github.sha }}
 
-      - name: Verify exact head, base, merge-base, and six-file fence
+      - name: Verify exact pushed head and frozen branch
         shell: bash
         run: |
-          set -euo pipefail
-          HEAD_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          set -Eeuo pipefail
+          ACTUAL_HEAD="$(git rev-parse HEAD)"
+          test "$ACTUAL_HEAD" = "$GITHUB_SHA" || {
+            echo "HEAD_MISMATCH"
+            exit 1
+          }
+          test "$GITHUB_REF_NAME" = "codex/m5-autonomy-alignment-r1" || {
+            echo "BRANCH_MISMATCH"
+            exit 1
+          }
+          echo "CI_HEAD_SHA=$GITHUB_SHA"
+          echo "CI_EVENT=$GITHUB_EVENT_NAME"
+          echo "CI_BRANCH=$GITHUB_REF_NAME"
+
+      - name: Verify frozen base and exact six-file scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE_SHA='fbaf6b10bd85846345d01a81a95be96235002793'
           git fetch --no-tags origin main
-          test "$(git rev-parse origin/main)" = "$BASE_SHA"
-          test "$(git merge-base HEAD origin/main)" = "$BASE_SHA"
-          expected=$'.github/workflows/m5-autonomy-alignment-validation.yml
-tests/test_external_mcp_invocation.py
-tests/test_external_tool_execution_fence.py
-tests/test_external_tool_side_effect_policy.py
-tools/external_tool_execution_fence.py
-tools/external_tool_side_effect_policy.py'
-          actual="$(git diff --name-only "$BASE_SHA" HEAD | sort)"
-          test "$actual" = "$expected"
-          git diff --check "$BASE_SHA" HEAD
+          test "$(git rev-parse origin/main)" = "$BASE_SHA" || {
+            echo "BASE_MOVED"
+            exit 1
+          }
+          test "$(git merge-base "$BASE_SHA" HEAD)" = "$BASE_SHA" || {
+            echo "BASE_NOT_ANCESTOR"
+            exit 1
+          }
+          expected="$(
+            printf '%s\n' \
+              '.github/workflows/m5-autonomy-alignment-validation.yml' \
+              'tests/test_external_mcp_invocation.py' \
+              'tests/test_external_tool_execution_fence.py' \
+              'tests/test_external_tool_side_effect_policy.py' \
+              'tools/external_tool_execution_fence.py' \
+              'tools/external_tool_side_effect_policy.py'
+          )"
+          actual="$(
+            git diff --name-only \
+              fbaf6b10bd85846345d01a81a95be96235002793 \
+              HEAD \
+              | sort
+          )"
+          test "$actual" = "$expected" || {
+            echo "EXACT_FILE_FENCE_FAILED"
+            printf '%s\n' "$actual"
+            exit 1
+          }
 
-      - name: Static autonomy boundary
+      - name: Verify R5 changed-since-old-head fence
         shell: bash
         run: |
-          set -euo pipefail
-          ! rg -n -i 'external_autonomous_policy|issue_external_autonomous_lease|autonomous_lease' tools/external_tool_side_effect_policy.py tools/external_tool_execution_fence.py
-          ! rg -n 'execution_mode[[:space:]]*='             tools/external_tool_execution_fence.py tests/test_external_mcp_invocation.py
+          set -Eeuo pipefail
+          r5_changed="$(
+            git diff --name-only \
+              7ae244c2181db27e0b73600366fdb28394a6a373 \
+              HEAD
+          )"
+          test "$r5_changed" = \
+            '.github/workflows/m5-autonomy-alignment-validation.yml' || {
+            echo "R5_WORKFLOW_ONLY_FENCE_FAILED"
+            printf '%s\n' "$r5_changed"
+            exit 1
+          }
+          git diff --check \
+            fbaf6b10bd85846345d01a81a95be96235002793 \
+            HEAD
+
+      - name: Verify autonomy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! rg -n -i \
+            'external_autonomous_policy|issue_external_autonomous_lease|autonomous_lease' \
+            tools/external_tool_side_effect_policy.py \
+            tools/external_tool_execution_fence.py
+          ! rg -n \
+            'github\.event\.pull_request|github\.head_ref|refs/pull/|merge_commit_sha' \
+            .github/workflows/m5-autonomy-alignment-validation.yml
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -65,11 +119,19 @@ tools/external_tool_side_effect_policy.py'
       - name: Run focused tests
         shell: bash
         run: |
-          set -euo pipefail
-          python -m unittest -v             tests.test_external_tool_side_effect_policy             tests.test_external_tool_execution_fence             tests.test_external_mcp_invocation
+          set -Eeuo pipefail
+          python -m unittest -v \
+            tests.test_external_tool_side_effect_policy \
+            tests.test_external_tool_execution_fence \
+            tests.test_external_mcp_invocation
 
       - name: Run M5 regression
         shell: bash
         run: |
-          set -euo pipefail
-          python -m unittest -v             tests.test_external_server_registry             tests.test_external_tool_registry             tests.test_external_tool_execution_fence             tests.test_external_mcp_invocation             tests.test_external_mcp_auth_binding
+          set -Eeuo pipefail
+          python -m unittest -v \
+            tests.test_external_server_registry \
+            tests.test_external_tool_registry \
+            tests.test_external_tool_execution_fence \
+            tests.test_external_mcp_invocation \
+            tests.test_external_mcp_auth_binding
