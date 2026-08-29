@@ -93,8 +93,8 @@ function toolAccent(groupId: string, available: boolean): string {
 
 function transportLabel(group: InventoryGroup): string {
   const providers = group.tools.map((tool) => tool.provider || '').join(' ');
-  if (/\\bsse\\b/i.test(providers)) return 'SSE';
-  if (/\\bhttps?:\\/\\//i.test(providers) || /\\bhttp\\b/i.test(providers)) return 'HTTP';
+  if (/\bsse\b/i.test(providers)) return 'SSE';
+  if (/\bhttps?:\/\//i.test(providers) || /\bhttp\b/i.test(providers)) return 'HTTP';
   return '其他';
 }
 
