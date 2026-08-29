@@ -49,10 +49,12 @@ function raw(sampledAt, accel, gyro, monitoring = true) {
 function createEnvironment({
   visible = true,
   bridge,
+  activityBridge,
   now = 0,
 } = {}) {
   let currentVisible = visible;
   let currentBridge = bridge;
+  let currentActivityBridge = activityBridge;
   let currentNow = now;
   let intervalCallback = null;
   let nextIntervalId = 1;
@@ -69,6 +71,7 @@ function createEnvironment({
   const environment = {
     now: () => currentNow,
     getBridge: () => currentBridge,
+    getActivityBridge: () => currentActivityBridge,
     isVisible: () => currentVisible,
     setInterval: (callback, intervalMs) => {
       assert.ok([PHYSICAL_POLL_MS, PHYSICAL_BACKGROUND_POLL_MS].includes(intervalMs));
@@ -105,6 +108,9 @@ function createEnvironment({
     setBridge: (value) => {
       currentBridge = value;
     },
+    setActivityBridge: (value) => {
+      currentActivityBridge = value;
+    },
     setNow: (value) => {
       currentNow = value;
     },
@@ -140,6 +146,21 @@ function assertInitial(store) {
       motion: "unknown",
       observedAt: null,
     },
+    activity: {
+      raw: null,
+      userActivity: "unknown",
+      possibility: null,
+      activitySampledAt: null,
+      source: "none",
+      registration: "unknown",
+      lastErrorCode: null,
+      callbackReceived: false,
+      intentHasExtras: false,
+      responsePresent: false,
+      activityDataCount: 0,
+      rawCandidate: null,
+      rawPossibility: null,
+    },
   });
 }
 
@@ -165,6 +186,37 @@ visibleRuntime.start();
 assert.equal(immediateReads, 1);
 assert.equal(visibleStore.getSnapshot().physical.observedAt, 1000);
 assert.equal(visibleStore.getSnapshot().physical.facts.orientation, "face_up");
+
+const activityStore = new RealityStore();
+const activityEnvironment = createEnvironment({
+  bridge: validBridge,
+  activityBridge: {
+    getActivityState: () => JSON.stringify({
+      schemaVersion: 1,
+      available: true,
+      userActivity: "walking",
+      activityPossibility: 91,
+      activitySampledAt: 1000,
+      source: "hms",
+      registration: "registered",
+      callbackReceived: true,
+      intentHasExtras: true,
+      responsePresent: true,
+      activityDataCount: 1,
+      rawCandidate: 7,
+      rawPossibility: 91,
+    }),
+  },
+  now: 1000,
+});
+const activityRuntime = new PhysicalRealityRuntime(
+  activityStore,
+  activityEnvironment,
+);
+activityRuntime.start();
+assert.equal(activityStore.getSnapshot().activity.userActivity, "walking");
+assert.equal(activityStore.getSnapshot().activity.activitySampledAt, 1000);
+assert.equal(activityStore.getSnapshot().physical.motion, "unknown");
 
 const countingBridge = {
   getPhysicalState: () => {
