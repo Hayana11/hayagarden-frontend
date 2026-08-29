@@ -13,13 +13,11 @@ from tools.capability_manifest import (
 )
 from tools.lease_signer import (
     DEFAULT_ALLOWED_CAPABILITIES,
-    EXTERNAL_AUTONOMOUS_POLICY,
     ISSUED_FROM_VALUES,
     LEASE_VERSION,
     TURN_LEASE_FIELDS,
     LeaseSignError,
     default_allowed_capabilities,
-    issue_external_autonomous_lease,
     issue_turn_lease,
 )
 
@@ -92,7 +90,6 @@ class LeaseSignerContractTests(unittest.TestCase):
                 "default_policy",
                 "explicit_user_intent",
                 "user_confirmation",
-                EXTERNAL_AUTONOMOUS_POLICY,
                 "task_contract",
             },
         )
@@ -245,27 +242,6 @@ class LeaseSignerContractTests(unittest.TestCase):
                 requested_capabilities=("todo.write",),
             )
         self.assertEqual(ctx.exception.code, "LEASE_MISMATCH")
-
-    def test_external_autonomous_wrapper_is_narrow_and_action_bound(self):
-        action = "external_action_sha256:" + "a" * 64
-        lease = issue_external_autonomous_lease(
-            turn_id="turn-auto",
-            external_action_id=action,
-            issued_at="2026-08-29T00:00:00Z",
-        )
-        self.assertEqual(lease["issued_from"], EXTERNAL_AUTONOMOUS_POLICY)
-        self.assertEqual(lease["approval_ids"], (action,))
-        self.assertEqual(lease["turn_id"], "turn-auto")
-        self.assertEqual(lease["turn_mode"], "chat")
-        with self.assertRaises(LeaseSignError):
-            issue_external_autonomous_lease(turn_id="turn-auto", external_action_id="")
-        with self.assertRaises(LeaseSignError):
-            issue_turn_lease(
-                turn_id="turn-auto",
-                turn_mode="chat",
-                issued_from=EXTERNAL_AUTONOMOUS_POLICY,
-            )
-
 
     def test_g_task_contract_required_for_task_only(self):
         with self.assertRaises(LeaseSignError) as ctx:

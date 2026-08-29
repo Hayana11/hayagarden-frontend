@@ -17,7 +17,6 @@ from tools.external_mcp_invocation import (
     ExternalMcpInvocation,
     MAX_TOOL_INPUT_BYTES,
 )
-from tools.lease_signer import issue_external_autonomous_lease
 from tools.external_mcp_auth_binding import AUTH_NONE, ExternalMcpAuthBindingRegistry
 from tools.external_secret_store import ExternalSecretStore
 from tools.external_server_registry import ExternalServerRegistry
@@ -73,7 +72,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
 
     def allowed_lease(self, candidate, value=None, turn_id="turn-1", side_effect_class=NONE):
         action = build_external_action_id(candidate["control_id"], candidate["current_fingerprint"], candidate["current_source_registry_revision"], side_effect_class, value or {"q": "today"})
-        return issue_external_autonomous_lease(turn_id=turn_id, external_action_id=action), action
+        return None, action
 
     def runner(self, status="SUCCESS"):
         def run(envelope):
