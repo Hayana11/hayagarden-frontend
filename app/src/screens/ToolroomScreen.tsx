@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { type CSSProperties, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { http } from '../lib/http';
@@ -55,6 +55,33 @@ const GROUP_ICONS: Record<string, string> = {
   phone: '▯',
   moments: '◫',
 };
+
+const DISABLED_TOOL_ACCENT = '#C7B9B5';
+
+const GROUP_ACCENT_COLORS: Record<string, string> = {
+  memory: '#8A7AB5',
+  web: '#9FB6C7',
+  pocket: '#C08497',
+  light: '#7FA98F',
+  shopping: '#C08497',
+  gallery: '#8EA5B8',
+  code_files: '#8EA5B8',
+  workspace: '#8EA5B8',
+  self_config: '#8EA5B8',
+  board: '#B76E79',
+  life: '#5E7F98',
+  plans_ledger: '#D9A441',
+  desire: '#B76E79',
+  triggers: '#D9A441',
+  artifacts: '#8EA5B8',
+  phone: '#5E7F98',
+  moments: '#B76E79',
+};
+
+function toolAccent(groupId: string, available: boolean): string {
+  if (!available) return DISABLED_TOOL_ACCENT;
+  return GROUP_ACCENT_COLORS[groupId] || '#8EA5B8';
+}
 
 const ORIENTATION_LABELS = {
   face_up: '正面朝上',
@@ -323,7 +350,11 @@ export function ToolroomScreen() {
                                   [tool.tool_name]: !current[tool.tool_name],
                                 }))}
                               >
-                                <span className={'toolroom-status-dot' + (tool.available ? ' is-live' : '')} aria-hidden="true" />
+                                <span
+                                  className={'toolroom-status-dot' + (tool.available ? ' is-live' : '')}
+                                  style={{ '--toolroom-accent': toolAccent(group.id, tool.available) } as CSSProperties}
+                                  aria-hidden="true"
+                                />
                                 <span className="toolroom-tool-copy">
                                   <strong>{tool.tool_name}</strong>
                                   <span>{tool.display_label}</span>
@@ -331,7 +362,10 @@ export function ToolroomScreen() {
                                 <span className={'toolroom-chevron' + (toolOpen ? ' is-open' : '')} aria-hidden="true">⌄</span>
                               </button>
                               {toolOpen ? (
-                                <div className="toolroom-tool-detail">
+                                <div
+                                  className="toolroom-tool-detail"
+                                  style={{ '--toolroom-accent': toolAccent(group.id, tool.available) } as CSSProperties}
+                                >
                                   <span className="toolroom-detail-kicker">Prompt / Usage</span>
                                   <p>{tool.status_label}。本页只展示真实清单，不执行任何工具。</p>
                                   <div className="toolroom-detail-divider" aria-hidden="true" />
