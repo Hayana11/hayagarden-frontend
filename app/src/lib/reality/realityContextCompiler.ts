@@ -1,8 +1,10 @@
-import type { RealitySnapshot } from "./realityStore";
+import type { RealitySnapshot, UserActivity } from "./realityStore";
+import { getFreshUserActivity } from "./realityStore";
 import type { PhysicalMotion } from "./physicalMotion";
 
 export type RealityPromptDynamicKey =
   | "motion"
+  | "userActivity"
   | "charging"
   | "batteryLevel";
 
@@ -40,12 +42,43 @@ function motionClause(motion: PhysicalMotion): PromptClause | null {
   return null;
 }
 
-function compileClauses(snapshot: RealitySnapshot): PromptClause[] {
+function userActivityClause(
+  snapshot: RealitySnapshot,
+  nowMs: number,
+): PromptClause | null {
+  const userActivity = getFreshUserActivity(snapshot, nowMs);
+  if (userActivity === null) {
+    return null;
+  }
+
+  const labels: Record<Exclude<UserActivity, "unknown">, string> = {
+    still: "静止",
+    walking: "步行中",
+    running: "跑步中",
+    cycling: "骑行中",
+    in_vehicle: "乘车中",
+  };
+
+  return {
+    key: "userActivity",
+    text: labels[userActivity],
+  };
+}
+
+function compileClauses(
+  snapshot: RealitySnapshot,
+  nowMs: number,
+): PromptClause[] {
   const clauses: PromptClause[] = [];
   const motion = motionClause(snapshot.physical.motion);
 
   if (motion !== null) {
     clauses.push(motion);
+  }
+
+  const userActivity = userActivityClause(snapshot, nowMs);
+  if (userActivity !== null) {
+    clauses.push(userActivity);
   }
 
   if (snapshot.physical.facts.charging === true) {
@@ -72,8 +105,9 @@ function compileClauses(snapshot: RealitySnapshot): PromptClause[] {
 
 export function compileRealityContext(
   snapshot: RealitySnapshot,
+  nowMs: number = Date.now(),
 ): CompiledRealityPrompt {
-  const clauses = compileClauses(snapshot);
+  const clauses = compileClauses(snapshot, nowMs);
 
   if (clauses.length === 0) {
     return {
