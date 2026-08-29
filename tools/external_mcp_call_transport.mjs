@@ -39,6 +39,20 @@ class CallInputError extends Error {
   }
 }
 
+class CallAuthError extends CallInputError {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+class CallReflectionError extends Error {
+  constructor() {
+    super('provider material contained the transient credential');
+    this.code = 'SECRET_REFLECTION_BLOCKED';
+  }
+}
+
 class CallLimitError extends Error {
   constructor(message) {
     super(message);
@@ -77,6 +91,44 @@ function errorSummary(value, maxBytes) {
     .replace(/\s+/g, ' ')
     .trim();
   return truncateUtf8(clean, maxBytes);
+}
+
+function validateAuth(auth) {
+  if (auth === null || typeof auth === 'undefined') return null;
+  if (!auth || typeof auth !== 'object' || Array.isArray(auth) || Object.getPrototypeOf(auth) !== Object.prototype) {
+    throw new CallAuthError('AUTH_SCHEME_UNSUPPORTED', 'MCP auth scheme is unsupported');
+  }
+  if (Object.keys(auth).sort().join(',') !== 'credential,scheme' || auth.scheme !== 'bearer' ||
+      typeof auth.credential !== 'string' || auth.credential.length === 0) {
+    throw new CallAuthError('AUTH_SCHEME_UNSUPPORTED', 'MCP auth scheme is unsupported');
+  }
+  if (textEncoder.encode(auth.credential).byteLength > 16 * 1024 || /[\u0000-\u001f\u007f]/.test(auth.credential)) {
+    throw new CallAuthError('AUTH_SCHEME_UNSUPPORTED', 'MCP auth scheme is unsupported');
+  }
+  return { scheme: 'bearer', credential: auth.credential };
+}
+
+function requestHeaders(initHeaders, auth) {
+  const headers = new Headers(initHeaders || {});
+  if (!auth) return headers;
+  if (headers.has('authorization')) {
+    throw new CallAuthError('AUTHORIZATION_HEADER_CONFLICT', 'authorization header is already present');
+  }
+  headers.set('authorization', `Bearer ${auth.credential}`);
+  return headers;
+}
+
+function containsCredential(value, credential, seen = new Set()) {
+  if (!credential || value === null || typeof value === 'undefined') return false;
+  if (typeof value === 'string') return value.includes(credential);
+  if (typeof value !== 'object' && !(value instanceof Error)) return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (value instanceof Error && (String(value.message).includes(credential) || String(value.stack || '').includes(credential))) return true;
+  for (const key of Object.keys(value)) {
+    if (containsCredential(value[key], credential, seen)) return true;
+  }
+  return false;
 }
 
 function assertJsonSafe(value, seen = new Set(), path = 'value') {
@@ -171,6 +223,14 @@ function boundedResponse(response, maxBytes) {
   });
 }
 
+async function responseWithReflectionGuard(response, credential, maxBytes) {
+  const bounded = boundedResponse(response, maxBytes);
+  if (!credential || typeof bounded.clone !== 'function') return bounded;
+  const reflectedBody = await bounded.clone().text();
+  if (reflectedBody.includes(credential)) throw new CallReflectionError();
+  return bounded;
+}
+
 function combineSignals(signals) {
   const active = signals.filter(Boolean);
   if (active.length === 0) return undefined;
@@ -205,6 +265,7 @@ function localError(code, summary, limits) {
 }
 
 function classifyPreCallError(error, limits) {
+  if (error instanceof CallAuthError) return localError(error.code, error.message, limits);
   if (error instanceof CallLimitError || error instanceof DiscoveryLimitError) return localError('LIMIT_EXCEEDED', 'MCP transport limit exceeded', limits);
   if (error instanceof CallTimeoutError || error instanceof DiscoveryTimeoutError || error?.name === 'AbortError') return localError('TIMEOUT', 'MCP transport timed out before the tool call', limits);
   if (error instanceof CallInputError || error instanceof DiscoveryInputError) return localError('INPUT_INVALID', error.message, limits);
@@ -229,6 +290,7 @@ export async function invokeExternalMcp({
   transport = SUPPORTED_TRANSPORT,
   tool_name: toolName,
   tool_input: toolInput,
+  auth = null,
   limits: requestedLimits,
   fetchImpl,
   resolver,
@@ -246,8 +308,9 @@ export async function invokeExternalMcp({
     validateToolName(toolName);
     const url = validateCallEndpoint(endpoint, transport);
     const toolInputSnapshot = validateToolInput(toolInput, limits.maxInputBytes);
+    const authBinding = validateAuth(auth);
     const result = skeleton(diagnostics);
-    const dispatcher = fetchImpl ? null : createSafeDispatcher({ resolver });
+    const dispatcher = createSafeDispatcher({ resolver });
     let requestIndex = 0;
     const fetcher = async (input, init = {}) => {
       requestIndex += 1;
@@ -259,6 +322,7 @@ export async function invokeExternalMcp({
       try {
         const request = Promise.resolve((fetchImpl ?? globalThis.fetch)(input, {
           ...init,
+          headers: requestHeaders(init.headers, authBinding),
           redirect: 'error',
           signal,
           ...(dispatcher ? { dispatcher } : {}),
@@ -271,7 +335,10 @@ export async function invokeExternalMcp({
         });
         const response = await Promise.race([request, timeout]);
         if (!response || typeof response.body === 'undefined') throw new CallInputError('fetch returned an invalid response');
-        return boundedResponse(response, limits.maxResponseBytes);
+        return await responseWithReflectionGuard(response, authBinding?.credential, limits.maxResponseBytes);
+      } catch (error) {
+        if (authBinding?.credential && containsCredential(error, authBinding.credential)) throw new CallReflectionError();
+        throw error;
       } finally {
         clearTimeout(requestTimer);
       }
@@ -296,6 +363,7 @@ export async function invokeExternalMcp({
       diagnostics.call_started = true;
       diagnostics.call_tool_count += 1;
       const callResult = await Promise.race([client.callTool({ name: toolName, arguments: toolInputSnapshot }), overallTimeout]);
+      if (authBinding?.credential && containsCredential(callResult, authBinding.credential)) throw new CallReflectionError();
       const safeResult = serializeCallToolResult(callResult, limits.maxResultBytes);
       diagnostics.call_result_received = true;
       result.status = safeResult.isError === true ? CALL_OUTCOME.TOOL_ERROR : CALL_OUTCOME.SUCCESS;
@@ -304,7 +372,9 @@ export async function invokeExternalMcp({
     } catch (error) {
       if (diagnostics.call_started) {
         result.status = CALL_OUTCOME.OUTCOME_UNKNOWN;
-        result.error = classifyCallError(error, limits);
+        result.error = authBinding?.credential && (error instanceof CallReflectionError || containsCredential(error, authBinding.credential))
+          ? localError('SECRET_REFLECTION_BLOCKED', 'provider material was suppressed', limits)
+          : classifyCallError(error, limits);
       } else {
         result.status = CALL_OUTCOME.NOT_INVOKED;
         result.error = classifyPreCallError(error, limits);

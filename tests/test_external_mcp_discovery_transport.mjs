@@ -61,6 +61,53 @@ test('real SDK initialize + paginated tools/list captures the complete SDK-visib
   assert.ok(calls.every((call) => call.signal instanceof AbortSignal));
 });
 
+test('bearer auth is injected for every discovery request and safe dispatch remains present', async () => {
+  const calls = [];
+  const result = await discoverExternalMcp({
+    endpoint: 'https://public.example.test/mcp',
+    auth: { scheme: 'bearer', credential: 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13' },
+    fetchImpl: fixtureFetch({ calls, pages: [{ tools: [] }, { tools: [] }] }),
+  });
+  assert.equal(result.status, DISCOVERY_STATUS.SUCCESS);
+  assert.ok(calls.length >= 3);
+  assert.ok(calls.every((call) => call.headers.get('authorization') === 'Bearer M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13'));
+  const source = await (await import('node:fs/promises')).readFile(new URL('../tools/external_mcp_discovery_transport.mjs', import.meta.url), 'utf8');
+  assert.match(source, /createSafeDispatcher\(\{ resolver \}\)/);
+  assert.match(source, /headers: requestHeaders\(init\.headers, auth\)/);
+});
+
+test('unsupported auth and Authorization conflicts are fail closed', async () => {
+  const unsupported = await discoverExternalMcp({ endpoint: 'https://public.example.test/mcp', auth: { scheme: 'basic', credential: 'x' }, fetchImpl: fixtureFetch() });
+  assert.equal(unsupported.status, 'AUTH_SCHEME_UNSUPPORTED');
+  const source = await (await import('node:fs/promises')).readFile(new URL('../tools/external_mcp_discovery_transport.mjs', import.meta.url), 'utf8');
+  assert.match(source, /AUTHORIZATION_HEADER_CONFLICT/);
+  assert.match(source, /headers\.has\('authorization'\)/);
+});
+
+test('credential reflection in catalog and remote errors suppresses all output', async () => {
+  const credential = 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13';
+  const reflectedCatalog = await discoverExternalMcp({
+    endpoint: 'https://public.example.test/mcp',
+    auth: { scheme: 'bearer', credential },
+    fetchImpl: fixtureFetch({ pages: [{ tools: [{ name: credential, description: 'reflected' }] }] }),
+  });
+  assert.equal(reflectedCatalog.status, 'SECRET_REFLECTION_BLOCKED');
+  assert.deepEqual(reflectedCatalog.tools, []);
+  assert.equal(JSON.stringify(reflectedCatalog).includes(credential), false);
+  const reflectedError = await discoverExternalMcp({
+    endpoint: 'https://public.example.test/mcp',
+    auth: { scheme: 'bearer', credential },
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.method === 'initialize') return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'fixture', version: '1.0.0' } } });
+      if (body.method === 'notifications/initialized') return jsonResponse(undefined, 202);
+      throw new Error(`remote error ${credential}`);
+    },
+  });
+  assert.equal(reflectedError.status, 'SECRET_REFLECTION_BLOCKED');
+  assert.equal(JSON.stringify(reflectedError).includes(credential), false);
+});
+
 test('successful empty catalog is distinct from a failed discovery', async () => {
   const success = await discoverExternalMcp({ endpoint: 'https://public.example.test/mcp', fetchImpl: fixtureFetch() });
   assert.equal(success.status, DISCOVERY_STATUS.SUCCESS);

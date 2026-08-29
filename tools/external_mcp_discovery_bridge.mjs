@@ -20,7 +20,7 @@ function parseEnvelope(value) {
   if (value.bridge_version !== BRIDGE_VERSION) {
     throw new BridgeEnvelopeError('bridge input version is unsupported');
   }
-  if (keys.some((key) => !['bridge_version', 'endpoint', 'transport'].includes(key))) {
+  if (keys.some((key) => !['bridge_version', 'endpoint', 'transport', 'auth'].includes(key))) {
     throw new BridgeEnvelopeError('bridge input contains unsupported fields');
   }
   if (typeof value.endpoint !== 'string' || value.endpoint.length === 0) {
@@ -29,7 +29,16 @@ function parseEnvelope(value) {
   if (value.transport !== 'streamable_http') {
     throw new BridgeEnvelopeError('bridge transport is unsupported');
   }
-  return { endpoint: value.endpoint, transport: value.transport };
+  if (!Object.hasOwn(value, 'auth')) return { endpoint: value.endpoint, transport: value.transport, auth: null };
+  if (value.auth !== null && (
+    !value.auth || typeof value.auth !== 'object' || Array.isArray(value.auth) ||
+    Object.getPrototypeOf(value.auth) !== Object.prototype ||
+    Object.keys(value.auth).sort().join(',') !== 'credential,scheme' ||
+    value.auth.scheme !== 'bearer' || typeof value.auth.credential !== 'string' ||
+    value.auth.credential.length === 0 ||
+    new TextEncoder().encode(value.auth.credential).byteLength > 16 * 1024
+  )) throw new BridgeEnvelopeError('bridge auth is unsupported', 'AUTH_SCHEME_UNSUPPORTED');
+  return { endpoint: value.endpoint, transport: value.transport, auth: value.auth };
 }
 
 export async function executeBridgeEnvelope(input, { discover = discoverExternalMcp } = {}) {
