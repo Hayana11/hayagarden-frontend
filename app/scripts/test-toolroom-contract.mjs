@@ -50,7 +50,7 @@ assert.match(css, /\.toolroom-transport-badge\s*\{[\s\S]*?color:\s*#5e7f98/);
 assert.match(css, /\.toolroom-connection-badge::before\s*\{[\s\S]*?background:\s*#c7b9b5/);
 assert.match(css, /\.toolroom-connection-badge\.is-live::before\s*\{[\s\S]*?background:\s*#8fbb86/);
 assert.match(css, /\.toolroom-chevron\.is-open\s*\{[\s\S]*?scaleY\(0\.62\)/);
-assert.match(css, /\.toolroom-header-wrap \.page-header__subtitle\s*\{[\s\S]*?left:\s*70px/);
+assert.match(css, /\.toolroom-header-wrap \.page-header__subtitle\s*\{[\s\S]*?left:\s*52px/);
 assert.match(css, /\.toolroom-header-wrap \.page-header__subtitle\s*\{[\s\S]*?font-style:\s*normal/);
 assert.match(css, /\.toolroom-header-wrap \.page-header__subtitle::before\s*\{[\s\S]*?display:\s*none/);
 assert.doesNotMatch(screen, /🧠/);
