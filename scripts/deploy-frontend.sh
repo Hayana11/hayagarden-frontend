@@ -40,7 +40,7 @@ cd "$ROOT"
 git fetch --prune "$REMOTE"
 
 target_sha="$(git rev-parse --verify "$REMOTE/$BRANCH^{commit}")"
-current_sha="$(git rev-parse --verify HEAD^{commit}")"
+current_sha="$(git rev-parse --verify HEAD^{commit})"
 if [[ -n "$EXPECTED_SHA" && "$EXPECTED_SHA" != "$target_sha" ]]; then
   fail "origin/main moved: expected $EXPECTED_SHA but fetched $target_sha"
 fi
