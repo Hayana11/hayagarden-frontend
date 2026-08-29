@@ -16,6 +16,12 @@ function snapshot({
   lightExposure = "unknown",
   raw = null,
   observedAt = null,
+  userActivity = "unknown",
+  activitySource = "none",
+  activitySampledAt = null,
+  activityPossibility = null,
+  rawCandidate = null,
+  rawPossibility = null,
 } = {}) {
   return {
     schemaVersion: 1,
@@ -31,6 +37,21 @@ function snapshot({
       },
       motion,
       observedAt,
+    },
+    activity: {
+      raw: null,
+      userActivity,
+      possibility: activityPossibility,
+      activitySampledAt,
+      source: activitySource,
+      registration: "registered",
+      lastErrorCode: null,
+      callbackReceived: true,
+      intentHasExtras: true,
+      responsePresent: true,
+      activityDataCount: rawCandidate === null ? 0 : 1,
+      rawCandidate,
+      rawPossibility,
     },
   };
 }
@@ -85,7 +106,7 @@ function raw({
 }
 
 function compile(options) {
-  return compileRealityContext(snapshot(options));
+  return compileRealityContext(snapshot(options), options.now ?? 0);
 }
 
 const stillCharging80 = compile({
@@ -115,6 +136,65 @@ assert.equal(
   "设备当前静止，正在充电。",
 );
 assert.equal(compile({}).text, "");
+
+assert.equal(
+  compile({
+    motion: "still",
+    userActivity: "walking",
+    activitySource: "hms",
+    activitySampledAt: 0,
+    rawCandidate: 7,
+    rawPossibility: 92,
+  }).text,
+  "设备当前静止，步行中。",
+);
+assert.equal(
+  compile({
+    motion: "moving",
+    userActivity: "still",
+    activitySource: "hms",
+    activitySampledAt: 0,
+  }).text,
+  "设备当前移动中，静止。",
+);
+assert.equal(
+  compile({
+    motion: "still",
+    userActivity: "walking",
+    activitySource: "hms",
+    activitySampledAt: 301000,
+    now: 301000,
+  }).text,
+  "设备当前静止，步行中。",
+);
+assert.equal(
+  compile({
+    motion: "still",
+    userActivity: "walking",
+    activitySource: "hms",
+    activitySampledAt: 0,
+    now: 180001,
+  }).text,
+  "设备当前静止。",
+);
+assert.equal(
+  compile({
+    motion: "still",
+    userActivity: "unknown",
+    activitySource: "hms",
+    activitySampledAt: 0,
+  }).text,
+  "设备当前静止。",
+);
+assert.equal(
+  compile({
+    motion: "still",
+    userActivity: "walking",
+    activitySource: "none",
+    activitySampledAt: 0,
+  }).text,
+  "设备当前静止。",
+);
 
 const segments = stillCharging80.segments;
 assert.equal(segments.map((segment) => segment.text).join(""), stillCharging80.text);
