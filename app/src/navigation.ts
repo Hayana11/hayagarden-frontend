@@ -27,6 +27,7 @@ export const ROUTES = {
   profile: '/profile',
   dailySoftWindow: '/daily-soft-window',
   manualContextWindow: '/manual-context-window',
+  toolroom: '/toolroom',
 } as const;
 
 export type SpaRoute = (typeof ROUTES)[keyof typeof ROUTES];
@@ -63,6 +64,7 @@ export const ROUTE_META = {
   moments: { chrome: 'fullscreen', globalNav: false },
   profile: { chrome: 'fullscreen', globalNav: false },
   dailySoftWindow: { chrome: 'fullscreen', globalNav: false },
+  toolroom: { chrome: 'fullscreen', globalNav: false },
 } as const satisfies Record<keyof typeof ROUTES, RouteMeta>;
 
 /** Chrome for dynamic monopoly room routes (`/monopoly/:roomId`). */
