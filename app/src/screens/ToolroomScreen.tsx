@@ -77,7 +77,7 @@ function ToolroomDeviceIcon({ kind }: { kind: 'phone' | 'computer' }) {
 
 type ExternalMcpAuthScheme = 'none' | 'bearer';
 
-type ExternalMcpIcon = 'server' | 'globe' | 'plug' | 'spark';
+type ExternalMcpIcon = 'default' | 'server' | 'globe' | 'plug' | 'spark';
 
 type ExternalMcpForm = {
   icon: ExternalMcpIcon;
@@ -88,24 +88,41 @@ type ExternalMcpForm = {
 };
 
 const DEFAULT_EXTERNAL_MCP_FORM: ExternalMcpForm = {
-  icon: 'server',
+  icon: 'default',
   name: '',
   description: '',
   url: '',
   auth: 'none',
 };
 
-const EXTERNAL_MCP_ICON_PATHS: Record<ExternalMcpIcon, string> = {
+const EXTERNAL_MCP_ICON_PATHS: Record<Exclude<ExternalMcpIcon, 'default'>, string> = {
   server: 'M4 5h16v14H4z M8 9h8M8 13h5 M7 19v2m10-2v2',
   globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-8.4 6h16.8M3.6 15h16.8M12 3c2.1 2.4 3.2 5.4 3.2 9S14.1 18.6 12 21c-2.1-2.4-3.2-5.4-3.2-9S9.9 5.4 12 3Z',
   plug: 'M9 3v6m6-6v6m-8 0h10v2a5 5 0 0 1-10 0V9Zm5 7v5',
   spark: 'M12 3l1.8 6.2L20 11l-6.2 1.8L12 19l-1.8-6.2L4 11l6.2-1.8L12 3Z',
 };
 
-function ExternalMcpIconView({ icon }: { icon: ExternalMcpIcon }) {
+const EXTERNAL_MCP_ICON_OPTIONS: ExternalMcpIcon[] = ['default', 'server', 'globe', 'plug', 'spark'];
+const EXTERNAL_MCP_ICON_LABELS: Record<ExternalMcpIcon, string> = {
+  default: '默认图标（按名称匹配）',
+  server: '服务器图标',
+  globe: '地球图标',
+  plug: '插头图标',
+  spark: '星芒图标',
+};
+
+function externalMcpIconForName(name: string): Exclude<ExternalMcpIcon, 'default'> {
+  const source = Array.from(name.trim() || 'mcp');
+  const score = source.reduce((total, character) => total + character.charCodeAt(0), 0);
+  const icons: Array<Exclude<ExternalMcpIcon, 'default'>> = ['server', 'globe', 'plug', 'spark'];
+  return icons[score % icons.length];
+}
+
+function ExternalMcpIconView({ icon, name = '' }: { icon: ExternalMcpIcon; name?: string }) {
+  const resolvedIcon = icon === 'default' ? externalMcpIconForName(name) : icon;
   return (
     <svg viewBox="0 0 24 24" role="presentation" focusable="false">
-      <path d={EXTERNAL_MCP_ICON_PATHS[icon]} />
+      <path d={EXTERNAL_MCP_ICON_PATHS[resolvedIcon]} />
     </svg>
   );
 }
@@ -609,19 +626,21 @@ export function ToolroomScreen() {
               <div className="toolroom-mcp-field">
                 <span className="toolroom-mcp-label">图标 <small>内置线条图标</small></span>
                 <div className="toolroom-mcp-icon-grid" role="group" aria-label="选择 MCP 图标">
-                  {(Object.keys(EXTERNAL_MCP_ICON_PATHS) as ExternalMcpIcon[]).map((icon) => (
+                  {EXTERNAL_MCP_ICON_OPTIONS.map((icon) => (
                     <button
                       type="button"
                       key={icon}
                       className={'toolroom-mcp-icon-option' + (externalMcpForm.icon === icon ? ' is-selected' : '')}
-                      aria-label={'选择' + icon + '图标'}
+                      aria-label={'选择' + EXTERNAL_MCP_ICON_LABELS[icon]}
+                      title={EXTERNAL_MCP_ICON_LABELS[icon]}
                       aria-pressed={externalMcpForm.icon === icon}
                       onClick={() => setExternalMcpForm((current) => ({ ...current, icon }))}
                     >
-                      <ExternalMcpIconView icon={icon} />
+                      <ExternalMcpIconView icon={icon} name={externalMcpForm.name} />
                     </button>
                   ))}
                 </div>
+                <small className="toolroom-mcp-icon-note">选择默认图标后，会根据名称自动匹配。</small>
               </div>
 
               <label className="toolroom-mcp-field">
