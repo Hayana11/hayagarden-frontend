@@ -64,6 +64,17 @@ function ToolroomGroupIcon({ groupId }: { groupId: string }) {
   );
 }
 
+function ToolroomDeviceIcon({ kind }: { kind: 'phone' | 'computer' }) {
+  const path = kind === 'phone'
+    ? 'M7 3h10v18H7z M10 18h4'
+    : 'M4 5h16v11H4z M9 21h6m-3-5v5';
+  return (
+    <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+      <path d={path} />
+    </svg>
+  );
+}
+
 const DISABLED_TOOL_ACCENT = '#C7B9B5';
 
 const GROUP_ACCENT_COLORS: Record<string, string> = {
@@ -240,7 +251,7 @@ export function ToolroomScreen() {
     {
       id: 'prompt',
       title: '实际注入 Prompt',
-      subtitle: 'RealityPromptProjection',
+      subtitle: '系统配置 · Reality Prompt 预览',
       status: prompt.text ? '有内容' : '空',
       rows: [
         ['字符数', String(Array.from(prompt.text).length)],
@@ -417,16 +428,20 @@ export function ToolroomScreen() {
 
           <div className="toolroom-device-grid">
             <article className="toolroom-device-card">
-              <div className="toolroom-card-title"><span aria-hidden="true">▯</span><strong>手机状态</strong></div>
+              <div className="toolroom-card-title"><ToolroomDeviceIcon kind="phone" /><strong>手机状态</strong></div>
               <dl>
                 <div><dt>姿态</dt><dd>{ORIENTATION_LABELS[facts.orientation]}</dd></div>
                 <div><dt>动作</dt><dd>{MOTION_LABELS[reality.physical.motion]}</dd></div>
                 <div><dt>光线</dt><dd>{LIGHT_LABELS[facts.lightExposure]}</dd></div>
+                <div><dt>距离传感器</dt><dd>{PROXIMITY_LABELS[facts.proximity]}</dd></div>
+                <div><dt>电量</dt><dd>{facts.batteryLevel === null ? '未知' : String(facts.batteryLevel) + '%'}</dd></div>
+                <div><dt>充电</dt><dd>{facts.charging === null ? '未知' : facts.charging ? '是' : '否'}</dd></div>
+                <div><dt>观测时间</dt><dd>{formatObservedAt(reality.physical.observedAt)}</dd></div>
                 <div><dt>连接</dt><dd>{statusLabel}</dd></div>
               </dl>
             </article>
             <article className="toolroom-device-card is-muted">
-              <div className="toolroom-card-title"><span aria-hidden="true">▣</span><strong>电脑状态</strong></div>
+              <div className="toolroom-card-title"><ToolroomDeviceIcon kind="computer" /><strong>电脑状态</strong></div>
               <p>当前网页没有可证明的桌面观测桥接，因此不显示原型里的示例应用或窗口。</p>
             </article>
           </div>
