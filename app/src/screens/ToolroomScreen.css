@@ -678,11 +678,6 @@
 }
 
 @media (max-width: 360px) {
-  .toolroom-mcp-dialog {
-    height: calc(133.333vw - 43px);
-    max-height: calc(100% - 32px);
-  }
-
   .toolroom-header-wrap,
   .toolroom-scroll {
     padding-left: 16px;
@@ -972,5 +967,13 @@
   .toolroom-mcp-form {
     padding-left: 0;
     padding-right: 0;
+  }
+}
+
+
+@media (max-width: 360px) {
+  .toolroom-mcp-dialog {
+    height: calc(133.333vw - 43px);
+    max-height: calc(100% - 32px);
   }
 }
