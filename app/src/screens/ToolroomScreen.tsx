@@ -331,9 +331,12 @@ export function ToolroomScreen() {
                                 <span className={'toolroom-chevron' + (toolOpen ? ' is-open' : '')} aria-hidden="true">⌄</span>
                               </button>
                               {toolOpen ? (
+                                <div className="toolroom-tool-divider" aria-hidden="true" />
                                 <div className="toolroom-tool-detail">
-                                  <span className="toolroom-detail-kicker">Current binding</span>
+                                  <span className="toolroom-detail-kicker">Prompt / Usage</span>
                                   <p>{tool.status_label}。本页只展示真实清单，不执行任何工具。</p>
+                                  <div className="toolroom-detail-divider" aria-hidden="true" />
+                                  <span className="toolroom-detail-label">Current binding</span>
                                   <dl>
                                     <div><dt>Provider</dt><dd>{sourceLabel(tool.provider)}</dd></div>
                                     <div><dt>Reason</dt><dd>{tool.reason_code}</dd></div>
