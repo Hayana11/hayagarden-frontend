@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from cryptography.fernet import Fernet
 
 from tools.external_mcp_auth_binding import (
     AUTH_BEARER,
@@ -28,9 +29,10 @@ class ExternalMcpAuthBindingTests(unittest.TestCase):
             display_name="Calendar", endpoint="https://calendar.example/mcp", provenance="owner-admin"
         )
         self.tempdir = tempfile.TemporaryDirectory()
-        self.store = ExternalSecretStore(
-            self.connection, key_file=os.path.join(self.tempdir.name, "key"), registry=self.servers
-        )
+        self.key_path = os.path.join(self.tempdir.name, "key")
+        with open(self.key_path, "wb") as key_file:
+            key_file.write(Fernet.generate_key())
+        self.store = ExternalSecretStore(self.connection, key_file=self.key_path, registry=self.servers)
         self.bindings = ExternalMcpAuthBindingRegistry(
             self.connection, server_registry=self.servers, secret_store=self.store
         )
