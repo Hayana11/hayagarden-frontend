@@ -765,10 +765,10 @@
 
 .toolroom-mcp-dialog::before {
   position: absolute;
-  top: 10px;
-  right: 10px;
-  bottom: 10px;
-  left: 10px;
+  top: 7px;
+  right: 7px;
+  bottom: 7px;
+  left: 7px;
   z-index: 0;
   border: 1px solid rgba(183, 110, 121, 0.12);
   border-radius: 20px;
@@ -807,17 +807,28 @@
   text-transform: uppercase;
 }
 
+.toolroom-mcp-eyebrow::before {
+  display: inline-block;
+  margin-right: 6px;
+  color: #c15b77;
+  content: '✦';
+  font-family: var(--font-serif-cn);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .toolroom-mcp-close {
   display: grid;
   place-items: center;
   flex: none;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border: 0;
   border-radius: 50%;
   background: rgba(183, 110, 121, 0.09);
-  color: #bfa9ac;
-  font: 400 21px/1 var(--font-serif-cn);
+  color: #a66f77;
+  font: 400 17px/1 var(--font-serif-cn);
   cursor: pointer;
 }
 
