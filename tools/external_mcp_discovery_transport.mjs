@@ -309,6 +309,7 @@ function classifyFailure(error, limits) {
 
 async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostics, result, auth }) {
   const dispatcher = createSafeDispatcher({ resolver });
+  let reflectedCredential = false;
   let requestIndex = 0;
   const fetcher = async (input, init = {}) => {
     requestIndex += 1;
@@ -335,7 +336,10 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
       if (!response || typeof response.body === 'undefined') throw new DiscoveryInputError('fetch returned an invalid response');
       return responseWithReflectionGuard(response, auth?.credential, limits.maxResponseBytes);
     } catch (error) {
-      if (auth?.credential && containsCredential(error, auth.credential)) throw new DiscoveryReflectionError();
+      if (auth?.credential && containsCredential(error, auth.credential)) {
+        reflectedCredential = true;
+        throw new DiscoveryReflectionError();
+      }
       throw error;
     } finally {
       clearTimeout(timer);
@@ -395,6 +399,9 @@ async function discoverWithClient({ url, limits, fetchImpl, resolver, diagnostic
     result.catalog_complete = true;
     result.zero_tools = result.tools.length === 0;
     result.status = DISCOVERY_STATUS.SUCCESS;
+  } catch (error) {
+    if (reflectedCredential) throw new DiscoveryReflectionError();
+    throw error;
   } finally {
     clearTimeout(overallTimer);
     await client.close().catch(() => undefined);
