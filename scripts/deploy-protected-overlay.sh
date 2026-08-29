@@ -152,4 +152,3 @@ protected_overlay_verify() {
      ! -e "$root/$PROTECTED_OVERLAY_PATH_B" && ! -L "$root/$PROTECTED_OVERLAY_PATH_B" ]] ||
     _protected_overlay_error 'PROTECTED_OVERLAY_POSTCHECK_FAILED'
 }
-

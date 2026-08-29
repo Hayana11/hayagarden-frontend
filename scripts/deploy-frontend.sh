@@ -252,4 +252,3 @@ mkdir -p "$STATE_DIR"
 printf '%s\n' "$target_sha" > "$STATE_DIR/DEPLOYED_SHA"
 trap - ERR
 echo "Deployed $target_sha from $REMOTE/$BRANCH"
-
