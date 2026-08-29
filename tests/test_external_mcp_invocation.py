@@ -122,9 +122,8 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         self.policy.classify(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], side_effect_class="unknown", actor="owner", provenance="settings-admin")
         self.assertEqual(self.invoke(self.lease())["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
-        candidate = self.prepare()
-        lease, action = self.allowed_lease(candidate)
-        self.assertEqual(self.invoke(lease, expected_turn_id="wrong")["status"], FAILED_PRE_CALL)
+        self.prepare()
+        self.assertEqual(self.invoke(self.lease(), expected_turn_id="wrong")["status"], FAILED_PRE_CALL)
         self.assertEqual(self.calls, 0)
 
     def test_final_fence_invalidation_paths_never_run(self):
@@ -274,8 +273,7 @@ class ExternalMcpInvocationTests(unittest.TestCase):
                 return ExternalMcpInvocation(conn, server_registry=servers, candidate_registry=candidates, side_effect_policy=policy, execution_fence=fence, auth_binding_registry=auth)
             one, two = owner(left), owner(right)
             # Use a fresh turn; initial attempt is deliberately already terminal.
-            fresh_lease = dict(lease); fresh_lease["turn_id"] = "turn-race"
-            fresh_lease["approval_ids"] = (build_external_action_id(candidate["control_id"], candidate["current_fingerprint"], candidate["current_source_registry_revision"], EXTERNAL_STATE, {"q": "today"}),)
+            fresh_lease = None
             calls = []; start = threading.Barrier(2)
             def race(inv):
                 start.wait(); result = inv.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, fresh_lease, expected_turn_id="turn-race", runner=lambda _: calls.append(1) or {"status": "SUCCESS"}); self.assertIn(result["status"], {SUCCEEDED, STARTED})

@@ -280,6 +280,8 @@ class ExternalToolExecutionFence:
         ):
             return _deny(TURN_ID_MISMATCH)
         lease_error = _lease_error(turn_lease) if turn_lease is not None else None
+        if lease_error:
+            return _deny(TURN_LEASE_INVALID)
         if (
             isinstance(turn_lease, Mapping)
             and turn_lease.get("turn_id") != expected_turn_id
