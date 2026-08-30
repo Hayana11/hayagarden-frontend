@@ -69,6 +69,16 @@ class _Runtime:
         raise AssertionError("admin route must never invoke tools")
 
 
+class _CountingCandidateRegistry:
+    def __init__(self, actual):
+        self.actual = actual
+        self.calls = 0
+
+    def ingest(self, result):
+        self.calls += 1
+        return self.actual.ingest(result)
+
+
 class _FailingIngest:
     def __init__(self, actual):
         self.actual = actual
@@ -210,10 +220,14 @@ class ExternalMcpAdminRouteTests(unittest.TestCase):
 
     def test_full_success_ingests_once_with_safe_candidate_state(self):
         self.graph.runtime.tools = [{"name": "echo", "description": "safe"}]
+        actual = self.graph.candidate_registry
+        counter = _CountingCandidateRegistry(actual)
+        self.graph.candidate_registry = counter
         response = self.post(self.payload())
-        candidate = self.graph.candidate_registry.get_candidate("srv-test", "echo")
+        candidate = actual.get_candidate("srv-test", "echo")
         self.assertEqual(response.status_code, 201)
         self.assertEqual(len(self.graph.runtime.discover_calls), 1)
+        self.assertEqual(counter.calls, 1)
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["presence_state"], "PRESENT")
         self.assertEqual(candidate["review_state"], "REVIEW_REQUIRED")
