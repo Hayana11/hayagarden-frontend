@@ -182,17 +182,32 @@ function defaultResolve(hostname) {
   return dns.lookup(hostname, { all: true, verbatim: true });
 }
 
-export function createSafeDispatcher({ resolver = defaultResolve } = {}) {
-  const lookup = (hostname, _options, callback) => {
+export function createSafeLookup({ resolver = defaultResolve } = {}) {
+  return (hostname, options, callback) => {
     Promise.resolve(resolver(hostname))
       .then((records) => {
         const validated = validateResolvedAddresses(records);
-        const selected = validated[0];
-        callback(null, selected.address, selected.family || net.isIP(selected.address));
+        const normalized = validated.map((record) => ({
+          address: record.address,
+          family: net.isIP(record.address),
+        }));
+        if (options && typeof options === 'object' && options.all === true) {
+          callback(null, normalized);
+          return;
+        }
+        const selected = normalized[0];
+        callback(null, selected.address, selected.family);
       })
       .catch((error) => callback(error));
   };
-  return new Agent({ connect: { lookup } });
+}
+
+export function createSafeDispatcher({ resolver = defaultResolve } = {}) {
+  return new Agent({
+    connect: {
+      lookup: createSafeLookup({ resolver }),
+    },
+  });
 }
 
 function combineSignals(signals) {
