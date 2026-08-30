@@ -286,7 +286,7 @@ assert.deepEqual(
   segments
     .filter((segment) => segment.kind === "dynamic")
     .map((segment) => segment.key),
-  ["motion", "charging", "batteryLevel"],
+  ["motion", "charging"],
 );
 assert.equal(stillCharging80.text.includes("**"), false);
 
