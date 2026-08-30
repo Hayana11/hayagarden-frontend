@@ -52,8 +52,10 @@ for (const token of ['activitySampledAt', 'REALITY_ACTIVITY_MAX_AGE_MS', 'getAct
 }
 assert.ok(compiler.includes('getActivityFreshness'));
 assert.ok(compiler.includes('getActivitySemanticConfidence'));
-assert.ok(compiler.includes('环境【较暗】'));
-assert.ok(compiler.includes('手机【正面朝上平放】'));
+assert.ok(compiler.includes('lightSemanticLabel'));
+assert.ok(compiler.includes('orientationSemanticLabel'));
+assert.ok(compiler.includes('环境【function () { [native code] }】'));
+assert.ok(compiler.includes('姿态【function () { [native code] }】'));
 assert.ok(compiler.includes('"userActivity"'));
 assert.equal(chat.includes('ElpisActivity'), false);
 assert.equal(chat.includes('getActivityState'), false);
