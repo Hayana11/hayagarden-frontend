@@ -410,7 +410,7 @@ chargingStore.ingestPhysical(
   raw({ at: 500, charging: false, batteryLevel: null }),
   500,
 );
-assert.equal(chargingProjection.getSnapshot().text, "");
+assert.equal(chargingProjection.getSnapshot().text, "姿态【正面朝上平放】。");
 assert.equal(chargingNotifications, 1);
 
 const batteryStore = new RealityStore();
@@ -428,7 +428,7 @@ batteryStore.ingestPhysical(
   raw({ at: 500, charging: null, batteryLevel: 79 }),
   500,
 );
-assert.equal(batteryProjection.getSnapshot().text, "");
+assert.equal(batteryProjection.getSnapshot().text, "姿态【正面朝上平放】。");
 assert.equal(batteryNotifications, 1);
 
 const resetStore = new RealityStore();
