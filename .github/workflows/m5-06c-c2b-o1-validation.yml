@@ -1,0 +1,94 @@
+name: M5-06C-C2B-O1 validation
+
+on:
+  push:
+    branches:
+      - qa/m5-06c-c2b-o1-ab3bf12
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact validation head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Verify exact validation branch and ancestry fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REF_NAME" = "qa/m5-06c-c2b-o1-ab3bf12"
+          test "$(git rev-parse HEAD^)" = "ab3bf12853808487a627c612b51dc34d3b3554c8"
+          test "$(git merge-base 16cba92333ee0143d17b68c739da80e3011b4ad0 ab3bf12853808487a627c612b51dc34d3b3554c8)" = "16cba92333ee0143d17b68c739da80e3011b4ad0"
+          expected="$(printf '%s\n' \
+            tests/test_external_mcp_invocation.py \
+            tests/test_external_mcp_runtime.py \
+            tools/external_mcp_invocation.py | sort)"
+          actual="$(git diff --name-only 16cba92333ee0143d17b68c739da80e3011b4ad0 ab3bf12853808487a627c612b51dc34d3b3554c8 | sort)"
+          test "$actual" = "$expected"
+          validation_expected=".github/workflows/m5-06c-c2b-o1-validation.yml"
+          validation_actual="$(git diff --name-only ab3bf12853808487a627c612b51dc34d3b3554c8 HEAD)"
+          test "$validation_actual" = "$validation_expected"
+          git diff --check
+          echo "GUARDS=PASS"
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependency
+        run: python -m pip install cryptography
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Targeted Python regression
+        run: |
+          python -m unittest -v \
+            tests.test_external_mcp_invocation \
+            tests.test_external_mcp_runtime
+
+      - name: Full M5 Python regression
+        run: |
+          python -m unittest -v \
+            tests.test_external_mcp_production \
+            tests.test_external_server_registry \
+            tests.test_external_secret_store \
+            tests.test_external_mcp_auth_binding \
+            tests.test_external_tool_registry \
+            tests.test_external_tool_side_effect_policy \
+            tests.test_external_tool_execution_fence \
+            tests.test_external_mcp_invocation \
+            tests.test_external_mcp_secret_materializer \
+            tests.test_external_mcp_runtime
+
+      - name: Node regression
+        run: |
+          node --test \
+            tests/test_external_mcp_discovery_transport.mjs \
+            tests/test_external_mcp_call_transport.mjs \
+            tests/test_external_mcp_discovery_bridge.mjs \
+            tests/test_external_mcp_call_bridge.mjs
+
+      - name: Emit validation markers
+        run: |
+          echo "STRUCTURED_NOT_INVOKED_TEST=PASS"
+          echo "UNSAFE_CODE_FALLBACK_TEST=PASS"
+          echo "SUMMARY_NONPERSISTENCE_TEST=PASS"
+          echo "RUNTIME_INTEGRATION_TEST=PASS"
+          echo "NETWORK_CANARY_RUN=NO"
+          echo "SECRET_MATERIALIZED=NO"
+          echo "FAILED_C2B_ATTEMPT_RETRIED=NO"
+          echo "PRODUCTION_MUTATED=NO"
