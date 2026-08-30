@@ -57,7 +57,10 @@ class ProductionCompositionTests(unittest.TestCase):
         real_lstat = os.lstat
 
         def root_owned_lstat(path: str, *, code: str):
-            metadata = real_lstat(path)
+            try:
+                metadata = real_lstat(path)
+            except OSError as exc:
+                raise ExternalMcpProductionInitializationError(code) from exc
             if path in {str(self.key), str(self.db)}:
                 return SimpleNamespace(
                     st_mode=metadata.st_mode,
@@ -91,6 +94,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
+                if not row[0].startswith("sqlite_")
             }
 
     def _counts(self) -> dict[str, int]:
