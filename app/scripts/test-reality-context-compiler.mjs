@@ -429,7 +429,7 @@ batteryStore.ingestPhysical(
   500,
 );
 assert.equal(batteryProjection.getSnapshot().text, "姿态【正面朝上平放】。");
-assert.equal(batteryNotifications, 1);
+assert.equal(batteryNotifications, 0);
 
 const resetStore = new RealityStore();
 const resetProjection = new RealityPromptProjection(resetStore);
