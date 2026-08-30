@@ -341,7 +341,7 @@ projectionInitialStore.ingestPhysical(
 const projectionInitial = new RealityPromptProjection(projectionInitialStore);
 assert.equal(
   projectionInitial.getSnapshot().text,
-  "正在充电。",
+  "姿态【正面朝上平放】，正在充电。",
 );
 projectionInitial.dispose();
 
@@ -355,7 +355,7 @@ semanticStore.ingestPhysical(
   raw({ charging: true, batteryLevel: 80 }),
   0,
 );
-assert.equal(semanticProjection.getSnapshot().text, "正在充电。");
+assert.equal(semanticProjection.getSnapshot().text, "姿态【正面朝上平放】，正在充电。");
 assert.equal(semanticNotifications, 1);
 
 const rawOnlyStore = new RealityStore();
@@ -373,7 +373,7 @@ rawOnlyStore.ingestPhysical(
   raw({ at: 500, charging: true, batteryLevel: 80, lux: 900 }),
   500,
 );
-assert.equal(rawOnlyProjection.getSnapshot().text, "正在充电。");
+assert.equal(rawOnlyProjection.getSnapshot().text, "姿态【正面朝上平放】，正在充电。");
 assert.equal(rawOnlyNotifications, 0);
 
 const motionStore = new RealityStore();
@@ -494,7 +494,7 @@ assert.doesNotThrow(() => {
 assert.equal(goodSubscriberNotifications, 1);
 assert.equal(
   badSubscriberProjection.getSnapshot().text,
-  "正在充电。",
+  "姿态【正面朝上平放】，正在充电。",
 );
 
 console.log("P2C.1f reality context compiler tests: PASS");
