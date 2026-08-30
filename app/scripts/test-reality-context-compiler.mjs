@@ -114,26 +114,26 @@ const stillCharging80 = compile({
   charging: true,
   batteryLevel: 80,
 });
-assert.equal(stillCharging80.text, "设备当前静止，正在充电，电量80%。");
+assert.equal(stillCharging80.text, "设备【静止】，正在充电，电量80%。");
 
 const movingNotCharging79 = compile({
   motion: "moving",
   charging: false,
   batteryLevel: 79,
 });
-assert.equal(movingNotCharging79.text, "设备当前移动中，未充电，电量79%。");
+assert.equal(movingNotCharging79.text, "设备【移动中】，未充电，电量79%。");
 
 assert.equal(
   compile({ charging: true, batteryLevel: 80 }).text,
-  "设备当前正在充电，电量80%。",
+  "正在充电，电量80%。",
 );
 assert.equal(
   compile({ motion: "still", batteryLevel: 80 }).text,
-  "设备当前静止，电量80%。",
+  "设备【静止】，电量80%。",
 );
 assert.equal(
   compile({ motion: "still", charging: true }).text,
-  "设备当前静止，正在充电。",
+  "设备【静止】，正在充电。",
 );
 assert.equal(compile({}).text, "");
 
@@ -143,10 +143,11 @@ assert.equal(
     userActivity: "walking",
     activitySource: "hms",
     activitySampledAt: 0,
+    activityPossibility: 92,
     rawCandidate: 7,
     rawPossibility: 92,
   }).text,
-  "设备当前静止，用户正在步行。",
+  "设备【静止】，推断活动【步行】。",
 );
 assert.equal(
   compile({
@@ -154,32 +155,36 @@ assert.equal(
     userActivity: "still",
     activitySource: "hms",
     activitySampledAt: 0,
+    activityPossibility: 87,
   }).text,
-  "设备当前移动中，用户当前静止。",
+  "设备【移动中】，推断活动【静止】。",
 );
 assert.equal(
   compile({
     userActivity: "running",
     activitySource: "hms",
     activitySampledAt: 0,
+    activityPossibility: 87,
   }).text,
-  "设备当前用户正在跑步。",
+  "推断活动【跑步】。",
 );
 assert.equal(
   compile({
     userActivity: "cycling",
     activitySource: "hms",
     activitySampledAt: 0,
+    activityPossibility: 87,
   }).text,
-  "设备当前用户正在骑行。",
+  "推断活动【骑行】。",
 );
 assert.equal(
   compile({
     userActivity: "in_vehicle",
     activitySource: "hms",
     activitySampledAt: 0,
+    activityPossibility: 87,
   }).text,
-  "设备当前用户正在乘车。",
+  "推断活动【车载】。",
 );
 assert.equal(
   compile({
@@ -187,9 +192,10 @@ assert.equal(
     userActivity: "walking",
     activitySource: "hms",
     activitySampledAt: 301000,
+    activityPossibility: 87,
     now: 301000,
   }).text,
-  "设备当前静止，用户正在步行。",
+  "设备【静止】，推断活动【步行】。",
 );
 assert.equal(
   compile({
@@ -199,7 +205,7 @@ assert.equal(
     activitySampledAt: 0,
     now: 180001,
   }).text,
-  "设备当前静止。",
+  "设备【静止】。",
 );
 assert.equal(
   compile({
@@ -208,7 +214,7 @@ assert.equal(
     activitySource: "hms",
     activitySampledAt: 0,
   }).text,
-  "设备当前静止。",
+  "设备【静止】。",
 );
 assert.equal(
   compile({
@@ -217,7 +223,21 @@ assert.equal(
     activitySource: "none",
     activitySampledAt: 0,
   }).text,
-  "设备当前静止。",
+  "设备【静止】。",
+);
+
+const lightDark = compile({ motion: "unknown", lightExposure: "dark" });
+assert.equal(lightDark.text, "环境【较暗】。");
+assert.equal(compile({ motion: "unknown", lightExposure: "bright" }).text, "环境【较亮】。");
+assert.equal(compile({ motion: "unknown", lightExposure: "dim" }).text, "");
+assert.equal(compile({ motion: "unknown", lightExposure: "moderate" }).text, "");
+assert.equal(compile({ motion: "unknown", orientation: "face_up" }).text, "手机【正面朝上平放】。");
+assert.equal(compile({ motion: "unknown", orientation: "face_down" }).text, "手机【正面朝下扣放】。");
+assert.equal(compile({ motion: "unknown", orientation: "vertical" }).text, "手机【竖向】。");
+assert.equal(compile({ motion: "unknown", orientation: "tilted" }).text, "");
+assert.equal(
+  compile({ lightExposure: "dark", orientation: "face_up", motion: "still", userActivity: "walking", activitySource: "hms", activitySampledAt: 0, activityPossibility: 87, charging: true, batteryLevel: 63 }).text,
+  "环境【较暗】，手机【正面朝上平放】，设备【静止】，推断活动【步行】，正在充电，电量63%。",
 );
 
 const segments = stillCharging80.segments;
@@ -273,7 +293,7 @@ projectionInitialStore.ingestPhysical(
 const projectionInitial = new RealityPromptProjection(projectionInitialStore);
 assert.equal(
   projectionInitial.getSnapshot().text,
-  "设备当前正在充电，电量80%。",
+  "正在充电，电量80%。",
 );
 projectionInitial.dispose();
 
@@ -287,7 +307,7 @@ semanticStore.ingestPhysical(
   raw({ charging: true, batteryLevel: 80 }),
   0,
 );
-assert.equal(semanticProjection.getSnapshot().text, "设备当前正在充电，电量80%。");
+assert.equal(semanticProjection.getSnapshot().text, "正在充电，电量80%。");
 assert.equal(semanticNotifications, 1);
 
 const rawOnlyStore = new RealityStore();
@@ -305,7 +325,7 @@ rawOnlyStore.ingestPhysical(
   raw({ at: 500, charging: true, batteryLevel: 80, lux: 900 }),
   500,
 );
-assert.equal(rawOnlyProjection.getSnapshot().text, "设备当前正在充电，电量80%。");
+assert.equal(rawOnlyProjection.getSnapshot().text, "正在充电，电量80%。");
 assert.equal(rawOnlyNotifications, 0);
 
 const motionStore = new RealityStore();
@@ -324,7 +344,7 @@ for (const at of [0, 500, 1000, 1500]) {
     }),
   }, at);
 }
-assert.equal(motionProjection.getSnapshot().text, "设备当前移动中。");
+assert.equal(motionProjection.getSnapshot().text, "设备【移动中】。");
 assert.equal(motionNotifications, 1);
 
 const chargingStore = new RealityStore();
@@ -342,7 +362,7 @@ chargingStore.ingestPhysical(
   raw({ at: 500, charging: false, batteryLevel: null }),
   500,
 );
-assert.equal(chargingProjection.getSnapshot().text, "设备当前未充电。");
+assert.equal(chargingProjection.getSnapshot().text, "未充电。");
 assert.equal(chargingNotifications, 1);
 
 const batteryStore = new RealityStore();
@@ -360,7 +380,7 @@ batteryStore.ingestPhysical(
   raw({ at: 500, charging: null, batteryLevel: 79 }),
   500,
 );
-assert.equal(batteryProjection.getSnapshot().text, "设备当前电量79%。");
+assert.equal(batteryProjection.getSnapshot().text, "电量79%.");
 assert.equal(batteryNotifications, 1);
 
 const resetStore = new RealityStore();
@@ -426,7 +446,7 @@ assert.doesNotThrow(() => {
 assert.equal(goodSubscriberNotifications, 1);
 assert.equal(
   badSubscriberProjection.getSnapshot().text,
-  "设备当前正在充电，电量80%。",
+  "正在充电，电量80%。",
 );
 
 console.log("P2C.1f reality context compiler tests: PASS");
