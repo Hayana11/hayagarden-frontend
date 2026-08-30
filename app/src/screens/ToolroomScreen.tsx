@@ -574,6 +574,13 @@ export function ToolroomScreen() {
     void loadCompanionHints();
   }, [loadCompanionHints, loadInventory]);
 
+  const closeAddMcpDialog = useCallback(() => {
+    if (externalMcpSubmitting) return;
+    setAddMcpOpen(false);
+    setExternalMcpCredential('');
+    setExternalMcpNotice('');
+  }, [externalMcpSubmitting]);
+
   useEffect(() => {
     if (!addMcpOpen) return undefined;
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -581,14 +588,7 @@ export function ToolroomScreen() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [addMcpOpen]);
-
-  const closeAddMcpDialog = () => {
-    if (externalMcpSubmitting) return;
-    setAddMcpOpen(false);
-    setExternalMcpCredential('');
-    setExternalMcpNotice('');
-  };
+  }, [addMcpOpen, closeAddMcpDialog]);
 
   const openAddMcpDialog = () => {
     setExternalMcpForm(DEFAULT_EXTERNAL_MCP_FORM);
