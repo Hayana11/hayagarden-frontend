@@ -260,13 +260,14 @@ assert.equal(lightDark.text, "环境【较暗】。");
 assert.equal(compile({ motion: "unknown", lightExposure: "bright" }).text, "环境【较亮】。");
 assert.equal(compile({ motion: "unknown", lightExposure: "dim" }).text, "");
 assert.equal(compile({ motion: "unknown", lightExposure: "moderate" }).text, "");
-assert.equal(compile({ motion: "unknown", orientation: "face_up" }).text, "手机【正面朝上平放】。");
-assert.equal(compile({ motion: "unknown", orientation: "face_down" }).text, "手机【正面朝下扣放】。");
-assert.equal(compile({ motion: "unknown", orientation: "vertical" }).text, "手机【竖向】。");
+assert.equal(compile({ motion: "unknown", orientation: "face_up" }).text, "姿态【正面朝上平放】。");
+assert.equal(compile({ motion: "unknown", orientation: "face_down" }).text, "姿态【正面朝下扣放】。");
+assert.equal(compile({ motion: "unknown", orientation: "vertical" }).text, "姿态【竖向】。");
+assert.equal(compile({ motion: "unknown", orientation: "horizontal" }).text, "姿态【横向】。");
 assert.equal(compile({ motion: "unknown", orientation: "tilted" }).text, "");
 assert.equal(
   compile({ lightExposure: "dark", orientation: "face_up", motion: "still", userActivity: "walking", activitySource: "hms", activitySampledAt: 0, activityPossibility: 87, charging: true, batteryLevel: 63 }).text,
-  "环境【较暗】，手机【正面朝上平放】，设备【静止】，推断活动【步行】，正在充电。",
+  "环境【较暗】，姿态【正面朝上平放】，设备【静止】，推断活动【步行】，正在充电。",
 );
 
 const segments = stillCharging80.segments;
