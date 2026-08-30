@@ -334,6 +334,15 @@ export function ProfileScreen() {
                 <div className="profile-help-text">48h 试用 · 只编辑工具名称与自然语言说明；真实能力边界由系统固定。</div>
               </div>
             </div>
+            {draftHints?.prompt_preview ? (
+              <div className="profile-tool-prompt-preview">
+                <div className="profile-tool-prompt-preview__title">
+                  <span>Prompt / Usage</span>
+                  <small>当前注入预览</small>
+                </div>
+                <p>{draftHints.prompt_preview}</p>
+              </div>
+            ) : null}
             {capabilityStateLoadError && (
               <div className="profile-capability-state-error" role="status">
                 真实能力状态暂时读不到：{capabilityStateLoadError}。工具直觉仍可编辑，当前不臆测开启状态。
@@ -369,7 +378,7 @@ export function ProfileScreen() {
                         {open && (
                           <div className="profile-tool-editor">
                             <label>小猫看到的工具名字<input value={tool.display_label} onChange={(event) => editTool(tool.capability_id, 'display_label', event.target.value)} /></label>
-                            <label>工具直觉说明<textarea value={tool.companion_hint} onChange={(event) => editTool(tool.capability_id, 'companion_hint', event.target.value)} /></label>
+                            <label>Prompt / Usage · 费佳看到的说明<textarea value={tool.companion_hint} onChange={(event) => editTool(tool.capability_id, 'companion_hint', event.target.value)} /></label>
                             {longHint && <div className="profile-tool-warning">这段说明比较长，会增加下一次 resident 启动的静态上下文；系统不会自动压缩或改写它。</div>}
                             <div className="profile-tool-preview-title">费佳实际会看到 · 逐字预览</div>
                             <pre className="profile-tool-preview">{preview}</pre>

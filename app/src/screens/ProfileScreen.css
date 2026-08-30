@@ -277,6 +277,37 @@
 
 .profile-tool-heading { display: flex; justify-content: space-between; }
 .profile-tool-groups { display: flex; flex-direction: column; gap: 14px; }
+
+.profile-tool-prompt-preview {
+  border: 1px solid rgba(183, 110, 121, 0.12);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(252, 242, 244, 0.72);
+}
+
+.profile-tool-prompt-preview__title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--rose);
+  font: italic 11px/1.4 var(--font-serif-display);
+  letter-spacing: 1px;
+}
+
+.profile-tool-prompt-preview__title small {
+  color: var(--faint);
+  font: 400 10px/1.4 var(--font-mono);
+  letter-spacing: 0;
+}
+
+.profile-tool-prompt-preview p {
+  margin: 8px 0 0;
+  color: var(--ink2);
+  font: 400 12px/1.65 var(--serif);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .profile-tool-group {
   background: var(--card);
   border: 1px solid var(--line);

@@ -3,6 +3,7 @@ import type { RealityPromptSegment } from '../lib/reality/realityContextCompiler
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { http } from '../lib/http';
+import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { realityStore } from '../lib/reality/realityRuntime';
 import { getRealityFreshness } from '../lib/reality/realityStore';
@@ -36,6 +37,29 @@ type InventoryResponse = {
 };
 
 type ToolroomTab = 'tools' | 'activity';
+
+function companionToolForInventory(hints: ToolCompanionHints | null, tool: InventoryTool): ToolCompanionTool | null {
+  if (!hints) return null;
+  for (const group of hints.groups) {
+    const exactId = group.tools.find((candidate) => candidate.capability_id === tool.tool_name);
+    if (exactId) return exactId;
+    const labelMatches = group.tools.filter((candidate) => (
+      candidate.display_label.trim().toLocaleLowerCase() === tool.display_label.trim().toLocaleLowerCase()
+    ));
+    if (labelMatches.length === 1) return labelMatches[0];
+  }
+  return null;
+}
+
+function promptTextForTool(
+  tool: InventoryTool,
+  hints: ToolCompanionHints | null,
+  overrides: Record<string, string>,
+): string {
+  if (overrides[tool.tool_name] !== undefined) return overrides[tool.tool_name];
+  const linked = companionToolForInventory(hints, tool);
+  return linked?.companion_hint || `${tool.status_label}。本页只展示真实清单，不执行任何工具。`;
+}
 
 const GROUP_ICON_PATHS: Record<string, string> = {
   memory: 'M9.4 4.2c-2.2 0-3.8 1.6-3.8 3.7 0 .4.1.8.2 1.1-1.1.6-1.8 1.7-1.8 3 0 1.8 1.5 3.3 3.3 3.3h.4v2.1c0 1.3 1 2.4 2.4 2.4 1 0 1.8-.6 2.2-1.5.5.9 1.4 1.5 2.4 1.5 1.4 0 2.5-1.1 2.5-2.5v-1.9h.3c1.8 0 3.2-1.4 3.2-3.2 0-1.2-.6-2.2-1.6-2.8.1-.3.2-.7.2-1.1 0-2-1.5-3.5-3.5-3.5-.7 0-1.4.2-1.9.6-.7-.7-1.6-1.1-2.3-1.1Z M8.2 10.3h2.1m3.4 0h2.1m-5.5 3h2.8',
@@ -281,6 +305,12 @@ export function ToolroomScreen() {
   const [addMcpOpen, setAddMcpOpen] = useState(false);
   const [externalMcpForm, setExternalMcpForm] = useState<ExternalMcpForm>(DEFAULT_EXTERNAL_MCP_FORM);
   const [externalMcpNotice, setExternalMcpNotice] = useState('');
+  const [companionHints, setCompanionHints] = useState<ToolCompanionHints | null>(null);
+  const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>({});
+  const [promptEditorTool, setPromptEditorTool] = useState<string | null>(null);
+  const [promptDraft, setPromptDraft] = useState('');
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptNotice, setPromptNotice] = useState('');
 
   const reality = useSyncExternalStore(
     (listener) => realityStore.subscribe(listener),
@@ -308,9 +338,18 @@ export function ToolroomScreen() {
     }
   }, []);
 
+  const loadCompanionHints = useCallback(async () => {
+    try {
+      setCompanionHints(await fetchToolCompanionHints());
+    } catch {
+      setCompanionHints(null);
+    }
+  }, []);
+
   useEffect(() => {
     void loadInventory();
-  }, [loadInventory]);
+    void loadCompanionHints();
+  }, [loadCompanionHints, loadInventory]);
 
   useEffect(() => {
     if (!addMcpOpen) return undefined;
@@ -330,6 +369,40 @@ export function ToolroomScreen() {
   const handleExternalMcpPreviewSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setExternalMcpNotice('已保留在当前页面预览中；尚未接入 External MCP Registry。');
+  };
+
+  const openPromptEditor = (tool: InventoryTool) => {
+    setPromptEditorTool(tool.tool_name);
+    setPromptDraft(promptTextForTool(tool, companionHints, promptOverrides));
+    setPromptNotice('');
+  };
+
+  const closePromptEditor = () => {
+    if (promptSaving) return;
+    setPromptEditorTool(null);
+    setPromptDraft('');
+    setPromptNotice('');
+  };
+
+  const savePrompt = async (tool: InventoryTool) => {
+    const linked = companionToolForInventory(companionHints, tool);
+    setPromptSaving(true);
+    setPromptNotice('');
+    try {
+      if (linked) {
+        const nextHints = await patchToolCompanionHint({
+          capability_id: linked.capability_id,
+          companion_hint: promptDraft,
+        });
+        setCompanionHints(nextHints);
+      }
+      setPromptOverrides((current) => ({ ...current, [tool.tool_name]: promptDraft }));
+      setPromptNotice(linked ? '已更新费佳档案工具区中的 Prompt。' : '未找到对应档案工具，仅保留当前页面预览。');
+    } catch (error) {
+      setPromptNotice(error instanceof Error ? error.message : 'Prompt 保存失败，请稍后重试。');
+    } finally {
+      setPromptSaving(false);
+    }
   };
 
   const normalizedSearch = search.trim().toLocaleLowerCase();
@@ -592,8 +665,46 @@ export function ToolroomScreen() {
                                   className="toolroom-tool-detail"
                                   style={{ '--toolroom-accent': toolAccent(group.id, tool.available) } as CSSProperties}
                                 >
-                                  <span className="toolroom-detail-kicker">Prompt / Usage</span>
-                                  <p>{tool.status_label}。本页只展示真实清单，不执行任何工具。</p>
+                                  <div className="toolroom-detail-kicker-row">
+                                    <span className="toolroom-detail-kicker">Prompt / Usage</span>
+                                    <button
+                                      type="button"
+                                      className="toolroom-prompt-edit-button"
+                                      aria-label={'编辑 ' + tool.tool_name + ' Prompt'}
+                                      onClick={() => openPromptEditor(tool)}
+                                    >
+                                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                        <path d="m4.5 17.2-.8 3.1 3.1-.8L18.4 8a2 2 0 0 0-2.8-2.8L4.5 17.2Z" />
+                                        <path d="m13.9 6.9 3.2 3.2" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                  {promptEditorTool === tool.tool_name ? (
+                                    <div className="toolroom-prompt-editor">
+                                      <textarea
+                                        value={promptDraft}
+                                        onChange={(event) => setPromptDraft(event.target.value)}
+                                        aria-label={tool.tool_name + ' Prompt 编辑器'}
+                                        rows={4}
+                                      />
+                                      <div className="toolroom-prompt-editor-actions">
+                                        <button type="button" onClick={closePromptEditor} disabled={promptSaving}>取消</button>
+                                        <button type="button" onClick={() => void savePrompt(tool)} disabled={promptSaving}>
+                                          {promptSaving ? '保存中…' : '保存'}
+                                        </button>
+                                      </div>
+                                      {promptNotice ? <small>{promptNotice}</small> : null}
+                                    </div>
+                                  ) : (
+                                    <p>{promptTextForTool(tool, companionHints, promptOverrides)}</p>
+                                  )}
+                                  <details className="toolroom-boundary-disclosure">
+                                    <summary>真实能力边界</summary>
+                                    <p className="toolroom-boundary-copy">
+                                      {companionToolForInventory(companionHints, tool)?.physical_boundary
+                                        || '当前清单未提供真实能力边界。'}
+                                    </p>
+                                  </details>
                                   <div className="toolroom-detail-divider" aria-hidden="true" />
                                   <span className="toolroom-detail-label">Current binding</span>
                                   <dl>
