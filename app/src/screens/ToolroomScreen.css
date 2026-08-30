@@ -509,6 +509,7 @@
   border-right: 1px solid currentColor;
   border-bottom: 1px solid currentColor;
   content: '';
+  flex: none;
   vertical-align: middle;
   transform: rotate(45deg);
   transition: transform 160ms ease;
@@ -802,6 +803,58 @@
   border-top: 1px solid rgba(183, 110, 121, 0.06);
 }
 
+.toolroom-native-detail {
+  border-top: 1px solid rgba(183, 110, 121, 0.10);
+}
+
+.toolroom-native-detail dl {
+  border-top: 0;
+}
+
+.toolroom-native-panel dd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.toolroom-native-action {
+  flex: none;
+  border: 1px solid rgba(183, 110, 121, 0.24);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: transparent;
+  color: #b76e79;
+  font: 400 10px/1.2 var(--font-mono);
+  cursor: pointer;
+}
+
+.toolroom-native-action:hover {
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.toolroom-native-action:disabled {
+  border-color: rgba(199, 185, 181, 0.2);
+  color: #c7b9b5;
+  cursor: default;
+}
+
+.toolroom-native-notice {
+  margin: 0 17px;
+  border-top: 1px dashed rgba(183, 110, 121, 0.16);
+  padding: 9px 0 0;
+  color: #8f7d79;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.toolroom-native-hint {
+  display: block;
+  padding: 6px 17px 12px;
+  color: #b7a29c;
+  font: 400 10px/1.45 var(--font-mono);
+}
+
 @keyframes toolroomFadeIn {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
@@ -889,8 +942,8 @@
   position: relative;
   width: 100%;
   max-width: 380px;
-  height: 507px;
-  max-height: calc(100% - 32px);
+  height: 620px;
+  max-height: calc(100% - 24px);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   border: 1px solid rgba(183, 110, 121, 0.12);
@@ -902,12 +955,12 @@
 
 .toolroom-mcp-dialog::before {
   position: absolute;
-  top: 7px;
-  right: 7px;
-  bottom: 7px;
-  left: 7px;
+  top: 11px;
+  right: 11px;
+  bottom: 11px;
+  left: 11px;
   z-index: 0;
-  border: 1px solid rgba(183, 110, 121, 0.12);
+  border: 1px solid rgba(183, 110, 121, 0.16);
   border-radius: 20px;
   content: '';
   pointer-events: none;
@@ -924,13 +977,15 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  padding: 22px 22px 0;
+  position: relative;
+  z-index: 1;
+  padding: 30px 30px 0;
 }
 
 .toolroom-mcp-dialog-header h2 {
   margin: 5px 0 0;
   color: #4a3b3b;
-  font-family: var(--font-serif-display);
+  font-family: var(--font-serif-cn);
   font-size: 23px;
   font-weight: 500;
   letter-spacing: 0.4px;
@@ -970,7 +1025,9 @@
 }
 
 .toolroom-mcp-preview-note {
-  margin: 11px 22px 0;
+  position: relative;
+  z-index: 1;
+  margin: 17px 30px 0;
   border-left: 2px solid #c08497;
   padding-left: 10px;
   color: #8b716f;
@@ -979,7 +1036,9 @@
 }
 
 .toolroom-mcp-form {
-  padding: 18px 22px 22px;
+  position: relative;
+  z-index: 1;
+  padding: 24px 30px 28px;
 }
 
 .toolroom-mcp-field {
@@ -995,8 +1054,18 @@
   display: flex;
   align-items: baseline;
   color: #5a4e4b;
+  font-family: var(--font-serif-display);
   font-size: 12.5px;
   letter-spacing: 0.8px;
+}
+
+.toolroom-mcp-label::before {
+  margin-right: 6px;
+  color: #c15b77;
+  content: '◆';
+  font-family: var(--font-serif-cn);
+  font-size: 8px;
+  line-height: 1;
 }
 
 .toolroom-mcp-label small {
@@ -1035,9 +1104,10 @@
 }
 
 .toolroom-mcp-icon-grid {
-  display: flex;
-  flex-wrap: wrap;
-  margin: 9px -4px -4px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin: 11px 0 0;
 }
 
 .toolroom-mcp-icon-note {
@@ -1050,9 +1120,9 @@
 .toolroom-mcp-icon-option {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  margin: 4px;
+  width: 100%;
+  height: 52px;
+  margin: 0;
   border: 1px solid rgba(183, 110, 121, 0.14);
   border-radius: 14px;
   background: rgba(252, 242, 244, 0.68);
@@ -1123,27 +1193,30 @@
 
 @media (max-width: 360px) {
   .toolroom-mcp-dialog-header {
-    padding-left: 17px;
-    padding-right: 17px;
+    padding: 26px 22px 0;
   }
 
-  .toolroom-mcp-preview-note,
-  .toolroom-mcp-form {
-    margin-left: 17px;
-    margin-right: 17px;
+  .toolroom-mcp-preview-note {
+    margin-left: 22px;
+    margin-right: 22px;
   }
 
   .toolroom-mcp-form {
-    padding-left: 0;
-    padding-right: 0;
+    padding-left: 22px;
+    padding-right: 22px;
+  }
+
+  .toolroom-mcp-form {
+    padding-top: 21px;
+    padding-bottom: 24px;
   }
 }
 
 
 @media (max-width: 360px) {
   .toolroom-mcp-dialog {
-    height: calc(133.333vw - 43px);
-    max-height: calc(100% - 32px);
+    height: min(620px, calc(100vh - 32px));
+    max-height: calc(100% - 24px);
   }
 }
 
@@ -1203,7 +1276,9 @@
 }
 
 .toolroom-raw-json summary {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   color: #b76e79;
   cursor: pointer;
   font: 400 10.5px/1.4 var(--font-mono);
@@ -1212,8 +1287,42 @@
   text-align: left;
 }
 
+.toolroom-raw-json summary > span:first-of-type {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .toolroom-raw-json summary::-webkit-details-marker {
   display: none;
+}
+
+.toolroom-raw-json-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 10px;
+  letter-spacing: 0;
+}
+
+.toolroom-raw-json-action {
+  border: 1px solid rgba(183, 110, 121, 0.22);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: transparent;
+  color: #b76e79;
+  font: 400 10px/1.2 var(--font-mono);
+  cursor: pointer;
+}
+
+.toolroom-raw-json-action:hover,
+.toolroom-raw-json-action:focus-visible,
+.toolroom-raw-json-action.is-active {
+  outline: none;
+  border-color: rgba(183, 110, 121, 0.45);
+  background: rgba(255, 255, 255, 0.65);
+  color: #9c3b4a;
+  box-shadow: none;
 }
 
 .toolroom-raw-json summary::before {
@@ -1232,6 +1341,21 @@
 .toolroom-raw-json[open] summary::before {
   margin-bottom: -2px;
   transform: rotate(225deg);
+}
+
+.toolroom-raw-json summary:focus,
+.toolroom-raw-json summary:focus-visible,
+.toolroom-boundary-disclosure summary:focus,
+.toolroom-boundary-disclosure summary:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.toolroom-raw-json-notice {
+  display: block;
+  margin-top: 7px;
+  color: #b7a29c;
+  font: 400 10px/1.4 var(--font-mono);
 }
 
 .toolroom-raw-json pre {

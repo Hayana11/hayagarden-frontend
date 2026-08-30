@@ -9,6 +9,27 @@ import { realityStore } from '../lib/reality/realityRuntime';
 import { getRealityFreshness } from '../lib/reality/realityStore';
 import './ToolroomScreen.css';
 
+type ElpisNativeBridge = {
+  hasUsageAccess?: () => unknown;
+  openUsageAccessSettings?: () => unknown;
+  getScreenTime?: () => unknown;
+  isIgnoringBatteryOptimizations?: () => unknown;
+  requestIgnoreBatteryOptimizations?: () => unknown;
+};
+
+type ElpisNotificationsBridge = {
+  hasNotificationPermission?: () => unknown;
+  requestNotificationPermission?: () => unknown;
+  showTestNotification?: () => unknown;
+};
+
+declare global {
+  interface Window {
+    ElpisNative?: ElpisNativeBridge;
+    ElpisNotifications?: ElpisNotificationsBridge;
+  }
+}
+
 type InventoryTool = {
   tool_name: string;
   display_label: string;
@@ -148,6 +169,7 @@ function ExternalMcpIconView({ icon, name = '' }: { icon: ExternalMcpIcon; name?
   return (
     <svg viewBox="0 0 24 24" role="presentation" focusable="false">
       <path d={EXTERNAL_MCP_ICON_PATHS[resolvedIcon]} />
+      {icon === 'default' ? <circle cx="18" cy="6" r="1.2" fill="currentColor" stroke="none" /> : null}
     </svg>
   );
 }
@@ -282,6 +304,52 @@ function rawJson(value: unknown): string {
   }
 }
 
+function formatNativeScreenTime(value: unknown): string {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { return '读取失败'; }
+  }
+  const record = asRawRecord(parsed);
+  if (record?.error === 'no_permission') return '未授权';
+  if (record?.error === 'unavailable') return '暂不可用';
+  if (record?.error) return '读取失败';
+  const minutes = typeof record?.totalMinutes === 'number'
+    ? record.totalMinutes
+    : typeof record?.minutes === 'number'
+      ? record.minutes
+      : typeof record?.totalSeconds === 'number'
+        ? Math.round(record.totalSeconds / 60)
+        : null;
+  if (minutes === null) return '暂不可用';
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder > 0 ? `${hours} 小时 ${remainder} 分钟` : `${hours} 小时`;
+}
+
+type NativeDiagnosticState = {
+  bridgeConnected: boolean;
+  usage: { value: string; canAuthorize: boolean };
+  screenTime: string;
+  doze: { value: string; canAuthorize: boolean };
+  notifications: {
+    bridgeConnected: boolean;
+    capability: string;
+    canRequest: boolean;
+    canTest: boolean;
+  };
+  notice: string;
+};
+
+const DEFAULT_NATIVE_DIAGNOSTIC: NativeDiagnosticState = {
+  bridgeConnected: false,
+  usage: { value: '未接入', canAuthorize: false },
+  screenTime: '未接入',
+  doze: { value: '未接入', canAuthorize: false },
+  notifications: { bridgeConnected: false, capability: '未接入', canRequest: false, canTest: false },
+  notice: '',
+};
+
 function toolMatches(tool: InventoryTool, query: string): boolean {
   return [
     tool.tool_name,
@@ -311,6 +379,10 @@ export function ToolroomScreen() {
   const [promptDraft, setPromptDraft] = useState('');
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptNotice, setPromptNotice] = useState('');
+  const [nativeDiag, setNativeDiag] = useState<NativeDiagnosticState>(DEFAULT_NATIVE_DIAGNOSTIC);
+  const [rawJsonFrozen, setRawJsonFrozen] = useState(false);
+  const [rawJsonSnapshot, setRawJsonSnapshot] = useState<string | null>(null);
+  const [rawJsonNotice, setRawJsonNotice] = useState('');
 
   const reality = useSyncExternalStore(
     (listener) => realityStore.subscribe(listener),
@@ -345,6 +417,122 @@ export function ToolroomScreen() {
       setCompanionHints(null);
     }
   }, []);
+
+  const refreshNativeDiagnostics = useCallback(async () => {
+    const native = window.ElpisNative;
+    const has = (value: unknown): value is (...args: never[]) => unknown => typeof value === 'function';
+    const bridgeConnected = Boolean(native && (
+      has(native.hasUsageAccess) || has(native.getScreenTime)
+      || has(native.isIgnoringBatteryOptimizations)
+    ));
+    let usage = { value: '未接入', canAuthorize: false };
+    let screenTime = '未接入';
+    let doze = { value: '未接入', canAuthorize: false };
+    if (native && has(native.hasUsageAccess)) {
+      try {
+        const allowed = Boolean(await Promise.resolve(native.hasUsageAccess()));
+        usage = { value: allowed ? '已授权' : '未授权', canAuthorize: !allowed && has(native.openUsageAccessSettings) };
+        if (allowed && has(native.getScreenTime)) {
+          screenTime = formatNativeScreenTime(await Promise.resolve(native.getScreenTime()));
+        } else if (!allowed) {
+          screenTime = '等待授权';
+        }
+      } catch {
+        usage = { value: '读取失败', canAuthorize: has(native.openUsageAccessSettings) };
+        screenTime = '读取失败';
+      }
+    } else if (native && has(native.getScreenTime)) {
+      try { screenTime = formatNativeScreenTime(await Promise.resolve(native.getScreenTime())); } catch { screenTime = '读取失败'; }
+    }
+    if (native && has(native.isIgnoringBatteryOptimizations)) {
+      try {
+        const ignoring = Boolean(await Promise.resolve(native.isIgnoringBatteryOptimizations()));
+        doze = { value: ignoring ? '已豁免' : '未豁免', canAuthorize: !ignoring && has(native.requestIgnoreBatteryOptimizations) };
+      } catch {
+        doze = { value: '读取失败', canAuthorize: has(native.requestIgnoreBatteryOptimizations) };
+      }
+    }
+    const notifications = window.ElpisNotifications;
+    const notificationBridgeConnected = Boolean(notifications && (
+      has(notifications.hasNotificationPermission)
+      || has(notifications.requestNotificationPermission)
+      || has(notifications.showTestNotification)
+    ));
+    let notificationState: NativeDiagnosticState['notifications'] = {
+      bridgeConnected: notificationBridgeConnected,
+      capability: notificationBridgeConnected ? '未开启' : '未接入',
+      canRequest: Boolean(notificationBridgeConnected && has(notifications?.requestNotificationPermission)),
+      canTest: false,
+    };
+    if (notifications && has(notifications.hasNotificationPermission)) {
+      try {
+        const allowed = Boolean(await Promise.resolve(notifications.hasNotificationPermission()));
+        notificationState = {
+          bridgeConnected: true,
+          capability: allowed ? '可用' : '未开启',
+          canRequest: !allowed && has(notifications.requestNotificationPermission),
+          canTest: allowed && has(notifications.showTestNotification),
+        };
+      } catch {
+        notificationState = { bridgeConnected: true, capability: '不可用', canRequest: has(notifications.requestNotificationPermission), canTest: false };
+      }
+    }
+    setNativeDiag((current) => ({ ...current, bridgeConnected, usage, screenTime, doze, notifications: notificationState }));
+  }, []);
+
+  useEffect(() => {
+    void refreshNativeDiagnostics();
+    const handleRefresh = () => { void refreshNativeDiagnostics(); };
+    window.addEventListener('focus', handleRefresh);
+    document.addEventListener('visibilitychange', handleRefresh);
+    return () => {
+      window.removeEventListener('focus', handleRefresh);
+      document.removeEventListener('visibilitychange', handleRefresh);
+    };
+  }, [refreshNativeDiagnostics]);
+
+  const authorizeUsage = async () => {
+    if (!window.ElpisNative?.openUsageAccessSettings) return;
+    try {
+      await Promise.resolve(window.ElpisNative.openUsageAccessSettings());
+      setNativeDiag((current) => ({ ...current, notice: '已打开屏幕时间权限设置。' }));
+    } catch {
+      setNativeDiag((current) => ({ ...current, notice: '无法打开屏幕时间权限设置。' }));
+    }
+    window.setTimeout(() => { void refreshNativeDiagnostics(); }, 180);
+  };
+
+  const authorizeDoze = async () => {
+    if (!window.ElpisNative?.requestIgnoreBatteryOptimizations) return;
+    try {
+      await Promise.resolve(window.ElpisNative.requestIgnoreBatteryOptimizations());
+      setNativeDiag((current) => ({ ...current, notice: '已打开电池优化设置。' }));
+    } catch {
+      setNativeDiag((current) => ({ ...current, notice: '无法打开电池优化设置。' }));
+    }
+    window.setTimeout(() => { void refreshNativeDiagnostics(); }, 180);
+  };
+
+  const requestNotifications = async () => {
+    if (!window.ElpisNotifications?.requestNotificationPermission) return;
+    try {
+      await Promise.resolve(window.ElpisNotifications.requestNotificationPermission());
+      setNativeDiag((current) => ({ ...current, notice: '已请求通知权限。' }));
+    } catch {
+      setNativeDiag((current) => ({ ...current, notice: '通知权限请求失败。' }));
+    }
+    window.setTimeout(() => { void refreshNativeDiagnostics(); }, 180);
+  };
+
+  const sendTestNotification = async () => {
+    if (!window.ElpisNotifications?.showTestNotification) return;
+    try {
+      const result = await Promise.resolve(window.ElpisNotifications.showTestNotification());
+      setNativeDiag((current) => ({ ...current, notice: result === false ? '当前无法发送通知。' : '已发送，请查看通知栏。' }));
+    } catch {
+      setNativeDiag((current) => ({ ...current, notice: '当前无法发送通知。' }));
+    }
+  };
 
   useEffect(() => {
     void loadInventory();
@@ -423,6 +611,30 @@ export function ToolroomScreen() {
     return groups;
   }, [inventory, normalizedSearch]);
 
+  const liveRawJson = rawJson(reality.physical.raw);
+  const displayedRawJson = rawJsonFrozen && rawJsonSnapshot !== null ? rawJsonSnapshot : liveRawJson;
+
+  const copyRawJson = async () => {
+    try {
+      await navigator.clipboard.writeText(displayedRawJson);
+      setRawJsonNotice('已复制原始 JSON。');
+    } catch {
+      setRawJsonNotice('复制失败，请检查浏览器剪贴板权限。');
+    }
+  };
+
+  const toggleRawJsonFreeze = () => {
+    if (rawJsonFrozen) {
+      setRawJsonFrozen(false);
+      setRawJsonSnapshot(null);
+      setRawJsonNotice('已恢复实时 JSON。');
+    } else {
+      setRawJsonSnapshot(liveRawJson);
+      setRawJsonFrozen(true);
+      setRawJsonNotice('已冻结当前 JSON。');
+    }
+  };
+
   const freshness = getRealityFreshness(reality, Date.now());
   const facts = reality.physical.facts;
   const statusLabel = freshness.status === 'fresh'
@@ -431,20 +643,16 @@ export function ToolroomScreen() {
       ? '已过期'
       : '未连接';
 
+  const nativeRows = [
+    { label: '原生桥', value: nativeDiag.bridgeConnected ? '已连接' : '仅 App 可用' },
+    { label: '屏幕时间权限', value: nativeDiag.usage.value, action: nativeDiag.usage.canAuthorize ? { label: '去授权', onClick: authorizeUsage } : undefined },
+    { label: '今日屏幕时间', value: nativeDiag.screenTime },
+    { label: '电池优化', value: nativeDiag.doze.value, action: nativeDiag.doze.canAuthorize ? { label: '去设置', onClick: authorizeDoze } : undefined },
+    { label: '通知桥', value: nativeDiag.notifications.bridgeConnected ? '已连接' : '仅 App 可用' },
+    { label: '通知能力', value: nativeDiag.notifications.capability, action: nativeDiag.notifications.canRequest ? { label: '申请通知权限', onClick: requestNotifications } : undefined },
+  ];
+
   const nativePanels = [
-    {
-      id: 'native',
-      title: '原生能力诊断',
-      subtitle: 'Elpis Canary · NativeBridge Lite',
-      status: reality.physical.raw ? '已连接' : '未连接',
-      rows: [
-        ['原生桥', reality.physical.raw ? '已连接' : '未连接'],
-        ['电量', facts.batteryLevel === null ? '未知' : String(facts.batteryLevel) + '%'],
-        ['屏幕时间权限', '未接入'],
-        ['今日屏幕时间', '未接入'],
-        ['电池优化', '未接入'],
-      ],
-    },
     {
       id: 'boundary',
       title: '数据边界',
@@ -458,6 +666,7 @@ export function ToolroomScreen() {
       ],
     },
   ];
+
 
   const physicalRaw = asRawRecord(reality.physical.raw);
   const sensorPanels = [
@@ -781,6 +990,51 @@ export function ToolroomScreen() {
             <div><strong>原生信息栏</strong></div>
           </div>
           <div className="toolroom-native-panels">
+            <article className="toolroom-native-panel">
+              <button
+                type="button"
+                aria-expanded={Boolean(openPanels['native:native'])}
+                onClick={() => setOpenPanels((current) => ({ ...current, 'native:native': !current['native:native'] }))}
+              >
+                <span><strong>原生能力诊断</strong><small>Elpis Canary · NativeBridge Lite</small></span>
+                <em className={nativeDiag.bridgeConnected ? 'is-live' : undefined}>{nativeDiag.bridgeConnected ? '已连接' : '仅 App 可用'}</em>
+                <span className={'toolroom-chevron' + (openPanels['native:native'] ? ' is-open' : '')} aria-hidden="true">⌄</span>
+              </button>
+              {openPanels['native:native'] ? (
+                <div className="toolroom-native-detail">
+                  <dl>
+                    {nativeRows.map((row) => (
+                      <div key={row.label}>
+                        <dt>{row.label}</dt>
+                        <dd>
+                          <span>{row.value}</span>
+                          {row.action ? (
+                            <button
+                              type="button"
+                              className="toolroom-native-action"
+                              onClick={(event) => { event.stopPropagation(); void row.action?.onClick(); }}
+                            >{row.action.label}</button>
+                          ) : null}
+                        </dd>
+                      </div>
+                    ))}
+                    <div>
+                      <dt>发送测试通知</dt>
+                      <dd>
+                        <button
+                          type="button"
+                          className="toolroom-native-action"
+                          disabled={!nativeDiag.notifications.canTest}
+                          onClick={(event) => { event.stopPropagation(); void sendTestNotification(); }}
+                        >发送测试通知</button>
+                      </dd>
+                    </div>
+                  </dl>
+                  {nativeDiag.notice ? <p className="toolroom-native-notice">{nativeDiag.notice}</p> : null}
+                  <small className="toolroom-native-hint">测试通知仅在本机显示，不访问消息服务器。</small>
+                </div>
+              ) : null}
+            </article>
             {nativePanels.map((panel) => {
               const key = 'native:' + panel.id;
               const open = Boolean(openPanels[key]);
@@ -789,25 +1043,13 @@ export function ToolroomScreen() {
                   <button
                     type="button"
                     aria-expanded={open}
-                    onClick={() => setOpenPanels((current) => ({
-                      ...current,
-                      [key]: !current[key],
-                    }))}
+                    onClick={() => setOpenPanels((current) => ({ ...current, [key]: !current[key] }))}
                   >
-                    <span>
-                      <strong>{panel.title}</strong>
-                      <small>{panel.subtitle}</small>
-                    </span>
-                    <em className={panel.status === '已连接' ? 'is-live' : undefined}>{panel.status}</em>
+                    <span><strong>{panel.title}</strong><small>{panel.subtitle}</small></span>
+                    <em>{panel.status}</em>
                     <span className={'toolroom-chevron' + (open ? ' is-open' : '')} aria-hidden="true">⌄</span>
                   </button>
-                  {open ? (
-                    <dl>
-                      {panel.rows.map((row) => (
-                        <div key={row[0]}><dt>{row[0]}</dt><dd>{row[1]}</dd></div>
-                      ))}
-                    </dl>
-                  ) : null}
+                  {open ? <dl>{panel.rows.map((row) => <div key={row[0]}><dt>{row[0]}</dt><dd>{row[1]}</dd></div>)}</dl> : null}
                 </article>
               );
             })}
@@ -837,8 +1079,23 @@ export function ToolroomScreen() {
             ))}
           </div>
           <details className="toolroom-raw-json toolroom-raw-json-all">
-            <summary>原始JSON</summary>
-            <pre>{rawJson(reality.physical.raw)}</pre>
+            <summary>
+              <span>原始JSON</span>
+              <span className="toolroom-raw-json-actions">
+                <button
+                  type="button"
+                  className="toolroom-raw-json-action"
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); void copyRawJson(); }}
+                >复制</button>
+                <button
+                  type="button"
+                  className={'toolroom-raw-json-action' + (rawJsonFrozen ? ' is-active' : '')}
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); toggleRawJsonFreeze(); }}
+                >{rawJsonFrozen ? '解冻' : '冻结'}</button>
+              </span>
+            </summary>
+            <pre>{displayedRawJson}</pre>
+            {rawJsonNotice ? <small className="toolroom-raw-json-notice" role="status">{rawJsonNotice}</small> : null}
           </details>
           <div className="toolroom-signoff">Still becoming.</div>
         </section>
