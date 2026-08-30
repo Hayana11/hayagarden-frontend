@@ -208,6 +208,38 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], FAILED_PRE_CALL)
         fresh._spawn_json.assert_not_called()
 
+    def test_runtime_preserves_safe_not_invoked_reason(self):
+        self._prepared_lease()
+        summary = "RUNTIME_FAKE_SECRET_LIKE_SUMMARY_MUST_NOT_PERSIST"
+        runtime = self._runtime(
+            call_output={
+                "status": "NOT_INVOKED",
+                "result": None,
+                "error": {
+                    "code": "AUTH_REQUIRED",
+                    "summary": summary,
+                },
+                "diagnostics": {
+                    "phase": "PRE_CALL",
+                    "request_count": 1,
+                    "call_started": False,
+                },
+            }
+        )
+        result = runtime.invoke(
+            f"ext:{self.server.server_id}:calendar.list",
+            {"q": "today"},
+            None,
+            expected_turn_id="turn-1",
+        )
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(result["reason_code"], "AUTH_REQUIRED")
+        attempt = self.invocation.get_attempt(result["attempt_id"])
+        self.assertEqual(attempt["status"], FAILED_PRE_CALL)
+        self.assertEqual(attempt["reason_code"], "AUTH_REQUIRED")
+        self.assertEqual(self.invocation.list_audit(result["attempt_id"])[-1]["reason_code"], "AUTH_REQUIRED")
+        self.assertNotIn(summary, "\n".join(self.connection.iterdump()))
+
     def test_post_spawn_failure_is_unknown_and_no_retry(self):
         runtime = self._runtime()
         runtime._spawn_json.side_effect = RuntimeError("child failed")
