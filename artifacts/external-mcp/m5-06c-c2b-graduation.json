@@ -1,0 +1,62 @@
+{
+  "milestone": "M5-06C-C2B",
+  "graduated_at_date": "2026-08-30",
+  "production_sha": "78320de8bb83069bb5704389147373f4b8fb0535",
+  "provider": "GitHub Remote MCP",
+  "endpoint": "https://api.githubcopilot.com/mcp/readonly",
+  "transport": "streamable_http",
+  "tool": {
+    "name": "list_branches",
+    "control_id": "ext:23ccc8fa13eded4ee992aee374d419d8:list_branches",
+    "fingerprint": "dc682d42d124840ab59909184ecb1033765100451468e8b1316fe1d8326e1a15",
+    "source_revision": 2,
+    "raw_read_only_hint": true,
+    "side_effect_class": "none",
+    "execution_mode": "autonomous"
+  },
+  "canary_target": {
+    "owner": "Hayana11",
+    "repo": "Elpis",
+    "input": {
+      "owner": "Hayana11",
+      "repo": "Elpis",
+      "page": 1,
+      "perPage": 1
+    },
+    "rest_user_status": 200,
+    "rest_branches_status": 200,
+    "rest_result_count": 0
+  },
+  "attempts": {
+    "canary_001": {
+      "attempt_id": "a6e22cc5dc645be5c7a899019eca59ac",
+      "terminal_status": "FAILED_PRE_CALL",
+      "reason_code": "NOT_INVOKED"
+    },
+    "canary_002": {
+      "attempt_id": "6ab3c67ceaad016eb52b31d5e18cda23",
+      "terminal_status": "FAILED_PRE_CALL",
+      "reason_code": "AUTH_REQUIRED"
+    },
+    "canary_003": {
+      "attempt_id": "52509ec7f40b2b19f17bebbdfa9c2799",
+      "terminal_status": "SUCCEEDED",
+      "reason_code": "SUCCESS",
+      "audit_sequence": [
+        "PRE_CALL",
+        "STARTED",
+        "SUCCEEDED"
+      ]
+    }
+  },
+  "security_assertions": {
+    "plaintext_secret_exposed": false,
+    "invocation_retry": false,
+    "discovery_retried_during_c2b": false,
+    "approval_mutated_by_successful_canary": false,
+    "classification_mutated_by_successful_canary": false,
+    "secret_rotated_by_successful_canary": false,
+    "other_tool_invoked": false
+  },
+  "graduation_verdict": "REAL_EXTERNAL_MCP_READ_ONLY_E2E_PASS"
+}
