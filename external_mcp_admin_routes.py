@@ -155,7 +155,7 @@ def create_external_mcp_admin_blueprint(
                 except RegistryValidationError as exc:
                     return jsonify({"ok": False, "error": _error_code(exc, "EXTERNAL_MCP_ADMIN_FAILED")}), 400
                 except RegistryError as exc:
-                    return jsonify({"ok": False, "error": exc.code}), 400
+                    return jsonify({"ok": False, "error": _error_code(exc, "EXTERNAL_MCP_ADMIN_FAILED")}), 400
 
                 try:
                     if scheme == "none":
