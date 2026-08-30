@@ -306,7 +306,15 @@ const orientationChanged = compile({
   proximity: "near",
   lightExposure: "dark",
 });
-assert.equal(orientationOnly.text, orientationChanged.text);
+assert.equal(
+  orientationOnly.text,
+  "设备当前【静止】，环境【较亮】，姿态【正面朝上平放】，正在充电。",
+);
+assert.equal(
+  orientationChanged.text,
+  "设备当前【静止】，环境【较暗】，姿态【正面朝下扣放】，正在充电。",
+);
+assert.notEqual(orientationOnly.text, orientationChanged.text);
 
 const rawOne = { sensor: { x: 1, y: 2, z: 3 }, lux: 10 };
 const rawTwo = { sensor: { x: 9, y: 8, z: 7 }, lux: 999 };
