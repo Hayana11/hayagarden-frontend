@@ -1259,7 +1259,7 @@ export function ToolroomScreen() {
             </div>
 
             <p className="toolroom-mcp-preview-note">
-              仅前端预览：填写后不会写入服务器，也不会执行任何工具。
+              新增后默认关闭。发现到的工具需要审核后才能使用。
             </p>
 
             <form className="toolroom-mcp-form" onSubmit={handleExternalMcpSubmit}>
