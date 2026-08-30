@@ -147,6 +147,21 @@ _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "required": ["title"],
     },
+    "mcp__capability__self_trigger_schedule": {
+        "type": "object",
+        "properties": {
+            "minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+            "note": {"type": "string"},
+        },
+        "required": ["minutes"],
+    },
+    "mcp__capability__self_trigger_cancel": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer", "minimum": 1},
+        },
+        "required": ["id"],
+    },
     "mcp__capability__home_light_status": _EMPTY_SCHEMA,
     "mcp__capability__todo_read": _EMPTY_SCHEMA,
     "mcp__capability__ledger_read": {
