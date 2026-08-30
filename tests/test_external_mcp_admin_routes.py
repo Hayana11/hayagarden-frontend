@@ -101,6 +101,8 @@ class _HermeticGraph:
         self.db_path = root / "external-mcp.db"
         self.key_path = root / "credentials.key"
         self.key_path.write_bytes(Fernet.generate_key())
+        if os.name == "posix":
+            self.key_path.chmod(0o600)
         self.connection = sqlite3.connect(self.db_path)
         self.server_registry = ExternalServerRegistry(
             self.connection, id_factory=lambda: "srv-test"
