@@ -1,7 +1,9 @@
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import type { RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { http } from '../lib/http';
+import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { realityStore } from '../lib/reality/realityRuntime';
 import { getRealityFreshness } from '../lib/reality/realityStore';
@@ -35,6 +37,29 @@ type InventoryResponse = {
 };
 
 type ToolroomTab = 'tools' | 'activity';
+
+function companionToolForInventory(hints: ToolCompanionHints | null, tool: InventoryTool): ToolCompanionTool | null {
+  if (!hints) return null;
+  for (const group of hints.groups) {
+    const exactId = group.tools.find((candidate) => candidate.capability_id === tool.tool_name);
+    if (exactId) return exactId;
+    const labelMatches = group.tools.filter((candidate) => (
+      candidate.display_label.trim().toLocaleLowerCase() === tool.display_label.trim().toLocaleLowerCase()
+    ));
+    if (labelMatches.length === 1) return labelMatches[0];
+  }
+  return null;
+}
+
+function promptTextForTool(
+  tool: InventoryTool,
+  hints: ToolCompanionHints | null,
+  overrides: Record<string, string>,
+): string {
+  if (overrides[tool.tool_name] !== undefined) return overrides[tool.tool_name];
+  const linked = companionToolForInventory(hints, tool);
+  return linked?.companion_hint || `${tool.status_label}。本页只展示真实清单，不执行任何工具。`;
+}
 
 const GROUP_ICON_PATHS: Record<string, string> = {
   memory: 'M9.4 4.2c-2.2 0-3.8 1.6-3.8 3.7 0 .4.1.8.2 1.1-1.1.6-1.8 1.7-1.8 3 0 1.8 1.5 3.3 3.3 3.3h.4v2.1c0 1.3 1 2.4 2.4 2.4 1 0 1.8-.6 2.2-1.5.5.9 1.4 1.5 2.4 1.5 1.4 0 2.5-1.1 2.5-2.5v-1.9h.3c1.8 0 3.2-1.4 3.2-3.2 0-1.2-.6-2.2-1.6-2.8.1-.3.2-.7.2-1.1 0-2-1.5-3.5-3.5-3.5-.7 0-1.4.2-1.9.6-.7-.7-1.6-1.1-2.3-1.1Z M8.2 10.3h2.1m3.4 0h2.1m-5.5 3h2.8',
@@ -207,6 +232,56 @@ function formatObservedAt(observedAt: number | null): string {
   });
 }
 
+function renderToolroomPromptSegment(segment: RealityPromptSegment, index: number) {
+  if (segment.kind === 'dynamic') {
+    return <strong key={segment.key + '-' + index}>{segment.text}</strong>;
+  }
+  return <span key={'literal-' + index}>{segment.text}</span>;
+}
+
+function formatRelativeTime(observedAt: number | null): string {
+  if (observedAt === null || !Number.isFinite(observedAt)) return '暂无';
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - observedAt) / 1000));
+  if (ageSeconds < 5) return '刚刚';
+  if (ageSeconds < 60) return ageSeconds + '秒前';
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) return ageMinutes + '分钟前';
+  return Math.floor(ageMinutes / 60) + '小时前';
+}
+
+function asRawRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function rawValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '未知';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  return String(value);
+}
+
+function sensorState(value: unknown): { available: boolean; label: string } {
+  const sensor = asRawRecord(value);
+  const available = sensor?.available === true && sensor?.ready !== false;
+  return { available, label: available ? '可用' : '未连接' };
+}
+
+function sensorSampleAge(value: unknown, fallback: number | null): string {
+  const sensor = asRawRecord(value);
+  const sampledAt = typeof sensor?.sampledAt === 'number' ? sensor.sampledAt : fallback;
+  return formatRelativeTime(sampledAt);
+}
+
+function rawJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? null, null, 2) || 'null';
+  } catch {
+    return '不可序列化';
+  }
+}
+
 function toolMatches(tool: InventoryTool, query: string): boolean {
   return [
     tool.tool_name,
@@ -230,6 +305,12 @@ export function ToolroomScreen() {
   const [addMcpOpen, setAddMcpOpen] = useState(false);
   const [externalMcpForm, setExternalMcpForm] = useState<ExternalMcpForm>(DEFAULT_EXTERNAL_MCP_FORM);
   const [externalMcpNotice, setExternalMcpNotice] = useState('');
+  const [companionHints, setCompanionHints] = useState<ToolCompanionHints | null>(null);
+  const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>({});
+  const [promptEditorTool, setPromptEditorTool] = useState<string | null>(null);
+  const [promptDraft, setPromptDraft] = useState('');
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptNotice, setPromptNotice] = useState('');
 
   const reality = useSyncExternalStore(
     (listener) => realityStore.subscribe(listener),
@@ -257,9 +338,18 @@ export function ToolroomScreen() {
     }
   }, []);
 
+  const loadCompanionHints = useCallback(async () => {
+    try {
+      setCompanionHints(await fetchToolCompanionHints());
+    } catch {
+      setCompanionHints(null);
+    }
+  }, []);
+
   useEffect(() => {
     void loadInventory();
-  }, [loadInventory]);
+    void loadCompanionHints();
+  }, [loadCompanionHints, loadInventory]);
 
   useEffect(() => {
     if (!addMcpOpen) return undefined;
@@ -279,6 +369,40 @@ export function ToolroomScreen() {
   const handleExternalMcpPreviewSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setExternalMcpNotice('已保留在当前页面预览中；尚未接入 External MCP Registry。');
+  };
+
+  const openPromptEditor = (tool: InventoryTool) => {
+    setPromptEditorTool(tool.tool_name);
+    setPromptDraft(promptTextForTool(tool, companionHints, promptOverrides));
+    setPromptNotice('');
+  };
+
+  const closePromptEditor = () => {
+    if (promptSaving) return;
+    setPromptEditorTool(null);
+    setPromptDraft('');
+    setPromptNotice('');
+  };
+
+  const savePrompt = async (tool: InventoryTool) => {
+    const linked = companionToolForInventory(companionHints, tool);
+    setPromptSaving(true);
+    setPromptNotice('');
+    try {
+      if (linked) {
+        const nextHints = await patchToolCompanionHint({
+          capability_id: linked.capability_id,
+          companion_hint: promptDraft,
+        });
+        setCompanionHints(nextHints);
+      }
+      setPromptOverrides((current) => ({ ...current, [tool.tool_name]: promptDraft }));
+      setPromptNotice(linked ? '已更新费佳档案工具区中的 Prompt。' : '未找到对应档案工具，仅保留当前页面预览。');
+    } catch (error) {
+      setPromptNotice(error instanceof Error ? error.message : 'Prompt 保存失败，请稍后重试。');
+    } finally {
+      setPromptSaving(false);
+    }
   };
 
   const normalizedSearch = search.trim().toLocaleLowerCase();
@@ -307,31 +431,18 @@ export function ToolroomScreen() {
       ? '已过期'
       : '未连接';
 
-  const activityPanels = [
+  const nativePanels = [
     {
-      id: 'physical',
-      title: '现实传感器诊断',
-      subtitle: 'ElpisPhysical · schema v1',
-      status: statusLabel,
+      id: 'native',
+      title: '原生能力诊断',
+      subtitle: 'Elpis Canary · NativeBridge Lite',
+      status: reality.physical.raw ? '已连接' : '未连接',
       rows: [
-        ['姿态', ORIENTATION_LABELS[facts.orientation]],
-        ['动作', MOTION_LABELS[reality.physical.motion]],
-        ['环境光线', LIGHT_LABELS[facts.lightExposure]],
-        ['距离传感器', PROXIMITY_LABELS[facts.proximity]],
+        ['原生桥', reality.physical.raw ? '已连接' : '未连接'],
         ['电量', facts.batteryLevel === null ? '未知' : String(facts.batteryLevel) + '%'],
-        ['充电', facts.charging === null ? '未知' : facts.charging ? '是' : '否'],
-        ['观测时间', formatObservedAt(reality.physical.observedAt)],
-      ],
-    },
-    {
-      id: 'prompt',
-      title: '实际注入 Prompt',
-      subtitle: '系统配置 · Reality Prompt 预览',
-      status: prompt.text ? '有内容' : '空',
-      rows: [
-        ['字符数', String(Array.from(prompt.text).length)],
-        ['数据来源', prompt.text ? '设备现实状态' : '无可用状态'],
-        ['更新语义', '状态变化时刷新'],
+        ['屏幕时间权限', '未接入'],
+        ['今日屏幕时间', '未接入'],
+        ['电池优化', '未接入'],
       ],
     },
     {
@@ -344,6 +455,83 @@ export function ToolroomScreen() {
         ['手机', 'ElpisPhysical'],
         ['桌面观测', '未接入'],
         ['通知内容', '未接入'],
+      ],
+    },
+  ];
+
+  const physicalRaw = asRawRecord(reality.physical.raw);
+  const sensorPanels = [
+    {
+      id: 'battery',
+      title: '电池',
+      subtitle: 'Battery',
+      raw: physicalRaw?.battery,
+      ...sensorState(physicalRaw?.battery),
+      rows: [
+        ['状态', sensorState(physicalRaw?.battery).label],
+        ['电量', facts.batteryLevel === null ? '未知' : String(facts.batteryLevel) + '%'],
+        ['充电', facts.charging === null ? '未知' : facts.charging ? '是' : '否'],
+        ['样本年龄', sensorSampleAge(physicalRaw?.battery, reality.physical.observedAt)],
+      ],
+    },
+    {
+      id: 'accelerometer',
+      title: '加速度计',
+      subtitle: 'Accelerometer',
+      raw: physicalRaw?.accelerometer,
+      ...sensorState(physicalRaw?.accelerometer),
+      rows: [
+        ['状态', sensorState(physicalRaw?.accelerometer).label],
+        ['x / y / z', (() => {
+          const sensor = asRawRecord(physicalRaw?.accelerometer);
+          return rawValue(sensor?.x) + ' / ' + rawValue(sensor?.y) + ' / ' + rawValue(sensor?.z);
+        })()],
+        ['姿态', ORIENTATION_LABELS[facts.orientation]],
+        ['样本年龄', sensorSampleAge(physicalRaw?.accelerometer, reality.physical.observedAt)],
+      ],
+    },
+    {
+      id: 'gyroscope',
+      title: '陀螺仪',
+      subtitle: 'Gyroscope',
+      raw: physicalRaw?.gyroscope,
+      ...sensorState(physicalRaw?.gyroscope),
+      rows: [
+        ['状态', sensorState(physicalRaw?.gyroscope).label],
+        ['x / y / z', (() => {
+          const sensor = asRawRecord(physicalRaw?.gyroscope);
+          return rawValue(sensor?.x) + ' / ' + rawValue(sensor?.y) + ' / ' + rawValue(sensor?.z);
+        })()],
+        ['样本年龄', sensorSampleAge(physicalRaw?.gyroscope, reality.physical.observedAt)],
+      ],
+    },
+    {
+      id: 'proximity',
+      title: '距离',
+      subtitle: 'Proximity',
+      raw: physicalRaw?.proximity,
+      ...sensorState(physicalRaw?.proximity),
+      rows: [
+        ['状态', sensorState(physicalRaw?.proximity).label],
+        ['value / maxRange', (() => {
+          const sensor = asRawRecord(physicalRaw?.proximity);
+          return rawValue(sensor?.value) + ' / ' + rawValue(sensor?.maxRange);
+        })()],
+        ['距离状态', PROXIMITY_LABELS[facts.proximity]],
+        ['样本年龄', sensorSampleAge(physicalRaw?.proximity, reality.physical.observedAt)],
+      ],
+    },
+    {
+      id: 'light',
+      title: '光线',
+      subtitle: 'Ambient Light',
+      raw: physicalRaw?.light,
+      ...sensorState(physicalRaw?.light),
+      rows: [
+        ['状态', sensorState(physicalRaw?.light).label],
+        ['lux', rawValue(asRawRecord(physicalRaw?.light)?.lux)],
+        ['光线状态', LIGHT_LABELS[facts.lightExposure]],
+        ['样本年龄', sensorSampleAge(physicalRaw?.light, reality.physical.observedAt)],
       ],
     },
   ];
@@ -477,8 +665,46 @@ export function ToolroomScreen() {
                                   className="toolroom-tool-detail"
                                   style={{ '--toolroom-accent': toolAccent(group.id, tool.available) } as CSSProperties}
                                 >
-                                  <span className="toolroom-detail-kicker">Prompt / Usage</span>
-                                  <p>{tool.status_label}。本页只展示真实清单，不执行任何工具。</p>
+                                  <div className="toolroom-detail-kicker-row">
+                                    <span className="toolroom-detail-kicker">Prompt / Usage</span>
+                                    <button
+                                      type="button"
+                                      className="toolroom-prompt-edit-button"
+                                      aria-label={'编辑 ' + tool.tool_name + ' Prompt'}
+                                      onClick={() => openPromptEditor(tool)}
+                                    >
+                                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                        <path d="m4.5 17.2-.8 3.1 3.1-.8L18.4 8a2 2 0 0 0-2.8-2.8L4.5 17.2Z" />
+                                        <path d="m13.9 6.9 3.2 3.2" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                  {promptEditorTool === tool.tool_name ? (
+                                    <div className="toolroom-prompt-editor">
+                                      <textarea
+                                        value={promptDraft}
+                                        onChange={(event) => setPromptDraft(event.target.value)}
+                                        aria-label={tool.tool_name + ' Prompt 编辑器'}
+                                        rows={4}
+                                      />
+                                      <div className="toolroom-prompt-editor-actions">
+                                        <button type="button" onClick={closePromptEditor} disabled={promptSaving}>取消</button>
+                                        <button type="button" onClick={() => void savePrompt(tool)} disabled={promptSaving}>
+                                          {promptSaving ? '保存中…' : '保存'}
+                                        </button>
+                                      </div>
+                                      {promptNotice ? <small>{promptNotice}</small> : null}
+                                    </div>
+                                  ) : (
+                                    <p>{promptTextForTool(tool, companionHints, promptOverrides)}</p>
+                                  )}
+                                  <details className="toolroom-boundary-disclosure">
+                                    <summary>真实能力边界</summary>
+                                    <p className="toolroom-boundary-copy">
+                                      {companionToolForInventory(companionHints, tool)?.physical_boundary
+                                        || '当前清单未提供真实能力边界。'}
+                                    </p>
+                                  </details>
                                   <div className="toolroom-detail-divider" aria-hidden="true" />
                                   <span className="toolroom-detail-label">Current binding</span>
                                   <dl>
@@ -513,14 +739,14 @@ export function ToolroomScreen() {
             <article className="toolroom-device-card">
               <div className="toolroom-card-title"><ToolroomDeviceIcon kind="phone" /><strong>手机状态</strong></div>
               <dl>
-                <div><dt>姿态</dt><dd>{ORIENTATION_LABELS[facts.orientation]}</dd></div>
-                <div><dt>动作</dt><dd>{MOTION_LABELS[reality.physical.motion]}</dd></div>
-                <div><dt>光线</dt><dd>{LIGHT_LABELS[facts.lightExposure]}</dd></div>
-                <div><dt>距离传感器</dt><dd>{PROXIMITY_LABELS[facts.proximity]}</dd></div>
-                <div><dt>电量</dt><dd>{facts.batteryLevel === null ? '未知' : String(facts.batteryLevel) + '%'}</dd></div>
-                <div><dt>充电</dt><dd>{facts.charging === null ? '未知' : facts.charging ? '是' : '否'}</dd></div>
-                <div><dt>观测时间</dt><dd>{formatObservedAt(reality.physical.observedAt)}</dd></div>
-                <div><dt>连接</dt><dd>{statusLabel}</dd></div>
+                <div><dt>姿态</dt><dd>{ORIENTATION_LABELS[facts.orientation]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>动作</dt><dd>{MOTION_LABELS[reality.physical.motion]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>光线</dt><dd>{LIGHT_LABELS[facts.lightExposure]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>距离传感器</dt><dd>{PROXIMITY_LABELS[facts.proximity]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>电量</dt><dd>{facts.batteryLevel === null ? '未知' : String(facts.batteryLevel) + '%'} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>充电</dt><dd>{facts.charging === null ? '未知' : facts.charging ? '是' : '否'} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>观测时间</dt><dd>{formatObservedAt(reality.physical.observedAt)} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>连接</dt><dd>{statusLabel} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
               </dl>
             </article>
             <article className="toolroom-device-card is-muted">
@@ -543,11 +769,11 @@ export function ToolroomScreen() {
           <div className="toolroom-section-heading">
             <div>
               <strong>实际注入 Prompt</strong>
-              <span>{Array.from(prompt.text).length} chars</span>
+              <span>系统配置 · Reality Prompt 预览 · {Array.from(prompt.text).length} chars</span>
             </div>
           </div>
           <article className="toolroom-prompt-card">
-            {prompt.text ? <pre>{prompt.text}</pre> : <p>暂无可用的设备现实状态。</p>}
+            {prompt.text ? <p className="toolroom-prompt-text">{prompt.segments.map(renderToolroomPromptSegment)}</p> : <p>暂无可用的设备现实状态。</p>}
             <small>只显示当前 RealityPromptProjection；不在这里写入长期记忆。</small>
           </article>
 
@@ -555,8 +781,9 @@ export function ToolroomScreen() {
             <div><strong>原生信息栏</strong></div>
           </div>
           <div className="toolroom-native-panels">
-            {activityPanels.map((panel) => {
-              const open = Boolean(openPanels[panel.id]);
+            {nativePanels.map((panel) => {
+              const key = 'native:' + panel.id;
+              const open = Boolean(openPanels[key]);
               return (
                 <article className="toolroom-native-panel" key={panel.id}>
                   <button
@@ -564,14 +791,14 @@ export function ToolroomScreen() {
                     aria-expanded={open}
                     onClick={() => setOpenPanels((current) => ({
                       ...current,
-                      [panel.id]: !current[panel.id],
+                      [key]: !current[key],
                     }))}
                   >
                     <span>
                       <strong>{panel.title}</strong>
                       <small>{panel.subtitle}</small>
                     </span>
-                    <em>{panel.status}</em>
+                    <em className={panel.status === '已连接' ? 'is-live' : undefined}>{panel.status}</em>
                     <span className={'toolroom-chevron' + (open ? ' is-open' : '')} aria-hidden="true">⌄</span>
                   </button>
                   {open ? (
@@ -585,6 +812,34 @@ export function ToolroomScreen() {
               );
             })}
           </div>
+
+          <div className="toolroom-section-heading">
+            <div><strong>现实传感器</strong><span>实际注入 Prompt 的设备快照</span></div>
+          </div>
+          <div className="toolroom-sensor-panels">
+            {sensorPanels.map((sensor) => (
+              <article className="toolroom-native-panel toolroom-sensor-panel" key={sensor.id}>
+                <div className="toolroom-sensor-heading">
+                  <span>
+                    <strong>{sensor.title}</strong>
+                    <small>{sensor.subtitle}</small>
+                  </span>
+                  <em className={sensor.available ? 'is-live' : undefined}>{sensor.label}</em>
+                </div>
+                <div className="toolroom-sensor-body">
+                  <dl>
+                    {sensor.rows.map((row) => (
+                      <div key={row[0]}><dt>{row[0]}</dt><dd>{row[1]}</dd></div>
+                    ))}
+                  </dl>
+                </div>
+              </article>
+            ))}
+          </div>
+          <details className="toolroom-raw-json toolroom-raw-json-all">
+            <summary>原始JSON</summary>
+            <pre>{rawJson(reality.physical.raw)}</pre>
+          </details>
           <div className="toolroom-signoff">Still becoming.</div>
         </section>
       )}
