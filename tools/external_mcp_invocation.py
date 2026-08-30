@@ -39,6 +39,31 @@ _OUTCOME_STATUS = {
 MAX_TOOL_INPUT_BYTES = 256 * 1024
 
 
+def _safe_runner_reason_code(runner_result: Any) -> str:
+    """Return only a bounded local code from a NOT_INVOKED runner result."""
+    if not isinstance(runner_result, Mapping):
+        return "NOT_INVOKED"
+    error = runner_result.get("error")
+    code = error.get("code") if isinstance(error, Mapping) else None
+    if (
+        type(code) is not str
+        or not code
+        or code != code.strip()
+        or not code.isascii()
+        or len(code) > 64
+        or any(
+            not (
+                "A" <= character <= "Z"
+                or "0" <= character <= "9"
+                or character == "_"
+            )
+            for character in code
+        )
+    ):
+        return "NOT_INVOKED"
+    return code
+
+
 class ExternalInvocationError(ValueError):
     code = "EXTERNAL_INVOCATION_ERROR"
 
@@ -253,7 +278,10 @@ class ExternalMcpInvocation:
             runner_result = runner(call_envelope)
             outcome = runner_result.get("status") if isinstance(runner_result, Mapping) else None
             terminal_status = _OUTCOME_STATUS.get(outcome) if outcome in _RUNNER_OUTCOMES else OUTCOME_UNKNOWN
-            reason = str(outcome) if outcome in _RUNNER_OUTCOMES else "RUNNER_MALFORMED"
+            if outcome == "NOT_INVOKED":
+                reason = _safe_runner_reason_code(runner_result)
+            else:
+                reason = str(outcome) if outcome in _RUNNER_OUTCOMES else "RUNNER_MALFORMED"
         except Exception:
             terminal_status, reason = OUTCOME_UNKNOWN, "RUNNER_EXCEPTION"
 

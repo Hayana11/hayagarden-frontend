@@ -284,6 +284,48 @@ class ExternalMcpInvocationTests(unittest.TestCase):
         finally:
             os.unlink(handle.name)
 
+    def test_structured_not_invoked_reason_and_summary_nonpersistence(self):
+        self.prepare()
+        summary = "C2B_FAKE_SECRET_LIKE_SUMMARY_MUST_NOT_PERSIST"
+        payload = {
+            "status": "NOT_INVOKED",
+            "result": None,
+            "error": {"code": "AUTH_REQUIRED", "summary": summary},
+            "diagnostics": {"phase": "PRE_CALL"},
+        }
+        result = self.invoke(None, runner=lambda _: payload)
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(result["reason_code"], "AUTH_REQUIRED")
+        attempt = self.invocation.get_attempt(result["attempt_id"])
+        self.assertEqual(attempt["status"], FAILED_PRE_CALL)
+        self.assertEqual(attempt["reason_code"], "AUTH_REQUIRED")
+        self.assertEqual(self.invocation.list_audit(result["attempt_id"])[-1]["reason_code"], "AUTH_REQUIRED")
+        self.assertNotIn(summary, "\n".join(self.connection.iterdump()))
+
+    def test_unsafe_not_invoked_code_falls_back_to_generic_reason(self):
+        self.prepare()
+        unsafe_code = "bad code\nvalue"
+        result = self.invoke(
+            None,
+            runner=lambda _: {
+                "status": "NOT_INVOKED",
+                "error": {"code": unsafe_code, "summary": "unsafe summary"},
+            },
+        )
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(result["reason_code"], "NOT_INVOKED")
+        attempt = self.invocation.get_attempt(result["attempt_id"])
+        self.assertEqual(attempt["reason_code"], "NOT_INVOKED")
+        self.assertNotIn(unsafe_code, "\n".join(self.connection.iterdump()))
+
+    def test_missing_not_invoked_error_preserves_compatibility(self):
+        self.prepare()
+        result = self.invoke(None, runner=lambda _: {"status": "NOT_INVOKED"})
+        self.assertEqual(result["status"], FAILED_PRE_CALL)
+        self.assertEqual(result["reason_code"], "NOT_INVOKED")
+        attempt = self.invocation.get_attempt(result["attempt_id"])
+        self.assertEqual(attempt["reason_code"], "NOT_INVOKED")
+
     def test_all_outcomes_exception_and_recovery_are_unknown_without_replay(self):
         for runner_outcome, expected in (("SUCCESS", SUCCEEDED), ("TOOL_ERROR", TOOL_ERROR), ("NOT_INVOKED", FAILED_PRE_CALL), ("OUTCOME_UNKNOWN", OUTCOME_UNKNOWN)):
             with self.subTest(runner_outcome=runner_outcome):
