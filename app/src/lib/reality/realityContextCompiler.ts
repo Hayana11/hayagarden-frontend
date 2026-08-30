@@ -73,10 +73,9 @@ function compileClauses(snapshot: RealitySnapshot, nowMs: number): PromptClause[
   const activity = activityClause(snapshot, nowMs);
   if (activity !== null) clauses.push(activity);
   if (snapshot.physical.facts.charging === true) clauses.push({ key: "charging", text: "正在充电" });
-  else if (snapshot.physical.facts.charging === false) clauses.push({ key: "charging", text: "未充电" });
   const batteryLevel = snapshot.physical.facts.batteryLevel;
-  if (typeof batteryLevel === "number" && Number.isInteger(batteryLevel) && batteryLevel >= 0 && batteryLevel <= 100) {
-    clauses.push({ key: "batteryLevel", text: `${batteryLevel}%` });
+  if (typeof batteryLevel === "number" && Number.isInteger(batteryLevel) && batteryLevel >= 0 && batteryLevel <= 25) {
+    clauses.push({ key: "batteryLevel", text: `电量【${batteryLevel}%】` });
   }
   return clauses;
 }
@@ -86,8 +85,7 @@ export function compileRealityContext(snapshot: RealitySnapshot, nowMs: number =
   if (clauses.length === 0) return { schemaVersion: 1, text: "", segments: [] };
   const segments: RealityPromptSegment[] = [];
   clauses.forEach((clause, index) => {
-    if (clause.key === "batteryLevel") segments.push({ kind: "literal", text: index === 0 ? "电量" : "，电量" });
-    else if (index > 0) segments.push({ kind: "literal", text: "，" });
+    if (index > 0) segments.push({ kind: "literal", text: "，" });
     segments.push({ kind: "dynamic", key: clause.key, text: clause.text });
   });
   segments.push({ kind: "literal", text: "。" });
