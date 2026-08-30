@@ -257,18 +257,20 @@ assert.equal(activityCompile(70).text, "设备当前【移动中】，推断【�
 assert.equal(activityCompile(100).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
 assert.equal(activityCompile(100, { now: 180001 }).text, "设备当前【移动中】，正在充电，电量【12%】。");
 
-assert.equal(lightSemanticLabel("dark"), "较暗");
+assert.equal(lightSemanticLabel("dark"), "黑暗");
 assert.equal(lightSemanticLabel("bright"), "较亮");
-assert.equal(lightSemanticLabel("dim"), null);
+assert.equal(lightSemanticLabel("dim"), "较暗");
 assert.equal(orientationSemanticLabel("face_up"), "正面朝上平放");
 assert.equal(orientationSemanticLabel("face_down"), "正面朝下扣放");
 assert.equal(orientationSemanticLabel("vertical"), "竖向");
 assert.equal(orientationSemanticLabel("horizontal"), "横向");
 assert.equal(orientationSemanticLabel("tilted"), null);
 const lightDark = compile({ motion: "unknown", lightExposure: "dark" });
-assert.equal(lightDark.text, "环境【较暗】。");
+assert.equal(lightDark.text, "环境【黑暗】。");
+const lightDim = compile({ motion: "unknown", lightExposure: "dim" });
+assert.equal(lightDim.text, "环境【较暗】。");
 assert.equal(compile({ motion: "unknown", lightExposure: "bright" }).text, "环境【较亮】。");
-assert.equal(compile({ motion: "unknown", lightExposure: "dim" }).text, "");
+assert.equal(compile({ motion: "unknown", lightExposure: "moderate" }).text, "");
 assert.equal(compile({ motion: "unknown", lightExposure: "moderate" }).text, "");
 assert.equal(compile({ motion: "unknown", orientation: "face_up" }).text, "姿态【正面朝上平放】。");
 assert.equal(compile({ motion: "unknown", orientation: "face_down" }).text, "姿态【正面朝下扣放】。");
@@ -277,7 +279,7 @@ assert.equal(compile({ motion: "unknown", orientation: "horizontal" }).text, "�
 assert.equal(compile({ motion: "unknown", orientation: "tilted" }).text, "");
 assert.equal(
   compile({ lightExposure: "dark", orientation: "face_up", motion: "still", userActivity: "walking", activitySource: "hms", activitySampledAt: 0, activityPossibility: 87, charging: true, batteryLevel: 63 }).text,
-  "设备当前【静止】，推断【步行】，环境【较暗】，姿态【正面朝上平放】，正在充电。",
+  "设备当前【静止】，推断【步行】，环境【黑暗】，姿态【正面朝上平放】，正在充电。",
 );
 
 const segments = stillCharging80.segments;
@@ -312,7 +314,7 @@ assert.equal(
 );
 assert.equal(
   orientationChanged.text,
-  "设备当前【静止】，环境【较暗】，姿态【正面朝下扣放】，正在充电。",
+  "设备当前【静止】，环境【黑暗】，姿态【正面朝下扣放】，正在充电。",
 );
 assert.notEqual(orientationOnly.text, orientationChanged.text);
 
