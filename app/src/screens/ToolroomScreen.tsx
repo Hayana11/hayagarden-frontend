@@ -1,5 +1,5 @@
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { getActivitySemanticConfidence, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
+import { getActivitySemanticConfidence, lightSemanticLabel, orientationSemanticLabel, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { http } from '../lib/http';
@@ -747,7 +747,7 @@ export function ToolroomScreen() {
           const sensor = asRawRecord(physicalRaw?.accelerometer);
           return rawValue(sensor?.x) + ' / ' + rawValue(sensor?.y) + ' / ' + rawValue(sensor?.z);
         })()],
-        ['姿态', ORIENTATION_LABELS[facts.orientation]],
+        ['姿态', orientationSemanticLabel(facts.orientation) || '—'],
         ['样本年龄', sensorSampleAge(physicalRaw?.accelerometer, reality.physical.observedAt)],
       ],
     },
@@ -1000,9 +1000,9 @@ export function ToolroomScreen() {
             <article className="toolroom-device-card">
               <div className="toolroom-card-title"><ToolroomDeviceIcon kind="phone" /><strong>手机状态</strong></div>
               <dl>
-                <div><dt>姿态</dt><dd>{ORIENTATION_LABELS[facts.orientation]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>姿态</dt><dd>{orientationSemanticLabel(facts.orientation) || '—'} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
                 <div><dt>动作</dt><dd>{MOTION_LABELS[reality.physical.motion]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
-                <div><dt>光线</dt><dd>{LIGHT_LABELS[facts.lightExposure]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
+                <div><dt>光线</dt><dd>{lightSemanticLabel(facts.lightExposure) || '—'} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
                 <div><dt>距离传感器</dt><dd>{PROXIMITY_LABELS[facts.proximity]} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
                 <div><dt>电量</dt><dd>{facts.batteryLevel === null ? '未知' : String(facts.batteryLevel) + '%'} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
                 <div><dt>充电</dt><dd>{facts.charging === null ? '未知' : facts.charging ? '是' : '否'} <small>（{formatRelativeTime(reality.physical.observedAt)}）</small></dd></div>
@@ -1015,45 +1015,6 @@ export function ToolroomScreen() {
               <p>当前网页没有可证明的桌面观测桥接，因此不显示原型里的示例应用或窗口。</p>
             </article>
           </div>
-
-          <div className="toolroom-section-heading">
-            <div>
-              <strong>HMS Activity</strong>
-              <span>实时状态 · 复用既有 ElpisActivity bridge</span>
-            </div>
-            <em className={activityFreshness.status === 'fresh' ? 'is-live' : undefined}>{activityFreshness.status}</em>
-          </div>
-          <article className="toolroom-hms-activity toolroom-native-panel">
-            <div className="toolroom-hms-activity-head">
-              <span>
-                <strong>Semantic</strong>
-                <small>只读；stale / unknown 不进入 prompt</small>
-              </span>
-              <em className={activitySemanticReady ? 'is-live' : undefined}>
-                {activitySemanticReady ? 'fresh' : activityFreshness.status}
-              </em>
-            </div>
-            <dl>
-              <div><dt>环境光线</dt><dd>{reality.physical.facts.lightExposure === 'dark' ? '较暗' : reality.physical.facts.lightExposure === 'bright' ? '较亮' : '—'}</dd></div>
-              <div><dt>设备朝向</dt><dd>{reality.physical.facts.orientation === 'face_up' ? '正面朝上平放' : reality.physical.facts.orientation === 'face_down' ? '正面朝下扣放' : reality.physical.facts.orientation === 'vertical' ? '竖向' : reality.physical.facts.orientation === 'horizontal' ? '横向' : '—'}</dd></div>
-              <div><dt>设备物理状态</dt><dd>{MOTION_LABELS[reality.physical.motion]}</dd></div>
-              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] + (activityConfidence === 'low' ? '（低置信）' : '') : '—'}</dd></div>
-              <div><dt>置信度</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility) + '%'}</dd></div>
-              <div><dt>activity age</dt><dd>{formatActivityAge(activityFreshness.status, activity.activitySampledAt, activityNow)}</dd></div>
-              <div><dt>activity source</dt><dd>{activity.source}</dd></div>
-            </dl>
-            <div className="toolroom-hms-activity-divider" aria-hidden="true" />
-            <div className="toolroom-hms-activity-label">Technical diagnostic</div>
-            <dl>
-              <div><dt>registration</dt><dd>{activity.registration}</dd></div>
-              <div><dt>lastErrorCode</dt><dd>{activity.lastErrorCode || '—'}</dd></div>
-              <div><dt>callbackReceived</dt><dd>{activity.callbackReceived ? 'yes' : 'no'}</dd></div>
-              <div><dt>intentHasExtras</dt><dd>{activity.intentHasExtras ? 'yes' : 'no'}</dd></div>
-              <div><dt>responsePresent</dt><dd>{activity.responsePresent ? 'yes' : 'no'}</dd></div>
-              <div><dt>activityDataCount</dt><dd>{String(activity.activityDataCount)}</dd></div>
-              <div><dt>raw activity code</dt><dd>{activity.rawCandidate === null ? '—' : String(activity.rawCandidate)}</dd></div>
-            </dl>
-          </article>
 
           <div className="toolroom-section-heading">
             <div><strong>重要通知</strong></div>
@@ -1147,7 +1108,7 @@ export function ToolroomScreen() {
           </div>
 
           <div className="toolroom-section-heading">
-            <div><strong>现实传感器</strong><span>实际注入 Prompt 的设备快照</span></div>
+            <div><strong>显示传感器</strong><span>Physical Reality 与 HMS Activity 只读观测</span></div>
           </div>
           <div className="toolroom-sensor-panels">
             {sensorPanels.map((sensor) => (
@@ -1169,6 +1130,43 @@ export function ToolroomScreen() {
               </article>
             ))}
           </div>
+
+          <div className="toolroom-section-heading">
+            <div>
+              <strong>HMS Activity</strong>
+              <span>实时状态 · 复用既有 ElpisActivity bridge</span>
+            </div>
+            <em className={activityFreshness.status === 'fresh' ? 'is-live' : undefined}>{activityFreshness.status}</em>
+          </div>
+          <article className="toolroom-hms-activity toolroom-native-panel">
+            <div className="toolroom-hms-activity-head">
+              <span>
+                <strong>Semantic</strong>
+                <small>只读；stale / unknown 不进入 prompt</small>
+              </span>
+              <em className={activitySemanticReady ? 'is-live' : undefined}>
+                {activitySemanticReady ? 'fresh' : activityFreshness.status}
+              </em>
+            </div>
+            <dl>
+              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] + (activityConfidence === 'low' ? '（低置信）' : '') : '—'}</dd></div>
+              <div><dt>置信度</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility) + '%'}</dd></div>
+              <div><dt>activity age</dt><dd>{formatActivityAge(activityFreshness.status, activity.activitySampledAt, activityNow)}</dd></div>
+              <div><dt>activity source</dt><dd>{activity.source}</dd></div>
+            </dl>
+            <div className="toolroom-hms-activity-divider" aria-hidden="true" />
+            <div className="toolroom-hms-activity-label">Technical diagnostic</div>
+            <dl>
+              <div><dt>registration</dt><dd>{activity.registration}</dd></div>
+              <div><dt>lastErrorCode</dt><dd>{activity.lastErrorCode || '—'}</dd></div>
+              <div><dt>callbackReceived</dt><dd>{activity.callbackReceived ? 'yes' : 'no'}</dd></div>
+              <div><dt>intentHasExtras</dt><dd>{activity.intentHasExtras ? 'yes' : 'no'}</dd></div>
+              <div><dt>responsePresent</dt><dd>{activity.responsePresent ? 'yes' : 'no'}</dd></div>
+              <div><dt>activityDataCount</dt><dd>{String(activity.activityDataCount)}</dd></div>
+              <div><dt>raw activity code</dt><dd>{activity.rawCandidate === null ? '—' : String(activity.rawCandidate)}</dd></div>
+            </dl>
+          </article>
+
           <details className="toolroom-raw-json toolroom-raw-json-all">
             <summary>
               <span>原始JSON</span>
