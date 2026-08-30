@@ -64,7 +64,7 @@ assert.doesNotMatch(screen, /<dt>设备物理状态<\/dt>/);
 assert.match(screen, /<dt>设备推断活动<\/dt>/);
 assert.match(screen, /加速度计/);
 assert.match(screen, /陀螺仪/);
-assert.match(screen, /<details className=\"toolroom-raw-json toolroom-raw-json-all\"/);
+assert.match(screen, /<details className="toolroom-raw-json toolroom-raw-json-all"/);
 assert.match(screen, /formatRelativeTime/);
 assert.match(screen, /renderToolroomPromptSegment/);
 assert.match(screen, /toolroom-sensor-heading/);
