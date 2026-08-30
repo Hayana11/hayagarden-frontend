@@ -144,7 +144,7 @@ assert.match(screen, /type="password"/);
 assert.match(screen, /name="credential"/);
 assert.match(screen, /Streamable HTTP/);
 assert.match(screen, /保存并读取工具/);
-assert.doesNotMatch(screen, /localStorage[\s\S]*credential|sessionStorage[\s\S]*credential|console\\.(log|error)[\s\S]*credential/);
+assert.doesNotMatch(screen, /localStorage[\s\S]*credential|sessionStorage[\s\S]*credential|console\.(log|error)[\s\S]*credential/);
 assert.match(css, /\.toolroom-add-button\s*\{/);
 assert.match(css, /\.toolroom-modal-backdrop\s*\{[\s\S]*?position:\s*fixed/);
 assert.match(css, /\.toolroom-mcp-dialog\s*\{[\s\S]*?height:\s*620px[\s\S]*?max-height:\s*calc\(100% - 24px\)/);
