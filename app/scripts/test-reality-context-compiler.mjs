@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { RealityStore } from "../src/lib/reality/realityStore.ts";
 import {
   compileRealityContext,
+  lightSemanticLabel,
+  orientationSemanticLabel,
 } from "../src/lib/reality/realityContextCompiler.ts";
 import {
   RealityPromptProjection,
@@ -114,14 +116,14 @@ const stillCharging80 = compile({
   charging: true,
   batteryLevel: 80,
 });
-assert.equal(stillCharging80.text, "设备【静止】，正在充电。");
+assert.equal(stillCharging80.text, "设备当前【静止】，正在充电。");
 
 const movingNotCharging79 = compile({
   motion: "moving",
   charging: false,
   batteryLevel: 79,
 });
-assert.equal(movingNotCharging79.text, "设备【移动中】。");
+assert.equal(movingNotCharging79.text, "设备当前【移动中】。");
 
 assert.equal(
   compile({ charging: true, batteryLevel: 80 }).text,
@@ -129,11 +131,11 @@ assert.equal(
 );
 assert.equal(
   compile({ motion: "still", batteryLevel: 80 }).text,
-  "设备【静止】。",
+  "设备当前【静止】。",
 );
 assert.equal(
   compile({ motion: "still", charging: true }).text,
-  "设备【静止】，正在充电。",
+  "设备当前【静止】，正在充电。",
 );
 assert.equal(compile({}).text, "");
 
@@ -147,7 +149,7 @@ assert.equal(
     rawCandidate: 7,
     rawPossibility: 92,
   }).text,
-  "设备【静止】，推断活动【步行】。",
+  "设备当前【静止】，推断【步行】。",
 );
 assert.equal(
   compile({
@@ -157,7 +159,7 @@ assert.equal(
     activitySampledAt: 0,
     activityPossibility: 87,
   }).text,
-  "设备【移动中】，推断活动【静止】。",
+  "设备当前【移动中】，推断【静止】。",
 );
 assert.equal(
   compile({
@@ -166,7 +168,7 @@ assert.equal(
     activitySampledAt: 0,
     activityPossibility: 87,
   }).text,
-  "推断活动【跑步】。",
+  "推断【跑步】。",
 );
 assert.equal(
   compile({
@@ -175,7 +177,7 @@ assert.equal(
     activitySampledAt: 0,
     activityPossibility: 87,
   }).text,
-  "推断活动【骑行】。",
+  "推断【骑行】。",
 );
 assert.equal(
   compile({
@@ -184,7 +186,7 @@ assert.equal(
     activitySampledAt: 0,
     activityPossibility: 87,
   }).text,
-  "推断活动【车载】。",
+  "推断【车载】。",
 );
 assert.equal(
   compile({
@@ -195,7 +197,7 @@ assert.equal(
     activityPossibility: 87,
     now: 301000,
   }).text,
-  "设备【静止】，推断活动【步行】。",
+  "设备当前【静止】，推断【步行】。",
 );
 assert.equal(
   compile({
@@ -205,7 +207,7 @@ assert.equal(
     activitySampledAt: 0,
     now: 180001,
   }).text,
-  "设备【静止】。",
+  "设备当前【静止】。",
 );
 assert.equal(
   compile({
@@ -214,7 +216,7 @@ assert.equal(
     activitySource: "hms",
     activitySampledAt: 0,
   }).text,
-  "设备【静止】。",
+  "设备当前【静止】。",
 );
 assert.equal(
   compile({
@@ -223,7 +225,7 @@ assert.equal(
     activitySource: "none",
     activitySampledAt: 0,
   }).text,
-  "设备【静止】。",
+  "设备当前【静止】。",
 );
 
 // Battery semantic gate.
@@ -248,13 +250,21 @@ const activityCompile = (possibility, extra = {}) => compile({
   ...extra,
   now: extra.now ?? 0,
 });
-assert.equal(activityCompile(49).text, "设备【移动中】，正在充电，电量【12%】。");
-assert.equal(activityCompile(50).text, "设备【移动中】，推断活动【步行（低置信）】，正在充电，电量【12%】。");
-assert.equal(activityCompile(69).text, "设备【移动中】，推断活动【步行（低置信）】，正在充电，电量【12%】。");
-assert.equal(activityCompile(70).text, "设备【移动中】，推断活动【步行】，正在充电，电量【12%】。");
-assert.equal(activityCompile(100).text, "设备【移动中】，推断活动【步行】，正在充电，电量【12%】。");
-assert.equal(activityCompile(100, { now: 180001 }).text, "设备【移动中】，正在充电，电量【12%】。");
+assert.equal(activityCompile(49).text, "设备当前【移动中】，正在充电，电量【12%】。");
+assert.equal(activityCompile(50).text, "设备当前【移动中】，推断【步行（低置信）】，正在充电，电量【12%】。");
+assert.equal(activityCompile(69).text, "设备当前【移动中】，推断【步行（低置信）】，正在充电，电量【12%】。");
+assert.equal(activityCompile(70).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
+assert.equal(activityCompile(100).text, "设备当前【移动中】，推断【步行】，正在充电，电量【12%】。");
+assert.equal(activityCompile(100, { now: 180001 }).text, "设备当前【移动中】，正在充电，电量【12%】。");
 
+assert.equal(lightSemanticLabel("dark"), "较暗");
+assert.equal(lightSemanticLabel("bright"), "较亮");
+assert.equal(lightSemanticLabel("dim"), null);
+assert.equal(orientationSemanticLabel("face_up"), "正面朝上平放");
+assert.equal(orientationSemanticLabel("face_down"), "正面朝下扣放");
+assert.equal(orientationSemanticLabel("vertical"), "竖向");
+assert.equal(orientationSemanticLabel("horizontal"), "横向");
+assert.equal(orientationSemanticLabel("tilted"), null);
 const lightDark = compile({ motion: "unknown", lightExposure: "dark" });
 assert.equal(lightDark.text, "环境【较暗】。");
 assert.equal(compile({ motion: "unknown", lightExposure: "bright" }).text, "环境【较亮】。");
@@ -267,7 +277,7 @@ assert.equal(compile({ motion: "unknown", orientation: "horizontal" }).text, "�
 assert.equal(compile({ motion: "unknown", orientation: "tilted" }).text, "");
 assert.equal(
   compile({ lightExposure: "dark", orientation: "face_up", motion: "still", userActivity: "walking", activitySource: "hms", activitySampledAt: 0, activityPossibility: 87, charging: true, batteryLevel: 63 }).text,
-  "环境【较暗】，姿态【正面朝上平放】，设备【静止】，推断活动【步行】，正在充电。",
+  "设备当前【静止】，推断【步行】，环境【较暗】，姿态【正面朝上平放】，正在充电。",
 );
 
 const segments = stillCharging80.segments;
@@ -374,7 +384,7 @@ for (const at of [0, 500, 1000, 1500]) {
     }),
   }, at);
 }
-assert.equal(motionProjection.getSnapshot().text, "设备【移动中】。");
+assert.equal(motionProjection.getSnapshot().text, "设备当前【移动中】。");
 assert.equal(motionNotifications, 1);
 
 const chargingStore = new RealityStore();
