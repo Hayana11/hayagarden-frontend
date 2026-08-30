@@ -392,7 +392,7 @@ for (const at of [0, 500, 1000, 1500]) {
     }),
   }, at);
 }
-assert.equal(motionProjection.getSnapshot().text, "设备当前【移动中】。");
+assert.equal(motionProjection.getSnapshot().text, "设备当前【移动中】，姿态【正面朝上平放】。");
 assert.equal(motionNotifications, 1);
 
 const chargingStore = new RealityStore();
