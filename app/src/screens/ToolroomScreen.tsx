@@ -128,7 +128,6 @@ type ExternalMcpIcon = 'default' | 'server' | 'globe' | 'plug' | 'spark';
 type ExternalMcpForm = {
   icon: ExternalMcpIcon;
   name: string;
-  description: string;
   url: string;
   auth: ExternalMcpAuthScheme;
 };
@@ -136,7 +135,6 @@ type ExternalMcpForm = {
 const DEFAULT_EXTERNAL_MCP_FORM: ExternalMcpForm = {
   icon: 'default',
   name: '',
-  description: '',
   url: '',
   auth: 'none',
 };
@@ -381,6 +379,8 @@ export function ToolroomScreen() {
   const [addMcpOpen, setAddMcpOpen] = useState(false);
   const [externalMcpForm, setExternalMcpForm] = useState<ExternalMcpForm>(DEFAULT_EXTERNAL_MCP_FORM);
   const [externalMcpNotice, setExternalMcpNotice] = useState('');
+  const [externalMcpCredential, setExternalMcpCredential] = useState('');
+  const [externalMcpSubmitting, setExternalMcpSubmitting] = useState(false);
   const [companionHints, setCompanionHints] = useState<ToolCompanionHints | null>(null);
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>({});
   const [promptEditorTool, setPromptEditorTool] = useState<string | null>(null);
@@ -574,24 +574,72 @@ export function ToolroomScreen() {
     void loadCompanionHints();
   }, [loadCompanionHints, loadInventory]);
 
+  const closeAddMcpDialog = useCallback(() => {
+    if (externalMcpSubmitting) return;
+    setAddMcpOpen(false);
+    setExternalMcpCredential('');
+    setExternalMcpNotice('');
+  }, [externalMcpSubmitting]);
+
   useEffect(() => {
     if (!addMcpOpen) return undefined;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setAddMcpOpen(false);
+      if (event.key === 'Escape') closeAddMcpDialog();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [addMcpOpen]);
+  }, [addMcpOpen, closeAddMcpDialog]);
 
   const openAddMcpDialog = () => {
     setExternalMcpForm(DEFAULT_EXTERNAL_MCP_FORM);
+    setExternalMcpCredential('');
     setExternalMcpNotice('');
     setAddMcpOpen(true);
   };
 
-  const handleExternalMcpPreviewSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleExternalMcpSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setExternalMcpNotice('已保留在当前页面预览中；尚未接入 External MCP Registry。');
+    if (externalMcpSubmitting) return;
+    setExternalMcpSubmitting(true);
+    setExternalMcpNotice('');
+    const body = {
+      display_name: externalMcpForm.name,
+      endpoint: externalMcpForm.url,
+      auth: externalMcpForm.auth === 'bearer'
+        ? { scheme: 'bearer', credential: externalMcpCredential }
+        : { scheme: 'none' },
+    };
+    try {
+      const result = await http.post<{
+        ok: boolean;
+        connection_saved?: boolean;
+        auth_configured?: boolean;
+        discovery?: { status?: string; reason_code?: string | null; tool_count?: number };
+      }>('/api/external-mcp/servers', body);
+      if (result.ok && result.discovery?.status === 'SUCCESS') {
+        const count = result.discovery.tool_count ?? 0;
+        setExternalMcpNotice(count > 0 ? '已保存，发现 ' + count + ' 个工具，等待审核' : '已保存，暂未发现工具');
+      } else if (result.connection_saved && result.auth_configured === false) {
+        setExternalMcpNotice('连接已保存，但认证配置失败：' + (result.discovery?.reason_code || 'AUTH_CONFIGURATION_FAILED'));
+      } else if (result.connection_saved) {
+        setExternalMcpNotice('连接已保存，但读取工具失败：' + (result.discovery?.reason_code || 'DISCOVERY_FAILED'));
+      } else {
+        setExternalMcpNotice('未保存：REQUEST_FAILED');
+      }
+    } catch (error) {
+      const candidate = (error as { code?: unknown }).code;
+      const payload = (error as { payload?: unknown }).payload;
+      const payloadError = payload && typeof payload === 'object' ? (payload as { error?: unknown }).error : undefined;
+      const safeCode = typeof candidate === 'string' && /^[A-Z0-9_]{2,64}$/.test(candidate)
+        ? candidate
+        : typeof payloadError === 'string' && /^[A-Z0-9_]{2,64}$/.test(payloadError)
+          ? payloadError
+          : 'REQUEST_FAILED';
+      setExternalMcpNotice('未保存：' + safeCode);
+    } finally {
+      setExternalMcpCredential('');
+      setExternalMcpSubmitting(false);
+    }
   };
 
   const openPromptEditor = (tool: InventoryTool) => {
@@ -1186,7 +1234,7 @@ export function ToolroomScreen() {
           className="toolroom-modal-backdrop"
           role="presentation"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setAddMcpOpen(false);
+            if (event.target === event.currentTarget) closeAddMcpDialog();
           }}
         >
           <section
@@ -1203,7 +1251,7 @@ export function ToolroomScreen() {
               <button
                 type="button"
                 className="toolroom-mcp-close"
-                onClick={() => setAddMcpOpen(false)}
+                onClick={closeAddMcpDialog}
                 aria-label="关闭添加外部 MCP"
               >
                 ×
@@ -1211,10 +1259,10 @@ export function ToolroomScreen() {
             </div>
 
             <p className="toolroom-mcp-preview-note">
-              仅前端预览：填写后不会写入服务器，也不会执行任何工具。
+              新增后默认关闭。发现到的工具需要审核后才能使用。
             </p>
 
-            <form className="toolroom-mcp-form" onSubmit={handleExternalMcpPreviewSubmit}>
+            <form className="toolroom-mcp-form" onSubmit={handleExternalMcpSubmit}>
               <div className="toolroom-mcp-field">
                 <span className="toolroom-mcp-label">图标 <small>内置线条图标</small></span>
                 <div className="toolroom-mcp-icon-grid" role="group" aria-label="选择 MCP 图标">
@@ -1248,17 +1296,6 @@ export function ToolroomScreen() {
               </label>
 
               <label className="toolroom-mcp-field">
-                <span className="toolroom-mcp-label">描述 <small>可选备注</small></span>
-                <textarea
-                  name="description"
-                  value={externalMcpForm.description}
-                  onChange={(event) => setExternalMcpForm((current) => ({ ...current, description: event.target.value }))}
-                  placeholder="用几句话说明它的用途"
-                  rows={3}
-                />
-              </label>
-
-              <label className="toolroom-mcp-field">
                 <span className="toolroom-mcp-label">服务器 URL</span>
                 <input
                   name="url"
@@ -1282,13 +1319,30 @@ export function ToolroomScreen() {
                   <option value="bearer">bearer</option>
                 </select>
               </label>
+              <div className="toolroom-mcp-field">
+                <span className="toolroom-mcp-label">传输方式</span>
+                <span className="toolroom-mcp-transport">Streamable HTTP</span>
+              </div>
+              {externalMcpForm.auth === 'bearer' ? (
+                <label className="toolroom-mcp-field">
+                  <span className="toolroom-mcp-label">Bearer 凭据</span>
+                  <input
+                    type="password"
+                    name="credential"
+                    value={externalMcpCredential}
+                    onChange={(event) => setExternalMcpCredential(event.target.value)}
+                    autoComplete="new-password"
+                    required
+                  />
+                </label>
+              ) : null}
 
               <div className="toolroom-mcp-actions">
-                <button type="button" className="toolroom-mcp-secondary" onClick={() => setAddMcpOpen(false)}>
+                <button type="button" className="toolroom-mcp-secondary" onClick={closeAddMcpDialog} disabled={externalMcpSubmitting}>
                   取消
                 </button>
-                <button type="submit" className="toolroom-mcp-primary">
-                  保存配置（仅预览）
+                <button type="submit" className="toolroom-mcp-primary" disabled={externalMcpSubmitting}>
+                  {externalMcpSubmitting ? '读取中…' : '保存并读取工具'}
                 </button>
               </div>
 

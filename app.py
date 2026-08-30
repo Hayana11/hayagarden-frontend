@@ -12,6 +12,7 @@ import moments_cover
 from moments_auth import OwnerAuthError, require_owner
 from context_usage_routes import create_context_usage_blueprint
 from moments_routes import create_moments_blueprint
+from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 from monopoly_rooms import MonopolyService
 from monopoly_routes import create_monopoly_blueprint
 from valence_scale import normalize_arousal, normalize_valence
@@ -128,6 +129,7 @@ app.register_blueprint(create_moments_blueprint(
     memories_db_path=DB_PATH,
     gallery_db_path=gallery_store.DB_PATH,
 ))
+app.register_blueprint(create_external_mcp_admin_blueprint())
 app.register_blueprint(create_monopoly_blueprint(MonopolyService(db_path=DB_PATH)))
 
 
