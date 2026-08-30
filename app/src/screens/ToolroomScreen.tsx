@@ -165,7 +165,12 @@ function externalMcpIconForName(name: string): Exclude<ExternalMcpIcon, 'default
 function ExternalMcpIconView({ icon, name = '' }: { icon: ExternalMcpIcon; name?: string }) {
   const resolvedIcon = icon === 'default' ? externalMcpIconForName(name) : icon;
   return (
-    <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+    <svg
+      viewBox="0 0 24 24"
+      preserveAspectRatio="xMidYMid meet"
+      role="presentation"
+      focusable="false"
+    >
       <path d={EXTERNAL_MCP_ICON_PATHS[resolvedIcon]} />
       {icon === 'default' ? <circle cx="18" cy="6" r="1.2" fill="currentColor" stroke="none" /> : null}
     </svg>
@@ -1237,9 +1242,10 @@ export function ToolroomScreen() {
             if (event.target === event.currentTarget) closeAddMcpDialog();
           }}
         >
-          <section
-            className="toolroom-mcp-dialog"
-            role="dialog"
+          <div className="toolroom-mcp-shell">
+            <section
+              className="toolroom-mcp-dialog"
+              role="dialog"
             aria-modal="true"
             aria-labelledby="toolroom-mcp-dialog-title"
           >
@@ -1350,7 +1356,8 @@ export function ToolroomScreen() {
                 <p className="toolroom-mcp-status" role="status">{externalMcpNotice}</p>
               ) : null}
             </form>
-          </section>
+            </section>
+          </div>
         </div>
       ) : null}
     </main>
