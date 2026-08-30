@@ -54,10 +54,27 @@ class ProductionCompositionTests(unittest.TestCase):
         self.key.write_bytes(Fernet.generate_key())
         if os.name == "posix":
             os.chmod(self.key, 0o600)
+        real_lstat = os.lstat
+
+        def root_owned_lstat(path: str, *, code: str):
+            metadata = real_lstat(path)
+            if path in {str(self.key), str(self.db)}:
+                return SimpleNamespace(
+                    st_mode=metadata.st_mode,
+                    st_uid=0,
+                    st_gid=0,
+                    st_nlink=metadata.st_nlink,
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                )
+            return metadata
+
+        self.parent_patcher = patch("tools.external_mcp_production._validate_db_parent")
         self.patchers = [
             patch("tools.external_mcp_production.EXTERNAL_MCP_DB_PATH", str(self.db)),
             patch("tools.external_mcp_production.EXTERNAL_MCP_KEY_FILE", str(self.key)),
-            patch("tools.external_mcp_production._validate_db_parent"),
+            self.parent_patcher,
+            patch("tools.external_mcp_production._lstat", side_effect=root_owned_lstat),
         ]
         for item in self.patchers:
             item.start()
@@ -250,12 +267,12 @@ class ProductionCompositionTests(unittest.TestCase):
                 )
             return real_lstat(path)
 
-        self.patchers[-1].stop()
+        self.parent_patcher.stop()
         try:
             with patch("tools.external_mcp_production._lstat", side_effect=fake_lstat):
                 self._assert_open_fails_without_db()
         finally:
-            self.patchers[-1].start()
+            self.parent_patcher.start()
 
     def test_open_has_zero_secret_lookup_decrypt_child_and_network(self) -> None:
         with patch.object(ExternalSecretStore, "_load_runtime_record", side_effect=AssertionError("secret lookup")) as lookup, \
