@@ -1034,7 +1034,7 @@ export function ToolroomScreen() {
             </div>
             <dl>
               <div><dt>环境光线</dt><dd>{reality.physical.facts.lightExposure === 'dark' ? '较暗' : reality.physical.facts.lightExposure === 'bright' ? '较亮' : '—'}</dd></div>
-              <div><dt>手机朝向</dt><dd>{reality.physical.facts.orientation === 'face_up' ? '正面朝上平放' : reality.physical.facts.orientation === 'face_down' ? '正面朝下扣放' : reality.physical.facts.orientation === 'vertical' ? '竖向' : '—'}</dd></div>
+              <div><dt>设备朝向</dt><dd>{reality.physical.facts.orientation === 'face_up' ? '正面朝上平放' : reality.physical.facts.orientation === 'face_down' ? '正面朝下扣放' : reality.physical.facts.orientation === 'vertical' ? '竖向' : '—'}</dd></div>
               <div><dt>设备物理状态</dt><dd>{MOTION_LABELS[reality.physical.motion]}</dd></div>
               <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] + (activityConfidence === 'low' ? '（低置信）' : '') : '—'}</dd></div>
               <div><dt>置信度</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility) + '%'}</dd></div>
