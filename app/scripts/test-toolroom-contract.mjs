@@ -138,7 +138,7 @@ assert.match(screen, /name="url"/);
 assert.match(screen, /name="auth"/);
 assert.match(screen, /<option value="none">none<\/option>/);
 assert.match(screen, /<option value="bearer">bearer<\/option>/);
-assert.match(screen, /http\.post<.*>\('\/api\/external-mcp\/servers'/);
+assert.match(screen, /http\.post[\\s\\S]*['\"]\/api\/external-mcp\/servers['\"]/);
 assert.equal((screen.match(/\/api\/external-mcp\/servers/g) || []).length, 1);
 assert.match(screen, /type="password"/);
 assert.match(screen, /name="credential"/);
