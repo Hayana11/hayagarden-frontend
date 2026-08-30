@@ -50,7 +50,10 @@ assert.equal(toolroom.includes('window.ElpisActivity'), false, 'tool room must n
 for (const token of ['activitySampledAt', 'REALITY_ACTIVITY_MAX_AGE_MS', 'getActivityFreshness', 'getFreshUserActivity']) {
   assert.ok(store.includes(token), `activity freshness contract missing: ${token}`);
 }
-assert.ok(compiler.includes('getFreshUserActivity'));
+assert.ok(compiler.includes('getActivityFreshness'));
+assert.ok(compiler.includes('getActivitySemanticConfidence'));
+assert.ok(compiler.includes('环境【较暗】'));
+assert.ok(compiler.includes('手机【正面朝上平放】'));
 assert.ok(compiler.includes('"userActivity"'));
 assert.equal(chat.includes('ElpisActivity'), false);
 assert.equal(chat.includes('getActivityState'), false);
