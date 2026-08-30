@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from email.utils import parsedate_to_datetime
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -205,7 +207,8 @@ def _http_get_json(url: str, headers: dict[str, str], timeout: int = 6) -> dict[
 
 
 def _http_get_json_result(
-    url: str, headers: dict[str, str], timeout: int = 6
+    url: str, headers: dict[str, str], timeout: int = 6,
+    *, retry_metadata: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, int | None]:
     """GET JSON; return (payload, http_status). status is set on HTTPError too."""
     request = urllib.request.Request(url, method="GET", headers=headers)
@@ -213,9 +216,15 @@ def _http_get_json_result(
         with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
             status = int(response.status)
             if status != 200:
+                if retry_metadata is not None:
+                    retry_metadata["retry_after_seconds"] = _claude_retry_after_seconds(response.headers.get("Retry-After"))
                 return None, status
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if retry_metadata is not None:
+            retry_metadata["retry_after_seconds"] = _claude_retry_after_seconds(
+                exc.headers.get("Retry-After") if exc.headers else None
+            )
         return None, int(exc.code)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
         return None, None
@@ -276,7 +285,74 @@ def _store_cached_official(agent: str, quota: dict[str, Any]) -> None:
     _write_official_cache(cache)
 
 
-def fetch_claude_official_usage(token: str) -> dict[str, Any] | None:
+def _claude_retry_after_seconds(value: Any) -> float:
+    """Bound untrusted Retry-After (delay seconds or HTTP date) to one day."""
+    delay = 0.0
+    if isinstance(value, str) and len(value) <= 128:
+        value = value.strip()
+        if re.fullmatch(r"[0-9]+", value):
+            delay = float(value)
+        else:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is not None:
+                    delay = (when - dt.datetime.now(dt.timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return max(0.0, min(delay, 86400.0))
+
+
+def _claude_cooldown_active(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    retry_at = iso_time(entry.get("next_retry_at"))
+    if not retry_at:
+        return False
+    return dt.datetime.fromisoformat(retry_at.replace("Z", "+00:00")) > dt.datetime.now(dt.timezone.utc)
+
+
+def _store_claude_failure(attempt: dict[str, Any]) -> None:
+    """Persist only safe failure metadata, even before the first good quota."""
+    cache = _read_official_cache()
+    previous = cache.get("claude")
+    entry = dict(previous) if isinstance(previous, dict) else {}
+    status = attempt.get("last_status")
+    # Network errors, 408/429/5xx and invalid payloads also need a retry floor.
+    delay = max(OFFICIAL_MIN_INTERVAL_SEC, 1)
+    if status == 429 or status == 503:
+        delay = max(delay, attempt.get("retry_after_seconds", 0))
+    now = dt.datetime.now(dt.timezone.utc)
+    entry.update({
+        "last_attempt_at": now.isoformat().replace("+00:00", "Z"),
+        "last_status": status,
+        "next_retry_at": (now + dt.timedelta(seconds=delay)).isoformat().replace("+00:00", "Z"),
+    })
+    cache["claude"] = entry
+    # Replace atomically so a killed one-shot collector cannot truncate last-good.
+    temp_path = None
+    try:
+        OFFICIAL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=OFFICIAL_CACHE_PATH.parent, delete=False) as handle:
+            temp_path = Path(handle.name)
+            json.dump(cache, handle, ensure_ascii=False)
+        temp_path.replace(OFFICIAL_CACHE_PATH)
+    except OSError:
+        print("Claude official usage: failed to persist retry cooldown", file=sys.stderr)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    transient = status is None or status in (408, 429) or 500 <= status <= 599
+    if not transient:
+        # Never print exception text, headers, tokens or response bodies.
+        print(f"Claude official usage: HTTP {status}; no usable quota; check credentials/endpoint", file=sys.stderr)
+
+
+def fetch_claude_official_usage(
+    token: str, *, attempt: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Call the same account-usage endpoint the Claude Code CLI itself reads.
 
     Same endpoint as 双子续杯 / Claude Code Settings:
@@ -290,7 +366,10 @@ def fetch_claude_official_usage(token: str) -> dict[str, Any] | None:
             "anthropic-beta": "oauth-2025-04-20",
             "User-Agent": "claude-cli",
         },
+        retry_metadata=attempt,
     )
+    if attempt is not None:
+        attempt["last_status"] = status
     if status == 429:
         return None  # caller uses cache; do not invent JSONL "exhausted"
     if not payload:
@@ -685,15 +764,19 @@ def collect_claude(
     source = "unavailable"
     if use_official:
         cached = _get_cached_official("claude")
-        cache_age = _cache_age_seconds(_read_official_cache().get("claude"))
+        entry = _read_official_cache().get("claude")
+        cache_age = _cache_age_seconds(entry)
         # Throttle: Claude oauth/usage 429s under ~5min dual timers (双子续杯: 10–15min).
-        if cached and cache_age is not None and cache_age < OFFICIAL_MIN_INTERVAL_SEC:
+        if _claude_cooldown_active(entry) or (cached and cache_age is not None and cache_age < OFFICIAL_MIN_INTERVAL_SEC):
             official = cached
             source = "claude_oauth_usage"
         else:
             token = read_claude_oauth_token(credentials_path or default_claude_credentials_path())
             if token:
-                official = fetch_claude_official_usage(token)
+                attempt: dict[str, Any] = {}
+                official = fetch_claude_official_usage(token, attempt=attempt)
+                if not official:
+                    _store_claude_failure(attempt)
             if official:
                 _store_cached_official("claude", official)
                 source = "claude_oauth_usage"
