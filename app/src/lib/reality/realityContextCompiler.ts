@@ -22,7 +22,8 @@ export type ActivitySemanticConfidence = "hidden" | "low" | "normal";
 export function lightSemanticLabel(
   light: RealitySnapshot["physical"]["facts"]["lightExposure"],
 ): string | null {
-  if (light === "dark") return "较暗";
+  if (light === "dark") return "黑暗";
+  if (light === "dim") return "较暗";
   if (light === "bright") return "较亮";
   return null;
 }

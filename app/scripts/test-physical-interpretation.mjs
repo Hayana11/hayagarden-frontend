@@ -82,11 +82,19 @@ assert.equal(
   "dark",
 );
 assert.equal(
-  interpretPhysicalState(raw({ light: { ...available, lux: 50 } })).lightExposure,
+  interpretPhysicalState(raw({ light: { ...available, lux: 9.99 } })).lightExposure,
+  "dark",
+);
+assert.equal(
+  interpretPhysicalState(raw({ light: { ...available, lux: 10 } })).lightExposure,
   "dim",
 );
 assert.equal(
-  interpretPhysicalState(raw({ light: { ...available, lux: 154 } })).lightExposure,
+  interpretPhysicalState(raw({ light: { ...available, lux: 99.99 } })).lightExposure,
+  "dim",
+);
+assert.equal(
+  interpretPhysicalState(raw({ light: { ...available, lux: 100 } })).lightExposure,
   "moderate",
 );
 assert.equal(
