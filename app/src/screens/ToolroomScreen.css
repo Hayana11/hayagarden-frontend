@@ -1009,3 +1009,173 @@
     max-height: calc(100% - 32px);
   }
 }
+
+
+.toolroom-device-card dd {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 3px 5px;
+}
+
+.toolroom-device-card dd small {
+  color: #c9b7b8;
+  font: 400 10px/1.35 var(--font-mono);
+  white-space: nowrap;
+}
+
+.toolroom-prompt-text {
+  margin: 0;
+  color: #6b5a55;
+  font: 400 11.5px/2 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.toolroom-prompt-text strong {
+  color: #5e4b4a;
+  font-weight: 700;
+}
+
+.toolroom-sensor-panels > * + * {
+  margin-top: 9px;
+}
+
+.toolroom-sensor-panel {
+  border-radius: 18px;
+}
+
+.toolroom-sensor-panel > button {
+  padding-top: 13px;
+  padding-bottom: 13px;
+}
+
+.toolroom-sensor-body {
+  border-top: 1px solid rgba(183, 110, 121, 0.10);
+}
+
+.toolroom-sensor-body dl {
+  margin: 0;
+  border-top: 0;
+  padding: 2px 17px 8px;
+}
+
+.toolroom-raw-json {
+  margin: 11px 17px 14px;
+}
+
+.toolroom-raw-json summary {
+  display: block;
+  color: #b76e79;
+  cursor: pointer;
+  font: 400 10.5px/1.4 var(--font-mono);
+  letter-spacing: 1px;
+  list-style: none;
+  text-align: left;
+}
+
+.toolroom-raw-json summary::-webkit-details-marker {
+  display: none;
+}
+
+.toolroom-raw-json summary::before {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 8px 2px 1px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  content: '';
+  vertical-align: middle;
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.toolroom-raw-json[open] summary::before {
+  margin-bottom: -2px;
+  transform: rotate(225deg);
+}
+
+.toolroom-raw-json pre {
+  max-height: 220px;
+  margin: 9px 0 0;
+  overflow: auto;
+  border-radius: 10px;
+  padding: 10px 11px;
+  background: rgba(246, 239, 236, 0.82);
+  color: #a08f8c;
+  font: 400 10px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .toolroom-root button:focus,
+  .toolroom-root button:focus-visible {
+    outline: none;
+    outline-offset: 0;
+    box-shadow: none;
+  }
+}
+
+.toolroom-native-panel > button > em:not(.is-live) {
+  background: rgba(199, 185, 181, 0.18);
+  color: #998d89;
+}
+
+.toolroom-sensor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 17px 10px;
+}
+
+.toolroom-sensor-heading > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.toolroom-sensor-heading > span > * + * {
+  margin-top: 2px;
+}
+
+.toolroom-sensor-heading strong {
+  color: #5a4e4b;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.toolroom-sensor-heading small {
+  color: #bfa9ac;
+  font: 400 10.5px/1.4 var(--font-mono);
+}
+
+.toolroom-sensor-heading em {
+  flex: none;
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: rgba(199, 185, 181, 0.18);
+  color: #998d89;
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+.toolroom-sensor-heading em.is-live {
+  background: rgba(143, 187, 134, 0.14);
+  color: #6b8c62;
+}
+
+.toolroom-raw-json-all {
+  margin-top: 11px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.toolroom-raw-json-all pre {
+  margin-bottom: 11px;
+}

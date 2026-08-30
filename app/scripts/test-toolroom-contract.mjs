@@ -43,6 +43,20 @@ assert.match(css, /\.toolroom-tool-detail p\s*\{[\s\S]*?color:\s*#6b5a55;[\s\S]*
 assert.match(screen, /GROUP_ICON_PATHS/);
 assert.match(screen, /<ToolroomGroupIcon/);
 assert.match(screen, /transportLabel/);
+assert.match(screen, /nativePanels/);
+assert.match(screen, /sensorPanels/);
+assert.match(screen, /加速度计/);
+assert.match(screen, /陀螺仪/);
+assert.match(screen, /<details className=\"toolroom-raw-json toolroom-raw-json-all\"/);
+assert.match(screen, /formatRelativeTime/);
+assert.match(screen, /renderToolroomPromptSegment/);
+assert.match(screen, /toolroom-sensor-heading/);
+assert.doesNotMatch(screen, /sensorPanels\.map\(\(sensor\) => \{[\s\S]*aria-expanded/);
+assert.match(screen, /<summary>原始JSON<\/summary>/);
+
+assert.match(css, /\.toolroom-root button:focus-visible/);
+assert.match(css, /\.toolroom-raw-json/);
+
 assert.match(screen, /return 'Canary'/);
 assert.match(screen, /function ToolroomDeviceIcon/);
 assert.match(screen, /ToolroomDeviceIcon kind="phone"/);
