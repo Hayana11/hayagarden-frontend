@@ -57,7 +57,10 @@
 }
 
 .toolroom-tabs {
-  flex: none;
+  display: flex;
+  flex: 0 0 auto;
+  align-self: center;
+  box-sizing: border-box;
   width: calc(100% - 44px);
   max-width: 386px;
   margin: 16px auto 4px;
@@ -67,7 +70,12 @@
 }
 
 .toolroom-tab {
-  flex: 1;
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 0;
   border: 0;
   border-radius: 14px;
   padding: 11px 0;
@@ -938,14 +946,14 @@
   backdrop-filter: blur(4px);
 }
 
-.toolroom-mcp-dialog {
+.toolroom-mcp-shell {
   position: relative;
+  box-sizing: border-box;
   width: 100%;
   max-width: 380px;
   height: 620px;
   max-height: calc(100% - 24px);
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow: hidden;
   border: 1px solid rgba(183, 110, 121, 0.12);
   border-radius: 26px;
   background: rgba(255, 249, 249, 0.98);
@@ -953,17 +961,33 @@
   color: var(--color-text);
 }
 
-.toolroom-mcp-dialog::before {
+.toolroom-mcp-shell::before {
   position: absolute;
   top: 11px;
   right: 11px;
   bottom: 11px;
   left: 11px;
-  z-index: 0;
+  z-index: 2;
   border: 1px solid rgba(183, 110, 121, 0.16);
   border-radius: 20px;
   content: '';
   pointer-events: none;
+}
+
+.toolroom-mcp-dialog {
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 0;
+  border-radius: 26px;
+  background: transparent;
+  color: inherit;
 }
 
 .toolroom-mcp-dialog::-webkit-scrollbar {
@@ -1118,8 +1142,9 @@
 }
 
 .toolroom-mcp-icon-option {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   height: 52px;
   margin: 0;
@@ -1214,9 +1239,9 @@
 
 
 @media (max-width: 360px) {
-  .toolroom-mcp-dialog {
-    height: min(620px, calc(100vh - 32px));
-    max-height: calc(100% - 24px);
+  .toolroom-mcp-shell {
+    height: 620px;
+    max-height: calc(100vh - 32px);
   }
 }
 
