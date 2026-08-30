@@ -209,15 +209,6 @@ function transportLabel(group: InventoryGroup): string {
   return '其他';
 }
 
-const ORIENTATION_LABELS = {
-  face_up: '正面朝上',
-  face_down: '背面朝上',
-  vertical: '竖直',
-  horizontal: '横向',
-  tilted: '倾斜',
-  unknown: '未知',
-} as const;
-
 const MOTION_LABELS = {
   still: '静止',
   moving: '移动中',
