@@ -22,18 +22,18 @@ export type ActivitySemanticConfidence = "hidden" | "low" | "normal";
 export function lightSemanticLabel(
   light: RealitySnapshot["physical"]["facts"]["lightExposure"],
 ): string | null {
-  if (light === "dark") return "环境【较暗】";
-  if (light === "bright") return "环境【较亮】";
+  if (light === "dark") return "较暗";
+  if (light === "bright") return "较亮";
   return null;
 }
 
 export function orientationSemanticLabel(
   orientation: RealitySnapshot["physical"]["facts"]["orientation"],
 ): string | null {
-  if (orientation === "face_up") return "姿态【正面朝上平放】";
-  if (orientation === "face_down") return "姿态【正面朝下扣放】";
-  if (orientation === "vertical") return "姿态【竖向】";
-  if (orientation === "horizontal") return "姿态【横向】";
+  if (orientation === "face_up") return "正面朝上平放";
+  if (orientation === "face_down") return "正面朝下扣放";
+  if (orientation === "vertical") return "竖向";
+  if (orientation === "horizontal") return "横向";
   return null;
 }
 
@@ -44,12 +44,12 @@ export function getActivitySemanticConfidence(possibility: number | null): Activ
 
 function lightClause(snapshot: RealitySnapshot): PromptClause | null {
   const text = lightSemanticLabel(snapshot.physical.facts.lightExposure);
-  return text === null ? null : { key: "lightExposure", text };
+  return text === null ? null : { key: "lightExposure", text: `环境【${text}】` };
 }
 
 function orientationClause(snapshot: RealitySnapshot): PromptClause | null {
   const text = orientationSemanticLabel(snapshot.physical.facts.orientation);
-  return text === null ? null : { key: "orientation", text };
+  return text === null ? null : { key: "orientation", text: `姿态【${text}】` };
 }
 
 function motionClause(motion: PhysicalMotion): PromptClause | null {
