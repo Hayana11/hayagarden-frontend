@@ -7,6 +7,7 @@ changes model/execution visibility.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 from typing import Callable, Iterator
 
 from flask import Blueprint, jsonify, request
@@ -23,6 +24,7 @@ _EXPECTED_TOP_LEVEL = frozenset({"display_name", "endpoint", "auth"})
 _EXPECTED_AUTH_FIELDS = frozenset({"scheme", "credential"})
 _SAFE_DISCOVERY_FAILURE = "DISCOVERY_FAILED"
 _GENERIC_FAILURE = "EXTERNAL_MCP_ADMIN_FAILED"
+_SAFE_CODE_RE = re.compile(r"^[A-Z0-9_]{2,64}$")
 
 
 def _owner_error_response(exc: OwnerAuthError):
@@ -46,10 +48,13 @@ def _safe_server(record) -> dict[str, object]:
 
 
 def _error_code(error: object, fallback: str = _SAFE_DISCOVERY_FAILURE) -> str:
+    code = None
     if isinstance(error, Mapping):
         code = error.get("code")
-        if isinstance(code, str) and code and len(code) <= 128:
-            return code
+    else:
+        code = getattr(error, "code", None)
+    if isinstance(code, str) and _SAFE_CODE_RE.fullmatch(code):
+        return code
     return fallback
 
 
@@ -58,6 +63,12 @@ def _discovery_summary(result: object) -> dict[str, object]:
         return {"status": "FAILED", "reason_code": _SAFE_DISCOVERY_FAILURE, "tool_count": 0}
     status = result.get("status")
     status_value = status if isinstance(status, str) and status else "FAILED"
+    if status_value == "SUCCESS" and result.get("catalog_complete") is not True:
+        return {
+            "status": "FAILED",
+            "reason_code": "INCOMPLETE_DISCOVERY",
+            "tool_count": 0,
+        }
     tools = result.get("tools")
     tool_count = len(tools) if isinstance(tools, list) and status_value == "SUCCESS" else 0
     reason_code = None if status_value == "SUCCESS" else _error_code(result.get("error"))
@@ -140,9 +151,9 @@ def create_external_mcp_admin_blueprint(
                         provenance="toolroom-owner",
                     )
                 except DuplicateEndpointError as exc:
-                    return jsonify({"ok": False, "error": exc.code}), 409
+                    return jsonify({"ok": False, "error": _error_code(exc, "DUPLICATE_ACTIVE_ENDPOINT")}), 409
                 except RegistryValidationError as exc:
-                    return jsonify({"ok": False, "error": exc.code}), 400
+                    return jsonify({"ok": False, "error": _error_code(exc, "EXTERNAL_MCP_ADMIN_FAILED")}), 400
                 except RegistryError as exc:
                     return jsonify({"ok": False, "error": exc.code}), 400
 
@@ -163,19 +174,18 @@ def create_external_mcp_admin_blueprint(
                         )
                     auth_configured = True
                 except Exception as exc:
-                    code = getattr(exc, "code", "AUTH_CONFIGURATION_FAILED")
-                    if not isinstance(code, str) or not code:
-                        code = "AUTH_CONFIGURATION_FAILED"
                     return _partial_response(
                         server=server,
                         scheme=scheme,
                         auth_configured=False,
                         discovery={
                             "status": "NOT_ATTEMPTED",
-                            "reason_code": code,
+                            "reason_code": _error_code(exc, "AUTH_CONFIGURATION_FAILED"),
                             "tool_count": 0,
                         },
                     )
+
+                server = graph.server_registry.get(server.server_id)
 
                 try:
                     discovery_result = graph.runtime.discover(server.server_id)
