@@ -9,6 +9,10 @@ export interface ElpisPhysicalBridge {
   getPhysicalState?: () => unknown;
 }
 
+export interface ElpisActivityBridge {
+  getActivityState?: () => unknown;
+}
+
 export type RealityLifecycleEvent =
   | "visibilitychange"
   | "pagehide"
@@ -17,6 +21,7 @@ export type RealityLifecycleEvent =
 export interface RealityRuntimeEnvironment {
   now: () => number;
   getBridge: () => ElpisPhysicalBridge | undefined;
+  getActivityBridge?: () => ElpisActivityBridge | undefined;
   isVisible: () => boolean;
   setInterval: (callback: () => void, intervalMs: number) => unknown;
   clearInterval: (handle: unknown) => void;
@@ -109,6 +114,7 @@ export class PhysicalRealityRuntime {
     this.stopPolling();
     this.detachListeners();
     this.resetIfNeeded();
+    this.store.resetActivity();
   }
 
   private attachListeners(): void {
@@ -166,6 +172,11 @@ export class PhysicalRealityRuntime {
   }
 
   private refresh(): void {
+    this.refreshPhysical();
+    this.refreshActivity();
+  }
+
+  private refreshPhysical(): void {
     let bridge: ElpisPhysicalBridge | undefined;
     try {
       bridge = this.environment.getBridge();
@@ -208,6 +219,54 @@ export class PhysicalRealityRuntime {
     this.store.ingestPhysical(parsed, this.environment.now());
   }
 
+  private refreshActivity(): void {
+    if (typeof this.environment.getActivityBridge !== "function") {
+      this.store.resetActivity();
+      return;
+    }
+
+    let bridge: ElpisActivityBridge | undefined;
+    try {
+      bridge = this.environment.getActivityBridge();
+    } catch {
+      this.store.resetActivity();
+      return;
+    }
+
+    if (!bridge || typeof bridge.getActivityState !== "function") {
+      this.store.resetActivity();
+      return;
+    }
+
+    let result: unknown;
+    try {
+      result = bridge.getActivityState();
+    } catch {
+      this.store.resetActivity();
+      return;
+    }
+
+    if (typeof result !== "string") {
+      this.store.resetActivity();
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result);
+    } catch {
+      this.store.resetActivity();
+      return;
+    }
+
+    if (!isSchemaV1Object(parsed)) {
+      this.store.resetActivity();
+      return;
+    }
+
+    this.store.ingestActivity(parsed);
+  }
+
   private resetIfNeeded(): void {
     const snapshot: RealitySnapshot = this.store.getSnapshot();
     const physical = snapshot.physical;
@@ -233,6 +292,8 @@ function createProductionEnvironment(): RealityRuntimeEnvironment {
     now: () => Date.now(),
     getBridge: () =>
       typeof window === "undefined" ? undefined : window.ElpisPhysical,
+    getActivityBridge: () =>
+      typeof window === "undefined" ? undefined : window.ElpisActivity,
     isVisible: () =>
       typeof document !== "undefined" &&
       document.visibilityState === "visible",
@@ -261,6 +322,7 @@ function createProductionEnvironment(): RealityRuntimeEnvironment {
 declare global {
   interface Window {
     ElpisPhysical?: ElpisPhysicalBridge;
+    ElpisActivity?: ElpisActivityBridge;
   }
 }
 

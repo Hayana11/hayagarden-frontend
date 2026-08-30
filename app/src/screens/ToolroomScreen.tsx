@@ -1,12 +1,12 @@
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import type { RealityPromptSegment } from '../lib/reality/realityContextCompiler';
+import { getActivitySemanticConfidence, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { http } from '../lib/http';
 import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { realityStore } from '../lib/reality/realityRuntime';
-import { getRealityFreshness } from '../lib/reality/realityStore';
+import { getActivityFreshness, getRealityFreshness } from '../lib/reality/realityStore';
 import './ToolroomScreen.css';
 
 type ElpisNativeBridge = {
@@ -213,6 +213,7 @@ const ORIENTATION_LABELS = {
   face_up: '正面朝上',
   face_down: '背面朝上',
   vertical: '竖直',
+  horizontal: '横向',
   tilted: '倾斜',
   unknown: '未知',
 } as const;
@@ -237,12 +238,28 @@ const LIGHT_LABELS = {
   unknown: '未知',
 } as const;
 
+const ACTIVITY_LABELS: Record<string, string> = {
+  still: '静止',
+  walking: '步行',
+  running: '跑步',
+  cycling: '骑行',
+  in_vehicle: '车载',
+  unknown: '未知',
+};
+
 function sourceLabel(provider: string | null): string {
   if (!provider) return 'Legacy';
   if (provider.indexOf('mcp__home__') === 0) return 'Home MCP';
   if (provider.indexOf('mcp__codebase') === 0) return 'Codebase MCP';
   if (provider.indexOf('Claude Code') === 0) return 'Claude Code';
   return provider;
+}
+
+
+function formatActivityAge(status: 'fresh' | 'stale' | 'unknown', sampledAt: number | null, nowMs: number): string {
+  if (sampledAt === null || !Number.isFinite(sampledAt)) return 'unknown';
+  const ageSeconds = Math.max(0, Math.floor((nowMs - sampledAt) / 1000));
+  return status === 'stale' ? 'stale · ' + ageSeconds + 's' : ageSeconds + 's';
 }
 
 function formatObservedAt(observedAt: number | null): string {
@@ -383,6 +400,7 @@ export function ToolroomScreen() {
   const [rawJsonFrozen, setRawJsonFrozen] = useState(false);
   const [rawJsonSnapshot, setRawJsonSnapshot] = useState<string | null>(null);
   const [rawJsonNotice, setRawJsonNotice] = useState('');
+  const [activityNow, setActivityNow] = useState(() => Date.now());
 
   const reality = useSyncExternalStore(
     (listener) => realityStore.subscribe(listener),
@@ -535,6 +553,32 @@ export function ToolroomScreen() {
   };
 
   useEffect(() => {
+    let activityUiTimer: number | null = null;
+    const refreshActivityUi = () => {
+      if (document.visibilityState === 'visible') setActivityNow(Date.now());
+    };
+    const stopActivityUiPolling = () => {
+      if (activityUiTimer !== null) {
+        window.clearInterval(activityUiTimer);
+        activityUiTimer = null;
+      }
+    };
+    const startActivityUiPolling = () => {
+      stopActivityUiPolling();
+      refreshActivityUi();
+      if (document.visibilityState === 'visible') {
+        activityUiTimer = window.setInterval(refreshActivityUi, 1000);
+      }
+    };
+    startActivityUiPolling();
+    document.addEventListener('visibilitychange', startActivityUiPolling);
+    return () => {
+      stopActivityUiPolling();
+      document.removeEventListener('visibilitychange', startActivityUiPolling);
+    };
+  }, []);
+
+  useEffect(() => {
     void loadInventory();
     void loadCompanionHints();
   }, [loadCompanionHints, loadInventory]);
@@ -636,6 +680,14 @@ export function ToolroomScreen() {
   };
 
   const freshness = getRealityFreshness(reality, Date.now());
+  const activityFreshness = getActivityFreshness(reality, activityNow);
+  const activity = reality.activity;
+  const activityConfidence = activity.source === 'hms'
+    && activityFreshness.status === 'fresh'
+    ? getActivitySemanticConfidence(activity.possibility)
+    : 'hidden';
+  const activitySemanticReady = activityConfidence !== 'hidden'
+    && activity.userActivity !== 'unknown';
   const facts = reality.physical.facts;
   const statusLabel = freshness.status === 'fresh'
     ? '实时'
@@ -963,6 +1015,45 @@ export function ToolroomScreen() {
               <p>当前网页没有可证明的桌面观测桥接，因此不显示原型里的示例应用或窗口。</p>
             </article>
           </div>
+
+          <div className="toolroom-section-heading">
+            <div>
+              <strong>HMS Activity</strong>
+              <span>实时状态 · 复用既有 ElpisActivity bridge</span>
+            </div>
+            <em className={activityFreshness.status === 'fresh' ? 'is-live' : undefined}>{activityFreshness.status}</em>
+          </div>
+          <article className="toolroom-hms-activity toolroom-native-panel">
+            <div className="toolroom-hms-activity-head">
+              <span>
+                <strong>Semantic</strong>
+                <small>只读；stale / unknown 不进入 prompt</small>
+              </span>
+              <em className={activitySemanticReady ? 'is-live' : undefined}>
+                {activitySemanticReady ? 'fresh' : activityFreshness.status}
+              </em>
+            </div>
+            <dl>
+              <div><dt>环境光线</dt><dd>{reality.physical.facts.lightExposure === 'dark' ? '较暗' : reality.physical.facts.lightExposure === 'bright' ? '较亮' : '—'}</dd></div>
+              <div><dt>设备朝向</dt><dd>{reality.physical.facts.orientation === 'face_up' ? '正面朝上平放' : reality.physical.facts.orientation === 'face_down' ? '正面朝下扣放' : reality.physical.facts.orientation === 'vertical' ? '竖向' : reality.physical.facts.orientation === 'horizontal' ? '横向' : '—'}</dd></div>
+              <div><dt>设备物理状态</dt><dd>{MOTION_LABELS[reality.physical.motion]}</dd></div>
+              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] + (activityConfidence === 'low' ? '（低置信）' : '') : '—'}</dd></div>
+              <div><dt>置信度</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility) + '%'}</dd></div>
+              <div><dt>activity age</dt><dd>{formatActivityAge(activityFreshness.status, activity.activitySampledAt, activityNow)}</dd></div>
+              <div><dt>activity source</dt><dd>{activity.source}</dd></div>
+            </dl>
+            <div className="toolroom-hms-activity-divider" aria-hidden="true" />
+            <div className="toolroom-hms-activity-label">Technical diagnostic</div>
+            <dl>
+              <div><dt>registration</dt><dd>{activity.registration}</dd></div>
+              <div><dt>lastErrorCode</dt><dd>{activity.lastErrorCode || '—'}</dd></div>
+              <div><dt>callbackReceived</dt><dd>{activity.callbackReceived ? 'yes' : 'no'}</dd></div>
+              <div><dt>intentHasExtras</dt><dd>{activity.intentHasExtras ? 'yes' : 'no'}</dd></div>
+              <div><dt>responsePresent</dt><dd>{activity.responsePresent ? 'yes' : 'no'}</dd></div>
+              <div><dt>activityDataCount</dt><dd>{String(activity.activityDataCount)}</dd></div>
+              <div><dt>raw activity code</dt><dd>{activity.rawCandidate === null ? '—' : String(activity.rawCandidate)}</dd></div>
+            </dl>
+          </article>
 
           <div className="toolroom-section-heading">
             <div><strong>重要通知</strong></div>

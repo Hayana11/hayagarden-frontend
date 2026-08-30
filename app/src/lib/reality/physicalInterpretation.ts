@@ -9,6 +9,7 @@ export type PhysicalOrientation =
   | "face_up"
   | "face_down"
   | "vertical"
+  | "horizontal"
   | "tilted"
   | "unknown";
 
@@ -94,11 +95,12 @@ function orientationFrom(rawSensor: unknown): PhysicalOrientation {
     return z > 0 ? "face_up" : z < 0 ? "face_down" : "unknown";
   }
 
-  if (
-    Math.max(Math.abs(x), Math.abs(y)) / magnitude >=
-    DOMINANT_AXIS_RATIO
-  ) {
+  if (Math.abs(y) / magnitude >= DOMINANT_AXIS_RATIO) {
     return "vertical";
+  }
+
+  if (Math.abs(x) / magnitude >= DOMINANT_AXIS_RATIO) {
+    return "horizontal";
   }
 
   return "tilted";

@@ -1440,3 +1440,87 @@
 .toolroom-raw-json-all pre {
   margin-bottom: 11px;
 }
+
+
+.toolroom-hms-activity {
+  border-left: 3px solid #9FB6C7;
+  padding: 15px 17px 17px;
+}
+
+.toolroom-hms-activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.toolroom-hms-activity-head > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.toolroom-hms-activity-head > span > * + * {
+  margin-top: 3px;
+}
+
+.toolroom-hms-activity-head strong {
+  color: #5a4e4b;
+  font-size: 13.5px;
+  letter-spacing: 1px;
+}
+
+.toolroom-hms-activity-head small,
+.toolroom-hms-activity-label {
+  color: #b7a29c;
+  font: 400 10.5px/1.4 var(--font-mono);
+}
+
+.toolroom-hms-activity-head em {
+  flex: none;
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: rgba(199, 185, 181, 0.18);
+  color: #998d89;
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+.toolroom-hms-activity-head em.is-live {
+  background: rgba(143, 187, 134, 0.14);
+  color: #6b8c62;
+}
+
+.toolroom-hms-activity dl {
+  margin: 8px 0 0;
+}
+
+.toolroom-hms-activity dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-top: 1px solid rgba(183, 110, 121, 0.08);
+  padding: 8px 0;
+}
+
+.toolroom-hms-activity dt {
+  color: #b7a29c;
+  font: 400 10.5px/1.4 var(--font-mono);
+}
+
+.toolroom-hms-activity dd {
+  margin-left: 12px;
+  color: #7e6c68;
+  font: 400 11.5px/1.4 var(--font-mono);
+  text-align: right;
+  word-break: break-word;
+}
+
+.toolroom-hms-activity-divider {
+  margin: 10px 0 9px;
+  border-top: 1px dashed rgba(183, 110, 121, 0.18);
+}
+
+.toolroom-hms-activity-label {
+  color: #b76e79;
+  letter-spacing: 1px;
+}

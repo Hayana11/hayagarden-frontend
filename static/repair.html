@@ -66,6 +66,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .physical-diag-details summary{font-size:11px;color:var(--primary);cursor:pointer;}
 .physical-diag-error{font-size:11px;color:var(--red);line-height:1.45;margin-top:8px;min-height:15px;}
 
+
 /* 生成锁急救 */
 .fix-card{background:linear-gradient(135deg,#fff9f0,#fff);border:1px solid #f0dfc8;border-radius:14px;padding:14px 16px;margin-bottom:12px;}
 .fix-title{font-size:13px;font-weight:600;color:#8a5a18;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
@@ -658,6 +659,7 @@ document.addEventListener('visibilitychange', function () {
   if (document.visibilityState === 'visible') { refreshNotificationDiagnostic(); }
 });
 // P2B_NOTIFICATION_DIAG_JS_END
+
 /* ===== P2A NativeBridge Lite diagnostic (local display only) ===== */
 function getElpisNative() {
   try {

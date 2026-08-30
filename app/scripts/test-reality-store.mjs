@@ -68,6 +68,21 @@ assert.deepEqual(initialStore.getSnapshot(), {
     motion: "unknown",
     observedAt: null,
   },
+  activity: {
+    raw: null,
+    userActivity: "unknown",
+    possibility: null,
+    activitySampledAt: null,
+    source: "none",
+    registration: "unknown",
+    lastErrorCode: null,
+    callbackReceived: false,
+    intentHasExtras: false,
+    responsePresent: false,
+    activityDataCount: 0,
+    rawCandidate: null,
+    rawPossibility: null,
+  },
 });
 
 const factsStore = new RealityStore();
