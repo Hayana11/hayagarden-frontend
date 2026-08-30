@@ -271,7 +271,6 @@ const lightDim = compile({ motion: "unknown", lightExposure: "dim" });
 assert.equal(lightDim.text, "环境【较暗】。");
 assert.equal(compile({ motion: "unknown", lightExposure: "bright" }).text, "环境【较亮】。");
 assert.equal(compile({ motion: "unknown", lightExposure: "moderate" }).text, "");
-assert.equal(compile({ motion: "unknown", lightExposure: "moderate" }).text, "");
 assert.equal(compile({ motion: "unknown", orientation: "face_up" }).text, "姿态【正面朝上平放】。");
 assert.equal(compile({ motion: "unknown", orientation: "face_down" }).text, "姿态【正面朝下扣放】。");
 assert.equal(compile({ motion: "unknown", orientation: "vertical" }).text, "姿态【竖向】。");
