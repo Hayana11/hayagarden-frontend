@@ -1,5 +1,5 @@
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import type { RealityPromptSegment } from '../lib/reality/realityContextCompiler';
+import { getActivitySemanticConfidence, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { http } from '../lib/http';
@@ -242,7 +242,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
   walking: '步行',
   running: '跑步',
   cycling: '骑行',
-  in_vehicle: '乘车',
+  in_vehicle: '车载',
   unknown: '未知',
 };
 
@@ -681,8 +681,11 @@ export function ToolroomScreen() {
   const freshness = getRealityFreshness(reality, Date.now());
   const activityFreshness = getActivityFreshness(reality, activityNow);
   const activity = reality.activity;
-  const activitySemanticReady = activity.source === 'hms'
+  const activityConfidence = activity.source === 'hms'
     && activityFreshness.status === 'fresh'
+    ? getActivitySemanticConfidence(activity.possibility)
+    : 'hidden';
+  const activitySemanticReady = activityConfidence !== 'hidden'
     && activity.userActivity !== 'unknown';
   const facts = reality.physical.facts;
   const statusLabel = freshness.status === 'fresh'
@@ -1030,10 +1033,13 @@ export function ToolroomScreen() {
               </em>
             </div>
             <dl>
-              <div><dt>userActivity</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] : 'unknown'}</dd></div>
+              <div><dt>环境光线</dt><dd>{reality.physical.facts.lightExposure === 'dark' ? '较暗' : reality.physical.facts.lightExposure === 'bright' ? '较亮' : '—'}</dd></div>
+              <div><dt>手机朝向</dt><dd>{reality.physical.facts.orientation === 'face_up' ? '正面朝上平放' : reality.physical.facts.orientation === 'face_down' ? '正面朝下扣放' : reality.physical.facts.orientation === 'vertical' ? '竖向' : '—'}</dd></div>
+              <div><dt>设备物理状态</dt><dd>{MOTION_LABELS[reality.physical.motion]}</dd></div>
+              <div><dt>设备推断活动</dt><dd>{activitySemanticReady ? ACTIVITY_LABELS[activity.userActivity] + (activityConfidence === 'low' ? '（低置信）' : '') : '—'}</dd></div>
+              <div><dt>置信度</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility) + '%'}</dd></div>
               <div><dt>activity age</dt><dd>{formatActivityAge(activityFreshness.status, activity.activitySampledAt, activityNow)}</dd></div>
               <div><dt>activity source</dt><dd>{activity.source}</dd></div>
-              <div><dt>possibility</dt><dd>{activity.possibility === null ? '—' : String(activity.possibility)}</dd></div>
             </dl>
             <div className="toolroom-hms-activity-divider" aria-hidden="true" />
             <div className="toolroom-hms-activity-label">Technical diagnostic</div>
