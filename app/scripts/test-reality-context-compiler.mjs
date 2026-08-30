@@ -236,6 +236,25 @@ assert.equal(compile({ motion: "unknown", charging: false, batteryLevel: 63 }).t
 assert.equal(compile({ motion: "unknown", charging: true, batteryLevel: 63 }).text, "正在充电。");
 assert.equal(compile({ motion: "unknown", charging: true, batteryLevel: 12 }).text, "正在充电，电量【12%】。");
 
+// HMS confidence gate boundaries and freshness ordering.
+const activityCompile = (possibility, extra = {}) => compile({
+  motion: "moving",
+  userActivity: "walking",
+  activitySource: "hms",
+  activitySampledAt: 0,
+  activityPossibility: possibility,
+  charging: true,
+  batteryLevel: 12,
+  ...extra,
+  now: extra.now ?? 0,
+});
+assert.equal(activityCompile(49).text, "设备【移动中】，正在充电，电量【12%】。");
+assert.equal(activityCompile(50).text, "设备【移动中】，推断活动【步行（低置信）】，正在充电，电量【12%】。");
+assert.equal(activityCompile(69).text, "设备【移动中】，推断活动【步行（低置信）】，正在充电，电量【12%】。");
+assert.equal(activityCompile(70).text, "设备【移动中】，推断活动【步行】，正在充电，电量【12%】。");
+assert.equal(activityCompile(100).text, "设备【移动中】，推断活动【步行】，正在充电，电量【12%】。");
+assert.equal(activityCompile(100, { now: 180001 }).text, "设备【移动中】，正在充电，电量【12%】。");
+
 const lightDark = compile({ motion: "unknown", lightExposure: "dark" });
 assert.equal(lightDark.text, "环境【较暗】。");
 assert.equal(compile({ motion: "unknown", lightExposure: "bright" }).text, "环境【较亮】。");
