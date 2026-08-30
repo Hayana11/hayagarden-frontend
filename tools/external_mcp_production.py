@@ -107,8 +107,8 @@ def _validate_existing_db() -> None:
         raise _initialization_error("EXTERNAL_MCP_DB_INVALID")
 
 
-def _create_db_exclusively() -> tuple[bool, tuple[int, int] | None]:
-    """Ensure the exact DB file exists, returning whether this call created it."""
+def _create_db_exclusively() -> None:
+    """Ensure the exact DB file exists without taking ownership of cleanup."""
     try:
         metadata = os.lstat(EXTERNAL_MCP_DB_PATH)
     except FileNotFoundError:
@@ -118,7 +118,7 @@ def _create_db_exclusively() -> tuple[bool, tuple[int, int] | None]:
 
     if metadata is not None:
         _validate_existing_db()
-        return False, (metadata.st_dev, metadata.st_ino)
+        return
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -127,8 +127,7 @@ def _create_db_exclusively() -> tuple[bool, tuple[int, int] | None]:
         fd = os.open(EXTERNAL_MCP_DB_PATH, flags, 0o600)
     except FileExistsError:
         _validate_existing_db()
-        metadata = os.lstat(EXTERNAL_MCP_DB_PATH)
-        return False, (metadata.st_dev, metadata.st_ino)
+        return
     except OSError as exc:
         raise _initialization_error("EXTERNAL_MCP_DB_CREATE_FAILED") from exc
     try:
@@ -137,36 +136,7 @@ def _create_db_exclusively() -> tuple[bool, tuple[int, int] | None]:
     finally:
         os.close(fd)
     _validate_existing_db()
-    return True, (metadata.st_dev, metadata.st_ino)
-
-
-def _sidecar_paths() -> tuple[str, ...]:
-    return tuple(f"{EXTERNAL_MCP_DB_PATH}{suffix}" for suffix in ("-journal", "-wal", "-shm"))
-
-
-def _safe_cleanup_new_db(identity: tuple[int, int], prior_sidecars: set[str]) -> None:
-    try:
-        metadata = os.lstat(EXTERNAL_MCP_DB_PATH)
-    except OSError:
-        metadata = None
-    if metadata is not None and stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
-        if (metadata.st_dev, metadata.st_ino) == identity:
-            try:
-                os.unlink(EXTERNAL_MCP_DB_PATH)
-            except OSError:
-                pass
-    for sidecar in _sidecar_paths():
-        if sidecar in prior_sidecars:
-            continue
-        try:
-            sidecar_metadata = os.lstat(sidecar)
-        except OSError:
-            continue
-        if stat.S_ISREG(sidecar_metadata.st_mode) and not stat.S_ISLNK(sidecar_metadata.st_mode):
-            try:
-                os.unlink(sidecar)
-            except OSError:
-                pass
+    return
 
 
 def _build_graph(connection: sqlite3.Connection) -> ExternalMcpProductionGraph:
@@ -234,21 +204,15 @@ def open_external_mcp_production() -> Iterator[ExternalMcpProductionGraph]:
     """Open the one production external-MCP authority graph."""
     _validate_external_key()
     _validate_db_parent()
-    prior_sidecars = {path for path in _sidecar_paths() if os.path.lexists(path)}
-    newly_created, identity = _create_db_exclusively()
-    assert identity is not None
+    _create_db_exclusively()
     connection: sqlite3.Connection | None = None
-    yielded = False
     try:
         connection = sqlite3.connect(EXTERNAL_MCP_DB_PATH, timeout=5.0)
         graph = _build_graph(connection)
-        yielded = True
         yield graph
     finally:
         if connection is not None:
             connection.close()
-        if newly_created and not yielded:
-            _safe_cleanup_new_db(identity, prior_sidecars)
 
 
 __all__ = [

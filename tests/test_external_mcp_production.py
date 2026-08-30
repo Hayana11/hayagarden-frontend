@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import socket
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,7 @@ from tools.external_mcp_production import (
     ExternalMcpProductionInitializationError,
     open_external_mcp_production,
 )
+from tools import external_mcp_production as production
 from tools.external_secret_store import ExternalSecretStore
 
 
@@ -217,12 +220,76 @@ class ProductionCompositionTests(unittest.TestCase):
                 "keep_me",
             )
 
-    def test_new_db_pre_yield_failure_is_cleaned_safely(self) -> None:
-        with patch("tools.external_mcp_production._build_graph", side_effect=RuntimeError("construction failed")):
+    def test_new_db_pre_yield_failure_preserves_forensic_db(self) -> None:
+        sidecar = Path(str(self.db) + "-journal")
+
+        def fail_after_creating_sidecar(connection):
+            sidecar.write_bytes(b"forensic sidecar")
+            raise RuntimeError("construction failed")
+
+        with patch("tools.external_mcp_production._build_graph", side_effect=fail_after_creating_sidecar):
             with self.assertRaises(RuntimeError):
                 with open_external_mcp_production():
                     pass
-        self.assertFalse(self.db.exists())
+        self.assertTrue(self.db.exists())
+        self.assertTrue(sidecar.exists())
+
+    def test_creator_failure_never_unlinks_db_used_by_successful_follower(self) -> None:
+        creator_entered = threading.Event()
+        creator_release = threading.Event()
+        follower_opened = threading.Event()
+        follower_release = threading.Event()
+        creator_result: dict[str, object] = {}
+        follower_result: dict[str, object] = {}
+        original_build = production._build_graph
+
+        def build_graph(connection):
+            if threading.current_thread().name == "c1w-creator":
+                creator_entered.set()
+                if not creator_release.wait(timeout=10):
+                    raise AssertionError("creator barrier timeout")
+                raise RuntimeError("creator construction failed")
+            return original_build(connection)
+
+        def creator() -> None:
+            try:
+                with open_external_mcp_production():
+                    pass
+            except BaseException as exc:
+                creator_result["error"] = exc
+
+        def follower() -> None:
+            try:
+                with open_external_mcp_production() as graph:
+                    follower_opened.set()
+                    if not follower_release.wait(timeout=10):
+                        raise AssertionError("follower barrier timeout")
+                    follower_result["db_exists"] = self.db.exists()
+                    follower_result["connection_usable"] = (
+                        graph.server_registry._connection.execute("SELECT 1").fetchone()[0] == 1
+                    )
+            except BaseException as exc:
+                follower_result["error"] = exc
+
+        with patch("tools.external_mcp_production._build_graph", side_effect=build_graph):
+            creator_thread = threading.Thread(target=creator, name="c1w-creator")
+            follower_thread = threading.Thread(target=follower, name="c1w-follower")
+            creator_thread.start()
+            self.assertTrue(creator_entered.wait(timeout=10))
+            follower_thread.start()
+            self.assertTrue(follower_opened.wait(timeout=10))
+            creator_release.set()
+            creator_thread.join(timeout=10)
+            self.assertFalse(creator_thread.is_alive())
+            self.assertIsInstance(creator_result.get("error"), RuntimeError)
+            self.assertTrue(self.db.exists())
+            follower_release.set()
+            follower_thread.join(timeout=10)
+            self.assertFalse(follower_thread.is_alive())
+
+        self.assertNotIn("error", follower_result)
+        self.assertIs(follower_result.get("db_exists"), True)
+        self.assertIs(follower_result.get("connection_usable"), True)
 
     def test_db_symlink_mode_hardlink_and_wrong_owner_fail_closed(self) -> None:
         if os.name != "posix":
@@ -279,11 +346,17 @@ class ProductionCompositionTests(unittest.TestCase):
             self.parent_patcher.start()
 
     def test_open_has_zero_secret_lookup_decrypt_child_and_network(self) -> None:
-        with patch.object(ExternalSecretStore, "_load_runtime_record", side_effect=AssertionError("secret lookup")) as lookup, \
+        with patch("socket.getaddrinfo", side_effect=AssertionError("network")) as getaddrinfo, \
+            patch("socket.create_connection", side_effect=AssertionError("network")) as create_connection, \
+            patch.object(socket.socket, "connect", side_effect=AssertionError("network")) as connect, \
+            patch.object(ExternalSecretStore, "_load_runtime_record", side_effect=AssertionError("secret lookup")) as lookup, \
             patch("tools.external_secret_store.decrypt_secret", side_effect=AssertionError("decrypt")) as decrypt, \
             patch("tools.external_mcp_runtime.subprocess.Popen", side_effect=AssertionError("node child")) as child:
             with open_external_mcp_production():
                 pass
+        getaddrinfo.assert_not_called()
+        create_connection.assert_not_called()
+        connect.assert_not_called()
         lookup.assert_not_called()
         decrypt.assert_not_called()
         child.assert_not_called()
