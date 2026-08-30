@@ -5,6 +5,7 @@ import {
   DEFAULT_LIMITS,
   DISCOVERY_STATUS,
   classifyAddress,
+  createSafeLookup,
   discoverExternalMcp,
   validateEndpoint,
   validateResolvedAddresses,
@@ -37,6 +38,66 @@ function fixtureFetch({ pages = [{ tools: [] }], statusFor = {}, calls = [] } = 
     return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { ...page } });
   };
 }
+
+function invokeLookup(records, options) {
+  return new Promise((resolve, reject) => {
+    const lookup = createSafeLookup({ resolver: async () => records });
+    lookup('public.example.test', options, (error, address, family) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve({ address, family });
+    });
+  });
+}
+
+test('Node autoSelectFamily all=true lookup contract returns address objects rather than a scalar address', async () => {
+  const result = await invokeLookup([
+    { address: '8.8.8.8', family: 4 },
+    { address: '2606:4700:4700::1111', family: 6 },
+  ], { all: true });
+  assert.deepEqual(result.address, [
+    { address: '8.8.8.8', family: 4 },
+    { address: '2606:4700:4700::1111', family: 6 },
+  ]);
+  assert.equal(result.family, undefined);
+});
+
+test('safe lookup scalar mode returns the first validated address and derived family', async () => {
+  const result = await invokeLookup([
+    { address: '8.8.8.8', family: 4 },
+    { address: '2606:4700:4700::1111', family: 6 },
+  ], { all: false });
+  assert.equal(result.address, '8.8.8.8');
+  assert.equal(result.family, 4);
+});
+
+test('safe lookup derives family from the address instead of resolver metadata', async () => {
+  const result = await invokeLookup([{ address: '8.8.8.8', family: 6 }], { all: false });
+  assert.equal(result.address, '8.8.8.8');
+  assert.equal(result.family, 4);
+});
+
+test('safe lookup all=true fails closed when any resolved address is unsafe', async () => {
+  await assert.rejects(
+    invokeLookup([
+      { address: '8.8.8.8', family: 4 },
+      { address: '10.0.0.1', family: 4 },
+    ], { all: true }),
+    /non-public/,
+  );
+});
+
+test('safe lookup scalar mode fails closed when any resolved address is unsafe', async () => {
+  await assert.rejects(
+    invokeLookup([
+      { address: '8.8.8.8', family: 4 },
+      { address: '10.0.0.1', family: 4 },
+    ], { all: false }),
+    /non-public/,
+  );
+});
 
 test('real SDK initialize + paginated tools/list captures the complete SDK-visible catalog', async () => {
   const calls = [];
