@@ -29,9 +29,15 @@ assert.equal(
 );
 assert.equal(
   interpretPhysicalState(
-    raw({ accelerometer: { ...available, x: 9.8, y: 0, z: 0 } }),
+    raw({ accelerometer: { ...available, x: 0, y: 9.8, z: 0 } }),
   ).orientation,
   "vertical",
+);
+assert.equal(
+  interpretPhysicalState(
+    raw({ accelerometer: { ...available, x: 9.8, y: 0, z: 0 } }),
+  ).orientation,
+  "horizontal",
 );
 assert.equal(
   interpretPhysicalState(
