@@ -72,7 +72,7 @@ function activityClause(snapshot: RealitySnapshot, nowMs: number): PromptClause 
   };
   const label = labels[userActivity];
   if (!label) return null;
-  return { key: "userActivity", text: `推断活动【${label}${confidence === "low" ? "（低置信）" : ""}】` };
+  return { key: "userActivity", text: `推断【${label}${confidence === "low" ? "（低置信）" : ""}】` };
 }
 
 function compileClauses(snapshot: RealitySnapshot, nowMs: number): PromptClause[] {
