@@ -33,9 +33,10 @@ function lightClause(snapshot: RealitySnapshot): PromptClause | null {
 
 function orientationClause(snapshot: RealitySnapshot): PromptClause | null {
   const orientation = snapshot.physical.facts.orientation;
-  if (orientation === "face_up") return { key: "orientation", text: "手机【正面朝上平放】" };
-  if (orientation === "face_down") return { key: "orientation", text: "手机【正面朝下扣放】" };
-  if (orientation === "vertical") return { key: "orientation", text: "手机【竖向】" };
+  if (orientation === "face_up") return { key: "orientation", text: "姿态【正面朝上平放】" };
+  if (orientation === "face_down") return { key: "orientation", text: "姿态【正面朝下扣放】" };
+  if (orientation === "vertical") return { key: "orientation", text: "姿态【竖向】" };
+  if (orientation === "horizontal") return { key: "orientation", text: "姿态【横向】" };
   return null;
 }
 
