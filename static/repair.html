@@ -66,9 +66,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
 .physical-diag-details summary{font-size:11px;color:var(--primary);cursor:pointer;}
 .physical-diag-error{font-size:11px;color:var(--red);line-height:1.45;margin-top:8px;min-height:15px;}
 
-/* HMS Activity live Reality diagnostic */
-.hms-activity-diag-section{font-size:11px;color:var(--muted);padding:8px 0 3px;border-bottom:.5px solid var(--border);}
-.hms-activity-diag-status{font-size:11px;color:var(--muted);line-height:1.45;margin-top:6px;}
 
 /* 生成锁急救 */
 .fix-card{background:linear-gradient(135deg,#fff9f0,#fff);border:1px solid #f0dfc8;border-radius:14px;padding:14px 16px;margin-bottom:12px;}
@@ -269,31 +266,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,'PingFang 
     </details>
   </div>
   <!-- P2C1_PHYSICAL_DIAGNOSTIC_END -->
-  <!-- HMS_ACTIVITY_R1_REPAIR_DIAGNOSTIC_BEGIN -->
-  <div class="native-diag-card" id="hms-activity-diag-card">
-    <div class="native-diag-hd">
-      <div>
-        <div class="native-diag-title">Reality 实时状态 · HMS Activity</div>
-        <div class="native-diag-sub">只读 · 复用 ElpisActivity bridge · 不注册第二套更新</div>
-      </div>
-      <span class="status-badge badge-checking" id="hms-activity-diag-state">检查中</span>
-    </div>
-    <div class="hms-activity-diag-section">Semantic</div>
-    <div class="native-diag-row"><span class="native-diag-label">userActivity</span><span class="native-diag-value" id="hms-activity-user">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">activity age</span><span class="native-diag-value" id="hms-activity-age">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">activity source</span><span class="native-diag-value" id="hms-activity-source">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">possibility</span><span class="native-diag-value" id="hms-activity-possibility">—</span></div>
-    <div class="hms-activity-diag-status" id="hms-activity-status">—</div>
-    <div class="hms-activity-diag-section">Technical diagnostic</div>
-    <div class="native-diag-row"><span class="native-diag-label">registration</span><span class="native-diag-value" id="hms-activity-registration">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">lastErrorCode</span><span class="native-diag-value" id="hms-activity-error-code">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">callbackReceived</span><span class="native-diag-value" id="hms-activity-callback">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">intentHasExtras</span><span class="native-diag-value" id="hms-activity-extras">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">responsePresent</span><span class="native-diag-value" id="hms-activity-response">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">activityDataCount</span><span class="native-diag-value" id="hms-activity-count">—</span></div>
-    <div class="native-diag-row"><span class="native-diag-label">raw activity code</span><span class="native-diag-value" id="hms-activity-raw">—</span></div>
-  </div>
-  <!-- HMS_ACTIVITY_R1_REPAIR_DIAGNOSTIC_END -->
   <!-- 生成锁急救 -->
   <div class="fix-card">
     <div class="fix-title"><i class="ti ti-lock-open"></i> 聊天卡在「仍在生成」？</div>
@@ -687,145 +659,6 @@ document.addEventListener('visibilitychange', function () {
   if (document.visibilityState === 'visible') { refreshNotificationDiagnostic(); }
 });
 // P2B_NOTIFICATION_DIAG_JS_END
-/* ===== HMS_ACTIVITY_R1_REPAIR_DIAGNOSTIC_BEGIN ===== */
-var hmsActivityPollTimer = null;
-var HMS_ACTIVITY_MAX_AGE_MS = 3 * 60 * 1000;
-
-function getHmsActivityBridge() {
-  try {
-    return window.ElpisActivity || null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function setHmsActivityText(id, value) {
-  var el = document.getElementById(id);
-  if (el) el.textContent = value;
-}
-
-function setHmsActivityBadge(text, className) {
-  var el = document.getElementById('hms-activity-diag-state');
-  if (!el) return;
-  el.textContent = text;
-  el.className = 'status-badge ' + className;
-}
-
-function formatHmsActivityAge(ageMs) {
-  if (typeof ageMs !== 'number' || !isFinite(ageMs) || ageMs < 0) return '—';
-  return Math.floor(ageMs / 1000) + 's';
-}
-
-function renderHmsActivityUnavailable(message) {
-  setHmsActivityBadge('不可用', 'badge-warn');
-  setHmsActivityText('hms-activity-user', 'unknown');
-  setHmsActivityText('hms-activity-age', '—');
-  setHmsActivityText('hms-activity-source', 'none');
-  setHmsActivityText('hms-activity-possibility', '—');
-  setHmsActivityText('hms-activity-registration', '—');
-  setHmsActivityText('hms-activity-error-code', '—');
-  setHmsActivityText('hms-activity-callback', '—');
-  setHmsActivityText('hms-activity-extras', '—');
-  setHmsActivityText('hms-activity-response', '—');
-  setHmsActivityText('hms-activity-count', '—');
-  setHmsActivityText('hms-activity-raw', '—');
-  setHmsActivityText('hms-activity-status', message || '当前环境没有 ElpisActivity bridge。');
-}
-
-function renderHmsActivitySnapshot(snapshot) {
-  var now = Date.now();
-  var sampledAt = snapshot && typeof snapshot.activitySampledAt === 'number'
-    ? snapshot.activitySampledAt : null;
-  var ageMs = sampledAt === null ? null : now - sampledAt;
-  var source = snapshot && snapshot.source === 'hms' ? 'hms' : 'none';
-  var userActivity = snapshot && typeof snapshot.userActivity === 'string'
-    ? snapshot.userActivity : 'unknown';
-  var fresh = ageMs !== null && isFinite(ageMs) && ageMs >= 0 &&
-    ageMs <= HMS_ACTIVITY_MAX_AGE_MS;
-  var semanticReady = source === 'hms' && fresh && userActivity !== 'unknown';
-  var possibility = snapshot && Number.isInteger(snapshot.rawPossibility)
-    ? snapshot.rawPossibility
-    : (snapshot && Number.isInteger(snapshot.activityPossibility)
-      ? snapshot.activityPossibility : null);
-  var rawCode = snapshot && Number.isInteger(snapshot.rawCandidate)
-    ? snapshot.rawCandidate
-    : (snapshot && snapshot.rawActivity ? snapshot.rawActivity : null);
-
-  setHmsActivityText('hms-activity-user', semanticReady ? userActivity : 'unknown');
-  setHmsActivityText('hms-activity-age', ageMs === null ? '—' :
-    (fresh ? formatHmsActivityAge(ageMs) : 'stale · ' + formatHmsActivityAge(ageMs)));
-  setHmsActivityText('hms-activity-source', source);
-  setHmsActivityText('hms-activity-possibility', possibility === null ? '—' : String(possibility));
-  setHmsActivityText('hms-activity-registration', snapshot && snapshot.registration || 'unknown');
-  setHmsActivityText('hms-activity-error-code', snapshot && snapshot.lastErrorCode || '—');
-  setHmsActivityText('hms-activity-callback', snapshot && snapshot.callbackReceived ? 'yes' : 'no');
-  setHmsActivityText('hms-activity-extras', snapshot && snapshot.intentHasExtras ? 'yes' : 'no');
-  setHmsActivityText('hms-activity-response', snapshot && snapshot.responsePresent ? 'yes' : 'no');
-  setHmsActivityText('hms-activity-count', snapshot && Number.isInteger(snapshot.activityDataCount)
-    ? String(snapshot.activityDataCount) : '0');
-  setHmsActivityText('hms-activity-raw', rawCode === null ? '—' : String(rawCode));
-
-  if (semanticReady) {
-    setHmsActivityBadge('fresh', 'badge-ok');
-    setHmsActivityText('hms-activity-status', 'fresh · 可进入 Reality semantic prompt');
-  } else if (sampledAt !== null && !fresh) {
-    setHmsActivityBadge('stale', 'badge-warn');
-    setHmsActivityText('hms-activity-status', 'stale · userActivity 不进入 prompt');
-  } else if (source === 'hms' && userActivity === 'unknown') {
-    setHmsActivityBadge('unknown', 'badge-warn');
-    setHmsActivityText('hms-activity-status', 'unknown · userActivity 不进入 prompt');
-  } else {
-    setHmsActivityBadge('不可用', 'badge-warn');
-    setHmsActivityText('hms-activity-status', 'unavailable · userActivity 不进入 prompt');
-  }
-}
-
-function refreshHmsActivityDiagnostic() {
-  var bridge = getHmsActivityBridge();
-  if (!bridge || typeof bridge.getActivityState !== 'function') {
-    renderHmsActivityUnavailable('当前环境没有 ElpisActivity bridge；桌面浏览器无法读取 HMS。');
-    return;
-  }
-  try {
-    var raw = bridge.getActivityState();
-    var snapshot = JSON.parse(raw);
-    if (!snapshot || typeof snapshot !== 'object' || snapshot.schemaVersion !== 1) {
-      throw new Error('invalid HMS activity schema');
-    }
-    renderHmsActivitySnapshot(snapshot);
-  } catch (e) {
-    renderHmsActivityUnavailable('读取失败；未展示任何 Intent extras。');
-  }
-}
-
-function startHmsActivityPolling() {
-  if (hmsActivityPollTimer !== null || document.hidden) return;
-  hmsActivityPollTimer = setInterval(refreshHmsActivityDiagnostic, 1000);
-}
-
-function stopHmsActivityPolling() {
-  if (hmsActivityPollTimer !== null) {
-    clearInterval(hmsActivityPollTimer);
-    hmsActivityPollTimer = null;
-  }
-}
-
-refreshHmsActivityDiagnostic();
-startHmsActivityPolling();
-document.addEventListener('visibilitychange', function () {
-  if (document.hidden) {
-    stopHmsActivityPolling();
-  } else {
-    refreshHmsActivityDiagnostic();
-    startHmsActivityPolling();
-  }
-});
-window.addEventListener('pagehide', stopHmsActivityPolling);
-window.addEventListener('pageshow', function () {
-  refreshHmsActivityDiagnostic();
-  startHmsActivityPolling();
-});
-/* ===== HMS_ACTIVITY_R1_REPAIR_DIAGNOSTIC_END ===== */
 
 /* ===== P2A NativeBridge Lite diagnostic (local display only) ===== */
 function getElpisNative() {

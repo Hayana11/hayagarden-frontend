@@ -5,6 +5,7 @@ import {
   DEFAULT_LIMITS,
   DISCOVERY_STATUS,
   classifyAddress,
+  createSafeLookup,
   discoverExternalMcp,
   validateEndpoint,
   validateResolvedAddresses,
@@ -38,6 +39,66 @@ function fixtureFetch({ pages = [{ tools: [] }], statusFor = {}, calls = [] } = 
   };
 }
 
+function invokeLookup(records, options) {
+  return new Promise((resolve, reject) => {
+    const lookup = createSafeLookup({ resolver: async () => records });
+    lookup('public.example.test', options, (error, address, family) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve({ address, family });
+    });
+  });
+}
+
+test('Node autoSelectFamily all=true lookup contract returns address objects rather than a scalar address', async () => {
+  const result = await invokeLookup([
+    { address: '8.8.8.8', family: 4 },
+    { address: '2606:4700:4700::1111', family: 6 },
+  ], { all: true });
+  assert.deepEqual(result.address, [
+    { address: '8.8.8.8', family: 4 },
+    { address: '2606:4700:4700::1111', family: 6 },
+  ]);
+  assert.equal(result.family, undefined);
+});
+
+test('safe lookup scalar mode returns the first validated address and derived family', async () => {
+  const result = await invokeLookup([
+    { address: '8.8.8.8', family: 4 },
+    { address: '2606:4700:4700::1111', family: 6 },
+  ], { all: false });
+  assert.equal(result.address, '8.8.8.8');
+  assert.equal(result.family, 4);
+});
+
+test('safe lookup derives family from the address instead of resolver metadata', async () => {
+  const result = await invokeLookup([{ address: '8.8.8.8', family: 6 }], { all: false });
+  assert.equal(result.address, '8.8.8.8');
+  assert.equal(result.family, 4);
+});
+
+test('safe lookup all=true fails closed when any resolved address is unsafe', async () => {
+  await assert.rejects(
+    invokeLookup([
+      { address: '8.8.8.8', family: 4 },
+      { address: '10.0.0.1', family: 4 },
+    ], { all: true }),
+    /non-public/,
+  );
+});
+
+test('safe lookup scalar mode fails closed when any resolved address is unsafe', async () => {
+  await assert.rejects(
+    invokeLookup([
+      { address: '8.8.8.8', family: 4 },
+      { address: '10.0.0.1', family: 4 },
+    ], { all: false }),
+    /non-public/,
+  );
+});
+
 test('real SDK initialize + paginated tools/list captures the complete SDK-visible catalog', async () => {
   const calls = [];
   const result = await discoverExternalMcp({
@@ -59,6 +120,53 @@ test('real SDK initialize + paginated tools/list captures the complete SDK-visib
   assert.deepEqual(calls.map((call) => call.method), ['initialize', 'notifications/initialized', 'tools/list', 'tools/list']);
   assert.ok(calls.every((call) => call.redirect === 'error'));
   assert.ok(calls.every((call) => call.signal instanceof AbortSignal));
+});
+
+test('bearer auth is injected for every discovery request and safe dispatch remains present', async () => {
+  const calls = [];
+  const result = await discoverExternalMcp({
+    endpoint: 'https://public.example.test/mcp',
+    auth: { scheme: 'bearer', credential: 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13' },
+    fetchImpl: fixtureFetch({ calls, pages: [{ tools: [] }, { tools: [] }] }),
+  });
+  assert.equal(result.status, DISCOVERY_STATUS.SUCCESS);
+  assert.ok(calls.length >= 3);
+  assert.ok(calls.every((call) => call.headers.get('authorization') === 'Bearer M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13'));
+  const source = await (await import('node:fs/promises')).readFile(new URL('../tools/external_mcp_discovery_transport.mjs', import.meta.url), 'utf8');
+  assert.match(source, /createSafeDispatcher\(\{ resolver \}\)/);
+  assert.match(source, /headers: requestHeaders\(init\.headers, auth\)/);
+});
+
+test('unsupported auth and Authorization conflicts are fail closed', async () => {
+  const unsupported = await discoverExternalMcp({ endpoint: 'https://public.example.test/mcp', auth: { scheme: 'basic', credential: 'x' }, fetchImpl: fixtureFetch() });
+  assert.equal(unsupported.status, 'AUTH_SCHEME_UNSUPPORTED');
+  const source = await (await import('node:fs/promises')).readFile(new URL('../tools/external_mcp_discovery_transport.mjs', import.meta.url), 'utf8');
+  assert.match(source, /AUTHORIZATION_HEADER_CONFLICT/);
+  assert.match(source, /headers\.has\('authorization'\)/);
+});
+
+test('credential reflection in catalog and remote errors suppresses all output', async () => {
+  const credential = 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13';
+  const reflectedCatalog = await discoverExternalMcp({
+    endpoint: 'https://public.example.test/mcp',
+    auth: { scheme: 'bearer', credential },
+    fetchImpl: fixtureFetch({ pages: [{ tools: [{ name: credential, description: 'reflected' }] }] }),
+  });
+  assert.equal(reflectedCatalog.status, 'SECRET_REFLECTION_BLOCKED');
+  assert.deepEqual(reflectedCatalog.tools, []);
+  assert.equal(JSON.stringify(reflectedCatalog).includes(credential), false);
+  const reflectedError = await discoverExternalMcp({
+    endpoint: 'https://public.example.test/mcp',
+    auth: { scheme: 'bearer', credential },
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.method === 'initialize') return jsonResponse({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'fixture', version: '1.0.0' } } });
+      if (body.method === 'notifications/initialized') return jsonResponse(undefined, 202);
+      throw new Error(`remote error ${credential}`);
+    },
+  });
+  assert.equal(reflectedError.status, 'SECRET_REFLECTION_BLOCKED');
+  assert.equal(JSON.stringify(reflectedError).includes(credential), false);
 });
 
 test('successful empty catalog is distinct from a failed discovery', async () => {

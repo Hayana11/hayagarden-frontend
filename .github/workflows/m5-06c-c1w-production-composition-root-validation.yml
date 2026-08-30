@@ -1,0 +1,82 @@
+name: M5-06C-C1W production composition root validation
+
+on:
+  push:
+    branches:
+      - codex/m5-06c-c1w-production-composition-root-r1
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_SHA: ca3ffabf9adbd7f5956b8bba3ce631f80ab5fba0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Verify exact head, frozen base, and three-file fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF_NAME" = "codex/m5-06c-c1w-production-composition-root-r1"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git merge-base "$BASE_SHA" HEAD)" = "$BASE_SHA"
+          expected="$(printf '%s\n' \
+            '.github/workflows/m5-06c-c1w-production-composition-root-validation.yml' \
+            'tests/test_external_mcp_production.py' \
+            'tools/external_mcp_production.py' | sort)"
+          actual="$(git diff --name-only "$BASE_SHA" HEAD | sort)"
+          test "$actual" = "$expected"
+          test "$(git diff --name-only "$BASE_SHA" HEAD | wc -l)" -eq 3
+          git diff --check "$BASE_SHA" HEAD
+          for path in \
+            app.py gateway.py .env scripts tools/external_server_registry.py \
+            tools/external_secret_store.py tools/external_mcp_auth_binding.py \
+            tools/external_tool_registry.py tools/external_tool_side_effect_policy.py \
+            tools/external_tool_execution_fence.py tools/external_mcp_invocation.py \
+            tools/external_mcp_secret_materializer.py tools/external_mcp_runtime.py \
+            relay
+          do test -z "$(git diff --name-only "$BASE_SHA" HEAD -- "$path")"; done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install cryptography
+          npm ci --no-audit --no-fund
+      - name: C1W composition and M5 Python regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m unittest -v \
+            tests.test_external_mcp_production \
+            tests.test_external_server_registry \
+            tests.test_external_secret_store \
+            tests.test_external_mcp_auth_binding \
+            tests.test_external_tool_registry \
+            tests.test_external_tool_side_effect_policy \
+            tests.test_external_tool_execution_fence \
+            tests.test_external_mcp_invocation \
+            tests.test_external_mcp_secret_materializer \
+            tests.test_external_mcp_runtime
+      - name: B1 and B2 Node regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node --test \
+            tests/test_external_mcp_call_bridge.mjs \
+            tests/test_external_mcp_call_transport.mjs \
+            tests/test_external_mcp_discovery_bridge.mjs \
+            tests/test_external_mcp_discovery_transport.mjs

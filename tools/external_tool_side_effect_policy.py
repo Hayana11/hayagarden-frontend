@@ -27,6 +27,9 @@ EXTERNAL_STATE = "external_state"
 CODE_OR_PROCESS = "code_or_process"
 UNKNOWN = "unknown"
 SIDE_EFFECT_CLASSES = frozenset({NONE, EXTERNAL_STATE, CODE_OR_PROCESS, UNKNOWN})
+AUTONOMOUS = "autonomous"
+OWNER_CONFIRMED = "owner_confirmed"
+EXECUTION_MODES = frozenset({AUTONOMOUS, OWNER_CONFIRMED})
 MAX_CLASSIFICATION_TEXT_BYTES = 200
 
 
@@ -127,6 +130,15 @@ def _classification(value: Any) -> str:
     return value
 
 
+def _execution_mode(value: Any) -> str:
+    if not isinstance(value, str) or value not in EXECUTION_MODES:
+        raise SideEffectValidationError(
+            "execution_mode is not one of the frozen values",
+            code="INVALID_EXECUTION_MODE",
+        )
+    return value
+
+
 class ExternalToolSideEffectPolicy:
     """SQLite owner for explicit side-effect classification facts."""
 
@@ -172,6 +184,9 @@ class ExternalToolSideEffectPolicy:
                 classified_at TEXT NOT NULL,
                 classified_actor TEXT NOT NULL,
                 classified_provenance TEXT NOT NULL,
+                execution_mode TEXT NOT NULL DEFAULT 'autonomous' CHECK (
+                    execution_mode IN ('autonomous', 'owner_confirmed')
+                ),
                 PRIMARY KEY (server_id, tool_name)
             );
             CREATE TABLE IF NOT EXISTS external_tool_side_effect_audit (
@@ -202,6 +217,17 @@ class ExternalToolSideEffectPolicy:
             END;
             """
         )
+        columns = {
+            row[1]
+            for row in self._connection.execute(
+                "PRAGMA table_info(external_tool_side_effect_baselines)"
+            ).fetchall()
+        }
+        if "execution_mode" not in columns:
+            self._connection.execute(
+                "ALTER TABLE external_tool_side_effect_baselines "
+                "ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'autonomous'"
+            )
         self._connection.commit()
 
     def classify(
@@ -214,12 +240,14 @@ class ExternalToolSideEffectPolicy:
         side_effect_class: Any,
         actor: Any,
         provenance: Any,
+        execution_mode: Any = AUTONOMOUS,
     ) -> dict[str, Any]:
         server_id = _require_server_id(server_id)
         tool_name = _require_tool_name(tool_name)
         fingerprint = _fingerprint(expected_fingerprint)
         source_revision = _revision(expected_source_registry_revision)
         side_effect_class = _classification(side_effect_class)
+        execution_mode = _execution_mode(execution_mode)
         actor = _review_text(actor, "actor")
         provenance = _review_text(provenance, "provenance")
 
@@ -244,6 +272,7 @@ class ExternalToolSideEffectPolicy:
                 and baseline[2] == side_effect_class
                 and baseline[4] == actor
                 and baseline[5] == provenance
+                and baseline[6] == execution_mode
             ):
                 self._connection.rollback()
                 return self._result(
@@ -256,17 +285,19 @@ class ExternalToolSideEffectPolicy:
                 "INSERT INTO external_tool_side_effect_baselines ("
                 "server_id, tool_name, classified_fingerprint, "
                 "classified_source_registry_revision, side_effect_class, classified_at, "
-                "classified_actor, classified_provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "classified_actor, classified_provenance, execution_mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(server_id, tool_name) DO UPDATE SET "
                 "classified_fingerprint=excluded.classified_fingerprint, "
                 "classified_source_registry_revision=excluded.classified_source_registry_revision, "
                 "side_effect_class=excluded.side_effect_class, "
                 "classified_at=excluded.classified_at, "
                 "classified_actor=excluded.classified_actor, "
-                "classified_provenance=excluded.classified_provenance",
+                "classified_provenance=excluded.classified_provenance, "
+                "execution_mode=excluded.execution_mode",
                 (
                     server_id, tool_name, fingerprint, source_revision, side_effect_class,
-                    now, actor, provenance,
+                    now, actor, provenance, execution_mode,
                 ),
             )
             self._connection.execute(
@@ -346,6 +377,9 @@ class ExternalToolSideEffectPolicy:
         return {
             "effective_classified": effective,
             "effective_side_effect_class": effective_class,
+            "effective_execution_mode": (
+                baseline["execution_mode"] if effective and baseline else None
+            ),
             "server_id": server_id,
             "tool_name": tool_name,
             "candidate_fingerprint": (
@@ -423,8 +457,8 @@ class ExternalToolSideEffectPolicy:
     def _baseline_row(self, server_id: str, tool_name: str):
         return self._connection.execute(
             "SELECT classified_fingerprint, classified_source_registry_revision, "
-            "side_effect_class, classified_at, classified_actor, classified_provenance "
-            "FROM external_tool_side_effect_baselines WHERE server_id=? AND tool_name=?",
+            "side_effect_class, classified_at, classified_actor, classified_provenance, "
+            "execution_mode FROM external_tool_side_effect_baselines WHERE server_id=? AND tool_name=?",
             (server_id, tool_name),
         ).fetchone()
 
@@ -433,6 +467,7 @@ class ExternalToolSideEffectPolicy:
         keys = (
             "classified_fingerprint", "classified_source_registry_revision",
             "side_effect_class", "classified_at", "classified_actor", "classified_provenance",
+            "execution_mode",
         )
         return {"server_id": server_id, "tool_name": tool_name, **dict(zip(keys, row))}
 
@@ -456,10 +491,13 @@ class ExternalToolSideEffectPolicy:
 
 
 __all__ = [
+    "AUTONOMOUS",
     "CODE_OR_PROCESS",
+    "EXECUTION_MODES",
     "EXTERNAL_STATE",
     "ExternalToolSideEffectPolicy",
     "NONE",
+    "OWNER_CONFIRMED",
     "SIDE_EFFECT_CLASSES",
     "SideEffectPolicyError",
     "SideEffectRejectedError",

@@ -1,0 +1,140 @@
+name: M5 autonomy alignment validation
+
+on:
+  push:
+    branches:
+      - codex/m5-autonomy-alignment-r1
+    paths:
+      - .github/workflows/m5-autonomy-alignment-validation.yml
+      - tools/external_tool_side_effect_policy.py
+      - tools/external_tool_execution_fence.py
+      - tests/test_external_tool_side_effect_policy.py
+      - tests/test_external_tool_execution_fence.py
+      - tests/test_external_mcp_invocation.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE_SHA: fbaf6b10bd85846345d01a81a95be96235002793
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Verify exact pushed head and frozen branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ACTUAL_HEAD="$(git rev-parse HEAD)"
+          test "$ACTUAL_HEAD" = "$GITHUB_SHA" || {
+            echo "HEAD_MISMATCH"
+            exit 1
+          }
+          test "$GITHUB_REF_NAME" = "codex/m5-autonomy-alignment-r1" || {
+            echo "BRANCH_MISMATCH"
+            exit 1
+          }
+          echo "CI_HEAD_SHA=$GITHUB_SHA"
+          echo "CI_EVENT=$GITHUB_EVENT_NAME"
+          echo "CI_BRANCH=$GITHUB_REF_NAME"
+
+      - name: Verify frozen base and exact six-file scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE_SHA='fbaf6b10bd85846345d01a81a95be96235002793'
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$BASE_SHA" || {
+            echo "BASE_MOVED"
+            exit 1
+          }
+          test "$(git merge-base "$BASE_SHA" HEAD)" = "$BASE_SHA" || {
+            echo "BASE_NOT_ANCESTOR"
+            exit 1
+          }
+          expected="$(
+            printf '%s\n' \
+              '.github/workflows/m5-autonomy-alignment-validation.yml' \
+              'tests/test_external_mcp_invocation.py' \
+              'tests/test_external_tool_execution_fence.py' \
+              'tests/test_external_tool_side_effect_policy.py' \
+              'tools/external_tool_execution_fence.py' \
+              'tools/external_tool_side_effect_policy.py'
+          )"
+          actual="$(
+            git diff --name-only \
+              fbaf6b10bd85846345d01a81a95be96235002793 \
+              HEAD \
+              | sort
+          )"
+          test "$actual" = "$expected" || {
+            echo "EXACT_FILE_FENCE_FAILED"
+            printf '%s\n' "$actual"
+            exit 1
+          }
+
+      - name: Verify R5 changed-since-old-head fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          r5_changed="$(
+            git diff --name-only \
+              7ae244c2181db27e0b73600366fdb28394a6a373 \
+              HEAD
+          )"
+          test "$r5_changed" = \
+            '.github/workflows/m5-autonomy-alignment-validation.yml' || {
+            echo "R5_WORKFLOW_ONLY_FENCE_FAILED"
+            printf '%s\n' "$r5_changed"
+            exit 1
+          }
+          git diff --check \
+            fbaf6b10bd85846345d01a81a95be96235002793 \
+            HEAD
+
+      - name: Verify autonomy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! rg -n -i \
+            'external_autonomous_policy|issue_external_autonomous_lease|autonomous_lease' \
+            tools/external_tool_side_effect_policy.py \
+            tools/external_tool_execution_fence.py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python test dependency
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install cryptography
+
+      - name: Run focused tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m unittest -v \
+            tests.test_external_tool_side_effect_policy \
+            tests.test_external_tool_execution_fence \
+            tests.test_external_mcp_invocation
+
+      - name: Run M5 regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m unittest -v \
+            tests.test_external_server_registry \
+            tests.test_external_tool_registry \
+            tests.test_external_tool_execution_fence \
+            tests.test_external_mcp_invocation \
+            tests.test_external_mcp_auth_binding

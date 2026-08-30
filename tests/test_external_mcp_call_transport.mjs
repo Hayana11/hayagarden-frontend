@@ -34,7 +34,7 @@ function callResult(text = 'ok', isError) {
 function fixtureFetch({ calls = [], result = callResult(), onCall, onInitialize, connectError, connectDelayMs = 0 } = {}) {
   return async (_url, init) => {
     const body = JSON.parse(init.body);
-    calls.push({ method: body.method, params: body.params, redirect: init.redirect, signal: init.signal });
+    calls.push({ method: body.method, params: body.params, headers: init.headers, redirect: init.redirect, signal: init.signal });
     if (body.method === 'initialize') {
       if (connectError) throw connectError;
       if (connectDelayMs) await new Promise((resolve) => setTimeout(resolve, connectDelayMs));
@@ -77,6 +77,49 @@ test('real SDK Client and StreamableHTTPClientTransport return a complete SUCCES
   assert.deepEqual(calls.map((call) => call.method), ['initialize', 'notifications/initialized', 'tools/call']);
   assert.ok(calls.every((call) => call.redirect === 'error'));
   assert.ok(calls.every((call) => call.signal instanceof AbortSignal));
+});
+
+test('bearer auth is injected by the transport and keeps the safe dispatcher path', async () => {
+  const calls = [];
+  const result = await invoke({ calls, auth: { scheme: 'bearer', credential: 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13' } });
+  assert.equal(result.status, CALL_OUTCOME.SUCCESS);
+  assert.equal(calls[0].headers.get('authorization'), 'Bearer M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13');
+  assert.equal(calls.filter((call) => call.headers.get('authorization')).length, 3);
+  const source = await readFile(PRODUCT_PATH, 'utf8');
+  assert.match(source, /createSafeDispatcher\(\{ resolver \}\)/);
+  assert.match(source, /headers: requestHeaders\(init\.headers, authBinding\)/);
+});
+
+test('unsupported auth and caller Authorization header conflicts fail closed', async () => {
+  const unsupported = await invoke({ auth: { scheme: 'basic', credential: 'x' } });
+  assert.equal(unsupported.status, CALL_OUTCOME.NOT_INVOKED);
+  assert.equal(unsupported.error.code, 'AUTH_SCHEME_UNSUPPORTED');
+  const source = await readFile(PRODUCT_PATH, 'utf8');
+  assert.match(source, /AUTHORIZATION_HEADER_CONFLICT/);
+  assert.match(source, /headers\.has\('authorization'\)/);
+});
+
+test('credential reflection in successful result is wholly suppressed', async () => {
+  const credential = 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13';
+  const result = await invoke({ auth: { scheme: 'bearer', credential }, result: callResult(credential) });
+  assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN);
+  assert.equal(result.result, null);
+  assert.equal(result.error.code, 'SECRET_REFLECTION_BLOCKED');
+  assert.equal(JSON.stringify(result).includes(credential), false);
+});
+
+test('credential reflection in tool error and thrown error is blocked', async () => {
+  const credential = 'M5_B1_CANARY_SECRET_DO_NOT_LEAK_7f13';
+  for (const options of [
+    { result: callResult(credential, true) },
+    { onCall: () => { throw new Error(`remote failure ${credential}`); } },
+  ]) {
+    const result = await invoke({ auth: { scheme: 'bearer', credential }, ...options });
+    assert.equal(result.status, CALL_OUTCOME.OUTCOME_UNKNOWN);
+    assert.equal(result.result, null);
+    assert.equal(result.error.code, 'SECRET_REFLECTION_BLOCKED');
+    assert.equal(JSON.stringify(result).includes(credential), false);
+  }
 });
 
 test('isError=true is a determinate TOOL_ERROR and never retries', async () => {

@@ -25,6 +25,7 @@
     "test:chat-warm-return": "vite-node scripts/test-chat-warm-return.mjs",
     "test:chat-capacity-header": "vite-node scripts/test-chat-capacity-header.mjs",
     "test:task-timer-real-data-wiring": "vite-node scripts/test-task-timer-real-data-wiring.mjs",
+    "test:toolroom-contract": "vite-node scripts/test-toolroom-contract.mjs",
     "test:memory-cold-start": "vite-node scripts/test-memory-cold-start.mjs",
     "test:rewrite-finalize-retry": "vite-node scripts/test-rewrite-finalize-retry.mjs",
     "test:reality-lifecycle": "vite-node scripts/test-reality-lifecycle.mjs",

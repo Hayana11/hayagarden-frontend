@@ -12,7 +12,7 @@ import importlib.util
 import re
 import secrets
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
@@ -39,6 +39,7 @@ def _load_credential_vault_primitive():
 
 _CREDENTIAL_VAULT = _load_credential_vault_primitive()
 CredentialVaultError = _CREDENTIAL_VAULT.CredentialVaultError
+decrypt_secret = _CREDENTIAL_VAULT.decrypt_secret
 encrypt_secret = _CREDENTIAL_VAULT.encrypt_secret
 
 
@@ -101,6 +102,18 @@ class ExternalSecretRecord:
             "updated_at": self.updated_at,
             "revision": self.revision,
         }
+
+
+@dataclass(frozen=True)
+class _RuntimeSecretRecord:
+    """Private transport seam; never expose this through public metadata APIs."""
+
+    secret_ref: str
+    server_id: str
+    credential_slot: str
+    lifecycle: str
+    revision: int
+    ciphertext: Optional[str] = field(repr=False)
 
 
 def _timestamp(value: Optional[datetime]) -> str:
@@ -263,6 +276,21 @@ class ExternalSecretStore:
             "FROM external_secret_records WHERE secret_ref = ?",
             (secret_ref,),
         ).fetchone()
+
+    def _load_runtime_record(self, secret_ref: object) -> _RuntimeSecretRecord:
+        """Load one exact encrypted record for the authenticated runtime seam."""
+        ref = _secret_ref(secret_ref)
+        row = self._select(ref)
+        if row is None:
+            raise SecretNotFoundError("secret reference does not exist")
+        return _RuntimeSecretRecord(
+            secret_ref=str(row[0]),
+            server_id=str(row[1]),
+            credential_slot=str(row[2]),
+            lifecycle=str(row[4]),
+            revision=int(row[7]),
+            ciphertext=None if row[3] is None else str(row[3]),
+        )
 
     def create(
         self,
