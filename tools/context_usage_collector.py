@@ -39,6 +39,7 @@ RATE_LIMIT_MARKERS = (
 # API and may change or remove them without notice; treat failures here as
 # "no data" and fall back to local-file estimation rather than raising.
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
 # Claude oauth/usage is aggressively rate-limited (community note: refresh ≥10–15min).
@@ -271,6 +272,16 @@ def _cache_age_seconds(entry: dict[str, Any] | None) -> float | None:
         return None
 
 
+def _cached_official_source(agent: str) -> str:
+    entry = _read_official_cache().get(agent)
+    if not isinstance(entry, dict):
+        return "claude_oauth_usage" if agent == "claude" else ""
+    source = entry.get("source")
+    if agent == "claude" and source == "claude_api_headers":
+        return source
+    return "claude_oauth_usage" if agent == "claude" else ""
+
+
 def _get_cached_official(agent: str) -> dict[str, Any] | None:
     entry = _read_official_cache().get(agent)
     if not isinstance(entry, dict):
@@ -279,9 +290,24 @@ def _get_cached_official(agent: str) -> dict[str, Any] | None:
     return quota if isinstance(quota, dict) and (quota.get("five_hour") or quota.get("seven_day")) else None
 
 
-def _store_cached_official(agent: str, quota: dict[str, Any]) -> None:
+def _store_cached_official(
+    agent: str,
+    quota: dict[str, Any],
+    *,
+    source: str | None = None,
+    preserve_retry: bool = False,
+) -> None:
     cache = _read_official_cache()
-    cache[agent] = {"fetched_at": utc_now_iso(), "quota": quota}
+    entry: dict[str, Any] = {"fetched_at": utc_now_iso(), "quota": quota}
+    if source == "claude_api_headers":
+        entry["source"] = source
+    if preserve_retry:
+        previous = cache.get(agent)
+        if isinstance(previous, dict):
+            for key in ("last_attempt_at", "last_status", "next_retry_at"):
+                if key in previous:
+                    entry[key] = previous[key]
+    cache[agent] = entry
     _write_official_cache(cache)
 
 
@@ -380,6 +406,69 @@ def fetch_claude_official_usage(
         return None
     five_hour = _official_window(payload.get("five_hour"), "utilization")
     seven_day = _official_window(payload.get("seven_day"), "utilization")
+    if not five_hour and not seven_day:
+        return None
+    return {"five_hour": five_hour, "seven_day": seven_day, "updated_at": utc_now_iso()}
+
+
+def _http_post_headers_result(
+    url: str,
+    headers: dict[str, str],
+    data: bytes,
+    timeout: int = 6,
+) -> tuple[dict[str, str], int | None]:
+    request = urllib.request.Request(url, data=data, method="POST", headers=headers)
+    try:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+            return {str(key).lower(): str(value).strip() for key, value in response.headers.items()}, int(response.status)
+    except urllib.error.HTTPError as exc:
+        return (
+            {str(key).lower(): str(value).strip() for key, value in exc.headers.items()} if exc.headers else {},
+            int(exc.code),
+        )
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {}, None
+
+
+def _claude_header_window(headers: dict[str, str], suffix: str) -> dict[str, Any]:
+    utilization = numeric(headers.get(f"anthropic-ratelimit-unified-{suffix}-utilization"))
+    reset = iso_time(headers.get(f"anthropic-ratelimit-unified-{suffix}-reset"))
+    if utilization is None or not reset:
+        return {}
+    used = min(100.0, max(0.0, utilization * 100))
+    return {
+        "used_percentage": round(used, 4),
+        "remaining_percentage": round(100 - used, 4),
+        "resets_at": reset,
+    }
+
+
+def fetch_claude_api_headers_usage(
+    token: str, *, attempt: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    body = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 1,
+        "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "messages": [{"role": "user", "content": "quota"}],
+    }).encode("utf-8")
+    headers, status = _http_post_headers_result(
+        CLAUDE_MESSAGES_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            "User-Agent": "claude-cli/2.1.220 (external, cli)",
+        },
+        data=body,
+    )
+    if attempt is not None:
+        attempt["last_status"] = status
+    if status != 200:
+        return None
+    five_hour = _claude_header_window(headers, "5h")
+    seven_day = _claude_header_window(headers, "7d")
     if not five_hour and not seven_day:
         return None
     return {"five_hour": five_hour, "seven_day": seven_day, "updated_at": utc_now_iso()}
@@ -839,26 +928,38 @@ def collect_claude(
     source = "unavailable"
     if use_official:
         cached = _get_cached_official("claude")
+        cached_source = _cached_official_source("claude")
         entry = _read_official_cache().get("claude")
         cache_age = _cache_age_seconds(entry)
         # Throttle: Claude oauth/usage 429s under ~5min dual timers (双子续杯: 10–15min).
         if _claude_cooldown_active(entry) or (cached and cache_age is not None and cache_age < OFFICIAL_MIN_INTERVAL_SEC):
             official = cached
-            source = "claude_oauth_usage"
+            source = cached_source
         else:
             token = read_claude_oauth_token(credentials_path or default_claude_credentials_path())
             if token:
                 attempt: dict[str, Any] = {}
                 official = fetch_claude_official_usage(token, attempt=attempt)
-                if not official:
+                if official:
+                    _store_cached_official("claude", official)
+                    source = "claude_oauth_usage"
+                else:
+                    # Persist the primary failure before the one allowed fallback probe.
                     _store_claude_failure(attempt)
-            if official:
-                _store_cached_official("claude", official)
-                source = "claude_oauth_usage"
-            elif cached:
-                # 429 / transient failure: keep last good percentages, never JSONL false alarm
+                    header_attempt: dict[str, Any] = {}
+                    official = fetch_claude_api_headers_usage(token, attempt=header_attempt)
+                    if official:
+                        _store_cached_official(
+                            "claude",
+                            official,
+                            source="claude_api_headers",
+                            preserve_retry=True,
+                        )
+                        source = "claude_api_headers"
+            if not official and cached:
+                # Reuse the last authoritative quota after primary/probe failure.
                 official = cached
-                source = "claude_oauth_usage"
+                source = cached_source
 
     if official:
         quota = dict(official)

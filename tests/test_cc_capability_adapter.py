@@ -166,7 +166,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for name in NON_P3_HOME_MCP_TOOLS:
             self.assertNotIn(name, home)
         cfg = build_uh_a0_mcp_config(env={})
-        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "external"})
+        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability"})
         capability_cfg = cfg["mcpServers"]["capability"]
         self.assertEqual(capability_cfg["type"], "stdio")
         self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"])
@@ -182,12 +182,6 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             cfg["mcpServers"]["internal"]["headers"],
             {"X-UH-A0-Profile": "uh_a0"},
         )
-        external_cfg = cfg["mcpServers"]["external"]
-        self.assertEqual(external_cfg["type"], "stdio")
-        self.assertEqual(set(external_cfg["env"]), {"UH_A0_REPO_ROOT", "UH_A0_TURN_LEASE_PATH"})
-        self.assertTrue(external_cfg["env"]["UH_A0_REPO_ROOT"])
-        self.assertTrue(external_cfg["env"]["UH_A0_TURN_LEASE_PATH"])
-        self.assertTrue(external_cfg["args"][0].endswith("external-mcp-surface-server.js"))
         self.assertNotIn("workspace", cfg["mcpServers"])
 
     def test_c_home_compatibility_diary_is_hidden_but_registered(self):
@@ -392,7 +386,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             mcp_path = Path(flags["mcp_path"])
             self.assertTrue(mcp_path.is_file())
             cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
-            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "external"})
+            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability"})
 
             # tool_profile mismatch is detected by the existing decision helper
             # once a live generation exists (process_dead otherwise wins).

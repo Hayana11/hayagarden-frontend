@@ -65,28 +65,6 @@ def capability_for_tool(tool_name: str) -> str | None:
     return tool_capability_index().get(str(tool_name or "").strip())
 
 
-def external_surface_tool(tool_name: str) -> dict[str, Any] | None:
-    physical_name = str(tool_name or "").strip()
-    prefix = "mcp__external__"
-    if not physical_name.startswith(prefix):
-        return None
-    surface_name = physical_name[len(prefix):]
-    if not surface_name:
-        return None
-    try:
-        from tools.external_mcp_surface import current_external_tools
-        return next(
-            (
-                item
-                for item in current_external_tools()
-                if item.get("surface_tool_name") == surface_name
-            ),
-            None,
-        )
-    except Exception:
-        return None
-
-
 def build_approval_id(
     capability_id: str,
     tool_name: str,
@@ -170,20 +148,6 @@ def evaluate_tool_call(
 
     capability_id = capability_for_tool(tool_name)
     turn_mode = str(turn_lease["turn_mode"])
-    if str(tool_name or "").strip().startswith("mcp__external__"):
-        surface = external_surface_tool(tool_name)
-        if surface is None or surface.get("available") is not True:
-            return _decision(
-                capability_id=None,
-                turn_mode=turn_mode,
-                lease_decision="DENIED_CAPABILITY",
-                diagnostic="external surface tool is unavailable",
-            )
-        return _decision(
-            capability_id="external_mcp:" + str(surface["control_id"]),
-            turn_mode=turn_mode,
-            lease_decision="ALLOW",
-        )
     if capability_id is None:
         return _decision(
             capability_id=None, turn_mode=turn_mode,
