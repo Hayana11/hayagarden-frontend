@@ -190,6 +190,8 @@ assert.match(screen, /GROUP_ACCENT_COLORS\[visualGroupId\(groupId\)\]/);
 assert.match(screen, /external_mcp:/);
 assert.match(screen, /EXTERNAL_MCP_ICON_PATHS/);
 assert.match(css, /data-group='external_mcp'/);
+assert.match(css, /\.toolroom-group-header \.toolroom-group-toggle\s*\{[\s\S]*?display:\s*flex[\s\S]*?align-items:\s*center[\s\S]*?padding:\s*16px 18px/);
+assert.match(css, /\.toolroom-mcp-check-action\s*\{[\s\S]*?top:\s*39px[\s\S]*?left:\s*41px/);
 
 const intervalEnd = screen.indexOf('window.setInterval(refresh, 10_000)');
 const intervalStart = screen.lastIndexOf('const refresh =', intervalEnd);
