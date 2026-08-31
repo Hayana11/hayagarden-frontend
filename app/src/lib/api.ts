@@ -216,19 +216,13 @@ function clampPct(value: number): number {
 function usedPct(window: RawQuotaWindow | undefined): number | null {
   if (!window) return null;
   const direct = window.used_percentage ?? window.used_percent;
-  if (typeof direct === 'number' && Number.isFinite(direct)) return clampPct(direct);
-  if (typeof window.remaining_percentage === 'number' && Number.isFinite(window.remaining_percentage)) {
-    return clampPct(100 - window.remaining_percentage);
-  }
-  return null;
+  return typeof direct === 'number' && Number.isFinite(direct) ? clampPct(direct) : null;
 }
 
-function remainingPct(window: RawQuotaWindow | undefined, used: number | null): number | null {
+function remainingPct(window: RawQuotaWindow | undefined): number | null {
   if (!window) return null;
-  if (typeof window.remaining_percentage === 'number' && Number.isFinite(window.remaining_percentage)) {
-    return clampPct(window.remaining_percentage);
-  }
-  return used === null ? null : clampPct(100 - used);
+  const direct = window.remaining_percentage;
+  return typeof direct === 'number' && Number.isFinite(direct) ? clampPct(direct) : null;
 }
 
 function emptyAgent(id: UsageAgentId): AgentUsageSummary {
