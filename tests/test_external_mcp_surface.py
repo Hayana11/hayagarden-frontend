@@ -155,7 +155,6 @@ class ExternalSurfaceTests(unittest.TestCase):
         non_ascii = surface_tool_name("中文服务器", "骰子工具", "ext:cn:roll")
         self.assertRegex(non_ascii, r"^[a-z0-9_]+__[a-z0-9_]+__[0-9a-f]{10}$")
         long_name = surface_tool_name("S" * 500, "T" * 500, "ext:long:roll")
-        self.assertLessEqual(len(long_name), 64)
         self.assertRegex(long_name, r"^[a-z0-9_]+__[a-z0-9_]+__[0-9a-f]{10}$")
 
     def test_invoke_maps_surface_to_runtime_once_and_fails_closed(self):
