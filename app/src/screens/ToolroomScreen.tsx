@@ -45,6 +45,8 @@ type InventoryGroup = {
   total: number;
   available: number;
   tools: InventoryTool[];
+  lifecycle_state?: string;
+  transport?: string;
 };
 
 type InventoryResponse = {
@@ -103,9 +105,12 @@ const GROUP_ICON_PATHS: Record<string, string> = {
 };
 
 function ToolroomGroupIcon({ groupId }: { groupId: string }) {
+  const path = groupId.startsWith('external_mcp:')
+    ? 'M9 3v6m6-6v6m-8 0h10v2a5 5 0 0 1-10 0V9Zm5 7v5'
+    : GROUP_ICON_PATHS[groupId] || GROUP_ICON_PATHS.workspace;
   return (
     <svg viewBox="0 0 24 24" role="presentation" focusable="false">
-      <path d={GROUP_ICON_PATHS[groupId] || GROUP_ICON_PATHS.workspace} />
+      <path d={path} />
     </svg>
   );
 }
@@ -205,6 +210,9 @@ function toolAccent(groupId: string, available: boolean): string {
 }
 
 function transportLabel(group: InventoryGroup): string {
+  if (group.id.startsWith('external_mcp:')) {
+    return group.transport === 'streamable_http' ? 'Streamable HTTP' : 'External MCP';
+  }
   const providers = group.tools.map((tool) => tool.provider || '').join(' ');
   if (/\bsse\b/i.test(providers)) return 'SSE';
   if (/\bhttps?:\/\//i.test(providers) || /\bhttp\b/i.test(providers)) return 'HTTP';
@@ -409,8 +417,8 @@ export function ToolroomScreen() {
     () => realityPromptProjection.getSnapshot(),
   );
 
-  const loadInventory = useCallback(async () => {
-    setLoading(true);
+  const loadInventory = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true);
     setInventoryError('');
     try {
       const result = await http.get<InventoryResponse>('/api/tools/inventory');
@@ -420,7 +428,7 @@ export function ToolroomScreen() {
       setInventory(null);
       setInventoryError(error instanceof Error ? error.message : '工具清单读取失败');
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }, []);
 
@@ -575,9 +583,38 @@ export function ToolroomScreen() {
   }, []);
 
   useEffect(() => {
-    void loadInventory();
     void loadCompanionHints();
-  }, [loadCompanionHints, loadInventory]);
+  }, [loadCompanionHints]);
+
+  useEffect(() => {
+    let timer: number | null = null;
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void loadInventory(false);
+    };
+    const start = () => {
+      stop();
+      void loadInventory();
+      if (document.visibilityState === 'visible') {
+        timer = window.setInterval(refresh, 10_000);
+      }
+    };
+    const handleFocus = () => { void loadInventory(false); };
+    const handleVisibility = () => { start(); };
+    start();
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stop();
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [loadInventory]);
 
   const closeAddMcpDialog = useCallback(() => {
     if (externalMcpSubmitting) return;
@@ -622,6 +659,7 @@ export function ToolroomScreen() {
         tool_count?: number;
         discovery?: { status?: string; reason_code?: string | null; tool_count?: number };
       }>('/api/external-mcp/servers', body);
+      if (result.ok) void loadInventory(false);
       if (result.ok && result.connected === true && result.status === 'CONNECTED') {
         setExternalMcpNotice('已连接 · ' + (result.tool_count ?? result.discovery?.tool_count ?? 0) + ' 个工具');
       } else {
@@ -925,8 +963,10 @@ export function ToolroomScreen() {
                       <span className="toolroom-group-copy">
                         <strong>{group.label}</strong>
                         <span className="toolroom-badges">
-                          <em className={'toolroom-connection-badge' + (group.available > 0 ? ' is-live' : '')}>
-                            {group.available > 0 ? '已连接' : '当前不可用'}
+                          <em className={'toolroom-connection-badge' + (group.available > 0 || group.lifecycle_state === 'CONNECTED' ? ' is-live' : '')}>
+                            {group.id.startsWith('external_mcp:')
+                              ? group.lifecycle_state === 'CONNECTED' ? '已连接' : '未连接'
+                              : group.available > 0 ? '已连接' : '当前不可用'}
                           </em>
                           <em className="toolroom-transport-badge">{transportLabel(group)}</em>
                           <em>工具：{group.available}/{group.total}</em>
