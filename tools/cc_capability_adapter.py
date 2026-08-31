@@ -114,6 +114,7 @@ DEFAULT_INTERNAL_MCP_URL = "http://127.0.0.1:3101/mcp"
 UH_A0_MCP_CONFIG_FILENAME = "cc-tools-uh-a0.json"
 UH_A0_SETTINGS_FILENAME = "cc-settings-uh-a0.json"
 DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
+EXTERNAL_MCP_SERVER_FILENAME = "external-mcp-surface-server.js"
 
 
 def resolve_uh_a0_turn_lease_path(cwd=None, *, env=None):
@@ -247,7 +248,8 @@ def build_uh_a0_mcp_config(
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Strict UH-A0 config with Home compatibility and Internal Todo."""
+    """Strict UH-A0 config with the existing servers and one local external adapter."""
+    root = Path(__file__).resolve().parent.parent
     return {
         "mcpServers": {
             "home": {
@@ -263,11 +265,20 @@ def build_uh_a0_mcp_config(
             "capability": {
                 "type": "stdio",
                 "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
-                "args": [str(Path(__file__).resolve().parent.parent / "capability-proxy-mcp-server.js")],
+                "args": [str(root / "capability-proxy-mcp-server.js")],
                 "env": {
-                    "UH_A0_REPO_ROOT": str(Path(__file__).resolve().parent.parent),
+                    "UH_A0_REPO_ROOT": str(root),
                     "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
                     "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
+                },
+            },
+            "external": {
+                "type": "stdio",
+                "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
+                "args": [str(root / EXTERNAL_MCP_SERVER_FILENAME)],
+                "env": {
+                    "UH_A0_REPO_ROOT": str(root),
+                    "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
                 },
             },
         }
@@ -380,8 +391,30 @@ def short_intent_instructions() -> str:
     )
 
 
+def _external_surface_catalog() -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
+    try:
+        from tools.external_mcp_surface import current_external_tools, list_external_surface
+        catalog = list_external_surface()
+        visible = tuple(current_external_tools(catalog))
+        return catalog, visible
+    except Exception:
+        return [], ()
+
+
 def _surface_fingerprint(snapshot: Mapping[str, Any]) -> str:
     """Hash the complete visible and forbidden physical UH-A0 surface."""
+    external = sorted(
+        (
+            {
+                "surface_tool_name": item["surface_tool_name"],
+                "control_id": item["control_id"],
+                "fingerprint": item["fingerprint"],
+                "source_registry_revision": item["source_registry_revision"],
+            }
+            for item in snapshot.get("external_mcp_surface", ())
+        ),
+        key=lambda item: item["surface_tool_name"],
+    )
     return sha256_canonical_json({
         "built_ins": list(snapshot["built_in_tools"]),
         "home_mcp": list(snapshot["home_mcp_tools"]),
@@ -389,6 +422,7 @@ def _surface_fingerprint(snapshot: Mapping[str, Any]) -> str:
         "runtime_hidden_home_mcp": list(snapshot["runtime_hidden_home_mcp_tools"]),
         "runtime_hidden_internal_mcp": list(snapshot["runtime_hidden_internal_mcp_tools"]),
         "capability_proxy": list(snapshot["capability_proxy_tools"]),
+        "external_mcp_surface": external,
         "forbidden_built_ins": list(FORBIDDEN_BUILTIN_TOOLS),
         "non_p3_home": list(NON_P3_HOME_MCP_TOOLS),
     })
@@ -403,6 +437,11 @@ def _surface_snapshot() -> dict[str, Any]:
     compatibility_home_tools = uh_a0_home_compatibility_tools()
     native_file_bindings = {cid: _claude_binding(cid) for cid in NATIVE_FILE_CAPABILITY_IDS}
     external_bindings = {cid: _claude_binding(cid) for cid in EXTERNAL_READ_CAPABILITY_IDS}
+    external_catalog, external_visible_tools = _external_surface_catalog()
+    external_mcp_tools = tuple(
+        "mcp__external__" + str(item["surface_tool_name"])
+        for item in external_visible_tools
+    )
     all_capability_ids = (
         HOME_MCP_CAPABILITY_IDS
         + INTERNAL_MCP_CAPABILITY_IDS
@@ -456,6 +495,17 @@ def _surface_snapshot() -> dict[str, Any]:
         "runtime_hidden_home_mcp_tools": hidden_home,
         "runtime_hidden_internal_mcp_tools": hidden_internal,
         "runtime_hidden_capability_proxy_tools": hidden_proxy,
+        "external_mcp_surface": tuple(
+            {
+                "surface_tool_name": item["surface_tool_name"],
+                "control_id": item["control_id"],
+                "fingerprint": item["fingerprint"],
+                "source_registry_revision": item["source_registry_revision"],
+            }
+            for item in external_visible_tools
+        ),
+        "external_mcp_tools": external_mcp_tools,
+        "external_mcp_catalog": external_catalog,
     }
 
 def physical_surface_names() -> tuple[str, ...]:
@@ -465,6 +515,7 @@ def physical_surface_names() -> tuple[str, ...]:
         + snapshot["home_mcp_tools"]
         + snapshot["internal_mcp_tools"]
         + snapshot["capability_proxy_tools"]
+        + snapshot["external_mcp_tools"]
     )
 
 
@@ -492,6 +543,7 @@ def build_uh_a0_spawn_plan(
     home_tools = surface["home_mcp_tools"]
     internal_tools = surface["internal_mcp_tools"]
     proxy_tools = surface["capability_proxy_tools"]
+    external_tools = surface["external_mcp_tools"]
     native = surface["native_bindings"]
     loading = loading_plan_from_manifest()
 
@@ -523,6 +575,7 @@ def build_uh_a0_spawn_plan(
         + list(home_tools)
         + list(internal_tools)
         + list(proxy_tools)
+        + list(external_tools)
     )
     disallowed = (
         list(FORBIDDEN_BUILTIN_TOOLS)
@@ -554,6 +607,7 @@ def build_uh_a0_spawn_plan(
         "home_mcp_tools": home_tools,
         "internal_mcp_tools": internal_tools,
         "capability_proxy_tools": proxy_tools,
+        "external_mcp_tools": external_tools,
         "native_bindings": native,
         "surface_allowlist": tuple(allowlist),
         "surface_allowlist_csv": allowed_csv,
@@ -574,7 +628,7 @@ def build_uh_a0_spawn_plan(
         "intent_instructions": short_intent_instructions(),
         # Visibility claim for reports: what Claude can see under UH-A0 plan.
         "claude_visible_built_ins": built_in_tools,
-        "claude_visible_mcp_tools": home_tools + internal_tools + proxy_tools,
+        "claude_visible_mcp_tools": home_tools + internal_tools + proxy_tools + external_tools,
         "claude_absent_servers": ("brain", "codebase", "workspace"),
     }
     return plan
