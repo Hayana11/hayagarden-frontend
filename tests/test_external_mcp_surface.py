@@ -12,6 +12,7 @@ from tools.external_mcp_auth_binding import AUTH_NONE, ExternalMcpAuthBindingReg
 from tools.external_mcp_surface import (
     current_external_tools,
     list_external_surface,
+    model_tool_definitions,
     surface_tool_name,
 )
 from tools.external_mcp_invocation import ExternalMcpInvocation
@@ -93,6 +94,8 @@ class ExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(len(current_external_tools(catalog)), 1)
         tool = catalog[0]["tools"][0]
         self.assertTrue(tool["available"])
+        self.assertIn("Calendar", tool["description"])
+        self.assertIn("List calendar entries", tool["description"])
         self.assertEqual(
             tool["surface_tool_name"],
             surface_tool_name("calendar", "calendar.list", tool["control_id"]),
@@ -112,6 +115,33 @@ class ExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(len(catalog[0]["tools"]), 1)
         self.assertFalse(catalog[0]["tools"][0]["available"])
         self.assertEqual(current_external_tools(catalog), ())
+
+    def test_toolroom_and_model_use_one_catalog(self):
+        catalog = [{
+            "server_id": "calendar",
+            "display_name": "Calendar",
+            "lifecycle_state": "CONNECTED",
+            "transport": "STREAMABLE_HTTP",
+            "revision": 4,
+            "tools": [{
+                "control_id": "ext:calendar:roll",
+                "remote_tool_name": "roll",
+                "description": "Calendar: Roll",
+                "input_schema": {"type": "object"},
+                "fingerprint": "a" * 64,
+                "source_registry_revision": 4,
+                "surface_tool_name": "calendar__roll__1234567890",
+                "available": True,
+            }],
+        }]
+        with patch("tools.external_mcp_surface.list_external_surface", return_value=catalog):
+            from tools import tool_inventory
+
+            inventory_group = tool_inventory._external_groups()[0]
+            model_tools = model_tool_definitions()
+        self.assertEqual(inventory_group["tools"][0]["tool_name"], "roll")
+        self.assertEqual(model_tools[0]["name"], "calendar__roll__1234567890")
+        self.assertEqual(model_tools[0]["description"], inventory_group["tools"][0]["display_label"])
 
     def test_dynamic_pretooluse_binding_uses_current_catalog_result(self):
         lease = issue_turn_lease(
