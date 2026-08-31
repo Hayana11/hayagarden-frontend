@@ -204,8 +204,9 @@
 }
 
 .toolroom-mcp-check-button {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 19px;
   height: 19px;
   border: 1px solid rgba(255, 255, 255, 0.94);
@@ -218,6 +219,7 @@
 }
 
 .toolroom-mcp-check-icon {
+  display: block;
   width: 11px;
   height: 11px;
   fill: none;
