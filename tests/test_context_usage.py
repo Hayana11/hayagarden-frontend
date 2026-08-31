@@ -327,6 +327,26 @@ class OfficialUsageParsingTests(unittest.TestCase):
         self.assertEqual(result["seven_day"]["used_percentage"], 70)
         self.assertEqual(result["seven_day"]["remaining_percentage"], 30)
 
+    def test_fetch_claude_official_usage_uses_pinned_request_headers(self):
+        payload = {
+            "five_hour": {"utilization": 23},
+            "seven_day": {"utilization": 70},
+        }
+        token = "secret-token-for-test"
+        with mock.patch.object(collector, "_http_get_json_result", return_value=(payload, 200)) as http, mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            collector.fetch_claude_official_usage(token)
+        http.assert_called_once()
+        args, kwargs = http.call_args
+        self.assertEqual(args[0], collector.CLAUDE_USAGE_URL)
+        headers = kwargs["headers"]
+        self.assertIn("Authorization", headers)
+        self.assertTrue(headers["Authorization"].startswith("Bearer "))
+        self.assertEqual(headers["anthropic-beta"], "oauth-2025-04-20")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["User-Agent"], "claude-cli/2.1.220 (external, cli)")
+        self.assertIsNone(kwargs["retry_metadata"])
+        self.assertNotIn(token, stderr.getvalue())
+
     def test_fetch_claude_official_usage_returns_none_when_fields_missing(self):
         with mock.patch.object(collector, "_http_get_json_result", return_value=({"unrelated": True}, 200)):
             self.assertIsNone(collector.fetch_claude_official_usage("fake-token"))
