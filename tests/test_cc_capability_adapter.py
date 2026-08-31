@@ -386,7 +386,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             mcp_path = Path(flags["mcp_path"])
             self.assertTrue(mcp_path.is_file())
             cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
-            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability"})
+            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "external"})
 
             # tool_profile mismatch is detected by the existing decision helper
             # once a live generation exists (process_dead otherwise wins).
