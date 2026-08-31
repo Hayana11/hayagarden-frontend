@@ -147,4 +147,3 @@ assert.match(codexAlert, /等待下一次额度窗口恢复/);
 assert.match(limitAlert(renderAgent({ ...generic, exhausted: true }, codex)), /Try again after 5pm/);
 
 console.log('test-usage-chrome78-runtime: ok (runtime checks + 14 real-card render cases)');
-

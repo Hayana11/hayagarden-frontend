@@ -614,7 +614,8 @@ class ClaudeJsonlLimitSignalTests(unittest.TestCase):
         return collector.rate_limit_detail(json.dumps({"error": message, **extra}), self.observed)
 
     def collect(self, rows, *, source="ccusage"):
-        (self.root / "session.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        if rows is not None:
+            (self.root / "session.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
         with mock.patch.object(collector, "OFFICIAL_CACHE_PATH", self.root / "official.json"), \
              mock.patch.object(collector, "read_claude_oauth_token", return_value="fake-token"), \
              mock.patch.object(collector, "fetch_claude_official_usage", return_value=self.official), \
@@ -658,6 +659,89 @@ class ClaudeJsonlLimitSignalTests(unittest.TestCase):
     def test_equal_timestamp_usage_does_not_clear_limit(self):
         agent = self.collect([self.event(), self.session(self.observed)])
         self.assertIn("effective_limit", agent["quota"])
+
+    def write_project(self, name, rows, mtime):
+        path = self.root / name
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+
+    def test_cross_file_latest_limit_uses_event_time_not_file_mtime(self):
+        older = self.event("Weekly limit reached. Resets Sep 1")
+        latest = {**self.event("429. Try again after 5pm"), "timestamp": "2026-08-31T03:00:00Z"}
+        for source in ("ccusage", "official", "jsonl"):
+            for newest_event_file_mtime in (100, 300):
+                with self.subTest(source=source, mtime=newest_event_file_mtime):
+                    self.write_project("older-event.jsonl", [older], 200)
+                    self.write_project("latest-event.jsonl", [self.session("2026-08-31T02:00:00Z"), latest], newest_event_file_mtime)
+                    agent = self.collect(None, source=source)
+                    self.assertEqual(agent["quota"]["effective_limit"], {
+                        "kind": "rate_limit", "exhausted": False,
+                        "reset_text": "Try again after 5pm", "observed_at": latest["timestamp"],
+                    })
+                    self.assertEqual(agent["quota_source"], {
+                        "ccusage": "ccusage_blocks", "official": "claude_oauth_usage", "jsonl": "claude_project_jsonl",
+                    }[source])
+
+    def test_cross_file_session_does_not_stop_search_for_that_files_limit(self):
+        latest = {**self.event("Opus limit reached. Resets at 3 PM"), "timestamp": "2026-08-31T03:00:00Z"}
+        self.write_project("older-event.jsonl", [self.event()], 200)
+        # Reverse scanning encounters this file's session before its limit.
+        # A limit found in another file must not satisfy this file's stop condition.
+        for session_time in ("2026-08-31T02:00:00Z", latest["timestamp"], "2026-08-31T04:00:00Z"):
+            with self.subTest(session_time=session_time):
+                self.write_project("latest-event.jsonl", [latest, self.session(session_time)], 100)
+                sessions, limit = collector.scan_claude_projects(self.root)
+                self.assertEqual(limit["observed_at"], latest["timestamp"])
+                self.assertEqual(limit["kind"], "opus")
+                self.assertEqual(sessions[0]["updated_at"], session_time)
+                agent = self.collect(None)
+                if session_time > latest["timestamp"]:
+                    self.assertNotIn("effective_limit", agent["quota"])
+                else:
+                    self.assertEqual(agent["quota"]["effective_limit"], limit)
+
+    def test_cross_file_latest_limit_without_any_session(self):
+        latest = {**self.event("Opus limit reached. Resets at 3 PM"), "timestamp": "2026-08-31T03:00:00Z"}
+        self.write_project("older-event.jsonl", [self.event()], 200)
+        self.write_project("latest-event.jsonl", [latest], 100)
+        sessions, limit = collector.scan_claude_projects(self.root)
+        self.assertEqual(sessions, [])
+        self.assertEqual(limit["observed_at"], latest["timestamp"])
+        self.assertEqual(self.collect(None)["quota"]["effective_limit"], limit)
+
+    def test_cross_file_session_cap_keeps_newest_usage_for_stale_clear(self):
+        self.write_project("limit.jsonl", [self.event()], 300)
+        for index in range(6):
+            self.write_project(f"old-session-{index}.jsonl", [self.session("2026-08-31T00:00:00Z")], 200 - index)
+        self.write_project("newest-session.jsonl", [self.session("2026-08-31T02:00:00Z")], 100)
+        sessions, limit = collector.scan_claude_projects(self.root)
+        self.assertEqual(len(sessions), 6)
+        self.assertEqual(sessions[0]["updated_at"], "2026-08-31T02:00:00Z")
+        self.assertEqual(limit["observed_at"], self.observed)
+        self.assertNotIn("effective_limit", self.collect(None)["quota"])
+
+    def test_cross_file_limit_order_uses_instants_with_offsets_and_fractions(self):
+        for older_time, newer_time in (
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T02:00:00Z"),
+            ("2026-08-31T01:00:00Z", "2026-08-31T01:00:00.500000Z"),
+        ):
+            with self.subTest(older=older_time, newer=newer_time):
+                self.write_project("older-event.jsonl", [{**self.event(), "timestamp": older_time}], 200)
+                self.write_project("latest-event.jsonl", [{**self.event(), "timestamp": newer_time}], 100)
+                _, limit = collector.scan_claude_projects(self.root)
+                self.assertEqual(limit["observed_at"], newer_time)
+
+    def test_stale_fence_compares_instants_not_timestamp_strings(self):
+        for limit_time, session_time, cleared in (
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T02:00:00Z", True),
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T01:00:00Z", False),
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T00:59:59Z", False),
+            ("2026-08-31T01:00:00Z", "2026-08-31T01:00:00.500000Z", True),
+            ("2026-08-31T01:00:00.500000Z", "2026-08-31T01:00:00Z", False),
+        ):
+            with self.subTest(limit_time=limit_time, session_time=session_time):
+                agent = self.collect([{**self.event(), "timestamp": limit_time}, self.session(session_time)])
+                self.assertEqual("effective_limit" not in agent["quota"], cleared)
 
     def test_jsonl_only_signal_retains_existing_source(self):
         agent = self.collect([self.event("429. Try again after 5pm")], source="jsonl")

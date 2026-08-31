@@ -780,11 +780,17 @@ def rate_limit_detail(text: str, observed_at: str) -> dict[str, Any] | None:
     }
 
 
+def _claude_event_time(value: Any) -> dt.datetime:
+    """Compare Claude event instants without changing their serialized timestamps."""
+    return dt.datetime.fromisoformat(iso_time(value, "1970-01-01T00:00:00Z").replace("Z", "+00:00"))
+
+
 def scan_claude_projects(projects_dir: Path, file_limit: int = 8) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     sessions: list[dict[str, Any]] = []
     newest_limit: dict[str, Any] | None = None
     for path in recent_jsonl(projects_dir, file_limit):
         session: dict[str, Any] | None = None
+        project_limit: dict[str, Any] | None = None
         lines_seen = 0
         for line in reverse_lines(path):
             lines_seen += 1
@@ -794,10 +800,8 @@ def scan_claude_projects(projects_dir: Path, file_limit: int = 8) -> tuple[list[
             if not row:
                 continue
             observed_at = iso_time(row.get("timestamp"), iso_time(path.stat().st_mtime))
-            if newest_limit is None:
-                detail = rate_limit_detail(line, observed_at)
-                if detail:
-                    newest_limit = detail
+            if project_limit is None:
+                project_limit = rate_limit_detail(line, observed_at)
             if session is None:
                 message = row.get("message") if isinstance(row.get("message"), dict) else {}
                 usage = message.get("usage") if isinstance(message.get("usage"), dict) else row.get("usage")
@@ -808,10 +812,17 @@ def scan_claude_projects(projects_dir: Path, file_limit: int = 8) -> tuple[list[
                         "model": str(message.get("model") or row.get("model") or "")[:100],
                         "updated_at": observed_at,
                     }
-            if session is not None and newest_limit is not None:
+            if session is not None and project_limit is not None:
                 break
+        # File mtime chooses the bounded scan set, not the newest limit event.
+        if project_limit and (
+            newest_limit is None
+            or _claude_event_time(project_limit["observed_at"]) > _claude_event_time(newest_limit["observed_at"])
+        ):
+            newest_limit = project_limit
         if session:
             sessions.append({key: value for key, value in session.items() if value not in (None, "")})
+    sessions.sort(key=lambda session: _claude_event_time(session.get("updated_at")), reverse=True)
     return sessions[:6], newest_limit
 
 
@@ -860,8 +871,8 @@ def collect_claude(
         source = "ccusage_blocks" if block else "claude_project_jsonl" if effective_limit else "unavailable"
 
     if effective_limit and sessions:
-        newest = max((s.get("updated_at") or "") for s in sessions)
-        if newest and newest > (effective_limit.get("observed_at") or ""):
+        newest = max(_claude_event_time(s.get("updated_at")) for s in sessions)
+        if newest > _claude_event_time(effective_limit.get("observed_at")):
             effective_limit = None
 
     # JSONL limit events are independent of official quota and ccusage reset time.
