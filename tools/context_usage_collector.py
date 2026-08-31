@@ -432,7 +432,9 @@ def _http_post_headers_result(
 
 def _claude_header_window(headers: dict[str, str], suffix: str) -> dict[str, Any]:
     utilization = numeric(headers.get(f"anthropic-ratelimit-unified-{suffix}-utilization"))
-    reset = iso_time(headers.get(f"anthropic-ratelimit-unified-{suffix}-reset"))
+    reset_raw = headers.get(f"anthropic-ratelimit-unified-{suffix}-reset")
+    reset_number = numeric(reset_raw)
+    reset = iso_time(reset_number if reset_number is not None else reset_raw)
     if utilization is None or not reset:
         return {}
     used = min(100.0, max(0.0, utilization * 100))
