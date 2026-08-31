@@ -260,7 +260,7 @@ function toolAccent(groupId: string, available: boolean): string {
 
 function transportLabel(group: InventoryGroup): string {
   if (group.id.startsWith('external_mcp:')) {
-    return group.transport === 'streamable_http' ? 'Streamable HTTP' : 'External MCP';
+    return group.transport === 'streamable_http' ? 'HTTP' : 'External MCP';
   }
   const providers = group.tools.map((tool) => tool.provider || '').join(' ');
   if (/\bsse\b/i.test(providers)) return 'SSE';
