@@ -179,11 +179,70 @@
   cursor: pointer;
 }
 
-.toolroom-group-toggle {
+.toolroom-group-header {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.toolroom-group-header .toolroom-group-toggle {
   display: flex;
   align-items: center;
+  flex: 1;
+  min-width: 0;
   padding: 16px 18px;
   transition: background-color 160ms ease;
+}
+
+.toolroom-mcp-check-action {
+  position: absolute;
+  top: 39px;
+  left: 41px;
+  z-index: 2;
+  display: block;
+  padding: 0;
+}
+
+.toolroom-mcp-check-button {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border: 1px solid rgba(255, 255, 255, 0.94);
+  border-radius: 50%;
+  padding: 0;
+  background: rgba(159, 182, 199, 0.96);
+  color: #ffffff;
+  box-shadow: 0 2px 6px rgba(94, 127, 152, 0.18);
+  cursor: pointer;
+}
+
+.toolroom-mcp-check-icon {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.toolroom-mcp-check-button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.toolroom-mcp-check-error {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  border-radius: 6px;
+  padding: 3px 5px;
+  background: rgba(255, 250, 250, 0.96);
+  color: #b76e79;
+  font: 400 9px/1.2 var(--font-mono);
+  white-space: nowrap;
+  box-shadow: 0 2px 7px rgba(183, 110, 121, 0.10);
 }
 
 .toolroom-group-toggle > * + * {
@@ -197,8 +256,8 @@
   width: 42px;
   height: 42px;
   border-radius: 14px;
-  background: rgba(142, 165, 184, 0.15);
-  color: #5e7f98;
+  background: var(--toolroom-group-icon-background, rgba(142, 165, 184, 0.15));
+  color: var(--toolroom-group-icon-color, #5e7f98);
   font-size: 19px;
 }
 
@@ -206,6 +265,11 @@
 .toolroom-group-icon[data-group='desire'] {
   background: rgba(138, 122, 181, 0.15);
   color: var(--color-violet);
+}
+
+.toolroom-group-icon[data-group='external_mcp'] {
+  background: var(--toolroom-group-icon-background, rgba(159, 182, 199, 0.18));
+  color: var(--toolroom-group-icon-color, #5e7f98);
 }
 
 .toolroom-group-icon[data-group='light'],

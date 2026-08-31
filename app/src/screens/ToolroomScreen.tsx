@@ -102,12 +102,60 @@ const GROUP_ICON_PATHS: Record<string, string> = {
   artifacts: 'M12 3 19.8 7.5v9L12 21l-7.8-4.5v-9L12 3Z',
   phone: 'M7 3h10v18H7z M10 18h4',
   moments: 'M4 5h10v12H4z M10 8h10v11H10z',
+  external_mcp: 'M9 3v6m6-6v6m-8 0h10v2a5 5 0 0 1-10 0V9Zm5 7v5',
+  server: 'M4 5h16v14H4z M8 9h8M8 13h5 M7 19v2m10-2v2',
+  globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-8.4 6h16.8M3.6 15h16.8M12 3c2.1 2.4 3.2 5.4 3.2 9S14.1 18.6 12 21c-2.1-2.4-3.2-5.4-3.2-9S9.9 5.4 12 3Z',
+  spark: 'M12 3l1.8 6.2L20 11l-6.2 1.8L12 19l-1.8-6.2L4 11l6.2-1.8L12 3Z',
 };
 
+const VISUAL_GROUP_ALIASES: Record<string, string> = {
+  memory: 'memory',
+  home: 'light',
+  plans: 'plans_ledger',
+  ledger: 'plans_ledger',
+  files: 'code_files',
+  external_read: 'web',
+};
+
+function visualGroupId(groupId: string): string {
+  if (groupId.startsWith('legacy:')) return groupId.slice('legacy:'.length);
+  if (groupId.startsWith('external_mcp:')) return 'external_mcp';
+  return VISUAL_GROUP_ALIASES[groupId] || groupId;
+}
+
+function externalMcpServerId(groupId: string): string | null {
+  const prefix = 'external_mcp:';
+  return groupId.startsWith(prefix) ? groupId.slice(prefix.length) : null;
+}
+
+function safeReasonCode(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Z0-9_]{2,64}$/.test(value) ? value : null;
+}
+
+type ExternalMcpVisual = {
+  pathId: 'external_mcp' | 'server' | 'globe' | 'spark';
+  background: string;
+  color: string;
+};
+
+const EXTERNAL_MCP_VISUALS: ExternalMcpVisual[] = [
+  { pathId: 'external_mcp', background: 'rgba(159, 182, 199, 0.18)', color: '#5e7f98' },
+  { pathId: 'server', background: 'rgba(142, 165, 184, 0.18)', color: '#6f879a' },
+  { pathId: 'globe', background: 'rgba(127, 169, 143, 0.18)', color: '#5e896f' },
+  { pathId: 'spark', background: 'rgba(217, 164, 65, 0.18)', color: '#b77a19' },
+];
+
+function externalMcpVisualForGroup(groupId: string): ExternalMcpVisual | null {
+  const serverId = externalMcpServerId(groupId);
+  if (!serverId) return null;
+  const score = Array.from(serverId).reduce((total, character) => total + character.charCodeAt(0), 0);
+  return EXTERNAL_MCP_VISUALS[score % EXTERNAL_MCP_VISUALS.length];
+}
+
 function ToolroomGroupIcon({ groupId }: { groupId: string }) {
-  const path = groupId.startsWith('external_mcp:')
-    ? 'M9 3v6m6-6v6m-8 0h10v2a5 5 0 0 1-10 0V9Zm5 7v5'
-    : GROUP_ICON_PATHS[groupId] || GROUP_ICON_PATHS.workspace;
+  const visualId = visualGroupId(groupId);
+  const externalVisual = externalMcpVisualForGroup(groupId);
+  const path = GROUP_ICON_PATHS[externalVisual?.pathId || visualId] || GROUP_ICON_PATHS.workspace;
   return (
     <svg viewBox="0 0 24 24" role="presentation" focusable="false">
       <path d={path} />
@@ -193,6 +241,7 @@ const GROUP_ACCENT_COLORS: Record<string, string> = {
   gallery: '#8EA5B8',
   code_files: '#8EA5B8',
   workspace: '#8EA5B8',
+  external_mcp: '#9FB6C7',
   self_config: '#8EA5B8',
   board: '#B76E79',
   life: '#5E7F98',
@@ -206,12 +255,12 @@ const GROUP_ACCENT_COLORS: Record<string, string> = {
 
 function toolAccent(groupId: string, available: boolean): string {
   if (!available) return DISABLED_TOOL_ACCENT;
-  return GROUP_ACCENT_COLORS[groupId] || '#8EA5B8';
+  return GROUP_ACCENT_COLORS[visualGroupId(groupId)] || '#8EA5B8';
 }
 
 function transportLabel(group: InventoryGroup): string {
   if (group.id.startsWith('external_mcp:')) {
-    return group.transport === 'streamable_http' ? 'Streamable HTTP' : 'External MCP';
+    return group.transport === 'streamable_http' ? 'HTTP' : 'External MCP';
   }
   const providers = group.tools.map((tool) => tool.provider || '').join(' ');
   if (/\bsse\b/i.test(providers)) return 'SSE';
@@ -394,6 +443,8 @@ export function ToolroomScreen() {
   const [externalMcpNotice, setExternalMcpNotice] = useState('');
   const [externalMcpCredential, setExternalMcpCredential] = useState('');
   const [externalMcpSubmitting, setExternalMcpSubmitting] = useState(false);
+  const [externalMcpChecking, setExternalMcpChecking] = useState<Record<string, boolean>>({});
+  const [externalMcpCheckErrors, setExternalMcpCheckErrors] = useState<Record<string, string>>({});
   const [companionHints, setCompanionHints] = useState<ToolCompanionHints | null>(null);
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>({});
   const [promptEditorTool, setPromptEditorTool] = useState<string | null>(null);
@@ -682,6 +733,47 @@ export function ToolroomScreen() {
     }
   };
 
+  const checkExternalMcp = useCallback(async (groupId: string) => {
+    const serverId = externalMcpServerId(groupId);
+    if (!serverId || externalMcpChecking[serverId]) return;
+    setExternalMcpChecking((current) => ({ ...current, [serverId]: true }));
+    try {
+      const result = await http.post<{
+        ok: boolean;
+        connected?: boolean;
+        status?: string;
+        reason_code?: string | null;
+        discovery?: { reason_code?: string | null };
+      }>(`/api/external-mcp/servers/${encodeURIComponent(serverId)}/check`);
+      if (result.ok && result.connected === true && result.status === 'CONNECTED') {
+        setExternalMcpCheckErrors((current) => {
+          const next = { ...current };
+          delete next[serverId];
+          return next;
+        });
+      } else {
+        const reasonCode = safeReasonCode(result.discovery?.reason_code)
+          || safeReasonCode(result.reason_code)
+          || 'CHECK_FAILED';
+        setExternalMcpCheckErrors((current) => ({ ...current, [serverId]: reasonCode }));
+      }
+    } catch (error) {
+      const candidate = (error as { code?: unknown }).code;
+      const payload = (error as { payload?: unknown }).payload;
+      const payloadRecord = payload && typeof payload === 'object'
+        ? payload as { reason_code?: unknown; code?: unknown }
+        : null;
+      const reasonCode = safeReasonCode(candidate)
+        || safeReasonCode(payloadRecord?.reason_code)
+        || safeReasonCode(payloadRecord?.code)
+        || 'CHECK_FAILED';
+      setExternalMcpCheckErrors((current) => ({ ...current, [serverId]: reasonCode }));
+    } finally {
+      setExternalMcpChecking((current) => ({ ...current, [serverId]: false }));
+      void loadInventory(false);
+    }
+  }, [externalMcpChecking, loadInventory]);
+
   const openPromptEditor = (tool: InventoryTool) => {
     setPromptEditorTool(tool.tool_name);
     setPromptDraft(promptTextForTool(tool, companionHints, promptOverrides));
@@ -947,34 +1039,76 @@ export function ToolroomScreen() {
             <div className="toolroom-groups">
               {filteredGroups.map((group) => {
                 const open = Boolean(openGroups[group.id]) || Boolean(normalizedSearch);
+                const serverId = externalMcpServerId(group.id);
+                const checking = serverId ? Boolean(externalMcpChecking[serverId]) : false;
+                const checkError = serverId ? externalMcpCheckErrors[serverId] : '';
+                const checkLabel = checking
+                  ? '检查中…'
+                  : group.lifecycle_state === 'CONNECTED' ? '检查连接' : '重新检查';
+                const externalVisual = externalMcpVisualForGroup(group.id);
                 return (
                   <article className="toolroom-group" key={group.id}>
-                    <button
-                      type="button"
-                      className="toolroom-group-toggle"
-                      aria-expanded={open}
-                      onClick={() => setOpenGroups((current) => ({
-                        ...current,
-                        [group.id]: !current[group.id],
-                      }))}
-                    >
-                      <span className="toolroom-group-icon" data-group={group.id} aria-hidden="true">
-                        <ToolroomGroupIcon groupId={group.id} />
-                      </span>
-                      <span className="toolroom-group-copy">
-                        <strong>{group.label}</strong>
-                        <span className="toolroom-badges">
-                          <em className={'toolroom-connection-badge' + (group.available > 0 || group.lifecycle_state === 'CONNECTED' ? ' is-live' : '')}>
-                            {group.id.startsWith('external_mcp:')
-                              ? group.lifecycle_state === 'CONNECTED' ? '已连接' : '未连接'
-                              : group.available > 0 ? '已连接' : '当前不可用'}
-                          </em>
-                          <em className="toolroom-transport-badge">{transportLabel(group)}</em>
-                          <em>工具：{group.available}/{group.total}</em>
+                    <div className="toolroom-group-header">
+                      <button
+                        type="button"
+                        className="toolroom-group-toggle"
+                        aria-expanded={open}
+                        onClick={() => setOpenGroups((current) => ({
+                          ...current,
+                          [group.id]: !current[group.id],
+                        }))}
+                      >
+                        <span
+                          className="toolroom-group-icon"
+                          data-group={visualGroupId(group.id)}
+                          style={externalVisual ? {
+                            '--toolroom-group-icon-background': externalVisual.background,
+                            '--toolroom-group-icon-color': externalVisual.color,
+                          } as CSSProperties : undefined}
+                          aria-hidden="true"
+                        >
+                          <ToolroomGroupIcon groupId={group.id} />
                         </span>
-                      </span>
-                      <span className={'toolroom-chevron' + (open ? ' is-open' : '')} aria-hidden="true">⌄</span>
-                    </button>
+                        <span className="toolroom-group-copy">
+                          <strong>{group.label}</strong>
+                          <span className="toolroom-badges">
+                            <em className={'toolroom-connection-badge' + (group.available > 0 || group.lifecycle_state === 'CONNECTED' ? ' is-live' : '')}>
+                              {group.id.startsWith('external_mcp:')
+                                ? group.lifecycle_state === 'CONNECTED' ? '已连接' : '未连接'
+                                : group.available > 0 ? '已连接' : '当前不可用'}
+                            </em>
+                            <em className="toolroom-transport-badge">{transportLabel(group)}</em>
+                            <em>工具：{group.available}/{group.total}</em>
+                          </span>
+                        </span>
+                        <span className={'toolroom-chevron' + (open ? ' is-open' : '')} aria-hidden="true">⌄</span>
+                      </button>
+                      {serverId ? (
+                        <div className="toolroom-mcp-check-action">
+                          <button
+                            type="button"
+                            className={'toolroom-mcp-check-button' + (checking ? ' is-checking' : '')}
+                            disabled={checking}
+                            aria-label={checkLabel + ' ' + group.label}
+                            title={checkLabel}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void checkExternalMcp(group.id);
+                            }}
+                          >
+                            <svg className="toolroom-mcp-check-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                              <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+                              <path d="M20 5v7h-7" />
+                            </svg>
+                          </button>
+                          {checkError ? (
+                            <small className="toolroom-mcp-check-error" role="status">
+                              检查失败 · {checkError}
+                            </small>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
 
                     {open ? (
                       <div className="toolroom-tool-list">
