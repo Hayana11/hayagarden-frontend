@@ -157,8 +157,8 @@ export function mockUsageSummary(now: Date): UsageSummary {
         contextTokens: null,
         contextWindowTokens: null,
         effectiveLimit: null,
-        fiveHour: { usedPct: null, resetAt: '', remainingMinutes: null },
-        sevenDay: { usedPct: null, resetAt: '', remainingMinutes: null },
+        fiveHour: { usedPct: null, remainingPct: null, resetAt: '', remainingMinutes: null },
+        sevenDay: { usedPct: null, remainingPct: null, resetAt: '', remainingMinutes: null },
       },
       codex: {
         id: 'codex',
@@ -169,8 +169,8 @@ export function mockUsageSummary(now: Date): UsageSummary {
         contextTokens: null,
         contextWindowTokens: null,
         effectiveLimit: null,
-        fiveHour: { usedPct: null, resetAt: '', remainingMinutes: null },
-        sevenDay: { usedPct: null, resetAt: '', remainingMinutes: null },
+        fiveHour: { usedPct: null, remainingPct: null, resetAt: '', remainingMinutes: null },
+        sevenDay: { usedPct: null, remainingPct: null, resetAt: '', remainingMinutes: null },
       },
     },
   };
