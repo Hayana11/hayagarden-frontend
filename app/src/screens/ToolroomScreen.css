@@ -256,8 +256,8 @@
   width: 42px;
   height: 42px;
   border-radius: 14px;
-  background: rgba(142, 165, 184, 0.15);
-  color: #5e7f98;
+  background: var(--toolroom-group-icon-background, rgba(142, 165, 184, 0.15));
+  color: var(--toolroom-group-icon-color, #5e7f98);
   font-size: 19px;
 }
 
@@ -268,8 +268,8 @@
 }
 
 .toolroom-group-icon[data-group='external_mcp'] {
-  background: rgba(159, 182, 199, 0.18);
-  color: #5e7f98;
+  background: var(--toolroom-group-icon-background, rgba(159, 182, 199, 0.18));
+  color: var(--toolroom-group-icon-color, #5e7f98);
 }
 
 .toolroom-group-icon[data-group='light'],
