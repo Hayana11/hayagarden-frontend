@@ -599,12 +599,13 @@ export function ToolroomScreen() {
     };
     const start = () => {
       stop();
+      if (document.visibilityState !== 'visible') return;
       void loadInventory();
-      if (document.visibilityState === 'visible') {
-        timer = window.setInterval(refresh, 10_000);
-      }
+      timer = window.setInterval(refresh, 10_000);
     };
-    const handleFocus = () => { void loadInventory(false); };
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') void loadInventory(false);
+    };
     const handleVisibility = () => { start(); };
     start();
     window.addEventListener('focus', handleFocus);
