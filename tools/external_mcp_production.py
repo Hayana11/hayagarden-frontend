@@ -23,9 +23,7 @@ from .external_mcp_runtime import ExternalMcpRuntime
 from .external_mcp_secret_materializer import ExternalMcpSecretMaterializer
 from .external_secret_store import ExternalSecretStore
 from .external_server_registry import ExternalServerRegistry
-from .external_tool_execution_fence import ExternalToolExecutionFence
 from .external_tool_registry import ExternalToolCandidateRegistry
-from .external_tool_side_effect_policy import ExternalToolSideEffectPolicy
 
 
 EXTERNAL_MCP_DB_PATH = "/var/lib/hayagarden/external-mcp.db"
@@ -44,8 +42,6 @@ class ExternalMcpProductionGraph:
     secret_store: ExternalSecretStore
     auth_binding_registry: ExternalMcpAuthBindingRegistry
     candidate_registry: ExternalToolCandidateRegistry
-    side_effect_policy: ExternalToolSideEffectPolicy
-    execution_fence: ExternalToolExecutionFence
     invocation: ExternalMcpInvocation
     materializer: ExternalMcpSecretMaterializer
     runtime: ExternalMcpRuntime
@@ -155,23 +151,10 @@ def _build_graph(connection: sqlite3.Connection) -> ExternalMcpProductionGraph:
         connection,
         server_registry=server_registry,
     )
-    side_effect_policy = ExternalToolSideEffectPolicy(
-        connection,
-        candidate_registry=candidate_registry,
-        server_registry=server_registry,
-    )
-    execution_fence = ExternalToolExecutionFence(
-        connection,
-        server_registry=server_registry,
-        candidate_registry=candidate_registry,
-        side_effect_policy=side_effect_policy,
-    )
     invocation = ExternalMcpInvocation(
         connection,
         server_registry=server_registry,
         candidate_registry=candidate_registry,
-        side_effect_policy=side_effect_policy,
-        execution_fence=execution_fence,
         auth_binding_registry=auth_binding_registry,
     )
     materializer = ExternalMcpSecretMaterializer(
@@ -190,8 +173,6 @@ def _build_graph(connection: sqlite3.Connection) -> ExternalMcpProductionGraph:
         secret_store=secret_store,
         auth_binding_registry=auth_binding_registry,
         candidate_registry=candidate_registry,
-        side_effect_policy=side_effect_policy,
-        execution_fence=execution_fence,
         invocation=invocation,
         materializer=materializer,
         runtime=runtime,
@@ -222,3 +203,4 @@ __all__ = [
     "ExternalMcpProductionInitializationError",
     "open_external_mcp_production",
 ]
+
