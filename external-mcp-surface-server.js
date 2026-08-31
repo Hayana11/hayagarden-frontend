@@ -58,7 +58,8 @@ function callSurface(name, args, runner = runPython) {
     if (result.status === 'TOOL_ERROR') {
       return {
         status: 'TOOL_ERROR',
-        error: { code: 'EXTERNAL_TOOL_ERROR', summary: 'External MCP tool returned an error.' },
+        result: result.result,
+        error: result.error,
       };
     }
     return safeFailure(result.error && result.error.code);
@@ -87,20 +88,39 @@ function listSurface(runner = runPython) {
   }
 }
 
-function mcpCallResult(result) {
-  if (result.status === 'SUCCESS') {
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result.result ?? null) }],
-      isError: false,
-    };
-  }
+function isCallToolResult(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Array.isArray(value.content)
+    && (!Object.hasOwn(value, 'isError') || typeof value.isError === 'boolean'),
+  );
+}
+
+function localMcpError(summary) {
   return {
     content: [{
       type: 'text',
-      text: result.error?.summary || 'External MCP call was not completed.',
+      text: typeof summary === 'string' && summary
+        ? summary
+        : 'External MCP call was not completed.',
     }],
     isError: true,
   };
+}
+
+function mcpCallResult(result) {
+  if ((result.status === 'SUCCESS' || result.status === 'TOOL_ERROR') && isCallToolResult(result.result)) {
+    return result.result;
+  }
+  return localMcpError(
+    result.error?.summary || (
+      result.status === 'TOOL_ERROR'
+        ? 'External MCP tool returned an error.'
+        : 'External MCP call was not completed.'
+    ),
+  );
 }
 
 function buildServer({ runner = runPython } = {}) {
