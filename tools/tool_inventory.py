@@ -97,6 +97,20 @@ if set(DISPLAY_LABELS) != _TOOL_NAMES or any(not label.strip() or label == name 
 
 def _tool(tool_name: str, display_label: str, *, available: bool=False, reason_code: str="legacy_only", provider: str|None=None)->dict[str,Any]:
     return {"tool_name":tool_name,"display_label":display_label,"available":available,"status_label":"当前可用" if available else "当前不可用","reason_code":reason_code,"provider":provider}
+
+
+_GRAY = {
+  "browse_github": _tool("browse_github", "浏览 GitHub", reason_code="provider_blocked", provider="gateway._github_browse"),
+  "collect_chat_moment": _tool("collect_chat_moment", "收藏聊天到朋友圈", reason_code="prerequisite_unproven", provider="mcp__home__collect_chat_moment"),
+  "light_on": _tool("light_on", "开灯", reason_code="contract_disabled", provider="mcp__home__light_on"),
+  "light_off": _tool("light_off", "关灯", reason_code="contract_disabled", provider="mcp__home__light_off"),
+  "light_warm": _tool("light_warm", "暖光", reason_code="contract_disabled", provider="mcp__home"),
+  "light_neutral": _tool("light_neutral", "中性光", reason_code="contract_disabled", provider="mcp__home"),
+  "set_brightness": _tool("set_brightness", "设置亮度", reason_code="retired"),
+  "set_color_temp": _tool("set_color_temp", "设置色温", reason_code="retired"),
+  "codebase_patch": _tool("codebase_patch", "修改项目文件", reason_code="safety_gap", provider="mcp__codebase"),
+  "codebase_create_file": _tool("codebase_create_file", "创建项目文件", reason_code="safety_gap", provider="mcp__codebase"),
+}
 from tools import tool_companion_hints
 from tools.capability_manifest import get_capability
 from tools.cc_capability_adapter import physical_surface_names
