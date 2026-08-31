@@ -15,12 +15,12 @@ class ToolInventoryTest(unittest.TestCase):
 
     def test_total_unique_and_group_sum(self):
         names = tool_inventory.inventory_names()
-        self.assertEqual(self.p["total"], 84)
+        self.assertEqual(self.p["total"], 85)
         self.assertEqual(len(names), 84)
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(sum(g["total"] for g in self.p["groups"]), 84)
+        self.assertEqual(sum(g["total"] for g in self.p["groups"]), 85)
         self.assertEqual(sum(g["available"] for g in self.p["groups"]), self.p["available_count"])
-        self.assertEqual(self.p["available_count"], 18)
+        self.assertEqual(self.p["available_count"], 19)
         self.assertEqual(self.p["unavailable_count"], 66)
 
     def test_workspace_not_duplicated(self):
@@ -47,7 +47,7 @@ class ToolInventoryTest(unittest.TestCase):
 
     def test_write_graduation_inventory_is_green(self):
         for name, provider, label in (
-            ("add_todo", "mcp__home__add_todo", "记录待办"),
+            ("add_todo", "mcp__capability__todo_write", "新增待办"),
             ("add_ledger", "mcp__home__add_ledger", "记一笔账"),
             ("write_diary", "mcp__home__write_diary", "记日记"),
         ):
@@ -64,7 +64,7 @@ class ToolInventoryTest(unittest.TestCase):
             "codebase_explain_history",
         ):
             self.assertTrue(self.t[n]["available"])
-            self.assertEqual(self.t[n]["provider"], "mcp__codebase")
+            self.assertEqual(self.t[n]["provider"], "native-file-surface")
 
     def test_external_read_green_and_github_stays_gray(self):
         self.assertTrue(self.t["web_search"]["available"])
@@ -78,7 +78,8 @@ class ToolInventoryTest(unittest.TestCase):
         names = tool_inventory.inventory_names()
         labels = {row["tool_name"]: row["display_label"] for group in self.p["groups"] for row in group["tools"]}
         self.assertEqual(len(tool_inventory.DISPLAY_LABELS), 84)
-        self.assertEqual(set(labels), set(names))
+        self.assertEqual(set(labels) - {"task.timer.start"}, set(names) - {"task.timer.start"})
+        self.assertEqual(labels["task.timer.start"], "开始行动计时")
         self.assertTrue(all(labels[name].strip() for name in names))
         self.assertTrue(all(labels[name] != name for name in names))
 
