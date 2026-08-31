@@ -186,14 +186,18 @@
 }
 
 .toolroom-group-header .toolroom-group-toggle {
+  display: flex;
+  align-items: center;
   flex: 1;
   min-width: 0;
+  padding: 16px 18px;
+  transition: background-color 160ms ease;
 }
 
 .toolroom-mcp-check-action {
   position: absolute;
-  top: 29px;
-  left: 30px;
+  top: 39px;
+  left: 41px;
   z-index: 2;
   display: block;
   padding: 0;
