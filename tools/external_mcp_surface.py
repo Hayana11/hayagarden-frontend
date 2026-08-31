@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from typing import Any, Iterator
+from typing import Any
 
 from .external_server_registry import CONNECTED_STATE
 from .external_tool_registry import PRESENT, fingerprint_raw_tool
@@ -27,6 +27,7 @@ from .external_mcp_invocation import (
 _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 _SURFACE_PREFIX = "mcp__external__"
 _MAX_DESCRIPTION = 12000
+_MAX_SURFACE_TOOL_NAME = 64
 _SAFE_SLUG = re.compile(r"[^a-z0-9]+")
 _HEX = frozenset("0123456789abcdef")
 
@@ -38,11 +39,17 @@ def _slug(value: object, fallback: str) -> str:
     return text[:64] or fallback
 
 
-def surface_tool_name(server_id: str, remote_tool_name: str, control_id: str) -> str:
-    server_slug = _slug(server_id, "server")
+def surface_tool_name(server_display_name: str, remote_tool_name: str, control_id: str) -> str:
+    server_slug = _slug(server_display_name, "server")
     tool_slug = _slug(remote_tool_name, "tool")
     short_hash = hashlib.sha256(control_id.encode("utf-8")).hexdigest()[:10]
-    return f"{server_slug}__{tool_slug}__{short_hash}"
+    readable_budget = _MAX_SURFACE_TOOL_NAME - len(short_hash) - 4
+    server_budget = max(1, readable_budget // 2)
+    tool_budget = max(1, readable_budget - server_budget)
+    return (
+        f"{server_slug[:server_budget]}__"
+        f"{tool_slug[:tool_budget]}__{short_hash}"
+    )
 
 
 def _valid_fingerprint(value: object) -> bool:
@@ -102,7 +109,7 @@ def _tool_row(server: Any, candidate: Mapping[str, Any], snapshot: Mapping[str, 
         "input_schema": _schema(snapshot or {}),
         "fingerprint": fingerprint,
         "source_registry_revision": source_revision,
-        "surface_tool_name": surface_tool_name(server.server_id, remote_name, control_id),
+        "surface_tool_name": surface_tool_name(server.display_name, remote_name, control_id),
         "available": current,
     }
 
@@ -213,8 +220,22 @@ def invoke_external_surface(
     except Exception:
         return _bounded_local_result(OUTCOME_UNKNOWN, "EXTERNAL_RUNTIME_UNAVAILABLE")
     status = response.get("status")
+    mcp_result = response.get("mcp_result")
+    preserves_call_result = (
+        isinstance(mcp_result, Mapping)
+        and isinstance(mcp_result.get("content"), list)
+        and (
+            "isError" not in mcp_result
+            or isinstance(mcp_result.get("isError"), bool)
+        )
+    )
     if status == SUCCEEDED:
-        return {"status": SUCCEEDED, "result": response.get("mcp_result")}
+        return {
+            "status": SUCCEEDED,
+            "result": dict(mcp_result) if preserves_call_result else None,
+        }
+    if status == TOOL_ERROR and preserves_call_result:
+        return {"status": TOOL_ERROR, "result": dict(mcp_result)}
     if status == TOOL_ERROR:
         return _bounded_local_result(TOOL_ERROR)
     return _bounded_local_result(status or FAILED_PRE_CALL, response.get("reason_code"))
