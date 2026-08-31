@@ -12,6 +12,14 @@ import {
 
 test('list and call stay on the injected local bridge', () => {
   const requests = [];
+  const original = {
+    content: [
+      { type: 'text', text: 'rolled' },
+      { type: 'image', data: 'bounded-image' },
+    ],
+    structuredContent: { value: 6 },
+    isError: false,
+  };
   const runner = (request) => {
     requests.push(request);
     if (request.operation === 'list') {
@@ -23,20 +31,39 @@ test('list and call stay on the injected local bridge', () => {
         }],
       };
     }
-    return { status: 'SUCCESS', result: { entries: [] } };
+    return { status: 'SUCCESS', result: original };
   };
 
   assert.deepEqual(listSurface(runner).tools[0].name, 'calendar__list__abc123');
-  assert.deepEqual(callSurface('calendar__list__abc123', {}, runner), {
-    status: 'SUCCESS',
-    result: { entries: [] },
-  });
+  const successfulCall = callSurface('calendar__list__abc123', {}, runner);
+  assert.deepEqual(successfulCall, { status: 'SUCCESS', result: original });
+  const successfulOutput = mcpCallResult(successfulCall);
+  assert.deepEqual(successfulOutput.content, original.content);
+  assert.deepEqual(successfulOutput.structuredContent, original.structuredContent);
+  assert.equal(successfulOutput.isError, false);
+  assert.notEqual(successfulOutput.content[0].text, JSON.stringify(original));
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[1], {
     operation: 'call',
     name: 'calendar__list__abc123',
     arguments: {},
   });
+  const remoteError = {
+    content: [
+      { type: 'text', text: 'invalid move' },
+      { type: 'resource', resource: { uri: 'mcp://bounded' } },
+    ],
+    structuredContent: { code: 'INVALID_MOVE' },
+    isError: true,
+  };
+  const errorOutput = mcpCallResult(callSurface(
+    'calendar__list__abc123',
+    {},
+    () => ({ status: 'TOOL_ERROR', result: remoteError }),
+  ));
+  assert.deepEqual(errorOutput.content, remoteError.content);
+  assert.deepEqual(errorOutput.structuredContent, remoteError.structuredContent);
+  assert.equal(errorOutput.isError, true);
   assert.equal(mcpCallResult({ status: 'TOOL_ERROR' }).isError, true);
   assert.ok(buildServer({ runner }));
 });
