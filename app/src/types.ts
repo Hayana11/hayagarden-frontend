@@ -66,6 +66,7 @@ export type UsageAgentId = 'claude' | 'codex';
 
 export interface UsageQuotaWindow {
   usedPct: number | null;
+  remainingPct: number | null;
   resetAt: string;
   remainingMinutes: number | null;
 }
