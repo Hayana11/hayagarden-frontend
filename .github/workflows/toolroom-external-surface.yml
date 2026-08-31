@@ -20,6 +20,8 @@ jobs:
   focused-surface:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      HAYAGARDEN_CONFIG_DB_PATH: /tmp/toolroom-external-surface-runtime.db
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
