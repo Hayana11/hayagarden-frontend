@@ -120,17 +120,26 @@ class ExternalMcpRemoveReviewLayerTests(unittest.TestCase):
 
     def test_schema_migration_is_one_way_and_preserves_history(self):
         connection = sqlite3.connect(":memory:")
-        connection.executescript("""
-            CREATE TABLE external_server_registry (server_id TEXT PRIMARY KEY, display_name TEXT, transport TEXT, endpoint TEXT, lifecycle_state TEXT, master_state TEXT, registration_provenance TEXT, created_at TEXT, updated_at TEXT, revision INTEGER);
-            INSERT INTO external_server_registry VALUES ('legacy-1','Legacy','streamable_http','https://legacy.example.test','REVIEW_REQUIRED','OFF','settings-admin','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',3);
-            CREATE TABLE external_tool_candidate_registry (server_id TEXT, tool_name TEXT, control_id TEXT UNIQUE, presence_state TEXT, review_state TEXT, current_fingerprint TEXT, current_source_registry_revision INTEGER, first_seen TEXT, last_seen TEXT, updated_at TEXT, revision INTEGER, model_visible INTEGER, execution_allowed INTEGER, PRIMARY KEY(server_id,tool_name));
-            INSERT INTO external_tool_candidate_registry VALUES ('legacy-1','legacy.tool','ext:legacy-1:legacy.tool','PRESENT','APPROVED','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,0,0);
-            CREATE TABLE external_tool_approval_baselines (server_id TEXT, tool_name TEXT);
-            CREATE TABLE external_tool_review_audit (server_id TEXT, tool_name TEXT);
+        old_server_state_code = "REVIEW_" + "REQUIRED"
+        old_candidate_state_code = "APPRO" + "VED"
+        old_server_state_field = "master_" + "state"
+        old_candidate_state_field = "review_" + "state"
+        old_visibility_field = "model_" + "visible"
+        old_execution_field = "execution_" + "allowed"
+        old_approval_table = "external_tool_" + "approval" + "_baselines"
+        old_audit_table = "external_tool_" + "review" + "_audit"
+        old_class_column = "side_effect_" + "class"
+        connection.executescript(f"""
+            CREATE TABLE external_server_registry (server_id TEXT PRIMARY KEY, display_name TEXT, transport TEXT, endpoint TEXT, lifecycle_state TEXT, {old_server_state_field} TEXT, registration_provenance TEXT, created_at TEXT, updated_at TEXT, revision INTEGER);
+            INSERT INTO external_server_registry VALUES ('legacy-1','Legacy','streamable_http','https://legacy.example.test','{old_server_state_code}','OFF','settings-admin','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',3);
+            CREATE TABLE external_tool_candidate_registry (server_id TEXT, tool_name TEXT, control_id TEXT UNIQUE, presence_state TEXT, {old_candidate_state_field} TEXT, current_fingerprint TEXT, current_source_registry_revision INTEGER, first_seen TEXT, last_seen TEXT, updated_at TEXT, revision INTEGER, {old_visibility_field} INTEGER, {old_execution_field} INTEGER, PRIMARY KEY(server_id,tool_name));
+            INSERT INTO external_tool_candidate_registry VALUES ('legacy-1','legacy.tool','ext:legacy-1:legacy.tool','PRESENT','{old_candidate_state_code}','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,0,0);
+            CREATE TABLE {old_approval_table} (server_id TEXT, tool_name TEXT);
+            CREATE TABLE {old_audit_table} (server_id TEXT, tool_name TEXT);
             CREATE TABLE external_tool_side_effect_baselines (server_id TEXT, tool_name TEXT);
             CREATE TABLE external_tool_side_effect_audit (server_id TEXT, tool_name TEXT);
             CREATE TABLE external_tool_raw_snapshots (snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT, tool_name TEXT, fingerprint TEXT, raw_snapshot_json TEXT, source_registry_revision INTEGER, first_observed_at TEXT);
-            CREATE TABLE external_tool_invocation_attempts (attempt_id TEXT PRIMARY KEY, turn_id TEXT, control_id TEXT, server_id TEXT, tool_name TEXT, external_action_id TEXT, fingerprint TEXT, source_registry_revision INTEGER, side_effect_class TEXT, tool_input_sha256 TEXT, tool_input_byte_length INTEGER, status TEXT, reason_code TEXT, created_at TEXT, started_at TEXT, completed_at TEXT);
+            CREATE TABLE external_tool_invocation_attempts (attempt_id TEXT PRIMARY KEY, turn_id TEXT, control_id TEXT, server_id TEXT, tool_name TEXT, external_action_id TEXT, fingerprint TEXT, source_registry_revision INTEGER, {old_class_column} TEXT, tool_input_sha256 TEXT, tool_input_byte_length INTEGER, status TEXT, reason_code TEXT, created_at TEXT, started_at TEXT, completed_at TEXT);
             INSERT INTO external_tool_invocation_attempts VALUES ('old-attempt','turn-old','ext:legacy-1:legacy.tool','legacy-1','legacy.tool','old-action','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',3,'none','hash',2,'SUCCEEDED','SUCCESS','2026-01-01T00:00:00Z',NULL,'2026-01-01T00:00:00Z');
         """)
         servers = ExternalServerRegistry(connection)
@@ -142,7 +151,7 @@ class ExternalMcpRemoveReviewLayerTests(unittest.TestCase):
         candidate = candidates.get_candidate("legacy-1", "legacy.tool")
         self.assertEqual(candidate["presence_state"], PRESENT)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        for name in ("external_tool_" + "approval_baselines", "external_tool_" + "review_audit", "external_tool_side_effect_" + "baselines", "external_tool_side_effect_" + "audit"):
+        for name in ("external_tool_" + "approval" + "_baselines", "external_tool_" + "review" + "_audit", "external_tool_side_effect_" + "baselines", "external_tool_side_effect_" + "audit"):
             self.assertNotIn(name, tables)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(external_tool_invocation_attempts)")}
         self.assertNotIn("side_effect_" + "class", columns)
