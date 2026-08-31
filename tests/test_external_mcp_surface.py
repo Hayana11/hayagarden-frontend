@@ -78,8 +78,8 @@ class ExternalSurfaceTests(unittest.TestCase):
             "catalog_complete": True,
             "tool_record_boundary": "SDK_VISIBLE_RAW",
             "tools": [{
-                "name": "monopoly.list",
-                "description": "List monopoly entries",
+                "name": "roll",
+                "description": "Roll Monopoly dice",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"day": {"type": "string"}},
@@ -95,10 +95,10 @@ class ExternalSurfaceTests(unittest.TestCase):
         tool = catalog[0]["tools"][0]
         self.assertTrue(tool["available"])
         self.assertIn("Monopoly", tool["description"])
-        self.assertIn("List monopoly entries", tool["description"])
+        self.assertIn("Roll Monopoly dice", tool["description"])
         self.assertEqual(
             tool["surface_tool_name"],
-            surface_tool_name("monopoly", "monopoly.list", tool["control_id"]),
+            surface_tool_name("monopoly", "roll", tool["control_id"]),
         )
         self.assertEqual(tool["source_registry_revision"], catalog[0]["revision"])
         self.assertNotIn("endpoint", tool)
@@ -148,26 +148,26 @@ class ExternalSurfaceTests(unittest.TestCase):
             turn_id="turn-1", turn_mode="chat", issued_from="default_policy"
         )
         surface = {
-            "control_id": "ext:monopoly:monopoly.list",
+            "control_id": "ext:monopoly:roll",
             "available": True,
         }
         with patch(
             "tools.execution_fence.external_surface_tool", return_value=surface
         ):
             result = evaluate_tool_call(
-                "mcp__external__monopoly__monopoly_list__abc123",
+                "mcp__external__monopoly__roll__abc123",
                 {"day": "today"},
                 lease,
             )
         self.assertEqual(result["lease_decision"], "ALLOW")
-        self.assertEqual(result["capability_id"], "external_mcp:ext:monopoly:monopoly.list")
+        self.assertEqual(result["capability_id"], "external_mcp:ext:monopoly:roll")
 
         with patch(
             "tools.execution_fence.external_surface_tool",
             return_value={**surface, "available": False},
         ):
             denied = evaluate_tool_call(
-                "mcp__external__monopoly__monopoly_list__abc123",
+                "mcp__external__monopoly__roll__abc123",
                 {},
                 lease,
             )
