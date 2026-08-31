@@ -1018,50 +1018,55 @@ export function ToolroomScreen() {
                 const serverId = externalMcpServerId(group.id);
                 const checking = serverId ? Boolean(externalMcpChecking[serverId]) : false;
                 const checkError = serverId ? externalMcpCheckErrors[serverId] : '';
+                const checkLabel = checking
+                  ? '检查中…'
+                  : group.lifecycle_state === 'CONNECTED' ? '检查连接' : '重新检查';
                 return (
                   <article className="toolroom-group" key={group.id}>
                     <div className="toolroom-group-header">
-                    <button
-                      type="button"
-                      className="toolroom-group-toggle"
-                      aria-expanded={open}
-                      onClick={() => setOpenGroups((current) => ({
-                        ...current,
-                        [group.id]: !current[group.id],
-                      }))}
-                    >
-                      <span className="toolroom-group-icon" data-group={visualGroupId(group.id)} aria-hidden="true">
-                        <ToolroomGroupIcon groupId={group.id} />
-                      </span>
-                      <span className="toolroom-group-copy">
-                        <strong>{group.label}</strong>
-                        <span className="toolroom-badges">
-                          <em className={'toolroom-connection-badge' + (group.available > 0 || group.lifecycle_state === 'CONNECTED' ? ' is-live' : '')}>
-                            {group.id.startsWith('external_mcp:')
-                              ? group.lifecycle_state === 'CONNECTED' ? '已连接' : '未连接'
-                              : group.available > 0 ? '已连接' : '当前不可用'}
-                          </em>
-                          <em className="toolroom-transport-badge">{transportLabel(group)}</em>
-                          <em>工具：{group.available}/{group.total}</em>
+                      <button
+                        type="button"
+                        className="toolroom-group-toggle"
+                        aria-expanded={open}
+                        onClick={() => setOpenGroups((current) => ({
+                          ...current,
+                          [group.id]: !current[group.id],
+                        }))}
+                      >
+                        <span className="toolroom-group-icon" data-group={visualGroupId(group.id)} aria-hidden="true">
+                          <ToolroomGroupIcon groupId={group.id} />
                         </span>
-                      </span>
-                      <span className={'toolroom-chevron' + (open ? ' is-open' : '')} aria-hidden="true">⌄</span>
-                    </button>
+                        <span className="toolroom-group-copy">
+                          <strong>{group.label}</strong>
+                          <span className="toolroom-badges">
+                            <em className={'toolroom-connection-badge' + (group.available > 0 || group.lifecycle_state === 'CONNECTED' ? ' is-live' : '')}>
+                              {group.id.startsWith('external_mcp:')
+                                ? group.lifecycle_state === 'CONNECTED' ? '已连接' : '未连接'
+                                : group.available > 0 ? '已连接' : '当前不可用'}
+                            </em>
+                            <em className="toolroom-transport-badge">{transportLabel(group)}</em>
+                            <em>工具：{group.available}/{group.total}</em>
+                          </span>
+                        </span>
+                        <span className={'toolroom-chevron' + (open ? ' is-open' : '')} aria-hidden="true">⌄</span>
+                      </button>
                       {serverId ? (
                         <div className="toolroom-mcp-check-action">
                           <button
                             type="button"
-                            className="toolroom-mcp-check-button"
+                            className={'toolroom-mcp-check-button' + (checking ? ' is-checking' : '')}
                             disabled={checking}
-                            aria-label={'检查 ' + group.label}
+                            aria-label={checkLabel + ' ' + group.label}
+                            title={checkLabel}
                             onClick={(event) => {
                               event.stopPropagation();
                               void checkExternalMcp(group.id);
                             }}
                           >
-                            {checking
-                              ? '检查中…'
-                              : group.lifecycle_state === 'CONNECTED' ? '检查连接' : '重新检查'}
+                            <svg className="toolroom-mcp-check-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                              <path d="M20 11a8 8 0 1 0 2 5.3" />
+                              <path d="M20 5v6h-6" />
+                            </svg>
                           </button>
                           {checkError ? (
                             <small className="toolroom-mcp-check-error" role="status">
