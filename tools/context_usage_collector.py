@@ -693,25 +693,88 @@ def claude_window(block: dict[str, Any], now: dt.datetime | None = None) -> dict
     return result
 
 
+def _limit_error_texts(row: dict[str, Any]) -> list[str]:
+    """Read error fields, never ordinary assistant/user conversation content."""
+    texts: list[str] = []
+
+    def error_text(value: Any) -> None:
+        if isinstance(value, str):
+            texts.append(value)
+        elif isinstance(value, dict):
+            for key in ("message", "error", "detail", "type", "code"):
+                if isinstance(value.get(key), str):
+                    texts.append(value[key])
+
+    error_text(row.get("error"))
+    if row.get("type") == "error" or row.get("is_error") is True or row.get("isApiErrorMessage") is True:
+        if row.get("status") in (429, "429") or row.get("status_code") in (429, "429"):
+            texts.append("429")
+        message = row.get("message")
+        error_text(message)
+        content = message.get("content") if isinstance(message, dict) else row.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                    texts.append(item["text"])
+    return texts
+
+
+def _safe_limit_reset_text(text: str) -> str:
+    """Keep a short provider time hint, not the rest of an error or JSONL row."""
+    if re.search(r"authorization|bearer\b|token\b|api[_ -]?key|https?://|[A-Za-z]:[\\/]|/(?:root|home|opt|tmp|var)/", text, re.IGNORECASE):
+        return ""
+    clock = r"(?:(?:0?[1-9]|1[0-2])(?::[0-5][0-9])?[ \t]*[ap]m|(?:[01]?[0-9]|2[0-3]):[0-5][0-9])"
+    month = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    date = rf"{month}[ \t]+(?:[12][0-9]|3[01]|0?[1-9])(?:,[ \t]*[0-9]{{4}})?(?:[ \t]+(?:at[ \t]+)?{clock})?"
+    unit = r"[0-9]{1,3}[ \t]*(?:seconds?|minutes?|hours?|days?)"
+    duration = rf"{unit}(?:(?:[ \t]+(?:and[ \t]+)?|,[ \t]*(?:and[ \t]+)?){unit}){{0,3}}"
+    hint = re.search(
+        rf"\b(?:resets?|try[ \t]+again)[ \t]*(?:(?:at|on|after|in)[ \t]+|:[ \t]*)?(?:{date}|{clock}|{duration})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not hint or re.match(r"[ \t]*(?:[,/+:&-]|(?:and|or)\b|[0-9])", text[hint.end():]):
+        # Never turn an unsupported compound time into an earlier partial reset.
+        return ""
+    return re.sub(r"[ \t]+", " ", hint.group(0)).strip()[:120]
+
+
 def rate_limit_detail(text: str, observed_at: str) -> dict[str, Any] | None:
     if len(text) > 500:
         return None
-    if "[DIARY" in text or "[THOUGHT" in text or "[[SAVE:" in text:
+    if re.search(r"\[\[?(?:DIARY|THOUGHT|SAVE)\b", text, re.IGNORECASE):
         return None
-    lowered = text.lower()
-    if not any(marker in lowered for marker in RATE_LIMIT_MARKERS):
+    row = parse_json_line(text)
+    if row is None:
         return None
-    if '"is_error":true' not in lowered and '"type":"error"' not in lowered:
-        if not re.search(r'\b(429|rate limit|usage limit reached|limit reached)\b', lowered):
-            return None
-    kind = "weekly" if "weekly" in lowered else "opus" if "opus" in lowered else "rate_limit"
-    reset_match = re.search(r"(?:reset(?:s)?|try again)[^\n\r.]{0,180}", text, re.IGNORECASE)
-    reset_text = reset_match.group(0)[:200] if reset_match else ""
-    if len(reset_text) > 120 and ("\n" in reset_text or "---" in reset_text):
+    texts = _limit_error_texts(row)
+    if any(re.search(r"\[\[?(?:DIARY|THOUGHT|SAVE)\b", item, re.IGNORECASE) for item in texts):
         return None
+    lowered = " ".join(texts).lower().replace("_", " ").replace("-", " ")
+    weekly = bool(re.search(r"\bweekly(?: usage)? limit\b", lowered))
+    opus = bool(re.search(r"\bopus(?: usage)? limit\b", lowered))
+    explicit_usage = bool(re.search(
+        r"\b(?:(?:usage|quota) limit(?: (?:has been|is))? (?:reached|exhausted|exceeded)"
+        r"|(?:reached|exceeded|exhausted) (?:your |the )?(?:usage|quota)(?: limit)?"
+        r"|(?:usage|quota)(?: (?:is|has been))? (?:exhausted|exceeded))\b",
+        lowered,
+    ))
+    reached_own_limit = bool(re.search(r"\byou(?:'ve|’ve| have) (?:hit|reached) your (?:usage )?limit\b", lowered))
+    request_frequency = bool(re.search(
+        r"\b(?:request|token)s? (?:rate limit|(?:per|a|each) (?:second|minute|hour|day|sec|min|hr)s?)\b"
+        r"|\b(?:requests|tokens)/(?:s|m|h|d|second|minute|hour|day)\b",
+        lowered,
+    ))
+    exhausted = weekly or opus or ((explicit_usage or reached_own_limit) and not request_frequency)
+    if not exhausted and not request_frequency and not any(marker in lowered for marker in RATE_LIMIT_MARKERS) and not re.search(r"\b429\b", lowered):
+        return None
+    kind = "weekly" if weekly else "opus" if opus else "rate_limit"
+    reset_text = next((hint for item in texts if (hint := _safe_limit_reset_text(item))), "")
     return {
         "kind": kind,
-        "exhausted": True,
+        "exhausted": exhausted,
         "reset_text": reset_text,
         "observed_at": observed_at,
     }
@@ -787,7 +850,6 @@ def collect_claude(
 
     if official:
         quota = dict(official)
-        effective_limit = None
     else:
         block = read_ccusage_block(timezone)
         quota = {
@@ -802,9 +864,8 @@ def collect_claude(
         if newest and newest > (effective_limit.get("observed_at") or ""):
             effective_limit = None
 
-    # JSONL "exhausted" is a last-resort hint only — never when we have % bars or recent chat.
-    if effective_limit and (quota.get("five_hour") or quota.get("seven_day")):
-        effective_limit = None
+    # JSONL limit events are independent of official quota and ccusage reset time.
+    # Only a strictly newer normal usage/session clears the event above.
     if effective_limit:
         quota["effective_limit"] = effective_limit
 
