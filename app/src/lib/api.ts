@@ -216,11 +216,13 @@ function clampPct(value: number): number {
 function usedPct(window: RawQuotaWindow | undefined): number | null {
   if (!window) return null;
   const direct = window.used_percentage ?? window.used_percent;
-  if (typeof direct === 'number' && Number.isFinite(direct)) return clampPct(direct);
-  if (typeof window.remaining_percentage === 'number' && Number.isFinite(window.remaining_percentage)) {
-    return clampPct(100 - window.remaining_percentage);
-  }
-  return null;
+  return typeof direct === 'number' && Number.isFinite(direct) ? clampPct(direct) : null;
+}
+
+function remainingPct(window: RawQuotaWindow | undefined): number | null {
+  if (!window) return null;
+  const direct = window.remaining_percentage;
+  return typeof direct === 'number' && Number.isFinite(direct) ? clampPct(direct) : null;
 }
 
 function emptyAgent(id: UsageAgentId): AgentUsageSummary {
@@ -233,24 +235,29 @@ function emptyAgent(id: UsageAgentId): AgentUsageSummary {
     contextTokens: null,
     contextWindowTokens: null,
     effectiveLimit: null,
-    fiveHour: { usedPct: null, resetAt: '', remainingMinutes: null },
-    sevenDay: { usedPct: null, resetAt: '', remainingMinutes: null },
+    fiveHour: { usedPct: null, remainingPct: null, resetAt: '', remainingMinutes: null },
+    sevenDay: { usedPct: null, remainingPct: null, resetAt: '', remainingMinutes: null },
   };
 }
 
 function normalizeAgent(id: UsageAgentId, raw: RawUsageAgent, generatedAt: string): AgentUsageSummary {
   const quota = raw.quota || {};
   const active = raw.active_sessions?.[0];
-  const fiveHourPct = usedPct(quota.five_hour);
-  const sevenDayPct = usedPct(quota.seven_day);
   const source = raw.quota_source || 'unavailable';
+  // Claude percentages are authoritative only when the collector labels the
+  // snapshot as coming from Anthropic's OAuth usage endpoint.
+  const allowClaudePercentage = id !== 'claude' || source === 'claude_oauth_usage';
+  const fiveHourPct = allowClaudePercentage ? usedPct(quota.five_hour) : null;
+  const sevenDayPct = allowClaudePercentage ? usedPct(quota.seven_day) : null;
   const fiveHour = {
     usedPct: fiveHourPct,
+    remainingPct: allowClaudePercentage ? remainingPct(quota.five_hour) : null,
     resetAt: quota.five_hour?.resets_at || '',
     remainingMinutes: quota.five_hour?.remaining_minutes ?? null,
   };
   const sevenDay = {
     usedPct: sevenDayPct,
+    remainingPct: allowClaudePercentage ? remainingPct(quota.seven_day) : null,
     resetAt: quota.seven_day?.resets_at || '',
     remainingMinutes: quota.seven_day?.remaining_minutes ?? null,
   };
@@ -282,17 +289,6 @@ function normalizeAgent(id: UsageAgentId, raw: RawUsageAgent, generatedAt: strin
   };
 }
 
-function legacyClaude(base: LegacyUsageSummary): AgentUsageSummary {
-  return {
-    ...emptyAgent('claude'),
-    available: true,
-    source: 'claude_legacy_usage',
-    updatedAt: new Date().toISOString(),
-    fiveHour: { usedPct: base.win5Pct, resetAt: base.win5ResetAt, remainingMinutes: null },
-    sevenDay: { usedPct: base.win7Pct, resetAt: base.win7ResetAt, remainingMinutes: null },
-  };
-}
-
 // Combines the existing app-activity summary with independently sourced
 // Claude Code and Codex quota snapshots. Missing agent data stays unavailable.
 export async function fetchUsageSummary(now: Date): Promise<UsageSummary> {
@@ -300,15 +296,19 @@ export async function fetchUsageSummary(now: Date): Promise<UsageSummary> {
   try {
     base = await http.get<LegacyUsageSummary>('/api/usage/summary');
   } catch {
-    return mock.mockUsageSummary(now);
+    const fallback = mock.mockUsageSummary(now);
+    return {
+      ...fallback,
+      agents: { claude: emptyAgent('claude'), codex: emptyAgent('codex') },
+    };
   }
 
   let snapshot: ContextUsageSnapshot | null = null;
   try {
     snapshot = await http.get<ContextUsageSnapshot>('/api/context-usage');
   } catch {
-    // The collector endpoint can be deployed after the UI. Claude keeps its
-    // existing source; Codex explicitly remains unavailable in the meantime.
+    // A transport failure must not substitute the legacy activity estimate for
+    // Claude's OAuth percentage; keep the existing unavailable state instead.
   }
 
   const rawClaude = snapshot?.agents?.find((agent) => agent.id === 'claude');
@@ -318,9 +318,7 @@ export async function fetchUsageSummary(now: Date): Promise<UsageSummary> {
     agents: {
       claude: rawClaude
         ? normalizeAgent('claude', rawClaude, snapshot?.generated_at || '')
-        : snapshot
-          ? emptyAgent('claude')
-          : legacyClaude(base),
+        : emptyAgent('claude'),
       codex: rawCodex ? normalizeAgent('codex', rawCodex, snapshot?.generated_at || '') : emptyAgent('codex'),
     },
   };

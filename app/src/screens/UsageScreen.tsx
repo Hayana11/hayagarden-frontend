@@ -123,6 +123,7 @@ function AgentQuotaCard({ agent, now }: { agent: AgentUsageSummary; now: Date })
             big
             label="5 小时窗 · 已用"
             pct={agent.fiveHour.usedPct}
+            remainingPct={agent.fiveHour.remainingPct}
             color={colors.primary}
             hint={windowHint(agent.fiveHour.resetAt, agent.fiveHour.remainingMinutes, now)}
           />
@@ -130,6 +131,7 @@ function AgentQuotaCard({ agent, now }: { agent: AgentUsageSummary; now: Date })
             big
             label={`${isClaude ? '周额度' : '7 天窗'} · 已用`}
             pct={agent.sevenDay.usedPct}
+            remainingPct={agent.sevenDay.remainingPct}
             color={colors.secondary}
             hint={windowHint(agent.sevenDay.resetAt, agent.sevenDay.remainingMinutes, now)}
           />
