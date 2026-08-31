@@ -179,11 +179,46 @@
   cursor: pointer;
 }
 
-.toolroom-group-toggle {
+.toolroom-group-header {
   display: flex;
-  align-items: center;
-  padding: 16px 18px;
-  transition: background-color 160ms ease;
+  align-items: stretch;
+}
+
+.toolroom-group-header .toolroom-group-toggle {
+  flex: 1;
+  min-width: 0;
+}
+
+.toolroom-mcp-check-action {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 8px 12px 8px 0;
+}
+
+.toolroom-mcp-check-button {
+  border: 1px solid rgba(159, 182, 199, 0.42);
+  border-radius: 999px;
+  padding: 6px 9px;
+  background: rgba(159, 182, 199, 0.12);
+  color: #5e7f98;
+  font: 400 10.5px/1.2 var(--font-serif-cn);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toolroom-mcp-check-button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.toolroom-mcp-check-error {
+  margin-top: 4px;
+  color: #b76e79;
+  font: 400 9px/1.2 var(--font-mono);
+  white-space: nowrap;
 }
 
 .toolroom-group-toggle > * + * {
@@ -206,6 +241,11 @@
 .toolroom-group-icon[data-group='desire'] {
   background: rgba(138, 122, 181, 0.15);
   color: var(--color-violet);
+}
+
+.toolroom-group-icon[data-group='external_mcp'] {
+  background: rgba(159, 182, 199, 0.18);
+  color: #5e7f98;
 }
 
 .toolroom-group-icon[data-group='light'],
