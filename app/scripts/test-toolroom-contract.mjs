@@ -174,3 +174,39 @@ assert.match(css, /background:\s*var\(--toolroom-accent/);
 assert.match(css, /border-left:\s*3px solid var\(--toolroom-accent/);
 
 console.log('test-toolroom-contract: ok');
+
+
+const visualNormalizerStart = screen.indexOf('function visualGroupId');
+assert.ok(visualNormalizerStart >= 0);
+assert.match(screen, /home:\s*'light'/);
+assert.match(screen, /plans:\s*'plans_ledger'/);
+assert.match(screen, /ledger:\s*'plans_ledger'/);
+assert.match(screen, /files:\s*'code_files'/);
+assert.match(screen, /external_read:\s*'web'/);
+assert.match(screen, /groupId\.startsWith\('legacy:'\)/);
+assert.match(screen, /return 'external_mcp'/);
+assert.match(screen, /const visualId = visualGroupId\(groupId\)/);
+assert.match(screen, /data-group=\{visualGroupId\(group\.id\)\}/);
+assert.match(screen, /GROUP_ACCENT_COLORS\[visualGroupId\(groupId\)\]/);
+assert.match(screen, /external_mcp:/);
+assert.match(screen, /EXTERNAL_MCP_ICON_PATHS/);
+assert.match(css, /data-group='external_mcp'/);
+
+const intervalEnd = screen.indexOf('window.setInterval(refresh, 10_000)');
+const intervalStart = screen.lastIndexOf('const refresh =', intervalEnd);
+assert.ok(intervalStart >= 0 && intervalEnd >= 0);
+assert.doesNotMatch(screen.slice(intervalStart, intervalEnd), /\/check/);
+assert.match(screen, /function externalMcpServerId/);
+assert.match(screen, /externalMcpChecking/);
+assert.match(screen, /toolroom-mcp-check-button/);
+assert.match(screen, /\/api\/external-mcp\/servers\/\\$\{encodeURIComponent\(serverId\)\}\/check/);
+assert.match(screen, /loadInventory\(false\)/);
+assert.match(screen, /检查中…/);
+assert.match(screen, /重新检查/);
+assert.match(screen, /检查连接/);
+assert.match(screen, /CHECK_FAILED/);
+assert.doesNotMatch(screen, /重新检查全部|刷新全部 MCP|巡检全部 MCP/);
+const headerStart = screen.indexOf('className="toolroom-group-header"');
+const toggleClose = screen.indexOf('</button>', headerStart);
+const checkButtonPos = screen.indexOf('toolroom-mcp-check-button', headerStart);
+assert.ok(headerStart >= 0 && toggleClose >= 0 && checkButtonPos > toggleClose);
