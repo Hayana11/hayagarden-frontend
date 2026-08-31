@@ -93,7 +93,8 @@ def _tool_row(server: Any, candidate: Mapping[str, Any], snapshot: Mapping[str, 
         and snapshot is not None
         and _valid_fingerprint(fingerprint)
     )
-    description = str((snapshot or {}).get("description") or remote_name)[:_MAX_DESCRIPTION]
+    raw_description = str((snapshot or {}).get("description") or remote_name).strip()
+    description = f"{server.display_name}: {raw_description}"[:_MAX_DESCRIPTION]
     return {
         "control_id": control_id,
         "remote_tool_name": remote_name,
