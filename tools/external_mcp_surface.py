@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any, Iterator
 
 from .external_server_registry import CONNECTED_STATE
-from .external_tool_registry import PRESENT
+from .external_tool_registry import PRESENT, fingerprint_raw_tool
 from .external_mcp_production import open_external_mcp_production
 from .external_mcp_invocation import (
     FAILED_PRE_CALL,
@@ -74,6 +74,8 @@ def _snapshot(candidate: Mapping[str, Any], snapshots: tuple[Mapping[str, Any], 
             except (TypeError, ValueError, json.JSONDecodeError):
                 return None
             if not isinstance(raw, Mapping):
+                return None
+            if fingerprint_raw_tool(raw) != fingerprint:
                 return None
             return dict(raw)
     return None
