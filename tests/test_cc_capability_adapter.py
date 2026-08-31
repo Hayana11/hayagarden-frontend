@@ -182,6 +182,12 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             cfg["mcpServers"]["internal"]["headers"],
             {"X-UH-A0-Profile": "uh_a0"},
         )
+        external_cfg = cfg["mcpServers"]["external"]
+        self.assertEqual(external_cfg["type"], "stdio")
+        self.assertEqual(set(external_cfg["env"]), {"UH_A0_REPO_ROOT", "UH_A0_TURN_LEASE_PATH"})
+        self.assertTrue(external_cfg["env"]["UH_A0_REPO_ROOT"])
+        self.assertTrue(external_cfg["env"]["UH_A0_TURN_LEASE_PATH"])
+        self.assertTrue(external_cfg["args"][0].endswith("external-mcp-surface-server.js"))
         self.assertNotIn("workspace", cfg["mcpServers"])
 
     def test_c_home_compatibility_diary_is_hidden_but_registered(self):
