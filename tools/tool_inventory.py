@@ -103,6 +103,7 @@ from tools.cc_capability_adapter import physical_surface_names
 
 _LEGACY_CAPABILITY_ALIASES = {
   "memory.search": "search_memories",
+  "memory.write": "save_memory",
   "diary.write": "write_diary",
   "todo.write": "add_todo",
   "ledger.write": "add_ledger",
@@ -113,6 +114,9 @@ _LEGACY_CAPABILITY_ALIASES = {
   "countdown.read": "get_countdowns",
   "ledger.read": "get_ledger",
   "ledger.budget.read": "get_ledger_budget",
+  "files.read": "codebase_read_file",
+  "files.find": "codebase_list_directory",
+  "code.search": "codebase_search_code",
 }
 
 def _manifest_binding(capability_id: str) -> str | None:
