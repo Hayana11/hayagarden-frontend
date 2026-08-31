@@ -1,12 +1,14 @@
 export function UsageWindowBar({
   label,
   pct,
+  remainingPct,
   color,
   hint,
   big,
 }: {
   label: string;
   pct: number | null;
+  remainingPct?: number | null;
   color: string;
   hint?: string;
   big?: boolean;
@@ -16,7 +18,10 @@ export function UsageWindowBar({
     <div style={{ marginTop: big ? 16 : 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <span style={{ fontSize: big ? 14 : 13, color: 'var(--color-text-soft)' }}>{label}</span>
-        <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: big ? 18 : 16, fontWeight: 600 }}>{pct === null ? '—' : `${Math.round(pct)}%`}</span>
+        <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: big ? 18 : 16, fontWeight: 600 }}>
+          {pct === null ? '—' : `${Math.round(pct)}%`}
+          {remainingPct !== null && remainingPct !== undefined ? ` · 剩余 ${Math.round(remainingPct)}%` : ''}
+        </span>
       </div>
       <div
         style={{
