@@ -1097,8 +1097,10 @@ export function ToolroomScreen() {
                             }}
                           >
                             <svg className="toolroom-mcp-check-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                              <path d="M20 12a8 8 0 1 1-2.34-5.66" />
-                              <path d="M20 5v7h-7" />
+                              <path d="M20 12a8 8 0 0 0-13.66-5.66L4 8.68" />
+                              <path d="M4 5v3.68h3.68" />
+                              <path d="M4 12a8 8 0 0 0 13.66 5.66L20 15.32" />
+                              <path d="M20 19v-3.68h-3.68" />
                             </svg>
                           </button>
                           {checkError ? (
