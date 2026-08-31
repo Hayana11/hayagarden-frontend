@@ -35,7 +35,7 @@ class ExternalMcpRemoveReviewLayerTests(unittest.TestCase):
         self.connection.close()
 
     def discovery(self, tools=None, status="SUCCESS"):
-        return {"status": status, "catalog_complete": status == "SUCCESS", "zero_tools": not tools, "tools": tools or [], "diagnostics": {}, "error": None}
+        return {"status": status, "catalog_complete": status == "SUCCESS", "tool_record_boundary": "SDK_VISIBLE_RAW", "zero_tools": not tools, "tools": tools or [], "diagnostics": {}, "error": None}
 
     def connect_with_tool(self):
         tool = {"name": "calendar.list", "description": "List calendar entries", "inputSchema": {"type": "object"}}
@@ -95,6 +95,7 @@ class ExternalMcpRemoveReviewLayerTests(unittest.TestCase):
         invocation = self.make_invocation()
         calls = []
         action = build_external_action_id(candidate["control_id"], candidate["current_fingerprint"], candidate["current_source_registry_revision"], {"q": "today"})
+        self.assertRegex(action, r"^external_action_sha256:[0-9a-f]{64}$")
         result = invocation.invoke(candidate["control_id"], {"q": "today"}, None, expected_turn_id="turn-1", runner=lambda envelope: calls.append(envelope) or {"status": "SUCCESS"})
         self.assertEqual(result["status"], SUCCEEDED)
         self.assertEqual(calls[0]["external_action_id"], action)
@@ -141,24 +142,62 @@ class ExternalMcpRemoveReviewLayerTests(unittest.TestCase):
             CREATE TABLE external_tool_raw_snapshots (snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT, tool_name TEXT, fingerprint TEXT, raw_snapshot_json TEXT, source_registry_revision INTEGER, first_observed_at TEXT);
             CREATE TABLE external_tool_invocation_attempts (attempt_id TEXT PRIMARY KEY, turn_id TEXT, control_id TEXT, server_id TEXT, tool_name TEXT, external_action_id TEXT, fingerprint TEXT, source_registry_revision INTEGER, {old_class_column} TEXT, tool_input_sha256 TEXT, tool_input_byte_length INTEGER, status TEXT, reason_code TEXT, created_at TEXT, started_at TEXT, completed_at TEXT);
             INSERT INTO external_tool_invocation_attempts VALUES ('old-attempt','turn-old','ext:legacy-1:legacy.tool','legacy-1','legacy.tool','old-action','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',3,'none','hash',2,'SUCCEEDED','SUCCESS','2026-01-01T00:00:00Z',NULL,'2026-01-01T00:00:00Z');
+            CREATE TABLE external_tool_invocation_audit (
+                audit_sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+                attempt_id TEXT NOT NULL REFERENCES external_tool_invocation_attempts(attempt_id), turn_id TEXT NOT NULL,
+                control_id TEXT NOT NULL, server_id TEXT NOT NULL, tool_name TEXT NOT NULL,
+                external_action_id TEXT NOT NULL, status TEXT NOT NULL, reason_code TEXT NOT NULL, event_at TEXT NOT NULL
+            );
+            INSERT INTO external_tool_invocation_audit VALUES (7,'old-event','old-attempt','turn-old','ext:legacy-1:legacy.tool','legacy-1','legacy.tool','old-action','SUCCEEDED','SUCCESS','2026-01-01T00:00:00Z');
+            CREATE TRIGGER external_tool_invocation_audit_no_update BEFORE UPDATE ON external_tool_invocation_audit BEGIN SELECT RAISE(ABORT, 'append only'); END;
+            CREATE TRIGGER external_tool_invocation_audit_no_delete BEFORE DELETE ON external_tool_invocation_audit BEGIN SELECT RAISE(ABORT, 'append only'); END;
         """)
+        for server_id, state in (("legacy-registered", "REGISTERED"), ("legacy-revoked", "REVOKED")):
+            connection.execute("INSERT INTO external_server_registry VALUES (?,?,?,?,?,?,?,?,?,?)", (server_id, server_id, "streamable_http", f"https://{server_id}.example.test", state, "OFF", "settings-admin", "created", "updated", 4))
+        connection.execute("INSERT INTO external_tool_raw_snapshots VALUES (?,?,?,?,?,?,?)", (11, "legacy-1", "legacy.tool", "a" * 64, '{"name":"legacy.tool","unknown":{"nested":true}}', 3, "first-observed"))
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys=ON")
+        snapshots_before = connection.execute("SELECT * FROM external_tool_raw_snapshots").fetchall()
+        audits_before = connection.execute("SELECT * FROM external_tool_invocation_audit").fetchall()
+        attempt_before = connection.execute("SELECT attempt_id,turn_id,control_id,server_id,tool_name,external_action_id,fingerprint,source_registry_revision,tool_input_sha256,tool_input_byte_length,status,reason_code,created_at,started_at,completed_at FROM external_tool_invocation_attempts").fetchone()
         servers = ExternalServerRegistry(connection)
         self.assertEqual(servers.get("legacy-1").lifecycle_state, DISCONNECTED_STATE)
+        self.assertEqual(servers.get("legacy-registered").lifecycle_state, DISCONNECTED_STATE)
+        self.assertEqual(servers.get("legacy-revoked").lifecycle_state, REVOKED_STATE)
         secrets = ExternalSecretStore(connection, registry=servers, key_file="/tmp/test-external-mcp.key")
         auth = ExternalMcpAuthBindingRegistry(connection, server_registry=servers, secret_store=secrets)
         candidates = ExternalToolCandidateRegistry(connection, server_registry=servers)
-        ExternalMcpInvocation(connection, server_registry=servers, candidate_registry=candidates, auth_binding_registry=auth)
+        invocation = ExternalMcpInvocation(connection, server_registry=servers, candidate_registry=candidates, auth_binding_registry=auth)
         candidate = candidates.get_candidate("legacy-1", "legacy.tool")
         self.assertEqual(candidate["presence_state"], PRESENT)
+        self.assertEqual(candidate["control_id"], "ext:legacy-1:legacy.tool")
+        self.assertEqual(candidate["current_fingerprint"], "a" * 64)
+        self.assertEqual(candidate["current_source_registry_revision"], 3)
+        self.assertEqual(candidate["revision"], 1)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for name in ("external_tool_" + "approval" + "_baselines", "external_tool_" + "review" + "_audit", "external_tool_side_effect_" + "baselines", "external_tool_side_effect_" + "audit"):
             self.assertNotIn(name, tables)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(external_tool_invocation_attempts)")}
         self.assertNotIn("side_effect_" + "class", columns)
         self.assertIsNotNone(connection.execute("SELECT 1 FROM external_tool_invocation_attempts WHERE attempt_id='old-attempt'").fetchone())
+        self.assertEqual(connection.execute("SELECT * FROM external_tool_invocation_attempts").fetchone(), attempt_before)
+        self.assertEqual(connection.execute("SELECT * FROM external_tool_raw_snapshots").fetchall(), snapshots_before)
+        self.assertEqual(connection.execute("SELECT * FROM external_tool_invocation_audit").fetchall(), audits_before)
+        self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+        migrated = "\n".join(connection.iterdump())
+        for _ in range(2):
+            servers.initialize()
+            candidates.initialize()
+            invocation.initialize()
+            self.assertEqual("\n".join(connection.iterdump()), migrated)
+        with self.assertRaises(sqlite3.DatabaseError):
+            connection.execute("UPDATE external_tool_invocation_audit SET reason_code='EDITED'")
+        connection.rollback()
+        with self.assertRaises(sqlite3.DatabaseError):
+            connection.execute("DELETE FROM external_tool_invocation_audit")
+        connection.rollback()
         connection.close()
 
 
 if __name__ == "__main__":
     unittest.main()
-

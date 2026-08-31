@@ -187,7 +187,8 @@ class ExternalServerRegistry:
             raise
         except Exception: self._connection.rollback(); raise
 
-    update_transport = update_connection
+    def update_transport(self, server_id: object, transport: object, *, now: Optional[datetime] = None) -> ExternalServerRecord:
+        return self.update_connection(server_id, transport=transport, now=now)
 
     def revoke(self, server_id: object, *, now: Optional[datetime] = None) -> ExternalServerRecord:
         current = self.get(server_id)
@@ -257,4 +258,3 @@ class ExternalServerRegistry:
 
 
 __all__ = ["CONNECTED_STATE", "DISCONNECTED_STATE", "DuplicateEndpointError", "ExternalServerRecord", "ExternalServerRegistry", "InvalidStateTransitionError", "LIFECYCLE_STATES", "REVOKED_STATE", "RegistryError", "RegistryValidationError", "TRANSPORT_STREAMABLE_HTTP", "UnknownServerError", "normalize_external_endpoint"]
-

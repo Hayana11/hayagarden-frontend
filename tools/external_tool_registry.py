@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .external_server_registry import ExternalServerRegistry, REVOKED_STATE, UnknownServerError
+from .external_server_registry import CONNECTED_STATE, DISCONNECTED_STATE, ExternalServerRegistry, REVOKED_STATE, UnknownServerError
 
 PRESENT = "PRESENT"
 MISSING = "MISSING"
@@ -92,7 +92,7 @@ class ExternalToolCandidateRegistry:
                 control_id TEXT NOT NULL UNIQUE,
                 presence_state TEXT NOT NULL CHECK (presence_state IN ('PRESENT','MISSING')),
                 current_fingerprint TEXT NOT NULL,
-                current_source_registry_revision INTEGER NOT NULL CHECK (current_source_registry_revision >= 1),
+                current_source_registry_revision INTEGER CHECK (current_source_registry_revision >= 1),
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -112,9 +112,11 @@ class ExternalToolCandidateRegistry:
         """)
 
     def _migrate_legacy_schema(self) -> None:
+        columns = {row[1] for row in self._connection.execute("PRAGMA table_info(external_tool_candidate_registry)")}
+        source_column = "current_source_registry_revision" if "current_source_registry_revision" in columns else "NULL"
         self._connection.execute("ALTER TABLE external_tool_candidate_registry RENAME TO external_tool_candidate_registry_legacy")
         self._create_schema()
-        rows = self._connection.execute("SELECT server_id, tool_name, control_id, presence_state, current_fingerprint, COALESCE(current_source_registry_revision, 1), first_seen, last_seen, updated_at, revision FROM external_tool_candidate_registry_legacy").fetchall()
+        rows = self._connection.execute("SELECT server_id, tool_name, control_id, presence_state, current_fingerprint, " + source_column + ", first_seen, last_seen, updated_at, revision FROM external_tool_candidate_registry_legacy").fetchall()
         self._connection.executemany("INSERT INTO external_tool_candidate_registry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         self._connection.execute("DROP TABLE external_tool_candidate_registry_legacy")
 
@@ -122,8 +124,7 @@ class ExternalToolCandidateRegistry:
         server_id, source_revision, tools = self._validate_discovery(discovery_result)
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            server = self._server_registry.get(server_id)
-            if server.revision != source_revision: raise ToolRegistryRejectedError("server revision changed", code="REVISION_MISMATCH")
+            self._gate_current_server(server_id, source_revision)
             now = _timestamp()
             existing = {row[0]: row for row in self._connection.execute("SELECT tool_name, control_id, presence_state, current_fingerprint, current_source_registry_revision, first_seen, last_seen, updated_at, revision FROM external_tool_candidate_registry WHERE server_id=?", (server_id,))}
             present = set()
@@ -132,8 +133,10 @@ class ExternalToolCandidateRegistry:
                 if old is None:
                     self._connection.execute("INSERT INTO external_tool_candidate_registry (server_id, tool_name, control_id, presence_state, current_fingerprint, current_source_registry_revision, first_seen, last_seen, updated_at, revision) VALUES (?, ?, ?, 'PRESENT', ?, ?, ?, ?, ?, 1)", (server_id, name, f"ext:{server_id}:{name}", fingerprint, source_revision, now, now, now))
                 else:
+                    self._verify_raw_snapshot(server_id, name, old[3])
                     self._connection.execute("UPDATE external_tool_candidate_registry SET presence_state='PRESENT', current_fingerprint=?, current_source_registry_revision=?, last_seen=?, updated_at=?, revision=revision+1 WHERE server_id=? AND tool_name=?", (fingerprint, source_revision, now, now, server_id, name))
                 self._connection.execute("INSERT INTO external_tool_raw_snapshots (server_id, tool_name, fingerprint, raw_snapshot_json, source_registry_revision, first_observed_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(server_id, tool_name, fingerprint) DO NOTHING", (server_id, name, fingerprint, raw_json, source_revision, now))
+                self._verify_raw_snapshot(server_id, name, fingerprint)
             for name, old in existing.items():
                 if name not in present:
                     self._connection.execute("UPDATE external_tool_candidate_registry SET presence_state='MISSING', current_source_registry_revision=?, updated_at=?, revision=revision+1 WHERE server_id=? AND tool_name=?", (source_revision, now, server_id, name))
@@ -142,20 +145,70 @@ class ExternalToolCandidateRegistry:
         rows = self._connection.execute("SELECT presence_state FROM external_tool_candidate_registry WHERE server_id=?", (server_id,)).fetchall()
         return {"server_id": server_id, "registry_revision": source_revision, "present_tool_count": sum(r[0] == PRESENT for r in rows), "missing_tool_count": sum(r[0] == MISSING for r in rows)}
 
-    def _validate_discovery(self, result: Mapping[str, Any]) -> tuple[str, int, list[tuple[str, str, str]]]:
-        if not isinstance(result, Mapping) or result.get("status") != DISCOVERY_SUCCESS or result.get("catalog_complete") is not True or not isinstance(result.get("tools"), list): raise ToolRegistryRejectedError("only a complete successful catalog can be ingested", code="INCOMPLETE_DISCOVERY")
-        server_id = _server_id(result.get("server_id")); source_revision = _revision(result.get("registry_revision"))
-        if len(result["tools"]) > MAX_CATALOG_TOOLS: raise ToolCatalogValidationError("catalog has too many tools", code="CATALOG_TOO_LARGE")
-        tools: list[tuple[str, str, str]] = []; names: set[str] = set(); total = 0
-        for tool in result["tools"]:
-            if not isinstance(tool, Mapping): raise ToolCatalogValidationError("tool record must be an object")
-            name = _tool_name(tool.get("name")); raw_json = canonical_json(tool); encoded = raw_json.encode("utf-8")
-            if len(encoded) > MAX_TOOL_SNAPSHOT_BYTES: raise ToolCatalogValidationError("tool snapshot is too large", code="TOOL_SNAPSHOT_TOO_LARGE")
-            total += len(encoded)
-            if total > MAX_CATALOG_BYTES: raise ToolCatalogValidationError("catalog is too large", code="CATALOG_TOO_LARGE")
-            if name in names: raise ToolCatalogValidationError("catalog contains duplicate tool names", code="DUPLICATE_TOOL_NAME")
-            names.add(name); tools.append((name, raw_json, hashlib.sha256(encoded).hexdigest()))
+    def _validate_discovery(
+        self, result: Mapping[str, Any]
+    ) -> tuple[str, int, list[tuple[str, str, str]]]:
+        if not isinstance(result, Mapping):
+            raise ToolRegistryRejectedError("discovery result must be an object", code="INVALID_DISCOVERY_RESULT")
+        if result.get("status") != DISCOVERY_SUCCESS or result.get("catalog_complete") is not True:
+            raise ToolRegistryRejectedError("only complete successful discovery is ingestible", code="INCOMPLETE_DISCOVERY")
+        diagnostics = result.get("diagnostics")
+        if not isinstance(diagnostics, Mapping) or diagnostics.get("registry_changed_during_attempt") is not False:
+            raise ToolRegistryRejectedError("discovery attempt is stale or lacks a change fence", code="STALE_DISCOVERY")
+        if result.get("tool_record_boundary") != RAW_BOUNDARY:
+            raise ToolRegistryRejectedError("tool record boundary is unsupported", code="UNSUPPORTED_RECORD_BOUNDARY")
+        server_id = _server_id(result.get("server_id"))
+        source_revision = result.get("registry_revision")
+        if isinstance(source_revision, bool) or not isinstance(source_revision, int) or source_revision < 1:
+            raise ToolRegistryRejectedError("registry revision is invalid", code="INVALID_REGISTRY_REVISION")
+        if "control_id" in result:
+            raise ToolRegistryRejectedError("caller-controlled tool identity is forbidden", code="UNSUPPORTED_DISCOVERY_FIELD")
+        raw_tools = result.get("tools")
+        if not isinstance(raw_tools, list) or len(raw_tools) > MAX_CATALOG_TOOLS:
+            raise ToolCatalogValidationError("tool catalog exceeds its count bound", code="CATALOG_TOO_LARGE")
+        tools: list[tuple[str, str, str]] = []
+        names: set[str] = set()
+        total_bytes = 0
+        for tool in raw_tools:
+            if not isinstance(tool, Mapping):
+                raise ToolCatalogValidationError("every tool must be an object", code="INVALID_TOOL_RECORD")
+            name = _tool_name(tool.get("name"))
+            if name in names:
+                raise ToolCatalogValidationError("duplicate exact tool name", code="DUPLICATE_TOOL_NAME")
+            names.add(name)
+            raw_json = canonical_json(tool)
+            raw_bytes = len(raw_json.encode("utf-8"))
+            if raw_bytes > MAX_TOOL_SNAPSHOT_BYTES:
+                raise ToolCatalogValidationError("tool snapshot exceeds its byte bound", code="SNAPSHOT_TOO_LARGE")
+            total_bytes += raw_bytes
+            if total_bytes > MAX_CATALOG_BYTES:
+                raise ToolCatalogValidationError("catalog exceeds its byte bound", code="CATALOG_TOO_LARGE")
+            tools.append((name, raw_json, hashlib.sha256(raw_json.encode("utf-8")).hexdigest()))
         return server_id, source_revision, tools
+
+    def _verify_raw_snapshot(self, server_id: str, tool_name: str, fingerprint: str) -> None:
+        row = self._connection.execute(
+            "SELECT raw_snapshot_json FROM external_tool_raw_snapshots WHERE server_id=? AND tool_name=? AND fingerprint=?",
+            (server_id, tool_name, fingerprint),
+        ).fetchone()
+        if row is None:
+            raise ToolRegistryRejectedError("raw snapshot does not exist", code="SNAPSHOT_MISSING")
+        if not isinstance(row[0], str) or hashlib.sha256(row[0].encode("utf-8")).hexdigest() != fingerprint:
+            raise ToolRegistryRejectedError("raw snapshot hash does not match candidate", code="SNAPSHOT_MISMATCH")
+
+    def _gate_current_server(self, server_id: str, source_revision: int) -> None:
+        try:
+            record = self._server_registry.get(server_id)
+        except UnknownServerError as exc:
+            raise ToolRegistryRejectedError(
+                "server identity is unknown", code="UNKNOWN_SERVER"
+            ) from exc
+        if record.lifecycle_state == REVOKED_STATE:
+            raise ToolRegistryRejectedError("revoked server cannot ingest tools", code="REVOKED_SERVER")
+        if record.lifecycle_state not in (CONNECTED_STATE, DISCONNECTED_STATE):
+            raise ToolRegistryRejectedError("server lifecycle is not ingestible", code="INVALID_SERVER_STATE")
+        if record.revision != source_revision:
+            raise ToolRegistryRejectedError("server revision changed before ingest", code="REVISION_MISMATCH")
 
     def get_candidate(self, server_id: str, tool_name: str) -> Optional[dict[str, Any]]:
         row = self._connection.execute("SELECT server_id, tool_name, control_id, presence_state, current_fingerprint, current_source_registry_revision, first_seen, last_seen, updated_at, revision FROM external_tool_candidate_registry WHERE server_id=? AND tool_name=?", (server_id, tool_name)).fetchone()
@@ -172,10 +225,5 @@ class ExternalToolCandidateRegistry:
         rows = self._connection.execute("SELECT fingerprint, raw_snapshot_json, source_registry_revision, first_observed_at FROM external_tool_raw_snapshots WHERE server_id=? AND tool_name=? ORDER BY snapshot_id", (server_id, tool_name)).fetchall()
         return tuple(dict(zip(("fingerprint", "raw_snapshot_json", "source_registry_revision", "first_observed_at"), row)) for row in rows)
 
-    def _gate_current_server(self, server_id: str, source_revision: int) -> None:
-        try: server = self._server_registry.get(server_id)
-        except UnknownServerError as exc: raise ToolRegistryRejectedError("server does not exist", code="UNKNOWN_SERVER") from exc
-        if server.revision != source_revision or server.lifecycle_state == REVOKED_STATE: raise ToolRegistryRejectedError("server authority is stale", code="REVISION_MISMATCH")
 
 __all__ = ["DISCOVERY_SUCCESS", "ExternalToolCandidateRegistry", "MISSING", "PRESENT", "RAW_BOUNDARY", "SECURITY_FINGERPRINT_SCOPE", "ToolCatalogValidationError", "ToolRegistryError", "ToolRegistryRejectedError", "canonical_json", "fingerprint_raw_tool"]
-

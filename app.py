@@ -1,6 +1,5 @@
 import os, re, json, sqlite3, datetime, base64, uuid, threading, shutil, hmac
 from flask import Flask, request, jsonify, send_from_directory, abort, Response, stream_with_context
-from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 import config_store
 import attachment_store
 import gallery_store
@@ -49,7 +48,6 @@ from chat.attachment_contract import (
 )
 
 app = Flask(__name__, static_folder='static')
-app.register_blueprint(create_external_mcp_admin_blueprint())
 DB_PATH = '/opt/frontend/memories.db'
 UPLOAD_DIR = '/opt/frontend/static/uploads'
 APP_DIST_DIR = '/opt/frontend/app/dist'

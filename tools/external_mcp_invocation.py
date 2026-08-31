@@ -54,7 +54,7 @@ def _freeze(value: Any) -> Any:
 
 def build_external_action_id(control_id: str, fingerprint: str, source_registry_revision: int, tool_input: Mapping[str, Any]) -> str:
     payload = {"control_id": control_id, "fingerprint": fingerprint, "source_registry_revision": source_registry_revision, "tool_input": json.loads(canonical_json(tool_input))}
-    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    return "external_action_sha256:" + hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 def _safe_runner_reason_code(value: Any) -> str:
     error = value.get("error") if isinstance(value, Mapping) else None; code = error.get("code") if isinstance(error, Mapping) else None
@@ -128,8 +128,8 @@ class ExternalMcpInvocation:
         except ExternalInvocationError as exc: return self._result(FAILED_PRE_CALL, reason_code=exc.code)
         if not callable(runner): return self._result(FAILED_PRE_CALL, reason_code="RUNNER_INVALID")
         try:
-            decision = self._technical_decision(control_id, frozen, expected_turn_id)
             self._connection.execute("BEGIN IMMEDIATE")
+            decision = self._technical_decision(control_id, frozen, expected_turn_id)
             existing = self._existing(decision["turn_id"], decision["external_action_id"])
             if existing is not None: self._connection.commit(); return self._attempt_result(existing, duplicate=True)
             if decision["reason_code"] != "READY":
@@ -151,7 +151,10 @@ class ExternalMcpInvocation:
         decision: dict[str, Any] = {"turn_id": expected_turn_id if isinstance(expected_turn_id, str) and expected_turn_id else "unknown", "control_id": str(control_id)[:500], "server_id": "unknown", "tool_name": "unknown", "fingerprint": "unknown", "source_registry_revision": 0, "external_action_id": "failed:" + hashlib.sha256(canonical_json(tool_input).encode()).hexdigest(), "reason_code": "INVALID_CONTROL_ID"}
         if not isinstance(control_id, str): return decision
         candidate = self._candidate_registry.get_by_control_id(control_id)
-        if candidate is None: return decision | {"reason_code": "CANDIDATE_NOT_FOUND"}
+        if candidate is None:
+            decision["reason_code"] = "CANDIDATE_NOT_FOUND"
+            decision["external_action_id"] = "failed:" + hashlib.sha256(canonical_json({"control_id": control_id, "reason_code": decision["reason_code"], "tool_input": tool_input}).encode("utf-8")).hexdigest()
+            return decision
         decision.update({"server_id": candidate["server_id"], "tool_name": candidate["tool_name"], "fingerprint": candidate["current_fingerprint"], "source_registry_revision": candidate["current_source_registry_revision"]})
         decision["external_action_id"] = build_external_action_id(control_id, candidate["current_fingerprint"], candidate["current_source_registry_revision"], tool_input)
         try: server = self._server_registry.get(candidate["server_id"])
@@ -189,9 +192,10 @@ class ExternalMcpInvocation:
     def _insert_attempt(self, attempt_id: str, d: Mapping[str, Any], input_hash: str, length: int, status: str, reason: str) -> None:
         self._connection.execute("INSERT INTO external_tool_invocation_attempts (attempt_id,turn_id,control_id,server_id,tool_name,external_action_id,fingerprint,source_registry_revision,tool_input_sha256,tool_input_byte_length,status,reason_code,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt_id,d["turn_id"],d["control_id"],d["server_id"],d["tool_name"],d["external_action_id"],d["fingerprint"],d["source_registry_revision"],input_hash,length,status,reason,_now()))
     def _transition(self, attempt_id: str, d: Mapping[str, Any], status: str, reason: str) -> None:
-        now = _now(); if_started = status != STARTED
+        now = _now()
         if status == STARTED: result = self._connection.execute("UPDATE external_tool_invocation_attempts SET status=?,reason_code=?,started_at=? WHERE attempt_id=? AND status=?", (status,reason,now,attempt_id,PRE_CALL))
-        else: result = self._connection.execute("UPDATE external_tool_invocation_attempts SET status=?,reason_code=?,completed_at=? WHERE attempt_id=? AND status=?", (status,reason,now,attempt_id,STARTED if if_started else PRE_CALL))
+        elif status == FAILED_PRE_CALL: result = self._connection.execute("UPDATE external_tool_invocation_attempts SET status=?,reason_code=?,completed_at=? WHERE attempt_id=? AND status IN (?,?)", (status,reason,now,attempt_id,PRE_CALL,STARTED))
+        else: result = self._connection.execute("UPDATE external_tool_invocation_attempts SET status=?,reason_code=?,completed_at=? WHERE attempt_id=? AND status=?", (status,reason,now,attempt_id,STARTED))
         if result.rowcount != 1: raise sqlite3.IntegrityError("invalid invocation transition")
         self._audit(attempt_id,d,status,reason)
     def _audit(self, attempt_id: str, d: Mapping[str, Any], status: str, reason: str) -> None:
@@ -213,4 +217,3 @@ class ExternalMcpInvocation:
 
 
 __all__ = ["ExternalMcpInvocation", "ExternalInvocationError", "ExternalInvocationInitializationError", "PRE_CALL", "STARTED", "SUCCEEDED", "TOOL_ERROR", "FAILED_PRE_CALL", "OUTCOME_UNKNOWN", "TERMINAL_STATUSES", "MAX_TOOL_INPUT_BYTES", "build_external_action_id"]
-
