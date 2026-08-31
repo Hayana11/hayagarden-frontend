@@ -28,7 +28,7 @@ jobs:
       - name: Install Python focused-test dependency
         run: python -m pip install cryptography
       - name: Run canonical external surface tests
-        run: python -m unittest tests.test_external_mcp_surface -v
+        run: python -m unittest tests.test_external_mcp_surface tests.test_tool_inventory -v
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
