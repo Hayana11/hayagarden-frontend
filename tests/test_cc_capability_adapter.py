@@ -166,7 +166,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for name in NON_P3_HOME_MCP_TOOLS:
             self.assertNotIn(name, home)
         cfg = build_uh_a0_mcp_config(env={})
-        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability"})
+        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "external"})
         capability_cfg = cfg["mcpServers"]["capability"]
         self.assertEqual(capability_cfg["type"], "stdio")
         self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"])
