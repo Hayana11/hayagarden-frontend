@@ -381,7 +381,7 @@ class OfficialUsageParsingTests(unittest.TestCase):
         )
         self.assertIsNone(collector.rate_limit_detail(diary, "2026-07-18T03:52:06Z"))
 
-    def test_collect_claude_drops_jsonl_limit_when_official_available(self):
+    def test_collect_claude_keeps_fresh_jsonl_limit_when_official_available(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             cache = root / "official-cache.json"
@@ -400,9 +400,11 @@ class OfficialUsageParsingTests(unittest.TestCase):
                 }):
                     agent = collector.collect_claude(root, "UTC", creds, use_official=True)
         self.assertEqual(agent["quota_source"], "claude_oauth_usage")
-        self.assertNotIn("effective_limit", agent["quota"])
+        self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 10)
+        self.assertEqual(agent["quota"]["effective_limit"]["kind"], "weekly")
+        self.assertEqual(agent["quota"]["effective_limit"]["reset_text"], "resets at 09:00")
 
-    def test_collect_claude_reuses_cache_on_429_instead_of_jsonl_exhausted(self):
+    def test_collect_claude_reuses_cache_on_429_alongside_fresh_jsonl_limit(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             cache = root / "official-cache.json"
@@ -429,7 +431,8 @@ class OfficialUsageParsingTests(unittest.TestCase):
                         agent = collector.collect_claude(root, "UTC", creds, use_official=True)
         self.assertEqual(agent["quota_source"], "claude_oauth_usage")
         self.assertEqual(agent["quota"]["five_hour"]["used_percentage"], 40)
-        self.assertNotIn("effective_limit", agent["quota"])
+        self.assertEqual(agent["quota"]["effective_limit"]["kind"], "weekly")
+        self.assertEqual(agent["quota"]["effective_limit"]["reset_text"], "resets at 09:00")
 
     def test_fetch_codex_official_usage_returns_none_on_http_failure(self):
         with mock.patch.object(collector, "_http_get_json_result", return_value=(None, None)):
@@ -588,6 +591,279 @@ class RedirectDoesNotLeakAuthorizationTests(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(captured_auth, [])
+
+
+class ClaudeJsonlLimitSignalTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.observed = "2026-08-31T01:00:00Z"
+        self.block = {
+            "startTime": "2026-08-31T00:00:00Z",
+            "endTime": "2026-08-31T05:00:00Z",
+            "projection": {"remainingMinutes": 74},
+        }
+        self.official = {
+            "five_hour": {"used_percentage": 12, "remaining_percentage": 88},
+            "seven_day": {"used_percentage": 34, "remaining_percentage": 66},
+            "updated_at": self.observed,
+        }
+
+    def detail(self, message, **extra):
+        return collector.rate_limit_detail(json.dumps({"error": message, **extra}), self.observed)
+
+    def collect(self, rows, *, source="ccusage"):
+        if rows is not None:
+            (self.root / "session.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        with mock.patch.object(collector, "OFFICIAL_CACHE_PATH", self.root / "official.json"), \
+             mock.patch.object(collector, "read_claude_oauth_token", return_value="fake-token"), \
+             mock.patch.object(collector, "fetch_claude_official_usage", return_value=self.official), \
+             mock.patch.object(collector, "read_ccusage_block", return_value=self.block if source == "ccusage" else None):
+            return collector.collect_claude(self.root, "UTC", use_official=source == "official")
+
+    def event(self, message="Usage limit reached. Resets at 1am"):
+        return {"timestamp": self.observed, "error": message}
+
+    def session(self, timestamp):
+        return {"timestamp": timestamp, "type": "assistant", "message": {"usage": {"input_tokens": 100, "output_tokens": 12}}}
+
+    def test_ccusage_and_fresh_usage_limit_coexist_without_percentage(self):
+        agent = self.collect([self.session("2026-08-31T00:59:59Z"), self.event()])
+        self.assertEqual(agent["quota_source"], "ccusage_blocks")
+        window = agent["quota"]["five_hour"]
+        self.assertEqual(window["remaining_minutes"], 74)
+        self.assertEqual(window["remaining_basis"], "time_until_reset")
+        self.assertNotIn("used_percentage", window)
+        self.assertNotIn("remaining_percentage", window)
+        self.assertEqual(agent["quota"]["seven_day"], {})
+        self.assertEqual(agent["quota"]["effective_limit"], {
+            "kind": "rate_limit", "exhausted": True,
+            "reset_text": "Resets at 1am", "observed_at": self.observed,
+        })
+
+    def test_official_and_fresh_model_limit_coexist(self):
+        agent = self.collect([self.event("Opus limit reached, resets at 3 PM")], source="official")
+        self.assertEqual(agent["quota_source"], "claude_oauth_usage")
+        self.assertEqual(agent["quota"]["five_hour"], self.official["five_hour"])
+        self.assertEqual(agent["quota"]["seven_day"], self.official["seven_day"])
+        self.assertEqual(agent["quota"]["effective_limit"]["kind"], "opus")
+        self.assertEqual(agent["quota"]["effective_limit"]["reset_text"], "resets at 3 PM")
+
+    def test_newer_normal_usage_clears_limit_with_each_quota_source(self):
+        for source in ("ccusage", "official", "jsonl"):
+            with self.subTest(source=source):
+                agent = self.collect([self.event(), self.session("2026-08-31T01:00:01Z")], source=source)
+                self.assertNotIn("effective_limit", agent["quota"])
+
+    def test_equal_timestamp_usage_does_not_clear_limit(self):
+        agent = self.collect([self.event(), self.session(self.observed)])
+        self.assertIn("effective_limit", agent["quota"])
+
+    def write_project(self, name, rows, mtime):
+        path = self.root / name
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+
+    def test_cross_file_latest_limit_uses_event_time_not_file_mtime(self):
+        older = self.event("Weekly limit reached. Resets Sep 1")
+        latest = {**self.event("429. Try again after 5pm"), "timestamp": "2026-08-31T03:00:00Z"}
+        for source in ("ccusage", "official", "jsonl"):
+            for newest_event_file_mtime in (100, 300):
+                with self.subTest(source=source, mtime=newest_event_file_mtime):
+                    self.write_project("older-event.jsonl", [older], 200)
+                    self.write_project("latest-event.jsonl", [self.session("2026-08-31T02:00:00Z"), latest], newest_event_file_mtime)
+                    agent = self.collect(None, source=source)
+                    self.assertEqual(agent["quota"]["effective_limit"], {
+                        "kind": "rate_limit", "exhausted": False,
+                        "reset_text": "Try again after 5pm", "observed_at": latest["timestamp"],
+                    })
+                    self.assertEqual(agent["quota_source"], {
+                        "ccusage": "ccusage_blocks", "official": "claude_oauth_usage", "jsonl": "claude_project_jsonl",
+                    }[source])
+
+    def test_cross_file_session_does_not_stop_search_for_that_files_limit(self):
+        latest = {**self.event("Opus limit reached. Resets at 3 PM"), "timestamp": "2026-08-31T03:00:00Z"}
+        self.write_project("older-event.jsonl", [self.event()], 200)
+        # Reverse scanning encounters this file's session before its limit.
+        # A limit found in another file must not satisfy this file's stop condition.
+        for session_time in ("2026-08-31T02:00:00Z", latest["timestamp"], "2026-08-31T04:00:00Z"):
+            with self.subTest(session_time=session_time):
+                self.write_project("latest-event.jsonl", [latest, self.session(session_time)], 100)
+                sessions, limit = collector.scan_claude_projects(self.root)
+                self.assertEqual(limit["observed_at"], latest["timestamp"])
+                self.assertEqual(limit["kind"], "opus")
+                self.assertEqual(sessions[0]["updated_at"], session_time)
+                agent = self.collect(None)
+                if session_time > latest["timestamp"]:
+                    self.assertNotIn("effective_limit", agent["quota"])
+                else:
+                    self.assertEqual(agent["quota"]["effective_limit"], limit)
+
+    def test_cross_file_latest_limit_without_any_session(self):
+        latest = {**self.event("Opus limit reached. Resets at 3 PM"), "timestamp": "2026-08-31T03:00:00Z"}
+        self.write_project("older-event.jsonl", [self.event()], 200)
+        self.write_project("latest-event.jsonl", [latest], 100)
+        sessions, limit = collector.scan_claude_projects(self.root)
+        self.assertEqual(sessions, [])
+        self.assertEqual(limit["observed_at"], latest["timestamp"])
+        self.assertEqual(self.collect(None)["quota"]["effective_limit"], limit)
+
+    def test_cross_file_session_cap_keeps_newest_usage_for_stale_clear(self):
+        self.write_project("limit.jsonl", [self.event()], 300)
+        for index in range(6):
+            self.write_project(f"old-session-{index}.jsonl", [self.session("2026-08-31T00:00:00Z")], 200 - index)
+        self.write_project("newest-session.jsonl", [self.session("2026-08-31T02:00:00Z")], 100)
+        sessions, limit = collector.scan_claude_projects(self.root)
+        self.assertEqual(len(sessions), 6)
+        self.assertEqual(sessions[0]["updated_at"], "2026-08-31T02:00:00Z")
+        self.assertEqual(limit["observed_at"], self.observed)
+        self.assertNotIn("effective_limit", self.collect(None)["quota"])
+
+    def test_cross_file_limit_order_uses_instants_with_offsets_and_fractions(self):
+        for older_time, newer_time in (
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T02:00:00Z"),
+            ("2026-08-31T01:00:00Z", "2026-08-31T01:00:00.500000Z"),
+        ):
+            with self.subTest(older=older_time, newer=newer_time):
+                self.write_project("older-event.jsonl", [{**self.event(), "timestamp": older_time}], 200)
+                self.write_project("latest-event.jsonl", [{**self.event(), "timestamp": newer_time}], 100)
+                _, limit = collector.scan_claude_projects(self.root)
+                self.assertEqual(limit["observed_at"], newer_time)
+
+    def test_stale_fence_compares_instants_not_timestamp_strings(self):
+        for limit_time, session_time, cleared in (
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T02:00:00Z", True),
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T01:00:00Z", False),
+            ("2026-08-31T03:00:00+02:00", "2026-08-31T00:59:59Z", False),
+            ("2026-08-31T01:00:00Z", "2026-08-31T01:00:00.500000Z", True),
+            ("2026-08-31T01:00:00.500000Z", "2026-08-31T01:00:00Z", False),
+        ):
+            with self.subTest(limit_time=limit_time, session_time=session_time):
+                agent = self.collect([{**self.event(), "timestamp": limit_time}, self.session(session_time)])
+                self.assertEqual("effective_limit" not in agent["quota"], cleared)
+
+    def test_jsonl_only_signal_retains_existing_source(self):
+        agent = self.collect([self.event("429. Try again after 5pm")], source="jsonl")
+        self.assertEqual(agent["quota_source"], "claude_project_jsonl")
+        self.assertEqual(agent["quota"]["five_hour"], {})
+        self.assertEqual(agent["quota"]["seven_day"], {})
+        self.assertFalse(agent["quota"]["effective_limit"]["exhausted"])
+        self.assertEqual(agent["quota"]["effective_limit"]["reset_text"], "Try again after 5pm")
+
+    def test_explicit_usage_exhaustion_and_recovery_phrases(self):
+        cases = [
+            ("Usage limit reached. Resets at 1am", "Resets at 1am"),
+            ("You've reached your usage limit. Your limit will reset at 3 PM", "reset at 3 PM"),
+            ("Quota limit reached. Try again after 5pm", "Try again after 5pm"),
+            ("You've hit your limit. Resets at 09:00", "Resets at 09:00"),
+            ("Usage limit exceeded. Try again in 15 minutes", "Try again in 15 minutes"),
+        ]
+        for message, hint in cases:
+            with self.subTest(message=message):
+                signal = self.detail(message)
+                self.assertTrue(signal["exhausted"])
+                self.assertEqual(signal["reset_text"], hint)
+
+    def test_weekly_limit_classification(self):
+        for message in ("Weekly limit reached. Resets Sep 1", "Weekly usage limit. Resets September 1 at 3 PM"):
+            with self.subTest(message=message):
+                signal = self.detail(message)
+                self.assertEqual(signal["kind"], "weekly")
+                self.assertTrue(signal["exhausted"])
+                self.assertTrue(signal["reset_text"].startswith("Resets Sep"))
+
+    def test_opus_limit_classification(self):
+        signal = self.detail("Opus limit reached, resets at 3 PM")
+        self.assertEqual(signal["kind"], "opus")
+        self.assertTrue(signal["exhausted"])
+        self.assertEqual(signal["reset_text"], "resets at 3 PM")
+
+    def test_generic_throttling_never_implies_quota_exhaustion(self):
+        for message in ("429", "HTTP 429: rate limit", "Rate limit reached. Try again after 5pm", "Too many requests", "rate_limit", "request-rate-limit"):
+            with self.subTest(message=message):
+                signal = self.detail(message)
+                self.assertIsNotNone(signal)
+                self.assertEqual(signal["kind"], "rate_limit")
+                self.assertFalse(signal["exhausted"])
+
+    def test_claude_api_error_shape_reads_error_message_not_conversation(self):
+        row = {
+            "type": "assistant", "isApiErrorMessage": True, "error": "rate_limit",
+            "timestamp": self.observed,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "You've reached your usage limit. Resets at 1am"}], "usage": {"input_tokens": 0}},
+        }
+        agent = self.collect([row])
+        signal = agent["quota"]["effective_limit"]
+        self.assertTrue(signal["exhausted"])
+        self.assertEqual(signal["reset_text"], "Resets at 1am")
+        for role in ("assistant", "user"):
+            conversation = {"type": role, "message": {"role": role, "content": [{"type": "text", "text": "Usage limit reached. Resets at 1am"}]}}
+            self.assertIsNone(collector.rate_limit_detail(json.dumps(conversation), self.observed))
+
+    def test_request_frequency_with_usage_words_is_not_subscription_exhaustion(self):
+        for message in (
+            "HTTP 429: rate limit reached for API usage. Try again in 1 minute",
+            "Request rate limit exceeded. See usage dashboard. Try again after 5pm",
+            "You've reached your limit of 10 requests per minute. Try again in 30 seconds",
+            "Usage limit reached: 100 tokens per minute. Try again in 1 minute",
+            "You've reached your limit of 100 requests per hour. Try again in 1 hour",
+            "You've reached your limit of 10 requests per sec. Try again in 1 minute",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(self.detail(message)["exhausted"])
+
+    def test_reset_duration_is_not_truncated_to_an_earlier_time(self):
+        for hint in ("Resets in 1 hour 30 minutes", "Try again in 2 hours and 15 minutes", "Resets in 1 day, 2 hours, and 3 minutes"):
+            with self.subTest(hint=hint):
+                self.assertEqual(self.detail("429. " + hint)["reset_text"], hint)
+        for hint in ("Resets in 1 hour 30m", "Resets in 1 hour and a half", "Resets at 1am/3am", "Resets Sep 1, 2026/2027", "Resets Sep 1-3"):
+            with self.subTest(hint=hint):
+                self.assertEqual(self.detail("429. " + hint)["reset_text"], "")
+
+    def test_structured_error_forms_and_unrelated_fields(self):
+        for row in (
+            {"error": {"message": "429. Try again after 5pm"}},
+            {"type": "error", "message": "429. Try again after 5pm"},
+            {"is_error": True, "content": "429. Try again after 5pm"},
+            {"type": "error", "status": 429, "message": "Try again after 5pm"},
+            {"error": {"type": "rate_limit_error", "message": "Try again after 5pm"}},
+        ):
+            with self.subTest(row=row):
+                signal = collector.rate_limit_detail(json.dumps(row), self.observed)
+                self.assertFalse(signal["exhausted"])
+                self.assertEqual(signal["reset_text"], "Try again after 5pm")
+        signal = self.detail("429", unrelated="Weekly limit reached. Resets at 1am")
+        self.assertFalse(signal["exhausted"])
+        self.assertEqual(signal["reset_text"], "")
+
+    def test_reset_text_cannot_leak_jsonl_body_credentials_or_paths(self):
+        for tail in ("Authorization: Bearer private", "access_token=private", "token private", "api_key=private", "/root/private/file", "C:\\Users\\private", "https://private.example/key"):
+            with self.subTest(tail=tail):
+                signal = self.detail("Usage limit reached. Resets at 1am " + tail)
+                self.assertEqual(signal["reset_text"], "")
+        signal = self.detail("Usage limit reached. Resets at 1am. Here is private conversation text", raw_prompt="private-body", path="/private/file")
+        self.assertEqual(signal["reset_text"], "Resets at 1am")
+        self.assertNotIn("private", json.dumps(signal))
+        for message in ("Usage limit reached. Resets whenever", "429. Resets at /private/file", "429. Try again", "Usage limit reached. Resets at 99:99"):
+            self.assertEqual(self.detail(message)["reset_text"], "")
+        self.assertIsNone(self.detail("Usage limit reached " + "x" * 500))
+
+    def test_diary_thought_save_and_malformed_lines_stay_ignored(self):
+        for marker in ("[DIARY", "[THOUGHT", "[[SAVE:", "[diary", "[thought", "[[save:"):
+            self.assertIsNone(self.detail("Weekly limit reached. Resets at 1am " + marker))
+        self.assertIsNone(collector.rate_limit_detail('not JSON: 429, Resets at 1am', self.observed))
+        self.assertIsNone(self.detail("Upstream connection closed"))
+
+    def test_existing_store_preserves_false_signal_and_window_source(self):
+        agent = self.collect([self.event("429. Try again after 5pm")])
+        accepted, snapshot = context_usage_store.save_report({"generated_at": self.observed, "agents": [agent]}, str(self.root / "reports.db"))
+        self.assertEqual(accepted, ["claude"])
+        stored = snapshot["agents"][0]
+        self.assertEqual(stored["quota_source"], "ccusage_blocks")
+        self.assertEqual(stored["quota"]["effective_limit"], agent["quota"]["effective_limit"])
+        self.assertFalse(stored["quota"]["effective_limit"]["exhausted"])
+        self.assertNotIn("used_percentage", stored["quota"]["five_hour"])
 
 
 class Clock(dt.datetime):

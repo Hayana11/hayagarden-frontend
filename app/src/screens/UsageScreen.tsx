@@ -81,6 +81,16 @@ function windowHint(resetAt: string, remainingMinutes: number | null, now: Date)
 function AgentQuotaCard({ agent, now }: { agent: AgentUsageSummary; now: Date }) {
   const colors = AGENT_COLORS[agent.id];
   const isClaude = agent.id === 'claude';
+  const effectiveLimit = agent.effectiveLimit;
+  const limitTitle = !isClaude
+    ? '当前额度已耗尽'
+    : !effectiveLimit?.exhausted
+      ? 'Claude Code 请求暂时受限'
+      : effectiveLimit.kind === 'weekly'
+        ? '周额度已触达限制'
+        : effectiveLimit.kind === 'opus'
+          ? 'Opus 额度已触达限制'
+          : '当前额度已触达限制';
   const context = agent.contextTokens === null
     ? ''
     : agent.contextWindowTokens
@@ -100,10 +110,10 @@ function AgentQuotaCard({ agent, now }: { agent: AgentUsageSummary; now: Date })
         <em className={agent.available ? 'ready' : ''}>{agent.available ? '有数据' : '暂无数据'}</em>
       </div>
 
-      {agent.effectiveLimit?.exhausted && (
+      {effectiveLimit && (isClaude || effectiveLimit.exhausted) && (
         <div className="usage-limit-alert">
-          <strong>当前额度已耗尽</strong>
-          <span>{agent.effectiveLimit.resetText || '等待下一次额度窗口恢复'}</span>
+          <strong>{limitTitle}</strong>
+          <span>{effectiveLimit.resetText || (isClaude && !effectiveLimit.exhausted ? '稍后会自动重试' : '等待下一次额度窗口恢复')}</span>
         </div>
       )}
 
