@@ -364,7 +364,8 @@ def fetch_claude_official_usage(
         headers={
             "Authorization": f"Bearer {token}",
             "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "claude-cli",
+            "Content-Type": "application/json",
+            "User-Agent": "claude-cli/2.1.220 (external, cli)",
         },
         retry_metadata=attempt,
     )
