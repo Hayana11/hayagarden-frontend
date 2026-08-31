@@ -198,6 +198,8 @@ assert.doesNotMatch(screen.slice(intervalStart, intervalEnd), /\/check/);
 assert.match(screen, /function externalMcpServerId/);
 assert.match(screen, /externalMcpChecking/);
 assert.match(screen, /toolroom-mcp-check-button/);
+assert.match(screen, /toolroom-mcp-check-icon/);
+assert.match(screen, /title=\{checkLabel\}/);
 assert.match(screen, /\/api\/external-mcp\/servers\/\$\{encodeURIComponent\(serverId\)\}\/check/);
 assert.match(screen, /loadInventory\(false\)/);
 assert.match(screen, /检查中…/);
