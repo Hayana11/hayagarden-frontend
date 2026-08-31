@@ -118,6 +118,8 @@ _LEGACY_CAPABILITY_ALIASES = {
   "files.find": "codebase_list_directory",
   "code.search": "codebase_search_code",
 }
+_LEGACY_CURRENT_NAMES = frozenset(_LEGACY_CAPABILITY_ALIASES.values())
+
 
 def _manifest_binding(capability_id: str) -> str | None:
     entry = get_capability(capability_id) or {}
@@ -125,67 +127,47 @@ def _manifest_binding(capability_id: str) -> str | None:
     return binding if isinstance(binding, str) and binding.strip() else None
 
 
-def _current_capability_rows() -> dict[str, dict[str, Any]]:
+def _current_capability_groups() -> list[dict[str, Any]]:
     hints = tool_companion_hints.payload()
     physical = set(physical_surface_names())
-    rows: dict[str, dict[str, Any]] = {}
-    for group in hints["groups"]:
-        for hint in group["tools"]:
+    groups: list[dict[str, Any]] = []
+    for source_group in hints["groups"]:
+        tools: list[dict[str, Any]] = []
+        for hint in source_group["tools"]:
             capability_id = str(hint["capability_id"])
             binding = _manifest_binding(capability_id)
             if not binding:
                 continue
-            name = _LEGACY_CAPABILITY_ALIASES.get(capability_id, capability_id)
             available = binding in physical
-            rows[name] = _tool(
-                name,
+            tools.append(_tool(
+                capability_id,
                 str(hint["display_label"]),
                 available=available,
                 reason_code="active" if available else "runtime_disabled",
                 provider=binding,
-            )
-
-    native_ready = {"Read", "Glob", "Grep"}.issubset(physical)
-    for name in (
-        "codebase_describe_project",
-        "codebase_read_file",
-        "codebase_list_directory",
-        "codebase_search_code",
-        "codebase_find_references",
-        "codebase_git_view",
-        "codebase_explain_history",
-    ):
-        rows[name] = _tool(
-            name,
-            DISPLAY_LABELS[name],
-            available=native_ready,
-            reason_code="active" if native_ready else "runtime_disabled",
-            provider="native-file-surface",
-        )
-    return rows
+            ))
+        groups.append({
+            "id": str(source_group["id"]),
+            "label": str(source_group["label"]),
+            "total": len(tools),
+            "available": sum(tool["available"] for tool in tools),
+            "tools": tools,
+        })
+    return groups
 
 
-def _legacy_row(name: str, current: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
-    return current.get(name) or {
-        "tool_name": name,
-        "display_label": DISPLAY_LABELS[name],
-        "available": False,
-        "status_label": "当前不可用",
-        "reason_code": "legacy_only",
-        "provider": None,
-    }
+def _legacy_row(name: str) -> dict[str, Any]:
+    return _GRAY.get(name) or _tool(name, DISPLAY_LABELS[name])
 
 
-def _build_groups() -> list[dict[str, Any]]:
-    current = _current_capability_rows()
+def _legacy_groups() -> list[dict[str, Any]]:
     groups: list[dict[str, Any]] = []
     for group_id, label, names in GROUP_DEFS:
-        tools = [_legacy_row(name, current) for name in names]
-        if group_id == "plans_ledger" and "task.timer.start" in current:
-            tools.append(current["task.timer.start"])
+        historical_names = [name for name in names if name not in _LEGACY_CURRENT_NAMES]
+        tools = [_legacy_row(name) for name in historical_names]
         groups.append({
-            "id": group_id,
-            "label": label,
+            "id": "legacy:" + group_id,
+            "label": "历史 · " + label,
             "total": len(tools),
             "available": sum(tool["available"] for tool in tools),
             "tools": tools,
@@ -197,13 +179,24 @@ def _external_groups() -> list[dict[str, Any]]:
     from tools.external_mcp_surface import list_external_surface
     groups: list[dict[str, Any]] = []
     for server in list_external_surface():
+        connected = server["lifecycle_state"] == "CONNECTED"
         tools = [
             {
-                "tool_name": tool["surface_tool_name"],
+                "tool_name": tool["remote_tool_name"],
                 "display_label": tool["description"] or tool["remote_tool_name"],
                 "available": tool["available"] is True,
-                "status_label": "当前可用" if tool["available"] is True else "当前不可用",
-                "reason_code": "active" if tool["available"] is True else "external_surface_stale",
+                "status_label": (
+                    "当前可用"
+                    if tool["available"] is True
+                    else "未连接"
+                    if not connected
+                    else "当前不可用"
+                ),
+                "reason_code": (
+                    "active"
+                    if tool["available"] is True
+                    else "external_surface_stale"
+                ),
                 "provider": "External MCP · Streamable HTTP",
             }
             for tool in server.get("tools", ())
@@ -221,7 +214,7 @@ def _external_groups() -> list[dict[str, Any]]:
 
 
 def payload() -> dict[str, Any]:
-    groups = _build_groups() + _external_groups()
+    groups = _current_capability_groups() + _legacy_groups() + _external_groups()
     tools = [tool for group in groups for tool in group["tools"]]
     available = sum(tool["available"] for tool in tools)
     return {
@@ -235,4 +228,8 @@ def payload() -> dict[str, Any]:
 
 
 def inventory_names() -> list[str]:
-    return [tool["tool_name"] for group in _build_groups() + _external_groups() for tool in group["tools"]]
+    return [
+        tool["tool_name"]
+        for group in _current_capability_groups() + _legacy_groups() + _external_groups()
+        for tool in group["tools"]
+    ]
