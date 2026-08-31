@@ -28,10 +28,10 @@ from tools.lease_signer import issue_turn_lease
 class ExternalSurfaceTests(unittest.TestCase):
     def setUp(self):
         self.connection = sqlite3.connect(":memory:", check_same_thread=False)
-        self.servers = ExternalServerRegistry(self.connection, id_factory=lambda: "calendar")
+        self.servers = ExternalServerRegistry(self.connection, id_factory=lambda: "monopoly")
         self.server = self.servers.register(
-            display_name="Calendar",
-            endpoint="https://calendar.example/mcp",
+            display_name="Monopoly",
+            endpoint="https://monopoly.example/mcp",
             provenance="test",
         )
         self.tmp = tempfile.TemporaryDirectory()
@@ -78,8 +78,8 @@ class ExternalSurfaceTests(unittest.TestCase):
             "catalog_complete": True,
             "tool_record_boundary": "SDK_VISIBLE_RAW",
             "tools": [{
-                "name": "calendar.list",
-                "description": "List calendar entries",
+                "name": "monopoly.list",
+                "description": "List monopoly entries",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"day": {"type": "string"}},
@@ -94,11 +94,11 @@ class ExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(len(current_external_tools(catalog)), 1)
         tool = catalog[0]["tools"][0]
         self.assertTrue(tool["available"])
-        self.assertIn("Calendar", tool["description"])
-        self.assertIn("List calendar entries", tool["description"])
+        self.assertIn("Monopoly", tool["description"])
+        self.assertIn("List monopoly entries", tool["description"])
         self.assertEqual(
             tool["surface_tool_name"],
-            surface_tool_name("calendar", "calendar.list", tool["control_id"]),
+            surface_tool_name("monopoly", "monopoly.list", tool["control_id"]),
         )
         self.assertEqual(tool["source_registry_revision"], catalog[0]["revision"])
         self.assertNotIn("endpoint", tool)
@@ -107,7 +107,7 @@ class ExternalSurfaceTests(unittest.TestCase):
     def test_disconnected_candidate_stays_toolroom_gray_and_leaves_model(self):
         self._ingest()
         changed = self.servers.update_connection(
-            self.server.server_id, endpoint="https://calendar-2.example/mcp"
+            self.server.server_id, endpoint="https://monopoly-2.example/mcp"
         )
         catalog = list_external_surface(self._graph())
         self.assertEqual(catalog[0]["lifecycle_state"], "DISCONNECTED")
@@ -118,19 +118,19 @@ class ExternalSurfaceTests(unittest.TestCase):
 
     def test_toolroom_and_model_use_one_catalog(self):
         catalog = [{
-            "server_id": "calendar",
-            "display_name": "Calendar",
+            "server_id": "monopoly",
+            "display_name": "Monopoly",
             "lifecycle_state": "CONNECTED",
             "transport": "STREAMABLE_HTTP",
             "revision": 4,
             "tools": [{
-                "control_id": "ext:calendar:roll",
+                "control_id": "ext:monopoly:roll",
                 "remote_tool_name": "roll",
-                "description": "Calendar: Roll",
+                "description": "Monopoly: Roll",
                 "input_schema": {"type": "object"},
                 "fingerprint": "a" * 64,
                 "source_registry_revision": 4,
-                "surface_tool_name": "calendar__roll__1234567890",
+                "surface_tool_name": "monopoly__roll__1234567890",
                 "available": True,
             }],
         }]
@@ -140,7 +140,7 @@ class ExternalSurfaceTests(unittest.TestCase):
             inventory_group = tool_inventory._external_groups()[0]
             model_tools = model_tool_definitions()
         self.assertEqual(inventory_group["tools"][0]["tool_name"], "roll")
-        self.assertEqual(model_tools[0]["name"], "calendar__roll__1234567890")
+        self.assertEqual(model_tools[0]["name"], "monopoly__roll__1234567890")
         self.assertEqual(model_tools[0]["description"], inventory_group["tools"][0]["display_label"])
 
     def test_dynamic_pretooluse_binding_uses_current_catalog_result(self):
@@ -148,26 +148,26 @@ class ExternalSurfaceTests(unittest.TestCase):
             turn_id="turn-1", turn_mode="chat", issued_from="default_policy"
         )
         surface = {
-            "control_id": "ext:calendar:calendar.list",
+            "control_id": "ext:monopoly:monopoly.list",
             "available": True,
         }
         with patch(
             "tools.execution_fence.external_surface_tool", return_value=surface
         ):
             result = evaluate_tool_call(
-                "mcp__external__calendar__calendar_list__abc123",
+                "mcp__external__monopoly__monopoly_list__abc123",
                 {"day": "today"},
                 lease,
             )
         self.assertEqual(result["lease_decision"], "ALLOW")
-        self.assertEqual(result["capability_id"], "external_mcp:ext:calendar:calendar.list")
+        self.assertEqual(result["capability_id"], "external_mcp:ext:monopoly:monopoly.list")
 
         with patch(
             "tools.execution_fence.external_surface_tool",
             return_value={**surface, "available": False},
         ):
             denied = evaluate_tool_call(
-                "mcp__external__calendar__calendar_list__abc123",
+                "mcp__external__monopoly__monopoly_list__abc123",
                 {},
                 lease,
             )
