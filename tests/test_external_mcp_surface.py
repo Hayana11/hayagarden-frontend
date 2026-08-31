@@ -243,12 +243,11 @@ class ExternalSurfaceTests(unittest.TestCase):
             "isError": True,
         }
 
+        calls = []
+
         class RecordingRuntime:
             def invoke(self, control_id, tool_input, turn_lease, *, expected_turn_id):
-                self.assertEqual(control_id, surface["control_id"])
-                self.assertEqual(tool_input, {"move": "bad"})
-                self.assertIsNone(turn_lease)
-                self.assertEqual(expected_turn_id, "turn-error")
+                calls.append((control_id, tool_input, turn_lease, expected_turn_id))
                 return {"status": "TOOL_ERROR", "mcp_result": remote_error}
 
         graph.runtime = RecordingRuntime()
@@ -272,6 +271,10 @@ class ExternalSurfaceTests(unittest.TestCase):
                 ),
                 {"status": "TOOL_ERROR", "result": remote_error},
             )
+        self.assertEqual(
+            calls,
+            [(surface["control_id"], {"move": "bad"}, None, "turn-error")],
+        )
 
     def test_dynamic_pretooluse_binding_uses_current_catalog_result(self):
         lease = issue_turn_lease(
