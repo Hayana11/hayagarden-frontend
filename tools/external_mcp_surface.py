@@ -231,7 +231,7 @@ def invoke_external_surface(
     )
     if status == SUCCEEDED:
         return {
-            "status": SUCCEEDED,
+            "status": "SUCCESS",
             "result": dict(mcp_result) if preserves_call_result else None,
         }
     if status == TOOL_ERROR and preserves_call_result:
