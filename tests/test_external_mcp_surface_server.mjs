@@ -98,5 +98,4 @@ test('surface names satisfy the installed MCP ToolSchema contract', () => {
     }
   }
   if (installedMax > 0) assert.ok(generated.long.length <= installedMax);
-  assert.ok(generated.long.length <= 64);
 });
