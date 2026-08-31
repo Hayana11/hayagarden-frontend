@@ -251,13 +251,13 @@ function normalizeAgent(id: UsageAgentId, raw: RawUsageAgent, generatedAt: strin
   const sevenDayPct = allowClaudePercentage ? usedPct(quota.seven_day) : null;
   const fiveHour = {
     usedPct: fiveHourPct,
-    remainingPct: allowClaudePercentage ? remainingPct(quota.five_hour, fiveHourPct) : null,
+    remainingPct: allowClaudePercentage ? remainingPct(quota.five_hour) : null,
     resetAt: quota.five_hour?.resets_at || '',
     remainingMinutes: quota.five_hour?.remaining_minutes ?? null,
   };
   const sevenDay = {
     usedPct: sevenDayPct,
-    remainingPct: allowClaudePercentage ? remainingPct(quota.seven_day, sevenDayPct) : null,
+    remainingPct: allowClaudePercentage ? remainingPct(quota.seven_day) : null,
     resetAt: quota.seven_day?.resets_at || '',
     remainingMinutes: quota.seven_day?.remaining_minutes ?? null,
   };
