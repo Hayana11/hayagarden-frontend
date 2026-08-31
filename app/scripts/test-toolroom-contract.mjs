@@ -173,7 +173,6 @@ assert.match(screen, /DISABLED_TOOL_ACCENT/);
 assert.match(css, /background:\s*var\(--toolroom-accent/);
 assert.match(css, /border-left:\s*3px solid var\(--toolroom-accent/);
 
-console.log('test-toolroom-contract: ok');
 
 
 const visualNormalizerStart = screen.indexOf('function visualGroupId');
@@ -199,7 +198,7 @@ assert.doesNotMatch(screen.slice(intervalStart, intervalEnd), /\/check/);
 assert.match(screen, /function externalMcpServerId/);
 assert.match(screen, /externalMcpChecking/);
 assert.match(screen, /toolroom-mcp-check-button/);
-assert.match(screen, /\/api\/external-mcp\/servers\/\\$\{encodeURIComponent\(serverId\)\}\/check/);
+assert.match(screen, /\/api\/external-mcp\/servers\/\$\{encodeURIComponent\(serverId\)\}\/check/);
 assert.match(screen, /loadInventory\(false\)/);
 assert.match(screen, /检查中…/);
 assert.match(screen, /重新检查/);
@@ -210,3 +209,5 @@ const headerStart = screen.indexOf('className="toolroom-group-header"');
 const toggleClose = screen.indexOf('</button>', headerStart);
 const checkButtonPos = screen.indexOf('toolroom-mcp-check-button', headerStart);
 assert.ok(headerStart >= 0 && toggleClose >= 0 && checkButtonPos > toggleClose);
+
+console.log('test-toolroom-contract: ok');
