@@ -19,6 +19,7 @@ from flask import Flask
 import context_usage_store
 from context_usage_routes import create_context_usage_blueprint
 from tools import context_usage_collector as collector
+from scripts import claude_statusline_quota as bridge
 
 
 class ContextUsageStoreTests(unittest.TestCase):
@@ -316,6 +317,13 @@ class OAuthCredentialReadingTests(unittest.TestCase):
 
 
 class OfficialUsageParsingTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        patch = mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(Path(temp.name) / "missing.json")})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_fetch_claude_official_usage_parses_utilization(self):
         with mock.patch.object(collector, "_http_get_json_result", return_value=({
             "five_hour": {"utilization": 23, "resets_at": "2026-07-15T18:00:00Z"},
@@ -440,6 +448,13 @@ class OfficialUsageParsingTests(unittest.TestCase):
 
 
 class OfficialUsageFallbackTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        patch = mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(Path(temp.name) / "missing.json")})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_collect_codex_default_signature_never_touches_network(self):
         with mock.patch.object(collector, "_http_get_json", side_effect=AssertionError("network should not be called")):
             with tempfile.TemporaryDirectory() as temp:
@@ -598,6 +613,9 @@ class ClaudeJsonlLimitSignalTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        patch = mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(self.root / "missing.json")})
+        patch.start()
+        self.addCleanup(patch.stop)
         self.observed = "2026-08-31T01:00:00Z"
         self.block = {
             "startTime": "2026-08-31T00:00:00Z",
@@ -889,6 +907,7 @@ class ClaudeOfficialBackoffTests(unittest.TestCase):
         self.codex_entry = {"fetched_at": "2026-08-30T11:00:00Z", "quota": self.old_quota}
         self.block = {"endTime": "2026-08-30T15:00:00Z", "projection": {"remainingMinutes": 180}}
         for patch in (
+            mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(self.root / "missing.json")}),
             mock.patch.object(collector, "OFFICIAL_CACHE_PATH", self.cache),
             mock.patch.object(collector, "OFFICIAL_MIN_INTERVAL_SEC", 720),
             mock.patch.object(collector.dt, "datetime", Clock),
@@ -1093,6 +1112,372 @@ print("ok")
             self.assertEqual(result.stdout.strip(), "ok")
         self.assertEqual(self.read_cache()["claude"]["last_status"], 429)
         self.assertNotIn("quota", self.read_cache()["claude"])
+
+
+class ClaudeStatuslineBridgeTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.path = self.root / "snapshot.json"
+        self.now = dt.datetime(2026, 8, 31, 12, tzinfo=dt.timezone.utc)
+        self.windows = {
+            "five_hour": {"used_percentage": 44, "resets_at": self.now.timestamp() + 18000},
+            "seven_day": {"used_percentage": 27, "resets_at": self.now.timestamp() + 604800},
+        }
+
+    def invoke(self, raw, path=None):
+        return subprocess.run(
+            [sys.executable, "-B", str(Path(bridge.__file__).resolve())],
+            input=raw, capture_output=True, text=True, encoding="utf-8", timeout=10,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                 "HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(path or self.path)},
+        )
+
+    def test_machine_input_stdout_and_exact_whitelist(self):
+        payload = {
+            "rate_limits": self.windows, "prompt": "SECRET_PROMPT_CANARY",
+            "cwd": "SECRET_CWD_CANARY", "accountUuid": "SECRET_ACCOUNT_CANARY",
+            "session_id": "SECRET_SESSION", "model": {"id": "SECRET_MODEL"},
+            "cost": {"total_cost_usd": 100}, "environment": {"TOKEN": "SECRET_TOKEN"},
+        }
+        result = self.invoke(json.dumps(payload))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "5h 44% · 7d 27%\n")
+        self.assertEqual(result.stderr, "")
+        raw = self.path.read_text(encoding="utf-8")
+        self.assertNotIn("SECRET_", raw)
+        snapshot = json.loads(raw)
+        self.assertEqual(set(snapshot), {"schema_version", "source", "observed_at", *self.windows})
+        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertEqual(snapshot["source"], "claude_statusline")
+        self.assertTrue(snapshot["observed_at"].endswith("Z"))
+        for name, window in self.windows.items():
+            self.assertEqual(snapshot[name], window)
+
+    def test_each_single_window_and_numeric_boundaries(self):
+        for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
+            for value in (0, 100, 12.5):
+                with self.subTest(name=name, value=value):
+                    window = {**self.windows[name], "used_percentage": value}
+                    result = self.invoke(json.dumps({"rate_limits": {name: window}}))
+                    self.assertEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, f"{label} {value:g}%\n")
+                    snapshot = json.loads(self.path.read_text(encoding="utf-8"))
+                    self.assertEqual(snapshot[name], window)
+                    self.assertNotIn("seven_day" if name == "five_hour" else "five_hour", snapshot)
+
+    def test_invalid_input_preserves_last_good(self):
+        self.path.write_bytes(b'{"last_good":true}\n')
+        for raw in ("not json SECRET_PROMPT_CANARY", "null", "[]", "42", "{}",
+                    '{"rate_limits": []}', '{"rate_limits": {}}', "{" * 1500,
+                    " " * (bridge.MAX_INPUT_CHARS + 1)):
+            with self.subTest(size=len(raw)):
+                result = self.invoke(raw)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(self.path.read_bytes(), b'{"last_good":true}\n')
+
+    def test_invalid_window_values_never_coerce_or_replace_good_snapshot(self):
+        for key, values in (
+            ("used_percentage", (-1, 101, float("nan"), float("inf"), "44", True, None, 10 ** 1000)),
+            ("resets_at", ("123", True, None, float("nan"), float("inf"), 10 ** 1000, 1788177600000)),
+        ):
+            for value in values:
+                with self.subTest(key=key, value_type=type(value).__name__):
+                    self.path.write_bytes(b"last good")
+                    window = {**self.windows["five_hour"], key: value}
+                    result = self.invoke(json.dumps({"rate_limits": {"five_hour": window}}))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(self.path.read_bytes(), b"last good")
+
+    def test_window_extra_fields_are_dropped_and_other_window_can_survive(self):
+        payload = {"rate_limits": {
+            "five_hour": {"used_percentage": "invalid", "resets_at": 1},
+            "seven_day": {**self.windows["seven_day"], "token": "SECRET_TOKEN"},
+            "opus": {"used_percentage": 99},
+        }}
+        snapshot = bridge.sanitized_snapshot(payload, now=self.now)
+        self.assertEqual(snapshot, {
+            "schema_version": 1, "source": "claude_statusline",
+            "observed_at": "2026-08-31T12:00:00Z", "seven_day": self.windows["seven_day"],
+        })
+
+    def test_atomic_replacement_flushes_complete_json_and_permissions(self):
+        snapshot = bridge.sanitized_snapshot({"rate_limits": self.windows}, now=self.now)
+        self.path.write_bytes(b"last good")
+        actual_replace = os.replace
+
+        def inspect_replace(src, dst):
+            self.assertEqual(Path(src).parent, self.path.parent)
+            self.assertEqual(Path(dst), self.path)
+            self.assertEqual(self.path.read_bytes(), b"last good")
+            self.assertEqual(json.loads(Path(src).read_text(encoding="utf-8")), snapshot)
+            if os.name == "posix":
+                self.assertEqual(Path(src).stat().st_mode & 0o777, 0o600)
+            actual_replace(src, dst)
+
+        with mock.patch.object(bridge.os, "replace", side_effect=inspect_replace) as replace:
+            bridge.write_snapshot(self.path, snapshot)
+        replace.assert_called_once()
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), snapshot)
+        if os.name == "posix":
+            self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.root.iterdir()), [self.path])
+
+    def test_replace_failure_keeps_terminal_and_last_good_without_leaking(self):
+        self.path.write_bytes(b"last good")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(self.path)}), \
+             mock.patch.object(bridge.sys, "stdin", io.StringIO(json.dumps({"rate_limits": self.windows}))), \
+             mock.patch.object(bridge.sys, "stdout", stdout), \
+             mock.patch.object(bridge.sys, "stderr", stderr), \
+             mock.patch.object(bridge.os, "replace", side_effect=OSError("SECRET_PATH_CANARY")):
+            code = bridge.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout.getvalue(), "5h 44% · 7d 27%\n")
+        self.assertEqual(stderr.getvalue(), "Claude quota snapshot: write failed\n")
+        self.assertEqual(self.path.read_bytes(), b"last good")
+        self.assertEqual(list(self.root.iterdir()), [self.path])
+
+    def test_real_write_failure_still_exits_zero_and_prints_terminal(self):
+        result = self.invoke(json.dumps({"rate_limits": self.windows}), path=self.root)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "5h 44% · 7d 27%\n")
+        self.assertEqual(result.stderr, "Claude quota snapshot: write failed\n")
+        self.assertEqual(list(self.root.iterdir()), [])
+
+
+class ClaudeStatuslineCollectorTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.path = self.root / "snapshot.json"
+        self.cache = self.root / "official.json"
+        Clock.current = dt.datetime(2026, 8, 31, 12, tzinfo=dt.timezone.utc)
+        self.now = Clock.current
+        self.snapshot = {
+            "schema_version": 1, "source": "claude_statusline",
+            "observed_at": "2026-08-31T12:00:00Z",
+            "five_hour": {"used_percentage": 44, "resets_at": self.now.timestamp() + 18000},
+            "seven_day": {"used_percentage": 27, "resets_at": self.now.timestamp() + 604800},
+        }
+        self.oauth = {"five_hour": {"used_percentage": 11}, "seven_day": {"used_percentage": 22}}
+        for patch in (
+            mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(self.path),
+                                         "CLAUDE_STATUSLINE_MAX_AGE_SEC": "3600"}),
+            mock.patch.object(collector.dt, "datetime", Clock),
+            mock.patch.object(collector, "OFFICIAL_CACHE_PATH", self.cache),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def write(self, snapshot=None):
+        self.path.write_text(json.dumps(self.snapshot if snapshot is None else snapshot), encoding="utf-8")
+
+    def read(self, **kwargs):
+        return collector.read_claude_statusline_quota(self.path, now=self.now, **kwargs)
+
+    def collect(self, use_official=True):
+        return collector.collect_claude(self.root, "UTC", use_official=use_official)
+
+    def test_fresh_snapshot_source_percentages_and_api_contract(self):
+        self.write()
+        with mock.patch.object(collector, "fetch_claude_official_usage") as fetch:
+            agent = self.collect()
+        fetch.assert_not_called()
+        self.assertEqual(agent["quota_source"], "claude_statusline")
+        self.assertEqual(agent["quota"]["five_hour"], {
+            "used_percentage": 44, "remaining_percentage": 56, "resets_at": "2026-08-31T17:00:00Z",
+        })
+        self.assertEqual(agent["quota"]["seven_day"], {
+            "used_percentage": 27, "remaining_percentage": 73, "resets_at": "2026-09-07T12:00:00Z",
+        })
+        self.assertEqual(agent["quota"]["updated_at"], self.snapshot["observed_at"])
+        accepted, _ = context_usage_store.save_report({"agents": [agent]}, str(self.root / "usage.db"))
+        self.assertEqual(accepted, ["claude"])
+        stored = context_usage_store.get_snapshot(str(self.root / "usage.db"))["agents"][0]
+        self.assertEqual(stored["quota_source"], "claude_statusline")
+        self.assertEqual(stored["quota"]["five_hour"]["used_percentage"], 44)
+        self.assertEqual(stored["quota"]["seven_day"]["remaining_percentage"], 73)
+
+    def test_fresh_snapshot_never_touches_oauth_credentials_cache_or_ccusage(self):
+        self.write()
+        metadata = {
+            "claude": {"last_attempt_at": "2026-08-31T11:59:00Z", "last_status": 429,
+                       "next_retry_at": "2026-08-31T12:11:00Z", "quota": self.oauth},
+            "codex": {"quota": {"five_hour": {"used_percentage": 6}}},
+        }
+        self.cache.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        before = self.cache.read_bytes(), self.cache.stat().st_mtime_ns
+        with mock.patch.object(collector, "read_claude_oauth_token") as credentials, \
+             mock.patch.object(collector, "fetch_claude_official_usage") as fetch, \
+             mock.patch.object(collector, "_read_official_cache") as cache_read, \
+             mock.patch.object(collector, "_store_cached_official") as cache_write, \
+             mock.patch.object(collector, "_store_claude_failure") as failure_write, \
+             mock.patch.object(collector, "read_ccusage_block") as ccusage:
+            for enabled in (False, True):
+                self.assertEqual(self.collect(enabled)["quota_source"], "claude_statusline")
+        for boundary in (credentials, fetch, cache_read, cache_write, failure_write, ccusage):
+            boundary.assert_not_called()
+        self.assertEqual((self.cache.read_bytes(), self.cache.stat().st_mtime_ns), before)
+
+    def test_freshness_age_and_future_skew_boundaries(self):
+        for seconds, accepted in ((-3601, False), (-3600, True), (300, True), (301, False)):
+            with self.subTest(seconds=seconds):
+                self.snapshot["observed_at"] = (self.now + dt.timedelta(seconds=seconds)).isoformat()
+                self.write()
+                self.assertEqual(self.read() is not None, accepted)
+        self.snapshot["observed_at"] = "2026-08-31T11:59:00Z"
+        self.write()
+        self.assertIsNone(self.read(max_age_sec=59))
+        self.assertIsNotNone(self.read(max_age_sec=60))
+        with mock.patch.dict(os.environ, {"CLAUDE_STATUSLINE_MAX_AGE_SEC": "59"}):
+            self.assertIsNone(self.read())
+        for bad in ("NaN", "Infinity", "-1", "0", "invalid"):
+            with mock.patch.dict(os.environ, {"CLAUDE_STATUSLINE_MAX_AGE_SEC": bad}):
+                self.assertIsNotNone(self.read())
+
+    def test_reset_expiry_is_independent_per_window(self):
+        for name, other in (("five_hour", "seven_day"), ("seven_day", "five_hour")):
+            for offset in (-1, 0):
+                with self.subTest(name=name, offset=offset):
+                    snapshot = json.loads(json.dumps(self.snapshot))
+                    snapshot[name]["resets_at"] = self.now.timestamp() + offset
+                    self.write(snapshot)
+                    quota = self.read()
+                    self.assertEqual(quota[name], {})
+                    self.assertEqual(quota[other]["used_percentage"], snapshot[other]["used_percentage"])
+                    with mock.patch.object(collector, "fetch_claude_official_usage") as fetch:
+                        self.assertEqual(self.collect()["quota_source"], "claude_statusline")
+                    fetch.assert_not_called()
+        for window in self.snapshot.values():
+            if isinstance(window, dict):
+                window["resets_at"] = self.now.timestamp()
+        self.write()
+        self.assertIsNone(self.read())
+
+    def test_reader_rejects_schema_source_observation_and_unknown_fields(self):
+        for key, value in (
+            ("schema_version", 2), ("schema_version", True), ("schema_version", "1"),
+            ("source", "claude_oauth_usage"), ("observed_at", 123),
+            ("observed_at", "invalid"), ("observed_at", "2026-08-31T12:00:00"),
+            ("prompt", "SECRET_PROMPT_CANARY"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.write({**self.snapshot, key: value})
+                self.assertIsNone(self.read())
+        for value in (None, [], {"five_hour": self.snapshot["five_hour"]}):
+            self.path.write_text(json.dumps(value), encoding="utf-8")
+            self.assertIsNone(self.read())
+        for raw in (b"invalid", b"\xff", b"{" * 1500, b" " * (16 * 1024 + 1)):
+            self.path.write_bytes(raw)
+            self.assertIsNone(self.read())
+
+    def test_reader_window_validation_never_coerces_or_guesses_units(self):
+        for key, values in (
+            ("used_percentage", (-1, 101, "44", True, float("nan"), float("inf"), 10 ** 1000)),
+            ("resets_at", ("123", True, None, float("nan"), float("inf"), 10 ** 1000, 1788177600000)),
+            ("unknown", ("SECRET_TOKEN",)),
+        ):
+            for value in values:
+                with self.subTest(key=key, value_type=type(value).__name__):
+                    self.write({**self.snapshot, "five_hour": {**self.snapshot["five_hour"], key: value}})
+                    quota = self.read()
+                    self.assertEqual(quota["five_hour"], {})
+                    self.assertEqual(quota["seven_day"]["used_percentage"], 27)
+
+    def test_missing_invalid_stale_or_expired_snapshot_restores_oauth_fetch(self):
+        for state in ("missing", "invalid", "stale", "expired"):
+            with self.subTest(state=state):
+                self.path.unlink(missing_ok=True)
+                self.cache.unlink(missing_ok=True)
+                if state == "invalid":
+                    self.path.write_text("{}", encoding="utf-8")
+                elif state == "stale":
+                    self.write({**self.snapshot, "observed_at": "2026-08-31T10:59:59Z"})
+                elif state == "expired":
+                    expired = {**self.snapshot,
+                               "five_hour": {"used_percentage": 44, "resets_at": self.now.timestamp()}}
+                    expired.pop("seven_day")
+                    self.write(expired)
+                with mock.patch.object(collector, "read_claude_oauth_token", return_value="fixture-token"), \
+                     mock.patch.object(collector, "fetch_claude_official_usage", return_value=self.oauth) as fetch:
+                    agent = self.collect()
+                fetch.assert_called_once()
+                self.assertEqual(agent["quota_source"], "claude_oauth_usage")
+                self.assertEqual(agent["quota"], self.oauth)
+
+    def test_missing_invalid_and_stale_preserve_429_gate_and_ccusage_timing(self):
+        self.cache.write_text(json.dumps({"claude": {
+            "last_status": 429, "last_attempt_at": "2026-08-31T11:59:00Z",
+            "next_retry_at": "2026-08-31T12:11:00Z",
+        }}), encoding="utf-8")
+        before = self.cache.read_bytes()
+        for state in ("missing", "invalid", "stale"):
+            with self.subTest(state=state):
+                self.path.unlink(missing_ok=True)
+                if state == "invalid":
+                    self.path.write_text("not json", encoding="utf-8")
+                elif state == "stale":
+                    self.write({**self.snapshot, "observed_at": "2026-08-31T10:59:59Z"})
+                with mock.patch.object(collector, "fetch_claude_official_usage") as fetch, \
+                     mock.patch.object(collector, "read_ccusage_block", return_value={
+                         "projection": {"remainingMinutes": 74},
+                         "endTime": "2026-08-31T17:00:00Z",
+                     }):
+                    agent = self.collect()
+                fetch.assert_not_called()
+                self.assertEqual(self.cache.read_bytes(), before)
+                self.assertEqual(agent["quota_source"], "ccusage_blocks")
+                window = agent["quota"]["five_hour"]
+                self.assertEqual(window["remaining_minutes"], 74)
+                self.assertEqual(window["remaining_basis"], "time_until_reset")
+                self.assertNotIn("used_percentage", window)
+                self.assertNotIn("remaining_percentage", window)
+
+    def test_fresh_statusline_coexists_with_real_jsonl_limit_classification(self):
+        self.write()
+        for message, kind, exhausted in (
+            ("429 too many requests. Try again after 5pm", "rate_limit", False),
+            ("Usage limit reached. Resets at 1am", "rate_limit", True),
+            ("Weekly limit reached. Resets Sep 1", "weekly", True),
+            ("Opus limit reached. Resets at 3pm", "opus", True),
+        ):
+            with self.subTest(message=message):
+                (self.root / "session.jsonl").write_text(json.dumps({
+                    "timestamp": "2026-08-31T12:00:00Z", "error": message,
+                }) + "\n", encoding="utf-8")
+                quota = self.collect()["quota"]
+                self.assertEqual(quota["five_hour"]["used_percentage"], 44)
+                self.assertEqual(quota["seven_day"]["used_percentage"], 27)
+                self.assertEqual(quota["effective_limit"]["kind"], kind)
+                self.assertEqual(quota["effective_limit"]["exhausted"], exhausted)
+
+    def test_statusline_retains_strict_newer_jsonl_stale_fence_across_files(self):
+        self.write()
+        # mtime order must not let an older limit hide the newest event.
+        old = self.root / "old-limit.jsonl"
+        new = self.root / "new-limit.jsonl"
+        old.write_text(json.dumps({"timestamp": "2026-08-31T11:00:00Z", "error": "Weekly limit reached"}) + "\n", encoding="utf-8")
+        new.write_text(json.dumps({"timestamp": "2026-08-31T12:00:00Z", "error": "Opus limit reached"}) + "\n", encoding="utf-8")
+        os.utime(old, (200, 200))
+        os.utime(new, (100, 100))
+        for timestamp, retained in (
+            ("2026-08-31T11:30:00Z", True), ("2026-08-31T12:00:00Z", True),
+            ("2026-08-31T12:00:01Z", False),
+        ):
+            (self.root / "session.jsonl").write_text(json.dumps({
+                "timestamp": timestamp, "message": {"usage": {"input_tokens": 100}},
+            }) + "\n", encoding="utf-8")
+            agent = self.collect()
+            self.assertEqual(agent["quota_source"], "claude_statusline")
+            self.assertEqual("effective_limit" in agent["quota"], retained)
+            if retained:
+                self.assertEqual(agent["quota"]["effective_limit"]["kind"], "opus")
 
 
 if __name__ == "__main__":

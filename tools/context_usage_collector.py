@@ -149,6 +149,70 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def read_claude_statusline_quota(
+    path: Path | None = None, *, now: dt.datetime | None = None,
+    max_age_sec: float | None = None,
+) -> dict[str, Any] | None:
+    """Read only the bridge whitelist; never touch credentials or OAuth cache."""
+    path = path if path is not None else Path(os.environ.get(
+        "HAYA_CLAUDE_STATUSLINE_SNAPSHOT", "/var/lib/haya-context-usage/claude-statusline.json",
+    ))
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        if max_age_sec is None:
+            max_age_sec = float(os.environ.get("CLAUDE_STATUSLINE_MAX_AGE_SEC", "3600"))
+        if not math.isfinite(max_age_sec) or max_age_sec <= 0:
+            max_age_sec = 3600
+    except (ValueError, OverflowError):
+        max_age_sec = 3600
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            raw = handle.read(16 * 1024 + 1)
+        if len(raw) > 16 * 1024:
+            return None
+        data = json.loads(raw)
+        allowed = {"schema_version", "source", "observed_at", "five_hour", "seven_day"}
+        if not isinstance(data, dict) or not set(data) <= allowed:
+            return None
+        if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
+            return None
+        if data.get("source") != "claude_statusline" or not isinstance(data.get("observed_at"), str):
+            return None
+        observed = dt.datetime.fromisoformat(data["observed_at"].replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            return None
+        age = (now - observed).total_seconds()
+        if age < -300 or age > max_age_sec:
+            return None
+    except (OSError, ValueError, OverflowError, RecursionError):
+        return None
+    quota: dict[str, Any] = {"five_hour": {}, "seven_day": {}}
+    for name in ("five_hour", "seven_day"):
+        window = data.get(name)
+        if not isinstance(window, dict) or set(window) != {"used_percentage", "resets_at"}:
+            continue
+        used, reset = window["used_percentage"], window["resets_at"]
+        try:
+            if type(used) not in (int, float) or not math.isfinite(used) or not 0 <= used <= 100:
+                continue
+            if type(reset) not in (int, float) or not math.isfinite(reset):
+                continue
+            reset_time = dt.datetime.fromtimestamp(reset, dt.timezone.utc)
+            if reset_time <= now:
+                continue
+        except (OSError, ValueError, OverflowError):
+            continue
+        quota[name] = {
+            "used_percentage": used,
+            "remaining_percentage": 100 - used,
+            "resets_at": reset_time.isoformat().replace("+00:00", "Z"),
+        }
+    if not quota["five_hour"] and not quota["seven_day"]:
+        return None
+    quota["updated_at"] = observed.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    return quota
+
+
 def read_claude_oauth_token(path: Path) -> str | None:
     """Get the access token Claude Code's own CLI already holds.
 
@@ -834,9 +898,9 @@ def collect_claude(
 ) -> dict[str, Any]:
     sessions, effective_limit = scan_claude_projects(projects_dir)
 
-    official = None
-    source = "unavailable"
-    if use_official:
+    official = read_claude_statusline_quota()
+    source = "claude_statusline" if official else "unavailable"
+    if use_official and not official:
         cached = _get_cached_official("claude")
         entry = _read_official_cache().get("claude")
         cache_age = _cache_age_seconds(entry)

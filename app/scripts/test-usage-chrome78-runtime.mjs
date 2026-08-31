@@ -138,6 +138,20 @@ assert.match(officialHtml, />12%</);
 assert.match(officialHtml, />34%</);
 assert.match(officialHtml, /Claude 官方账号额度/);
 
+// Explicit fixture values: statusLine percentages use the existing quota bars.
+const statuslineHtml = renderAgent(null, {
+  source: 'claude_statusline',
+  fiveHour: { ...quotaWindow, usedPct: 44 },
+  sevenDay: { ...quotaWindow, usedPct: 27 },
+});
+assert.match(statuslineHtml, /5 小时窗 · 已用<\/span><span[^>]*>44%<\/span>/);
+assert.match(statuslineHtml, /周额度 · 已用<\/span><span[^>]*>27%<\/span>/);
+assert.match(statuslineHtml, /width:44%/);
+assert.match(statuslineHtml, /width:27%/);
+assert.match(statuslineHtml, /source · Claude Code 额度快照/);
+assert.doesNotMatch(statuslineHtml, /Anthropic 官方 API|Claude 官方账号额度|public official API/);
+assert.equal(limitAlert(statuslineHtml), '', 'quota snapshot alone must not invent a limit event');
+
 // Codex retains its original exhausted-only gate and original wording.
 const codex = { id: 'codex', name: 'Codex', source: 'codex_session_jsonl' };
 assert.equal(limitAlert(renderAgent(generic, codex)), '');
@@ -146,4 +160,4 @@ assert.match(codexAlert, /<strong>当前额度已耗尽<\/strong>/);
 assert.match(codexAlert, /等待下一次额度窗口恢复/);
 assert.match(limitAlert(renderAgent({ ...generic, exhausted: true }, codex)), /Try again after 5pm/);
 
-console.log('test-usage-chrome78-runtime: ok (runtime checks + 14 real-card render cases)');
+console.log('test-usage-chrome78-runtime: ok (runtime checks + 14 existing real-card cases + 1 statusLine fixture)');

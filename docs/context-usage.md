@@ -2,6 +2,8 @@
 
 这套链路只上传脱敏数字快照：本地采集器读取 CLI 文件，VPS 接收并保存最近快照，手机前端只读取 VPS。
 
+Claude statusLine 的新优先级、白名单 snapshot、freshness 与尚未激活的边界见文末 R1 章节；其有效时会跳过下述 Claude OAuth 路径。
+
 ## 接口
 
 - `GET /api/context-usage`：返回 Claude Code 与 Codex 最近一次可信快照。
@@ -129,7 +131,8 @@ curl -s https://love-style.xyz/api/context-usage
 
 常见来源：
 
-- `claude_oauth_usage` / `codex_oauth_usage`：官方账号用量接口，百分比真实可信。
+- `claude_statusline`：Claude Code 提供的订阅百分比快照，通过 bridge freshness/reset 检查后消费。
+- `claude_oauth_usage` / `codex_oauth_usage`：客户端内部账号用量接口，百分比来自账号数据；不是稳定公共 API。
 - `ccusage_blocks`：Claude Code 活跃 5 小时 block（官方接口不可用时的兜底，只有剩余时间，没有百分比）。
 - `claude_project_jsonl`：只读到 Claude 限额事件，没读到 active block，也没有官方用量数据。
 - `codex_session_jsonl`：Codex 最近 session 的 `token_count.rate_limits`（官方接口不可用时的兜底）。
@@ -144,3 +147,87 @@ curl -s https://love-style.xyz/api/context-usage
 - 后端拒绝超过 64 KiB 的上报体，并丢弃白名单外字段。
 - 新快照按 agent 独立合并；较旧的上报不会覆盖较新的数据。
 - 官方用量接口是非官方逆向出来的：token 只在采集器进程内存里用一次即弃，不落盘、不上报、不写回凭据文件。不放心的话用 `--no-official-usage` / `CONTEXT_USAGE_OFFICIAL=0` 关掉，只保留本地估算路径。
+
+## Claude statusLine quota bridge（R1，尚未激活）
+
+Claude 的四条信号各有独立含义：
+
+| 来源 | 数据含义 | 使用方式 |
+| --- | --- | --- |
+| Claude Code statusLine `rate_limits` | Claude Code 自己提供的真实 Claude.ai 订阅已用百分比 | 新鲜 snapshot 优先；来源 `claude_statusline`，页面显示“Claude Code 额度快照” |
+| OAuth `/api/oauth/usage` | undocumented/internal 账号用量 fallback；当前 parser 读取两个窗口的 `utilization` | statusLine 不可用时保持原 cache/fetch 和 429 cooldown |
+| ccusage active block | block reset timing，含 `remaining_minutes` | 不能转换为订阅百分比 |
+| project JSONL | limit/reset event | 独立 `effective_limit`，可与任意百分比来源共存；不是统一百分比 |
+
+优先级为：**fresh trusted statusLine → 原 OAuth cache/fetch → ccusage active block → JSONL limit-only → unavailable**。只要 statusLine 至少一个窗口有效，本次 Claude collect 不读取凭据、不调用 OAuth、不读写 `official.json`；不能清除或延长 OAuth cooldown，也不能伪造成功状态。statusLine 缺失、无效、过期或两个窗口都已 reset 时恢复原 OAuth/backoff 路径。Codex 行为不变。
+
+### Bridge 输入与落盘
+
+`scripts/claude_statusline_quota.py` 是仅依赖 Python 标准库的 statusLine command。从 stdin 读取机器 JSON，stdout 输出单行无 ANSI 的文字，例如 **fixture** `5h 44% · 7d 27%`。44/27 只是测试示例；实际数值来自输入。缺一个窗口时只显示另一个，没有有效窗口时不显示假 0%，不覆盖 last-good snapshot。
+
+输入读取上限 1 MiB 字符。百分比必须是有限 JSON number 且在 0–100，拒绝 bool、字符串、NaN/Infinity、越界。reset 必须是可表示日期的有限 Unix **秒**，拒绝字符串/bool，绝不猜单位或把毫秒转换成秒。额外输入字段一律丢弃。
+
+默认文件：
+
+`/var/lib/haya-context-usage/claude-statusline.json`
+
+bridge 与 collector 均可通过 `HAYA_CLAUDE_STATUSLINE_SNAPSHOT` 指向同一自定义文件。建议使用仅 producer/collector 所属用户可访问的目录；目录需要可写，其他用户不应能替换 snapshot。
+
+唯一可持久化 schema：
+
+```json
+{
+  "schema_version": 1,
+  "source": "claude_statusline",
+  "observed_at": "<UTC ISO8601>",
+  "five_hour": {"used_percentage": 44, "resets_at": 1788195600},
+  "seven_day": {"used_percentage": 27, "resets_at": 1788782400}
+}
+```
+
+上述数字仍为 fixture；缺失窗口可以省略。绝不保存完整 statusLine JSON，尤其不保存 session_id、transcript_path、cwd、workspace、repo、model、accountUuid、prompt、cost、正文、token、headers 或 environment。使用同目录临时文件、完整 JSON、flush/fsync、`os.replace` 原子替换；POSIX 文件权限为 `0600`。写失败仍 exit 0，保留终端输出与已有 snapshot，stderr 只显示固定短错误，不含输入或路径。
+
+### Collector freshness 与窗口 reset
+
+reader 只读，最多读取 16 KiB 字符，严格检查 schema_version/source/允许字段和时区明确的 observed_at：
+
+- `CLAUDE_STATUSLINE_MAX_AGE_SEC` 默认 3600 秒；非正数或非有限/无效配置恢复默认值。
+- 超过最大年龄拒绝；允许最多 300 秒未来 clock skew，超过则拒绝。
+- 每个窗口必须满足 `resets_at > now`。过期窗口独立移除，不能作为当前百分比使用；另一个有效窗口仍可消费。
+- 输出沿用现有 quota contract，reset 转为 UTC ISO8601；`remaining_percentage = 100 - used_percentage`，仅基于真实订阅百分比。
+- `updated_at` 使用 bridge 的 observed_at，不伪称 collector 此刻刚从服务端获取。
+
+observed_at 是 bridge 收到机器输入的时间，**不是服务端采样时间**。Claude Code 可能提供内存中已有的 utilization，重复 statusLine render 不能证明服务端数据刚刷新。本实现的年龄/reset fence 限制可用范围，但不能消除此上游数据新鲜度限制。不要跨账户复用同一个 snapshot；未来 activation/账户切换须另外处理 producer 与 snapshot 归属，不在本 R1 自动启用。
+
+fresh JSONL 信号仍附加到 quota：generic 429 为 `exhausted=false`，明确 usage/weekly/Opus exhaustion 为 true；只被严格更新的 normal usage/session 清除，保留跨文件事件时间比较。statusLine 百分比不压制此信号。
+
+### Pinned 2.1.220 静态路径与未来 activation
+
+核查对象是 `/opt/frontend/.claude-runtime/node_modules/@anthropic-ai/claude-code/bin/claude.exe`，版本 2.1.220，SHA256：
+
+`674f61f20ff306f3100cf9200e4c36c4b70278b5bef2884549819b942a89c863`
+
+二进制内嵌 JS 的十进制字节偏移证据：
+
+- `252904465`：机器字段文档明确 0–100 订阅百分比与 Unix 秒；首次 API response 前字段可缺失。
+- `264011804`（cxS）：把 L7r() 的 five_hour/seven_day utilization × 100 放入 rate_limits，reset 保留秒。
+- `264013642`（uxS）/ `264349682`（interactive footer）：交互 hook 调用 configured statusLine；需满足配置、trust/policy 等已有条件。
+- `259237008`（V8s）→ `259196912`（q2o）→ `259202633`：序列化机器 JSON 后写入 command stdin。
+- `267502556`（GlE）识别 -p/--print → `267432230` prepared-headless → `267963401` 分派 runHeadless；不挂载 interactive footer，不调用 statusLine command。
+
+**PRINT_MODE_STATUSLINE_EXECUTION = NO（静态证据）。** 当前聊天仍是 `-p --input-format stream-json --output-format stream-json`，不会自动生产此 snapshot。本 R1 不改聊天 transport、不迁移 tmux、不启动 tmux、不改 runtime pin，也不修改生产 settings/systemd/timer。没有 producer 时 collector 正常走原 fallback；本 PR 不意味着生产已经获得新百分比。
+
+以后 interactive/tmux terminal 可复用同一个 bridge，在显示 statusLine 的同时产生脱敏 snapshot。本轮没有任何 tmux 实现。未来单独 activation 才可考虑以下 **文档示例，当前禁止 apply**：
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python3 /opt/frontend/scripts/claude_statusline_quota.py"
+  }
+}
+```
+
+`--no-official-usage` / `CONTEXT_USAGE_OFFICIAL=0` 只禁用 OAuth endpoint 路径，不禁用安全的本地 statusLine snapshot。
+
+验证命令 `python3 -B -m unittest tests.test_context_usage -v` 覆盖 bridge、reader、JSONL、429 cooldown、Codex 及 store/API 合同，全部使用临时 fixture；不运行真实 Claude prompt、/usage 或 Anthropic 请求。Frontend runtime harness 保留原 14 场景，并增加 statusLine 44/27 fixture。测试和部署、activation 是不同步骤。
