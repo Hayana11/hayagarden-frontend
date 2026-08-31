@@ -953,7 +953,7 @@ class ClaudeOfficialBackoffTests(unittest.TestCase):
         error = self.http_error()
         with mock.patch.object(collector._NO_REDIRECT_OPENER, "open", side_effect=error) as http:
             self.assert_fallback(self.collect())
-        http.assert_called_once()
+        self.assertEqual(http.call_count, 2)
         self.assertEqual(self.read_cache()["claude"], {
             "last_attempt_at": "2026-08-30T12:00:00Z",
             "last_status": 429,
@@ -1098,7 +1098,7 @@ with mock.patch.object(c, "read_claude_oauth_token", return_value="fake"), mock.
     if sys.argv[2] == "first":
         with mock.patch.object(c._NO_REDIRECT_OPENER, "open", side_effect=urllib.error.HTTPError(c.CLAUDE_USAGE_URL, 429, "simulated", {}, None)) as http:
             agent = c.collect_claude(Path("missing"), "UTC", use_official=True)
-        assert http.call_count == 1
+        assert http.call_count == 2
     else:
         with mock.patch.object(c, "fetch_claude_official_usage", side_effect=AssertionError("cooldown must skip fetch")) as fetch:
             agent = c.collect_claude(Path("missing"), "UTC", use_official=True)
