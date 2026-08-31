@@ -953,7 +953,7 @@ class ClaudeOfficialBackoffTests(unittest.TestCase):
         error = self.http_error()
         with mock.patch.object(collector._NO_REDIRECT_OPENER, "open", side_effect=error) as http:
             self.assert_fallback(self.collect())
-        http.assert_called_once()
+        self.assertEqual(http.call_count, 2)
         self.assertEqual(self.read_cache()["claude"], {
             "last_attempt_at": "2026-08-30T12:00:00Z",
             "last_status": 429,
@@ -1098,7 +1098,7 @@ with mock.patch.object(c, "read_claude_oauth_token", return_value="fake"), mock.
     if sys.argv[2] == "first":
         with mock.patch.object(c._NO_REDIRECT_OPENER, "open", side_effect=urllib.error.HTTPError(c.CLAUDE_USAGE_URL, 429, "simulated", {}, None)) as http:
             agent = c.collect_claude(Path("missing"), "UTC", use_official=True)
-        assert http.call_count == 1
+        assert http.call_count == 2
     else:
         with mock.patch.object(c, "fetch_claude_official_usage", side_effect=AssertionError("cooldown must skip fetch")) as fetch:
             agent = c.collect_claude(Path("missing"), "UTC", use_official=True)
@@ -1113,6 +1113,71 @@ print("ok")
             self.assertEqual(result.stdout.strip(), "ok")
         self.assertEqual(self.read_cache()["claude"]["last_status"], 429)
         self.assertNotIn("quota", self.read_cache()["claude"])
+
+
+    def test_fetch_claude_api_headers_usage_converts_fraction_and_epoch(self):
+        headers = {
+            "anthropic-ratelimit-unified-5h-utilization": "0.53",
+            "anthropic-ratelimit-unified-5h-reset": "1788204600",
+            "anthropic-ratelimit-unified-7d-utilization": "0.34",
+            "anthropic-ratelimit-unified-7d-reset": "1788624000",
+        }
+        with mock.patch.object(collector, "_http_post_headers_result", return_value=(headers, 200)) as post:
+            result = collector.fetch_claude_api_headers_usage("fake-token")
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[0], collector.CLAUDE_MESSAGES_URL)
+        self.assertEqual(result["five_hour"]["used_percentage"], 53)
+        self.assertEqual(result["five_hour"]["remaining_percentage"], 47)
+        self.assertEqual(result["five_hour"]["resets_at"], "2026-08-31T19:30:00Z")
+        self.assertEqual(result["seven_day"]["used_percentage"], 34)
+        self.assertEqual(result["seven_day"]["remaining_percentage"], 66)
+        self.assertEqual(result["seven_day"]["resets_at"], "2026-09-05T16:00:00Z")
+
+    def test_primary_success_skips_headers_probe(self):
+        self.seed()
+        with mock.patch.object(collector, "fetch_claude_official_usage", return_value=self.old_quota), mock.patch.object(collector, "fetch_claude_api_headers_usage") as probe:
+            agent = self.collect()
+        probe.assert_not_called()
+        self.assertEqual(agent["quota_source"], "claude_oauth_usage")
+
+    def test_primary_429_uses_one_headers_probe_and_preserves_cooldown(self):
+        self.seed()
+        def primary_failure(token, *, attempt=None):
+            attempt["last_status"] = 429
+            attempt["retry_after_seconds"] = 3600
+            return None
+        header_quota = {
+            "five_hour": {"used_percentage": 53, "remaining_percentage": 47, "resets_at": "2026-08-31T19:30:00Z"},
+            "seven_day": {"used_percentage": 34, "remaining_percentage": 66, "resets_at": "2026-09-05T16:00:00Z"},
+            "updated_at": "2026-08-30T12:00:00Z",
+        }
+        with mock.patch.object(collector, "fetch_claude_official_usage", side_effect=primary_failure), mock.patch.object(collector, "fetch_claude_api_headers_usage", return_value=header_quota) as probe:
+            agent = self.collect()
+        probe.assert_called_once()
+        self.assertEqual(agent["quota_source"], "claude_api_headers")
+        self.assertEqual(agent["quota"], header_quota)
+        entry = self.read_cache()["claude"]
+        self.assertEqual(entry["source"], "claude_api_headers")
+        self.assertEqual(entry["last_status"], 429)
+        self.assertEqual(entry["next_retry_at"], "2026-08-30T13:00:00Z")
+
+    def test_cooldown_with_header_quota_skips_primary_and_probe(self):
+        self.seed(with_quota=True, source="claude_api_headers", next_retry_at="2026-08-30T13:00:00Z")
+        with mock.patch.object(collector, "fetch_claude_official_usage") as primary, mock.patch.object(collector, "fetch_claude_api_headers_usage") as probe:
+            agent = self.collect()
+        primary.assert_not_called()
+        probe.assert_not_called()
+        self.assertEqual(agent["quota_source"], "claude_api_headers")
+        self.assertEqual(agent["quota"], self.old_quota)
+
+    def test_probe_failure_without_last_good_uses_ccusage_without_percentage(self):
+        self.seed()
+        def primary_failure(token, *, attempt=None):
+            attempt["last_status"] = 429
+            return None
+        with mock.patch.object(collector, "fetch_claude_official_usage", side_effect=primary_failure), mock.patch.object(collector, "fetch_claude_api_headers_usage", return_value=None):
+            agent = self.collect()
+        self.assert_fallback(agent)
 
 
 if __name__ == "__main__":

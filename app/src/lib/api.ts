@@ -246,7 +246,7 @@ function normalizeAgent(id: UsageAgentId, raw: RawUsageAgent, generatedAt: strin
   const source = raw.quota_source || 'unavailable';
   // Claude percentages are authoritative only when the collector labels the
   // snapshot as coming from Anthropic's OAuth usage endpoint.
-  const allowClaudePercentage = id !== 'claude' || source === 'claude_oauth_usage';
+  const allowClaudePercentage = id !== 'claude' || source === 'claude_oauth_usage' || source === 'claude_api_headers';
   const fiveHourPct = allowClaudePercentage ? usedPct(quota.five_hour) : null;
   const sevenDayPct = allowClaudePercentage ? usedPct(quota.seven_day) : null;
   const fiveHour = {
