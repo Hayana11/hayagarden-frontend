@@ -1114,6 +1114,15 @@ print("ok")
         self.assertNotIn("quota", self.read_cache()["claude"])
 
 
+def transcript_assistant(timestamp, content="fixture assistant"):
+    return {
+        "type": "assistant", "timestamp": timestamp,
+        "message": {"id": "msg_fixture", "type": "message", "role": "assistant",
+                    "model": "claude-fixture", "content": [{"type": "text", "text": content}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1}},
+    }
+
+
 class ClaudeStatuslineBridgeTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -1121,14 +1130,35 @@ class ClaudeStatuslineBridgeTests(unittest.TestCase):
         self.root = Path(temp.name)
         self.path = self.root / "snapshot.json"
         self.now = dt.datetime(2026, 8, 31, 12, tzinfo=dt.timezone.utc)
+        transcript_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(transcript_temp.cleanup)
+        self.transcript = Path(transcript_temp.name) / "session.jsonl"
+        self.transcript.write_text(json.dumps(transcript_assistant(self.now.isoformat())) + "\n", encoding="utf-8")
+        Clock.current = self.now
+        patch = mock.patch.object(bridge.dt, "datetime", Clock)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.windows = {
             "five_hour": {"used_percentage": 44, "resets_at": self.now.timestamp() + 18000},
             "seven_day": {"used_percentage": 27, "resets_at": self.now.timestamp() + 604800},
         }
 
     def invoke(self, raw, path=None):
+        # Freeze invocation time in a separate process; real parsing/I/O still run.
+        script = '''
+import datetime, sys
+from scripts import claude_statusline_quota as bridge
+fixed = datetime.datetime.fromisoformat(sys.argv[1])
+class Frozen(datetime.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return fixed if tz else fixed.replace(tzinfo=None)
+bridge.dt.datetime = Frozen
+raise SystemExit(bridge.main())
+'''
         return subprocess.run(
-            [sys.executable, "-B", str(Path(bridge.__file__).resolve())],
+            [sys.executable, "-B", "-c", script, self.now.isoformat()],
+            cwd=Path(bridge.__file__).resolve().parents[1],
             input=raw, capture_output=True, text=True, encoding="utf-8", timeout=10,
             env={**os.environ, "PYTHONIOENCODING": "utf-8",
                  "HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(path or self.path)},
@@ -1136,6 +1166,7 @@ class ClaudeStatuslineBridgeTests(unittest.TestCase):
 
     def test_machine_input_stdout_and_exact_whitelist(self):
         payload = {
+            "transcript_path": str(self.transcript),
             "rate_limits": self.windows, "prompt": "SECRET_PROMPT_CANARY",
             "cwd": "SECRET_CWD_CANARY", "accountUuid": "SECRET_ACCOUNT_CANARY",
             "session_id": "SECRET_SESSION", "model": {"id": "SECRET_MODEL"},
@@ -1160,7 +1191,9 @@ class ClaudeStatuslineBridgeTests(unittest.TestCase):
             for value in (0, 100, 12.5):
                 with self.subTest(name=name, value=value):
                     window = {**self.windows[name], "used_percentage": value}
-                    result = self.invoke(json.dumps({"rate_limits": {name: window}}))
+                    self.now += dt.timedelta(seconds=1)
+                    self.transcript.write_text(json.dumps(transcript_assistant(self.now.isoformat())) + "\n", encoding="utf-8")
+                    result = self.invoke(json.dumps({"rate_limits": {name: window}, "transcript_path": str(self.transcript)}))
                     self.assertEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, f"{label} {value:g}%\n")
                     snapshot = json.loads(self.path.read_text(encoding="utf-8"))
@@ -1181,20 +1214,20 @@ class ClaudeStatuslineBridgeTests(unittest.TestCase):
 
     def test_invalid_window_values_never_coerce_or_replace_good_snapshot(self):
         for key, values in (
-            ("used_percentage", (-1, 101, float("nan"), float("inf"), "44", True, None, 10 ** 1000)),
-            ("resets_at", ("123", True, None, float("nan"), float("inf"), 10 ** 1000, 1788177600000)),
+            ("used_percentage", (-1, 101, float("nan"), float("inf"), float("-inf"), "44", True, False, None, 10 ** 1000)),
+            ("resets_at", ("123", True, False, None, float("nan"), float("inf"), float("-inf"), 10 ** 1000, 1788177600000)),
         ):
             for value in values:
                 with self.subTest(key=key, value_type=type(value).__name__):
                     self.path.write_bytes(b"last good")
                     window = {**self.windows["five_hour"], key: value}
-                    result = self.invoke(json.dumps({"rate_limits": {"five_hour": window}}))
+                    result = self.invoke(json.dumps({"rate_limits": {"five_hour": window}, "transcript_path": str(self.transcript)}))
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, "")
                     self.assertEqual(self.path.read_bytes(), b"last good")
 
     def test_window_extra_fields_are_dropped_and_other_window_can_survive(self):
-        payload = {"rate_limits": {
+        payload = {"transcript_path": str(self.transcript), "rate_limits": {
             "five_hour": {"used_percentage": "invalid", "resets_at": 1},
             "seven_day": {**self.windows["seven_day"], "token": "SECRET_TOKEN"},
             "opus": {"used_percentage": 99},
@@ -1206,7 +1239,7 @@ class ClaudeStatuslineBridgeTests(unittest.TestCase):
         })
 
     def test_atomic_replacement_flushes_complete_json_and_permissions(self):
-        snapshot = bridge.sanitized_snapshot({"rate_limits": self.windows}, now=self.now)
+        snapshot = bridge.sanitized_snapshot({"rate_limits": self.windows, "transcript_path": str(self.transcript)}, now=self.now)
         self.path.write_bytes(b"last good")
         actual_replace = os.replace
 
@@ -1231,7 +1264,7 @@ class ClaudeStatuslineBridgeTests(unittest.TestCase):
         self.path.write_bytes(b"last good")
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(self.path)}), \
-             mock.patch.object(bridge.sys, "stdin", io.StringIO(json.dumps({"rate_limits": self.windows}))), \
+             mock.patch.object(bridge.sys, "stdin", io.StringIO(json.dumps({"rate_limits": self.windows, "transcript_path": str(self.transcript)}))), \
              mock.patch.object(bridge.sys, "stdout", stdout), \
              mock.patch.object(bridge.sys, "stderr", stderr), \
              mock.patch.object(bridge.os, "replace", side_effect=OSError("SECRET_PATH_CANARY")):
@@ -1243,7 +1276,7 @@ class ClaudeStatuslineBridgeTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [self.path])
 
     def test_real_write_failure_still_exits_zero_and_prints_terminal(self):
-        result = self.invoke(json.dumps({"rate_limits": self.windows}), path=self.root)
+        result = self.invoke(json.dumps({"rate_limits": self.windows, "transcript_path": str(self.transcript)}), path=self.root)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "5h 44% · 7d 27%\n")
         self.assertEqual(result.stderr, "Claude quota snapshot: write failed\n")
@@ -1379,8 +1412,8 @@ class ClaudeStatuslineCollectorTests(unittest.TestCase):
 
     def test_reader_window_validation_never_coerces_or_guesses_units(self):
         for key, values in (
-            ("used_percentage", (-1, 101, "44", True, float("nan"), float("inf"), 10 ** 1000)),
-            ("resets_at", ("123", True, None, float("nan"), float("inf"), 10 ** 1000, 1788177600000)),
+            ("used_percentage", (-1, 101, "44", True, False, float("nan"), float("inf"), float("-inf"), 10 ** 1000)),
+            ("resets_at", ("123", True, False, None, float("nan"), float("inf"), float("-inf"), 10 ** 1000, 1788177600000)),
             ("unknown", ("SECRET_TOKEN",)),
         ):
             for value in values:
@@ -1478,6 +1511,281 @@ class ClaudeStatuslineCollectorTests(unittest.TestCase):
             self.assertEqual("effective_limit" in agent["quota"], retained)
             if retained:
                 self.assertEqual(agent["quota"]["effective_limit"]["kind"], "opus")
+
+
+class ClaudeStatuslineSourceEventTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.path = self.root / "snapshot.json"
+        self.transcript = self.root / "SECRET_PATH_CANARY.jsonl"
+        Clock.current = dt.datetime(2026, 8, 31, 10, 1, tzinfo=dt.timezone.utc)
+        self.payload = {
+            "transcript_path": str(self.transcript), "session_id": "SECRET_SESSION_CANARY",
+            "prompt_id": "SECRET_PROMPT_CANARY",
+            "rate_limits": {
+                "five_hour": {"used_percentage": 44, "resets_at": Clock.current.timestamp() + 18000},
+                "seven_day": {"used_percentage": 27, "resets_at": Clock.current.timestamp() + 604800},
+            },
+        }
+        for patch in (
+            mock.patch.object(bridge.dt, "datetime", Clock),
+            mock.patch.dict(os.environ, {"HAYA_CLAUDE_STATUSLINE_SNAPSHOT": str(self.path),
+                                         "CLAUDE_STATUSLINE_MAX_AGE_SEC": "3600"}),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.event("2026-08-31T10:00:00Z")
+
+    def event(self, timestamp):
+        self.transcript.write_text(json.dumps(transcript_assistant(timestamp)) + "\n", encoding="utf-8")
+
+    def invoke(self, payload=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(bridge.sys, "stdin", io.StringIO(json.dumps(self.payload if payload is None else payload))), \
+             mock.patch.object(bridge.sys, "stdout", stdout), mock.patch.object(bridge.sys, "stderr", stderr):
+            code = bridge.main()
+        self.assertEqual(code, 0)
+        return stdout.getvalue(), stderr.getvalue()
+
+    def saved(self):
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def fingerprint(self):
+        return self.path.read_bytes(), self.path.stat().st_mtime_ns
+
+    def test_source_event_time_not_invocation_time_and_utc_normalization(self):
+        self.event("2026-08-31T18:00:00+08:00")
+        self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", ""))
+        self.assertEqual(self.saved()["observed_at"], "2026-08-31T10:00:00Z")
+        self.assertNotEqual(self.saved()["observed_at"], Clock.current.isoformat().replace("+00:00", "Z"))
+
+    def test_non_api_rerenders_never_restamp_or_rewrite_and_collector_expires(self):
+        self.invoke()
+        before = self.fingerprint()
+        for when, change in (
+            ("10:30:00", {"permissionMode": "plan"}),
+            ("10:59:00", {"vimMode": "normal"}),
+            ("11:00:00", {"model": {"id": "claude-fixture"}, "refreshInterval": 1}),
+            ("11:30:00", {"refreshInterval": 1}),
+        ):
+            with self.subTest(when=when), mock.patch.object(bridge.os, "replace") as replace:
+                Clock.current = dt.datetime.fromisoformat("2026-08-31T" + when + "+00:00")
+                self.assertEqual(self.invoke({**self.payload, **change}), ("5h 44% · 7d 27%\n", ""))
+                replace.assert_not_called()
+                self.assertEqual(self.fingerprint(), before)
+                self.assertEqual(self.saved()["observed_at"], "2026-08-31T10:00:00Z")
+        self.assertIsNone(collector.read_claude_statusline_quota(self.path, now=Clock.current))
+
+    def test_same_event_changed_percentage_cannot_refresh_authoritative_snapshot(self):
+        self.invoke()
+        before = self.fingerprint()
+        self.payload["rate_limits"]["five_hour"]["used_percentage"] = 99
+        self.assertEqual(self.invoke(), ("5h 99% · 7d 27%\n", ""))
+        self.assertEqual(self.fingerprint(), before)
+        self.assertEqual(self.saved()["five_hour"]["used_percentage"], 44)
+
+    def test_same_percentage_new_response_refreshes_source_time(self):
+        self.invoke()
+        first = self.saved()
+        # Pin mtime so a real replacement is observable even on coarse filesystems.
+        os.utime(self.path, (1, 1))
+        before = self.fingerprint()
+        self.event("2026-08-31T10:40:00Z")
+        Clock.current += dt.timedelta(minutes=40)
+        self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", ""))
+        updated = self.saved()
+        self.assertEqual(updated["observed_at"], "2026-08-31T10:40:00Z")
+        self.assertEqual(updated["five_hour"], first["five_hour"])
+        self.assertEqual(updated["seven_day"], first["seven_day"])
+        self.assertNotEqual(self.fingerprint()[1], before[1])
+
+    def test_new_response_changed_percentage_updates_normally(self):
+        self.invoke()
+        self.event("2026-08-31T10:40:00Z")
+        Clock.current += dt.timedelta(minutes=40)
+        self.payload["rate_limits"]["five_hour"]["used_percentage"] = 45
+        self.payload["rate_limits"]["seven_day"]["used_percentage"] = 28
+        self.assertEqual(self.invoke(), ("5h 45% · 7d 28%\n", ""))
+        self.assertEqual(self.saved()["observed_at"], "2026-08-31T10:40:00Z")
+        self.assertEqual(self.saved()["five_hour"]["used_percentage"], 45)
+        self.assertEqual(self.saved()["seven_day"]["used_percentage"], 28)
+
+    def test_out_of_order_event_and_equivalent_timezone_do_not_overwrite(self):
+        self.event("2026-08-31T10:40:00Z")
+        Clock.current += dt.timedelta(minutes=40)
+        self.invoke()
+        before = self.fingerprint()
+        for timestamp in ("2026-08-31T10:20:00Z", "2026-08-31T18:40:00+08:00"):
+            with self.subTest(timestamp=timestamp), mock.patch.object(bridge.os, "replace") as replace:
+                self.event(timestamp)
+                self.invoke()
+                self.assertEqual(self.fingerprint(), before)
+                replace.assert_not_called()
+
+    def test_initial_stale_bootstrap_refuses_snapshot(self):
+        Clock.current = dt.datetime(2026, 8, 31, 11, 0, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", ""))
+        self.assertFalse(self.path.exists())
+
+    def test_producer_age_future_skew_and_configuration_boundaries(self):
+        for offset, accepted in ((-3601, False), (-3600, True), (300, True), (301, False)):
+            self.event((Clock.current + dt.timedelta(seconds=offset)).isoformat())
+            self.assertEqual(bridge.sanitized_snapshot(self.payload, now=Clock.current) is not None, accepted)
+        self.event("2026-08-31T10:00:00Z")
+        for configured, accepted in (("59", False), ("60", True), ("NaN", True),
+                                      ("Infinity", True), ("-1", True), ("invalid", True)):
+            with self.subTest(configured=configured), mock.patch.dict(os.environ, {"CLAUDE_STATUSLINE_MAX_AGE_SEC": configured}):
+                self.assertEqual(bridge.sanitized_snapshot(self.payload, now=Clock.current) is not None, accepted)
+
+    def test_missing_or_invalid_transcript_path_preserves_terminal_and_last_good(self):
+        self.invoke()
+        before = self.fingerprint()
+        for value in (None, "", False, 123, str(self.root / "absent.jsonl"), str(self.root), "\0"):
+            payload = {**self.payload, "transcript_path": value}
+            with self.subTest(value_type=type(value).__name__):
+                self.assertEqual(self.invoke(payload), ("5h 44% · 7d 27%\n", ""))
+                self.assertEqual(self.fingerprint(), before)
+        payload = dict(self.payload)
+        payload.pop("transcript_path")
+        self.assertEqual(self.invoke(payload), ("5h 44% · 7d 27%\n", ""))
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_permission_denied_is_private_fail_soft(self):
+        self.invoke()
+        before = self.fingerprint()
+        original_open = os.open
+
+        def denied(path, *args, **kwargs):
+            if Path(path) == self.transcript:
+                raise PermissionError("SECRET_PATH_CANARY")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch.object(bridge.os, "open", side_effect=denied):
+            self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", ""))
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_malformed_tail_or_no_assistant_preserves_last_good(self):
+        self.invoke()
+        before = self.fingerprint()
+        for raw in (b"malformed SECRET_ASSISTANT_CANARY\n", b"\xff\n", b"{" * 1500,
+                    b'{"type":"user","timestamp":"2026-08-31T10:01:00Z"}\n',
+                    b'{"timestamp":"2026-08-31T10:01:00Z"}\n', b"[]\n"):
+            self.transcript.write_bytes(raw)
+            self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", ""))
+            self.assertEqual(self.fingerprint(), before)
+
+    def test_invalid_latest_assistant_timestamp_never_falls_back_to_older_record(self):
+        self.invoke()
+        before = self.fingerprint()
+        for timestamp in (None, 123, "invalid", "2026-08-31T10:00:00",
+                          "1999-12-31T23:59:59Z", "2026-08-31T10:06:01Z"):
+            records = [transcript_assistant("2026-08-31T10:00:30Z"), transcript_assistant(timestamp)]
+            self.transcript.write_text("\n".join(json.dumps(row) for row in records) + "\n", encoding="utf-8")
+            self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", ""))
+            self.assertEqual(self.fingerprint(), before)
+        row = transcript_assistant(None)
+        del row["timestamp"]
+        self.transcript.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        self.invoke()
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_real_assistant_envelope_required_and_synthetic_errors_not_samples(self):
+        real = transcript_assistant("2026-08-31T10:00:00Z")
+        synthetic = transcript_assistant("2026-08-31T10:01:00Z")
+        synthetic["isApiErrorMessage"] = True
+        synthetic["message"]["model"] = "<synthetic>"
+        self.transcript.write_text(json.dumps(real) + "\n" + json.dumps(synthetic) + "\n", encoding="utf-8")
+        self.invoke()
+        self.assertEqual(self.saved()["observed_at"], real["timestamp"])
+        before = self.fingerprint()
+        for key, value in (("role", "user"), ("type", "not-message"), ("id", "synthetic-id"),
+                           ("usage", None), ("content", "not-list")):
+            row = transcript_assistant("2026-08-31T10:01:00Z")
+            row["message"][key] = value
+            self.transcript.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            self.invoke()
+            self.assertEqual(self.fingerprint(), before)
+
+    def test_tail_read_is_bounded_and_never_scans_to_old_event(self):
+        self.transcript.write_bytes(
+            (json.dumps(transcript_assistant("2026-08-31T10:00:00Z")) + "\n").encode()
+            + b"x" * (bridge.MAX_TRANSCRIPT_BYTES * 4)
+        )
+        original_fdopen = os.fdopen
+        reads = []
+
+        class ObservedFile:
+            def __init__(self, handle):
+                self.handle = handle
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.handle.close()
+            def fileno(self):
+                return self.handle.fileno()
+            def seek(self, *args):
+                return self.handle.seek(*args)
+            def read(self, size=-1):
+                data = self.handle.read(size)
+                reads.append((size, len(data)))
+                return data
+
+        with mock.patch.object(bridge.os, "fdopen", side_effect=lambda *a, **k: ObservedFile(original_fdopen(*a, **k))):
+            self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", ""))
+        self.assertFalse(self.path.exists())
+        self.assertEqual(reads, [(bridge.MAX_TRANSCRIPT_BYTES, bridge.MAX_TRANSCRIPT_BYTES)])
+
+    def test_truncated_first_row_is_not_accepted_as_a_complete_event(self):
+        event = json.dumps(transcript_assistant("2026-08-31T10:00:00Z")).encode()
+        self.transcript.write_bytes(b"invalid-prefix" + event + b" " * (bridge.MAX_TRANSCRIPT_BYTES - len(event)))
+        self.invoke()
+        self.assertFalse(self.path.exists())
+
+    def test_transcript_privacy_canaries_never_persist_or_print(self):
+        records = [
+            {"type": "user", "message": {"content": "SECRET_PROMPT_CANARY"}},
+            {"type": "tool", "message": {"content": "SECRET_TOOL_CANARY"}},
+            transcript_assistant("2026-08-31T10:00:00Z", "SECRET_ASSISTANT_CANARY"),
+        ]
+        records[-1]["uuid"] = "SECRET_UUID_CANARY"
+        self.transcript.write_text("\n".join(json.dumps(row) for row in records) + "\n", encoding="utf-8")
+        stdout, stderr = self.invoke()
+        snapshot = self.saved()
+        self.assertEqual(set(snapshot), {"schema_version", "source", "observed_at", "five_hour", "seven_day"})
+        for canary in ("SECRET_PROMPT_CANARY", "SECRET_ASSISTANT_CANARY", "SECRET_TOOL_CANARY",
+                       "SECRET_PATH_CANARY", "SECRET_UUID_CANARY", "SECRET_SESSION_CANARY"):
+            self.assertEqual((self.path.read_text(encoding="utf-8") + stdout + stderr).count(canary), 0)
+
+    def test_existing_snapshot_read_failure_does_not_allow_replacement(self):
+        self.invoke()
+        before = self.fingerprint()
+        self.event("2026-08-31T10:00:30Z")
+        actual_open = os.open
+
+        def denied(path, *args, **kwargs):
+            if Path(path) == self.path:
+                raise PermissionError("SECRET_PATH_CANARY")
+            return actual_open(path, *args, **kwargs)
+
+        with mock.patch.object(bridge.os, "open", side_effect=denied):
+            self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", "Claude quota snapshot: write failed\n"))
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_posix_writer_contention_is_nonblocking_and_preserves_last_good(self):
+        self.invoke()
+        before = self.fingerprint()
+        self.event("2026-08-31T10:00:30Z")
+        if os.name == "posix":
+            # Exercise the real advisory lock without adding persistent lock files.
+            with bridge.snapshot_write_guard(self.root):
+                self.assertEqual(self.invoke(), ("5h 44% · 7d 27%\n", "Claude quota snapshot: write failed\n"))
+            self.assertEqual(self.fingerprint(), before)
+        self.invoke()
+        self.assertEqual(self.saved()["observed_at"], "2026-08-31T10:00:30Z")
+        self.assertEqual(set(self.root.iterdir()), {self.path, self.transcript})
+
 
 
 if __name__ == "__main__":

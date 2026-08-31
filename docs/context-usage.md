@@ -165,7 +165,7 @@ Claude 的四条信号各有独立含义：
 
 `scripts/claude_statusline_quota.py` 是仅依赖 Python 标准库的 statusLine command。从 stdin 读取机器 JSON，stdout 输出单行无 ANSI 的文字，例如 **fixture** `5h 44% · 7d 27%`。44/27 只是测试示例；实际数值来自输入。缺一个窗口时只显示另一个，没有有效窗口时不显示假 0%，不覆盖 last-good snapshot。
 
-输入读取上限 1 MiB 字符。百分比必须是有限 JSON number 且在 0–100，拒绝 bool、字符串、NaN/Infinity、越界。reset 必须是可表示日期的有限 Unix **秒**，拒绝字符串/bool，绝不猜单位或把毫秒转换成秒。额外输入字段一律丢弃。
+输入读取上限 1 MiB 字符。百分比必须是有限 JSON number 且在 0–100，拒绝 True/False、字符串、NaN/正负 Infinity、越界。reset 必须是可表示日期的有限 Unix **秒**，拒绝字符串/bool，绝不猜单位或把毫秒转换成秒。额外输入字段不落盘；只有 transcript_path 用于下述瞬时只读检查。
 
 默认文件：
 
@@ -185,7 +185,19 @@ bridge 与 collector 均可通过 `HAYA_CLAUDE_STATUSLINE_SNAPSHOT` 指向同一
 }
 ```
 
-上述数字仍为 fixture；缺失窗口可以省略。绝不保存完整 statusLine JSON，尤其不保存 session_id、transcript_path、cwd、workspace、repo、model、accountUuid、prompt、cost、正文、token、headers 或 environment。使用同目录临时文件、完整 JSON、flush/fsync、`os.replace` 原子替换；POSIX 文件权限为 `0600`。写失败仍 exit 0，保留终端输出与已有 snapshot，stderr 只显示固定短错误，不含输入或路径。
+上述数字仍为 fixture；缺失窗口可以省略。绝不保存完整 statusLine JSON，尤其不保存 session_id、prompt_id、message UUID、transcript_path、cwd、workspace、repo、model、accountUuid、prompt、cost、正文、token、headers 或 environment。使用同目录临时文件、完整 JSON、flush/fsync、`os.replace` 原子替换；POSIX 文件权限为 `0600`。写失败仍 exit 0，保留终端输出与已有 snapshot，stderr 只显示固定短错误，不含输入或路径。
+
+### REWORK-A：source time 与严格更新
+
+**observed_at = 最近可信 assistant transcript event 的 timestamp**，绝不是 statusLine command execution time。pinned 2.1.220 的 response headers → UDt → L7r() → cxS() → rate_limits 没有 source-age fence；permission/vim/model 状态变化、refreshInterval 等重绘也会再次执行 command，所以禁止用本地调用时间替旧 quota 续命。
+
+bridge 仅瞬时读取 stdin.transcript_path 指向的普通文件，从尾部最多读取 **256 KiB bytes**，再按行逆序寻找可信 event；不全文件加载、不越过上限继续扫描。截断的首行不参与解析。VPS 只读结构抽查确认真实记录具有 type=assistant，message 内 role=assistant、type=message、msg_ 开头的 id、usage object 与 content list。桥接器验证这些 envelope 条件，并排除 isApiErrorMessage / synthetic model 记录；不提取内容或标识值用于输出/持久化。
+
+source timestamp 必须是 timezone-aware ISO，归一到 UTC，不早于 2000-01-01；producer 同样执行默认 3600 秒最大年龄、300 秒未来容差。`CLAUDE_STATUSLINE_MAX_AGE_SEC` 与 collector 共用配置语义。最新真实 assistant 的时间缺失、非法或不新鲜时拒绝写入，不再以更旧的 event 作为替代。路径缺失、不存在、无权限、非普通文件，或有界尾部没有可信 event 时也不写；终端仍可显示当前输入的 5h/7d 百分比，exit 0，不输出路径/正文。
+
+写入前读取并校验现有 snapshot 白名单；只有 candidate event time **严格大于**已有 observed_at 才替换。相等或更旧时不 rewrite、不 restamp，字节与 mtime 均保持。无法安全读取现有文件时不覆盖。Linux 写入端对现有目录 inode 取非阻塞 advisory lock，把比较与 atomic replace 串行化；竞争时 fail-soft，不增加 lock 文件或持久字段。非 POSIX 环境仍执行顺序的严格时间比较，不提供此 Linux 并发锁保证。
+
+示例：assistant 在 10:00，command 在 10:01 执行，observed_at 只能是 10:00。10:30、10:59、11:30 无新 assistant 的重绘不能刷新；到 11:30 collector 自然判 stale。若 10:40 出现新 assistant，即使额度仍为 44/27，也必须更新到 10:40；若值变成 45/28，同样正常更新。首次 activation 遇到几小时前的 assistant 时，producer 直接拒绝生成 authoritative snapshot。
 
 ### Collector freshness 与窗口 reset
 
@@ -195,9 +207,9 @@ reader 只读，最多读取 16 KiB 字符，严格检查 schema_version/source/
 - 超过最大年龄拒绝；允许最多 300 秒未来 clock skew，超过则拒绝。
 - 每个窗口必须满足 `resets_at > now`。过期窗口独立移除，不能作为当前百分比使用；另一个有效窗口仍可消费。
 - 输出沿用现有 quota contract，reset 转为 UTC ISO8601；`remaining_percentage = 100 - used_percentage`，仅基于真实订阅百分比。
-- `updated_at` 使用 bridge 的 observed_at，不伪称 collector 此刻刚从服务端获取。
+- `updated_at` 使用 assistant event 对应的 observed_at，不伪称 bridge/collector 此刻刚从服务端获取。
 
-observed_at 是 bridge 收到机器输入的时间，**不是服务端采样时间**。Claude Code 可能提供内存中已有的 utilization，重复 statusLine render 不能证明服务端数据刚刷新。本实现的年龄/reset fence 限制可用范围，但不能消除此上游数据新鲜度限制。不要跨账户复用同一个 snapshot；未来 activation/账户切换须另外处理 producer 与 snapshot 归属，不在本 R1 自动启用。
+observed_at 是当前 transcript 最近可信 assistant/API response event 的时间。statusLine 执行时间仅用于检查年龄，不能写成 source sample time；固定的 assistant event 不能被重绘续命。snapshot schema 不增加任何字段。不要跨账户复用同一个 snapshot；未来 activation/账户切换须另外处理 producer 与 snapshot 归属，不在本 R1 自动启用。
 
 fresh JSONL 信号仍附加到 quota：generic 429 为 `exhausted=false`，明确 usage/weekly/Opus exhaustion 为 true；只被严格更新的 normal usage/session 清除，保留跨文件事件时间比较。statusLine 百分比不压制此信号。
 
@@ -230,4 +242,4 @@ fresh JSONL 信号仍附加到 quota：generic 429 为 `exhausted=false`，明�
 
 `--no-official-usage` / `CONTEXT_USAGE_OFFICIAL=0` 只禁用 OAuth endpoint 路径，不禁用安全的本地 statusLine snapshot。
 
-验证命令 `python3 -B -m unittest tests.test_context_usage -v` 覆盖 bridge、reader、JSONL、429 cooldown、Codex 及 store/API 合同，全部使用临时 fixture；不运行真实 Claude prompt、/usage 或 Anthropic 请求。Frontend runtime harness 保留原 14 场景，并增加 statusLine 44/27 fixture。测试和部署、activation 是不同步骤。
+验证命令 `python3 -B -m unittest tests.test_context_usage -v` 覆盖 bridge、reader、JSONL、429 cooldown、Codex 及 store/API 合同，全部使用临时 fixture；不运行真实 Claude prompt、/usage 或 Anthropic 请求。REWORK-A 保留原 87 个测试，bridge 正常写入场景补充真实 envelope fixture 与冻结时钟，并新增 source time、严格更新、同值新 response、过期 bootstrap、有界读取、内容隐私及失败行为测试。Frontend runtime harness 原 14 场景和 statusLine 44/27 fixture 不变，collector/UI 没有本轮 diff。修复继续提交原 Draft PR #378；没有 activation、merge 或 deploy。
