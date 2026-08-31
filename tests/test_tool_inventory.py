@@ -62,7 +62,7 @@ class ToolInventoryTest(unittest.TestCase):
             for group in self.p["groups"][:6]
             for tool in group["tools"]
         }
-        self.assertIn("browse_github", self.groups["legacy:web"])
+        self.assertIn("browse_github", {tool["tool_name"] for tool in self.groups["legacy:web"]["tools"]})
         github_tool = next(tool for tool in self.groups["legacy:web"]["tools"] if tool["tool_name"] == "browse_github")
         self.assertFalse(github_tool["available"])
         self.assertEqual(github_tool["reason_code"], "provider_blocked")
@@ -74,7 +74,7 @@ class ToolInventoryTest(unittest.TestCase):
         self.assertEqual(patch_tool["reason_code"], "safety_gap")
         legacy_names = {
             tool["tool_name"]
-            for group in self.p.groups if group["id"].startswith("legacy:")
+            for group in self.p["groups"] if group["id"].startswith("legacy:")
             for tool in group["tools"]
         }
         self.assertTrue(current_names.isdisjoint(legacy_names))
