@@ -12,6 +12,7 @@ from tools.external_mcp_auth_binding import AUTH_NONE, ExternalMcpAuthBindingReg
 from tools.external_mcp_surface import (
     current_external_tools,
     list_external_surface,
+    invoke_external_surface,
     model_tool_definitions,
     surface_tool_name,
 )
@@ -142,6 +143,136 @@ class ExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(inventory_group["tools"][0]["tool_name"], "roll")
         self.assertEqual(model_tools[0]["name"], "monopoly__roll__1234567890")
         self.assertEqual(model_tools[0]["description"], inventory_group["tools"][0]["display_label"])
+
+    def test_surface_name_contract(self):
+        first = surface_tool_name("Monopoly", "roll", "ext:monopoly:roll")
+        self.assertEqual(first, surface_tool_name("Monopoly", "roll", "ext:monopoly:roll"))
+        self.assertTrue(first.startswith("monopoly__roll__"))
+        self.assertNotEqual(
+            first,
+            surface_tool_name("Monopoly", "roll", "ext:other-monopoly:roll"),
+        )
+        non_ascii = surface_tool_name("中文服务器", "骰子工具", "ext:cn:roll")
+        self.assertRegex(non_ascii, r"^[a-z0-9_]+__[a-z0-9_]+__[0-9a-f]{10}$")
+        long_name = surface_tool_name("S" * 500, "T" * 500, "ext:long:roll")
+        self.assertLessEqual(len(long_name), 64)
+        self.assertRegex(long_name, r"^[a-z0-9_]+__[a-z0-9_]+__[0-9a-f]{10}$")
+
+    def test_invoke_maps_surface_to_runtime_once_and_fails_closed(self):
+        self._ingest()
+        graph = self._graph()
+        catalog = list_external_surface(graph)
+        surface = catalog[0]["tools"][0]
+        calls = []
+
+        class RecordingRuntime:
+            def invoke(self, control_id, tool_input, turn_lease, *, expected_turn_id):
+                calls.append((control_id, tool_input, turn_lease, expected_turn_id))
+                return {
+                    "status": "SUCCEEDED",
+                    "mcp_result": {
+                        "content": [{"type": "text", "text": "rolled"}],
+                        "structuredContent": {"value": 6},
+                    },
+                }
+
+        graph.runtime = RecordingRuntime()
+
+        class GraphContext:
+            def __enter__(self):
+                return graph
+
+            def __exit__(self, *args):
+                return False
+
+        with patch(
+            "tools.external_mcp_surface.open_external_mcp_production",
+            return_value=GraphContext(),
+        ):
+            result = invoke_external_surface(
+                surface["surface_tool_name"],
+                {"sides": 6},
+                turn_id="turn-current",
+            )
+            self.assertEqual(
+                result,
+                {
+                    "status": "SUCCESS",
+                    "result": {
+                        "content": [{"type": "text", "text": "rolled"}],
+                        "structuredContent": {"value": 6},
+                    },
+                },
+            )
+            self.assertEqual(
+                calls,
+                [(surface["control_id"], {"sides": 6}, None, "turn-current")],
+            )
+
+            invoke_external_surface(
+                surface["surface_tool_name"],
+                {"sides": 8},
+                turn_id=None,
+            )
+            invoke_external_surface(
+                surface["surface_tool_name"] + "__stale",
+                {"sides": 8},
+                turn_id="turn-unknown",
+            )
+            changed = self.servers.update_connection(
+                self.server.server_id,
+                endpoint="https://monopoly-disconnected.example/mcp",
+            )
+            self.assertEqual(changed.lifecycle_state, "DISCONNECTED")
+            invoke_external_surface(
+                surface["surface_tool_name"],
+                {"sides": 10},
+                turn_id="turn-disconnected",
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_invoke_preserves_bounded_tool_error_result(self):
+        self._ingest()
+        graph = self._graph()
+        surface = list_external_surface(graph)[0]["tools"][0]
+        remote_error = {
+            "content": [
+                {"type": "text", "text": "invalid move"},
+                {"type": "image", "data": "bounded"},
+            ],
+            "structuredContent": {"code": "INVALID_MOVE"},
+            "isError": True,
+        }
+
+        class RecordingRuntime:
+            def invoke(self, control_id, tool_input, turn_lease, *, expected_turn_id):
+                self.assertEqual(control_id, surface["control_id"])
+                self.assertEqual(tool_input, {"move": "bad"})
+                self.assertIsNone(turn_lease)
+                self.assertEqual(expected_turn_id, "turn-error")
+                return {"status": "TOOL_ERROR", "mcp_result": remote_error}
+
+        graph.runtime = RecordingRuntime()
+
+        class GraphContext:
+            def __enter__(self):
+                return graph
+
+            def __exit__(self, *args):
+                return False
+
+        with patch(
+            "tools.external_mcp_surface.open_external_mcp_production",
+            return_value=GraphContext(),
+        ):
+            self.assertEqual(
+                invoke_external_surface(
+                    surface["surface_tool_name"],
+                    {"move": "bad"},
+                    turn_id="turn-error",
+                ),
+                {"status": "TOOL_ERROR", "result": remote_error},
+            )
 
     def test_dynamic_pretooluse_binding_uses_current_catalog_result(self):
         lease = issue_turn_lease(
