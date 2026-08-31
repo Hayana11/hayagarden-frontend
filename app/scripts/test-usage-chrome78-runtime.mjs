@@ -61,6 +61,8 @@ assert.deepEqual(hits, [], `unexpected Chrome78 runtime tokens in UsageScreen: $
 // 6. Claude percentages must be accepted only from the OAuth-labelled snapshot.
 assert.match(apiSource, /source === 'claude_oauth_usage'/);
 assert.doesNotMatch(apiSource, /function legacyClaude/);
+assert.doesNotMatch(apiSource, /100 - window\\.remaining_percentage/);
+assert.doesNotMatch(apiSource, /100 - used/);
 
 // 7. Render the real private AgentQuotaCard without exporting a test-only app API.
 // Only page-level dependencies are stubbed; the card, bars and formatters run.
