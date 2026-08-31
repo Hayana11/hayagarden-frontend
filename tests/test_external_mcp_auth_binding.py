@@ -14,8 +14,7 @@ from tools.external_mcp_auth_binding import (
 )
 from tools.external_secret_store import ExternalSecretStore
 from tools.external_server_registry import (
-    MASTER_OFF,
-    REVIEW_REQUIRED_STATE,
+    DISCONNECTED_STATE,
     ExternalServerRegistry,
 )
 
@@ -43,14 +42,15 @@ class ExternalMcpAuthBindingTests(unittest.TestCase):
         self.connection.close()
         self.tempdir.cleanup()
 
-    def test_none_binding_has_null_metadata_and_invalidates_trust(self):
+    def test_none_binding_has_null_metadata_and_invalidates_connection(self):
+        self.servers.mark_connected(self.server.server_id, self.server.revision)
+        self.assertEqual(self.servers.get(self.server.server_id).lifecycle_state, "CONNECTED")
         binding = self.bindings.set_binding(self.server.server_id, AUTH_NONE)
         current = self.servers.get(self.server.server_id)
         self.assertEqual((binding.secret_ref, binding.credential_slot), (None, None))
         self.assertEqual(binding.revision, 1)
         self.assertEqual(current.revision, self.server.revision + 1)
-        self.assertEqual(current.lifecycle_state, REVIEW_REQUIRED_STATE)
-        self.assertEqual(current.master_state, MASTER_OFF)
+        self.assertEqual(current.lifecycle_state, DISCONNECTED_STATE)
         self.assertEqual(self.bindings.set_binding(self.server.server_id, AUTH_NONE).revision, 1)
 
     def test_bearer_requires_active_exact_server_and_derived_slot(self):

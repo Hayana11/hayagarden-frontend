@@ -2,7 +2,7 @@
 
 The durable invocation and administrative discovery modules remain the owners
 of their respective state machines.  This module only composes their frozen
-authority snapshots with the already reviewed secret materializer and the
+authority snapshots with the existing secret materializer and the
 one-shot Node bridges.
 """
 

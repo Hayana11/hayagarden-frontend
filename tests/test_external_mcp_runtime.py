@@ -17,9 +17,7 @@ from tools.external_mcp_runtime import ExternalMcpRuntime, ExternalMcpRuntimeIni
 from tools.external_mcp_secret_materializer import ExternalMcpSecretMaterializer, ExternalMcpSecretMaterializerError
 from tools.external_secret_store import ExternalSecretStore
 from tools.external_server_registry import ExternalServerRegistry
-from tools.external_tool_execution_fence import ExternalToolExecutionFence
 from tools.external_tool_registry import ExternalToolCandidateRegistry
-from tools.external_tool_side_effect_policy import NONE, ExternalToolSideEffectPolicy
 
 
 CANARY = "B2_TEST_BEARER_CANARY"
@@ -59,14 +57,10 @@ class RuntimeTests(unittest.TestCase):
         self.auth = ExternalMcpAuthBindingRegistry(self.connection, server_registry=self.servers, secret_store=self.secrets)
         self.auth.set_binding(self.server.server_id, AUTH_NONE)
         self.candidates = ExternalToolCandidateRegistry(self.connection, server_registry=self.servers)
-        self.policy = ExternalToolSideEffectPolicy(self.connection, candidate_registry=self.candidates, server_registry=self.servers)
-        self.fence = ExternalToolExecutionFence(self.connection, server_registry=self.servers, candidate_registry=self.candidates, side_effect_policy=self.policy)
         self.invocation = ExternalMcpInvocation(
             self.connection,
             server_registry=self.servers,
             candidate_registry=self.candidates,
-            side_effect_policy=self.policy,
-            execution_fence=self.fence,
             auth_binding_registry=self.auth,
             id_factory=iter(f"attempt-{number}" for number in range(1, 1000)).__next__,
         )
@@ -97,8 +91,9 @@ class RuntimeTests(unittest.TestCase):
             runtime._spawn_json = Mock(return_value=output or {"status": "SUCCESS", "result": {"ok": True}, "error": None, "diagnostics": {}})
         return runtime
 
-    def _prepared_lease(self):
+    def _prepared_candidate(self):
         current = self.servers.get(self.server.server_id)
+        current = self.servers.mark_connected(self.server.server_id, current.revision)
         discovered = {
             "status": "SUCCESS",
             "server_id": self.server.server_id,
@@ -106,20 +101,15 @@ class RuntimeTests(unittest.TestCase):
             "registration_provenance": current.registration_provenance,
             "registry_revision": current.revision,
             "lifecycle_state": current.lifecycle_state,
-            "master_state": current.master_state,
             "transport": current.transport,
             "endpoint_snapshot": current.endpoint,
             "catalog_complete": True,
             "tool_record_boundary": "SDK_VISIBLE_RAW",
             "tools": [tool()],
             "diagnostics": {"registry_changed_during_attempt": False},
-            "model_visible": False,
-            "execution_allowed": False,
         }
         self.candidates.ingest(discovered)
         candidate = self.candidates.get_candidate(self.server.server_id, "calendar.list")
-        self.candidates.approve_candidate(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], actor="owner", provenance="settings-admin")
-        self.policy.classify(server_id=self.server.server_id, tool_name="calendar.list", expected_fingerprint=candidate["current_fingerprint"], expected_source_registry_revision=candidate["current_source_registry_revision"], side_effect_class=NONE, actor="owner", provenance="settings-admin")
         return None
 
     def _bearer(self):
@@ -144,7 +134,7 @@ class RuntimeTests(unittest.TestCase):
     def test_shared_authority_graph_and_none_call_has_zero_secret_access(self):
         self.secrets._load_runtime_record = Mock(side_effect=AssertionError("none auth accessed a secret"))
         runtime = self._runtime()
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], SUCCEEDED)
         self.assertEqual(result["mcp_result"], {"ok": True})
         runtime._spawn_json.assert_called_once()
@@ -155,7 +145,7 @@ class RuntimeTests(unittest.TestCase):
     def test_bearer_uses_exact_ref_and_never_persists_plaintext(self):
         secret, binding = self._bearer()
         runtime = self._runtime()
-        runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         semantic = runtime._spawn_json.call_args.args[1]
         self.assertEqual(semantic["auth"], {"scheme": "bearer", "credential": CANARY})
         self.assertNotIn(CANARY, "\n".join(self.connection.iterdump()))
@@ -165,7 +155,7 @@ class RuntimeTests(unittest.TestCase):
         self._bearer()
         materializer = MutatingMaterializer(self.secrets, key_file=str(self.key), mutation=lambda: self.auth.set_binding(self.server.server_id, AUTH_NONE))
         runtime = self._runtime(materializer=materializer)
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], FAILED_PRE_CALL)
         runtime._spawn_json.assert_not_called()
 
@@ -173,14 +163,14 @@ class RuntimeTests(unittest.TestCase):
         self._bearer()
         materializer = MutatingMaterializer(self.secrets, key_file=str(self.key), mutation=lambda: self.servers.update_connection(self.server.server_id, endpoint="https://changed.example/mcp"))
         runtime = self._runtime(materializer=materializer)
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], FAILED_PRE_CALL)
         runtime._spawn_json.assert_not_called()
 
     def test_materialization_failure_is_pre_call_and_zero_network(self):
         self._bearer()
         runtime = self._runtime(materializer=FailingMaterializer(self.secrets, key_file=str(self.key)))
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], FAILED_PRE_CALL)
         runtime._spawn_json.assert_not_called()
 
@@ -204,12 +194,12 @@ class RuntimeTests(unittest.TestCase):
         runtime._spawn_json.assert_not_called()
 
         fresh = self._runtime()
-        result = fresh.invoke(f"ext:{self.server.server_id}:calendar.list", {"data": "x" * (256 * 1024)}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = fresh.invoke(f"ext:{self.server.server_id}:calendar.list", {"data": "x" * (256 * 1024)}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], FAILED_PRE_CALL)
         fresh._spawn_json.assert_not_called()
 
     def test_runtime_preserves_safe_not_invoked_reason(self):
-        self._prepared_lease()
+        self._prepared_candidate()
         summary = "RUNTIME_FAKE_SECRET_LIKE_SUMMARY_MUST_NOT_PERSIST"
         runtime = self._runtime(
             call_output={
@@ -243,27 +233,27 @@ class RuntimeTests(unittest.TestCase):
     def test_post_spawn_failure_is_unknown_and_no_retry(self):
         runtime = self._runtime()
         runtime._spawn_json.side_effect = RuntimeError("child failed")
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], OUTCOME_UNKNOWN)
         self.assertIsNone(result.get("mcp_result"))
         self.assertEqual(runtime._spawn_json.call_count, 1)
 
     def test_unknown_outcome_suppresses_ephemeral_result(self):
         runtime = self._runtime({"status": "OUTCOME_UNKNOWN", "result": {"leak": "no"}, "error": {"code": "UNKNOWN"}, "diagnostics": {}})
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], OUTCOME_UNKNOWN)
         self.assertIsNone(result.get("mcp_result"))
 
     def test_post_persistence_unknown_suppresses_ephemeral_result(self):
         self.connection.executescript("CREATE TRIGGER fail_terminal BEFORE UPDATE OF status ON external_tool_invocation_attempts WHEN NEW.status IN ('SUCCEEDED','TOOL_ERROR','FAILED_PRE_CALL','OUTCOME_UNKNOWN') BEGIN SELECT RAISE(ABORT, 'fail terminal persistence'); END;")
         runtime = self._runtime()
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], OUTCOME_UNKNOWN)
         self.assertIsNone(result.get("mcp_result"))
 
     def test_duplicate_does_not_replay_ephemeral_result(self):
         runtime = self._runtime()
-        lease = self._prepared_lease()
+        lease = self._prepared_candidate()
         first = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, lease, expected_turn_id="turn-1")
         second = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, lease, expected_turn_id="turn-1")
         self.assertEqual(first["mcp_result"], {"ok": True})
@@ -328,7 +318,7 @@ class RuntimeTests(unittest.TestCase):
         capture = Path(self.tmp.name) / "capture.json"
         self._real_child_bridge(capture)
         runtime = self._runtime(node=sys.executable, mock_spawn=False)
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", {"q": "today"}, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], SUCCEEDED)
         captured = json.loads(capture.read_text(encoding="utf-8"))
         self.assertNotIn(CANARY, json.dumps(captured["argv"]))
@@ -345,7 +335,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertLessEqual(len(canonical), 256 * 1024)
         self.assertGreater(len(canonical), 250 * 1024)
         runtime = self._runtime(node=sys.executable, mock_spawn=False)
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", tool_input, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", tool_input, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], SUCCEEDED)
         captured = json.loads(capture.read_text(encoding="utf-8"))
         self.assertEqual(captured["stdin"]["tool_input"], tool_input)
@@ -359,7 +349,7 @@ class RuntimeTests(unittest.TestCase):
         canonical = json.dumps(tool_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
         self.assertGreater(len(canonical), 256 * 1024)
         runtime = self._runtime(node=sys.executable, mock_spawn=False)
-        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", tool_input, self._prepared_lease(), expected_turn_id="turn-1")
+        result = runtime.invoke(f"ext:{self.server.server_id}:calendar.list", tool_input, self._prepared_candidate(), expected_turn_id="turn-1")
         self.assertEqual(result["status"], FAILED_PRE_CALL)
         self.assertFalse(capture.exists())
         print(f"B2_BOUNDARY OVERSIZE_TOOL_INPUT_BYTES={len(canonical)} CHILD_COUNT=0")

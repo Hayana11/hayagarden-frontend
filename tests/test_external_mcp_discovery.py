@@ -22,8 +22,8 @@ from tools.external_mcp_discovery import (
 )
 from tools.external_server_registry import (
     ExternalServerRegistry,
-    REGISTRATION_STATE,
-    REVIEW_REQUIRED_STATE,
+    CONNECTED_STATE,
+    DISCONNECTED_STATE,
     REVOKED_STATE,
 )
 
@@ -68,7 +68,7 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
                 self.record.server_id, endpoint="https://caller.example/override"
             )
 
-    def test_registered_and_review_required_use_exact_registry_snapshot(self):
+    def test_disconnected_and_updated_use_exact_registry_snapshot(self):
         calls = []
 
         def runner(record):
@@ -81,39 +81,43 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
         self.assertEqual(registered["server_id"], self.record.server_id)
         self.assertEqual(registered["registration_provenance"], "owner-admin")
         self.assertEqual(registered["registry_revision"], self.record.revision)
-        self.assertEqual(registered["lifecycle_state"], REGISTRATION_STATE)
+        self.assertEqual(registered["lifecycle_state"], CONNECTED_STATE)
         self.assertEqual(registered["endpoint_snapshot"], self.record.endpoint)
         self.assertEqual(calls[0].endpoint, self.record.endpoint)
         self.assertEqual(calls[0].transport, self.record.transport)
         self.assertEqual(registered["tools"], SUCCESS["tools"])
 
-        reviewed = self.registry.update_connection(
+        updated = self.registry.update_connection(
             self.record.server_id, endpoint="https://calendar-new.example/mcp"
         )
-        reviewed_result = facade.discover(reviewed.server_id)
-        self.assertEqual(reviewed_result["status"], "SUCCESS")
-        self.assertEqual(reviewed_result["lifecycle_state"], REVIEW_REQUIRED_STATE)
-        self.assertEqual(self.registry.get(reviewed.server_id).lifecycle_state, REVIEW_REQUIRED_STATE)
-        self.assertEqual(self.registry.get(reviewed.server_id).master_state, "OFF")
-        self.assertEqual(self.registry.get(reviewed.server_id).revision, reviewed.revision)
-        self.assertEqual(calls[-1].endpoint, reviewed.endpoint)
+        updated_result = facade.discover(updated.server_id)
+        self.assertEqual(updated_result["status"], "SUCCESS")
+        self.assertEqual(updated_result["lifecycle_state"], CONNECTED_STATE)
+        self.assertEqual(self.registry.get(updated.server_id).lifecycle_state, CONNECTED_STATE)
+        self.assertEqual(self.registry.get(updated.server_id).revision, updated.revision)
+        self.assertEqual(calls[-1].endpoint, updated.endpoint)
 
     def test_unknown_and_revoked_fail_before_child_spawn(self):
         calls = []
         facade = ExternalMcpDiscovery(self.registry, runner=lambda record: calls.append(record) or SUCCESS)
         unknown = facade.discover("unknown-server")
         self.assertEqual(unknown["status"], "UNKNOWN_SERVER")
-        self.assertEqual(self.registry.get(self.record.server_id).lifecycle_state, REGISTRATION_STATE)
+        self.assertEqual(self.registry.get(self.record.server_id).lifecycle_state, DISCONNECTED_STATE)
         self.registry.revoke(self.record.server_id)
         revoked = facade.discover(self.record.server_id)
         self.assertEqual(revoked["status"], REVOKED_STATE)
         self.assertEqual(calls, [])
 
-    def test_success_does_not_mutate_registry_and_failure_classification_is_preserved(self):
+    def test_success_connects_same_registry_identity_and_failure_status_is_preserved(self):
         before = self.registry.get(self.record.server_id)
         success = ExternalMcpDiscovery(self.registry, runner=lambda _: SUCCESS).discover(self.record.server_id)
         self.assertEqual(success["status"], "SUCCESS")
-        self.assertEqual(self.registry.get(self.record.server_id), before)
+        connected = self.registry.get(self.record.server_id)
+        self.assertEqual(connected.lifecycle_state, CONNECTED_STATE)
+        self.assertEqual(connected.server_id, before.server_id)
+        self.assertEqual(connected.endpoint, before.endpoint)
+        self.assertEqual(connected.transport, before.transport)
+        self.assertEqual(connected.revision, before.revision)
 
         empty = ExternalMcpDiscovery(
             self.registry,
@@ -128,6 +132,7 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
         self.assertTrue(empty["catalog_complete"])
         self.assertTrue(empty["zero_tools"])
         self.assertEqual(empty["tools"], [])
+        before = self.registry.get(self.record.server_id)
 
         def unavailable(_record):
             return {
@@ -192,7 +197,6 @@ class ExternalMcpDiscoveryTests(unittest.TestCase):
             self.assertEqual(result["registration_provenance"], record.registration_provenance)
             self.assertEqual(result["registry_revision"], record.revision)
             self.assertEqual(result["lifecycle_state"], record.lifecycle_state)
-            self.assertEqual(result["master_state"], record.master_state)
             self.assertEqual(result["transport"], record.transport)
             self.assertEqual(result["endpoint_snapshot"], record.endpoint)
             self.assertFalse(result["catalog_complete"])

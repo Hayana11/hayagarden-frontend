@@ -617,19 +617,15 @@ export function ToolroomScreen() {
     try {
       const result = await http.post<{
         ok: boolean;
-        connection_saved?: boolean;
-        auth_configured?: boolean;
+        connected?: boolean;
+        status?: string;
+        tool_count?: number;
         discovery?: { status?: string; reason_code?: string | null; tool_count?: number };
       }>('/api/external-mcp/servers', body);
-      if (result.ok && result.discovery?.status === 'SUCCESS') {
-        const count = result.discovery.tool_count ?? 0;
-        setExternalMcpNotice(count > 0 ? '已保存，发现 ' + count + ' 个工具，等待审核' : '已保存，暂未发现工具');
-      } else if (result.connection_saved && result.auth_configured === false) {
-        setExternalMcpNotice('连接已保存，但认证配置失败：' + (result.discovery?.reason_code || 'AUTH_CONFIGURATION_FAILED'));
-      } else if (result.connection_saved) {
-        setExternalMcpNotice('连接已保存，但读取工具失败：' + (result.discovery?.reason_code || 'DISCOVERY_FAILED'));
+      if (result.ok && result.connected === true && result.status === 'CONNECTED') {
+        setExternalMcpNotice('已连接 · ' + (result.tool_count ?? result.discovery?.tool_count ?? 0) + ' 个工具');
       } else {
-        setExternalMcpNotice('未保存：REQUEST_FAILED');
+        setExternalMcpNotice('未连接');
       }
     } catch (error) {
       const candidate = (error as { code?: unknown }).code;
@@ -1265,7 +1261,7 @@ export function ToolroomScreen() {
             </div>
 
             <p className="toolroom-mcp-preview-note">
-              新增后默认关闭。发现到的工具需要审核后才能使用。
+              新增后会立即检查连接。连接成功后即可使用发现到的工具。
             </p>
 
             <form className="toolroom-mcp-form" onSubmit={handleExternalMcpSubmit}>

@@ -12,9 +12,7 @@ from tools.external_server_registry import (
     DuplicateEndpointError,
     ExternalServerRegistry,
     InvalidStateTransitionError,
-    MASTER_OFF,
-    REGISTRATION_STATE,
-    REVIEW_REQUIRED_STATE,
+    DISCONNECTED_STATE,
     REVOKED_STATE,
     RegistryValidationError,
     UnknownServerError,
@@ -46,16 +44,13 @@ class ExternalServerRegistryTests(unittest.TestCase):
             **fields,
         )
 
-    def test_new_registration_has_opaque_backend_generated_id_and_default_off(self):
+    def test_new_registration_has_opaque_backend_generated_id_and_default_disconnected(self):
         record = self.register()
         self.assertTrue(record.server_id)
         self.assertNotEqual(record.server_id, record.display_name)
         self.assertNotEqual(record.server_id, "https://calendar.example/mcp")
         self.assertNotIn(":", record.server_id)
-        self.assertEqual(record.lifecycle_state, REGISTRATION_STATE)
-        self.assertEqual(record.master_state, MASTER_OFF)
-        self.assertFalse(record.model_visible)
-        self.assertFalse(record.execution_allowed)
+        self.assertEqual(record.lifecycle_state, DISCONNECTED_STATE)
         self.assertEqual(record.transport, "streamable_http")
         self.assertEqual(record.endpoint, "https://calendar.example/mcp")
 
@@ -90,12 +85,13 @@ class ExternalServerRegistryTests(unittest.TestCase):
         self.assertEqual(restored, original)
         self.assertEqual(renamed.server_id, original.server_id)
         self.assertEqual(renamed.endpoint, original.endpoint)
-        self.assertEqual(renamed.lifecycle_state, REGISTRATION_STATE)
-        self.assertEqual(renamed.master_state, MASTER_OFF)
+        self.assertEqual(renamed.lifecycle_state, DISCONNECTED_STATE)
         reopened_connection.close()
 
-    def test_endpoint_change_preserves_id_requires_review_and_forces_off(self):
+    def test_endpoint_change_preserves_id_and_disconnects(self):
         original = self.register()
+        self.owner.mark_connected(original.server_id, original.revision, now=BASE_TIME)
+        self.assertEqual(self.owner.get(original.server_id).lifecycle_state, "CONNECTED")
         changed = self.owner.update_connection(
             original.server_id,
             endpoint="https://calendar-new.example/mcp",
@@ -103,10 +99,8 @@ class ExternalServerRegistryTests(unittest.TestCase):
         )
         self.assertEqual(changed.server_id, original.server_id)
         self.assertEqual(changed.endpoint, "https://calendar-new.example/mcp")
-        self.assertEqual(changed.lifecycle_state, REVIEW_REQUIRED_STATE)
-        self.assertEqual(changed.master_state, MASTER_OFF)
-        self.assertFalse(changed.model_visible)
-        self.assertFalse(changed.execution_allowed)
+        self.assertEqual(changed.lifecycle_state, DISCONNECTED_STATE)
+        self.assertEqual(changed.revision, original.revision + 1)
 
     def test_transport_outside_frozen_scope_is_rejected_without_state_change(self):
         original = self.register()
@@ -121,7 +115,6 @@ class ExternalServerRegistryTests(unittest.TestCase):
         replacement = self.register(name="Replacement")
         self.assertEqual(revoked.server_id, original.server_id)
         self.assertEqual(revoked.lifecycle_state, REVOKED_STATE)
-        self.assertEqual(revoked.master_state, MASTER_OFF)
         self.assertEqual(self.owner.get(original.server_id).lifecycle_state, REVOKED_STATE)
         self.assertNotEqual(replacement.server_id, original.server_id)
         with self.assertRaises(InvalidStateTransitionError):

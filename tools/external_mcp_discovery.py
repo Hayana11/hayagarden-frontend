@@ -20,8 +20,8 @@ from typing import Any, Callable, Mapping, Optional
 from .external_server_registry import (
     ExternalServerRecord,
     ExternalServerRegistry,
-    REGISTRATION_STATE,
-    REVIEW_REQUIRED_STATE,
+    CONNECTED_STATE,
+    DISCONNECTED_STATE,
     REVOKED_STATE,
     UnknownServerError,
 )
@@ -63,7 +63,6 @@ def _base_result(
         "registration_provenance": record.registration_provenance if record else None,
         "registry_revision": record.revision if record else None,
         "lifecycle_state": record.lifecycle_state if record else None,
-        "master_state": record.master_state if record else None,
         "transport": record.transport if record else None,
         "endpoint_snapshot": record.endpoint if record else None,
         "status": status,
@@ -73,8 +72,6 @@ def _base_result(
         "tools": [],
         "diagnostics": diagnostics_out,
         "error": dict(error) if error else None,
-        "model_visible": False,
-        "execution_allowed": False,
     }
 
 
@@ -89,11 +86,8 @@ def _with_registry_provenance(
             "registration_provenance": record.registration_provenance,
             "registry_revision": record.revision,
             "lifecycle_state": record.lifecycle_state,
-            "master_state": record.master_state,
             "transport": record.transport,
             "endpoint_snapshot": record.endpoint,
-            "model_visible": False,
-            "execution_allowed": False,
         }
     )
     return result
@@ -249,7 +243,7 @@ class ExternalMcpDiscovery:
                 status=REVOKED_STATE,
                 error={"code": REVOKED_STATE, "summary": "revoked server discovery is denied"},
             )
-        if record.lifecycle_state not in (REGISTRATION_STATE, REVIEW_REQUIRED_STATE):
+        if record.lifecycle_state not in (CONNECTED_STATE, DISCONNECTED_STATE):
             return _base_result(
                 record,
                 status="REGISTRY_ERROR",
@@ -303,13 +297,23 @@ class ExternalMcpDiscovery:
                     ),
                     "current_registry_revision": current.revision if current else None,
                     "current_lifecycle_state": current.lifecycle_state if current else None,
-                    "current_master_state": current.master_state if current else None,
                     "current_transport": current.transport if current else None,
                     "current_endpoint": current.endpoint if current else None,
                 }
             )
             return stale
-        return _with_registry_provenance(discovered, snapshot)
+        result = _with_registry_provenance(discovered, snapshot)
+        if result.get("status") == "SUCCESS" and result.get("catalog_complete") is True:
+            try:
+                self._registry.mark_connected(snapshot.server_id, expected_revision=snapshot.revision)
+                result["lifecycle_state"] = CONNECTED_STATE
+                result["status"] = "SUCCESS"
+            except Exception:
+                result = _with_registry_provenance(
+                    _base_result(snapshot, status=STALE, error={"code": STALE, "summary": "server state changed during discovery"}),
+                    snapshot,
+                )
+        return result
 
 
 def discover_external_server(

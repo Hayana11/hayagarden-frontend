@@ -31,10 +31,6 @@ SCHEMA_TABLES = {
     "external_mcp_auth_bindings",
     "external_tool_candidate_registry",
     "external_tool_raw_snapshots",
-    "external_tool_approval_baselines",
-    "external_tool_review_audit",
-    "external_tool_side_effect_baselines",
-    "external_tool_side_effect_audit",
     "external_tool_invocation_attempts",
     "external_tool_invocation_audit",
 }
@@ -129,13 +125,15 @@ class ProductionCompositionTests(unittest.TestCase):
 
     def test_valid_key_opens_full_graph_with_one_connection_and_closes(self) -> None:
         with open_external_mcp_production() as graph:
+            self.assertEqual({name for name in graph.__dataclass_fields__ if not name.startswith("_")}, {
+                "server_registry", "secret_store", "auth_binding_registry",
+                "candidate_registry", "invocation", "materializer", "runtime",
+            })
             connection = graph.server_registry._connection
             for owner in (
                 graph.secret_store,
                 graph.auth_binding_registry,
                 graph.candidate_registry,
-                graph.side_effect_policy,
-                graph.execution_fence,
                 graph.invocation,
             ):
                 self.assertIs(owner._connection, connection)
