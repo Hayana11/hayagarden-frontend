@@ -19,6 +19,7 @@ test('list and call stay on the injected local bridge', () => {
     ],
     structuredContent: { value: 6 },
     isError: false,
+    _meta: { source: 'bounded-test' },
   };
   const runner = (request) => {
     requests.push(request);
@@ -41,6 +42,7 @@ test('list and call stay on the injected local bridge', () => {
   assert.deepEqual(successfulOutput.content, original.content);
   assert.deepEqual(successfulOutput.structuredContent, original.structuredContent);
   assert.equal(successfulOutput.isError, false);
+  assert.deepEqual(successfulOutput, original);
   assert.notEqual(successfulOutput.content[0].text, JSON.stringify(original));
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[1], {
@@ -55,6 +57,7 @@ test('list and call stay on the injected local bridge', () => {
     ],
     structuredContent: { code: 'INVALID_MOVE' },
     isError: true,
+    _meta: { source: 'bounded-error' },
   };
   const errorOutput = mcpCallResult(callSurface(
     'calendar__list__abc123',
@@ -64,6 +67,7 @@ test('list and call stay on the injected local bridge', () => {
   assert.deepEqual(errorOutput.content, remoteError.content);
   assert.deepEqual(errorOutput.structuredContent, remoteError.structuredContent);
   assert.equal(errorOutput.isError, true);
+  assert.deepEqual(errorOutput, remoteError);
   assert.equal(mcpCallResult({ status: 'TOOL_ERROR' }).isError, true);
   assert.ok(buildServer({ runner }));
 });
