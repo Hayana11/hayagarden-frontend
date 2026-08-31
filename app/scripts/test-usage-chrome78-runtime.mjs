@@ -15,6 +15,8 @@ import { lastItem } from '../src/lib/lastItem.ts';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const usagePath = path.join(root, 'src/screens/UsageScreen.tsx');
 const usageSource = fs.readFileSync(usagePath, 'utf8');
+const apiPath = path.join(root, 'src/lib/api.ts');
+const apiSource = fs.readFileSync(apiPath, 'utf8');
 
 // 1. UsageScreen must not call Array.prototype.at
 assert.doesNotMatch(usageSource, /\.at\(/, 'UsageScreen must not use .at()');
@@ -56,7 +58,11 @@ const blockers = ['.at(', 'replaceAll', 'Object.hasOwn', 'structuredClone'];
 const hits = blockers.filter((token) => usageSource.includes(token));
 assert.deepEqual(hits, [], `unexpected Chrome78 runtime tokens in UsageScreen: ${hits.join(', ')}`);
 
-// 6. Render the real private AgentQuotaCard without exporting a test-only app API.
+// 6. Claude percentages must be accepted only from the OAuth-labelled snapshot.
+assert.match(apiSource, /source === 'claude_oauth_usage'/);
+assert.doesNotMatch(apiSource, /function legacyClaude/);
+
+// 7. Render the real private AgentQuotaCard without exporting a test-only app API.
 // Only page-level dependencies are stubbed; the card, bars and formatters run.
 const compiledUsage = ts.transpileModule(
   usageSource + '\nexport { AgentQuotaCard };',
@@ -85,7 +91,7 @@ vm.runInNewContext(compiledUsage, {
 const { AgentQuotaCard } = renderedModule.exports;
 assert.equal(typeof AgentQuotaCard, 'function');
 
-const quotaWindow = { usedPct: null, resetAt: '', remainingMinutes: null };
+const quotaWindow = { usedPct: null, remainingPct: null, resetAt: '', remainingMinutes: null };
 const baseAgent = {
   id: 'claude', name: 'Claude Code', available: true, source: 'claude_project_jsonl',
   updatedAt: '2026-08-30T16:40:00Z', contextTokens: null, contextWindowTokens: null,
@@ -130,12 +136,12 @@ assert.match(ccusageHtml, /ccusage active block/);
 assert.doesNotMatch(ccusageHtml, />\d+%</);
 const officialHtml = renderAgent(limitCases[4][0], {
   source: 'claude_oauth_usage',
-  fiveHour: { ...quotaWindow, usedPct: 12 },
-  sevenDay: { ...quotaWindow, usedPct: 34 },
+  fiveHour: { ...quotaWindow, usedPct: 12, remainingPct: 88 },
+  sevenDay: { ...quotaWindow, usedPct: 34, remainingPct: 66 },
 });
 assert.ok(limitAlert(officialHtml));
-assert.match(officialHtml, />12%</);
-assert.match(officialHtml, />34%</);
+assert.match(officialHtml, />12% · 剩余 88%</);
+assert.match(officialHtml, />34% · 剩余 66%</);
 assert.match(officialHtml, /Claude 官方账号额度/);
 
 // Codex retains its original exhausted-only gate and original wording.
