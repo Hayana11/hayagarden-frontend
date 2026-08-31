@@ -20,7 +20,7 @@ class ToolInventoryTest(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(sum(g["total"] for g in self.p["groups"]), 85)
         self.assertEqual(sum(g["available"] for g in self.p["groups"]), self.p["available_count"])
-        self.assertEqual(self.p["available_count"], 19)
+        self.assertEqual(self.p["available_count"], 20)
         self.assertEqual(self.p["unavailable_count"], 66)
 
     def test_workspace_not_duplicated(self):
