@@ -75,10 +75,7 @@ test('surface names satisfy the installed MCP ToolSchema contract', () => {
     ['-c', [
       'import json',
       'from tools.external_mcp_surface import surface_tool_name',
-      'print(json.dumps({',
-      '  "long": surface_tool_name("S" * 500, "T" * 500, "ext:long:roll"),',
-      '  "non_ascii": surface_tool_name("中文服务器", "骰子工具", "ext:cn:roll"),',
-      '}))',
+      'print(json.dumps({"long": surface_tool_name("S" * 500, "T" * 500, "ext:long:roll"), "non_ascii": surface_tool_name("中文服务器", "骰子工具", "ext:cn:roll")}))',
     ].join('; '),
     { cwd: process.cwd(), encoding: 'utf8' },
   ));
