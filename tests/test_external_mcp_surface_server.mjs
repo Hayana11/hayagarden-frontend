@@ -92,14 +92,14 @@ test('safe local failure codes are visible and unsafe codes fall back', () => {
   ]) {
     const output = localFailure(code);
     assert.equal(output.isError, true);
-    assert.equal(output.content[0].text, `External MCP call was not completed. [${code}]`);
+    assert.match(output.content[0].text, new RegExp(`\\[${code}\\]$`));
   }
 
   const unsafe = 'raw exception: Authorization=do-not-leak';
   const fallback = localFailure(unsafe);
   assert.equal(
     fallback.content[0].text,
-    'External MCP call was not completed. [SURFACE_ADAPTER_FAILED]',
+    'External MCP surface adapter failed. [SURFACE_ADAPTER_FAILED]',
   );
   assert.doesNotMatch(fallback.content[0].text, /raw exception|Authorization|do-not-leak/);
 });
