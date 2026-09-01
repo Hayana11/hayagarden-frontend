@@ -75,6 +75,119 @@ export function mergePendingChatImages(
   return current.map((image) => settledById.get(image.id) || image);
 }
 
+export const CHAT_IMAGE_EXIF_SCAN_BYTES = 256 * 1024;
+
+type JpegExifOrientation = number | null | 'malformed';
+
+function isJpegFile(file: File): boolean {
+  const mime = sourceMime(file);
+  const ext = extensionOf(file.name || '');
+  return mime === 'image/jpeg' || mime === 'image/jpg' || ext === 'jpg' || ext === 'jpeg';
+}
+
+function readU16(bytes: Uint8Array, offset: number, littleEndian: boolean): number {
+  return littleEndian
+    ? bytes[offset] | (bytes[offset + 1] << 8)
+    : (bytes[offset] << 8) | bytes[offset + 1];
+}
+
+function readU32(bytes: Uint8Array, offset: number, littleEndian: boolean): number {
+  return littleEndian
+    ? (bytes[offset]
+      | (bytes[offset + 1] << 8)
+      | (bytes[offset + 2] << 16)
+      | (bytes[offset + 3] << 24)) >>> 0
+    : (((bytes[offset] << 24)
+      | (bytes[offset + 1] << 16)
+      | (bytes[offset + 2] << 8)
+      | bytes[offset + 3]) >>> 0);
+}
+
+function parseExifTiff(bytes: Uint8Array, start: number, end: number): JpegExifOrientation {
+  if (start + 8 > end) return 'malformed';
+  const littleEndian = bytes[start] === 0x49 && bytes[start + 1] === 0x49;
+  const bigEndian = bytes[start] === 0x4d && bytes[start + 1] === 0x4d;
+  if (!littleEndian && !bigEndian) return 'malformed';
+  if (readU16(bytes, start + 2, littleEndian) !== 42) return 'malformed';
+  const ifdOffset = readU32(bytes, start + 4, littleEndian);
+  const ifd = start + ifdOffset;
+  if (ifd < start || ifd + 2 > end) return 'malformed';
+  const entryCount = readU16(bytes, ifd, littleEndian);
+  const entriesEnd = ifd + 2 + entryCount * 12;
+  if (entriesEnd + 4 > end) return 'malformed';
+  for (let index = 0; index < entryCount; index += 1) {
+    const entry = ifd + 2 + index * 12;
+    if (readU16(bytes, entry, littleEndian) !== 0x0112) continue;
+    const type = readU16(bytes, entry + 2, littleEndian);
+    const count = readU32(bytes, entry + 4, littleEndian);
+    if (type !== 3 || count !== 1) return 'malformed';
+    const orientation = readU16(bytes, entry + 8, littleEndian);
+    return orientation >= 1 && orientation <= 8 ? orientation : 'malformed';
+  }
+  return null;
+}
+
+export function parseJpegExifOrientation(bytes: Uint8Array): JpegExifOrientation {
+  if (bytes.length < 2 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return 'malformed';
+  let offset = 2;
+  while (offset < bytes.length) {
+    if (bytes[offset] !== 0xff) return 'malformed';
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) return 'malformed';
+    const marker = bytes[offset];
+    offset += 1;
+    if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (marker === 0xd9 || marker === 0xda) return null;
+    if (offset + 2 > bytes.length) return 'malformed';
+    const segmentLength = readU16(bytes, offset, false);
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) return 'malformed';
+    const payloadStart = offset + 2;
+    const payloadEnd = offset + segmentLength;
+    if (marker === 0xe1
+      && payloadEnd - payloadStart >= 6
+      && bytes[payloadStart] === 0x45
+      && bytes[payloadStart + 1] === 0x78
+      && bytes[payloadStart + 2] === 0x69
+      && bytes[payloadStart + 3] === 0x66
+      && bytes[payloadStart + 4] === 0
+      && bytes[payloadStart + 5] === 0) {
+      return parseExifTiff(bytes, payloadStart + 6, payloadEnd);
+    }
+    offset = payloadEnd;
+  }
+  return 'malformed';
+}
+
+async function readBlobPrefix(blob: Blob): Promise<Uint8Array> {
+  const candidate = blob as Blob & { arrayBuffer?: () => Promise<ArrayBuffer> };
+  if (typeof candidate.arrayBuffer === 'function') {
+    return new Uint8Array(await candidate.arrayBuffer());
+  }
+  if (typeof FileReader === 'undefined') throw new Error('exif-reader-unavailable');
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.onerror = () => reject(reader.error || new Error('exif-reader-failed'));
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+async function preserveForJpegExif(file: File): Promise<string | null> {
+  if (!isJpegFile(file)) return null;
+  try {
+    const prefix = await readBlobPrefix(file.slice(0, CHAT_IMAGE_EXIF_SCAN_BYTES));
+    const parsed = parseJpegExifOrientation(prefix);
+    if (parsed === 'malformed') {
+      return file.size > CHAT_IMAGE_EXIF_SCAN_BYTES ? 'preserve-exif-unknown' : 'preserve-malformed-exif';
+    }
+    if (typeof parsed === 'number' && parsed >= 2 && parsed <= 8) return 'preserve-exif-orientation';
+    if (file.size > CHAT_IMAGE_EXIF_SCAN_BYTES) return 'preserve-exif-unknown';
+    return null;
+  } catch {
+    return 'preserve-exif-unknown';
+  }
+}
+
 function positiveInteger(value: number): number {
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
@@ -233,6 +346,8 @@ async function encodeAtQuality(canvas: HTMLCanvasElement, mime: string, quality:
 export async function compressChatImage(file: File): Promise<ChatImageCompressionResult> {
   const preserved = shouldPreserveWithoutDecode(file);
   if (preserved) return originalResult(file, 0, 0, preserved);
+  const exifPreserved = await preserveForJpegExif(file);
+  if (exifPreserved) return originalResult(file, 0, 0, exifPreserved);
 
   let decoded: { image: HTMLImageElement; width: number; height: number };
   try { decoded = await loadImage(file); }
