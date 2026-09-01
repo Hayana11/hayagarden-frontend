@@ -1442,15 +1442,13 @@ def is_formal_chat_message(
     image_url = ''
     if hasattr(row, 'keys') and 'image_url' in row.keys():
         image_url = str(row['image_url'] or '').strip()
-    has_attachments = False
-    if hasattr(row, 'keys') and 'attachments' in row.keys():
-        from chat.attachment_contract import persisted_chat_attachments
-        has_attachments = bool(persisted_chat_attachments(
-            row['attachments'],
-            legacy_file_url=row['file_url'] if 'file_url' in row.keys() else '',
-            legacy_file_name=row['file_name'] if 'file_name' in row.keys() else '',
-            legacy_image_url=image_url,
-        ))
+    from chat.attachment_contract import persisted_chat_attachments
+    has_attachments = bool(persisted_chat_attachments(
+        row['attachments'] if hasattr(row, 'keys') and 'attachments' in row.keys() else [],
+        legacy_file_url=row['file_url'] if hasattr(row, 'keys') and 'file_url' in row.keys() else '',
+        legacy_file_name=row['file_name'] if hasattr(row, 'keys') and 'file_name' in row.keys() else '',
+        legacy_image_url=image_url,
+    ))
     if not content.strip() and not image_url and not has_attachments:
         return False
     if _SAVE_RE.search(content):
@@ -1527,20 +1525,19 @@ def _message_display_content(row: Any) -> str:
         image_url = str(row['image_url'] or '').strip()
     if image_url:
         return '[image]'
-    if hasattr(row, 'keys') and 'attachments' in row.keys():
-        from chat.attachment_contract import persisted_chat_attachments
-        names = [
-            str(item.get('name') or '附件')
-            for item in persisted_chat_attachments(
-                row['attachments'],
-                legacy_file_url=row['file_url'] if 'file_url' in row.keys() else '',
-                legacy_file_name=row['file_name'] if 'file_name' in row.keys() else '',
-                legacy_image_url=image_url,
-            )
-            if item['type'] == 'file'
-        ]
-        if names:
-            return '[附件: %s]' % ', '.join(names)
+    from chat.attachment_contract import persisted_chat_attachments
+    names = [
+        str(item.get('name') or '附件')
+        for item in persisted_chat_attachments(
+            row['attachments'] if hasattr(row, 'keys') and 'attachments' in row.keys() else [],
+            legacy_file_url=row['file_url'] if hasattr(row, 'keys') and 'file_url' in row.keys() else '',
+            legacy_file_name=row['file_name'] if hasattr(row, 'keys') and 'file_name' in row.keys() else '',
+            legacy_image_url=image_url,
+        )
+        if item['type'] == 'file'
+    ]
+    if names:
+        return '[附件: %s]' % ', '.join(names)
     return ''
 
 
