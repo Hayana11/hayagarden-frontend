@@ -53,6 +53,10 @@ class VisionBridgeUnitTests(unittest.TestCase):
         self.attach_dir.mkdir()
         self.png = self.upload_dir / 'probe_vision.png'
         _make_png(self.png)
+        self.webp = self.upload_dir / 'probe.webp'
+        _make_webp(self.webp)
+        self.attachment_webp = self.attach_dir / 'deadbeef.webp'
+        _make_webp(self.attachment_webp)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -67,7 +71,9 @@ class VisionBridgeUnitTests(unittest.TestCase):
 
     def _get_attachment(self, aid: str):
         # Simple fake: id maps to <id>.png in attach_dir when present.
-        fname = aid + '.png'
+        webp_name = aid + '.webp'
+        webp_path = self.attach_dir / webp_name
+        fname = webp_name if webp_path.is_file() else aid + '.png'
         path = self.attach_dir / fname
         if not path.is_file():
             return None
@@ -75,8 +81,81 @@ class VisionBridgeUnitTests(unittest.TestCase):
             'id': aid,
             'filename': fname,
             'kind': 'image',
-            'mime': 'image/png',
+            'mime': '' if fname.endswith('.webp') else 'image/png',
         }
+
+    def test_t9_deterministic_allowed_extensions_ignore_host_mimetypes(self):
+        fixtures = {
+            '.png': 'PNG',
+            '.jpg': 'JPEG',
+            '.jpeg': 'JPEG',
+            '.webp': 'WEBP',
+        }
+        expected = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp',
+        }
+        for extension, fmt in fixtures.items():
+            path = self.upload_dir / ('canonical' + extension)
+            image = Image.new('RGB', (8, 8), 'white')
+            image.save(path, format=fmt)
+        with mock.patch(
+            'chat.cc_vision_bridge.mimetypes.guess_type',
+            return_value=(None, None),
+        ):
+            for extension, mime in expected.items():
+                data, resolved = resolve_image_bytes(
+                    '/static/uploads/canonical' + extension,
+                    upload_dir=str(self.upload_dir),
+                )
+                self.assertTrue(data)
+                self.assertEqual(resolved, mime)
+
+    def test_t9_unknown_image_extensions_fail_closed(self):
+        with mock.patch(
+            'chat.cc_vision_bridge.mimetypes.guess_type',
+            return_value=(None, None),
+        ):
+            for extension in ('.gif', '.svg', '.bmp', '.tiff', '.heic', '.unknown'):
+                path = self.upload_dir / ('unsupported' + extension)
+                path.write_bytes(b'non-empty fixture')
+                with self.assertRaises(VisionBridgeError) as ar:
+                    resolve_image_bytes(
+                        '/static/uploads/unsupported' + extension,
+                        upload_dir=str(self.upload_dir),
+                    )
+                self.assertEqual(ar.exception.code, 'invalid_mime')
+
+    def test_t10_static_webp_with_unknown_host_mime_builds_content(self):
+        with mock.patch(
+            'chat.cc_vision_bridge.mimetypes.guess_type',
+            return_value=(None, None),
+        ):
+            data, mime = self._resolve('/static/uploads/probe.webp')
+            self.assertTrue(data)
+            self.assertEqual(mime, 'image/webp')
+            content = build_claude_user_content(
+                text='看看这个',
+                image_refs=['/static/uploads/probe.webp'],
+                resolve_fn=self._resolve,
+            )
+        self.assertIsInstance(content, list)
+        image_block = next(b for b in content if b.get('type') == 'image')
+        self.assertEqual(image_block['source']['media_type'], 'image/webp')
+        self.assertTrue(image_block['source']['data'])
+        self.assertGreater(len(image_block['source']['data']), 0)
+        assert_claude_user_content_safe(content)
+
+    def test_t11_attachment_webp_with_empty_row_mime(self):
+        with mock.patch(
+            'chat.cc_vision_bridge.mimetypes.guess_type',
+            return_value=(None, None),
+        ):
+            data, mime = self._resolve('attachment://deadbeef')
+        self.assertTrue(data)
+        self.assertEqual(mime, 'image/webp')
 
     # --- T1 text-only regression ---
     def test_t1_text_only_returns_plain_string(self):
@@ -141,7 +220,7 @@ class VisionBridgeUnitTests(unittest.TestCase):
         with self.assertRaises(VisionBridgeError) as ar:
             build_claude_user_content(
                 text='x',
-                image_refs=['attachment://deadbeef'],
+                image_refs=['attachment://badc0ffe'],
                 resolve_fn=self._resolve,
             )
         self.assertEqual(ar.exception.code, 'missing_attachment')
@@ -187,7 +266,7 @@ class VisionBridgeUnitTests(unittest.TestCase):
     def test_t6_hot_resident_image_turn_no_respawn(self):
         import cc_resident
 
-        ref = '/static/uploads/probe_vision.png'
+        ref = '/static/uploads/probe.webp'
         content = build_claude_user_content(
             text='看图',
             image_refs=[ref],
@@ -260,9 +339,11 @@ class VisionBridgeUnitTests(unittest.TestCase):
         payload = json.loads(writes[0].strip())
         self.assertEqual(payload['type'], 'user')
         self.assertIsInstance(payload['message']['content'], list)
-        self.assertTrue(any(
-            b.get('type') == 'image' for b in payload['message']['content']
-        ))
+        image_block = next(
+            b for b in payload['message']['content'] if b.get('type') == 'image'
+        )
+        self.assertEqual(image_block['source']['media_type'], 'image/webp')
+        self.assertTrue(image_block['source']['data'])
         # No respawn/kill from vision turn itself
         self.assertEqual(kill_calls, [])
         self.assertTrue(any(e[0] == 'done' for e in events))
@@ -468,6 +549,8 @@ class DailyRuntimeVisionWiringTests(unittest.TestCase):
         self.upload_dir.mkdir()
         self.png = self.upload_dir / 'hot_img.png'
         _make_png(self.png)
+        self.webp = self.upload_dir / 'hot_img.webp'
+        _make_webp(self.webp)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -493,6 +576,27 @@ class DailyRuntimeVisionWiringTests(unittest.TestCase):
             b.get('type') == 'text' and '图片中央' in b.get('text', '')
             for b in out
         ))
+
+    def test_daily_hot_turn_webp_becomes_multimodal(self):
+        from chat.daily_runtime import format_resident_turn_content
+        from chat import cc_vision_bridge as vb
+
+        def _resolve(ref):
+            return resolve_image_bytes(ref, upload_dir=str(self.upload_dir))
+
+        with mock.patch.object(vb, 'resolve_image_bytes', side_effect=_resolve):
+            out = format_resident_turn_content(
+                assembly={'state': '', 'current_day_history': []},
+                user_content='看看 WebP',
+                is_cold=False,
+                is_respawn=False,
+                user_image_url='/static/uploads/hot_img.webp',
+            )
+        self.assertIsInstance(out, list)
+        image_block = next(b for b in out if b.get('type') == 'image')
+        self.assertEqual(image_block['source']['media_type'], 'image/webp')
+        self.assertTrue(image_block['source']['data'])
+        assert_claude_user_content_safe(out)
 
     def test_daily_text_only_unchanged(self):
         from chat.daily_runtime import format_resident_turn_content
