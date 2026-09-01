@@ -13,8 +13,10 @@ import json
 import os
 import select
 import subprocess
+import tempfile
 import threading
 import time
+import uuid
 
 import config_store
 
@@ -308,6 +310,10 @@ class ResidentSession:
         # It is written only after Popen succeeds and is intentionally not
         # refreshed by _reset_session_meta or by a failed spawn.
         self._bound_tool_surface_fingerprint = None
+        # Each UH-A0 resident owns one opaque lease path for its full lifetime.
+        # It is allocated before the first Claude spawn and never derives from
+        # the provider session id, which is unavailable on cold start.
+        self._uh_a0_turn_lease_path = self._new_uh_a0_turn_lease_path()
         # No-benefit respawn loop breaker (P0 cold-storm fix, Fence C).
         # Deliberately *not* reset by ``_reset_session_meta`` / ``_spawn`` —
         # the estimate/generation pair must survive across the respawn it gates.
@@ -318,6 +324,19 @@ class ResidentSession:
         # immediate post-cold storms from genuine hot growth respawns.
         self._hard_context_pre_spawn_turns = None
         self._reset_session_meta(respawn_reason=None)
+
+    @staticmethod
+    def _new_uh_a0_turn_lease_path():
+        lease_dir = os.path.join(tempfile.gettempdir(), 'hayagarden-uh-a0-turn-leases')
+        return os.path.join(lease_dir, f'{uuid.uuid4().hex}.json')
+
+    def _prepare_spawn_env(self, env):
+        """Bind the resident-owned lease path for every UH-A0 spawn."""
+        if self._tool_profile != TOOL_PROFILE_UH_A0:
+            return env
+        prepared = dict(os.environ if env is None else env)
+        prepared['UH_A0_TURN_LEASE_PATH'] = self._uh_a0_turn_lease_path
+        return prepared
 
     def _reset_session_meta(self, *, respawn_reason):
         self._resident_turn_count = 0
@@ -360,14 +379,12 @@ class ResidentSession:
             }
         if self._tool_profile == TOOL_PROFILE_UH_A0:
             from tools.cc_capability_adapter import build_uh_a0_spawn_plan
+            spawn_env = self._prepare_spawn_env(env)
             plan = build_uh_a0_spawn_plan(
                 cwd=self._cwd,
                 legacy_mcp_config_path=self._mcp_config_path,
-                env=env,
+                env=spawn_env,
             )
-            self._uh_a0_turn_lease_path = plan["turn_lease_path"]
-            if isinstance(env, dict):
-                env.setdefault("UH_A0_TURN_LEASE_PATH", plan["turn_lease_path"])
             return {
                 'tools': plan['built_in_tools_csv'],
                 'extra': list(plan['spawn_extra_args']),
@@ -414,6 +431,7 @@ class ResidentSession:
         from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         self._kill(quiet=True)
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+        env = self._prepare_spawn_env(env)
         try:
             require_pinned_claude_version(env=env, cwd=self._cwd)
         except ClaudeRuntimeError as exc:
@@ -607,6 +625,7 @@ class ResidentSession:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            env = self._prepare_spawn_env(env)
             try:
                 require_pinned_claude_version(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
@@ -822,6 +841,7 @@ class ResidentSession:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
+            env = self._prepare_spawn_env(env)
             try:
                 require_pinned_claude_version(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
@@ -1077,14 +1097,11 @@ class ResidentSession:
         if self._tool_profile == TOOL_PROFILE_UH_A0:
             if turn_lease is None:
                 raise ResidentError('uh_a0_turn_lease_required')
-            from tools.execution_fence import UH_A0TurnRuntime, default_turn_lease_path
+            from tools.execution_fence import UH_A0TurnRuntime
             uh_a0_runtime = turn_runtime
             if uh_a0_runtime is None:
                 uh_a0_runtime = UH_A0TurnRuntime(
-                    getattr(
-                        self, '_uh_a0_turn_lease_path',
-                        default_turn_lease_path(cwd=self._cwd),
-                    ),
+                    self._uh_a0_turn_lease_path,
                     session_id=self._session_id,
                 )
             uh_a0_runtime.start_turn(turn_lease, session_id=self._session_id)
