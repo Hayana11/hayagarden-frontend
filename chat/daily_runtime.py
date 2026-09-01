@@ -2772,6 +2772,11 @@ def ensure_resident_and_stream(
             )
             if 'on_stdin_flushed' in params or accepts_kwargs:
                 send_kwargs['on_stdin_flushed'] = _mark_stdin_flushed
+            # Synthetic resident heartbeat keeps the browser transport alive
+            # during long Claude turns; it is not model activity and is only
+            # enabled when the resident explicitly supports the kwarg.
+            if 'idle_heartbeat_sec' in params or accepts_kwargs:
+                send_kwargs['idle_heartbeat_sec'] = 10.0
             if plan.tool_profile == cc_resident.TOOL_PROFILE_UH_A0:
                 if not isinstance(plan.turn_lease, dict) or not plan.turn_lease:
                     raise DailyRuntimeError(
