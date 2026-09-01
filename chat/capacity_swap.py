@@ -240,9 +240,13 @@ def _resolve_anchor(
             warnings,
         )
 
-    image_url = str(first_user.get('image_url') or '').strip()
+    has_image_attachment = bool(first_user.get('image_url') or any(
+        str(item.get('type') or '').lower() == 'image'
+        for item in (first_user.get('attachments') or [])
+        if isinstance(item, dict)
+    ))
     anchor_status = AnchorStatus.ANCHOR_RETAINED
-    if image_url and isinstance(canonical, str):
+    if has_image_attachment and isinstance(canonical, str):
         anchor_status = AnchorStatus.ANCHOR_IMAGE_DEGRADED
         warnings.append('anchor_image_degraded_to_text')
 
