@@ -174,6 +174,14 @@ _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
 }
 
+_BROWSER_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "mcp__browser__taobao_read": {
+        "type": "object",
+        "properties": {"url": {"type": "string", "format": "uri"}},
+        "required": ["url"],
+    },
+}
+
 
 def _parse_allowed_tools_ordered(allowed_tools: Optional[str]) -> list[str]:
     """Preserve allowlist CSV order; dedupe by first occurrence only."""
@@ -193,6 +201,7 @@ def _static_schema_registry() -> dict[str, dict[str, Any]]:
     registry.update(_HOME_TOOL_SCHEMAS)
     registry.update(_INTERNAL_TOOL_SCHEMAS)
     registry.update(_CAPABILITY_PROXY_TOOL_SCHEMAS)
+    registry.update(_BROWSER_TOOL_SCHEMAS)
     try:
         from codebase.client import CODEBASE_TOOLS
 
@@ -307,6 +316,8 @@ def _default_live_tool_lists(
 def _surface_kind(name: str) -> str:
     if str(name).startswith("mcp__capability__"):
         return "capability_proxy"
+    if str(name).startswith("mcp__browser__"):
+        return "browser_read"
     if str(name).startswith("mcp__"):
         return "legacy_physical"
     if str(name) in {"Read", "Glob", "Grep", "WebSearch", "WebFetch"}:
