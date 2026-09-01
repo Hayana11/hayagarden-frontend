@@ -414,6 +414,10 @@ export async function streamChatReply(
         if (ev.dup) continue; // legacy-compat duplicate events
         armSafety();
         switch (ev.t) {
+          case 'ping':
+            // Transport keepalive only: armSafety already ran above; do not
+            // dispatch synthetic heartbeats into any visible Chat handler.
+            break;
           case 'think':
             handlers.onThink(String(ev.d ?? ''));
             break;
