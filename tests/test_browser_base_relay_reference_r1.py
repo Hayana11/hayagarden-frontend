@@ -7,6 +7,7 @@ SOURCE = (RELAY / "relay.py").read_text(encoding="utf-8")
 CLIENT = (RELAY / "client.html").read_text(encoding="utf-8")
 LOGIN = (RELAY / "login.html").read_text(encoding="utf-8")
 ENV = (RELAY / ".env.example").read_text(encoding="utf-8")
+LICENSE = (RELAY / "LICENSE.ai-social-browser").read_text(encoding="utf-8")
 SERVICE = (ROOT / "deploy/systemd/hayagarden-browser-base.service").read_text(encoding="utf-8")
 REQUIREMENTS = (ROOT / "requirements.txt").read_text(encoding="utf-8")
 
@@ -59,6 +60,11 @@ def test_relay_pages_auth_dependency_and_generic_scope():
     assert "websockets>=14" in REQUIREMENTS
     assert "BROWSER_RELAY_PROXY_SERVER=" in ENV
     assert "BROWSER_RELAY_HOST=0.0.0.0" not in ENV
+    assert "/etc/hayagarden-browser-base.env" in ENV
+    assert "/etc/browser-relay.env" not in ENV
+    assert "MIT License" in LICENSE
+    assert "Copyright (c) 2026 blueberriely" in LICENSE
+    assert "LICENSE.ai-social-browser" in SOURCE
 
     forbidden = (
         "taobao", "tmall", "xiaohongshu", "twitter", "shopping", "cart",
@@ -67,6 +73,12 @@ def test_relay_pages_auth_dependency_and_generic_scope():
     runtime_text = "\n".join((SOURCE, CLIENT, LOGIN, ENV, SERVICE)).lower()
     for term in forbidden:
         assert term not in runtime_text, term
+
+
+def test_environment_file_path_has_one_authority():
+    assert "EnvironmentFile=-/etc/hayagarden-browser-base.env" in SERVICE
+    assert "/etc/hayagarden-browser-base.env" in ENV
+    assert "/etc/browser-relay.env" not in ENV
 
 
 def test_service_starts_one_relay_and_not_chromium():
@@ -83,6 +95,7 @@ if __name__ == "__main__":
         test_reference_relay_structure_and_ownership,
         test_fixed_browser_endpoints_profile_and_display,
         test_relay_pages_auth_dependency_and_generic_scope,
+        test_environment_file_path_has_one_authority,
         test_service_starts_one_relay_and_not_chromium,
     ):
         test()
