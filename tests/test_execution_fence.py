@@ -369,6 +369,7 @@ class ExecutionFenceTests(unittest.TestCase):
             set(physical_surface_names()),
             {
                 "Read", "Glob", "Grep", "WebSearch", "WebFetch",
+                "mcp__browser__taobao_read",
                 "mcp__capability__memory_search", "mcp__capability__memory_write",
                 "mcp__capability__home_light_status",
                 "mcp__capability__diary_write",
@@ -384,4 +385,3 @@ class ExecutionFenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
