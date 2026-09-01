@@ -77,18 +77,19 @@ function jpegWithExifOrientation(orientation) {
   const upright = await compressChatImage(orientation1File);
   assert.notEqual(upright.reason, 'preserve-exif-unknown');
 
-  const truncated = new Uint8Array(256 * 1024 + 64);
+  const scanBoundary = 256 * 1024;
+  const truncated = new Uint8Array(scanBoundary + 64);
   truncated.set([0xff, 0xd8], 0);
-  let offset = 2;
-  while (offset + 65535 < 256 * 1024 - 16) {
-    truncated.set([0xff, 0xe0, 0xff, 0xff], offset);
-    offset += 65535;
+  let markerStart = 2;
+  while (markerStart + 2 + 65535 <= scanBoundary - 8) {
+    truncated.set([0xff, 0xe0, 0xff, 0xff], markerStart);
+    markerStart += 2 + 65535;
   }
-  const finalAppLength = (256 * 1024 - 8) - offset;
-  truncated.set([0xff, 0xe0, (finalAppLength >> 8) & 0xff, finalAppLength & 0xff], offset);
-  offset += finalAppLength;
-  truncated.set([0xff, 0xe1, 0x00, 0x64, 0x45, 0x78, 0x69, 0x66, 0x00, 0x00], offset);
-  assert.equal(parseJpegExifOrientation(truncated.slice(0, 256 * 1024), false), 'unknown');
+  const finalAppLength = (scanBoundary - 8) - (markerStart + 2);
+  truncated.set([0xff, 0xe0, (finalAppLength >> 8) & 0xff, finalAppLength & 0xff], markerStart);
+  markerStart += 2 + finalAppLength;
+  truncated.set([0xff, 0xe1, 0x00, 0x64, 0x45, 0x78, 0x69, 0x66, 0x00, 0x00], markerStart);
+  assert.equal(parseJpegExifOrientation(truncated.slice(0, scanBoundary), false), 'unknown');
 
   const malformedExif = new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00, 0x0a, 0x45, 0x78, 0x69, 0x66, 0x00, 0x00]);
   const malformedFile = new File([malformedExif], 'malformed.jpg', { type: 'image/jpeg' });
