@@ -246,7 +246,11 @@ export async function compressChatImage(file: File): Promise<ChatImageCompressio
     if (selected) break;
   }
 
-  const chosen = selected || best;
+  const chosen = selected
+    ? selected
+    : best
+      ? { ...best, target: false }
+      : null;
   if (!chosen || chosen.blob.size >= file.size) {
     return originalResult(file, decoded.width, decoded.height, 'encoded-not-smaller-original');
   }
