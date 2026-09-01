@@ -168,6 +168,7 @@ def build_claude_user_content(
     image_refs: Optional[Sequence[str]] = None,
     *,
     resolve_fn: Optional[Callable[[str], tuple[bytes, str]]] = None,
+    attachment_parts: Optional[Sequence[dict[str, str]]] = None,
 ) -> Any:
     """Build Claude Code user ``content`` (str or multimodal list).
 
@@ -175,7 +176,11 @@ def build_claude_user_content(
     text+image / image-only → ``list`` of content blocks
     """
     refs = [str(r).strip() for r in (image_refs or []) if str(r or '').strip()]
-    if not refs:
+    parts = list(attachment_parts or [])
+    if refs and parts:
+        raise VisionBridgeError('image_refs and attachment_parts are mutually exclusive',
+                                code='bad_content_parts')
+    if not refs and not parts:
         return str(text or '')
 
     resolve = resolve_fn or (lambda r: resolve_image_bytes(r))
@@ -186,9 +191,28 @@ def build_claude_user_content(
     if text_part:
         blocks.append({'type': 'text', 'text': text_part})
 
-    for ref in refs:
-        data, mime = resolve(ref)
-        blocks.append(build_image_content_block(data, mime))
+    if parts:
+        for part in parts:
+            if not isinstance(part, dict):
+                raise VisionBridgeError('invalid attachment part', code='bad_content_part')
+            kind = str(part.get('type') or '').strip().lower()
+            if kind == 'text':
+                part_text = str(part.get('text') or '')
+                if part_text:
+                    blocks.append({'type': 'text', 'text': part_text})
+            elif kind == 'image':
+                ref = str(part.get('ref') or '').strip()
+                if not ref:
+                    raise VisionBridgeError('empty image reference', code='missing_attachment')
+                data, mime = resolve(ref)
+                blocks.append(build_image_content_block(data, mime))
+            else:
+                raise VisionBridgeError('unexpected attachment part type: %s' % kind,
+                                        code='bad_content_part')
+    else:
+        for ref in refs:
+            data, mime = resolve(ref)
+            blocks.append(build_image_content_block(data, mime))
 
     if not blocks:
         raise VisionBridgeError('image-only turn produced no content',
