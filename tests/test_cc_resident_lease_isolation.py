@@ -9,11 +9,8 @@ from unittest import mock
 
 import cc_resident
 from tools import cc_capability_adapter, external_mcp_surface
-from tools.execution_fence import (
-    UH_A0TurnRuntime,
-    issue_turn_lease,
-    read_current_turn_lease,
-)
+from tools.execution_fence import UH_A0TurnRuntime, read_current_turn_lease
+from tools.lease_signer import issue_turn_lease
 
 
 class ResidentLeaseIsolationTests(unittest.TestCase):
@@ -109,18 +106,17 @@ class ResidentLeaseIsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             resident = cc_resident.ResidentSession(tmp, "", "")
             captured = {}
-            resident._build_spawn_tool_flags = mock.Mock(
-                side_effect=lambda env: (
-                    captured.setdefault("env", dict(env))
-                    or {
-                        "tools": "",
-                        "extra": [],
-                        "surface_allowed": "",
-                        "mcp_path": None,
-                        "surface_fingerprint": None,
-                    }
-                )
-            )
+            def fake_spawn_flags(env):
+                captured["env"] = dict(env)
+                return {
+                    "tools": "",
+                    "extra": [],
+                    "surface_allowed": "",
+                    "mcp_path": None,
+                    "surface_fingerprint": None,
+                }
+
+            resident._build_spawn_tool_flags = mock.Mock(side_effect=fake_spawn_flags)
             with mock.patch("chat.cc_runtime.require_pinned_claude_version"), \
                  mock.patch("chat.cc_runtime.claude_cmd", return_value=["claude"]), \
                  mock.patch("chat.cc_model.cc_model_snapshot", return_value=("model", "identity", [])), \
