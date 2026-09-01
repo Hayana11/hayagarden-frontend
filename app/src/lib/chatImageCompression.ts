@@ -38,6 +38,43 @@ export type ChatImageCompressionResult = {
   reason: string;
 };
 
+export type PendingChatImage = {
+  id: string;
+  file: File;
+  previewUrl: string;
+  status: 'compressing' | 'ready';
+  originalBytes: number;
+  outputBytes?: number;
+};
+
+let pendingChatImageSequence = 0;
+
+export function createPendingChatImage(file: File): PendingChatImage {
+  const sequence = pendingChatImageSequence;
+  pendingChatImageSequence += 1;
+  return {
+    id: `chat-image-${Date.now()}-${sequence}`,
+    file,
+    previewUrl: URL.createObjectURL(file),
+    status: 'compressing',
+    originalBytes: file.size,
+  };
+}
+
+export function revokePendingChatImagePreview(image: PendingChatImage): void {
+  if (image.previewUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    URL.revokeObjectURL(image.previewUrl);
+  }
+}
+
+export function mergePendingChatImages(
+  current: PendingChatImage[],
+  settled: PendingChatImage[],
+): PendingChatImage[] {
+  const settledById = new Map(settled.map((image) => [image.id, image]));
+  return current.map((image) => settledById.get(image.id) || image);
+}
+
 function positiveInteger(value: number): number {
   if (!Number.isFinite(value) || value <= 0) return 0;
   return Math.floor(value);
