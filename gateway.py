@@ -6050,6 +6050,13 @@ def _stream_cc_first_turn(
         _close_event_iter()
 
 
+def _daily_heartbeat_sse(evt):
+    """Map only synthetic Daily heartbeats to transport-level SSE ping."""
+    if evt == 'heartbeat':
+        return _sse_json({'t': 'ping'})
+    return None
+
+
 def _stream_cc_daily_soft_window(
     _turn_data, _uc, *, request_reality_context='',
 ):
@@ -6190,6 +6197,10 @@ def _stream_cc_daily_soft_window(
         for evt, payload in filter_display_thinking_events(
             _daily_events, _display_thinking_mode,
         ):
+            heartbeat_sse = _daily_heartbeat_sse(evt)
+            if heartbeat_sse is not None:
+                yield heartbeat_sse
+                continue
             if evt == 'text':
                 text_acc.append(str(payload or ''))
                 yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
