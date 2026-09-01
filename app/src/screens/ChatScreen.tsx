@@ -2385,14 +2385,14 @@ export function ChatScreen() {
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
-              <Link data-testid="chat-preview-entry" to={ROUTES.manualContextWindow} onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(226,218,238,.72),rgba(249,228,232,.76))' }}>
+              <a data-testid="chat-preview-entry" href="https://love-style.xyz/preview/" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(226,218,238,.72),rgba(249,228,232,.76))' }}>
                 <div style={{ width: 34, height: 34, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, background: 'rgba(126,103,153,.12)', color: '#7E6799', fontSize: 18 }}>◫</div>
                 <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>Preview</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>Manual window · 状态预览</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>Chat 测试页 · 实时预览</span>
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
-              </Link>
+              </a>
               <Link to="/group-chat" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(220,232,217,.72),rgba(220,232,245,.76))' }}>
                 <div className="hstack hstack-6" style={{ flexShrink: 0 }}>
                   <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#91AD93' }} />
