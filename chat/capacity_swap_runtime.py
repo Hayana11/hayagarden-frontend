@@ -354,9 +354,18 @@ def _load_formal_messages_excluding_current(
             'author': str(row['author'] or ''),
             'content': str(row['content'] or ''),
             'image_url': '',
+            'file_url': '',
+            'file_name': '',
+            'attachments': '',
         }
         if hasattr(row, 'keys') and 'image_url' in row.keys():
             item['image_url'] = str(row['image_url'] or '')
+        if hasattr(row, 'keys') and 'file_url' in row.keys():
+            item['file_url'] = str(row['file_url'] or '')
+        if hasattr(row, 'keys') and 'file_name' in row.keys():
+            item['file_name'] = str(row['file_name'] or '')
+        if hasattr(row, 'keys') and 'attachments' in row.keys():
+            item['attachments'] = row['attachments']
         out.append(item)
     return out
 
@@ -393,8 +402,12 @@ def _load_mapping_for_messages(
             for r in conn.execute('PRAGMA table_info(chat_messages)').fetchall()
         }
         image_col = 'm.image_url' if 'image_url' in cols else "'' AS image_url"
+        file_url_col = 'm.file_url' if 'file_url' in cols else "'' AS file_url"
+        file_name_col = 'm.file_name' if 'file_name' in cols else "'' AS file_name"
+        attachments_col = 'm.attachments' if 'attachments' in cols else "'' AS attachments"
         db_rows = conn.execute(
-            f'''SELECT e.event_uuid AS event_uuid, m.content AS content, {image_col}
+            f'''SELECT e.event_uuid AS event_uuid, m.content AS content, {image_col},
+                       {file_url_col}, {file_name_col}, {attachments_col}
                 FROM chat_message_claude_events e
                 JOIN chat_messages m ON m.id = e.message_id
                 WHERE e.role = 'user' AND e.event_uuid IN ({placeholders})''',
@@ -404,6 +417,9 @@ def _load_mapping_for_messages(
             canonical[str(row['event_uuid'])] = _canonical_user_payload_from_db(
                 content=str(row['content'] or ''),
                 image_url=str(row['image_url'] or ''),
+                file_url=str(row['file_url'] or ''),
+                file_name=str(row['file_name'] or ''),
+                attachments=row['attachments'],
             )
     return canonical, mid_to_event, event_to_mid
 
