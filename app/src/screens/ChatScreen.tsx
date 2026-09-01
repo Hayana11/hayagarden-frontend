@@ -47,6 +47,7 @@ import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import {
   availableComposerAttachmentSlots,
+  canStartComposerAttachmentSelection,
   ComposerUploadCoordinator,
   releasePendingImageCompression,
   reservePendingImageCompression,
@@ -1333,7 +1334,7 @@ export function ChatScreen() {
   const onAttachFiles = useCallback(
     async (selectedFiles: FileList | null) => {
       setAttachMenuOpen(false);
-      if (!selectedFiles || postingRef.current || compressingImageIdsRef.current.size > 0) return;
+      if (!selectedFiles || !canStartComposerAttachmentSelection(postingRef.current, availableComposerSlots())) return;
       const remaining = availableComposerSlots();
       const selected = Array.from(selectedFiles).slice(0, Math.max(0, remaining));
       if (!selected.length) {
@@ -1365,7 +1366,7 @@ export function ChatScreen() {
   const onAttachImages = useCallback(
     async (selectedImages: FileList | null) => {
       setAttachMenuOpen(false);
-      if (!selectedImages || postingRef.current || uploadingFileSlotsRef.current > 0) return;
+      if (!selectedImages || !canStartComposerAttachmentSelection(postingRef.current, availableComposerSlots())) return;
       const remaining = availableComposerSlots();
       const selected = Array.from(selectedImages).slice(0, remaining);
       if (!selected.length) {
@@ -2210,7 +2211,7 @@ export function ChatScreen() {
             <>
               <div onClick={() => setAttachMenuOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
               <div className="vstack vstack-2" style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 190, background: 'var(--card)', borderRadius: 16, boxShadow: '0 24px 60px var(--shadow2)', padding: 8, animation: 'chatFadeIn .15s ease' }}>
-                <div onClick={() => { if (!postingRef.current && uploadingFileCount === 0 && compressingImageCount === 0) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || uploadingFileCount || compressingImageCount ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (canStartComposerAttachmentSelection(postingRef.current, availableComposerSlots())) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || availableComposerSlots() === 0 ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <rect x={3} y={3} width={18} height={18} rx={3} />
                     <circle cx={9} cy={9} r={2} />
@@ -2218,7 +2219,7 @@ export function ChatScreen() {
                   </svg>
                   <span style={{ fontSize: 13.5, color: 'var(--ink)' }}>上传图片</span>
                 </div>
-                <div onClick={() => { if (!postingRef.current && uploadingFileCount === 0) { setAttachMenuOpen(false); fileInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || uploadingFileCount ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (canStartComposerAttachmentSelection(postingRef.current, availableComposerSlots())) { setAttachMenuOpen(false); fileInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || availableComposerSlots() === 0 ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                     <path d="M14 2v6h6" />
@@ -2228,11 +2229,11 @@ export function ChatScreen() {
               </div>
             </>
           )}
-          <input ref={imgInputRef} type="file" accept="image/*" multiple disabled={posting || uploadingFileCount > 0 || compressingImageCount > 0} style={{ display: 'none' }} onChange={(e) => {
+          <input ref={imgInputRef} type="file" accept="image/*" multiple disabled={posting} style={{ display: 'none' }} onChange={(e) => {
             if (!postingRef.current) void onAttachImages(e.target.files);
             e.target.value = '';
           }} />
-          <input ref={fileInputRef} type="file" accept=".md,.txt,.html,.htm,.py,.js,.json,.csv,.css,.xml,.yaml,.yml,.log,.ini,.sh,.pdf,.doc,.docx" multiple disabled={posting || uploadingFileCount > 0} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFiles(e.target.files); e.target.value = ''; }} />
+          <input ref={fileInputRef} type="file" accept=".md,.txt,.html,.htm,.py,.js,.json,.csv,.css,.xml,.yaml,.yml,.log,.ini,.sh,.pdf,.doc,.docx" multiple disabled={posting} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFiles(e.target.files); e.target.value = ''; }} />
 
           {compressingImageCount > 0 && (
             <div aria-live="polite" style={{ padding: '0 4px 8px', color: 'var(--faint)', fontSize: 12.5 }}>
