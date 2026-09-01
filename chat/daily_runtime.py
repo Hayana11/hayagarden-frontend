@@ -22,6 +22,7 @@ from chat import daily_context as dc
 from chat import daily_history as dh
 from chat import context_window as cw
 from chat.attachment_contract import (
+    AttachmentValidationError,
     provider_current_turn_attachment_parts,
     provider_current_turn_attachments,
 )
@@ -278,12 +279,44 @@ def _fetch_user_message(message_id: int, *, db_path: Optional[str] = None) -> di
         conn.close()
 
 
+DAILY_HISTORY_ATTACHMENT_POLICY = 'explicit_metadata_degrade_v1'
+
+
+def _history_attachment_marker(msg: dict[str, Any]) -> str:
+    """Make prior-turn attachment downgrade explicit and bounded.
+
+    Daily history is a text reconstruction surface. Prior attachments are
+    represented by names only; actual image blocks and file bodies belong to
+    the current turn or the selected Forge carryover surface.
+    """
+    try:
+        items = provider_current_turn_attachments(
+            msg.get('attachments') or [],
+            legacy_file_url=msg.get('file_url') or '',
+            legacy_file_name=msg.get('file_name') or '',
+            legacy_image_url=msg.get('image_url') or '',
+        )
+    except AttachmentValidationError:
+        return '[历史附件已显式降级：附件元数据不可用]'
+    if not items:
+        return ''
+    names = [str(item.get('name') or '图片') for item in items]
+    return (
+        '[历史附件已显式降级为元数据标记：%s；'
+        '本轮不重读历史图片或文件正文]' % '、'.join(names)
+    )
+
+
 def _format_history_messages(messages: list[dict[str, Any]]) -> str:
     lines = []
     for msg in messages:
         role = msg.get('role') or 'user'
         label = '用户' if role == 'user' else '费佳'
-        lines.append('[%s] %s' % (label, msg.get('content') or ''))
+        line = '[%s] %s' % (label, msg.get('content') or '')
+        marker = _history_attachment_marker(msg)
+        if marker:
+            line += NL + marker
+        lines.append(line)
     return NL.join(lines)
 
 
