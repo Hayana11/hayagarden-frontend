@@ -77,7 +77,7 @@ export function mergePendingChatImages(
 
 export const CHAT_IMAGE_EXIF_SCAN_BYTES = 256 * 1024;
 
-type JpegExifOrientation = number | null | 'malformed';
+export type JpegExifOrientation = number | null | 'malformed' | 'unknown';
 
 function isJpegFile(file: File): boolean {
   const mime = sourceMime(file);
@@ -127,7 +127,8 @@ function parseExifTiff(bytes: Uint8Array, start: number, end: number): JpegExifO
   return null;
 }
 
-export function parseJpegExifOrientation(bytes: Uint8Array): JpegExifOrientation {
+export function parseJpegExifOrientation(bytes: Uint8Array, complete = true): JpegExifOrientation {
+  const incomplete = () => complete ? 'malformed' as const : 'unknown' as const;
   if (bytes.length < 2 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return 'malformed';
   let offset = 2;
   while (offset < bytes.length) {
@@ -138,9 +139,10 @@ export function parseJpegExifOrientation(bytes: Uint8Array): JpegExifOrientation
     offset += 1;
     if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) continue;
     if (marker === 0xd9 || marker === 0xda) return null;
-    if (offset + 2 > bytes.length) return 'malformed';
+    if (offset + 2 > bytes.length) return incomplete();
     const segmentLength = readU16(bytes, offset, false);
-    if (segmentLength < 2 || offset + segmentLength > bytes.length) return 'malformed';
+    if (segmentLength < 2) return 'malformed';
+    if (offset + segmentLength > bytes.length) return incomplete();
     const payloadStart = offset + 2;
     const payloadEnd = offset + segmentLength;
     if (marker === 0xe1
@@ -155,7 +157,7 @@ export function parseJpegExifOrientation(bytes: Uint8Array): JpegExifOrientation
     }
     offset = payloadEnd;
   }
-  return 'malformed';
+  return incomplete();
 }
 
 async function readBlobPrefix(blob: Blob): Promise<Uint8Array> {
@@ -176,12 +178,10 @@ async function preserveForJpegExif(file: File): Promise<string | null> {
   if (!isJpegFile(file)) return null;
   try {
     const prefix = await readBlobPrefix(file.slice(0, CHAT_IMAGE_EXIF_SCAN_BYTES));
-    const parsed = parseJpegExifOrientation(prefix);
-    if (parsed === 'malformed') {
-      return file.size > CHAT_IMAGE_EXIF_SCAN_BYTES ? 'preserve-exif-unknown' : 'preserve-malformed-exif';
-    }
+    const parsed = parseJpegExifOrientation(prefix, file.size <= CHAT_IMAGE_EXIF_SCAN_BYTES);
+    if (parsed === 'unknown') return 'preserve-exif-unknown';
+    if (parsed === 'malformed') return 'preserve-malformed-exif';
     if (typeof parsed === 'number' && parsed >= 2 && parsed <= 8) return 'preserve-exif-orientation';
-    if (file.size > CHAT_IMAGE_EXIF_SCAN_BYTES) return 'preserve-exif-unknown';
     return null;
   } catch {
     return 'preserve-exif-unknown';
