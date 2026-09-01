@@ -341,6 +341,7 @@ def format_resident_turn_content(
     is_respawn: bool,
     user_image_url: str = '',
     user_attachments: Optional[list[dict[str, str]]] = None,
+    attachment_static_dir: str = '/opt/frontend/static',
     provider_display_thinking_suffix: str = '',
     reality_time_anchor: str = '',
 ) -> Any:
@@ -357,6 +358,7 @@ def format_resident_turn_content(
     attachment_parts = provider_current_turn_attachment_parts(
         attachment_value,
         legacy_image_url=legacy_image_url,
+        static_dir=attachment_static_dir,
     )
     has_image = any(part.get('type') == 'image' for part in attachment_parts)
     # Real vision input replaces the textual [image] placeholder.
