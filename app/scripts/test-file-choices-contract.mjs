@@ -39,7 +39,7 @@ const composerSend = screen.slice(sendStart, choiceStart);
 const choiceSend = screen.slice(choiceStart, chooseStart);
 assert.match(composerSend, /files: pendingFiles/);
 assert.match(composerSend, /images: pendingImages/);
-assert.match(composerSend, /const extra = \{ files: attempt\.files, imageFiles: attempt\.images \}/);
+assert.match(composerSend, /const extra = \{ files: attempt\.files, imageFiles: attempt\.images\.map\(\(image\) => image\.file\) \}/);
 assert.match(composerSend, /setPendingFiles/);
 assert.match(composerSend, /setPendingImages/);
 assert.match(composerSend, /setInput\(''\)/);
