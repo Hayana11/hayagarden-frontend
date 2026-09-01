@@ -13,10 +13,10 @@ globalThis.setTimeout = (callback, delay) => {
 globalThis.clearTimeout = () => {};
 globalThis.fetch = async () => {
   const body = [
-    'data: {"t":"ping"}\\n\\n',
-    'data: {"t":"ping"}\\n\\n',
-    'data: {"t":"text","d":"hello"}\\n\\n',
-    'data: {"t":"done","ok":true}\\n\\n',
+    'data: {"t":"ping"}\n\n',
+    'data: {"t":"ping"}\n\n',
+    'data: {"t":"text","d":"hello"}\n\n',
+    'data: {"t":"done","ok":true}\n\n',
   ].join('');
   return new Response(body, {
     status: 200,
