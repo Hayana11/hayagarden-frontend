@@ -2652,7 +2652,7 @@ def ensure_resident_and_stream(
                 is_cold=plan.is_cold or actual_cold,
                 is_respawn=plan.is_respawn,
                 user_image_url=plan.user_image_url,
-            user_attachments=list(plan.user_attachments),
+                user_attachments=list(plan.user_attachments),
                 provider_display_thinking_suffix=(
                     plan.provider_display_thinking_suffix
                 ),
