@@ -327,7 +327,11 @@ def _format_carryover_messages(messages: list[dict[str, Any]]) -> str:
     for msg in messages:
         role = msg.get('role') or 'user'
         label = '用户' if role == 'user' else '费佳'
-        lines.append('[%s] %s' % (label, msg.get('content') or ''))
+        line = '[%s] %s' % (label, msg.get('content') or '')
+        marker = _history_attachment_marker(msg)
+        if marker:
+            line += NL + marker
+        lines.append(line)
     return NL.join(lines)
 
 
