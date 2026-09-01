@@ -25,6 +25,12 @@ from chat.attachment_contract import (
 )
 
 ALLOWED_IMAGE_MIMES = frozenset({'image/png', 'image/jpeg', 'image/webp'})
+_IMAGE_EXTENSION_MIMES = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+}
 _ATTACHMENT_URI_RE = re.compile(r'^attachment://([0-9a-fA-F]{8})$')
 _ATTACHMENT_API_RE = re.compile(r'^/api/attachments/([0-9a-fA-F]{8})$')
 _STATIC_UPLOAD_RE = re.compile(r'^/static/uploads/([^/]+)$')
@@ -49,6 +55,17 @@ def _norm_mime(mime: str, *, filename: str = '') -> str:
         m = 'image/jpeg'
     if m in ALLOWED_IMAGE_MIMES:
         return m
+
+    # Static uploads and legacy attachment rows can have an empty MIME when
+    # the host Python mimetypes database does not know WebP.  Resolve only the
+    # already-allowed canonical image extensions deterministically.
+    extension = os.path.splitext(str(filename or '').strip().lower())[1]
+    extension_mime = _IMAGE_EXTENSION_MIMES.get(extension)
+    if extension_mime:
+        return extension_mime
+
+    # Keep the system database as a compatibility fallback for callers that
+    # provide a filename outside the canonical extension map.
     guessed, _ = mimetypes.guess_type(filename or '')
     g = str(guessed or '').lower()
     if g == 'image/jpg':
