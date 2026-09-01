@@ -11,9 +11,17 @@ const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio
 const SERVER_NAME = 'external';
 const PYTHON_MAX_BUFFER = 2 * 1024 * 1024;
 const OUTPUT_MAX_BYTES = 256 * 1024;
+const FALLBACK_ERROR_CODE = 'SURFACE_ADAPTER_FAILED';
+const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 function repoRoot() {
   return process.env.UH_A0_REPO_ROOT || process.cwd();
+}
+
+function safeErrorCode(code) {
+  return typeof code === 'string' && SAFE_ERROR_CODE.test(code)
+    ? code
+    : FALLBACK_ERROR_CODE;
 }
 
 function runPython(request) {
@@ -39,11 +47,11 @@ function runPython(request) {
   return parsed;
 }
 
-function safeFailure(code = 'SURFACE_ADAPTER_FAILED') {
+function safeFailure(code = FALLBACK_ERROR_CODE) {
   return {
     status: 'FAILED_PRE_CALL',
     error: {
-      code: String(code).replace(/[^A-Z0-9_]/g, '_').slice(0, 64) || 'SURFACE_ADAPTER_FAILED',
+      code: safeErrorCode(code),
       summary: 'External MCP surface adapter failed.',
     },
   };
@@ -98,13 +106,14 @@ function isCallToolResult(value) {
   );
 }
 
-function localMcpError(summary) {
+function localMcpError(summary, code) {
+  const safeCode = safeErrorCode(code);
   return {
     content: [{
       type: 'text',
-      text: typeof summary === 'string' && summary
+      text: `${typeof summary === 'string' && summary
         ? summary
-        : 'External MCP call was not completed.',
+        : 'External MCP call was not completed.'} [${safeCode}]`,
     }],
     isError: true,
   };
@@ -120,6 +129,7 @@ function mcpCallResult(result) {
         ? 'External MCP tool returned an error.'
         : 'External MCP call was not completed.'
     ),
+    result.error?.code,
   );
 }
 
@@ -157,3 +167,4 @@ module.exports = {
   listSurface,
   mcpCallResult,
 };
+
