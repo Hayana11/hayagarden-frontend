@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
+from tools import capability_state
+from tools.capability_state import set_capability_state
 from tools.execution_fence import capability_for_tool, evaluate_tool_call
 from tools.lease_signer import issue_turn_lease
 from tools.shopping_taobao_read_adapter import (
@@ -33,6 +38,25 @@ class _Response:
 
 
 class BrowserTaobaoReadP0Tests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        db_path = Path(self._tmp.name) / "runtime.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE runtime_config ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+            "updated_at DATETIME DEFAULT (datetime('now')))"
+        )
+        conn.commit()
+        conn.close()
+        self._state_patch = mock.patch.object(
+            capability_state, "DB_PATH", str(db_path)
+        )
+        self._state_patch.start()
+        self.addCleanup(self._state_patch.stop)
+        self.addCleanup(self._tmp.cleanup)
+        set_capability_state("web.read", enabled=True)
+
     def test_browser_tool_is_web_read_and_chat_auto_allowed(self):
         tool = "mcp__browser__taobao_read"
         self.assertEqual(capability_for_tool(tool), "web.read")
