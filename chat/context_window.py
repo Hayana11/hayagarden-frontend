@@ -224,7 +224,7 @@ def _collect_context_formal_messages(
     if not cols:
         return []
     select_cols = ['m.id', 'm.author', 'm.content', 'm.created_at']
-    for optional in ('tool_calls', 'source_kind', 'image_url'):
+    for optional in ('tool_calls', 'source_kind', 'image_url', 'file_url', 'file_name', 'attachments'):
         if optional in cols:
             select_cols.append('m.' + optional)
     wake_contents = _wake_content_set(conn)
