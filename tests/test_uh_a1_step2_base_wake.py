@@ -195,6 +195,44 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
             ('success', ''),
         )
 
+    def test_normal_wake_trigger_restores_time_salience(self):
+        gateway = Path(__file__).resolve().parents[1].joinpath('gateway.py').read_text(
+            encoding='utf-8'
+        )
+        start = gateway.index('def _build_normal_wake_main_chat_trigger')
+        end = gateway.index('def _run_unified_normal_main_chat_turn', start)
+        trigger = gateway[start:end]
+        for phrase in (
+            '这是主动唤醒',
+            '不是上一句话的续写',
+            '距离她上次发消息约',
+            '距离上次有效互动约',
+            '这些时间只是现实背景，不是行动命令',
+        ):
+            self.assertIn(phrase, trigger)
+        self.assertIn('now.strftime', trigger)
+        self.assertIn('t2_hours', trigger)
+        self.assertIn('t_hours', trigger)
+        self.assertNotIn('_NORMAL_WAKE_MAIN_CHAT_TRIGGER', gateway)
+
+    def test_normal_wake_passes_existing_clock_values_without_new_clock_read(self):
+        gateway = Path(__file__).resolve().parents[1].joinpath('gateway.py').read_text(
+            encoding='utf-8'
+        )
+        decision_start = gateway.index('def _wake_decide_locked')
+        basic_start = gateway.index('if basic_normal:', decision_start)
+        clock_section = gateway[decision_start:basic_start]
+        self.assertEqual(clock_section.count('read_interaction_clock'), 1)
+        self.assertIn('guard_clock.user_idle_hours', clock_section)
+        self.assertIn('guard_clock.effective_idle_hours', clock_section)
+
+        basic_end = gateway.index('    planner_view = None', basic_start)
+        normal_route = gateway[basic_start:basic_end]
+        self.assertIn('now=now', normal_route)
+        self.assertIn('t2_hours=t2_hours', normal_route)
+        self.assertIn('t_hours=t_hours', normal_route)
+        self.assertNotIn('read_interaction_clock', normal_route)
+
     def test_unified_switch_gates_basic_planner_and_preserves_legacy_gate(self):
         gateway = Path(__file__).resolve().parents[1].joinpath('gateway.py').read_text(
             encoding='utf-8'
