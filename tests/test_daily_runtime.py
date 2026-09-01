@@ -3226,5 +3226,167 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             os.unlink(db)
 
 
+
+class DailyAttachmentReplayTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.static_dir = Path(self.tmp.name)
+        (self.static_dir / 'uploads' / 'files').mkdir(parents=True)
+        self.image_bytes = b'fake-image'
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _image(self, name):
+        return {'type': 'image', 'url': '/static/uploads/' + name, 'name': name}
+
+    def _file(self, name, body):
+        stored = 'abcdef12_' + name
+        (self.static_dir / 'uploads' / 'files' / stored).write_bytes(body)
+        return {
+            'type': 'file',
+            'url': '/static/uploads/files/' + stored,
+            'name': name,
+        }
+
+    def test_empty_metadata_variants_and_legacy_fallback(self):
+        from chat.attachment_contract import (
+            AttachmentValidationError,
+            provider_current_turn_attachments,
+        )
+
+        self.assertEqual(provider_current_turn_attachments(None), [])
+        self.assertEqual(provider_current_turn_attachments(''), [])
+        self.assertEqual(provider_current_turn_attachments('  \n\t'), [])
+        self.assertEqual(provider_current_turn_attachments('[]'), [])
+        image = provider_current_turn_attachments(
+            '', legacy_image_url='/static/uploads/legacy.png',
+        )
+        self.assertEqual(image[0]['type'], 'image')
+        text_file = self._file('legacy.txt', b'legacy')
+        file_items = provider_current_turn_attachments(
+            '', legacy_file_url=text_file['url'], legacy_file_name=text_file['name'],
+        )
+        self.assertEqual(file_items, [text_file])
+        with self.assertRaises(AttachmentValidationError):
+            provider_current_turn_attachments('{')
+        with self.assertRaises(AttachmentValidationError):
+            provider_current_turn_attachments('{}')
+        canonical = self._image('same.png')
+        self.assertEqual(
+            provider_current_turn_attachments(
+                [canonical], legacy_image_url=canonical['url'],
+            ),
+            [canonical],
+        )
+
+    def test_daily_prior_attachments_are_explicitly_bounded_on_cold_respawn(self):
+        from chat.daily_runtime import (
+            DAILY_HISTORY_ATTACHMENT_POLICY,
+            format_resident_turn_content,
+        )
+
+        prior = [
+            self._image('one.png'),
+            self._image('two.png'),
+            self._file('round-a.txt', b'private body'),
+        ]
+        history = [
+            {
+                'role': 'user',
+                'content': 'Round A text',
+                'image_url': '',
+                'file_url': '',
+                'file_name': '',
+                'attachments': prior,
+            },
+            {'role': 'assistant', 'content': 'Round A reply', 'attachments': []},
+        ]
+        for is_cold, is_respawn in ((True, False), (False, True)):
+            content = format_resident_turn_content(
+                assembly={'state': '', 'current_day_history': history},
+                user_content='Round B text',
+                user_image_url='',
+                user_attachments=[],
+                is_cold=is_cold,
+                is_respawn=is_respawn,
+            )
+            self.assertEqual(
+                DAILY_HISTORY_ATTACHMENT_POLICY,
+                'explicit_metadata_degrade_v1',
+            )
+            self.assertIn('Round A text', content)
+            self.assertIn('one.png', content)
+            self.assertIn('two.png', content)
+            self.assertIn('round-a.txt', content)
+            self.assertIn('显式降级为元数据标记', content)
+            self.assertIn('本轮不重读历史图片或文件正文', content)
+            self.assertNotIn('private body', content)
+
+    def test_selected_forge_carryover_keeps_ordered_attachment_content(self):
+        from chat.context_window_forge import _user_content_for_row
+
+        row = {
+            'id': 101,
+            'content': 'Round A text',
+            'image_url': '',
+            'file_url': '',
+            'file_name': '',
+            'attachments': [
+                self._image('one.png'),
+                self._file('carryover.txt', b'carryover body'),
+                self._image('two.png'),
+            ],
+        }
+        with mock.patch(
+            'chat.cc_vision_bridge.resolve_image_bytes',
+            return_value=(self.image_bytes, 'image/png'),
+        ):
+            content = _user_content_for_row(
+                row, attachment_static_dir=str(self.static_dir),
+            )
+        self.assertEqual(
+            [block['type'] for block in content],
+            ['text', 'image', 'text', 'image'],
+        )
+        self.assertIn('carryover body', content[2]['text'])
+        self.assertNotIn('base64', content[0]['text'].lower())
+
+
+    def test_daily_selected_carryover_keeps_explicit_attachment_marker(self):
+        from chat.daily_runtime import format_resident_turn_content
+
+        attachments = [
+            self._image('carry-one.png'),
+            self._image('carry-two.png'),
+            self._file('carry.txt', b'carry body'),
+        ]
+        content = format_resident_turn_content(
+            assembly={
+                'state': '',
+                'carryover_messages': [{
+                    'role': 'user',
+                    'content': 'Old round',
+                    'image_url': '',
+                    'file_url': '',
+                    'file_name': '',
+                    'attachments': attachments,
+                }],
+                'current_day_history': [],
+            },
+            user_content='New round',
+            user_image_url='',
+            user_attachments=[],
+            is_cold=True,
+            is_respawn=False,
+        )
+        self.assertIn('Old round', content)
+        self.assertIn('carry-one.png', content)
+        self.assertIn('carry-two.png', content)
+        self.assertIn('carry.txt', content)
+        self.assertIn('显式降级为元数据标记', content)
+        self.assertNotIn('carry body', content)
+
+
 if __name__ == '__main__':
     unittest.main()

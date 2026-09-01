@@ -288,16 +288,32 @@ def _get_registry_conn(
     ).fetchone())
 
 
-def _canonical_user_payload_from_db(*, content: str, image_url: str) -> Any:
-    """DB-authoritative user body for Transform (text str or multimodal list)."""
+def _canonical_user_payload_from_db(
+    *,
+    content: str,
+    image_url: str,
+    attachments: object = None,
+    file_url: str = '',
+    file_name: str = '',
+) -> Any:
+    """DB-authoritative user body from ordered canonical attachments."""
+    from chat.attachment_contract import provider_current_turn_attachment_parts
     from chat.cc_vision_bridge import VisionBridgeError, build_claude_user_content
 
     raw_text = str(content or '').strip()
-    image_ref = str(image_url or '').strip()
-    if not image_ref:
+    attachment_parts = provider_current_turn_attachment_parts(
+        attachments,
+        legacy_file_url=file_url,
+        legacy_file_name=file_name,
+        legacy_image_url=image_url,
+    )
+    if not attachment_parts:
         return raw_text
     try:
-        return build_claude_user_content(text=raw_text, image_refs=[image_ref])
+        return build_claude_user_content(
+            text=raw_text,
+            attachment_parts=attachment_parts,
+        )
     except VisionBridgeError:
         if raw_text:
             return raw_text
@@ -318,8 +334,12 @@ def _get_user_canonical_readonly_conn(
         for r in conn.execute('PRAGMA table_info(chat_messages)').fetchall()
     }
     image_col = 'm.image_url' if 'image_url' in cols else "'' AS image_url"
+    file_url_col = 'm.file_url' if 'file_url' in cols else "'' AS file_url"
+    file_name_col = 'm.file_name' if 'file_name' in cols else "'' AS file_name"
+    attachments_col = 'm.attachments' if 'attachments' in cols else "'' AS attachments"
     rows = conn.execute(
-        f'''SELECT e.event_uuid AS event_uuid, m.content AS content, {image_col}
+        f'''SELECT e.event_uuid AS event_uuid, m.content AS content, {image_col},
+                   {file_url_col}, {file_name_col}, {attachments_col}
             FROM chat_message_claude_events e
             JOIN chat_messages m ON m.id = e.message_id
             WHERE e.role = 'user' AND e.event_uuid IN ({placeholders})''',
@@ -330,6 +350,9 @@ def _get_user_canonical_readonly_conn(
         out[str(row['event_uuid'])] = _canonical_user_payload_from_db(
             content=str(row['content'] or ''),
             image_url=str(row['image_url'] or ''),
+            file_url=str(row['file_url'] or ''),
+            file_name=str(row['file_name'] or ''),
+            attachments=row['attachments'],
         )
     return out
 

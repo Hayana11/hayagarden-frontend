@@ -21,6 +21,11 @@ import cc_resident
 from chat import daily_context as dc
 from chat import daily_history as dh
 from chat import context_window as cw
+from chat.attachment_contract import (
+    AttachmentValidationError,
+    provider_current_turn_attachment_parts,
+    provider_current_turn_attachments,
+)
 from chat.claude_event_mapping import MappingPassRequest, MappingPassResult, run_mapping_pass
 from chat.daily_context import (
     ConflictError,
@@ -157,6 +162,7 @@ class DailyTurnPlan:
     feedback_ids: tuple[int, ...] = ()
     user_content: str = ''
     user_image_url: str = ''
+    user_attachments: tuple[dict[str, str], ...] = ()
     provider_display_thinking_suffix: str = field(default='', repr=False)
     lease_acquired: bool = False
     lease_released: bool = False
@@ -240,25 +246,65 @@ def _parse_message_created_at(value: str) -> datetime.datetime:
 def _fetch_user_message(message_id: int, *, db_path: Optional[str] = None) -> dict[str, Any]:
     conn = dc._connect(db_path)
     try:
+        cols = {str(r[1]) for r in conn.execute('PRAGMA table_info(chat_messages)').fetchall()}
+        select_cols = ['id', 'author', 'content', 'created_at']
+        for optional in ('image_url', 'file_url', 'file_name', 'attachments'):
+            if optional in cols:
+                select_cols.append(optional)
         row = conn.execute(
-            'SELECT id, author, content, image_url, created_at FROM chat_messages WHERE id=?',
+            'SELECT %s FROM chat_messages WHERE id=?' % ', '.join(select_cols),
             (int(message_id),),
         ).fetchone()
         if row is None:
             raise DailyRuntimeError('user message not found: %s' % message_id, error_code='user_message_missing')
         content = str(row['content'] or '').strip()
-        image_url = str(row['image_url'] or '').strip()
-        if not content and image_url:
+        image_url = str(row['image_url'] or '').strip() if 'image_url' in row.keys() else ''
+        attachments = provider_current_turn_attachments(
+            row['attachments'] if 'attachments' in row.keys() else [],
+            legacy_file_url=row['file_url'] if 'file_url' in row.keys() else '',
+            legacy_file_name=row['file_name'] if 'file_name' in row.keys() else '',
+            legacy_image_url=image_url,
+        )
+        if not content and any(item['type'] == 'image' for item in attachments):
             content = '[image]'
         created_at = str(row['created_at'] or '').strip()
         return {
             'id': int(row['id']),
             'content': content,
             'image_url': image_url,
+            'attachments': attachments,
             'created_at': created_at,
         }
     finally:
         conn.close()
+
+
+DAILY_HISTORY_ATTACHMENT_POLICY = 'explicit_metadata_degrade_v1'
+
+
+def _history_attachment_marker(msg: dict[str, Any]) -> str:
+    """Make prior-turn attachment downgrade explicit and bounded.
+
+    Daily history is a text reconstruction surface. Prior attachments are
+    represented by names only; actual image blocks and file bodies belong to
+    the current turn or the selected Forge carryover surface.
+    """
+    try:
+        items = provider_current_turn_attachments(
+            msg.get('attachments') or [],
+            legacy_file_url=msg.get('file_url') or '',
+            legacy_file_name=msg.get('file_name') or '',
+            legacy_image_url=msg.get('image_url') or '',
+        )
+    except AttachmentValidationError:
+        return '[历史附件已显式降级：附件元数据不可用]'
+    if not items:
+        return ''
+    names = [str(item.get('name') or '图片') for item in items]
+    return (
+        '[历史附件已显式降级为元数据标记：%s；'
+        '本轮不重读历史图片或文件正文]' % '、'.join(names)
+    )
 
 
 def _format_history_messages(messages: list[dict[str, Any]]) -> str:
@@ -266,7 +312,11 @@ def _format_history_messages(messages: list[dict[str, Any]]) -> str:
     for msg in messages:
         role = msg.get('role') or 'user'
         label = '用户' if role == 'user' else '费佳'
-        lines.append('[%s] %s' % (label, msg.get('content') or ''))
+        line = '[%s] %s' % (label, msg.get('content') or '')
+        marker = _history_attachment_marker(msg)
+        if marker:
+            line += NL + marker
+        lines.append(line)
     return NL.join(lines)
 
 
@@ -277,7 +327,11 @@ def _format_carryover_messages(messages: list[dict[str, Any]]) -> str:
     for msg in messages:
         role = msg.get('role') or 'user'
         label = '用户' if role == 'user' else '费佳'
-        lines.append('[%s] %s' % (label, msg.get('content') or ''))
+        line = '[%s] %s' % (label, msg.get('content') or '')
+        marker = _history_attachment_marker(msg)
+        if marker:
+            line += NL + marker
+        lines.append(line)
     return NL.join(lines)
 
 
@@ -323,6 +377,8 @@ def format_resident_turn_content(
     is_cold: bool,
     is_respawn: bool,
     user_image_url: str = '',
+    user_attachments: Optional[list[dict[str, str]]] = None,
+    attachment_static_dir: str = '/opt/frontend/static',
     provider_display_thinking_suffix: str = '',
     reality_time_anchor: str = '',
 ) -> Any:
@@ -332,10 +388,19 @@ def format_resident_turn_content(
     with image → multimodal list accepted by Claude Code stream-json
     """
     cold_like = bool(is_cold or is_respawn)
-    image_url = str(user_image_url or '').strip()
+    attachment_value = list(user_attachments or [])
+    legacy_image_url = ''
+    if not attachment_value and str(user_image_url or '').strip():
+        legacy_image_url = str(user_image_url or '').strip()
+    attachment_parts = provider_current_turn_attachment_parts(
+        attachment_value,
+        legacy_image_url=legacy_image_url,
+        static_dir=attachment_static_dir,
+    )
+    has_image = any(part.get('type') == 'image' for part in attachment_parts)
     # Real vision input replaces the textual [image] placeholder.
     turn_user_text = str(user_content or '')
-    if image_url and turn_user_text.strip() == '[image]':
+    if has_image and turn_user_text.strip() == '[image]':
         turn_user_text = ''
 
     time_anchor = str(reality_time_anchor or '').strip()
@@ -386,11 +451,14 @@ def format_resident_turn_content(
     else:
         text = turn_user_text
 
-    if not image_url:
+    if not attachment_parts:
         content = text
     else:
         from chat.cc_vision_bridge import build_claude_user_content
-        content = build_claude_user_content(text=text, image_refs=[image_url])
+        content = build_claude_user_content(
+            text=text,
+            attachment_parts=attachment_parts,
+        )
     from chat.display_thinking import append_display_thinking_suffix
     return append_display_thinking_suffix(
         content, provider_display_thinking_suffix,
@@ -1027,6 +1095,7 @@ def _assemble_plan(
     turn_started_at: Optional[datetime.datetime] = None,
     history_token_budget: Optional[int] = None,
     user_image_url: str = '',
+    user_attachments: Optional[list[dict[str, str]]] = None,
     feedback_snapshot: Optional[tuple[tuple[str, ...], tuple[int, ...]]] = None,
 ) -> DailyTurnPlan:
     context_id = int(refreshed['id'])
@@ -1112,6 +1181,7 @@ def _assemble_plan(
         feedback_ids=tuple(feedback_ids),
         user_content=user_content,
         user_image_url=str(user_image_url or ''),
+        user_attachments=tuple(dict(item) for item in (user_attachments or [])),
         lease_acquired=lease_acquired,
         db_path=db_path,
         turn_lease=copy.deepcopy(turn_lease),
@@ -1340,6 +1410,7 @@ def prepare_daily_turn(
             user_message_id=int(user_message_id),
             user_content=str(user_row.get('content') or ''),
             user_image_url=str(user_row.get('image_url') or ''),
+            user_attachments=list(user_row.get('attachments') or []),
             is_cold=is_cold,
             is_respawn=is_respawn,
             turn_kind=turn_kind,
@@ -2157,6 +2228,7 @@ def _apply_daily_cold_prompt_fence(
             is_cold=is_cold,
             is_respawn=is_respawn,
             user_image_url=plan.user_image_url,
+            user_attachments=list(plan.user_attachments),
             provider_display_thinking_suffix=(
                 plan.provider_display_thinking_suffix
             ),
@@ -2617,6 +2689,7 @@ def ensure_resident_and_stream(
                 is_cold=plan.is_cold or actual_cold,
                 is_respawn=plan.is_respawn,
                 user_image_url=plan.user_image_url,
+                user_attachments=list(plan.user_attachments),
                 provider_display_thinking_suffix=(
                     plan.provider_display_thinking_suffix
                 ),

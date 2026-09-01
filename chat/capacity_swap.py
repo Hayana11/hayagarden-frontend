@@ -240,9 +240,18 @@ def _resolve_anchor(
             warnings,
         )
 
-    image_url = str(first_user.get('image_url') or '').strip()
+    from chat.attachment_contract import provider_current_turn_attachments
+    normalized_attachments = provider_current_turn_attachments(
+        first_user.get('attachments') or [],
+        legacy_image_url=first_user.get('image_url') or '',
+        legacy_file_url=first_user.get('file_url') or '',
+        legacy_file_name=first_user.get('file_name') or '',
+    )
+    has_image_attachment = any(
+        item['type'] == 'image' for item in normalized_attachments
+    )
     anchor_status = AnchorStatus.ANCHOR_RETAINED
-    if image_url and isinstance(canonical, str):
+    if has_image_attachment and isinstance(canonical, str):
         anchor_status = AnchorStatus.ANCHOR_IMAGE_DEGRADED
         warnings.append('anchor_image_degraded_to_text')
 
