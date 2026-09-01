@@ -81,7 +81,7 @@ assert.match(composerUi, /pendingFiles\.map/);
 assert.match(composerUi, /pendingImages\.map/);
 assert.match(screen, /const \[uploadingFileCount, setUploadingFileCount\] = useState\(0\)/);
 assert.match(screen, /const uploadingFileSlotsRef = useRef\(0\)/);
-assert.match(screen, /- uploadingFileSlotsRef\.current/);
+assert.match(screen, /availableComposerAttachmentSlots\(\{[\s\S]*uploadingFileReservations: uploadingFileSlotsRef\.current/);
 assert.match(composerUi, /disabled=\{posting \|\| uploadingFileCount > 0\}/);
 const composerValue = screen.indexOf('value={input}');
 const composerTextareaStart = screen.lastIndexOf('<textarea', composerValue);
