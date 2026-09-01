@@ -3,7 +3,9 @@
 Pillow>=10.4.0,<13
 cryptography>=42.0.0
 python-frontmatter>=1.1.0,<2
+websockets>=14
 
 # HTTP/MCP sidecar client (`mcp>=1.27,<2`) is intentionally NOT listed here.
 # Install it only in disposable shadow environments before enabling
 # OMBRE_ADAPTER_BACKEND=http.
+
