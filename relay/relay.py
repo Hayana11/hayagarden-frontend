@@ -5,6 +5,7 @@ Browser Relay — 把一台机器上 headed Chrome 的画面推给手机网页�
 Mac 本地和 Linux 服务器（xvfb）都能跑；Playwright 等自动化工具可以通过
 CDP 端口共享同一个浏览器实例，人和脚本看到的是同一个现场。
 """
+# Based on blueberriely/ai-social-browser relay/ (MIT); see LICENSE.ai-social-browser.
 
 import asyncio
 import ctypes
