@@ -91,7 +91,11 @@ def _fetch_messages_by_ids(
     return ordered
 
 
-def _user_content_for_row(row: Any) -> Any:
+def _user_content_for_row(
+    row: Any,
+    *,
+    attachment_static_dir: str = '/opt/frontend/static',
+) -> Any:
     """Build forged user content from ordered canonical attachments."""
     raw_text = str(row['content'] or '').strip()
     try:
@@ -100,6 +104,7 @@ def _user_content_for_row(row: Any) -> Any:
             legacy_file_url=row['file_url'] if 'file_url' in row.keys() else '',
             legacy_file_name=row['file_name'] if 'file_name' in row.keys() else '',
             legacy_image_url=row['image_url'] if 'image_url' in row.keys() else '',
+            static_dir=attachment_static_dir,
         )
     except AttachmentValidationError as exc:
         raise CarryoverUnforgeableError('attachment_unreadable') from exc
