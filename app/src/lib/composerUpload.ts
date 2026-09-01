@@ -15,6 +15,32 @@ type QueuedImageCompression = {
   revision: number;
 };
 
+export function reservePendingImageCompression(
+  ids: Set<string>,
+  images: PendingChatImage[],
+): void {
+  images.forEach((image) => ids.add(image.id));
+}
+
+export function releasePendingImageCompression(ids: Set<string>, id: string): boolean {
+  return ids.delete(id);
+}
+
+export function availableComposerAttachmentSlots(input: {
+  maxAttachments: number;
+  pendingFiles: number;
+  pendingImages: number;
+  uploadingFileReservations: number;
+}): number {
+  return Math.max(
+    0,
+    input.maxAttachments
+      - input.pendingFiles
+      - input.pendingImages
+      - input.uploadingFileReservations,
+  );
+}
+
 /** Keep uploads started before a choice from mutating the composer mid-POST. */
 export class ComposerUploadCoordinator {
   private choicePosting = false;
