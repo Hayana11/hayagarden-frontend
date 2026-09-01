@@ -8,19 +8,28 @@ type QueuedUpload = {
   revision: number;
 };
 
+type QueuedImageCompression = {
+  files: File[];
+  revision: number;
+};
+
 /** Keep uploads started before a choice from mutating the composer mid-POST. */
 export class ComposerUploadCoordinator {
   private choicePosting = false;
   private queuedUpload: QueuedUpload | null = null;
+  private queuedImageCompression: QueuedImageCompression | null = null;
   private readonly currentRevision: () => number;
   private readonly commit: (files: PendingComposerFile[]) => void;
+  private readonly commitImages: (files: File[]) => void;
 
   constructor(
     currentRevision: () => number,
     commit: (files: PendingComposerFile[]) => void,
+    commitImages: (files: File[]) => void = () => {},
   ) {
     this.currentRevision = currentRevision;
     this.commit = commit;
+    this.commitImages = commitImages;
   }
 
   beginChoicePost(): void {
@@ -33,6 +42,11 @@ export class ComposerUploadCoordinator {
     this.queuedUpload = null;
     if (queued && queued.revision === this.currentRevision()) {
       this.commit(queued.files);
+    }
+    const queuedImages = this.queuedImageCompression;
+    this.queuedImageCompression = null;
+    if (queuedImages && queuedImages.revision === this.currentRevision()) {
+      this.commitImages(queuedImages.files);
     }
   }
 
@@ -48,6 +62,18 @@ export class ComposerUploadCoordinator {
       return true;
     }
     this.commit(files);
+    return true;
+  }
+
+  async settleImages(upload: Promise<File[]>, revision: number): Promise<boolean> {
+    const files = await upload;
+    if (!files.length) return false;
+    if (revision !== this.currentRevision()) return true;
+    if (this.choicePosting) {
+      this.queuedImageCompression = { files, revision };
+      return true;
+    }
+    this.commitImages(files);
     return true;
   }
 }

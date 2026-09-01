@@ -46,6 +46,7 @@ import {
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { ComposerUploadCoordinator } from '../lib/composerUpload';
+import { compressChatImage } from '../lib/chatImageCompression';
 import { ChatThemeQuickToggle, ChatThemeSegmented } from '../components/ChatThemeControl';
 import { ThemePerfRows } from '../components/ThemePerfRows';
 import { attachChatTheme, loadChatSettings, patchChatSettings, resolveEffectiveTheme, setChatTheme, type EffectiveTheme, type ThemeMode } from '../lib/chatTheme';
@@ -359,6 +360,7 @@ export function ChatScreen() {
   const [pendingFiles, setPendingFiles] = useState<Array<{ fileUrl: string; fileName: string }>>([]);
   const [pendingImages, setPendingImages] = useState<File[]>([]);
   const [uploadingFileCount, setUploadingFileCount] = useState(0);
+  const [compressingImageCount, setCompressingImageCount] = useState(0);
 
   const [navOpen, setNavOpen] = useState<null | 'wrench' | 'font' | 'search' | 'profile'>(null);
   const [searchQ, setSearchQ] = useState('');
@@ -413,12 +415,24 @@ export function ChatScreen() {
   const composerMutationRevisionRef = useRef(0);
   const composerDraftRevisionRef = useRef(0);
   const uploadingFileSlotsRef = useRef(0);
+  const compressingImageSlotsRef = useRef(0);
+  const pendingFilesRef = useRef<Array<{ fileUrl: string; fileName: string }>>([]);
+  const pendingImagesRef = useRef<File[]>([]);
   const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
     () => composerMutationRevisionRef.current,
     (files) => {
-      setPendingFiles((current) => (
-        [...current, ...files].slice(0, MAX_COMPOSER_ATTACHMENTS)
-      ));
+      setPendingFiles((current) => {
+        const next = [...current, ...files].slice(0, MAX_COMPOSER_ATTACHMENTS);
+        pendingFilesRef.current = next;
+        return next;
+      });
+    },
+    (images) => {
+      setPendingImages((current) => {
+        const next = [...current, ...images].slice(0, MAX_COMPOSER_ATTACHMENTS);
+        pendingImagesRef.current = next;
+        return next;
+      });
     },
   ));
 
@@ -427,6 +441,17 @@ export function ChatScreen() {
   msgsRef.current = msgs;
   hasMoreBeforeRef.current = hasMoreBefore;
   txWinRef.current = txWin;
+  pendingFilesRef.current = pendingFiles;
+  pendingImagesRef.current = pendingImages;
+
+  const availableComposerSlots = () => Math.max(
+    0,
+    MAX_COMPOSER_ATTACHMENTS
+      - pendingFilesRef.current.length
+      - pendingImagesRef.current.length
+      - uploadingFileSlotsRef.current
+      - compressingImageSlotsRef.current,
+  );
 
   const handleTranscriptScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const target = event.currentTarget;
@@ -1011,7 +1036,10 @@ export function ChatScreen() {
       files: pendingFiles,
       images: pendingImages,
     };
-    if ((!attempt.text && !attempt.files.length && !attempt.images.length) || sending) return;
+    if ((!attempt.text && !attempt.files.length && !attempt.images.length)
+      || sending
+      || uploadingFileCount > 0
+      || compressingImageCount > 0) return;
     const realityContext = realityPromptProjection.getSnapshot().text;
     const draftRevisionAtConsume = composerDraftRevisionRef.current;
     clearChatComposerDraft();
@@ -1039,15 +1067,23 @@ export function ChatScreen() {
       setSending(false);
       return;
     }
-    setPendingFiles((current) => (current === attempt.files ? [] : current));
-    setPendingImages((current) => (current === attempt.images ? [] : current));
+    setPendingFiles((current) => {
+      const next = current === attempt.files ? [] : current;
+      pendingFilesRef.current = next;
+      return next;
+    });
+    setPendingImages((current) => {
+      const next = current === attempt.images ? [] : current;
+      pendingImagesRef.current = next;
+      return next;
+    });
     pinTranscriptToLatest();
     await refetchLatest();
     await runStream(messageId, { realityContext });
     await refetchLatest();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFiles, pendingImages, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+  }, [input, pendingFiles, pendingImages, sending, uploadingFileCount, compressingImageCount, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
@@ -1272,11 +1308,8 @@ export function ChatScreen() {
   const onAttachFiles = useCallback(
     async (selectedFiles: FileList | null) => {
       setAttachMenuOpen(false);
-      if (!selectedFiles || postingRef.current) return;
-      const remaining = MAX_COMPOSER_ATTACHMENTS
-        - pendingFiles.length
-        - pendingImages.length
-        - uploadingFileSlotsRef.current;
+      if (!selectedFiles || postingRef.current || compressingImageSlotsRef.current > 0) return;
+      const remaining = availableComposerSlots();
       const selected = Array.from(selectedFiles).slice(0, Math.max(0, remaining));
       if (!selected.length) {
         showToast('一次消息最多上传 4 个附件');
@@ -1301,7 +1334,42 @@ export function ChatScreen() {
       }
       if (selectedFiles.length > selected.length) showToast('一次消息最多上传 4 个附件');
     },
-    [pendingFiles.length, pendingImages.length, showToast],
+    [showToast],
+  );
+
+  const onAttachImages = useCallback(
+    async (selectedImages: FileList | null) => {
+      setAttachMenuOpen(false);
+      if (!selectedImages || postingRef.current || uploadingFileSlotsRef.current > 0) return;
+      const remaining = availableComposerSlots();
+      const selected = Array.from(selectedImages).slice(0, remaining);
+      if (!selected.length) {
+        showToast('一次消息最多上传 4 个附件');
+        return;
+      }
+      compressingImageSlotsRef.current += selected.length;
+      setCompressingImageCount(compressingImageSlotsRef.current);
+      const mutationRevision = composerMutationRevisionRef.current;
+      try {
+        const results = await Promise.all(selected.map((file) => compressChatImage(file)));
+        await uploadCoordinatorRef.current.settleImages(
+          Promise.resolve(results.map((result) => result.file)),
+          mutationRevision,
+        );
+      } catch {
+        showToast('图片处理失败，已保留原图');
+        const settled = await uploadCoordinatorRef.current.settleImages(
+          Promise.resolve(selected),
+          mutationRevision,
+        );
+        if (!settled) showToast('图片处理失败');
+      } finally {
+        compressingImageSlotsRef.current -= selected.length;
+        setCompressingImageCount(compressingImageSlotsRef.current);
+      }
+      if (selectedImages.length > selected.length) showToast('一次消息最多上传 4 个附件');
+    },
+    [showToast],
   );
 
   const segStyle = (on: boolean): CSSProperties => ({
@@ -1324,7 +1392,9 @@ export function ChatScreen() {
   }, [models, currentModel, chatProvider, modelMode]);
 
   const canSend = Boolean(input.trim() || pendingFiles.length || pendingImages.length)
-    && !sending && uploadingFileCount === 0;
+    && !sending
+    && uploadingFileCount === 0
+    && compressingImageCount === 0;
 
   // ── message block renderers ──
 
@@ -2102,7 +2172,7 @@ export function ChatScreen() {
             <>
               <div onClick={() => setAttachMenuOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
               <div className="vstack vstack-2" style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, width: 190, background: 'var(--card)', borderRadius: 16, boxShadow: '0 24px 60px var(--shadow2)', padding: 8, animation: 'chatFadeIn .15s ease' }}>
-                <div onClick={() => { if (!postingRef.current && uploadingFileCount === 0) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || uploadingFileCount ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
+                <div onClick={() => { if (!postingRef.current && uploadingFileCount === 0 && compressingImageCount === 0) { setAttachMenuOpen(false); imgInputRef.current?.click(); } }} className="hstack hstack-10" style={{ cursor: posting || uploadingFileCount || compressingImageCount ? 'default' : 'pointer', padding: '10px 12px', borderRadius: 11 }}>
                   <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--rose)' }}>
                     <rect x={3} y={3} width={18} height={18} rx={3} />
                     <circle cx={9} cy={9} r={2} />
@@ -2120,25 +2190,28 @@ export function ChatScreen() {
               </div>
             </>
           )}
-          <input ref={imgInputRef} type="file" accept="image/*" multiple disabled={posting || uploadingFileCount > 0} style={{ display: 'none' }} onChange={(e) => {
-            if (!postingRef.current) {
-              const remaining = MAX_COMPOSER_ATTACHMENTS
-                - pendingFiles.length - pendingImages.length - uploadingFileSlotsRef.current;
-              const selected = Array.from(e.target.files || []).slice(0, Math.max(0, remaining));
-              if (selected.length) setPendingImages((current) => [...current, ...selected]);
-              if ((e.target.files?.length || 0) > selected.length) showToast('一次消息最多上传 4 个附件');
-            }
+          <input ref={imgInputRef} type="file" accept="image/*" multiple disabled={posting || uploadingFileCount > 0 || compressingImageCount > 0} style={{ display: 'none' }} onChange={(e) => {
+            if (!postingRef.current) void onAttachImages(e.target.files);
             e.target.value = '';
           }} />
           <input ref={fileInputRef} type="file" accept=".md,.txt,.html,.htm,.py,.js,.json,.csv,.css,.xml,.yaml,.yml,.log,.ini,.sh,.pdf,.doc,.docx" multiple disabled={posting || uploadingFileCount > 0} style={{ display: 'none' }} onChange={(e) => { if (!postingRef.current) void onAttachFiles(e.target.files); e.target.value = ''; }} />
 
+          {compressingImageCount > 0 && (
+            <div aria-live="polite" style={{ padding: '0 4px 8px', color: 'var(--faint)', fontSize: 12.5 }}>
+              正在处理图片…
+            </div>
+          )}
           {(pendingFiles.length || pendingImages.length) > 0 && (
             <div className="flex-wrap-gap-8" style={{ padding: '0 4px 8px' }}>
               {pendingImages.map((image, index) => (
                 <div key={`image-${image.name}-${index}`} className="hstack hstack-7" style={{ background: 'var(--card)', borderRadius: 999, padding: '7px 12px', boxShadow: '0 4px 12px var(--shadow)', animation: 'chatFadeIn .2s ease' }}>
                   <span style={{ color: 'var(--rose)', display: 'flex' }}><Svg d={IC.clip} size={12} sw={1.8} /></span>
                   <span style={{ fontSize: 12.5, color: 'var(--ink2)' }}>{image.name}</span>
-                  <span role="button" aria-disabled={posting} onClick={() => { if (!postingRef.current) setPendingImages((current) => current.filter((_, i) => i !== index)); }} style={{ cursor: posting ? 'default' : 'pointer', color: 'var(--ghost)', fontSize: 13, padding: '0 2px' }}>×</span>
+                  <span role="button" aria-disabled={posting} onClick={() => { if (!postingRef.current) setPendingImages((current) => {
+                    const next = current.filter((_, i) => i !== index);
+                    pendingImagesRef.current = next;
+                    return next;
+                  }); }} style={{ cursor: posting ? 'default' : 'pointer', color: 'var(--ghost)', fontSize: 13, padding: '0 2px' }}>×</span>
                 </div>
               ))}
               {pendingFiles.map((file, index) => (
