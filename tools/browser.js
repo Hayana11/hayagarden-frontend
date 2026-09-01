@@ -2,7 +2,7 @@
 // 统一的无头浏览器服务（BrowserService）。由 gateway 通过 subprocess 调用。
 //   node browser.js page <url>   → 读网页：加载(含JS)+抽正文+viewport截图
 //   node browser.js shot <url>   → 纯截图：给某个 URL 拍照（聊天截图走这条，url 里带 ?as=me&shot=1）
-// 两种模式共用同一套启动参数与资源限制（省内存：single-process、禁字体/媒体）。
+// page 模式使用同一套启动参数；shot 模式连接既有 Browser Base；两种模式共用资源限制（省内存：禁字体/媒体）。
 // 调用方(gateway)持有单飞锁，保证同一时刻只有一个 chromium。
 const { chromium } = require('/opt/frontend/node_modules/playwright-core');
 const { randomUUID } = require('crypto');
