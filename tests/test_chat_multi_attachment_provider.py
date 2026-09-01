@@ -200,5 +200,114 @@ class ChatMultiAttachmentProviderTests(unittest.TestCase):
                 block.get("text", "") for block in content if block["type"] == "text"
             ))
 
+    def test_empty_string_metadata_without_legacy_is_empty(self):
+        self.assertEqual(provider_current_turn_attachments(""), [])
+
+    def test_whitespace_metadata_without_legacy_is_empty(self):
+        self.assertEqual(provider_current_turn_attachments("  \n\t"), [])
+
+    def test_empty_json_array_metadata_is_empty(self):
+        self.assertEqual(provider_current_turn_attachments("[]"), [])
+
+    def test_empty_string_keeps_legacy_image(self):
+        items = provider_current_turn_attachments(
+            "", legacy_image_url="/static/uploads/legacy.png",
+        )
+        self.assertEqual(items, [{
+            "type": "image",
+            "url": "/static/uploads/legacy.png",
+            "name": "",
+        }])
+
+    def test_empty_string_keeps_legacy_file(self):
+        item = self._file("legacy.txt", b"legacy body")
+        items = provider_current_turn_attachments(
+            "", legacy_file_url=item["url"], legacy_file_name=item["name"],
+        )
+        self.assertEqual(items, [item])
+
+    def test_nonempty_malformed_json_fails_closed(self):
+        with self.assertRaises(AttachmentValidationError):
+            provider_current_turn_attachments("{")
+
+    def test_json_object_metadata_fails_closed(self):
+        with self.assertRaises(AttachmentValidationError):
+            provider_current_turn_attachments("{}")
+
+    def test_canonical_and_same_legacy_scalar_are_not_duplicated(self):
+        item = self._image("same.png")
+        items = provider_current_turn_attachments(
+            [item], legacy_image_url=item["url"],
+        )
+        self.assertEqual(items, [item])
+
+    def test_daily_prior_attachments_use_explicit_bounded_degrade_policy(self):
+        from chat.daily_runtime import (
+            DAILY_HISTORY_ATTACHMENT_POLICY,
+            format_resident_turn_content,
+        )
+
+        image_one = self._image("one.png")
+        image_two = self._image("two.png")
+        text_file = self._file("round-a.txt", b"private round-a body")
+        history = [{
+            "role": "user",
+            "content": "Round A text",
+            "image_url": "",
+            "file_url": "",
+            "file_name": "",
+            "attachments": [image_one, image_two, text_file],
+        }, {
+            "role": "assistant",
+            "content": "Round A reply",
+            "attachments": [],
+        }]
+        for is_cold, is_respawn in ((True, False), (False, True)):
+            content = format_resident_turn_content(
+                assembly={"state": "", "current_day_history": history},
+                user_content="Round B text",
+                user_image_url="",
+                user_attachments=[],
+                is_cold=is_cold,
+                is_respawn=is_respawn,
+            )
+            self.assertEqual(DAILY_HISTORY_ATTACHMENT_POLICY, "explicit_metadata_degrade_v1")
+            self.assertIn("Round A text", content)
+            self.assertIn("one.png", content)
+            self.assertIn("two.png", content)
+            self.assertIn("round-a.txt", content)
+            self.assertIn("显式降级为元数据标记", content)
+            self.assertIn("本轮不重读历史图片或文件正文", content)
+            self.assertNotIn("private round-a body", content)
+
+    def test_forge_selected_carryover_keeps_images_and_text_file_body(self):
+        from chat.context_window_forge import _user_content_for_row
+
+        image_one = self._image("one.png")
+        image_two = self._image("two.png")
+        text_file = self._file("carryover.txt", b"carryover body")
+        row = {
+            "id": 101,
+            "content": "Round A text",
+            "image_url": "",
+            "file_url": "",
+            "file_name": "",
+            "attachments": [image_one, text_file, image_two],
+        }
+        with mock.patch(
+            "chat.cc_vision_bridge.resolve_image_bytes",
+            return_value=(self.image_bytes, "image/png"),
+        ):
+            content = _user_content_for_row(
+                row, attachment_static_dir=str(self.static_dir),
+            )
+        self.assertEqual(
+            [block["type"] for block in content],
+            ["text", "image", "text", "image"],
+        )
+        self.assertIn("carryover body", content[2]["text"])
+        self.assertNotIn("data", content[0]["text"])
+
+
 if __name__ == "__main__":
     unittest.main()
