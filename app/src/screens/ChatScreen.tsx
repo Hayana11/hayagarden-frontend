@@ -45,7 +45,12 @@ import {
 } from '../lib/chat';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
-import { ComposerUploadCoordinator } from '../lib/composerUpload';
+import {
+  availableComposerAttachmentSlots,
+  ComposerUploadCoordinator,
+  releasePendingImageCompression,
+  reservePendingImageCompression,
+} from '../lib/composerUpload';
 import {
   compressChatImage,
   createPendingChatImage,
@@ -421,7 +426,7 @@ export function ChatScreen() {
   const composerMutationRevisionRef = useRef(0);
   const composerDraftRevisionRef = useRef(0);
   const uploadingFileSlotsRef = useRef(0);
-  const compressingImageSlotsRef = useRef(0);
+  const compressingImageIdsRef = useRef<Set<string>>(new Set());
   const pendingFilesRef = useRef<Array<{ fileUrl: string; fileName: string }>>([]);
   const pendingImagesRef = useRef<PendingChatImage[]>([]);
   const uploadCoordinatorRef = useRef(new ComposerUploadCoordinator(
@@ -450,14 +455,12 @@ export function ChatScreen() {
   pendingFilesRef.current = pendingFiles;
   pendingImagesRef.current = pendingImages;
 
-  const availableComposerSlots = () => Math.max(
-    0,
-    MAX_COMPOSER_ATTACHMENTS
-      - pendingFilesRef.current.length
-      - pendingImagesRef.current.length
-      - uploadingFileSlotsRef.current
-      - compressingImageSlotsRef.current,
-  );
+  const availableComposerSlots = () => availableComposerAttachmentSlots({
+    maxAttachments: MAX_COMPOSER_ATTACHMENTS,
+    pendingFiles: pendingFilesRef.current.length,
+    pendingImages: pendingImagesRef.current.length,
+    uploadingFileReservations: uploadingFileSlotsRef.current,
+  });
 
   const removePendingImage = useCallback((id: string) => {
     if (postingRef.current) return;
@@ -465,6 +468,8 @@ export function ChatScreen() {
     const removed = current.find((image) => image.id === id);
     if (!removed) return;
     revokePendingChatImagePreview(removed);
+    const released = releasePendingImageCompression(compressingImageIdsRef.current, id);
+    if (released) setCompressingImageCount(compressingImageIdsRef.current.size);
     const next = current.filter((image) => image.id !== id);
     pendingImagesRef.current = next;
     setPendingImages(next);
@@ -939,6 +944,7 @@ export function ChatScreen() {
       }
       pendingImagesRef.current.forEach(revokePendingChatImagePreview);
       pendingImagesRef.current = [];
+      compressingImageIdsRef.current.clear();
       mountedRef.current = false;
       cancelInFlightWarmUpState(coldStartRaceRef.current);
       bumpHistoryGenState(coldStartRaceRef.current);
@@ -1327,7 +1333,7 @@ export function ChatScreen() {
   const onAttachFiles = useCallback(
     async (selectedFiles: FileList | null) => {
       setAttachMenuOpen(false);
-      if (!selectedFiles || postingRef.current || compressingImageSlotsRef.current > 0) return;
+      if (!selectedFiles || postingRef.current || compressingImageIdsRef.current.size > 0) return;
       const remaining = availableComposerSlots();
       const selected = Array.from(selectedFiles).slice(0, Math.max(0, remaining));
       if (!selected.length) {
@@ -1372,8 +1378,8 @@ export function ChatScreen() {
       const next = [...current, ...pending].slice(0, MAX_COMPOSER_ATTACHMENTS);
       pendingImagesRef.current = next;
       setPendingImages(next);
-      compressingImageSlotsRef.current += pending.length;
-      setCompressingImageCount(compressingImageSlotsRef.current);
+      reservePendingImageCompression(compressingImageIdsRef.current, pending);
+      setCompressingImageCount(compressingImageIdsRef.current.size);
       const mutationRevision = composerMutationRevisionRef.current;
 
       try {
@@ -1396,8 +1402,8 @@ export function ChatScreen() {
         }));
         await uploadCoordinatorRef.current.settleImages(Promise.resolve(settled), mutationRevision);
       } finally {
-        compressingImageSlotsRef.current -= pending.length;
-        setCompressingImageCount(compressingImageSlotsRef.current);
+        pending.forEach((image) => releasePendingImageCompression(compressingImageIdsRef.current, image.id));
+        setCompressingImageCount(compressingImageIdsRef.current.size);
       }
       if (selectedImages.length > selected.length) showToast('一次消息最多上传 4 个附件');
     },
