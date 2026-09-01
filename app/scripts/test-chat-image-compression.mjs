@@ -181,7 +181,7 @@ const plan = (bytes, width, height) => buildChatImageCompressionPlan({
   assert.equal(result.reason, 'preserve-svg');
 }
 {
-  const undecodable = new File(['not-an-image'], 'broken.jpg', { type: 'image/jpeg' });
+  const undecodable = new File(['not-an-image'], 'broken.png', { type: 'image/png' });
   const result = await compressChatImage(undecodable);
   assert.equal(result.file, undecodable);
   assert.equal(result.compressed, false);
