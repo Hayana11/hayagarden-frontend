@@ -14,8 +14,57 @@ import {
   createPendingChatImage,
   mergePendingChatImages,
   revokePendingChatImagePreview,
+  parseJpegExifOrientation,
 } from '../src/lib/chatImageCompression.ts';
-import { ComposerUploadCoordinator } from '../src/lib/composerUpload.ts';
+import {
+  availableComposerAttachmentSlots,
+  ComposerUploadCoordinator,
+  releasePendingImageCompression,
+  reservePendingImageCompression,
+} from '../src/lib/composerUpload.ts';
+
+
+function jpegWithExifOrientation(orientation) {
+  const tiff = new Uint8Array([
+    0x49, 0x49, 0x2a, 0x00,
+    0x08, 0x00, 0x00, 0x00,
+    0x01, 0x00,
+    0x12, 0x01, 0x03, 0x00,
+    0x01, 0x00, 0x00, 0x00,
+    orientation, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+  ]);
+  const exif = new Uint8Array([0x45, 0x78, 0x69, 0x66, 0x00, 0x00, ...tiff]);
+  const length = exif.length + 2;
+  return new Uint8Array([
+    0xff, 0xd8, 0xff, 0xe1, (length >> 8) & 0xff, length & 0xff,
+    ...exif, 0xff, 0xd9,
+  ]);
+}
+
+{
+  const orientation1 = jpegWithExifOrientation(1);
+  const orientation6 = jpegWithExifOrientation(6);
+  const orientation8 = jpegWithExifOrientation(8);
+  assert.equal(parseJpegExifOrientation(orientation1), 1);
+  assert.equal(parseJpegExifOrientation(orientation6), 6);
+  assert.equal(parseJpegExifOrientation(orientation8), 8);
+  assert.doesNotThrow(() => parseJpegExifOrientation(new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00])));
+  assert.equal(parseJpegExifOrientation(new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00])), 'malformed');
+
+  const orientation6File = new File([orientation6], 'phone-rotated.jpg', { type: 'image/jpeg' });
+  const orientation8File = new File([orientation8], 'phone-rotated-8.jpg', { type: 'image/jpeg' });
+  const original6 = await compressChatImage(orientation6File);
+  const original8 = await compressChatImage(orientation8File);
+  assert.equal(original6.file, orientation6File);
+  assert.equal(original6.reason, 'preserve-exif-orientation');
+  assert.equal(original8.file, orientation8File);
+  assert.equal(original8.reason, 'preserve-exif-orientation');
+
+  const orientation1File = new File([orientation1], 'upright.jpg', { type: 'image/jpeg' });
+  const upright = await compressChatImage(orientation1File);
+  assert.notEqual(upright.reason, 'preserve-exif-orientation');
+}
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const screen = fs.readFileSync(path.join(root, '../src/screens/ChatScreen.tsx'), 'utf8');
@@ -72,10 +121,10 @@ const plan = (bytes, width, height) => buildChatImageCompressionPlan({
   assert.match(screen, /const pending = selected\.map\(createPendingChatImage\)/);
   assert.match(screen, /Promise\.all\(pending\.map\(async \(image\) =>/);
   assert.match(screen, /status: 'ready'/);
-  assert.match(screen, /compressingImageSlotsRef\.current/);
+  assert.match(screen, /compressingImageIdsRef\.current/);
   assert.match(screen, /compressingImageCount === 0/);
   assert.match(screen, /settleImages/);
-  assert.match(screen, /pendingFilesRef\.current\.length[\s\S]*pendingImagesRef\.current\.length[\s\S]*uploadingFileSlotsRef\.current[\s\S]*compressingImageSlotsRef\.current/);
+  assert.match(screen, /pendingFilesRef\.current\.length[\s\S]*pendingImagesRef\.current\.length[\s\S]*uploadingFileSlotsRef\.current/);
   assert.match(screen, /<img src=\{image\.previewUrl\}/);
   assert.match(screen, /objectFit: 'cover'/);
   assert.match(screen, /image\.status === 'compressing'/);
@@ -83,6 +132,9 @@ const plan = (bytes, width, height) => buildChatImageCompressionPlan({
   assert.match(screen, /removePendingImage\(image\.id\)/);
   assert.match(screen, /attempt\.images\.map\(\(image\) => image\.file\)/);
   assert.match(screen, /pendingImagesRef\.current\.forEach\(revokePendingChatImagePreview\)/);
+  assert.match(screen, /releasePendingImageCompression\(compressingImageIdsRef\.current, id\)/);
+  assert.doesNotMatch(screen, /compressingImageSlotsRef\.current/);
+  assert.match(screen, /setCompressingImageCount\(compressingImageIdsRef\.current\.size\)/);
   assert.match(screen, /attempt\.images\.forEach\(revokePendingChatImagePreview\)/);
   assert.match(screen, /revokePendingChatImagePreview\(removed\)/);
   assert.match(screen, /pendingFiles\.map\(\(file, index\) => \([\s\S]*borderRadius: 999[\s\S]*file\.fileName/);
@@ -169,5 +221,29 @@ const plan = (bytes, width, height) => buildChatImageCompressionPlan({
   await settling;
   assert.deepEqual(current, []);
 }
+{
+  const ids = new Set(['A', 'B']);
+  const imageA = { id: 'A', file: new File(['a'], 'A.jpg'), previewUrl: 'blob:A', status: 'compressing', originalBytes: 1 };
+  const imageB = { id: 'B', file: new File(['b'], 'B.jpg'), previewUrl: 'blob:B', status: 'compressing', originalBytes: 1 };
+  const imageC = { id: 'C', file: new File(['c'], 'C.jpg'), previewUrl: 'blob:C', status: 'compressing', originalBytes: 1 };
+  const readyA = { ...imageA, status: 'ready' };
+  const pending = [imageA, imageB];
+  assert.equal(availableComposerAttachmentSlots({ maxAttachments: 4, pendingFiles: 0, pendingImages: pending.length, uploadingFileReservations: 0 }), 2);
+  assert.equal(releasePendingImageCompression(ids, 'A'), true);
+  pending.splice(0, 1);
+  assert.equal(availableComposerAttachmentSlots({ maxAttachments: 4, pendingFiles: 0, pendingImages: pending.length, uploadingFileReservations: 0 }), 3);
+  pending.push(imageC);
+  reservePendingImageCompression(ids, [imageC]);
+  assert.deepEqual(pending.map((image) => image.id), ['B', 'C']);
+  assert.equal(availableComposerAttachmentSlots({ maxAttachments: 4, pendingFiles: 0, pendingImages: pending.length, uploadingFileReservations: 0 }), 2);
+  assert.equal(releasePendingImageCompression(ids, 'A'), false);
+  assert.equal(ids.has('A'), false);
+  assert.deepEqual(mergePendingChatImages(pending, [readyA]), pending);
+  assert.equal(ids.size, 2);
+  pending.length = 0;
+  ids.clear();
+  assert.equal(availableComposerAttachmentSlots({ maxAttachments: 4, pendingFiles: 0, pendingImages: 0, uploadingFileReservations: 0 }), 4);
+  assert.equal(ids.size, 0);
+}
 assert.ok(CHAT_IMAGE_TARGET_BYTES < CHAT_IMAGE_SOFT_MAX_BYTES);
-console.log('chat image compression focused tests passed: 17 cases');
+console.log('chat image compression focused tests passed: 19 cases');
