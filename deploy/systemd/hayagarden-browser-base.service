@@ -6,9 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/frontend
 Environment=HOME=/root
-ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1366x768x24" /snap/bin/chromium --remote-debugging-address=127.0.0.1 --remote-debugging-port=9333 --user-data-dir=/root/snap/chromium/common/hayagarden-browser-base-profile --no-sandbox --no-first-run
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1366x768x24" /snap/bin/chromium --remote-debugging-address=127.0.0.1 --remote-debugging-port=9333 --user-data-dir=/root/snap/chromium/common/hayagarden-browser-base-profile --no-sandbox --no-first-run about:blank
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
