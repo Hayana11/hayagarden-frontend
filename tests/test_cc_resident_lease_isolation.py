@@ -74,7 +74,7 @@ class ResidentLeaseIsolationTests(unittest.TestCase):
             resident._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
             seen = {}
 
-            def capture_spawn_env(env):
+            def capture_spawn_env(*, env, **_kwargs):
                 seen["env"] = dict(env)
                 return {
                     "built_in_tools_csv": "",
@@ -113,7 +113,7 @@ class ResidentLeaseIsolationTests(unittest.TestCase):
                     "extra": [],
                     "surface_allowed": "",
                     "mcp_path": None,
-                    "surface_fingerprint": None,
+                    "surface_fingerprint": "synthetic-surface",
                 }
 
             resident._build_spawn_tool_flags = mock.Mock(side_effect=fake_spawn_flags)
