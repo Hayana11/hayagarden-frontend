@@ -11,6 +11,9 @@ import {
   CHAT_IMAGE_TARGET_BYTES,
   buildChatImageCompressionPlan,
   compressChatImage,
+  createPendingChatImage,
+  mergePendingChatImages,
+  revokePendingChatImagePreview,
 } from '../src/lib/chatImageCompression.ts';
 import { ComposerUploadCoordinator } from '../src/lib/composerUpload.ts';
 
@@ -66,12 +69,26 @@ const plan = (bytes, width, height) => buildChatImageCompressionPlan({
   assert.equal(result.reason, 'invalid-dimensions');
 }
 {
-  assert.match(screen, /Promise\.all\(selected\.map\(\(file\) => compressChatImage\(file\)\)\)/);
+  assert.match(screen, /const pending = selected\.map\(createPendingChatImage\)/);
+  assert.match(screen, /Promise\.all\(pending\.map\(async \(image\) =>/);
+  assert.match(screen, /status: 'ready'/);
   assert.match(screen, /compressingImageSlotsRef\.current/);
   assert.match(screen, /compressingImageCount === 0/);
   assert.match(screen, /settleImages/);
   assert.match(screen, /pendingFilesRef\.current\.length[\s\S]*pendingImagesRef\.current\.length[\s\S]*uploadingFileSlotsRef\.current[\s\S]*compressingImageSlotsRef\.current/);
-  assert.match(screen, /正在处理图片/);
+  assert.match(screen, /<img src=\{image\.previewUrl\}/);
+  assert.match(screen, /objectFit: 'cover'/);
+  assert.match(screen, /image\.status === 'compressing'/);
+  assert.match(screen, /const pending = selected\.map\(createPendingChatImage\)/);
+  assert.match(screen, /removePendingImage\(image\.id\)/);
+  assert.match(screen, /attempt\.images\.map\(\(image\) => image\.file\)/);
+  assert.match(screen, /pendingImagesRef\.current\.forEach\(revokePendingChatImagePreview\)/);
+  assert.match(screen, /attempt\.images\.forEach\(revokePendingChatImagePreview\)/);
+  assert.match(screen, /revokePendingChatImagePreview\(removed\)/);
+  assert.match(screen, /pendingFiles\.map\(\(file, index\) => \([\s\S]*borderRadius: 999[\s\S]*file\.fileName/);
+  assert.ok((screen.match(/status: 'ready'/g) || []).length >= 2);
+  assert.doesNotMatch(screen, /URL\.createObjectURL\(file\)/);
+  assert.doesNotMatch(screen, /image-\$\{image\.name\}-\$\{index\}/);
 }
 {
   assert.match(api, /extra: \{ files\?: PendingChatFile\[\]; imageFiles\?: File\[\] \}/);
@@ -118,5 +135,39 @@ const plan = (bytes, width, height) => buildChatImageCompressionPlan({
   assert.equal(result.compressed, false);
   assert.equal(result.reason, 'decode-failed-original');
 }
+
+{
+  const original = new File(['original'], 'photo.png', { type: 'image/png' });
+  const pending = createPendingChatImage(original);
+  assert.ok(pending.id);
+  assert.equal(pending.file, original);
+  assert.equal(typeof pending.previewUrl, 'string');
+  assert.equal(pending.status, 'compressing');
+  const ready = { ...pending, file: new File(['compressed'], 'photo.webp', { type: 'image/webp' }), status: 'ready', outputBytes: 10 };
+  const merged = mergePendingChatImages([pending], [ready]);
+  assert.deepEqual(merged, [ready]);
+  revokePendingChatImagePreview(pending);
+}
+{
+  const first = { id: 'a', file: new File(['a'], 'a.jpg', { type: 'image/jpeg' }), previewUrl: 'blob:a', status: 'compressing', originalBytes: 1 };
+  const second = { id: 'b', file: new File(['b'], 'b.jpg', { type: 'image/jpeg' }), previewUrl: 'blob:b', status: 'compressing', originalBytes: 1 };
+  const readyFirst = { ...first, status: 'ready' };
+  const readySecond = { ...second, status: 'ready' };
+  assert.deepEqual(mergePendingChatImages([readySecond], [readyFirst, readySecond]), [readySecond]);
+  assert.deepEqual([first, second].map((image) => image.file), [first.file, second.file]);
+}
+{
+  let current = [];
+  const original = { id: 'pending', file: new File(['a'], 'pending.jpg', { type: 'image/jpeg' }), previewUrl: 'blob:pending', status: 'compressing', originalBytes: 1 };
+  const ready = { ...original, status: 'ready' };
+  current = [original];
+  const coordinator = new ComposerUploadCoordinator(() => 0, () => {}, (images) => {
+    current = mergePendingChatImages(current, images);
+  });
+  const settling = coordinator.settleImages(new Promise((resolve) => setTimeout(() => resolve([ready]), 5)), 0);
+  current = [];
+  await settling;
+  assert.deepEqual(current, []);
+}
 assert.ok(CHAT_IMAGE_TARGET_BYTES < CHAT_IMAGE_SOFT_MAX_BYTES);
-console.log('chat image compression focused tests passed: 14 cases');
+console.log('chat image compression focused tests passed: 17 cases');
