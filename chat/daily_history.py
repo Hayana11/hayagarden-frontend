@@ -117,7 +117,7 @@ def _fetch_current_day_history(
     try:
         cols = _table_columns(conn, 'chat_messages')
         select_cols = ['id', 'author', 'content', 'created_at']
-        for optional in ('tool_calls', 'source_kind', 'image_url', 'cache_info'):
+        for optional in ('tool_calls', 'source_kind', 'image_url', 'file_url', 'file_name', 'attachments', 'cache_info'):
             if optional in cols:
                 select_cols.append(optional)
         wake_contents = _wake_content_set(conn)
@@ -138,6 +138,10 @@ def _fetch_current_day_history(
                 'role': role,
                 'author': str(r['author']),
                 'content': _message_display_content(r),
+                'image_url': str(r['image_url'] or '') if 'image_url' in r.keys() else '',
+                'file_url': str(r['file_url'] or '') if 'file_url' in r.keys() else '',
+                'file_name': str(r['file_name'] or '') if 'file_name' in r.keys() else '',
+                'attachments': r['attachments'] if 'attachments' in r.keys() else '',
                 'created_at': str(r['created_at'] or ''),
             }
 
