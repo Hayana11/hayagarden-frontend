@@ -43,6 +43,19 @@ def _make_png(path: Path, text: str = MARKER) -> None:
     img.save(path, format='PNG')
 
 
+def _make_webp(path: Path, text: str = MARKER) -> None:
+    img = Image.new('RGB', (320, 100), 'white')
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 28,
+        )
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((16, 30), text, fill='black', font=font)
+    img.save(path, format='WEBP', quality=80)
+
+
 class VisionBridgeUnitTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
