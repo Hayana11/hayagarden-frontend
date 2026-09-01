@@ -19,6 +19,10 @@ from chat.daily_context import (
     is_formal_chat_message,
 )
 from chat.cc_vision_bridge import VisionBridgeError, build_claude_user_content
+from chat.attachment_contract import (
+    AttachmentValidationError,
+    provider_current_turn_attachment_parts,
+)
 from tools.claude_forge_core import (
     build_minimal_text_session,
     new_uuid,
@@ -68,7 +72,7 @@ def _fetch_messages_by_ids(
     if not cols:
         raise CarryoverUnforgeableError('chat_messages_missing')
     select_cols = ['id', 'author', 'content', 'created_at']
-    for optional in ('tool_calls', 'source_kind', 'image_url'):
+    for optional in ('tool_calls', 'source_kind', 'image_url', 'file_url', 'file_name', 'attachments'):
         if optional in cols:
             select_cols.append(optional)
     placeholders = ','.join('?' for _ in message_ids)
@@ -87,26 +91,27 @@ def _fetch_messages_by_ids(
     return ordered
 
 
-def _row_image_url(row: Any) -> str:
-    if hasattr(row, 'keys') and 'image_url' in row.keys():
-        return str(row['image_url'] or '').strip()
-    return ''
-
-
 def _user_content_for_row(row: Any) -> Any:
-    """Build forged user message.content — text str or multimodal list."""
+    """Build forged user content from ordered canonical attachments."""
     raw_text = str(row['content'] or '').strip()
-    image_url = _row_image_url(row)
-    if not image_url:
-        text = _message_display_content(row)
-        if not text:
-            raise CarryoverUnforgeableError('empty_content:%s' % int(row['id']))
-        return text
     try:
-        return build_claude_user_content(text=raw_text, image_refs=[image_url])
+        attachment_parts = provider_current_turn_attachment_parts(
+            row['attachments'] if 'attachments' in row.keys() else [],
+            legacy_file_url=row['file_url'] if 'file_url' in row.keys() else '',
+            legacy_file_name=row['file_name'] if 'file_name' in row.keys() else '',
+            legacy_image_url=row['image_url'] if 'image_url' in row.keys() else '',
+        )
+    except AttachmentValidationError as exc:
+        raise CarryoverUnforgeableError('attachment_unreadable') from exc
+    text = raw_text or (_message_display_content(row) if not attachment_parts else '')
+    if not text and not attachment_parts:
+        raise CarryoverUnforgeableError('empty_content:%s' % int(row['id']))
+    try:
+        return build_claude_user_content(
+            text=text,
+            attachment_parts=attachment_parts,
+        )
     except VisionBridgeError as exc:
-        if raw_text:
-            return raw_text
         raise CarryoverUnforgeableError('vision_unresolvable:%s' % exc.code) from exc
 
 
