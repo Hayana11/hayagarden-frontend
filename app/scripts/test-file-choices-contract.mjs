@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { ComposerUploadCoordinator } from '../src/lib/composerUpload.ts';
+import { mergePendingChatImages } from '../src/lib/chatImageCompression.ts';
 
 const screen = fs.readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
 const api = fs.readFileSync(new URL('../src/lib/api.ts', import.meta.url), 'utf8');
@@ -169,5 +170,58 @@ async function exerciseChoiceUploadRace({ uploadDuringPost }) {
 
 await exerciseChoiceUploadRace({ uploadDuringPost: false });
 await exerciseChoiceUploadRace({ uploadDuringPost: true });
+
+{
+  let revision = 21;
+  const committedFiles = [];
+  const committedImages = [];
+  const fileVisible = [];
+  const imageA = { id: 'image-A', file: new File(['a'], 'A.jpg'), previewUrl: 'blob:A', status: 'ready', originalBytes: 1 };
+  const imageB = { id: 'image-B', file: new File(['b'], 'B.jpg'), previewUrl: 'blob:B', status: 'ready', originalBytes: 1 };
+  let visibleImages = [imageA, imageB];
+  const coordinator = new ComposerUploadCoordinator(
+    () => revision,
+    (files) => {
+      committedFiles.push(files);
+      fileVisible.push(...files);
+    },
+    (images) => {
+      committedImages.push(images);
+      visibleImages = mergePendingChatImages(visibleImages, images);
+    },
+  );
+  const fileBatch1 = deferred();
+  const fileBatch2 = deferred();
+  const imageBatch1 = deferred();
+  const imageBatch2 = deferred();
+  const f1 = [{ fileUrl: '/static/uploads/files/f1.txt', fileName: 'f1.txt' }];
+  const f2 = [{ fileUrl: '/static/uploads/files/f2.pdf', fileName: 'f2.pdf' }];
+  const i1 = [{ ...imageA, file: new File(['compressed-a'], 'A.webp') }];
+  const i2 = [{ ...imageB, file: new File(['compressed-b'], 'B.webp') }];
+
+  coordinator.beginChoicePost();
+  const f1Task = coordinator.settle(fileBatch1.promise, revision);
+  const f2Task = coordinator.settle(fileBatch2.promise, revision);
+  const i1Task = coordinator.settleImages(imageBatch1.promise, revision);
+  const i2Task = coordinator.settleImages(imageBatch2.promise, revision);
+
+  fileBatch2.resolve(f2);
+  await f2Task;
+  imageBatch2.resolve(i2);
+  await i2Task;
+  fileBatch1.resolve(f1);
+  await f1Task;
+  imageBatch1.resolve(i1);
+  await i1Task;
+  coordinator.endChoicePost();
+
+  assert.deepEqual(committedFiles, [f2, f1]);
+  assert.deepEqual(fileVisible.map((file) => file.fileName), ['f2.pdf', 'f1.txt']);
+  assert.equal(new Set(fileVisible.map((file) => file.fileName)).size, 2);
+  assert.deepEqual(committedImages.flat().map((image) => image.id), ['image-B', 'image-A']);
+  assert.deepEqual(visibleImages.map((image) => image.id), ['image-A', 'image-B']);
+  assert.equal(new Set(visibleImages.map((image) => image.id)).size, 2);
+  assert.ok(fileVisible.length + visibleImages.length <= 4);
+}
 
 console.log('FILE+CHOICES frontend contract: ok');
