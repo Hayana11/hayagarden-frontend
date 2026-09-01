@@ -51,8 +51,13 @@ async function openClient(shopDaemonUrl) {
 async function closeClient(client, transport) {
   try {
     await client.close();
-  } finally {
+  } catch {
+    // Closing an already-terminated child is harmless for this contract test.
+  }
+  try {
     await transport.close();
+  } catch {
+    // The SDK may already have closed the stdio transport with the client.
   }
 }
 
@@ -108,7 +113,10 @@ try {
 }
 
 assert.ok(browseRequests.every(({ method, path }) => method === 'POST' && path === '/browse'));
-assert.equal(readFileSync(serverPath, 'utf8').includes('playwright'), false);
+const serverSource = readFileSync(serverPath, 'utf8');
+for (const forbidden of ['playwright', 'chromium', 'click', 'checkout', 'evaluate']) {
+  assert.equal(serverSource.includes(forbidden), false, 'read surface contains no ' + forbidden + ' operation');
+}
 
 await new Promise((resolve, reject) => {
   shopServer.close((error) => (error ? reject(error) : resolve()));
