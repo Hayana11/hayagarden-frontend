@@ -10,6 +10,7 @@ import {
   CHAT_IMAGE_SOFT_MAX_BYTES,
   CHAT_IMAGE_TARGET_BYTES,
   buildChatImageCompressionPlan,
+  compressChatImage,
 } from '../src/lib/chatImageCompression.ts';
 import { ComposerUploadCoordinator } from '../src/lib/composerUpload.ts';
 
@@ -96,5 +97,26 @@ const plan = (bytes, width, height) => buildChatImageCompressionPlan({
   }));
   assert.deepEqual(results, ["A'", "B'", "C'", "D'"]);
 }
+{
+  const gif = new File(['GIF89a'], 'animated.gif', { type: 'image/gif' });
+  const result = await compressChatImage(gif);
+  assert.equal(result.file, gif);
+  assert.equal(result.compressed, false);
+  assert.equal(result.reason, 'preserve-gif');
+}
+{
+  const svg = new File(['<svg/>'], 'diagram.svg', { type: 'image/svg+xml' });
+  const result = await compressChatImage(svg);
+  assert.equal(result.file, svg);
+  assert.equal(result.compressed, false);
+  assert.equal(result.reason, 'preserve-svg');
+}
+{
+  const undecodable = new File(['not-an-image'], 'broken.jpg', { type: 'image/jpeg' });
+  const result = await compressChatImage(undecodable);
+  assert.equal(result.file, undecodable);
+  assert.equal(result.compressed, false);
+  assert.equal(result.reason, 'decode-failed-original');
+}
 assert.ok(CHAT_IMAGE_TARGET_BYTES < CHAT_IMAGE_SOFT_MAX_BYTES);
-console.log('chat image compression focused tests passed: 11 cases');
+console.log('chat image compression focused tests passed: 14 cases');
