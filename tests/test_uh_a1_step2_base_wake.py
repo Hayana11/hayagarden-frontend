@@ -222,7 +222,7 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         decision_start = gateway.index('def _wake_decide_locked')
         basic_start = gateway.index('if basic_normal:', decision_start)
         clock_section = gateway[decision_start:basic_start]
-        self.assertEqual(clock_section.count('read_interaction_clock'), 1)
+        self.assertEqual(clock_section.count('read_interaction_clock('), 1)
         self.assertIn('guard_clock.user_idle_hours', clock_section)
         self.assertIn('guard_clock.effective_idle_hours', clock_section)
 
