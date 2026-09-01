@@ -287,11 +287,15 @@ def provider_current_turn_attachments(
     """Strict, ordered attachment set for a provider current turn."""
     raw = value
     if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            raise AttachmentValidationError('附件元数据无效') from exc
-    if raw in (None, '', []):
+        stripped = raw.strip()
+        if not stripped:
+            raw = []
+        else:
+            try:
+                raw = json.loads(stripped)
+            except (TypeError, ValueError) as exc:
+                raise AttachmentValidationError('附件元数据无效') from exc
+    if raw in (None, [], '[]'):
         raw = []
     if not isinstance(raw, list):
         raise AttachmentValidationError('附件元数据无效')
