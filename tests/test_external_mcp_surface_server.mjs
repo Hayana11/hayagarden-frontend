@@ -72,6 +72,38 @@ test('list and call stay on the injected local bridge', () => {
   assert.ok(buildServer({ runner }));
 });
 
+test('safe local failure codes are visible and unsafe codes fall back', () => {
+  const localFailure = (code) => mcpCallResult(callSurface(
+    'calendar__list__abc123',
+    {},
+    () => ({
+      status: 'FAILED_PRE_CALL',
+      error: {
+        code,
+        summary: 'External MCP call was not completed.',
+      },
+    }),
+  ));
+
+  for (const code of [
+    'TURN_RECORD_UNAVAILABLE',
+    'EXTERNAL_RUNTIME_UNAVAILABLE',
+    'AUTHORITY_WRITE_FAILED',
+  ]) {
+    const output = localFailure(code);
+    assert.equal(output.isError, true);
+    assert.equal(output.content[0].text, `External MCP call was not completed. [${code}]`);
+  }
+
+  const unsafe = 'raw exception: Authorization=do-not-leak';
+  const fallback = localFailure(unsafe);
+  assert.equal(
+    fallback.content[0].text,
+    'External MCP call was not completed. [SURFACE_ADAPTER_FAILED]',
+  );
+  assert.doesNotMatch(fallback.content[0].text, /raw exception|Authorization|do-not-leak/);
+});
+
 
 test('surface names satisfy the installed MCP ToolSchema contract', () => {
   const generated = JSON.parse(execFileSync(
@@ -103,3 +135,4 @@ test('surface names satisfy the installed MCP ToolSchema contract', () => {
   }
   if (installedMax > 0) assert.ok(generated.long.length <= installedMax);
 });
+
