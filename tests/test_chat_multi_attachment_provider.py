@@ -160,5 +160,45 @@ class ChatMultiAttachmentProviderTests(unittest.TestCase):
         self.assertEqual([part["type"] for part in first], ["image", "text", "image"])
 
 
+    def test_daily_hot_cold_respawn_each_keep_all_current_images(self):
+        from chat.daily_runtime import format_resident_turn_content
+
+        attachments = [self._image("%d.png" % n) for n in range(4)]
+        with mock.patch(
+            "chat.cc_vision_bridge.resolve_image_bytes",
+            return_value=(self.image_bytes, "image/png"),
+        ):
+            for is_cold, is_respawn in ((False, False), (True, False), (False, True)):
+                content = format_resident_turn_content(
+                    assembly={"state": "", "current_day_history": []},
+                    user_content="[image]",
+                    user_image_url="",
+                    user_attachments=attachments,
+                    attachment_static_dir=str(self.static_dir),
+                    is_cold=is_cold,
+                    is_respawn=is_respawn,
+                )
+                self.assertEqual(
+                    [block["type"] for block in content].count("image"), 4
+                )
+
+    def test_daily_text_file_contains_body_in_hot_cold_respawn(self):
+        from chat.daily_runtime import format_resident_turn_content
+
+        attachment = self._file("daily.txt", b"daily body")
+        for is_cold, is_respawn in ((False, False), (True, False), (False, True)):
+            content = format_resident_turn_content(
+                assembly={"state": "", "current_day_history": []},
+                user_content="请读文件",
+                user_image_url="",
+                user_attachments=[attachment],
+                attachment_static_dir=str(self.static_dir),
+                is_cold=is_cold,
+                is_respawn=is_respawn,
+            )
+            self.assertIn("daily body", "\n".join(
+                block.get("text", "") for block in content if block["type"] == "text"
+            ))
+
 if __name__ == "__main__":
     unittest.main()
