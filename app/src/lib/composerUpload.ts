@@ -1,3 +1,5 @@
+import type { PendingChatImage } from './chatImageCompression';
+
 export interface PendingComposerFile {
   fileUrl: string;
   fileName: string;
@@ -9,7 +11,7 @@ type QueuedUpload = {
 };
 
 type QueuedImageCompression = {
-  files: File[];
+  files: PendingChatImage[];
   revision: number;
 };
 
@@ -20,12 +22,12 @@ export class ComposerUploadCoordinator {
   private queuedImageCompression: QueuedImageCompression | null = null;
   private readonly currentRevision: () => number;
   private readonly commit: (files: PendingComposerFile[]) => void;
-  private readonly commitImages: (files: File[]) => void;
+  private readonly commitImages: (files: PendingChatImage[]) => void;
 
   constructor(
     currentRevision: () => number,
     commit: (files: PendingComposerFile[]) => void,
-    commitImages: (files: File[]) => void = () => {},
+    commitImages: (files: PendingChatImage[]) => void = () => {},
   ) {
     this.currentRevision = currentRevision;
     this.commit = commit;
@@ -65,7 +67,7 @@ export class ComposerUploadCoordinator {
     return true;
   }
 
-  async settleImages(upload: Promise<File[]>, revision: number): Promise<boolean> {
+  async settleImages(upload: Promise<PendingChatImage[]>, revision: number): Promise<boolean> {
     const files = await upload;
     if (!files.length) return false;
     if (revision !== this.currentRevision()) return true;
