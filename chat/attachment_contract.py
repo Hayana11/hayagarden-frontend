@@ -253,6 +253,109 @@ def text_file_attachments(
     ]
 
 
+def read_text_attachment_body(
+    file_url: object,
+    file_name: object,
+    *,
+    static_dir: str = '/opt/frontend/static',
+) -> Optional[str]:
+    """Read one canonical text upload with the existing path/size fences."""
+    item = _file_attachment(file_url, file_name, allow_legacy_static=False)
+    if item is None or Path(item['name']).suffix.lower() not in ALLOWED_TEXT_FILE_EXTENSIONS:
+        return None
+    files_dir = os.path.join(str(static_dir), 'uploads', 'files')
+    validated = validate_uploaded_file_reference(item['url'], item['name'], files_dir)
+    if validated is None:
+        return None
+    path, _label = validated
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) > MAX_TEXT_FILE_BYTES:
+        return None
+    return data.decode('utf-8', errors='replace')
+
+
+def provider_current_turn_attachments(
+    value: object,
+    *,
+    legacy_file_url: object = '',
+    legacy_file_name: object = '',
+    legacy_image_url: object = '',
+) -> list[dict[str, str]]:
+    """Strict, ordered attachment set for a provider current turn."""
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise AttachmentValidationError('附件元数据无效') from exc
+    if raw in (None, '', []):
+        raw = []
+    if not isinstance(raw, list):
+        raise AttachmentValidationError('附件元数据无效')
+    if len(raw) > MAX_CHAT_ATTACHMENTS:
+        raise AttachmentValidationError('最多上传 4 个附件')
+
+    normalized = persisted_chat_attachments(
+        raw,
+        legacy_file_url=legacy_file_url,
+        legacy_file_name=legacy_file_name,
+        legacy_image_url=legacy_image_url,
+    )
+    if raw:
+        canonical_keys = {(item['type'], item['url']) for item in normalized}
+        for item in raw:
+            if not isinstance(item, dict):
+                raise AttachmentValidationError('附件元数据无效')
+            kind = str(item.get('type') or '').strip().lower()
+            if kind not in {'image', 'file'}:
+                raise AttachmentValidationError('附件类型无效')
+            candidate = persisted_chat_attachments([item])
+            if not candidate or (candidate[0]['type'], candidate[0]['url']) not in canonical_keys:
+                raise AttachmentValidationError('附件引用无效')
+    if len(normalized) > MAX_CHAT_ATTACHMENTS:
+        raise AttachmentValidationError('最多上传 4 个附件')
+    return normalized
+
+
+def provider_current_turn_attachment_parts(
+    value: object,
+    *,
+    legacy_file_url: object = '',
+    legacy_file_name: object = '',
+    legacy_image_url: object = '',
+    static_dir: str = '/opt/frontend/static',
+) -> list[dict[str, str]]:
+    """Convert ordered durable attachments into provider content parts."""
+    parts: list[dict[str, str]] = []
+    for item in provider_current_turn_attachments(
+        value,
+        legacy_file_url=legacy_file_url,
+        legacy_file_name=legacy_file_name,
+        legacy_image_url=legacy_image_url,
+    ):
+        if item['type'] == 'image':
+            parts.append({'type': 'image', 'ref': item['url']})
+            continue
+        name = item['name'] or '附件'
+        if Path(name).suffix.lower() in ALLOWED_TEXT_FILE_EXTENSIONS:
+            body = read_text_attachment_body(item['url'], name, static_dir=static_dir)
+            if body is None:
+                raise AttachmentValidationError('文本附件正文不可读取: %s' % name)
+            parts.append({
+                'type': 'text',
+                'text': '[用户发来文件: %s]\n[正文开始]\n%s\n[正文结束]' % (name, body),
+            })
+        else:
+            parts.append({
+                'type': 'text',
+                'text': '[附件: %s（当前轮不读取正文）]' % name,
+            })
+    return parts
+
+
 def image_attachment_urls(
     value: object,
     *,
