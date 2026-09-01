@@ -26,6 +26,10 @@ export function releasePendingImageCompression(ids: Set<string>, id: string): bo
   return ids.delete(id);
 }
 
+export function canStartComposerAttachmentSelection(posting: boolean, availableSlots: number): boolean {
+  return !posting && availableSlots > 0;
+}
+
 export function availableComposerAttachmentSlots(input: {
   maxAttachments: number;
   pendingFiles: number;
@@ -45,7 +49,7 @@ export function availableComposerAttachmentSlots(input: {
 export class ComposerUploadCoordinator {
   private choicePosting = false;
   private queuedUpload: QueuedUpload | null = null;
-  private queuedImageCompression: QueuedImageCompression | null = null;
+  private queuedImageCompression: QueuedImageCompression[] = [];
   private readonly currentRevision: () => number;
   private readonly commit: (files: PendingComposerFile[]) => void;
   private readonly commitImages: (files: PendingChatImage[]) => void;
@@ -72,9 +76,11 @@ export class ComposerUploadCoordinator {
       this.commit(queued.files);
     }
     const queuedImages = this.queuedImageCompression;
-    this.queuedImageCompression = null;
-    if (queuedImages && queuedImages.revision === this.currentRevision()) {
-      this.commitImages(queuedImages.files);
+    this.queuedImageCompression = [];
+    for (const queuedImage of queuedImages) {
+      if (queuedImage.revision === this.currentRevision()) {
+        this.commitImages(queuedImage.files);
+      }
     }
   }
 
@@ -98,7 +104,7 @@ export class ComposerUploadCoordinator {
     if (!files.length) return false;
     if (revision !== this.currentRevision()) return true;
     if (this.choicePosting) {
-      this.queuedImageCompression = { files, revision };
+      this.queuedImageCompression.push({ files, revision });
       return true;
     }
     this.commitImages(files);
