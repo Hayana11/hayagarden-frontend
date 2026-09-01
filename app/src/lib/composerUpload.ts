@@ -48,7 +48,7 @@ export function availableComposerAttachmentSlots(input: {
 /** Keep uploads started before a choice from mutating the composer mid-POST. */
 export class ComposerUploadCoordinator {
   private choicePosting = false;
-  private queuedUpload: QueuedUpload | null = null;
+  private queuedUploads: QueuedUpload[] = [];
   private queuedImageCompression: QueuedImageCompression[] = [];
   private readonly currentRevision: () => number;
   private readonly commit: (files: PendingComposerFile[]) => void;
@@ -70,10 +70,12 @@ export class ComposerUploadCoordinator {
 
   endChoicePost(): void {
     this.choicePosting = false;
-    const queued = this.queuedUpload;
-    this.queuedUpload = null;
-    if (queued && queued.revision === this.currentRevision()) {
-      this.commit(queued.files);
+    const queued = this.queuedUploads;
+    this.queuedUploads = [];
+    for (const upload of queued) {
+      if (upload.revision === this.currentRevision()) {
+        this.commit(upload.files);
+      }
     }
     const queuedImages = this.queuedImageCompression;
     this.queuedImageCompression = [];
@@ -92,7 +94,7 @@ export class ComposerUploadCoordinator {
     if (!files.length) return false;
     if (revision !== this.currentRevision()) return true;
     if (this.choicePosting) {
-      this.queuedUpload = { files, revision };
+      this.queuedUploads.push({ files, revision });
       return true;
     }
     this.commit(files);
