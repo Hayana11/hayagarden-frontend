@@ -3353,6 +3353,40 @@ class DailyAttachmentReplayTests(unittest.TestCase):
         self.assertNotIn('base64', content[0]['text'].lower())
 
 
+    def test_daily_selected_carryover_keeps_explicit_attachment_marker(self):
+        from chat.daily_runtime import format_resident_turn_content
+
+        attachments = [
+            self._image('carry-one.png'),
+            self._image('carry-two.png'),
+            self._file('carry.txt', b'carry body'),
+        ]
+        content = format_resident_turn_content(
+            assembly={
+                'state': '',
+                'carryover_messages': [{
+                    'role': 'user',
+                    'content': 'Old round',
+                    'image_url': '',
+                    'file_url': '',
+                    'file_name': '',
+                    'attachments': attachments,
+                }],
+                'current_day_history': [],
+            },
+            user_content='New round',
+            user_image_url='',
+            user_attachments=[],
+            is_cold=True,
+            is_respawn=False,
+        )
+        self.assertIn('Old round', content)
+        self.assertIn('carry-one.png', content)
+        self.assertIn('carry-two.png', content)
+        self.assertIn('carry.txt', content)
+        self.assertIn('显式降级为元数据标记', content)
+        self.assertNotIn('carry body', content)
+
 
 if __name__ == '__main__':
     unittest.main()
