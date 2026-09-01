@@ -1964,7 +1964,10 @@ def get_selected_carryover_messages(
         ids = [int(r['message_id']) for r in links]
         cols = _table_columns(conn, 'chat_messages')
         select_cols = ['id', 'author', 'content', 'created_at']
-        for optional in ('image_url', 'source_kind', 'tool_calls'):
+        for optional in (
+            'image_url', 'file_url', 'file_name', 'attachments',
+            'source_kind', 'tool_calls',
+        ):
             if optional in cols:
                 select_cols.append(optional)
         placeholders = ','.join('?' * len(ids))
@@ -1985,6 +1988,10 @@ def get_selected_carryover_messages(
                 'role': role,
                 'author': str(r['author']),
                 'content': _message_display_content(r),
+                'image_url': str(r['image_url'] or '') if 'image_url' in r.keys() else '',
+                'file_url': str(r['file_url'] or '') if 'file_url' in r.keys() else '',
+                'file_name': str(r['file_name'] or '') if 'file_name' in r.keys() else '',
+                'attachments': r['attachments'] if 'attachments' in r.keys() else '',
                 'created_at': str(r['created_at'] or ''),
             })
         return out
