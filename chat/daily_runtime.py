@@ -3018,6 +3018,7 @@ def persist_daily_assistant_for_plan(
     tool_calls: str = '',
     cache_info: str = '',
     choices: str = '',
+    display_segments: str = '',
 ) -> int:
     return dc.persist_daily_assistant_if_current(
         chat_id=plan.chat_id,
@@ -3030,6 +3031,7 @@ def persist_daily_assistant_for_plan(
         tool_calls=tool_calls,
         cache_info=cache_info,
         choices=choices,
+        display_segments=display_segments,
         db_path=plan.db_path,
     )
 

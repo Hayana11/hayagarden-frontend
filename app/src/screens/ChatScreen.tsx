@@ -387,7 +387,7 @@ export function ChatScreen() {
   const [chatProvider, setChatProvider] = useState<'api_relay' | 'claude_code' | ''>('');
   const [modelMode, setModelMode] = useState<'default' | 'explicit' | 'unknown' | ''>('');
 
-  const [openThink, setOpenThink] = useState<Record<number, boolean>>({});
+  const [openThink, setOpenThink] = useState<Record<string, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
@@ -964,6 +964,11 @@ export function ChatScreen() {
     setLive(liveRef.current);
   }, []);
 
+  const clearLivePresentation = useCallback(() => {
+    liveRef.current = null;
+    setLive(null);
+  }, []);
+
   const runStream = useCallback(
     async (
       userMessageId: number | null,
@@ -1017,8 +1022,7 @@ export function ChatScreen() {
           confirmation_state: 'pending',
         });
       }
-      liveRef.current = null;
-      setLive(null);
+      if (!res.ok || res.deferredTool) clearLivePresentation();
       if (!res.ok && res.error) {
         if (!ctrl.signal.aborted) {
           setChatError({ message: res.error, hint: guessChatErrorHint(res.error) });
@@ -1027,7 +1031,7 @@ export function ChatScreen() {
       }
       return res.ok;
     },
-    [scrollBottom, showToast, updateLive, pinTranscriptToLatest],
+    [clearLivePresentation, scrollBottom, showToast, updateLive, pinTranscriptToLatest],
   );
 
   const confirmDeferred = useCallback(async (decision: 'approve' | 'reject') => {
@@ -1046,15 +1050,17 @@ export function ChatScreen() {
       realityContext,
     });
     if (decision === 'reject') {
+      clearLivePresentation();
       setPendingConfirmation({ ...pending, confirmation_state: 'rejected', running: false });
     } else if (ok) {
       await refetchLatest();
+      clearLivePresentation();
       setPendingConfirmation(null);
     } else {
       setPendingConfirmation({ ...pending, confirmation_state: 'pending', running: false });
     }
     setSending(false);
-  }, [pendingConfirmation, sending, runStream, refetchLatest]);
+  }, [clearLivePresentation, pendingConfirmation, sending, runStream, refetchLatest]);
 
   const send = useCallback(async () => {
     const rawText = input;
@@ -1110,9 +1116,10 @@ export function ChatScreen() {
     await refetchLatest();
     await runStream(messageId, { realityContext });
     await refetchLatest();
+    clearLivePresentation();
     setSending(false);
     taRef.current?.focus();
-  }, [input, pendingFiles, pendingImages, sending, uploadingFileCount, compressingImageCount, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+  }, [clearLivePresentation, input, pendingFiles, pendingImages, sending, uploadingFileCount, compressingImageCount, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
@@ -1140,9 +1147,10 @@ export function ChatScreen() {
     await refetchLatest();
     await runStream(messageId, { realityContext });
     await refetchLatest();
+    clearLivePresentation();
     setSending(false);
     return true;
-  }, [sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+  }, [clearLivePresentation, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
@@ -1171,16 +1179,19 @@ export function ChatScreen() {
       // Keep old assistant visible until candidate activates.
       // runStream pins latest before live mounts (mutation invariant).
       const ok = await runStream(prep.userMessageId, { rewriteId: prep.rewriteId });
+      let committed = false;
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
         const fin = await regenFinalize(prep.rewriteId);
+        committed = Boolean(fin);
         if (!fin) showToast('重答结果未确认，正在刷新…');
         else if (fin.effectsPending) showToast('重答已切换，收尾未完成，可再试一次');
       }
       await refetchLatest();
+      if (committed) clearLivePresentation();
       setSending(false);
     },
-    [sending, refetchLatest, runStream, showToast],
+    [clearLivePresentation, sending, refetchLatest, runStream, showToast],
   );
 
   const saveEdit = useCallback(
@@ -1199,9 +1210,11 @@ export function ChatScreen() {
       // Active transcript stays intact until finalize succeeds.
       // runStream pins latest before live mounts (mutation invariant).
       const ok = await runStream(null, { rewriteId: edit.rewriteId });
+      let committed = false;
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
         const fin = await editFinalize(edit.rewriteId);
+        committed = fin.ok;
         if (!fin.ok) {
           showToast(
             fin.effectsPending
@@ -1213,9 +1226,10 @@ export function ChatScreen() {
         }
       }
       await refetchLatest();
+      if (committed) clearLivePresentation();
       setSending(false);
     },
-    [editText, sending, refetchLatest, runStream, showToast],
+    [clearLivePresentation, editText, sending, refetchLatest, runStream, showToast],
   );
 
   const branchSwitch = useCallback(
@@ -1440,13 +1454,15 @@ export function ChatScreen() {
 
   // ── message block renderers ──
 
-  function renderThinkBlock(m: ChatMsg) {
-    if (!m.thinking) return null;
-    const label = m.thinkingSummary || `思考了 ${m.thinking.length} 字`;
-    const open = Boolean(openThink[m.id]);
+  function renderThinkBlock(m: ChatMsg, thinkingText = m.thinking, stateKey = String(m.id)) {
+    if (!thinkingText) return null;
+    const label = thinkingText === m.thinking && m.thinkingSummary
+      ? m.thinkingSummary
+      : `思考了 ${thinkingText.length} 字`;
+    const open = Boolean(openThink[stateKey]);
     const onClick = () => {
-      if (effThinkMode === 'drawer') setDrawer({ text: m.thinking, label });
-      else setOpenThink((o) => ({ ...o, [m.id]: !o[m.id] }));
+      if (effThinkMode === 'drawer') setDrawer({ text: thinkingText, label });
+      else setOpenThink((o) => ({ ...o, [stateKey]: !o[stateKey] }));
     };
     return (
       <div className="vstack vstack-8">
@@ -1463,7 +1479,7 @@ export function ChatScreen() {
         </div>
         {open && effThinkMode === 'inline' && (
           <div style={{ borderRadius: 14, background: 'var(--card2)', padding: '14px 16px', fontSize: '0.88em', lineHeight: 1.95, color: 'var(--mut)', whiteSpace: 'pre-wrap', animation: 'chatFadeIn .2s ease' }}>
-            {m.thinking}
+            {thinkingText}
           </div>
         )}
       </div>
@@ -1687,15 +1703,41 @@ export function ChatScreen() {
     );
   }
 
+  function renderOrderedAssistantContent(m: ChatMsg) {
+    if (!m.displaySegments?.length) return null;
+    return (
+      <div className="vstack vstack-12">
+        {m.displaySegments.map((segment, index) => {
+          if (segment.type === 'thinking') {
+            return renderThinkBlock(m, segment.text, `${m.id}-display-think-${index}`);
+          }
+          if (segment.type === 'text') return (
+            <Fragment key={`${m.id}-display-text-${index}`}>
+              {segment.text && renderMarkdown(segment.text)}
+            </Fragment>
+          );
+          const tool = m.toolCalls[segment.toolIndex];
+          return tool
+            ? renderToolItems(`${m.id}-display-tool-${index}`, [tool])
+            : null;
+        })}
+      </div>
+    );
+  }
+
   function renderAssistantMsg(m: ChatMsg) {
     const usage = m.cacheInfo;
     const cache = cacheLabel(usage);
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ borderRadius: 16 }}>
-        {renderThinkBlock(m)}
-        {renderToolItems(String(m.id), m.toolCalls)}
         {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
-        {m.text && renderMarkdown(m.text)}
+        {m.displaySegments?.length ? renderOrderedAssistantContent(m) : (
+          <>
+            {renderThinkBlock(m)}
+            {renderToolItems(String(m.id), m.toolCalls)}
+            {m.text && renderMarkdown(m.text)}
+          </>
+        )}
         {renderChoices(m)}
         <div className="vstack vstack-7">
           <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>

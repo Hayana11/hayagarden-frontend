@@ -85,6 +85,7 @@ def _migrate_chat_columns():
         'file_name': "ALTER TABLE chat_messages ADD COLUMN file_name TEXT DEFAULT ''",
         'attachments': "ALTER TABLE chat_messages ADD COLUMN attachments TEXT DEFAULT '[]'",
         'choices':   "ALTER TABLE chat_messages ADD COLUMN choices TEXT DEFAULT ''",
+        'display_segments': "ALTER TABLE chat_messages ADD COLUMN display_segments TEXT DEFAULT ''",
     }
     for col, stmt in ddl.items():
         if col not in cols:
@@ -4826,8 +4827,8 @@ def branch_switch():
     if new_idx != cur_idx:
         b = branches[new_idx]
         conn.execute(
-            'UPDATE chat_messages SET content=?, thinking=?, tool_calls=?, branch_idx=? WHERE id=?',
-            (b['content'], b.get('thinking', ''), b.get('tool_calls', ''), new_idx, msg_id)
+            'UPDATE chat_messages SET content=?, thinking=?, tool_calls=?, display_segments=?, branch_idx=? WHERE id=?',
+            (b['content'], b.get('thinking', ''), b.get('tool_calls', ''), b.get('display_segments', ''), new_idx, msg_id)
         )
         conn.commit()
     conn.close()

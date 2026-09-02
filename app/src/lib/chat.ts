@@ -56,6 +56,11 @@ export interface ChatAttachment {
   name: string;
 }
 
+export type DisplaySegment =
+  | { type: 'thinking'; text: string }
+  | { type: 'text'; text: string }
+  | { type: 'tool'; toolIndex: number };
+
 export interface ChatMsg {
   id: number;
   role: 'user' | 'assistant';
@@ -71,6 +76,7 @@ export interface ChatMsg {
   fileName: string;
   attachments: ChatAttachment[];
   choices: string[];
+  displaySegments?: DisplaySegment[];
   /** HH:MM, local */
   ts: string;
   /** YYYY-MM-DD for date separators */
@@ -96,6 +102,7 @@ export interface ChatMessageRow {
   file_name?: string | null;
   attachments?: string | null;
   choices?: string | null;
+  display_segments?: string | null;
   created_at?: string | null;
 }
 
@@ -194,6 +201,32 @@ export function isChoicesAnswered(msgId: number, messages: ChatMsg[]): boolean {
   return false;
 }
 
+export function parseDisplaySegments(raw: string | null | undefined): DisplaySegment[] | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+  const out: DisplaySegment[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') return undefined;
+    const value = item as { type?: unknown; text?: unknown; tool_index?: unknown };
+    if ((value.type === 'thinking' || value.type === 'text') && typeof value.text === 'string') {
+      out.push({ type: value.type, text: value.text });
+      continue;
+    }
+    if (value.type === 'tool' && Number.isInteger(value.tool_index) && (value.tool_index as number) >= 0) {
+      out.push({ type: 'tool', toolIndex: value.tool_index as number });
+      continue;
+    }
+    return undefined;
+  }
+  return out.length ? out : undefined;
+}
+
 function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -237,6 +270,7 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
         candidate.type === item.type && candidate.url === item.url
       )) === index),
     choices: normalizeChatChoices(parseJson<unknown>(row.choices, [])),
+    displaySegments: parseDisplaySegments(row.display_segments),
     ts: created.length >= 16 ? created.slice(11, 16) : '',
     dateKey: created.slice(0, 10),
     createdAt: created,

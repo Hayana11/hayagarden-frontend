@@ -3168,6 +3168,7 @@ def persist_daily_assistant_if_current(
     tool_calls: str = '',
     cache_info: str = '',
     choices: str = '',
+    display_segments: str = '',
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
 ) -> int:
@@ -3217,9 +3218,9 @@ def persist_daily_assistant_if_current(
             conn.rollback()
             raise ConflictError('lease expired at persist')
         cur = conn.execute(
-            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
-            "VALUES ('assistant', ?, ?, ?, ?, ?)",
-            (content, thinking, tool_calls, cache_info, choices),
+            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices, display_segments) "
+            "VALUES ('assistant', ?, ?, ?, ?, ?, ?)",
+            (content, thinking, tool_calls, cache_info, choices, display_segments),
         )
         assistant_id = int(cur.lastrowid)
         now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
