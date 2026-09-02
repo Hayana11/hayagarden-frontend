@@ -595,7 +595,15 @@ class BrowserRelay:
         try:
             self.x11 = X11Input()
             initial_target_id = self._current_target_id
-            calibration_target = self._open_target("about:blank")
+            calibration_html = (
+                '<!doctype html><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<title>relay-input-calibration</title>'
+            )
+            calibration_url = "data:text/html;charset=utf-8," + urllib.parse.quote(
+                calibration_html,
+            )
+            calibration_target = self._open_target(calibration_url)
             await self._connect_cdp(calibration_target["webSocketDebuggerUrl"])
             if initial_target_id and initial_target_id != self._current_target_id:
                 try:
@@ -702,29 +710,24 @@ class BrowserRelay:
         return self.x11.focus_browser()
 
     async def _calibrate_x11_input(self):
-        """Measure the emulated page's real X11 origin on a throwaway blank page."""
-        calibration_html = (
-            '<!doctype html><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>relay-input-calibration</title>'
-        )
-        calibration_url = "data:text/html;charset=utf-8," + urllib.parse.quote(
-            calibration_html,
-        )
-        await self.cdp_call("Page.navigate", {"url": calibration_url})
-
+        """Measure the emulated page's real X11 origin on the calibration page."""
         loop = asyncio.get_running_loop()
         calibration_ready_deadline = loop.time() + 1.0
         calibration_ready = False
         while loop.time() < calibration_ready_deadline:
             readiness = await self.cdp_call("Runtime.evaluate", {
-                "expression": "({title:document.title,readyState:document.readyState})",
+                "expression": (
+                    "({title:document.title,readyState:document.readyState,"
+                    "innerWidth:window.innerWidth,innerHeight:window.innerHeight})"
+                ),
                 "returnByValue": True,
             })
             readiness_value = ((readiness.get("result") or {}).get("value") or {})
             if (
                 readiness_value.get("title") == "relay-input-calibration"
                 and readiness_value.get("readyState") != "loading"
+                and readiness_value.get("innerWidth") == self.width
+                and readiness_value.get("innerHeight") == self.height
             ):
                 calibration_ready = True
                 break
