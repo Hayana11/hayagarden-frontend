@@ -11,6 +11,22 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in conn.execute('PRAGMA table_info(%s)' % table)}
 
 
+def ensure_chat_messages_display_segments(conn: sqlite3.Connection) -> bool:
+    """Add the durable presentation column without dropping or backfilling data."""
+    cols = _table_columns(conn, 'chat_messages')
+    if not cols or 'display_segments' in cols:
+        return False
+    try:
+        conn.execute(
+            "ALTER TABLE chat_messages ADD COLUMN display_segments TEXT DEFAULT ''"
+        )
+        return True
+    except sqlite3.OperationalError as exc:
+        if 'duplicate column' in str(exc).lower():
+            return False
+        raise
+
+
 def ensure_daily_meta_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         '''CREATE TABLE IF NOT EXISTS daily_soft_window_meta (
