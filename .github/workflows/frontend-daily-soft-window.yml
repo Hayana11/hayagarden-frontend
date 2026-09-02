@@ -6,6 +6,9 @@ on:
       - 'app/**'
       - 'daily_context_bff.py'
       - 'gateway.py'
+      - 'app.py'
+      - 'chat/**'
+      - 'tests/test_chat_durable_order.py'
       - '.github/workflows/frontend-daily-soft-window.yml'
   push:
     branches: [main]
@@ -13,6 +16,9 @@ on:
       - 'app/**'
       - 'daily_context_bff.py'
       - 'gateway.py'
+      - 'app.py'
+      - 'chat/**'
+      - 'tests/test_chat_durable_order.py'
       - '.github/workflows/frontend-daily-soft-window.yml'
 
 concurrency:
@@ -54,3 +60,5 @@ jobs:
           npm run test:chat-capacity-header
           npm run test:task-timer-real-data-wiring
           npm run test:memory-cold-start
+      - name: Durable chat backend order regression
+        run: python -m unittest tests.test_chat_durable_order
