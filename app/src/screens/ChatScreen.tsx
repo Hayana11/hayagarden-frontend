@@ -14,13 +14,16 @@ import {
   fetchChatMessages,
   fetchChatMessagesOrNull,
   ensureModelCatalog,
+  getChatEffort,
   regenFinalize,
   regenPrepare,
   sendChatMessage,
+  setChatEffort,
   setChatModel,
   switchChatBranch,
   uploadChatFile,
   type ChatModelCatalog,
+  type ChatEffortMode,
   type ModelCatalogEntry,
 } from '../lib/api';
 import {
@@ -386,6 +389,9 @@ export function ChatScreen() {
   const [currentModel, setCurrentModel] = useState('');
   const [chatProvider, setChatProvider] = useState<'api_relay' | 'claude_code' | ''>('');
   const [modelMode, setModelMode] = useState<'default' | 'explicit' | 'unknown' | ''>('');
+  const [currentEffort, setCurrentEffort] = useState('');
+  const [effortMode, setEffortMode] = useState<ChatEffortMode | ''>('');
+  const [allowedEfforts, setAllowedEfforts] = useState<string[]>([]);
 
   const [openThink, setOpenThink] = useState<Record<string, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
@@ -594,14 +600,27 @@ export function ChatScreen() {
     setCurrentModel(r.configuredModel || r.current || '');
   }, []);
 
+  const applyEffort = useCallback((r: Awaited<ReturnType<typeof getChatEffort>>) => {
+    if (r.provider !== 'claude_code') {
+      setCurrentEffort('');
+      setEffortMode(r.effortMode);
+      setAllowedEfforts([]);
+      return;
+    }
+    setCurrentEffort(r.configuredEffort || '');
+    setEffortMode(r.effortMode);
+    setAllowedEfforts(r.allowedEfforts);
+  }, []);
+
   const startModelCatalog = useCallback(() => {
     markChatColdStart('catalog_start');
-    void ensureModelCatalog().then((r) => {
+    void Promise.all([ensureModelCatalog(), getChatEffort()]).then(([catalog, effort]) => {
       markChatColdStart('catalog_ready');
       if (!mountedRef.current) return;
-      applyCatalog(r);
+      applyCatalog(catalog);
+      applyEffort(effort);
     });
-  }, [applyCatalog]);
+  }, [applyCatalog, applyEffort]);
 
   const runLegacyWarmUp = useCallback(async (anchorGen: number, earliestId: number) => {
     const race = coldStartRaceRef.current;
@@ -2244,6 +2263,60 @@ export function ChatScreen() {
                         </div>
                       </div>
                     ))}
+                    {effortMode !== 'unavailable' && (
+                      <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 4 }}>
+                        <MixedSectionLabel cn="思考强度" en="EFFORT" style={{ padding: '8px 8px 4px', letterSpacing: 2.5, fontSize: 10.5 }} />
+                        <div
+                          onClick={async () => {
+                            setModelPopOpen(false);
+                            if (effortMode === 'default') return;
+                            const result = await setChatEffort(null);
+                            if (result.ok) {
+                              setCurrentEffort('');
+                              setEffortMode('default');
+                              showToast('下一条消息起生效');
+                            } else showToast('切换失败');
+                          }}
+                          className="hstack hstack-10"
+                          style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: effortMode === 'default' ? 'var(--rosebg)' : 'transparent' }}
+                        >
+                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: effortMode === 'default' ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
+                          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                            <span style={{ fontSize: 14, color: 'var(--ink)' }}>默认（跟随 Claude Code）</span>
+                            <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)' }}>不传 --effort</span>
+                          </div>
+                        </div>
+                        {allowedEfforts.map((effort) => {
+                          const labels: Record<string, string> = {
+                            low: '低', medium: '中', high: '高', xhigh: '极高', max: '最大',
+                          };
+                          const selected = effortMode === 'explicit' && effort === currentEffort;
+                          return (
+                            <div
+                              key={effort}
+                              onClick={async () => {
+                                setModelPopOpen(false);
+                                if (selected) return;
+                                const result = await setChatEffort(effort);
+                                if (result.ok) {
+                                  setCurrentEffort(result.configuredEffort || effort);
+                                  setEffortMode(result.effortMode || 'explicit');
+                                  showToast('下一条消息起生效');
+                                } else showToast('切换失败');
+                              }}
+                              className="hstack hstack-10"
+                              style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: selected ? 'var(--rosebg)' : 'transparent' }}
+                            >
+                              <span style={{ width: 8, height: 8, borderRadius: '50%', background: selected ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
+                              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                                <span style={{ fontSize: 14, color: 'var(--ink)' }}>{labels[effort] || effort}</span>
+                                <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)' }}>--effort {effort}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </>
                 ) : models.map((mo) => (
                   <div
@@ -2520,3 +2593,4 @@ export function ChatScreen() {
     </div>
   );
 }
+

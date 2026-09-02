@@ -301,6 +301,10 @@ class ResidentSession:
         self._pending_deferred = None
         # MODEL-1B: identity of the model argv this process was started with.
         self._model_identity = None
+        # CC-CHAT-EFFORT-R1: identity of the effort argv this process was
+        # started with. None preserves compatibility with pre-R1 fake fixtures.
+        self._effort_identity = None
+        self._effort_value = None
         # Durable history-rewrite epoch bound at last successful spawn.
         # Compared against the cross-process epoch before hot reuse so every
         # gunicorn worker lazily invalidates after a rewrite, even when the
@@ -428,6 +432,7 @@ class ResidentSession:
 
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot
+        from chat.cc_effort import cc_effort_snapshot
         from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         self._kill(quiet=True)
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
@@ -437,6 +442,7 @@ class ResidentSession:
         except ClaudeRuntimeError as exc:
             raise ResidentError('claude_runtime:%s' % exc) from exc
         _model, model_identity, model_args = cc_model_snapshot()
+        effort, effort_identity, effort_args = cc_effort_snapshot()
         tool_flags = self._build_spawn_tool_flags(env=env)
         surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
         base_args = claude_cmd(
@@ -450,7 +456,7 @@ class ResidentSession:
             '--tools', tool_flags['tools'],
             '--thinking-display', 'summarized',
             '--exclude-dynamic-system-prompt-sections',
-        ) + model_args
+        ) + model_args + effort_args
         args = base_args + list(tool_flags['extra'])
         self._proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -471,6 +477,8 @@ class ResidentSession:
         self._history_rewrite_epoch = bound_epoch
         self._system_text = system_text
         self._model_identity = model_identity
+        self._effort_identity = effort_identity
+        self._effort_value = effort or None
         self._session_id = None
         self._cold = True
         self._generation += 1
@@ -511,6 +519,7 @@ class ResidentSession:
 
     def _decide_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_identity
+        from chat.cc_effort import cc_effort_identity
         # Durable rewrite epoch: any resident spawned before the latest
         # committed rewrite loses hot-reuse on every worker, lazily.
         try:
@@ -537,6 +546,12 @@ class ResidentSession:
         stored_identity = getattr(self, '_model_identity', None)
         if stored_identity is not None and cc_model_identity() != stored_identity:
             return 'model_changed'
+        stored_effort_identity = getattr(self, '_effort_identity', None)
+        if (
+            stored_effort_identity is not None
+            and cc_effort_identity() != stored_effort_identity
+        ):
+            return 'effort_changed'
         # Never-used residents (_last_used == 0) have no idle age — peek_idle_seconds
         # returns None. Only reap after a real successful use older than IDLE_REAP.
         idle_seconds = self.peek_idle_seconds()
@@ -590,6 +605,8 @@ class ResidentSession:
                     self._system_text = None
                     self._session_id = None
                     self._model_identity = None
+                    self._effort_identity = None
+                    self._effort_value = None
                     self._cold = True
                     self._next_spawn_reason = 'history_rewrite'
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
@@ -620,6 +637,7 @@ class ResidentSession:
         if not resume_session_id:
             raise ResidentError('resume_session_id required')
         from chat.cc_model import cc_model_snapshot
+        from chat.cc_effort import cc_effort_snapshot
         from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         with self._lock:
             if self._alive():
@@ -631,6 +649,7 @@ class ResidentSession:
             except ClaudeRuntimeError as exc:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
+            effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
             surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
             base_args = claude_cmd(
@@ -645,7 +664,7 @@ class ResidentSession:
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--resume', resume_session_id,
-            ) + model_args
+            ) + model_args + effort_args
             args = base_args + list(tool_flags['extra'])
             try:
                 self._proc = subprocess.Popen(
@@ -669,6 +688,8 @@ class ResidentSession:
                 self._history_rewrite_epoch = ''
             self._system_text = system_text
             self._model_identity = model_identity
+            self._effort_identity = effort_identity
+            self._effort_value = effort or None
             self._session_id = resume_session_id
             self._cold = False
             self._generation += 1
@@ -836,6 +857,7 @@ class ResidentSession:
         except (TypeError, ValueError) as exc:
             raise ResidentError('session_id must be uuid') from exc
         from chat.cc_model import cc_model_snapshot
+        from chat.cc_effort import cc_effort_snapshot
         from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
         with self._lock:
             if self._alive():
@@ -847,6 +869,7 @@ class ResidentSession:
             except ClaudeRuntimeError as exc:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
+            effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
             surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
             base_args = claude_cmd(
@@ -861,7 +884,7 @@ class ResidentSession:
                 '--thinking-display', 'summarized',
                 '--exclude-dynamic-system-prompt-sections',
                 '--session-id', session_id,
-            ) + model_args
+            ) + model_args + effort_args
             if '--resume' in base_args:
                 raise ResidentError('fresh_named must not carry --resume')
             args = base_args + list(tool_flags['extra'])
@@ -879,6 +902,8 @@ class ResidentSession:
                 self._bound_tool_surface_fingerprint = surface_fingerprint
             self._system_text = system_text
             self._model_identity = model_identity
+            self._effort_identity = effort_identity
+            self._effort_value = effort or None
             self._session_id = session_id
             self._cold = True
             self._generation += 1
@@ -1434,6 +1459,7 @@ class ResidentSession:
         usage['_obs_resident_generation'] = self._generation
         usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
         usage['_obs_claude_session_id'] = self._session_id
+        usage['_obs_effort'] = getattr(self, '_effort_value', None)
         usage['_obs_keepwarm_lease_expires_at'] = self._keepwarm_lease_expires_at
         surface = self._tool_surface_snapshot or {}
         usage['_obs_tool_schema_sha256'] = surface.get('tool_schema_sha256')
@@ -1591,6 +1617,10 @@ class ResidentSession:
         return getattr(self, '_model_identity', None)
 
     @property
+    def effort_identity(self):
+        return getattr(self, '_effort_identity', None)
+
+    @property
     def generation(self):
         return self._generation
 
@@ -1649,6 +1679,9 @@ class ResidentSession:
             self._system_text = None
             self._session_id = None
             self._model_identity = None
+            self._effort_identity = None
+            self._effort_value = None
             self._cold = True
             self._next_spawn_reason = str(reason or 'history_rewrite')
             self._reset_session_meta(respawn_reason=self._next_spawn_reason)
+

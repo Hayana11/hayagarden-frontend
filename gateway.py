@@ -4431,6 +4431,7 @@ def _cc_resident_stream_gen(
                 breakdown = _cc_obs.finalize_breakdown_with_usage(
                     obs_breakdown, usage, is_cold=is_cold,
                 )
+                observed_effort = usage.pop('_obs_effort', None)
                 runtime = _cc_obs.build_runtime(
                     resident_generation=int(usage.pop('_obs_resident_generation', _CC_RESIDENT.generation) or 0),
                     resident_pid=usage.pop('_obs_resident_pid', _CC_RESIDENT.resident_pid),
@@ -4459,10 +4460,10 @@ def _cc_resident_stream_gen(
                     ),
                     claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
                     model=usage.pop('_obs_model', None),
-                    effort=None,
+                    effort=observed_effort,
                     thinking_config={
                         'thinking_display': 'summarized',
-                        'effort': None,
+                        'effort': observed_effort,
                     },
                     claude_code_version=_cc_obs.detect_claude_code_version(),
                     observed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
