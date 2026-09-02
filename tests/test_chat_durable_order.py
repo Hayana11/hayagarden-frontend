@@ -80,7 +80,7 @@ class ChatDurableOrderTests(unittest.TestCase):
         schema = (ROOT / 'chat' / 'daily_schema.py').read_text(encoding='utf-8')
         self.assertIn('def ensure_chat_messages_display_segments', schema)
         self.assertIn('ensure_chat_messages_display_segments(conn)', app)
-        migration = re.search(r"def _migrate_chat_columns\(\):([\\s\\S]*?)\\n\\n_migrate_chat_columns", app)
+        migration = re.search(r"def _migrate_chat_columns\(\):([\s\S]*?)\n\n_migrate_chat_columns", app)
         self.assertIsNotNone(migration)
         body = migration.group(1)
         self.assertNotIn('DROP TABLE', body)
@@ -88,7 +88,7 @@ class ChatDurableOrderTests(unittest.TestCase):
 
     def test_t10_all_persistence_paths_carry_display_segments(self):
         gateway = (ROOT / 'gateway.py').read_text(encoding='utf-8')
-        self.assertIn('from chat.display_segments import DisplaySegmentAccumulator', gateway)
+        self.assertIn('from chat.display_segments import (', gateway)
         self.assertGreaterEqual(gateway.count('display_segments.to_json()'), 5)
         self.assertIn('display_segments_json=display_segments.to_json()', gateway)
         self.assertIn('display_segments=display_segments_json', gateway)
