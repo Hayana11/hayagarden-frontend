@@ -127,14 +127,16 @@ def _project_visible_text(segments: list[dict[str, Any]], visible_text: str) -> 
             append_equal(i1, i2, visible_text[j1:j2])
         elif tag == 'insert':
             target_slot = slot_for_offset(i1)
-            fallback_slot = fallback_slot or target_slot
+            if fallback_slot is None:
+                fallback_slot = target_slot
             projected[target_slot].append(visible_text[j1:j2])
         elif tag == 'replace':
             target_slot = slot_for_offset(i1)
             fallback_slot = fallback_slot or target_slot
             projected[target_slot].append(visible_text[j1:j2])
         elif tag == 'delete':
-            fallback_slot = fallback_slot or slot_for_offset(i1)
+            if fallback_slot is None:
+                fallback_slot = slot_for_offset(i1)
 
     rendered: list[dict[str, Any]] = []
     for segment_index, segment in enumerate(segments):
@@ -147,11 +149,12 @@ def _project_visible_text(segments: list[dict[str, Any]], visible_text: str) -> 
     joined = ''.join(item.get('text', '') for item in rendered if item.get('type') == 'text')
     if joined != visible_text:
         rendered = [item for item in rendered if item.get('type') != 'text']
-        fallback_segment_index = fallback_slot or text_slots[0][0]
-        insert_at = next(
-            (i for i, item in enumerate(segments)
-             if i == fallback_segment_index),
-            len(rendered),
+        fallback_segment_index = (
+            fallback_slot if fallback_slot is not None else text_slots[0][0]
+        )
+        insert_at = sum(
+            1 for index, item in enumerate(segments[:fallback_segment_index])
+            if item.get('type') != 'text'
         )
         rendered.insert(insert_at, {'type': 'text', 'text': visible_text})
     return rendered
