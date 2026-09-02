@@ -65,7 +65,7 @@ const screen = await (await import('node:fs/promises')).readFile(
   new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8',
 );
 assert.match(screen, /renderOrderedAssistantContent/);
-assert.ok(screen.includes('m.displaySegments?.length ? renderOrderedAssistantContent'));
+assert.ok(screen.includes('renderOrderedAssistantContent(m) ?? renderLegacyAssistantContent(m)'));
 assert.match(screen, /renderToolItems/);
 assert.match(screen, /renderLegacyAssistantContent/);
 assert.match(screen, /toolIndex >= m\\.toolCalls\\.length/);
