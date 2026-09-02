@@ -68,7 +68,7 @@ assert.match(screen, /renderOrderedAssistantContent/);
 assert.ok(screen.includes('renderOrderedAssistantContent(m) ?? renderLegacyAssistantContent(m)'));
 assert.match(screen, /renderToolItems/);
 assert.match(screen, /renderLegacyAssistantContent/);
-assert.match(screen, /toolIndex >= m\\.toolCalls\\.length/);
+assert.ok(screen.includes('segment.toolIndex >= m.toolCalls.length'));
 assert.match(screen, /clearLivePresentation/);
 assert.match(screen, /onThink:/);
 assert.match(screen, /onText:/);
