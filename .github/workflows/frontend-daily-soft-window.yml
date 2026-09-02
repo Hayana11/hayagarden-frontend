@@ -99,6 +99,8 @@ jobs:
           sqlite3.connect("/opt/frontend/commands.db").close()
           PY
           touch /opt/frontend/.env
+          sudo mkdir -p /var/lib/hayagarden /opt/workspace/tools
+          sudo chown -R "$USER" /var/lib/hayagarden /opt/workspace
       - name: Durable chat backend order regression
         env:
           HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-durable-order-config.db
