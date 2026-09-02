@@ -1705,11 +1705,18 @@ export function ChatScreen() {
 
   function renderOrderedAssistantContent(m: ChatMsg) {
     if (!m.displaySegments?.length) return null;
+    if (m.displaySegments.some((segment) => (
+      segment.type === 'tool' && segment.toolIndex >= m.toolCalls.length
+    ))) return null;
     return (
       <div className="vstack vstack-12">
         {m.displaySegments.map((segment, index) => {
           if (segment.type === 'thinking') {
-            return renderThinkBlock(m, segment.text, `${m.id}-display-think-${index}`);
+            return (
+              <Fragment key={String(m.id) + '-display-think-' + index}>
+                {renderThinkBlock(m, segment.text, String(m.id) + '-display-think-' + index)}
+              </Fragment>
+            );
           }
           if (segment.type === 'text') return (
             <Fragment key={`${m.id}-display-text-${index}`}>
@@ -1725,19 +1732,25 @@ export function ChatScreen() {
     );
   }
 
+  function renderLegacyAssistantContent(m: ChatMsg) {
+    return (
+      <>
+        {renderThinkBlock(m)}
+        {renderToolItems(String(m.id), m.toolCalls)}
+        {m.text && renderMarkdown(m.text)}
+      </>
+    );
+  }
+
   function renderAssistantMsg(m: ChatMsg) {
     const usage = m.cacheInfo;
     const cache = cacheLabel(usage);
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ borderRadius: 16 }}>
         {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
-        {m.displaySegments?.length ? renderOrderedAssistantContent(m) : (
-          <>
-            {renderThinkBlock(m)}
-            {renderToolItems(String(m.id), m.toolCalls)}
-            {m.text && renderMarkdown(m.text)}
-          </>
-        )}
+        {m.displaySegments?.length
+          ? (renderOrderedAssistantContent(m) ?? renderLegacyAssistantContent(m))
+          : renderLegacyAssistantContent(m)}
         {renderChoices(m)}
         <div className="vstack vstack-7">
           <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
