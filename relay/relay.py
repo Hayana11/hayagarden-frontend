@@ -566,20 +566,25 @@ class BrowserRelay:
                 'tell application "Google Chrome" to set miniaturized of front window to true',
             ]))
 
+        loop = asyncio.get_running_loop()
+        startup_deadline = loop.time() + 30.0
+
         page_ws_url = None
-        for _ in range(30):
+        while page_ws_url is None and loop.time() < startup_deadline:
             try:
-                resp = urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json")
-                pages = json.loads(resp.read())
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{CDP_PORT}/json", timeout=0.5,
+                ) as resp:
+                    pages = json.loads(resp.read())
                 for p in pages:
-                    if p.get("type") == "page":
-                        page_ws_url = p["webSocketDebuggerUrl"]
+                    ws_url = p.get("webSocketDebuggerUrl")
+                    if p.get("type") == "page" and ws_url:
+                        page_ws_url = ws_url
                         break
-                if page_ws_url:
-                    break
             except Exception:
                 pass
-            await asyncio.sleep(0.3)
+            if page_ws_url is None and loop.time() < startup_deadline:
+                await asyncio.sleep(0.3)
 
         if not page_ws_url:
             print("Chrome 启动超时")
