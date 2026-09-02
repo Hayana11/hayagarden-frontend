@@ -13,6 +13,12 @@ from tools import workspace_jobs
 from tools import workspace_apps
 from tools import ombre_adapter
 from tools.workspace_apps import WorkspaceAppError, verified_proxy_upstream, proxy_target
+from chat.display_segments import (
+    DisplaySegmentAccumulator,
+    extract_save_markers,
+    finalize_display_segments_json,
+    strip_save_markers,
+)
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -412,6 +418,7 @@ def _persist_turn_assistant(
     tool_calls_json: str = '',
     cache_info_json: str = '',
     choices_json: str = '',
+    display_segments_json: str = '',
     side_effects: dict | None = None,
 ):
     """Persist assistant text for a turn.
@@ -426,6 +433,7 @@ def _persist_turn_assistant(
     """
     rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
     text = (content or '').strip()
+    display_segments_json = finalize_display_segments_json(display_segments_json, text)
     if not text:
         return None
     if rewrite_id:
@@ -447,6 +455,7 @@ def _persist_turn_assistant(
                 tool_calls=tool_calls_json or '',
                 cache_info=cache_info_json or '',
                 choices=choices_json or '',
+                display_segments=display_segments_json or '',
                 side_effects=effects,
             )
             conn.commit()
@@ -463,14 +472,15 @@ def _persist_turn_assistant(
         return None
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
-        "VALUES ('assistant', ?, ?, ?, ?, ?)",
+        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices, display_segments) "
+        "VALUES ('assistant', ?, ?, ?, ?, ?, ?)",
         (
             text,
             thinking or '',
             tool_calls_json or '',
             cache_info_json or '',
             choices_json or '',
+            display_segments_json or '',
         ),
     )
     conn.commit()
@@ -1372,7 +1382,6 @@ def api_call(system, messages):
 
 
 NL = chr(10)
-SAVE_RE = re.compile(r'\[\[SAVE:\s*(.*?)\]\]', re.DOTALL)
 SSE_END = NL + NL
 FRONTEND_APP_URL = 'http://127.0.0.1:5050'
 
@@ -4861,7 +4870,7 @@ def _cc_stream_gen(full_system, prompt, env):
 
 def _cc_save_markers(text):
     """Extract [[SAVE:...]] markers, persist them, return cleaned text."""
-    saves = SAVE_RE.findall(text)
+    saves = extract_save_markers(text)
     if saves:
         try:
             import memory_tool
@@ -4871,7 +4880,7 @@ def _cc_save_markers(text):
                     memory_tool.save_memory(item)
         except Exception:
             pass
-    return SAVE_RE.sub('', text).strip()
+    return strip_save_markers(text).strip()
 
 def claude_code_call(system, messages):
     full_system, prompt, env = _cc_prepare(system, messages)
@@ -5448,6 +5457,7 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
     text_acc = []
     think_acc = []
     tool_calls = []
+    display_segments = DisplaySegmentAccumulator()
     usage = {}
     done_text = ''
     try:
@@ -5463,9 +5473,11 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
         ):
             if evt == 'text':
                 text_acc.append(str(payload or ''))
+                display_segments.append_text(str(payload or ''))
                 yield _sse_json({'t': 'text', 'd': payload})
             elif evt == 'think':
                 think_acc.append(str(payload or ''))
+                display_segments.append_thinking(str(payload or ''))
                 yield _sse_json({'t': 'think', 'd': payload})
             elif evt == 'tool_use':
                 item = {
@@ -5480,6 +5492,7 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
                     'result': '',
                     'success': True,
                 })
+                display_segments.append_tool(len(tool_calls) - 1)
                 yield _sse_json({'t': 'tool_use', 'd': item, 'idx': len(tool_calls) - 1})
             elif evt == 'tool_result':
                 idx = next(
@@ -5513,6 +5526,7 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
                     ensure_ascii=False,
                 ) if tool_calls else '',
                 cache_info_json=json.dumps(usage, ensure_ascii=False) if usage else '',
+                display_segments_json=display_segments.to_json(),
             )
         if usage:
             yield _sse_json({'t': 'usage', **{
@@ -5612,6 +5626,8 @@ def _stream_cc_first_turn(
     text_acc = []
     thinking_acc = []
     cc_tool_calls = []
+    display_segments = DisplaySegmentAccumulator()
+    display_tool_index = 0
     event_iter = None
     stdin_flushed = False
     log = logging.getLogger(__name__)
@@ -5740,7 +5756,7 @@ def _stream_cc_first_turn(
         cache_info_json = (
             json.dumps(usage, ensure_ascii=False) if usage else ''
         )
-        return _ft_text, thinking_text, cache_info_json, choices_json, usage
+        return _ft_text, thinking_text, cache_info_json, choices_json, display_segments.to_json(), usage
 
     _DRAIN_COMPLETED = 'DRAIN_COMPLETED'
     _DRAIN_DONE_FINALIZE_PENDING = 'DRAIN_DONE_FINALIZE_PENDING'
@@ -5754,7 +5770,7 @@ def _stream_cc_first_turn(
         nonlocal complete_started
         if complete_started or session is None or not first_released:
             return _DRAIN_INCOMPLETE
-        _ft_text, thinking_text, cache_info_json, choices_json, _usage = (
+        _ft_text, thinking_text, cache_info_json, choices_json, display_segments_json, _usage = (
             _assistant_payload_from_done(payload)
         )
         try:
@@ -5771,6 +5787,7 @@ def _stream_cc_first_turn(
                 thinking=thinking_text,
                 cache_info=cache_info_json,
                 choices=choices_json,
+                display_segments=display_segments_json,
             )
         except Exception:
             log.exception(
@@ -5795,6 +5812,7 @@ def _stream_cc_first_turn(
                     if not chunk.strip():
                         continue
                     text_acc.append(chunk)
+                    display_segments.append_text(chunk)
                     try:
                         ingest_first_turn_text_delta(
                             session, text=chunk, hooks=hooks, db_path=DB_PATH,
@@ -5878,6 +5896,11 @@ def _stream_cc_first_turn(
                     continue
 
                 if evt in ('think', 'tool_use', 'tool_result'):
+                    if evt == 'think':
+                        display_segments.append_thinking(str(payload or ''))
+                    elif evt == 'tool_use':
+                        display_segments.append_tool(display_tool_index)
+                        display_tool_index += 1
                     if not first_released:
                         pending.append((evt, payload))
                     elif evt == 'think':
@@ -5891,6 +5914,7 @@ def _stream_cc_first_turn(
 
                 if evt == 'text':
                     chunk = str(payload or '')
+                    display_segments.append_text(chunk)
                     if not chunk.strip() and not first_released:
                         continue
                     if not first_released:
@@ -5959,7 +5983,7 @@ def _stream_cc_first_turn(
                         yield _sse_json({'t': 'done', 'ok': False})
                         return
 
-                    _ft_text, thinking_text, cache_info_json, choices_json, usage = (
+                    _ft_text, thinking_text, cache_info_json, choices_json, display_segments_json, usage = (
                         _assistant_payload_from_done(payload)
                     )
                     try:
@@ -5976,6 +6000,7 @@ def _stream_cc_first_turn(
                             thinking=thinking_text,
                             cache_info=cache_info_json,
                             choices=choices_json,
+                            display_segments=display_segments_json,
                         )
                     except Exception as exc:
                         log.exception(
@@ -6201,6 +6226,7 @@ def _stream_cc_daily_soft_window(
         prepare_daily_display_thinking_plan(_daily_plan, _display_thinking_mode)
 
         cc_tool_calls = []
+        display_segments = DisplaySegmentAccumulator()
         deferred_payload = None
         _daily_resident = (
             _RequestRealityResident(_CC_RESIDENT, request_reality_context)
@@ -6221,15 +6247,18 @@ def _stream_cc_daily_soft_window(
                 continue
             if evt == 'text':
                 text_acc.append(str(payload or ''))
+                display_segments.append_text(str(payload or ''))
                 yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
             elif evt == 'think':
                 think_acc.append(str(payload or ''))
+                display_segments.append_thinking(str(payload or ''))
                 yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
             elif evt == 'tool_use':
                 cc_tool_calls.append({
                     'id': payload.get('id'), 'name': payload.get('name'),
                     'args': payload.get('args'), 'result': '', 'success': True,
                 })
+                display_segments.append_tool(len(cc_tool_calls) - 1)
                 event_data = {
                     'id': payload.get('id'),
                     'name': payload.get('name'),
@@ -6321,6 +6350,7 @@ def _stream_cc_daily_soft_window(
                 ) if cc_tool_calls else '',
                 cache_info=_cache_info_json,
                 choices=json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '',
+                display_segments=display_segments.to_json(),
             )
             assistant_persisted = True
         except _daily_ctx.ConflictError as exc:
@@ -6746,6 +6776,7 @@ def chat_stream():
 
                     phase = 'resident_stream'
                     cc_tool_calls = []
+                    display_segments = DisplaySegmentAccumulator()
                     deferred_payload = None
                     # Regression ordering anchor: for evt, payload in _cc_resident_stream_gen
                     # Persistence and one-shot consumption remain below this stream.
@@ -6763,12 +6794,15 @@ def chat_stream():
                         _resident_events, _display_thinking_mode,
                     ):
                         if evt == 'text':
+                            display_segments.append_text(str(payload or ''))
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
                         elif evt == 'think':
+                            display_segments.append_thinking(str(payload or ''))
                             yield 'data: ' + json.dumps({'t': 'think', 'd': payload}) + SSE_END
                         elif evt == 'tool_use':
                             cc_tool_calls.append({'id': payload.get('id'), 'name': payload.get('name'),
                                                   'args': payload.get('args'), 'result': '', 'success': True})
+                            display_segments.append_tool(len(cc_tool_calls) - 1)
                             event_data = {
                                 'id': payload.get('id'),
                                 'name': payload.get('name'),
@@ -6862,6 +6896,9 @@ def chat_stream():
                             tool_calls_json=_tool_json,
                             cache_info_json=_cache_info_json or '',
                             choices_json=_choices_json,
+
+                            display_segments_json=display_segments.to_json(),
+
                             side_effects=_turn_data.get('_staged_side_effects'),
                         )
                         # Candidate durable ≠ active assistant durable.
@@ -7030,6 +7067,7 @@ def chat_stream():
             )
             _wake_claim_ids = []
             think_acc, text_acc, tool_calls_acc = [], [], []
+            display_segments = DisplaySegmentAccumulator()
 
             def _clean_text(raw):
                 t = re.sub(r'```tool_use\s.*?```\s*', '', raw, flags=re.DOTALL).strip()
@@ -7075,6 +7113,9 @@ def chat_stream():
                     tool_calls_json=json.dumps(tool_calls_acc, ensure_ascii=False) if tool_calls_acc else '',
                     cache_info_json=_ci,
                     choices_json=json.dumps(_choices, ensure_ascii=False) if _choices else '',
+
+                    display_segments_json=display_segments.to_json(),
+
                     side_effects=_turn_data.get('_staged_side_effects'),
                 )
                 # Candidate durable ≠ active assistant durable.
@@ -7195,11 +7236,13 @@ def chat_stream():
                                 s = d.get('thinking', '')
                                 if cur is not None: cur['thinking'] = cur.get('thinking', '') + s
                                 think_acc.append(s)
+                                display_segments.append_thinking(s)
                                 yield 'data: ' + json.dumps({'t': 'think', 'd': s}) + SSE_END
                             elif dt == 'text_delta':
                                 s = d.get('text', '')
                                 if cur is not None: cur['text'] = cur.get('text', '') + s
                                 text_acc.append(s)
+                                display_segments.append_text(s)
                                 yield 'data: ' + json.dumps({'t': 'text', 'd': s}) + SSE_END
                             elif dt == 'input_json_delta':
                                 if cur is not None:
@@ -7277,6 +7320,7 @@ def chat_stream():
                                 'status': dispatched.get('status'),
                                 'approval_prompt': dispatched.get('approval_prompt'),
                             }
+                            display_segments.append_tool(len(tool_calls_acc))
                             yield 'data: ' + json.dumps({
                                 't': 'tool_use',
                                 'd': deferred_event,
@@ -7285,6 +7329,7 @@ def chat_stream():
                             yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
                             return
                         result_str = str(dispatched)
+                        display_segments.append_tool(len(tool_calls_acc))
                         yield 'data: ' + json.dumps({
                             't': 'tool_use',
                             'd': {
@@ -7408,6 +7453,7 @@ def chat_stream():
                         _dres = json.loads(_dr.read())
                     _dt = ((_dres.get('choices') or [{}])[0]).get('message', {}).get('content', '') or ''
                     if _dt:
+                        display_segments.append_text(_dt)
                         yield 'data: ' + json.dumps({'t': 'text', 'd': _dt}) + SSE_END
                         _dt_clean, _dt_choices = _extract_choices(_dt)
                         if _dt_choices and not _dt_clean:
@@ -7428,6 +7474,9 @@ def chat_stream():
                             _turn_data,
                             content=_dt_clean,
                             choices_json=json.dumps(_dt_choices, ensure_ascii=False) if _dt_choices else '',
+
+                            display_segments_json=display_segments.to_json(),
+
                             side_effects=_turn_data.get('_staged_side_effects'),
                         )
                         if assistant_id is not None:

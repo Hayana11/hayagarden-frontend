@@ -32,6 +32,7 @@ from chat.context_window import (
     mark_intent_committed,
     resolve_canonical_context_row_conn,
 )
+from chat.display_segments import finalize_display_segments_json
 from chat.daily_context import (
     DEFAULT_CHAT_ID,
     STATUS_PROVISIONAL,
@@ -621,6 +622,7 @@ def _persist_first_assistant_idempotent(
     thinking: str = '',
     cache_info: str = '',
     choices: str = '',
+    display_segments: str = '',
 ) -> int:
     """Insert assistant + write first_assistant_message_id in one txn (crash-safe)."""
     existing_aid = intent.get('first_assistant_message_id')
@@ -690,14 +692,16 @@ def _persist_first_assistant_idempotent(
     if exp_dt <= now_dt:
         raise FirstTurnError('lease expired', error_code='FIRST_TURN_LEASE_EXPIRED')
 
+    display_segments = finalize_display_segments_json(display_segments, assistant_content)
     cur = conn.execute(
-        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices) "
-        "VALUES ('assistant', ?, ?, '', ?, ?)",
+        "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices, display_segments) "
+        "VALUES ('assistant', ?, ?, '', ?, ?, ?)",
         (
             str(assistant_content),
             str(thinking or ''),
             str(cache_info or ''),
             str(choices or ''),
+            str(display_segments or ''),
         ),
     )
     assistant_id = int(cur.lastrowid)
@@ -1417,6 +1421,7 @@ def complete_first_turn_round(
     thinking: str = '',
     cache_info: str = '',
     choices: str = '',
+    display_segments: str = '',
 ) -> FirstTurnCompleteResult:
     """Assistant persist + cursor CAS + lease release + completed_at + last-good."""
     if not session._handoff_complete:
@@ -1478,6 +1483,7 @@ def complete_first_turn_round(
                 thinking=str(thinking or ''),
                 cache_info=str(cache_info or ''),
                 choices=str(choices or ''),
+                display_segments=str(display_segments or ''),
             )
             conn.commit()
     except FirstTurnError:

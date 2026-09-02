@@ -11,6 +11,8 @@ import secrets
 import time
 from typing import Any, Mapping, Optional
 
+from chat.daily_schema import ensure_chat_messages_display_segments
+
 
 STATUS_PREPARED = 'prepared'
 STATUS_GENERATING = 'generating'
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS chat_rewrite_staging (
     candidate_tool_calls TEXT,
     candidate_cache_info TEXT,
     candidate_choices TEXT,
+    candidate_display_segments TEXT,
     side_effects_json TEXT,
     activation_result_json TEXT,
     error TEXT,
@@ -88,6 +91,7 @@ def ensure_schema(conn, *, commit: bool = True) -> None:
     this *before* ``BEGIN IMMEDIATE`` so DDL cannot commit the write fence.
     """
     conn.execute(_SCHEMA_SQL)
+    ensure_chat_messages_display_segments(conn)
     cols = {r[1] for r in conn.execute('PRAGMA table_info(chat_rewrite_staging)')}
     for col, decl in (
         ('active_tip_id', 'INTEGER'),
@@ -98,6 +102,7 @@ def ensure_schema(conn, *, commit: bool = True) -> None:
         # Durable history-rewrite epoch handoff marker (P0 idempotence fix).
         # Nullable/additive; set at most once per rewrite_id, then read-only.
         ('history_epoch', 'TEXT'),
+        ('candidate_display_segments', 'TEXT'),
     ):
         if col not in cols:
             conn.execute(f'ALTER TABLE chat_rewrite_staging ADD COLUMN {col} {decl}')
@@ -168,6 +173,7 @@ def _revision_fields(row_d: Mapping[str, Any]) -> dict:
         'content': row_d.get('content'),
         'thinking': row_d.get('thinking') or '',
         'tool_calls': row_d.get('tool_calls') or '',
+        'display_segments': row_d.get('display_segments') or '',
         'branches': row_d.get('branches') or '',
         'branch_idx': row_d.get('branch_idx') or 0,
     }
@@ -235,6 +241,7 @@ def store_candidate(
     tool_calls: str = '',
     cache_info: str = '',
     choices: str = '',
+    display_segments: str = '',
     side_effects: Optional[Mapping[str, Any]] = None,
 ) -> None:
     text = (content or '').strip()
@@ -255,6 +262,7 @@ def store_candidate(
         candidate_tool_calls=tool_calls or '',
         candidate_cache_info=cache_info or '',
         candidate_choices=choices or '',
+        candidate_display_segments=display_segments or '',
         side_effects_json=_dumps(effects),
         error='',
     )
@@ -689,6 +697,7 @@ def prepare_regen(conn, *, source_assistant_id: int) -> dict:
         old_branches = [{
             'content': row_d.get('content') or '',
             'thinking': row_d.get('thinking') or '',
+            'display_segments': row_d.get('display_segments') or '',
             'tool_calls': row_d.get('tool_calls') or '',
         }]
 
@@ -845,7 +854,7 @@ def fetch_rewrite_prefix_rows(
             (int(source_id),),
         ).fetchone()[0] or 0
         sql = (
-            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name '
+            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name, display_segments '
             'FROM chat_messages WHERE ' + history_where + ' AND id < ?'
         )
         params: list[Any] = [int(source_id)]
@@ -911,12 +920,14 @@ def activate_regen(conn, rewrite_id: str) -> dict:
             old_branches = [{
                 'content': src.get('content') or '',
                 'thinking': src.get('thinking') or '',
+                'display_segments': src.get('display_segments') or '',
                 'tool_calls': src.get('tool_calls') or '',
             }]
         new_branch = {
             'content': row.get('candidate_content') or '',
             'thinking': row.get('candidate_thinking') or '',
             'tool_calls': row.get('candidate_tool_calls') or '',
+            'display_segments': row.get('candidate_display_segments') or '',
         }
         all_branches = list(old_branches) + [new_branch]
         branch_idx = len(all_branches) - 1
@@ -925,6 +936,7 @@ def activate_regen(conn, rewrite_id: str) -> dict:
             'content': new_branch['content'],
             'thinking': new_branch['thinking'],
             'tool_calls': new_branch['tool_calls'],
+            'display_segments': new_branch['display_segments'],
             'branches': _dumps(all_branches),
             'branch_idx': branch_idx,
         }
@@ -932,6 +944,8 @@ def activate_regen(conn, rewrite_id: str) -> dict:
             updates['cache_info'] = row.get('candidate_cache_info') or ''
         if 'choices' in cols:
             updates['choices'] = row.get('candidate_choices') or ''
+        if 'display_segments' in cols:
+            updates['display_segments'] = row.get('candidate_display_segments') or ''
         assignments = ', '.join(f'{k}=?' for k in updates)
         conn.execute(
             f'UPDATE chat_messages SET {assignments} WHERE id=?',
@@ -1127,6 +1141,7 @@ def activate_edit(conn, rewrite_id: str) -> dict:
             ('tool_calls', row.get('candidate_tool_calls') or ''),
             ('cache_info', row.get('candidate_cache_info') or ''),
             ('choices', row.get('candidate_choices') or ''),
+            ('display_segments', row.get('candidate_display_segments') or ''),
         ):
             if col in cols:
                 asst_cols.append(col)
@@ -1142,6 +1157,7 @@ def activate_edit(conn, rewrite_id: str) -> dict:
             'created_at': created_at,
             'edited_content': edited,
             'candidate_content': row.get('candidate_content') or '',
+            'candidate_display_segments': row.get('candidate_display_segments') or '',
             'user_message_id': new_user_id,
         }
         _set_status(

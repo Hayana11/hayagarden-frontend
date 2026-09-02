@@ -6,6 +6,9 @@ on:
       - 'app/**'
       - 'daily_context_bff.py'
       - 'gateway.py'
+      - 'app.py'
+      - 'chat/**'
+      - 'tests/test_chat_durable_order.py'
       - '.github/workflows/frontend-daily-soft-window.yml'
   push:
     branches: [main]
@@ -13,6 +16,9 @@ on:
       - 'app/**'
       - 'daily_context_bff.py'
       - 'gateway.py'
+      - 'app.py'
+      - 'chat/**'
+      - 'tests/test_chat_durable_order.py'
       - '.github/workflows/frontend-daily-soft-window.yml'
 
 concurrency:
@@ -39,6 +45,7 @@ jobs:
           npm run test:chat-sse-heartbeat
           npm run test:file-choices-contract
           npm run test:chat-live-timeline
+          npm run test:chat-durable-order
           npm run test:daily-soft-window
           npm run test:daily-soft-window-machine
           npm run test:manual-context-window
@@ -53,3 +60,53 @@ jobs:
           npm run test:chat-capacity-header
           npm run test:task-timer-real-data-wiring
           npm run test:memory-cold-start
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install backend focused-test dependencies
+        run: python -m pip install Flask Markdown -r requirements.txt
+      - name: Prepare /opt/frontend for backend runtime imports
+        run: |
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          python - <<'PY'
+          import sqlite3
+          conn = sqlite3.connect("/opt/frontend/memories.db")
+          conn.execute("""
+              CREATE TABLE IF NOT EXISTS chat_messages (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  author TEXT NOT NULL DEFAULT 'user',
+                  content TEXT NOT NULL DEFAULT '',
+                  thinking TEXT DEFAULT '',
+                  tool_calls TEXT DEFAULT '',
+                  branches TEXT DEFAULT '',
+                  branch_idx INTEGER DEFAULT 0,
+                  cache_info TEXT DEFAULT '',
+                  choices TEXT DEFAULT '',
+                  image_url TEXT DEFAULT '',
+                  file_url TEXT DEFAULT '',
+                  file_name TEXT DEFAULT '',
+                  attachments TEXT DEFAULT '[]',
+                  display_segments TEXT DEFAULT '',
+                  source_kind TEXT NOT NULL DEFAULT 'chat',
+                  created_at TEXT DEFAULT (datetime('now'))
+              )
+          """)
+          conn.commit()
+          conn.close()
+          sqlite3.connect("/opt/frontend/commands.db").close()
+          PY
+          touch /opt/frontend/.env
+          sudo mkdir -p /var/lib/hayagarden /opt/workspace/tools
+          sudo chown -R "$USER" /var/lib/hayagarden /opt/workspace
+      - name: Durable chat backend order regression
+        env:
+          HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-durable-order-config.db
+          HAYAGARDEN_ENV_PATH: ${{ runner.temp }}/chat-durable-order.env
+        run: |
+          python -m unittest tests.test_chat_durable_order
+          python -m unittest tests.test_daily_runtime.DailyRuntimeTurnTests.test_cold_turn_atomic_persist_and_cursor
+          python -m unittest tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_happy_path_first_delta_commit_and_complete
+          python -m unittest tests.test_rewrite_activation_atomicity

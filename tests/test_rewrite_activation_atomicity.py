@@ -31,6 +31,7 @@ def _schema(conn: sqlite3.Connection) -> None:
             image_url TEXT DEFAULT '',
             file_url TEXT DEFAULT '',
             file_name TEXT DEFAULT '',
+            attachments TEXT DEFAULT '[]',
             source_kind TEXT NOT NULL DEFAULT 'chat',
             created_at TEXT DEFAULT (datetime('now'))
         );

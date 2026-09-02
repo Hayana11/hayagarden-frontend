@@ -18,6 +18,7 @@
     "test:chat-sse-heartbeat": "vite-node scripts/test-chat-sse-heartbeat.mjs",
     "test:chat-markdown": "vite-node scripts/test-chat-markdown.mjs",
     "test:chat-live-timeline": "vite-node scripts/test-chat-live-timeline.mjs",
+    "test:chat-durable-order": "vite-node scripts/test-chat-durable-order.mjs",
     "test:legacy-transcript-window": "vite-node scripts/test-legacy-transcript-window.mjs",
     "test:react-shell-architecture": "vite-node scripts/test-react-shell-architecture.mjs",
     "test:typography-semantics": "vite-node scripts/test-typography-semantics.mjs",

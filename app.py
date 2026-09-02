@@ -89,9 +89,13 @@ def _migrate_chat_columns():
     for col, stmt in ddl.items():
         if col not in cols:
             conn.execute(stmt)
+    from chat.daily_schema import (
+        ensure_chat_messages_display_segments,
+        ensure_chat_messages_source_kind_logged,
+    )
+    ensure_chat_messages_display_segments(conn)
     conn.commit()
     conn.close()
-    from chat.daily_schema import ensure_chat_messages_source_kind_logged
     ensure_chat_messages_source_kind_logged(DB_PATH, connect_fn=lambda p: __import__('sqlite3').connect(p))
 
 
@@ -4826,8 +4830,8 @@ def branch_switch():
     if new_idx != cur_idx:
         b = branches[new_idx]
         conn.execute(
-            'UPDATE chat_messages SET content=?, thinking=?, tool_calls=?, branch_idx=? WHERE id=?',
-            (b['content'], b.get('thinking', ''), b.get('tool_calls', ''), new_idx, msg_id)
+            'UPDATE chat_messages SET content=?, thinking=?, tool_calls=?, display_segments=?, branch_idx=? WHERE id=?',
+            (b['content'], b.get('thinking', ''), b.get('tool_calls', ''), b.get('display_segments', ''), new_idx, msg_id)
         )
         conn.commit()
     conn.close()
