@@ -1,4 +1,5 @@
 import { normalizeToolCall, type ChatToolCall } from './chat';
+import { lastItem } from './lastItem';
 
 export type LiveSegment =
   | { id: number; type: 'thinking'; text: string }
@@ -18,7 +19,7 @@ export function createLiveState(): LiveState {
 }
 
 export function isTextCaretActive(state: LiveState): boolean {
-  return state.lastEvent === 'text' && state.segments.at(-1)?.type === 'text';
+  return state.lastEvent === 'text' && lastItem(state.segments)?.type === 'text';
 }
 
 function appendDelta(state: LiveState, type: 'thinking' | 'text', delta: string): LiveState {

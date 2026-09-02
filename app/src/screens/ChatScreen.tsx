@@ -983,13 +983,22 @@ export function ChatScreen() {
       const res = await streamChatReply(
         userMessageId,
         {
-          onThink: (d) => updateLive((l) => appendThinkingDelta(l, d)),
+          onThink: (d) => {
+            updateLive((l) => appendThinkingDelta(l, d));
+            scrollBottom();
+          },
           onText: (d) => {
             updateLive((l) => appendTextDelta(l, d));
             scrollBottom();
           },
-          onToolUse: (idx, tc) => updateLive((l) => upsertToolUse(l, idx, tc)),
-          onToolResult: (idx, tc) => updateLive((l) => applyToolResult(l, idx, tc)),
+          onToolUse: (idx, tc) => {
+            updateLive((l) => upsertToolUse(l, idx, tc));
+            scrollBottom();
+          },
+          onToolResult: (idx, tc) => {
+            updateLive((l) => applyToolResult(l, idx, tc));
+            scrollBottom();
+          },
           onNotice: (s) => showToast(s),
         },
         ctrl,

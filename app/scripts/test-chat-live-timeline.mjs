@@ -67,3 +67,14 @@ assert.equal(isTextCaretActive(caretState), false);
 assert.equal(isTextCaretActive(createLiveState()), false);
 
 console.log('chat live timeline focused checks: PASS');
+
+
+const originalAt = Array.prototype.at;
+try {
+  delete Array.prototype.at;
+  const chrome78State = appendTextDelta(createLiveState(), 'Chrome 78');
+  assert.equal(isTextCaretActive(chrome78State), true);
+} finally {
+  if (typeof originalAt === 'function') Array.prototype.at = originalAt;
+}
+assert.equal(isTextCaretActive(createLiveState()), false);
