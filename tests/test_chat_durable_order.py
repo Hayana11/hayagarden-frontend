@@ -3,10 +3,14 @@ import re
 import unittest
 from pathlib import Path
 
-from chat.display_segments import DisplaySegmentAccumulator
-
-
 ROOT = Path(__file__).resolve().parents[1]
+
+_spec = __import__('importlib.util').util.spec_from_file_location(
+    'chat_display_segments_under_test', ROOT / 'chat' / 'display_segments.py',
+)
+_module = __import__('importlib.util').util.module_from_spec(_spec)
+_spec.loader.exec_module(_module)
+DisplaySegmentAccumulator = _module.DisplaySegmentAccumulator
 
 
 class ChatDurableOrderTests(unittest.TestCase):
