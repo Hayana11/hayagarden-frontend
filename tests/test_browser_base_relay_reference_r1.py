@@ -111,6 +111,13 @@ def test_x11_calibration_wait_is_bounded_and_requires_trusted_event():
     calibration_start = SOURCE.index("    async def _calibrate_x11_input")
     calibration_end = SOURCE.index("\n    def _fit_viewport_to_window", calibration_start)
     calibration_source = SOURCE[calibration_start:calibration_end]
+    width_ready_marker = 'readiness_value.get("innerWidth") == self.width'
+    height_ready_marker = 'readiness_value.get("innerHeight") == self.height'
+    calibration_listener_marker = "window.__relayInputCalibration=null;"
+    assert width_ready_marker in calibration_source
+    assert height_ready_marker in calibration_source
+    assert calibration_source.index(width_ready_marker) < calibration_source.index(calibration_listener_marker)
+    assert calibration_source.index(height_ready_marker) < calibration_source.index(calibration_listener_marker)
     assert "Page.navigate" not in calibration_source
     assert "calibration_target = self._open_target(calibration_url)" in SOURCE
     assert "calibration_deadline = loop.time() + 1.0" in SOURCE
