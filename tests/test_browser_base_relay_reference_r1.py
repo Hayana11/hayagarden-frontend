@@ -104,19 +104,6 @@ def test_x11_calibration_wait_is_bounded_and_requires_trusted_event():
     assert 'DEFAULT_PORT = 8271' in SOURCE
     assert 'CDP_PORT = 9333' in SOURCE
 
-
-if __name__ == "__main__":
-    for test in (
-        test_reference_relay_structure_and_ownership,
-        test_fixed_browser_endpoints_profile_and_display,
-        test_relay_pages_auth_dependency_and_generic_scope,
-        test_environment_file_path_has_one_authority,
-        test_service_starts_one_relay_and_not_chromium,
-    ):
-        test()
-    print("BROWSER-BASE-RELAY-REFERENCE-PORT-R1 static validation: PASS")
-
-
 def test_startup_page_readiness_uses_bounded_monotonic_deadline():
     assert "for _ in range(30):" not in SOURCE
     assert "loop = asyncio.get_running_loop()" in SOURCE
@@ -128,3 +115,16 @@ def test_startup_page_readiness_uses_bounded_monotonic_deadline():
     assert 'page_ws_url = ws_url' in SOURCE
     assert 'print("Chrome 启动超时")' in SOURCE
     assert "sys.exit(1)" in SOURCE
+
+if __name__ == "__main__":
+    for test in (
+        test_reference_relay_structure_and_ownership,
+        test_fixed_browser_endpoints_profile_and_display,
+        test_relay_pages_auth_dependency_and_generic_scope,
+        test_environment_file_path_has_one_authority,
+        test_service_starts_one_relay_and_not_chromium,
+        test_x11_calibration_wait_is_bounded_and_requires_trusted_event,
+        test_startup_page_readiness_uses_bounded_monotonic_deadline,
+    ):
+        test()
+    print("BROWSER-BASE-RELAY-REFERENCE-PORT-R1 static validation: PASS")
