@@ -92,7 +92,16 @@ def test_service_starts_one_relay_and_not_chromium():
 
 
 def test_x11_calibration_wait_is_bounded_and_requires_trusted_event():
+    assert "await asyncio.sleep(0.15)" not in SOURCE
     assert "await asyncio.sleep(0.08)" not in SOURCE
+    assert "calibration_ready_deadline = loop.time() + 1.0" in SOURCE
+    assert "document.title" in SOURCE
+    assert "relay-input-calibration" in SOURCE
+    assert "document.readyState" in SOURCE
+    assert 'raise RuntimeError("X11 坐标校准页面未就绪")' in SOURCE
+    readiness_marker = "calibration_ready_deadline = loop.time() + 1.0"
+    listener_marker = "window.__relayInputCalibration=null;"
+    assert SOURCE.index(readiness_marker) < SOURCE.index(listener_marker)
     assert "calibration_deadline = loop.time() + 1.0" in SOURCE
     assert "while loop.time() < calibration_deadline:" in SOURCE
     assert "await asyncio.sleep(0.02)" in SOURCE

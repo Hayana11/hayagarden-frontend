@@ -712,7 +712,26 @@ class BrowserRelay:
             calibration_html,
         )
         await self.cdp_call("Page.navigate", {"url": calibration_url})
-        await asyncio.sleep(0.15)
+
+        loop = asyncio.get_running_loop()
+        calibration_ready_deadline = loop.time() + 1.0
+        calibration_ready = False
+        while loop.time() < calibration_ready_deadline:
+            readiness = await self.cdp_call("Runtime.evaluate", {
+                "expression": "({title:document.title,readyState:document.readyState})",
+                "returnByValue": True,
+            })
+            readiness_value = ((readiness.get("result") or {}).get("value") or {})
+            if (
+                readiness_value.get("title") == "relay-input-calibration"
+                and readiness_value.get("readyState") != "loading"
+            ):
+                calibration_ready = True
+                break
+            await asyncio.sleep(0.02)
+
+        if not calibration_ready:
+            raise RuntimeError("X11 坐标校准页面未就绪")
 
         geometry = self.x11.focus_browser()
         window_x, window_y, window_width, window_height = geometry
