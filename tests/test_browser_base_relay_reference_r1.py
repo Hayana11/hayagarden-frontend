@@ -116,3 +116,15 @@ if __name__ == "__main__":
         test()
     print("BROWSER-BASE-RELAY-REFERENCE-PORT-R1 static validation: PASS")
 
+
+def test_startup_page_readiness_uses_bounded_monotonic_deadline():
+    assert "for _ in range(30):" not in SOURCE
+    assert "loop = asyncio.get_running_loop()" in SOURCE
+    assert "startup_deadline = loop.time() + 30.0" in SOURCE
+    assert "while page_ws_url is None and loop.time() < startup_deadline:" in SOURCE
+    assert 'f"http://127.0.0.1:{CDP_PORT}/json", timeout=0.5' in SOURCE
+    assert "await asyncio.sleep(0.3)" in SOURCE
+    assert 'if p.get("type") == "page" and ws_url:' in SOURCE
+    assert 'page_ws_url = ws_url' in SOURCE
+    assert 'print("Chrome 启动超时")' in SOURCE
+    assert "sys.exit(1)" in SOURCE
