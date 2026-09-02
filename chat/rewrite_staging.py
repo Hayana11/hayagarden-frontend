@@ -11,6 +11,8 @@ import secrets
 import time
 from typing import Any, Mapping, Optional
 
+from chat.daily_schema import ensure_chat_messages_display_segments
+
 
 STATUS_PREPARED = 'prepared'
 STATUS_GENERATING = 'generating'
@@ -89,6 +91,7 @@ def ensure_schema(conn, *, commit: bool = True) -> None:
     this *before* ``BEGIN IMMEDIATE`` so DDL cannot commit the write fence.
     """
     conn.execute(_SCHEMA_SQL)
+    ensure_chat_messages_display_segments(conn)
     cols = {r[1] for r in conn.execute('PRAGMA table_info(chat_rewrite_staging)')}
     for col, decl in (
         ('active_tip_id', 'INTEGER'),
@@ -851,7 +854,7 @@ def fetch_rewrite_prefix_rows(
             (int(source_id),),
         ).fetchone()[0] or 0
         sql = (
-            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name '
+            'SELECT id, author, content, image_url, created_at, tool_calls, file_url, file_name, display_segments '
             'FROM chat_messages WHERE ' + history_where + ' AND id < ?'
         )
         params: list[Any] = [int(source_id)]
