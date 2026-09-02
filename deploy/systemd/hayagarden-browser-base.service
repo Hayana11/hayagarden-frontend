@@ -11,7 +11,8 @@ Environment=HOME=/root
 Environment=TZ=Asia/Shanghai
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/hayagarden-browser-base.env
-ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1920x1080x24" /usr/bin/python3.11 /opt/frontend/relay/relay.py
+ExecStartPre=/usr/bin/install -d -o root -g root -m 0700 /run/user/0
+ExecStart=/usr/bin/xvfb-run -a -f /root/snap/chromium/common/hayagarden-browser-base.Xauthority -s "-screen 0 1920x1080x24" /usr/bin/python3.11 /opt/frontend/relay/relay.py
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
