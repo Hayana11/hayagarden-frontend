@@ -38,6 +38,7 @@ jobs:
           npm run test:chat-image-compression
           npm run test:chat-sse-heartbeat
           npm run test:file-choices-contract
+          npm run test:chat-live-timeline
           npm run test:daily-soft-window
           npm run test:daily-soft-window-machine
           npm run test:manual-context-window

@@ -3,7 +3,7 @@
 // (think/text/tool_use/tool_result/usage/done/err), inline branches
 // (branch/switch, regen prepare/finalize), edit-with-truncate, model catalog.
 // Mounted at /dash/chat, parallel to the legacy /chat page.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { ROUTES } from '../navigation';
 import { CarryoverModal } from '../components/dailySoftWindow';
@@ -38,12 +38,21 @@ import {
   forceUnlockChatGenLock,
   guessChatErrorHint,
   isChoicesAnswered,
-  normalizeToolCall,
   streamChatReply,
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
+import {
+  appendTextDelta,
+  appendThinkingDelta,
+  applyToolResult,
+  createLiveState,
+  isTextCaretActive,
+  upsertToolUse,
+  type LiveSegment,
+  type LiveState,
+} from '../lib/chatLiveTimeline';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import {
   availableComposerAttachmentSlots,
@@ -289,12 +298,7 @@ function collectLayoutDiagnostics(
   return rows;
 }
 
-interface LiveState {
-  thinking: string;
-  text: string;
-  tools: ChatToolCall[];
-  phase: 'wait' | 'think' | 'tool' | 'text';
-}
+
 
 interface DrawerState {
   text: string;
@@ -956,7 +960,7 @@ export function ChatScreen() {
   }, []);
 
   const updateLive = useCallback((fn: (l: LiveState) => LiveState) => {
-    liveRef.current = fn(liveRef.current ?? { thinking: '', text: '', tools: [], phase: 'wait' });
+    liveRef.current = fn(liveRef.current ?? createLiveState());
     setLive(liveRef.current);
   }, []);
 
@@ -972,30 +976,29 @@ export function ChatScreen() {
       // Invariant: any path entering live streaming pins the DOM window to latest
       // so live replies never render under an old browsing window.
       pinTranscriptToLatest();
-      liveRef.current = { thinking: '', text: '', tools: [], phase: 'wait' };
+      liveRef.current = createLiveState();
       setLive(liveRef.current);
       const ctrl = new AbortController();
       abortRef.current = ctrl;
       const res = await streamChatReply(
         userMessageId,
         {
-          onThink: (d) => updateLive((l) => ({ ...l, phase: 'think', thinking: l.thinking + d })),
-          onText: (d) => {
-            updateLive((l) => ({ ...l, phase: 'text', text: l.text + d }));
+          onThink: (d) => {
+            updateLive((l) => appendThinkingDelta(l, d));
             scrollBottom();
           },
-          onToolUse: (idx, tc) =>
-            updateLive((l) => {
-              const tools = [...l.tools];
-              tools[idx] = tc;
-              return { ...l, phase: 'tool', tools };
-            }),
-          onToolResult: (idx, tc) =>
-            updateLive((l) => {
-              const tools = [...l.tools];
-              tools[idx] = normalizeToolCall({ ...tools[idx], ...tc, running: false });
-              return { ...l, tools };
-            }),
+          onText: (d) => {
+            updateLive((l) => appendTextDelta(l, d));
+            scrollBottom();
+          },
+          onToolUse: (idx, tc) => {
+            updateLive((l) => upsertToolUse(l, idx, tc));
+            scrollBottom();
+          },
+          onToolResult: (idx, tc) => {
+            updateLive((l) => applyToolResult(l, idx, tc));
+            scrollBottom();
+          },
           onNotice: (s) => showToast(s),
         },
         ctrl,
@@ -1774,36 +1777,46 @@ export function ChatScreen() {
   }
 
   function renderLive(l: LiveState) {
-    const lines = l.thinking.split('\n').filter(Boolean).slice(-3);
+    const lastSegment = l.segments[l.segments.length - 1];
     return (
       <div className="vstack vstack-12">
-        {l.thinking && (
-          <>
-            <div
-              onClick={() => setDrawer({ text: l.thinking, label: '思考中…' })}
-              className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}
-            >
-              <span style={{ display: 'flex', animation: l.phase === 'think' ? 'chatBreathe 1.6s ease-in-out infinite' : 'none' }}>
-                <Svg d={IC.brain} size={17} sw={1.5} />
-              </span>
-              <span style={{ fontSize: 13, letterSpacing: 1 }}>{l.phase === 'think' ? '思考中…' : `思考了 ${l.thinking.length} 字`}</span>
-            </div>
-            {l.phase === 'think' && (
-              <div style={{ position: 'relative', height: 76, overflow: 'hidden', borderRadius: 14, background: 'var(--card2)' }}>
-                <div className="vstack vstack-4" style={{ position: 'absolute', bottom: 10, left: 16, right: 16 }}>
-                  {lines.map((ln, i) => (
-                    <span key={`${i}-${ln.slice(0, 8)}`} style={{ fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.6, animation: 'chatFadeIn .4s ease', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
-                      {ln}
-                    </span>
-                  ))}
+        {l.segments.map((segment: LiveSegment) => {
+          if (segment.type === 'thinking') {
+            const active = l.lastEvent === 'thinking' && lastSegment?.id === segment.id;
+            const lines = segment.text.split('\n').filter(Boolean).slice(-3);
+            return (
+              <Fragment key={`live-segment-${segment.id}`}>
+                <div
+                  onClick={() => setDrawer({ text: segment.text, label: active ? '思考中…' : `思考了 ${segment.text.length} 字` })}
+                  className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}
+                >
+                  <span style={{ display: 'flex', animation: active ? 'chatBreathe 1.6s ease-in-out infinite' : 'none' }}>
+                    <Svg d={IC.brain} size={17} sw={1.5} />
+                  </span>
+                  <span style={{ fontSize: 13, letterSpacing: 1 }}>{active ? '思考中…' : `思考了 ${segment.text.length} 字`}</span>
                 </div>
-                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 30, background: 'linear-gradient(var(--card2),transparent)' }} />
-              </div>
-            )}
-          </>
-        )}
-        {renderToolItems('live', l.tools)}
-        {l.phase === 'text' ? renderMarkdown(l.text, true) : !l.thinking && !l.tools.length ? (
+                {active && (
+                  <div style={{ position: 'relative', height: 76, overflow: 'hidden', borderRadius: 14, background: 'var(--card2)' }}>
+                    <div className="vstack vstack-4" style={{ position: 'absolute', bottom: 10, left: 16, right: 16 }}>
+                      {lines.map((ln, i) => (
+                        <span key={`${segment.id}-${i}-${ln.slice(0, 8)}`} style={{ fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.6, animation: 'chatFadeIn .4s ease', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                          {ln}
+                        </span>
+                      ))}
+                    </div>
+                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 30, background: 'linear-gradient(var(--card2),transparent)' }} />
+                  </div>
+                )}
+              </Fragment>
+            );
+          }
+          if (segment.type === 'text') {
+            const caret = isTextCaretActive(l) && lastSegment?.id === segment.id;
+            return <Fragment key={`live-segment-${segment.id}`}>{renderMarkdown(segment.text, caret)}</Fragment>;
+          }
+          return <Fragment key={`live-segment-${segment.id}`}>{renderToolItems(`live-${segment.id}`, [segment.tool])}</Fragment>;
+        })}
+        {!l.segments.length ? (
           <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
             <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
             正在连接回复…
