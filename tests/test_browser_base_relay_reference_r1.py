@@ -92,16 +92,34 @@ def test_service_starts_one_relay_and_not_chromium():
 
 
 def test_x11_calibration_wait_is_bounded_and_requires_trusted_event():
+    assert 'calibration_target = self._open_target(calibration_url)' in SOURCE
+    assert 'calibration_target = self._open_target("about:blank")' not in SOURCE
+    assert '"about:blank",' in SOURCE
+    assert SOURCE.count('calibration_html = (') == 1
     assert "await asyncio.sleep(0.15)" not in SOURCE
     assert "await asyncio.sleep(0.08)" not in SOURCE
     assert "calibration_ready_deadline = loop.time() + 1.0" in SOURCE
     assert "document.title" in SOURCE
     assert "relay-input-calibration" in SOURCE
     assert "document.readyState" in SOURCE
+    assert "window.innerWidth" in SOURCE
+    assert "window.innerHeight" in SOURCE
     assert 'raise RuntimeError("X11 坐标校准页面未就绪")' in SOURCE
     readiness_marker = "calibration_ready_deadline = loop.time() + 1.0"
     listener_marker = "window.__relayInputCalibration=null;"
     assert SOURCE.index(readiness_marker) < SOURCE.index(listener_marker)
+    calibration_start = SOURCE.index("    async def _calibrate_x11_input")
+    calibration_end = SOURCE.index("\n    def _fit_viewport_to_window", calibration_start)
+    calibration_source = SOURCE[calibration_start:calibration_end]
+    width_ready_marker = 'readiness_value.get("innerWidth") == self.width'
+    height_ready_marker = 'readiness_value.get("innerHeight") == self.height'
+    calibration_listener_marker = "window.__relayInputCalibration=null;"
+    assert width_ready_marker in calibration_source
+    assert height_ready_marker in calibration_source
+    assert calibration_source.index(width_ready_marker) < calibration_source.index(calibration_listener_marker)
+    assert calibration_source.index(height_ready_marker) < calibration_source.index(calibration_listener_marker)
+    assert "Page.navigate" not in calibration_source
+    assert "calibration_target = self._open_target(calibration_url)" in SOURCE
     assert "calibration_deadline = loop.time() + 1.0" in SOURCE
     assert "while loop.time() < calibration_deadline:" in SOURCE
     assert "await asyncio.sleep(0.02)" in SOURCE
