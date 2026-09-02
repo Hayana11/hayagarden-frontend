@@ -38,7 +38,6 @@ import {
   forceUnlockChatGenLock,
   guessChatErrorHint,
   isChoicesAnswered,
-  normalizeToolCall,
   streamChatReply,
   type ChatMsg,
   type ChatToolCall,
