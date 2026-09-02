@@ -724,12 +724,18 @@ class BrowserRelay:
         sample_root_x = window_x + window_width // 2
         sample_root_y = window_y + window_height // 2
         self.x11.motion(sample_root_x, sample_root_y)
-        await asyncio.sleep(0.08)
-        result = await self.cdp_call("Runtime.evaluate", {
-            "expression": "window.__relayInputCalibration",
-            "returnByValue": True,
-        })
-        point = ((result.get("result") or {}).get("value") or {})
+        loop = asyncio.get_running_loop()
+        calibration_deadline = loop.time() + 1.0
+        point = {}
+        while loop.time() < calibration_deadline:
+            result = await self.cdp_call("Runtime.evaluate", {
+                "expression": "window.__relayInputCalibration",
+                "returnByValue": True,
+            })
+            point = ((result.get("result") or {}).get("value") or {})
+            if point.get("trusted"):
+                break
+            await asyncio.sleep(0.02)
         if not point or not point.get("trusted"):
             raise RuntimeError("X11 坐标校准没有收到可信鼠标事件")
 

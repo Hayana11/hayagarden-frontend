@@ -91,6 +91,20 @@ def test_service_starts_one_relay_and_not_chromium():
     assert "chromium --" not in SERVICE
 
 
+def test_x11_calibration_wait_is_bounded_and_requires_trusted_event():
+    assert "await asyncio.sleep(0.08)" not in SOURCE
+    assert "calibration_deadline = loop.time() + 1.0" in SOURCE
+    assert "while loop.time() < calibration_deadline:" in SOURCE
+    assert "await asyncio.sleep(0.02)" in SOURCE
+    assert 'if point.get("trusted"):' in SOURCE
+    assert 'if not point or not point.get("trusted"):' in SOURCE
+    assert 'raise RuntimeError("X11 坐标校准没有收到可信鼠标事件")' in SOURCE
+    assert SOURCE.count("self.x11.motion(") == 4
+    assert "Page.startScreencast" in SOURCE
+    assert 'DEFAULT_PORT = 8271' in SOURCE
+    assert 'CDP_PORT = 9333' in SOURCE
+
+
 if __name__ == "__main__":
     for test in (
         test_reference_relay_structure_and_ownership,
