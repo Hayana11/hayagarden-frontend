@@ -228,6 +228,56 @@ class ChatDurableOrderTests(unittest.TestCase):
         self.assertIn('display_segments', staging)
         self.assertIn('candidate_display_segments', staging)
 
+    def test_t14_choices_only_after_tool(self):
+        raw = [
+            {'type': 'tool', 'tool_index': 0},
+            {'type': 'text', 'text': '[choices]A|B[/choices]'},
+        ]
+        self.assertEqual(
+            finalize_display_segments(raw, visible_text='[选项: A / B]'),
+            [
+                {'type': 'tool', 'tool_index': 0},
+                {'type': 'text', 'text': '[选项: A / B]'},
+            ],
+        )
+
+    def test_t15_thinking_tool_choices_only_preserves_order(self):
+        raw = [
+            {'type': 'thinking', 'text': 'thinking'},
+            {'type': 'tool', 'tool_index': 0},
+            {'type': 'text', 'text': '[choices]A|B[/choices]'},
+        ]
+        self.assertEqual(
+            finalize_display_segments(raw, visible_text='[选项: A / B]'),
+            [
+                {'type': 'thinking', 'text': 'thinking'},
+                {'type': 'tool', 'tool_index': 0},
+                {'type': 'text', 'text': '[选项: A / B]'},
+            ],
+        )
+
+    def test_t16_replacement_after_multiple_tools_stays_in_slot(self):
+        raw = [
+            {'type': 'text', 'text': 'before'},
+            {'type': 'tool', 'tool_index': 0},
+            {'type': 'text', 'text': 'middle'},
+            {'type': 'tool', 'tool_index': 1},
+            {'type': 'text', 'text': '[choices]A|B[/choices]'},
+        ]
+        self.assertEqual(
+            finalize_display_segments(
+                raw,
+                visible_text='beforemiddle[选项: A / B]',
+            ),
+            [
+                {'type': 'text', 'text': 'before'},
+                {'type': 'tool', 'tool_index': 0},
+                {'type': 'text', 'text': 'middle'},
+                {'type': 'tool', 'tool_index': 1},
+                {'type': 'text', 'text': '[选项: A / B]'},
+            ],
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
