@@ -34,8 +34,10 @@ from chat.day_handoff import (
     previous_chat_day,
     validate_day_string,
 )
+from chat.display_segments import finalize_display_segments_json
 from chat.daily_schema import (
     META_SOURCE_KIND_CUTOVER,
+    ensure_chat_messages_display_segments,
     ensure_chat_messages_source_kind,
     ensure_daily_meta_table,
     get_meta_int,
@@ -494,6 +496,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             _ensure_manual_window_indexes(conn)
             _ensure_context_switch_forge_schema(conn)
             _ensure_session_registry_mapping_schema(conn)
+            ensure_chat_messages_display_segments(conn)
             conn.commit()
         finally:
             conn.close()
@@ -607,6 +610,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             );
             """
         )
+        ensure_chat_messages_display_segments(conn)
         ensure_daily_meta_table(conn)
         dcols = _table_columns(conn, 'daily_contexts')
         if dcols and 'is_backfill' not in dcols:
@@ -3217,6 +3221,7 @@ def persist_daily_assistant_if_current(
         if exp_dt <= now_dt:
             conn.rollback()
             raise ConflictError('lease expired at persist')
+        display_segments = finalize_display_segments_json(display_segments, content)
         cur = conn.execute(
             "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices, display_segments) "
             "VALUES ('assistant', ?, ?, ?, ?, ?, ?)",
