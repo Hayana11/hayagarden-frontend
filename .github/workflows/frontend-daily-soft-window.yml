@@ -61,4 +61,11 @@ jobs:
           npm run test:task-timer-real-data-wiring
           npm run test:memory-cold-start
       - name: Durable chat backend order regression
-        run: python -m unittest tests.test_chat_durable_order
+        env:
+          HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-durable-order-config.db
+          HAYAGARDEN_ENV_PATH: ${{ runner.temp }}/chat-durable-order.env
+        run: |
+          python -m unittest tests.test_chat_durable_order
+          python -m unittest tests.test_daily_runtime.DailyRuntimeTurnTests.test_cold_turn_atomic_persist_and_cursor
+          python -m unittest tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_happy_path_first_delta_commit_and_complete
+          python -m unittest tests.test_rewrite_activation_atomicity
