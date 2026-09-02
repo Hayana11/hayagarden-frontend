@@ -55,7 +55,7 @@ const screen = await (await import('node:fs/promises')).readFile(
   new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8',
 );
 assert.match(screen, /renderOrderedAssistantContent/);
-assert.match(screen, /displaySegments?.length ? renderOrderedAssistantContent/);
+assert.match(screen, /displaySegments\\?\\.length \\? renderOrderedAssistantContent/);
 assert.match(screen, /renderToolItems/);
 assert.match(screen, /clearLivePresentation/);
 assert.match(screen, /onThink:/);
