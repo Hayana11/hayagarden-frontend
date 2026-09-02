@@ -9,7 +9,7 @@ const ordered = [
   { type: 'tool', tool_index: 1 },
   { type: 'text', text: 'text D' },
 ];
-assert.deepEqual(parseDisplaySegments(JSON.stringify(ordered)), [
+assert.deepEqual(parseDisplaySegments(JSON.stringify(ordered), 2), [
   { type: 'thinking', text: 'think A' },
   { type: 'text', text: 'text B' },
   { type: 'tool', toolIndex: 0 },
@@ -40,6 +40,16 @@ for (const raw of ['', 'not json', '{}', '[]', '[{"type":"unknown","text":"x"}]'
   assert.equal(parseDisplaySegments(raw), undefined, raw);
 }
 
+assert.equal(parseDisplaySegments(JSON.stringify([{ type: 'tool', tool_index: 99 }]), 1), undefined);
+const invalidRow = rowToMsg({
+  id: 44,
+  author: 'assistant',
+  content: 'legacy tool fallback',
+  display_segments: JSON.stringify([{ type: 'tool', tool_index: 99 }]),
+  tool_calls: JSON.stringify([{ name: 'tool-a' }]),
+});
+assert.equal(invalidRow.displaySegments, undefined);
+
 const originalAt = Array.prototype.at;
 try {
   Object.defineProperty(Array.prototype, 'at', { configurable: true, value: undefined });
@@ -57,6 +67,8 @@ const screen = await (await import('node:fs/promises')).readFile(
 assert.match(screen, /renderOrderedAssistantContent/);
 assert.ok(screen.includes('m.displaySegments?.length ? renderOrderedAssistantContent'));
 assert.match(screen, /renderToolItems/);
+assert.match(screen, /renderLegacyAssistantContent/);
+assert.match(screen, /toolIndex >= m\\.toolCalls\\.length/);
 assert.match(screen, /clearLivePresentation/);
 assert.match(screen, /onThink:/);
 assert.match(screen, /onText:/);
