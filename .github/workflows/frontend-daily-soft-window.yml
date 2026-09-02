@@ -73,8 +73,30 @@ jobs:
           fi
           python - <<'PY'
           import sqlite3
-          for name in ("memories.db", "commands.db"):
-              sqlite3.connect(f"/opt/frontend/{name}").close()
+          conn = sqlite3.connect("/opt/frontend/memories.db")
+          conn.execute("""
+              CREATE TABLE IF NOT EXISTS chat_messages (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  author TEXT NOT NULL DEFAULT 'user',
+                  content TEXT NOT NULL DEFAULT '',
+                  thinking TEXT DEFAULT '',
+                  tool_calls TEXT DEFAULT '',
+                  branches TEXT DEFAULT '',
+                  branch_idx INTEGER DEFAULT 0,
+                  cache_info TEXT DEFAULT '',
+                  choices TEXT DEFAULT '',
+                  image_url TEXT DEFAULT '',
+                  file_url TEXT DEFAULT '',
+                  file_name TEXT DEFAULT '',
+                  attachments TEXT DEFAULT '[]',
+                  display_segments TEXT DEFAULT '',
+                  source_kind TEXT NOT NULL DEFAULT 'chat',
+                  created_at TEXT DEFAULT (datetime('now'))
+              )
+          """)
+          conn.commit()
+          conn.close()
+          sqlite3.connect("/opt/frontend/commands.db").close()
           PY
           touch /opt/frontend/.env
       - name: Durable chat backend order regression
