@@ -45,7 +45,8 @@ def test_fixed_browser_endpoints_profile_and_display():
     assert "--proxy-server={_PROXY_SERVER}" in SOURCE
 
     exec_line = next(line for line in SERVICE.splitlines() if line.startswith("ExecStart="))
-    assert 'xvfb-run -a -s "-screen 0 1920x1080x24"' in exec_line
+    assert SERVICE.count("ExecStartPre=/usr/bin/install -d -o root -g root -m 0700 /run/user/0") == 1
+    assert "xvfb-run -a -f /root/snap/chromium/common/hayagarden-browser-base.Xauthority -s \"-screen 0 1920x1080x24\"" in exec_line
     assert "/usr/bin/python3.11 /opt/frontend/relay/relay.py" in exec_line
     assert "/snap/bin/chromium" not in exec_line
     assert "browser-relay.service" not in SERVICE
