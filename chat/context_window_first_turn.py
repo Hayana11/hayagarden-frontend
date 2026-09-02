@@ -32,6 +32,7 @@ from chat.context_window import (
     mark_intent_committed,
     resolve_canonical_context_row_conn,
 )
+from chat.display_segments import finalize_display_segments_json
 from chat.daily_context import (
     DEFAULT_CHAT_ID,
     STATUS_PROVISIONAL,
@@ -691,6 +692,7 @@ def _persist_first_assistant_idempotent(
     if exp_dt <= now_dt:
         raise FirstTurnError('lease expired', error_code='FIRST_TURN_LEASE_EXPIRED')
 
+    display_segments = finalize_display_segments_json(display_segments, assistant_content)
     cur = conn.execute(
         "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices, display_segments) "
         "VALUES ('assistant', ?, ?, '', ?, ?, ?)",
