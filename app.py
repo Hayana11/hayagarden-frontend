@@ -85,14 +85,17 @@ def _migrate_chat_columns():
         'file_name': "ALTER TABLE chat_messages ADD COLUMN file_name TEXT DEFAULT ''",
         'attachments': "ALTER TABLE chat_messages ADD COLUMN attachments TEXT DEFAULT '[]'",
         'choices':   "ALTER TABLE chat_messages ADD COLUMN choices TEXT DEFAULT ''",
-        'display_segments': "ALTER TABLE chat_messages ADD COLUMN display_segments TEXT DEFAULT ''",
     }
     for col, stmt in ddl.items():
         if col not in cols:
             conn.execute(stmt)
+    from chat.daily_schema import (
+        ensure_chat_messages_display_segments,
+        ensure_chat_messages_source_kind_logged,
+    )
+    ensure_chat_messages_display_segments(conn)
     conn.commit()
     conn.close()
-    from chat.daily_schema import ensure_chat_messages_source_kind_logged
     ensure_chat_messages_source_kind_logged(DB_PATH, connect_fn=lambda p: __import__('sqlite3').connect(p))
 
 
