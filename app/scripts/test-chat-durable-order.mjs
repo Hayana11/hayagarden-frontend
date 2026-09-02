@@ -62,5 +62,5 @@ assert.match(screen, /onThink:/);
 assert.match(screen, /onText:/);
 assert.match(screen, /onToolUse:/);
 assert.match(screen, /onToolResult:/);
-assert.match(screen, /await refetchLatest();\s*clearLivePresentation\(\)/s);
+assert.ok(screen.includes('await refetchLatest();\n    clearLivePresentation();'));
 console.log('chat durable-order contract tests: PASS');
