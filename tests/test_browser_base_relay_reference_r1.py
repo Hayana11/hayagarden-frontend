@@ -107,7 +107,7 @@ def test_x11_calibration_wait_is_bounded_and_requires_trusted_event():
 def test_startup_page_readiness_uses_bounded_monotonic_deadline():
     assert "for _ in range(30):" not in SOURCE
     assert "loop = asyncio.get_running_loop()" in SOURCE
-    assert "startup_deadline = loop.time() + 30.0" in SOURCE
+    assert "startup_deadline = loop.time() + 45.0" in SOURCE
     assert "while page_ws_url is None and loop.time() < startup_deadline:" in SOURCE
     assert 'f"http://127.0.0.1:{CDP_PORT}/json", timeout=0.5' in SOURCE
     assert "await asyncio.sleep(0.3)" in SOURCE
