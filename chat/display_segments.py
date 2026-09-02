@@ -120,12 +120,21 @@ def _project_visible_text(segments: list[dict[str, Any]], visible_text: str) -> 
             projected[index].append(value[value_cursor:value_cursor + length])
             value_cursor += length
 
+    fallback_slot: int | None = None
     matcher = difflib.SequenceMatcher(None, raw_text, visible_text, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
             append_equal(i1, i2, visible_text[j1:j2])
         elif tag == 'insert':
-            projected[slot_for_offset(i1)].append(visible_text[j1:j2])
+            target_slot = slot_for_offset(i1)
+            fallback_slot = fallback_slot or target_slot
+            projected[target_slot].append(visible_text[j1:j2])
+        elif tag == 'replace':
+            target_slot = slot_for_offset(i1)
+            fallback_slot = fallback_slot or target_slot
+            projected[target_slot].append(visible_text[j1:j2])
+        elif tag == 'delete':
+            fallback_slot = fallback_slot or slot_for_offset(i1)
 
     rendered: list[dict[str, Any]] = []
     for segment_index, segment in enumerate(segments):
@@ -138,7 +147,12 @@ def _project_visible_text(segments: list[dict[str, Any]], visible_text: str) -> 
     joined = ''.join(item.get('text', '') for item in rendered if item.get('type') == 'text')
     if joined != visible_text:
         rendered = [item for item in rendered if item.get('type') != 'text']
-        insert_at = next((i for i, item in enumerate(rendered) if item.get('type') == 'tool'), len(rendered))
+        fallback_segment_index = fallback_slot or text_slots[0][0]
+        insert_at = next(
+            (i for i, item in enumerate(segments)
+             if i == fallback_segment_index),
+            len(rendered),
+        )
         rendered.insert(insert_at, {'type': 'text', 'text': visible_text})
     return rendered
 
