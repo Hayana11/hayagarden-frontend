@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterator, Optional
 import cc_resident
 
 from chat import daily_context as dc
+from chat.display_segments import has_save_markers, strip_save_markers
 from chat import daily_history as dh
 from chat import context_window as cw
 from chat.attachment_contract import (
@@ -64,7 +65,6 @@ CONTEXT_PROFILE = 'daily_window'
 DEFAULT_LEASE_TTL = 480
 LEASE_HEARTBEAT_INTERVAL = 50
 WORKER_ID = '%s:%s' % (socket.gethostname(), os.getpid())
-SAVE_RE = re.compile(r'\[\[SAVE(?::[^\]]+)?\]\]', re.IGNORECASE)
 DAILY_TOOL_PROFILE = cc_resident.TOOL_PROFILE_UH_A0
 
 
@@ -212,8 +212,8 @@ def _sha256_text(text: str) -> str:
 
 def strip_daily_save_markers(text: str) -> tuple[str, bool]:
     raw = str(text or '')
-    had = bool(SAVE_RE.search(raw))
-    cleaned = SAVE_RE.sub('', raw).strip()
+    had = has_save_markers(raw)
+    cleaned = strip_save_markers(raw).strip()
     return cleaned, had
 
 
