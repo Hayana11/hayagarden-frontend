@@ -13,7 +13,12 @@ from tools import workspace_jobs
 from tools import workspace_apps
 from tools import ombre_adapter
 from tools.workspace_apps import WorkspaceAppError, verified_proxy_upstream, proxy_target
-from chat.display_segments import DisplaySegmentAccumulator
+from chat.display_segments import (
+    DisplaySegmentAccumulator,
+    extract_save_markers,
+    finalize_display_segments_json,
+    strip_save_markers,
+)
 
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
@@ -428,6 +433,7 @@ def _persist_turn_assistant(
     """
     rewrite_id = str((turn_data or {}).get('rewrite_id') or '').strip()
     text = (content or '').strip()
+    display_segments_json = finalize_display_segments_json(display_segments_json, text)
     if not text:
         return None
     if rewrite_id:
@@ -1376,7 +1382,6 @@ def api_call(system, messages):
 
 
 NL = chr(10)
-SAVE_RE = re.compile(r'\[\[SAVE:\s*(.*?)\]\]', re.DOTALL)
 SSE_END = NL + NL
 FRONTEND_APP_URL = 'http://127.0.0.1:5050'
 
@@ -4865,7 +4870,7 @@ def _cc_stream_gen(full_system, prompt, env):
 
 def _cc_save_markers(text):
     """Extract [[SAVE:...]] markers, persist them, return cleaned text."""
-    saves = SAVE_RE.findall(text)
+    saves = extract_save_markers(text)
     if saves:
         try:
             import memory_tool
@@ -4875,7 +4880,7 @@ def _cc_save_markers(text):
                     memory_tool.save_memory(item)
         except Exception:
             pass
-    return SAVE_RE.sub('', text).strip()
+    return strip_save_markers(text).strip()
 
 def claude_code_call(system, messages):
     full_system, prompt, env = _cc_prepare(system, messages)
