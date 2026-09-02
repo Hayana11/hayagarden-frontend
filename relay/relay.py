@@ -567,7 +567,7 @@ class BrowserRelay:
             ]))
 
         loop = asyncio.get_running_loop()
-        startup_deadline = loop.time() + 30.0
+        startup_deadline = loop.time() + 45.0
 
         page_ws_url = None
         while page_ws_url is None and loop.time() < startup_deadline:
