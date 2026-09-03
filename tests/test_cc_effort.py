@@ -180,7 +180,9 @@ class UsageEffortTests(unittest.TestCase):
         self.assertIsNotNone(default['thinking_sha256'])
         self.assertNotEqual(explicit['thinking_sha256'], default['thinking_sha256'])
 
-\n\nclass EffortRouteTests(unittest.TestCase):
+
+
+class EffortRouteTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
