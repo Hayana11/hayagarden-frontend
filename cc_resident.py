@@ -1684,4 +1684,3 @@ class ResidentSession:
             self._cold = True
             self._next_spawn_reason = str(reason or 'history_rewrite')
             self._reset_session_meta(respawn_reason=self._next_spawn_reason)
-

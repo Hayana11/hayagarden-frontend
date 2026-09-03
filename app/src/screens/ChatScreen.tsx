@@ -2593,4 +2593,3 @@ export function ChatScreen() {
     </div>
   );
 }
-

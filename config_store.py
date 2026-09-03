@@ -187,4 +187,3 @@ def exists(key):
         return row is not None
     except Exception:
         return False
-

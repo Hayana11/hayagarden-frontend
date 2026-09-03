@@ -74,4 +74,3 @@ def set_cc_chat_effort(value: str | None) -> dict[str, Any]:
         'scope': 'cc_chat_effort',
     })
     return state
-

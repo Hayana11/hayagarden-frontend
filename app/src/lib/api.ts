@@ -1021,4 +1021,3 @@ export function markTaskTimerDone(id: number): Promise<{ ok: boolean; duration_m
 export function markTaskTimerCanceled(id: number): Promise<{ ok: boolean }> {
   return http.post<{ ok: boolean }>(`/api/commands/${id}/cancel`);
 }
-

@@ -22,4 +22,3 @@ for (const forbidden of ['Array.prototype.at', 'Object.hasOwn', 'replaceAll', 's
 }
 
 console.log('chat effort frontend contract: PASS');
-

@@ -1,4 +1,6 @@
 import sys
+import builtins
+import io
 import os
 import tempfile
 import types
@@ -178,7 +180,115 @@ class UsageEffortTests(unittest.TestCase):
         self.assertIsNotNone(default['thinking_sha256'])
         self.assertNotEqual(explicit['thinking_sha256'], default['thinking_sha256'])
 
+\n\nclass EffortRouteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.config_db_path = str(Path(cls.tmp.name) / 'config.db')
+        cls.memory_db_path = str(Path(cls.tmp.name) / 'memories.db')
+        cls.config_patch = patch.object(config_store, 'DB_PATH', cls.config_db_path)
+        cls.env_patch = patch.object(config_store, 'ENV_PATH', str(Path(cls.tmp.name) / '.env'))
+        cls.config_patch.start()
+        cls.env_patch.start()
+        config_store._init_table()
+
+        def redirect_connect(path, *args, **kwargs):
+            raw = os.fspath(path)
+            if raw.startswith('/opt/frontend/'):
+                path = str(Path(cls.tmp.name) / Path(raw).name)
+            return cls.real_connect(path, *args, **kwargs)
+
+        def redirect_open(file, *args, **kwargs):
+            try:
+                raw = os.fspath(file)
+            except TypeError:
+                raw = ''
+            if raw == '/opt/frontend/.env':
+                return io.StringIO('')
+            return cls.real_open(file, *args, **kwargs)
+
+        cls.real_connect = sqlite3.connect
+        cls.real_open = builtins.open
+        with patch.object(sqlite3, 'connect', side_effect=redirect_connect), \
+                patch.object(builtins, 'open', side_effect=redirect_open):
+            sys.modules.setdefault('moments_cover', types.ModuleType('moments_cover'))
+            if 'account_balance_routes' not in sys.modules:
+                from flask import Blueprint
+                account_routes = types.ModuleType('account_balance_routes')
+                account_routes.create_relay_account_blueprint = lambda **_kwargs: Blueprint(
+                    'cc_effort_account_stub', __name__,
+                )
+                sys.modules['account_balance_routes'] = account_routes
+            import app as app_module
+        cls.app_module = app_module
+        cls.client = app_module.app.test_client()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env_patch.stop()
+        cls.config_patch.stop()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        conn = sqlite3.connect(config_store.DB_PATH)
+        conn.execute('DELETE FROM runtime_config')
+        conn.commit()
+        conn.close()
+        config_store.set('CHAT_PROVIDER', 'claude_code')
+        config_store.set('CC_CHAT_EFFORT', '')
+
+    def test_get_claude_default(self):
+        response = self.client.get('/api/config/effort')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            'provider': 'claude_code',
+            'configured_effort': None,
+            'effort_mode': 'default',
+            'allowed_efforts': ['low', 'medium', 'high', 'xhigh', 'max'],
+        })
+
+    def test_get_explicit_high(self):
+        config_store.set('CC_CHAT_EFFORT', 'high')
+        response = self.client.get('/api/config/effort')
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body['configured_effort'], 'high')
+        self.assertEqual(body['effort_mode'], 'explicit')
+
+    def test_post_high_persists(self):
+        response = self.client.post('/api/config/effort', json={'effort': 'high'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['ok'])
+        self.assertEqual(config_store.get('CC_CHAT_EFFORT'), 'high')
+
+    def test_post_null_restores_default(self):
+        config_store.set('CC_CHAT_EFFORT', 'high')
+        response = self.client.post('/api/config/effort', json={'effort': None})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['ok'])
+        self.assertEqual(config_store.get('CC_CHAT_EFFORT'), '')
+
+    def test_post_invalid_preserves_previous_config(self):
+        config_store.set('CC_CHAT_EFFORT', 'high')
+        response = self.client.post('/api/config/effort', json={'effort': 'ultra'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(config_store.get('CC_CHAT_EFFORT'), 'high')
+
+    def test_non_claude_provider_is_unavailable_and_not_mutated(self):
+        config_store.set('CC_CHAT_EFFORT', 'high')
+        config_store.set('CHAT_PROVIDER', 'api_relay')
+        get_response = self.client.get('/api/config/effort')
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.get_json(), {
+            'provider': 'api_relay',
+            'configured_effort': None,
+            'effort_mode': 'unavailable',
+            'allowed_efforts': [],
+        })
+        post_response = self.client.post('/api/config/effort', json={'effort': 'low'})
+        self.assertEqual(post_response.status_code, 409)
+        self.assertEqual(config_store.get('CC_CHAT_EFFORT'), 'high')
+
 
 if __name__ == '__main__':
     unittest.main()
-
