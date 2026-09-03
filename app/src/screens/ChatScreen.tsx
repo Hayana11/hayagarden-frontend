@@ -14,16 +14,13 @@ import {
   fetchChatMessages,
   fetchChatMessagesOrNull,
   ensureModelCatalog,
-  getChatEffort,
   regenFinalize,
   regenPrepare,
   sendChatMessage,
-  setChatEffort,
   setChatModel,
   switchChatBranch,
   uploadChatFile,
   type ChatModelCatalog,
-  type ChatEffortMode,
   type ModelCatalogEntry,
 } from '../lib/api';
 import {
@@ -391,9 +388,6 @@ export function ChatScreen() {
   const [currentModel, setCurrentModel] = useState('');
   const [chatProvider, setChatProvider] = useState<'api_relay' | 'claude_code' | ''>('');
   const [modelMode, setModelMode] = useState<'default' | 'explicit' | 'unknown' | ''>('');
-  const [currentEffort, setCurrentEffort] = useState('');
-  const [effortMode, setEffortMode] = useState<ChatEffortMode | ''>('');
-  const [allowedEfforts, setAllowedEfforts] = useState<string[]>([]);
 
   const [openThink, setOpenThink] = useState<Record<string, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
@@ -603,27 +597,14 @@ export function ChatScreen() {
     setCurrentModel(r.configuredModel || r.current || '');
   }, []);
 
-  const applyEffort = useCallback((r: Awaited<ReturnType<typeof getChatEffort>>) => {
-    if (r.provider !== 'claude_code') {
-      setCurrentEffort('');
-      setEffortMode(r.effortMode);
-      setAllowedEfforts([]);
-      return;
-    }
-    setCurrentEffort(r.configuredEffort || '');
-    setEffortMode(r.effortMode);
-    setAllowedEfforts(r.allowedEfforts);
-  }, []);
-
   const startModelCatalog = useCallback(() => {
     markChatColdStart('catalog_start');
-    void Promise.all([ensureModelCatalog(), getChatEffort()]).then(([catalog, effort]) => {
+    void ensureModelCatalog().then((r) => {
       markChatColdStart('catalog_ready');
       if (!mountedRef.current) return;
-      applyCatalog(catalog);
-      applyEffort(effort);
+      applyCatalog(r);
     });
-  }, [applyCatalog, applyEffort]);
+  }, [applyCatalog]);
 
   const runLegacyWarmUp = useCallback(async (anchorGen: number, earliestId: number) => {
     const race = coldStartRaceRef.current;
@@ -1745,6 +1726,92 @@ export function ChatScreen() {
     );
   }
 
+  function renderUserMsg(m: ChatMsg) {
+    const editing = editingId === m.id;
+    const attachments = m.attachments?.length ? m.attachments : [
+      ...(m.fileUrl ? [{ type: 'file' as const, url: m.fileUrl, name: m.fileName || '文件' }] : []),
+      ...(m.imageUrl ? [{ type: 'image' as const, url: m.imageUrl, name: '图片' }] : []),
+    ];
+    return (
+      <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-7${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-end', borderRadius: 16 }}>
+        {editing ? (
+          <div className="vstack vstack-10" style={{ width: '100%', maxWidth: 520, background: 'var(--card)', borderRadius: 18, boxShadow: '0 10px 30px var(--shadow)', padding: 14 }}>
+            <textarea
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              rows={3}
+              style={{ width: '100%', border: 'none', background: 'var(--card2)', borderRadius: 12, padding: 12, fontSize: '1em', lineHeight: 1.7, color: 'var(--ink)', resize: 'none', fontFamily: FONT_CN }}
+            />
+            <div className="hstack hstack-8" style={{ justifyContent: 'flex-end' }}>
+              <span style={{ marginRight: 'auto', fontSize: 11, color: 'var(--ghost)' }}>修改会归档后面的对话，重新生成回复</span>
+              <div onClick={() => setEditingId(null)} style={{ cursor: 'pointer', padding: '8px 16px', borderRadius: 999, background: 'var(--card2)', color: 'var(--mut)', fontSize: 13 }}>
+                取消
+              </div>
+              <div onClick={() => saveEdit(m.id)} style={{ cursor: 'pointer', padding: '8px 16px', borderRadius: 999, background: 'var(--deep)', color: '#FBF3F0', fontSize: 13, letterSpacing: 1 }}>
+                发送新版本
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="vstack vstack-8" style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)' }}>
+              {attachments.length > 0 && (
+                <div className="flex-wrap-gap-6">
+                  {attachments.map((attachment, index) => {
+                    if (attachment.type === 'image') {
+                      return (
+                        <img
+                          key={`image-${attachment.url}-${index}`}
+                          src={attachment.url}
+                          alt={attachment.name || '图片附件'}
+                          style={{ maxWidth: 200, maxHeight: 200, borderRadius: 12, objectFit: 'cover' }}
+                        />
+                      );
+                    }
+                    const previewUrl = chatFilePreviewUrl(attachment.url);
+                    return (
+                      <a
+                        key={`file-${attachment.url}-${index}`}
+                        href={previewUrl || attachment.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hstack hstack-6"
+                        style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}
+                        title={attachment.name}
+                      >
+                        <Svg d={IC.clip} size={11} sw={1.8} />
+                        {attachment.name}
+                      </a>
+                    );
+                  })}
+                </div>
+              )}
+              {m.text && <span style={{ fontSize: '1em', lineHeight: 1.75, letterSpacing: 0.3, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>{m.text}</span>}
+            </div>
+            <div className="hstack hstack-4">
+              <div className="chat-msg-acts hstack hstack-4">
+                <div
+                  onClick={() => {
+                    setEditingId(m.id);
+                    setEditText(m.text);
+                  }}
+                  title="修改"
+                  style={{ cursor: 'pointer', width: 26, height: 26, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--faint)' }}
+                >
+                  <Svg d={IC.edit} size={14} sw={1.7} />
+                </div>
+                <div onClick={() => copyText(m.text)} title="复制" style={{ cursor: 'pointer', width: 26, height: 26, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--faint)' }}>
+                  <CopyIcon size={14} />
+                </div>
+              </div>
+              <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1 }}>{m.ts}</span>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
   function renderOrderedAssistantContent(m: ChatMsg) {
     if (!m.displaySegments?.length) return null;
     if (m.displaySegments.some((segment) => (
@@ -2289,60 +2356,6 @@ export function ChatScreen() {
                         </div>
                       </div>
                     ))}
-                    {effortMode !== 'unavailable' && (
-                      <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 4 }}>
-                        <MixedSectionLabel cn="思考强度" en="EFFORT" style={{ padding: '8px 8px 4px', letterSpacing: 2.5, fontSize: 10.5 }} />
-                        <div
-                          onClick={async () => {
-                            setModelPopOpen(false);
-                            if (effortMode === 'default') return;
-                            const result = await setChatEffort(null);
-                            if (result.ok) {
-                              setCurrentEffort('');
-                              setEffortMode('default');
-                              showToast('下一条消息起生效');
-                            } else showToast('切换失败');
-                          }}
-                          className="hstack hstack-10"
-                          style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: effortMode === 'default' ? 'var(--rosebg)' : 'transparent' }}
-                        >
-                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: effortMode === 'default' ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
-                          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                            <span style={{ fontSize: 14, color: 'var(--ink)' }}>默认（跟随 Claude Code）</span>
-                            <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)' }}>不传 --effort</span>
-                          </div>
-                        </div>
-                        {allowedEfforts.map((effort) => {
-                          const labels: Record<string, string> = {
-                            low: '低', medium: '中', high: '高', xhigh: '极高', max: '最大',
-                          };
-                          const selected = effortMode === 'explicit' && effort === currentEffort;
-                          return (
-                            <div
-                              key={effort}
-                              onClick={async () => {
-                                setModelPopOpen(false);
-                                if (selected) return;
-                                const result = await setChatEffort(effort);
-                                if (result.ok) {
-                                  setCurrentEffort(result.configuredEffort || effort);
-                                  setEffortMode(result.effortMode || 'explicit');
-                                  showToast('下一条消息起生效');
-                                } else showToast('切换失败');
-                              }}
-                              className="hstack hstack-10"
-                              style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: selected ? 'var(--rosebg)' : 'transparent' }}
-                            >
-                              <span style={{ width: 8, height: 8, borderRadius: '50%', background: selected ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
-                              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                                <span style={{ fontSize: 14, color: 'var(--ink)' }}>{labels[effort] || effort}</span>
-                                <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)' }}>--effort {effort}</span>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
                   </>
                 ) : models.map((mo) => (
                   <div
@@ -2627,4 +2640,3 @@ export function ChatScreen() {
     </div>
   );
 }
-

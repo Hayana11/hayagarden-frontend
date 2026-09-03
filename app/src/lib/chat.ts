@@ -20,28 +20,21 @@ export interface ChatArtifact {
 
 export interface ChatToolCall {
   name: string;
+  id?: string;
   args?: unknown;
+  tool_input?: unknown;
   result?: unknown;
   success?: boolean;
   caption?: string;
   running?: boolean;
   artifact?: ChatArtifact;
+  approval_id?: string;
+  pending_action_id?: string;
   deferred_tool_use?: boolean;
   status?: string;
   approval_prompt?: string;
-  confirmation_state?: string;
+  confirmation_state?: 'pending' | 'processing' | 'rejected';
 }
-
-export interface ChatAttachment {
-  type: 'image' | 'file';
-  url: string;
-  name: string;
-}
-
-export type ChatDisplaySegment =
-  | { type: 'thinking'; text: string }
-  | { type: 'text'; text: string }
-  | { type: 'tool'; toolIndex: number };
 
 export interface ChatUsage {
   inputTokens: number;
@@ -52,7 +45,21 @@ export interface ChatUsage {
   cacheSupported: boolean | null;
   costUsd?: number;
   costEstimated?: boolean;
+  lastRoundContext?: number;
+  residentTurnCount?: number;
+  respawnReason?: string;
 }
+
+export interface ChatAttachment {
+  type: 'file' | 'image';
+  url: string;
+  name: string;
+}
+
+export type DisplaySegment =
+  | { type: 'thinking'; text: string }
+  | { type: 'text'; text: string }
+  | { type: 'tool'; toolIndex: number };
 
 export interface ChatMsg {
   id: number;
@@ -67,9 +74,9 @@ export interface ChatMsg {
   imageUrl: string;
   fileUrl: string;
   fileName: string;
-  choices: string[];
   attachments: ChatAttachment[];
-  displaySegments: ChatDisplaySegment[];
+  choices: string[];
+  displaySegments?: DisplaySegment[];
   /** HH:MM, local */
   ts: string;
   /** YYYY-MM-DD for date separators */
@@ -94,9 +101,34 @@ export interface ChatMessageRow {
   file_url?: string | null;
   file_name?: string | null;
   attachments?: string | null;
-  display_segments?: string | null;
   choices?: string | null;
+  display_segments?: string | null;
   created_at?: string | null;
+}
+
+export function normalizeChatAttachments(value: unknown): ChatAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: ChatAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as { type?: unknown; url?: unknown; name?: unknown };
+    const type = raw.type === 'file' || raw.type === 'image' ? raw.type : '';
+    const url = typeof raw.url === 'string' ? raw.url : '';
+    const fileUrl = url.startsWith('/static/uploads/files/');
+    const imageUrl = url.startsWith('/static/uploads/') && !fileUrl;
+    if (!type || !url || (type === 'file' ? !fileUrl : !imageUrl)) continue;
+    const key = type + ':' + url;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const fallback = url.slice(url.lastIndexOf('/') + 1) || (type === 'image' ? '图片' : '文件');
+    out.push({
+      type,
+      url,
+      name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : fallback,
+    });
+  }
+  return out;
 }
 
 export const MAX_CHAT_CHOICES = 8;
@@ -169,6 +201,37 @@ export function isChoicesAnswered(msgId: number, messages: ChatMsg[]): boolean {
   return false;
 }
 
+export function parseDisplaySegments(raw: string | null | undefined, toolCount = Number.POSITIVE_INFINITY): DisplaySegment[] | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+  const out: DisplaySegment[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') return undefined;
+    const value = item as { type?: unknown; text?: unknown; tool_index?: unknown };
+    if ((value.type === 'thinking' || value.type === 'text') && typeof value.text === 'string') {
+      out.push({ type: value.type, text: value.text });
+      continue;
+    }
+    if (
+      value.type === 'tool'
+      && Number.isInteger(value.tool_index)
+      && (value.tool_index as number) >= 0
+      && (value.tool_index as number) < toolCount
+    ) {
+      out.push({ type: 'tool', toolIndex: value.tool_index as number });
+      continue;
+    }
+    return undefined;
+  }
+  return out.length ? out : undefined;
+}
+
 function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -178,53 +241,42 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-export function normalizeChatAttachments(value: unknown): ChatAttachment[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-    .map((item) => ({
-      type: item.type === 'image' ? 'image' as const : 'file' as const,
-      url: typeof item.url === 'string' ? item.url : '',
-      name: typeof item.name === 'string' ? item.name : '',
-    }))
-    .filter((item) => Boolean(item.url));
-}
-
-function normalizeDisplaySegments(value: unknown): ChatDisplaySegment[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-    .flatMap((item): ChatDisplaySegment[] => {
-      if (item.type === 'thinking' || item.type === 'text') {
-        return [{ type: item.type, text: typeof item.text === 'string' ? item.text : '' }];
-      }
-      if (item.type === 'tool' && Number.isInteger(item.toolIndex)) {
-        return [{ type: 'tool', toolIndex: Number(item.toolIndex) }];
-      }
-      return [];
-    });
-}
-
 /** created_at is stored as UTC+8 'YYYY-MM-DD HH:MM:SS'. */
 export function rowToMsg(row: ChatMessageRow): ChatMsg {
   const created = row.created_at || '';
   const branches = parseJson<unknown[]>(row.branches, []);
   const rawCache = parseJson<Record<string, unknown>>(row.cache_info, {});
   const cacheInfo = normalizeCacheInfo(rawCache);
+  const toolCalls = parseJson<ChatToolCall[]>(row.tool_calls, []).map(normalizeToolCall);
   return {
     id: row.id,
     role: isFyAuthor(row.author) ? 'assistant' : 'user',
     text: row.content || '',
     thinking: row.thinking || '',
     thinkingSummary: row.thinking_summary || '',
-    toolCalls: parseJson<ChatToolCall[]>(row.tool_calls, []).map(normalizeToolCall),
+    toolCalls,
     cacheInfo,
     branchIdx: row.branch_idx || 0,
     branchTotal: branches.length,
     imageUrl: row.image_url || '',
     fileUrl: row.file_url || '',
     fileName: row.file_name || '',
+    attachments: normalizeChatAttachments(parseJson<unknown>(row.attachments, []))
+      .concat(
+        row.file_url && row.file_name
+          ? normalizeChatAttachments([{ type: 'file', url: row.file_url, name: row.file_name }])
+          : [],
+      )
+      .concat(
+        row.image_url
+          ? normalizeChatAttachments([{ type: 'image', url: row.image_url, name: '' }])
+          : [],
+      )
+      .filter((item, index, all) => all.findIndex((candidate) => (
+        candidate.type === item.type && candidate.url === item.url
+      )) === index),
     choices: normalizeChatChoices(parseJson<unknown>(row.choices, [])),
-    attachments: normalizeChatAttachments(parseJson<unknown>(row.attachments, [])),
-    displaySegments: normalizeDisplaySegments(parseJson<unknown>(row.display_segments, [])),
+    displaySegments: parseDisplaySegments(row.display_segments, toolCalls.length),
     ts: created.length >= 16 ? created.slice(11, 16) : '',
     dateKey: created.slice(0, 10),
     createdAt: created,
@@ -234,6 +286,34 @@ export function rowToMsg(row: ChatMessageRow): ChatMsg {
 
 export function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+}
+
+/** Capacity Swap soft limit display denominator (CC_CONTEXT_SOFT_LIMIT). */
+export const CAPACITY_SOFT_LIMIT = 90000;
+
+/** Format resident context size for Fyodor header (lowercase k). */
+export function fmtCapacityK(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1000) return String(Math.round(n));
+  if (n % 1000 === 0) return `${n / 1000}k`;
+  return `${(n / 1000).toFixed(1)}k`;
+}
+
+export function formatCapacityLabel(lastRoundContext: number | null | undefined): string {
+  const denom = fmtCapacityK(CAPACITY_SOFT_LIMIT);
+  if (lastRoundContext == null || lastRoundContext <= 0) return `— / ${denom}`;
+  return `${fmtCapacityK(lastRoundContext)} / ${denom}`;
+}
+
+/** Latest assistant with positive last_round_context (skips partial rescue rows). */
+export function findLatestRoundContext(messages: ChatMsg[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role !== 'assistant') continue;
+    const lrc = m.cacheInfo?.lastRoundContext;
+    if (typeof lrc === 'number' && lrc > 0) return lrc;
+  }
+  return null;
 }
 
 export function fmtCostUsd(usd?: number, estimated?: boolean): string {
@@ -268,6 +348,9 @@ export function normalizeCacheInfo(raw: Record<string, unknown> | null | undefin
     cacheSupported: (raw.cache_supported ?? raw.cacheSupported ?? null) as boolean | null,
     costUsd: Number(raw.cost_usd ?? raw.costUsd ?? 0) || undefined,
     costEstimated: Boolean(raw.cost_estimated ?? raw.costEstimated),
+    lastRoundContext: Number(raw.last_round_context ?? raw.lastRoundContext ?? 0) || undefined,
+    residentTurnCount: Number(raw.resident_turn_count ?? raw.residentTurnCount ?? 0) || undefined,
+    respawnReason: String(raw.respawn_reason ?? raw.respawnReason ?? '').trim() || undefined,
   };
 }
 
@@ -286,6 +369,7 @@ export interface StreamHandlers {
 export interface StreamResult {
   ok: boolean;
   error?: string;
+  deferredTool?: ChatToolCall;
 }
 
 interface SseEvent {
@@ -302,13 +386,27 @@ interface SseEvent {
   cache_supported?: boolean | null;
   cost_usd?: number;
   cost_estimated?: boolean;
+  last_round_context?: number;
+  resident_turn_count?: number;
+  respawn_reason?: string;
 }
 
 /**
  * POST /api/gw/chat/stream and dispatch SSE events. Resolves on done/err or
  * stream end. Idle-timeout safety: aborts if no event arrives for 150s.
  */
-export async function streamChatReply(userMessageId: number | null, handlers: StreamHandlers, ctrl: AbortController): Promise<StreamResult> {
+export async function streamChatReply(
+  userMessageId: number | null,
+  handlers: StreamHandlers,
+  ctrl: AbortController,
+  extra: {
+    rewriteId?: string | null;
+    approvalId?: string | null;
+    pendingActionId?: string | null;
+    confirmationDecision?: 'approve' | 'reject';
+    realityContext?: string | null;
+  } = {},
+): Promise<StreamResult> {
   let safety: ReturnType<typeof setTimeout> | undefined;
   const armSafety = () => {
     clearTimeout(safety);
@@ -316,10 +414,19 @@ export async function streamChatReply(userMessageId: number | null, handlers: St
   };
   armSafety();
   try {
+    const body: Record<string, unknown> = {};
+    if (userMessageId) body.user_message_id = userMessageId;
+    if (extra.rewriteId) body.rewrite_id = extra.rewriteId;
+    if (extra.approvalId) body.approval_id = extra.approvalId;
+    if (extra.pendingActionId) body.pending_action_id = extra.pendingActionId;
+    if (extra.confirmationDecision) body.confirmation_decision = extra.confirmationDecision;
+    if (typeof extra.realityContext === 'string' && extra.realityContext.trim()) {
+      body.reality_context = extra.realityContext;
+    }
     const resp = await fetch(sseUrl('/api/gw/chat/stream'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(userMessageId ? { user_message_id: userMessageId } : {}),
+      body: JSON.stringify(body),
       signal: ctrl.signal,
     });
     if (!resp.ok || !resp.body) return { ok: false, error: `stream failed: HTTP ${resp.status}` };
@@ -327,6 +434,7 @@ export async function streamChatReply(userMessageId: number | null, handlers: St
     const decoder = new TextDecoder();
     let buf = '';
     let result: StreamResult | null = null;
+    let deferredTool: ChatToolCall | undefined;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -346,15 +454,22 @@ export async function streamChatReply(userMessageId: number | null, handlers: St
         if (ev.dup) continue; // legacy-compat duplicate events
         armSafety();
         switch (ev.t) {
+          case 'ping':
+            // Transport keepalive only: armSafety already ran above; do not
+            // dispatch synthetic heartbeats into any visible Chat handler.
+            break;
           case 'think':
             handlers.onThink(String(ev.d ?? ''));
             break;
           case 'text':
             handlers.onText(String(ev.d ?? ''));
             break;
-          case 'tool_use':
-            handlers.onToolUse(ev.idx ?? 0, { running: true, ...(ev.d as ChatToolCall) });
+          case 'tool_use': {
+            const tool = { running: true, ...(ev.d as ChatToolCall) };
+            if (tool.deferred_tool_use) deferredTool = tool;
+            handlers.onToolUse(ev.idx ?? 0, tool);
             break;
+          }
           case 'tool_result':
             handlers.onToolResult(ev.idx ?? 0, { running: false, ...(ev.d as ChatToolCall) });
             break;
@@ -371,13 +486,16 @@ export async function streamChatReply(userMessageId: number | null, handlers: St
               cacheSupported: ev.cache_supported ?? null,
               costUsd: Number(ev.cost_usd || 0) || undefined,
               costEstimated: Boolean(ev.cost_estimated),
+              lastRoundContext: Number(ev.last_round_context || 0) || undefined,
+              residentTurnCount: Number(ev.resident_turn_count || 0) || undefined,
+              respawnReason: String(ev.respawn_reason || '').trim() || undefined,
             });
             break;
           case 'notice':
             handlers.onNotice?.(String(ev.d ?? ''));
             break;
           case 'done':
-            result = { ok: ev.ok !== false };
+            result = { ok: ev.ok !== false, deferredTool };
             break;
           case 'err':
             result = { ok: false, error: String(ev.d ?? '未知错误') };
@@ -476,4 +594,3 @@ export async function forceUnlockChatGenLock(): Promise<{ ok: boolean; busy: boo
     return { ok: false, busy: null };
   }
 }
-
