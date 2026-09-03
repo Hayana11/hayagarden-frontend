@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   chatMediaLayoutForCount,
   chatMediaExitX,
+  chatMediaLayerPose,
   chatMediaSwipeDirection,
   clampChatMediaIndex,
   imageUrlsFromToolValue,
@@ -30,6 +31,10 @@ assert.equal(chatMediaExitX(1, 300), -300);
 assert.equal(chatMediaExitX(-1, 300), 300);
 assert.equal(chatMediaSwipeDirection(-40), 1);
 assert.equal(chatMediaSwipeDirection(40), -1);
+assert.deepEqual(chatMediaLayerPose(1, 0, 1), { x: 7, y: 6, rotate: 1.4, scale: 0.985, opacity: 1 });
+assert.deepEqual(chatMediaLayerPose(1, 1, 1), { x: 0, y: 0, rotate: 0, scale: 1, opacity: 1 });
+assert.deepEqual(chatMediaLayerPose(2, 1, 1), { x: 7, y: 6, rotate: 1.4, scale: 0.985, opacity: 1 });
+assert.deepEqual(chatMediaLayerPose(-1, 1, -1), { x: 0, y: 0, rotate: 0, scale: 1, opacity: 1 });
 
 const here = dirname(fileURLToPath(import.meta.url));
 const chatScreen = readFileSync(join(here, '../src/screens/ChatScreen.tsx'), 'utf8');
@@ -42,6 +47,7 @@ assert.match(assistantRenderer, /chat-message-content-assistant[\s\S]*ChatMediaG
 assert.match(mediaGroup, /data-testid="chat-photo-stack"/);
 assert.match(mediaGroup, /onTransitionEnd/);
 assert.doesNotMatch(mediaGroup, /280/);
+assert.match(mediaGroup, /setAnimating\(true\);[\s\S]*setDragX\(0\);[\s\S]*waitForTransition/);
 assert.doesNotMatch(chatScreen.slice(chatScreen.indexOf('function renderMarkdown'), chatScreen.indexOf('function renderUserMsg')), /chat-message-bubble-assistant/);
 
 assert.deepEqual(
