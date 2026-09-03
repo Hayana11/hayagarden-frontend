@@ -70,6 +70,8 @@ _DEFAULTS = {
     'CONTEXT_SWITCH_STAGED_HEALTH_MS': '2000',
     # MODEL-1B：Claude Code 显式模型；空=跟随 CC 默认（不传 --model）。无 .env fallback。
     'CC_CHAT_MODEL': '',
+    # CC-CHAT-EFFORT-R1：空=跟随 Claude Code 默认（不传 --effort）。
+    'CC_CHAT_EFFORT': '',
     # R0：staged rewrite 机会型 native session fork（默认关闭；缺 mapping/SDK 时 cold fallback）。
     'CC_REWRITE_NATIVE_FORK_ENABLED': '0',
     # Fyodor solo chat authored/display thinking compatibility.

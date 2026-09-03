@@ -46,6 +46,7 @@ jobs:
           npm run test:file-choices-contract
           npm run test:chat-live-timeline
           npm run test:chat-durable-order
+          npm run test:chat-effort
           npm run test:daily-soft-window
           npm run test:daily-soft-window-machine
           npm run test:manual-context-window
@@ -110,3 +111,8 @@ jobs:
           python -m unittest tests.test_daily_runtime.DailyRuntimeTurnTests.test_cold_turn_atomic_persist_and_cursor
           python -m unittest tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_happy_path_first_delta_commit_and_complete
           python -m unittest tests.test_rewrite_activation_atomicity
+      - name: Claude chat effort backend regressions
+        env:
+          HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-effort-config.db
+          HAYAGARDEN_ENV_PATH: ${{ runner.temp }}/chat-effort.env
+        run: python -m unittest tests.test_cc_effort -v

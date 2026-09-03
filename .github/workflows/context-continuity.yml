@@ -202,6 +202,7 @@ jobs:
           python3 -m unittest \
             tests.test_cc_jsonl_usage \
             tests.test_cc_usage_observability \
+            tests.test_cc_effort \
             -v
       - name: Run UH-A0 capability manifest contract
         run: python -m unittest tests.test_capability_manifest -v

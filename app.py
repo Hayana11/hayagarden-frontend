@@ -1862,6 +1862,54 @@ def config_set_model():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/config/effort', methods=['GET'])
+def config_get_effort():
+    """Return Claude Code chat effort without exposing relay configuration."""
+    from chat.provider_router import resolve_provider
+    provider = resolve_provider('chat')
+    if provider != 'claude_code':
+        return jsonify({
+            'provider': provider,
+            'configured_effort': None,
+            'effort_mode': 'unavailable',
+            'allowed_efforts': [],
+        })
+    from chat.cc_effort import CC_EFFORT_ALLOWED, get_cc_chat_effort
+    effort = get_cc_chat_effort()
+    return jsonify({
+        'provider': 'claude_code',
+        'configured_effort': effort or None,
+        'effort_mode': 'explicit' if effort else 'default',
+        'allowed_efforts': list(CC_EFFORT_ALLOWED),
+    })
+
+
+@app.route('/api/config/effort', methods=['POST'])
+def config_set_effort():
+    """Set Claude Code effort; null/empty means no --effort flag."""
+    from chat.provider_router import resolve_provider
+    provider = resolve_provider('chat')
+    if provider != 'claude_code':
+        return jsonify({'error': 'effort unavailable for provider', 'provider': provider}), 409
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'effort' not in data:
+        return jsonify({'error': 'missing effort'}), 400
+    raw = data.get('effort')
+    if raw is not None and not isinstance(raw, str):
+        return jsonify({'error': 'effort must be string or null'}), 400
+    from chat.cc_effort import CC_EFFORT_NOT_ALLOWED, set_cc_chat_effort
+    try:
+        result = set_cc_chat_effort(raw)
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+    if result.get('ok') is False or result.get('error') == CC_EFFORT_NOT_ALLOWED:
+        return jsonify(result), 400
+    result = dict(result)
+    result['provider'] = 'claude_code'
+    return jsonify(result)
+
+
 @app.route('/api/config/model-catalog', methods=['GET'])
 def config_model_catalog():
     """Chat-provider model catalog + current state.

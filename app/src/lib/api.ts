@@ -744,6 +744,102 @@ export function setChatModel(model: string | null): Promise<SetChatModelResult> 
     .catch((): SetChatModelResult => ({ ok: false }));
 }
 
+export type ChatEffortMode = 'default' | 'explicit' | 'unavailable' | 'unknown';
+export type ChatEffortProvider = 'api_relay' | 'claude_code' | '';
+
+export interface ChatEffortState {
+  provider: ChatEffortProvider;
+  configuredEffort: string | null;
+  effortMode: ChatEffortMode;
+  allowedEfforts: string[];
+}
+
+const CHAT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function unknownChatEffort(): ChatEffortState {
+  return {
+    provider: '',
+    configuredEffort: null,
+    effortMode: 'unknown',
+    allowedEfforts: [],
+  };
+}
+
+function normalizeChatEffort(r: {
+  provider?: string;
+  configured_effort?: string | null;
+  effort_mode?: string;
+  allowed_efforts?: unknown;
+}): ChatEffortState {
+  const provider: ChatEffortProvider =
+    r.provider === 'claude_code' || r.provider === 'api_relay' ? r.provider : '';
+  const allowed = Array.isArray(r.allowed_efforts)
+    ? r.allowed_efforts.filter((value): value is string => typeof value === 'string')
+    : [];
+  const allowedEfforts = provider === 'claude_code' &&
+      CHAT_EFFORTS.every((value) => allowed.includes(value)) &&
+      allowed.length === CHAT_EFFORTS.length
+    ? CHAT_EFFORTS.slice()
+    : (provider === 'api_relay' && allowed.length === 0 ? [] : []);
+  const configured =
+    r.configured_effort === null || r.configured_effort === undefined
+      ? null
+      : (typeof r.configured_effort === 'string' && CHAT_EFFORTS.includes(r.configured_effort)
+        ? r.configured_effort
+        : null);
+  let effortMode: ChatEffortMode = 'unknown';
+  if (provider === 'api_relay' && r.effort_mode === 'unavailable' && configured === null && allowedEfforts.length === 0) {
+    effortMode = 'unavailable';
+  } else if (
+    provider === 'claude_code' &&
+    allowedEfforts.length === CHAT_EFFORTS.length &&
+    ((r.effort_mode === 'default' && configured === null) ||
+      (r.effort_mode === 'explicit' && configured !== null))
+  ) {
+    effortMode = r.effort_mode;
+  }
+  return { provider, configuredEffort: configured, effortMode, allowedEfforts };
+}
+
+export function getChatEffort(): Promise<ChatEffortState> {
+  return http
+    .get<{
+      provider?: string;
+      configured_effort?: string | null;
+      effort_mode?: string;
+      allowed_efforts?: unknown;
+    }>('/api/config/effort')
+    .then((r) => normalizeChatEffort(r))
+    .catch(() => unknownChatEffort());
+}
+
+export interface SetChatEffortResult {
+  ok: boolean;
+  configuredEffort?: string | null;
+  effortMode?: ChatEffortMode;
+}
+
+export function setChatEffort(effort: string | null): Promise<SetChatEffortResult> {
+  return http
+    .post<{
+      ok?: boolean;
+      configured_effort?: string | null;
+      effort_mode?: string;
+    }>('/api/config/effort', { effort })
+    .then((r): SetChatEffortResult => ({
+      ok: r.ok === true,
+      configuredEffort:
+        r.configured_effort === undefined
+          ? undefined
+          : (r.configured_effort === null ? null : String(r.configured_effort)),
+      effortMode:
+        r.effort_mode === 'default' || r.effort_mode === 'explicit' || r.effort_mode === 'unavailable'
+          ? r.effort_mode
+          : 'unknown',
+    }))
+    .catch((): SetChatEffortResult => ({ ok: false }));
+}
+
 export interface LedgerEntryDraft {
   date: string;
   amount: number;

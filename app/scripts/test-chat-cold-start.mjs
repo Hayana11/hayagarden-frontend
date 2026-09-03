@@ -267,7 +267,7 @@ assert.deepEqual(
     screen.indexOf('const startModelCatalog = useCallback'),
     screen.indexOf('const runLegacyWarmUp = useCallback'),
   );
-  assert.match(catalogBlock, /if \(!mountedRef\.current\) return[\s\S]*applyCatalog\(r\)/);
+  assert.match(catalogBlock, /if \(!mountedRef\.current\) return[\s\S]*applyCatalog\(catalog\)/);
 
   const deferredBlock = screen.slice(
     screen.indexOf('const ensureDeferredColdStartInit = useCallback'),
