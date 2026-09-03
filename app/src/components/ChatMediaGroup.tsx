@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Poin
 import {
   chatMediaImageUrl,
   chatMediaExitX,
+  chatMediaLayerPose,
   chatMediaLayoutForCount,
   chatMediaSwipeDirection,
   clampChatMediaIndex,
@@ -152,8 +153,8 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
         setDragX(0);
       });
     } else {
-      setDragX(direction > 0 ? -Math.min(width * 0.12, 32) : Math.min(width * 0.12, 32));
-      waitForTransition(() => setDragX(0));
+      setDragX(0);
+      waitForTransition(() => {});
     }
   };
 
@@ -202,7 +203,8 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
       } else {
         lockRef.current = true;
         setAnimating(true);
-        waitForTransition(() => setDragX(0));
+        setDragX(0);
+        waitForTransition(() => {});
       }
     }
     pointerRef.current.id = -1;
@@ -229,36 +231,12 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
   const swipeDirection = chatMediaSwipeDirection(dragX);
   const mediaStyle = (index: number): CSSProperties => {
     const offset = index - stackIndex;
-    let x = 0;
-    let y = 0;
-    let rotate = 0;
-    let scale = 1;
-    let opacity = 1;
-    if (offset === 1) {
-      x = 7;
-      y = 6;
-      rotate = 1.4;
-      scale = 0.985;
-    } else if (offset === 2) {
-      x = -5;
-      y = 11;
-      rotate = -1.6;
-      scale = 0.97;
-    } else if (offset < 0) {
-      opacity = 0;
-      if (swipeDirection === -1 && offset === -1) {
-        x = -7 * (1 - progress);
-        y = -6 * (1 - progress);
-        rotate = -1.4 * (1 - progress);
-        scale = 0.985 + 0.015 * progress;
-        opacity = progress;
-      }
-    }
-    if (offset === 0) x += dragX;
+    const pose = chatMediaLayerPose(offset, progress, swipeDirection);
+    const x = pose.x + (offset === 0 ? dragX : 0);
     return {
       zIndex: swipeDirection === -1 && offset === -1 ? 5 : offset === 0 ? 4 : offset === 1 ? 3 : offset === 2 ? 2 : 1,
-      opacity,
-      transform: `translate3d(${x}px, ${y}px, 0) rotate(${rotate}deg) scale(${scale})`,
+      opacity: pose.opacity,
+      transform: `translate3d(${x}px, ${pose.y}px, 0) rotate(${pose.rotate}deg) scale(${pose.scale})`,
       transition: animating ? 'transform .26s ease, opacity .26s ease' : 'none',
     };
   };

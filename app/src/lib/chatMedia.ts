@@ -35,6 +35,35 @@ export function chatMediaSwipeDirection(dragX: number): -1 | 0 | 1 {
   return 0;
 }
 
+export interface ChatMediaLayerPose {
+  x: number;
+  y: number;
+  rotate: number;
+  scale: number;
+  opacity: number;
+}
+
+/** Interpolate the finite PhotoStack layers without mounting the full set. */
+export function chatMediaLayerPose(offset: number, progress: number, swipeDirection: -1 | 0 | 1): ChatMediaLayerPose {
+  const p = Math.min(1, Math.max(0, progress));
+  const remaining = p >= 1 ? 0 : 1 - p;
+  if (offset === 1) {
+    return swipeDirection === 1
+      ? { x: 7 * (1 - p), y: 6 * (1 - p), rotate: 1.4 * (1 - p), scale: 0.985 + 0.015 * p, opacity: 1 }
+      : { x: 7, y: 6, rotate: 1.4, scale: 0.985, opacity: 1 };
+  }
+  if (offset === 2) {
+    return swipeDirection === 1
+      ? { x: -5 * (1 - p) + 7 * p, y: 11 * (1 - p) + 6 * p, rotate: -1.6 * (1 - p) + 1.4 * p, scale: 0.97 + 0.015 * p, opacity: 1 }
+      : { x: -5, y: 11, rotate: -1.6, scale: 0.97, opacity: 1 };
+  }
+  if (offset < 0 && swipeDirection === -1 && offset === -1) {
+    return { x: remaining ? -7 * remaining : 0, y: remaining ? -6 * remaining : 0, rotate: remaining ? -1.4 * remaining : 0, scale: 0.985 + 0.015 * p, opacity: p };
+  }
+  if (offset < 0) return { x: 0, y: 0, rotate: 0, scale: 1, opacity: 0 };
+  return { x: 0, y: 0, rotate: 0, scale: 1, opacity: 1 };
+}
+
 /**
  * PhotoStack owns only a small sliding window. The order is previous/current/
  * next/nextNext so a right swipe can reveal the previous card without mounting
