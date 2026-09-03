@@ -212,6 +212,29 @@ class EffortRouteTests(unittest.TestCase):
 
         cls.real_connect = sqlite3.connect
         cls.real_open = builtins.open
+        conn = cls.real_connect(cls.memory_db_path)
+        conn.execute(
+            """CREATE TABLE chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                author TEXT NOT NULL DEFAULT 'user',
+                content TEXT NOT NULL DEFAULT '',
+                thinking TEXT DEFAULT '',
+                tool_calls TEXT DEFAULT '',
+                branches TEXT DEFAULT '',
+                branch_idx INTEGER DEFAULT 0,
+                cache_info TEXT DEFAULT '',
+                choices TEXT DEFAULT '',
+                image_url TEXT DEFAULT '',
+                file_url TEXT DEFAULT '',
+                file_name TEXT DEFAULT '',
+                attachments TEXT DEFAULT '[]',
+                display_segments TEXT DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'chat',
+                created_at TEXT DEFAULT (datetime('now'))
+            )"""
+        )
+        conn.commit()
+        conn.close()
         with patch.object(sqlite3, 'connect', side_effect=redirect_connect), \
                 patch.object(builtins, 'open', side_effect=redirect_open):
             sys.modules.setdefault('moments_cover', types.ModuleType('moments_cover'))
