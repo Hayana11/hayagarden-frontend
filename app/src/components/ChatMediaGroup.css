@@ -36,13 +36,6 @@
   color: var(--ink);
 }
 
-.chat-message-bubble-assistant {
-  background: var(--card2);
-  border-radius: 18px 18px 18px 6px;
-  padding: 12px 16px;
-  box-shadow: 0 6px 16px var(--shadow);
-}
-
 .chat-media-group {
   position: relative;
   width: 100%;

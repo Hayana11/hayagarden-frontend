@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type TransitionEvent as ReactTransitionEvent } from 'react';
 import {
   chatMediaImageUrl,
+  chatMediaExitX,
   chatMediaLayoutForCount,
+  chatMediaSwipeDirection,
   clampChatMediaIndex,
   nextChatMediaIndex,
   visibleChatMediaIndices,
@@ -106,17 +108,34 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
   const lockRef = useRef(false);
   const clickSuppressedRef = useRef(false);
   const stackIndexRef = useRef(stackIndex);
+  const animationFinishRef = useRef<(() => void) | null>(null);
+  const animationWatchdogRef = useRef<number | null>(null);
   stackIndexRef.current = stackIndex;
 
   const openGallery = (index: number) => onOpenGallery?.(validItems, index);
-  const clearAnimation = (callback?: () => void) => {
+  const finishAnimation = useCallback(() => {
+    const callback = animationFinishRef.current;
+    if (!callback) return;
+    animationFinishRef.current = null;
+    if (animationWatchdogRef.current !== null) {
+      window.clearTimeout(animationWatchdogRef.current);
+      animationWatchdogRef.current = null;
+    }
+    setAnimating(false);
+    lockRef.current = false;
+    callback();
+  }, []);
+
+  const waitForTransition = (callback: () => void) => {
     const reduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    window.setTimeout(() => {
-      setAnimating(false);
-      lockRef.current = false;
-      callback?.();
-    }, reduced ? 20 : 280);
+    animationFinishRef.current = callback;
+    animationWatchdogRef.current = window.setTimeout(finishAnimation, reduced ? 0 : 360);
   };
+
+  useEffect(() => () => {
+    if (animationWatchdogRef.current !== null) window.clearTimeout(animationWatchdogRef.current);
+    animationFinishRef.current = null;
+  }, []);
 
   const settle = (direction: -1 | 1, width: number) => {
     if (lockRef.current) return;
@@ -126,15 +145,15 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
     lockRef.current = true;
     setAnimating(true);
     if (canMove) {
-      setDragX(direction < 0 ? -width : width);
-      clearAnimation(() => {
+      setDragX(chatMediaExitX(direction, width));
+      waitForTransition(() => {
         stackIndexRef.current = target;
         setStackIndex(target);
         setDragX(0);
       });
     } else {
-      setDragX(direction < 0 ? -Math.min(width * 0.12, 32) : Math.min(width * 0.12, 32));
-      clearAnimation(() => setDragX(0));
+      setDragX(direction > 0 ? -Math.min(width * 0.12, 32) : Math.min(width * 0.12, 32));
+      waitForTransition(() => setDragX(0));
     }
   };
 
@@ -183,7 +202,7 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
       } else {
         lockRef.current = true;
         setAnimating(true);
-        clearAnimation(() => setDragX(0));
+        waitForTransition(() => setDragX(0));
       }
     }
     pointerRef.current.id = -1;
@@ -207,38 +226,47 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
 
   const visible = visibleChatMediaIndices(validItems.length, stackIndex);
   const progress = Math.min(1, Math.abs(dragX) / (viewportRef.current?.getBoundingClientRect().width || 240));
+  const swipeDirection = chatMediaSwipeDirection(dragX);
   const mediaStyle = (index: number): CSSProperties => {
     const offset = index - stackIndex;
-    const absProgress = progress;
     let x = 0;
     let y = 0;
     let rotate = 0;
     let scale = 1;
     let opacity = 1;
     if (offset === 1) {
-      x = 7 * (1 - absProgress);
-      y = 6 * (1 - absProgress);
-      rotate = 1.4 * (1 - absProgress);
-      scale = 0.985 + 0.015 * absProgress;
+      x = 7;
+      y = 6;
+      rotate = 1.4;
+      scale = 0.985;
     } else if (offset === 2) {
-      x = -5 * (1 - absProgress) + 7 * absProgress;
-      y = 11 * (1 - absProgress) + 6 * absProgress;
-      rotate = -1.6 * (1 - absProgress) + 1.4 * absProgress;
-      scale = 0.97 + 0.015 * absProgress;
+      x = -5;
+      y = 11;
+      rotate = -1.6;
+      scale = 0.97;
     } else if (offset < 0) {
-      x = -7 * (1 - absProgress);
-      y = -6 * (1 - absProgress);
-      rotate = -1.4 * (1 - absProgress);
-      scale = 0.985 + 0.015 * absProgress;
-      opacity = absProgress;
+      opacity = 0;
+      if (swipeDirection === -1 && offset === -1) {
+        x = -7 * (1 - progress);
+        y = -6 * (1 - progress);
+        rotate = -1.4 * (1 - progress);
+        scale = 0.985 + 0.015 * progress;
+        opacity = progress;
+      }
     }
     if (offset === 0) x += dragX;
     return {
-      zIndex: offset === 0 ? 4 : offset === 1 ? 3 : offset === 2 ? 2 : 1,
+      zIndex: swipeDirection === -1 && offset === -1 ? 5 : offset === 0 ? 4 : offset === 1 ? 3 : offset === 2 ? 2 : 1,
       opacity,
       transform: `translate3d(${x}px, ${y}px, 0) rotate(${rotate}deg) scale(${scale})`,
       transition: animating ? 'transform .26s ease, opacity .26s ease' : 'none',
     };
+  };
+
+  const onTransitionEnd = (event: ReactTransitionEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget || event.propertyName !== 'transform') return;
+    if ((event.target as HTMLElement).dataset.chatMediaLayer !== 'current') return;
+    finishAnimation();
   };
 
   return (
@@ -250,9 +278,10 @@ export function ChatMediaGroup({ items, onOpenGallery }: ChatMediaGroupProps) {
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onTransitionEnd={onTransitionEnd}
     >
       {visible.map((index) => (
-        <div key={`${validItems[index].url}-${index}`} className="chat-media-stack-layer" style={mediaStyle(index)}>
+        <div key={`${validItems[index].url}-${index}`} className="chat-media-stack-layer" data-chat-media-layer={index === stackIndex ? 'current' : undefined} style={mediaStyle(index)}>
           <ChatMediaImage item={validItems[index]} onClick={() => {
             if (clickSuppressedRef.current) {
               clickSuppressedRef.current = false;

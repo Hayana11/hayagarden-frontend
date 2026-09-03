@@ -1630,17 +1630,15 @@ export function ChatScreen() {
     return imageUrlsFromToolValue(tc.result).map((url) => ({ url, alt: '工具图片' }));
   }
 
-  function renderMarkdown(text: string, caret = false) {
-    return (
-      <div className="chat-message-bubble chat-message-bubble-assistant">
+    function renderMarkdown(text: string, caret = false) {
+      return (
         <div className={`chat-markdown${caret ? ' chat-markdown-streaming' : ''}`}>
           <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} disallowedElements={['img']} components={markdownComponents}>
             {text}
           </ReactMarkdown>
         </div>
-      </div>
-    );
-  }
+      );
+    }
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
     const attachments = m.attachments?.length ? m.attachments : [
@@ -2554,3 +2552,4 @@ export function ChatScreen() {
     </div>
   );
 }
+
