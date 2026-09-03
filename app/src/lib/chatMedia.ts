@@ -57,6 +57,13 @@ export function imageUrlsFromToolValue(value: unknown, limit = 8): string[] {
         seen.add(url);
         found.push(url);
       }
+      if (!imageContext && /^[[{]/.test(node.trim())) {
+        try {
+          visit(JSON.parse(node));
+        } catch {
+          // Ordinary tool text is not an image payload.
+        }
+      }
       return;
     }
     if (Array.isArray(node)) {
@@ -64,10 +71,13 @@ export function imageUrlsFromToolValue(value: unknown, limit = 8): string[] {
       return;
     }
     if (typeof node !== 'object') return;
-    Object.entries(node as Record<string, unknown>).forEach(([key, child]) => {
+    const record = node as Record<string, unknown>;
+    const typedImage = record.type === 'image' || record.kind === 'image' || record.media_type?.toString().startsWith('image/');
+    Object.entries(record).forEach(([key, child]) => {
       const imageKey = /^(image|image_url|imageUrl|image_uri|imageUri|src)$/i.test(key);
       const imageListKey = /^(images|image_urls|imageUrls|media)$/i.test(key);
-      visit(child, imageContext || imageKey || imageListKey);
+      const typedImageKey = typedImage && /^(url|src|source|data)$/i.test(key);
+      visit(child, imageContext || imageKey || imageListKey || typedImageKey);
     });
   };
   visit(value);

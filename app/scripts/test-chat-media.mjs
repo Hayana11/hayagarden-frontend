@@ -37,6 +37,7 @@ assert.deepEqual(
   imageUrlsFromToolValue({ images: [{ image_url: '/one.png' }, { imageUrl: 'https://example.test/two.jpg' }], url: '/ordinary-link' }),
   ['/one.png', 'https://example.test/two.jpg'],
 );
+assert.deepEqual(imageUrlsFromToolValue('{"type":"image","source":"/three.webp"}'), ['/three.webp']);
 
 console.log('chat media focused tests passed');
 
