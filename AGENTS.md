@@ -44,3 +44,7 @@ Before modifying any UI/page code under `app/src/**`, `app/index.html`, or `stat
 The guide defines the frozen viewport/scale authority, Chrome 78 compatibility contract, React-vs-static page boundary, routing/nav authority, layout geometry, and required focused tests. Do not introduce page-level zoom/scale, a second shell/nav authority, or new browser runtime requirements without explicitly auditing and reporting them.
 
 If current code conflicts with the guide, STOP and report the drift before editing either side.
+
+## Agent temporary workspace
+
+Except for explicitly persistent assets, VPS temporary work must be under /var/tmp/hayagarden-agent/: one-off files use scratch/, and Git worktrees use worktrees/. Clean up completed work; scratch is covered by systemd-tmpfiles retention, while worktrees must leave through git worktree remove followed by git worktree prune. Do not create new disposable test/build workspaces under /tmp, /root, or /opt.
