@@ -45,6 +45,7 @@ import {
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
+import { imageUrlsFromToolValue, type ChatMediaItem } from '../lib/chatMedia';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
 import {
   appendTextDelta,
@@ -133,6 +134,7 @@ import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
 import { TaskTimerCard } from '../components/TaskTimerCard';
 import { isTaskTimerFixtureEnabled, useTaskTimerController } from '../lib/taskTimer';
+import { ChatMediaGallery, ChatMediaGroup } from '../components/ChatMediaGroup';
 
 installObjectHasOwnCompat();
 
@@ -406,6 +408,7 @@ export function ChatScreen() {
   const [initialHistoryReady, setInitialHistoryReady] = useState(() => warmSnapshot !== null);
   const [refreshing, setRefreshing] = useState(false);
   const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
+  const [gallery, setGallery] = useState<{ items: ChatMediaItem[]; currentIndex: number } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
   const [layoutDiag, setLayoutDiag] = useState<LayoutDiagRow[] | null>(null);
   const [txWin, setTxWin] = useState<TranscriptWindow>(() => warmSnapshot ? { ...warmSnapshot.txWin } : { start: 0, end: 0 });
@@ -1557,11 +1560,16 @@ export function ChatScreen() {
     if (!tools.length) return null;
     return (
       <div className="vstack vstack-8">
-        {tools.map((tc, i) =>
-          tc.artifact
-            ? renderArtifactCard(`${keyPrefix}-artifact-${i}`, tc)
-            : renderToolCard(`${keyPrefix}-tool-${i}`, tc),
-        )}
+        {tools.map((tc, i) => (
+          <Fragment key={`${keyPrefix}-item-${i}`}>
+            {tc.artifact
+              ? renderArtifactCard(`${keyPrefix}-artifact-${i}`, tc)
+              : renderToolCard(`${keyPrefix}-tool-${i}`, tc)}
+            {toolMediaItems(tc).length > 0 && (
+              <ChatMediaGroup items={toolMediaItems(tc)} onOpenGallery={openMediaGallery} />
+            )}
+          </Fragment>
+        ))}
       </div>
     );
   }
@@ -1627,21 +1635,39 @@ export function ChatScreen() {
     );
   }
 
-  function renderMarkdown(text: string, caret = false) {
-    return (
-      <div className={`chat-markdown${caret ? ' chat-markdown-streaming' : ''}`}>
-        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} disallowedElements={['img']} components={markdownComponents}>
-          {text}
-        </ReactMarkdown>
-      </div>
-    );
+  function openMediaGallery(items: ChatMediaItem[], currentIndex: number) {
+    if (items.length) setGallery({ items, currentIndex });
   }
+
+  function messageMediaItems(m: ChatMsg): ChatMediaItem[] {
+    const attachments = m.attachments?.filter((attachment) => attachment.type === 'image') || [];
+    if (attachments.length) return attachments.map((attachment) => ({ url: attachment.url, alt: attachment.name || '图片' }));
+    return m.imageUrl ? [{ url: m.imageUrl, alt: '图片' }] : [];
+  }
+
+  function toolMediaItems(tc: ChatToolCall): ChatMediaItem[] {
+    return imageUrlsFromToolValue(tc.result).map((url) => ({ url, alt: '工具图片' }));
+  }
+
+    function renderMarkdown(text: string, caret = false) {
+      return (
+        <div className={`chat-markdown${caret ? ' chat-markdown-streaming' : ''}`}>
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} disallowedElements={['img']} components={markdownComponents}>
+            {text}
+          </ReactMarkdown>
+        </div>
+      );
+    }
   function renderUserMsg(m: ChatMsg) {
     const editing = editingId === m.id;
     const attachments = m.attachments?.length ? m.attachments : [
       ...(m.fileUrl ? [{ type: 'file' as const, url: m.fileUrl, name: m.fileName || '文件' }] : []),
       ...(m.imageUrl ? [{ type: 'image' as const, url: m.imageUrl, name: '图片' }] : []),
     ];
+    const mediaItems = attachments
+      .filter((attachment) => attachment.type === 'image')
+      .map((attachment) => ({ url: attachment.url, alt: attachment.name || '图片附件' }));
+    const fileItems = attachments.filter((attachment) => attachment.type !== 'image');
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-7${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-end', borderRadius: 16 }}>
         {editing ? (
@@ -1664,39 +1690,34 @@ export function ChatScreen() {
           </div>
         ) : (
           <>
-            <div className="vstack vstack-8" style={{ maxWidth: '82%', background: 'var(--bubble)', borderRadius: '18px 18px 6px 18px', padding: '12px 16px', boxShadow: '0 6px 16px var(--shadow)' }}>
-              {attachments.length > 0 && (
-                <div className="flex-wrap-gap-6">
-                  {attachments.map((attachment, index) => {
-                    if (attachment.type === 'image') {
-                      return (
-                        <img
-                          key={`image-${attachment.url}-${index}`}
-                          src={attachment.url}
-                          alt={attachment.name || '图片附件'}
-                          style={{ maxWidth: 200, maxHeight: 200, borderRadius: 12, objectFit: 'cover' }}
-                        />
-                      );
-                    }
-                    const previewUrl = chatFilePreviewUrl(attachment.url);
-                    return (
-                      <a
-                        key={`file-${attachment.url}-${index}`}
-                        href={previewUrl || attachment.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="hstack hstack-6"
-                        style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}
-                        title={attachment.name}
-                      >
-                        <Svg d={IC.clip} size={11} sw={1.8} />
-                        {attachment.name}
-                      </a>
-                    );
-                  })}
+            <div className="chat-message-content chat-message-content-user">
+              {mediaItems.length > 0 && <ChatMediaGroup items={mediaItems} onOpenGallery={openMediaGallery} />}
+              {(fileItems.length > 0 || m.text) && (
+                <div className="chat-message-bubble chat-message-bubble-user">
+                  {fileItems.length > 0 && (
+                    <div className="vstack vstack-6">
+                      {fileItems.map((attachment, index) => {
+                        const previewUrl = chatFilePreviewUrl(attachment.url);
+                        return (
+                          <a
+                            key={`file-${attachment.url}-${index}`}
+                            href={previewUrl || attachment.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hstack hstack-6"
+                            style={{ background: 'var(--card)', borderRadius: 999, padding: '5px 11px', fontSize: 11.5, color: 'var(--ink2)', textDecoration: 'none' }}
+                            title={attachment.name}
+                          >
+                            <Svg d={IC.clip} size={11} sw={1.8} />
+                            {attachment.name}
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {m.text && <span style={{ fontSize: '1em', lineHeight: 1.75, letterSpacing: 0.3, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>{m.text}</span>}
                 </div>
               )}
-              {m.text && <span style={{ fontSize: '1em', lineHeight: 1.75, letterSpacing: 0.3, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>{m.text}</span>}
             </div>
             <div className="hstack hstack-4">
               <div className="chat-msg-acts hstack hstack-4">
@@ -1764,12 +1785,15 @@ export function ChatScreen() {
   function renderAssistantMsg(m: ChatMsg) {
     const usage = m.cacheInfo;
     const cache = cacheLabel(usage);
+    const mediaItems = messageMediaItems(m);
     return (
-      <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ borderRadius: 16 }}>
-        {m.imageUrl && <img src={m.imageUrl} alt="" style={{ maxWidth: 240, borderRadius: 14 }} />}
-        {m.displaySegments?.length
-          ? (renderOrderedAssistantContent(m) ?? renderLegacyAssistantContent(m))
-          : renderLegacyAssistantContent(m)}
+      <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+        <div className="chat-message-content chat-message-content-assistant">
+          {mediaItems.length > 0 && <ChatMediaGroup items={mediaItems} onOpenGallery={openMediaGallery} />}
+          {m.displaySegments?.length
+            ? (renderOrderedAssistantContent(m) ?? renderLegacyAssistantContent(m))
+            : renderLegacyAssistantContent(m)}
+        </div>
         {renderChoices(m)}
         <div className="vstack vstack-7">
           <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11, color: 'var(--ghost)', letterSpacing: 1, padding: '0 2px' }}>{m.ts}</span>
@@ -2583,6 +2607,14 @@ export function ChatScreen() {
         }}
       />
 
+      {gallery && (
+        <ChatMediaGallery
+          items={gallery.items}
+          currentIndex={gallery.currentIndex}
+          onClose={() => setGallery(null)}
+        />
+      )}
+
       {/* ══ toast ══ */}
       {toast && (
         <div style={{ position: 'fixed', left: 0, right: 0, bottom: 100, zIndex: 80, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
@@ -2593,3 +2625,4 @@ export function ChatScreen() {
     </div>
   );
 }
+
