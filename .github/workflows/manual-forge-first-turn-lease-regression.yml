@@ -17,7 +17,21 @@ jobs:
         with:
           ref: fix/manual-forge-first-turn-lease-r1
           fetch-depth: 0
-      - name: Assert first-turn lease contract in real gateway test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prepare repo test runtime
+        run: |
+          python -m pip install Flask
+          sudo mkdir -p /opt
+          sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          python - <<'PY'
+          import sqlite3
+          for name in ('memories.db', 'commands.db'):
+              sqlite3.connect(f'/opt/frontend/{name}').close()
+          PY
+          touch /opt/frontend/.env
+      - name: Assert first-turn lease contract and run first-turn suite
         shell: bash
         run: |
           set -euo pipefail
@@ -37,7 +51,7 @@ jobs:
               s = s.replace(old, new, 1)
           p.write_text(s, encoding='utf-8')
           PY
-          python -m pytest -q tests/test_context_window_first_turn.py
+          python -m unittest tests.test_context_window_first_turn -v
           rm -f .github/workflows/manual-forge-first-turn-lease-regression.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
