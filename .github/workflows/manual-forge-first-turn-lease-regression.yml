@@ -1,0 +1,45 @@
+name: Manual Forge First-Turn Lease Regression
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  strengthen-regression:
+    if: github.head_ref == 'fix/manual-forge-first-turn-lease-r1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Assert first-turn lease contract in real gateway test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('tests/test_context_window_first_turn.py')
+          s = p.read_text(encoding='utf-8')
+          old1 = """        gateway_user_id = _insert_msg(self.db, 'hayana', '想想再说')\n\n        class _FakeStaged:\n"""
+          new1 = """        gateway_user_id = _insert_msg(self.db, 'hayana', '想想再说')\n        seen = {}\n\n        class _FakeStaged:\n"""
+          old2 = """            ):\n                if on_stdin_flushed is not None:\n                    on_stdin_flushed()\n                yield ('think', '先感受一下。')\n"""
+          new2 = """            ):\n                seen['turn_lease'] = turn_lease\n                if on_stdin_flushed is not None:\n                    on_stdin_flushed()\n                yield ('think', '先感受一下。')\n"""
+          old3 = """        self.assertIn('\\\"ok\\\": true', joined)\n        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)\n\n        aid = int(self._intent()['first_assistant_message_id'])\n"""
+          new3 = """        self.assertIn('\\\"ok\\\": true', joined)\n        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)\n        lease = seen.get('turn_lease')\n        self.assertIsInstance(lease, dict)\n        self.assertEqual(lease.get('turn_mode'), 'chat')\n        self.assertEqual(lease.get('issued_from'), 'default_policy')\n        self.assertTrue(str(lease.get('turn_id') or '').startswith('context-window-first-turn:'))\n\n        aid = int(self._intent()['first_assistant_message_id'])\n"""
+          for label, old, new in [('setup', old1, new1), ('capture', old2, new2), ('assert', old3, new3)]:
+              if s.count(old) != 1:
+                  raise SystemExit(f'{label} anchor count drifted: {s.count(old)}')
+              s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+          python -m pytest -q tests/test_context_window_first_turn.py
+          rm -f .github/workflows/manual-forge-first-turn-lease-regression.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/test_context_window_first_turn.py .github/workflows/manual-forge-first-turn-lease-regression.yml
+          git commit -m 'test(context-window): assert first-turn chat lease'
+          git push origin HEAD:${{ github.head_ref }}
