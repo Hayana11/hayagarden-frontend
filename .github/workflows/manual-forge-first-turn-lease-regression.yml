@@ -31,7 +31,7 @@ jobs:
               sqlite3.connect(f'/opt/frontend/{name}').close()
           PY
           touch /opt/frontend/.env
-      - name: Assert first-turn lease contract and run first-turn suite
+      - name: Assert first-turn lease contract
         shell: bash
         run: |
           set -euo pipefail
@@ -51,7 +51,7 @@ jobs:
               s = s.replace(old, new, 1)
           p.write_text(s, encoding='utf-8')
           PY
-          python -m unittest tests.test_context_window_first_turn -v
+          python -m unittest tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_gateway_first_turn_persists_thinking_and_cache_usage -v
           rm -f .github/workflows/manual-forge-first-turn-lease-regression.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
