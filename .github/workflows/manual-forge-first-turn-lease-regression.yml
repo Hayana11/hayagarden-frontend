@@ -1,20 +1,21 @@
 name: Manual Forge First-Turn Lease Regression
 
 on:
-  pull_request:
-    types: [synchronize]
+  push:
+    branches:
+      - fix/manual-forge-first-turn-lease-r1
 
 permissions:
   contents: write
 
 jobs:
   strengthen-regression:
-    if: github.head_ref == 'fix/manual-forge-first-turn-lease-r1'
+    if: github.ref == 'refs/heads/fix/manual-forge-first-turn-lease-r1'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: fix/manual-forge-first-turn-lease-r1
           fetch-depth: 0
       - name: Assert first-turn lease contract in real gateway test
         shell: bash
@@ -42,4 +43,4 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add tests/test_context_window_first_turn.py .github/workflows/manual-forge-first-turn-lease-regression.yml
           git commit -m 'test(context-window): assert first-turn chat lease'
-          git push origin HEAD:${{ github.head_ref }}
+          git push origin HEAD:fix/manual-forge-first-turn-lease-r1
