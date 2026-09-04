@@ -25,6 +25,12 @@ function ok(label) {
   void label;
 }
 
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const controllerPath = path.join(__dirname, '../src/lib/manualContextWindowController.ts');
+const controllerSrc = fs.readFileSync(controllerPath, 'utf8');
+assert.ok(!controllerSrc.includes('crypto.randomUUID'));
+ok('Chrome 78 static no randomUUID');
+
 assert.equal(LIVE_CONTEXT_WINDOW_CURRENT, '/api/gw/context-window/current');
 assert.equal(LIVE_CONTEXT_WINDOW_CANDIDATES, '/api/gw/context-window/carryover-candidates');
 assert.equal(LIVE_CONTEXT_WINDOW_SWITCH, '/api/gw/context-window/switch');
@@ -195,13 +201,61 @@ assert.equal(ctrl.getSnapshot().rounds.length, 1);
 ok('open loads captured-source candidates');
 
 ctrl.setDraftCount(5);
-const okSwitch = await ctrl.confirmSwitch();
-assert.equal(okSwitch, true);
-assert.equal(calls.switch, 1);
-assert.equal(calls.switchBody.count, 5);
-assert.equal(typeof calls.switchBody.requestId, 'string');
-assert.equal(ctrl.getSnapshot().modalOpen, false);
+const originalRandomUUID = globalThis.crypto.randomUUID;
+Object.defineProperty(globalThis.crypto, 'randomUUID', {
+  configurable: true,
+  writable: true,
+  value: undefined,
+});
+try {
+  assert.equal(typeof globalThis.crypto.randomUUID, 'undefined');
+  const okSwitch = await ctrl.confirmSwitch();
+  assert.equal(okSwitch, true);
+  assert.equal(calls.switch, 1);
+  assert.equal(calls.switchBody.count, 5);
+  assert.match(calls.switchBody.requestId, UUID_V4_RE);
+  assert.equal(ctrl.submitting, false);
+  assert.equal(ctrl.getSnapshot().uiState, 'idle');
+  assert.equal(ctrl.getSnapshot().modalOpen, false);
+} finally {
+  Object.defineProperty(globalThis.crypto, 'randomUUID', {
+    configurable: true,
+    writable: true,
+    value: originalRandomUUID,
+  });
+}
 ok('confirm switch');
+
+// Request-id generation errors must recover the controlled submitting state.
+const generationCalls = { switch: 0 };
+const generationFailCtrl = new ManualContextWindowController({
+  client: {
+    getCurrent: async () => cur,
+    getCandidates: async () => cand,
+    switchWindow: async () => {
+      generationCalls.switch += 1;
+      throw new Error('switch should not be called');
+    },
+  },
+});
+await generationFailCtrl.probeEnabled();
+await generationFailCtrl.openModal();
+const originalGetRandomValues = globalThis.crypto.getRandomValues;
+globalThis.crypto.getRandomValues = () => {
+  throw new Error('random source failed');
+};
+try {
+  const generationFail = await generationFailCtrl.confirmSwitch();
+  assert.equal(generationFail, false);
+  assert.equal(generationCalls.switch, 0);
+  assert.equal(generationFailCtrl.submitting, false);
+  assert.equal(generationFailCtrl.getSnapshot().uiState, 'error');
+  assert.match(generationFailCtrl.getSnapshot().errorDetail, /random source failed/);
+  assert.equal(generationFailCtrl.pendingRequestId, null);
+} finally {
+  globalThis.crypto.getRandomValues = originalGetRandomValues;
+}
+ok('request-id generation error recovery');
 
 // 404 hides
 const disabledCtrl = new ManualContextWindowController({
@@ -316,3 +370,4 @@ assert.match(chatSrc, /已经换了一扇新窗/);
 ok('ChatScreen wiring');
 
 console.log(`manual-context-window: ${passed} checks passed`);
+
