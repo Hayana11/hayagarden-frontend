@@ -303,7 +303,7 @@ ok('network retry reuses requestId');
 // CSS box model
 const css = fs.readFileSync(path.join(__dirname, '../src/components/dailySoftWindow/dailySoftWindow.css'), 'utf8');
 assert.match(css, /box-sizing:\s*border-box/);
-assert.match(css, /width:\s*min\(334px,\s*100%\)/);
+assert.match(css, /width:\s*334px/);\nassert.match(css, /max-width:\s*100%/);
 ok('334px dialog css');
 
 // ChatScreen wiring
