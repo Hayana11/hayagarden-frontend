@@ -5883,10 +5883,17 @@ def _stream_cc_first_turn(
             request_reality_context,
         )
 
+        from tools.lease_signer import issue_turn_lease
+        first_turn_lease = issue_turn_lease(
+            turn_id='context-window-first-turn:' + ft_req,
+            turn_mode='chat',
+            issued_from='default_policy',
+        )
         event_iter = iter(session.staged.send_turn(
             first_turn_content,
             on_stdin_flushed=on_stdin_flushed,
             idle_heartbeat_sec=10.0,
+            turn_lease=first_turn_lease,
         ))
 
         try:

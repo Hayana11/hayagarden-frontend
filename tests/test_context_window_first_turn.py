@@ -687,6 +687,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
 
         self._seed_source_and_forge()
         gateway_user_id = _insert_msg(self.db, 'hayana', '想想再说')
+        seen = {}
 
         class _FakeStaged:
             def send_turn(
@@ -695,7 +696,9 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
+                seen['turn_lease'] = turn_lease
                 if on_stdin_flushed is not None:
                     on_stdin_flushed()
                 yield ('think', '先感受一下。')
@@ -725,6 +728,11 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         self.assertIn('"t": "usage"', joined)
         self.assertIn('"ok": true', joined)
         self.assertEqual(self._intent()['status'], INTENT_COMMITTED)
+        lease = seen.get('turn_lease')
+        self.assertIsInstance(lease, dict)
+        self.assertEqual(lease.get('turn_mode'), 'chat')
+        self.assertEqual(lease.get('issued_from'), 'default_policy')
+        self.assertTrue(str(lease.get('turn_id') or '').startswith('context-window-first-turn:'))
 
         aid = int(self._intent()['first_assistant_message_id'])
         row = sqlite3.connect(self.db).execute(
@@ -1003,6 +1011,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if on_stdin_flushed is not None:
                     on_stdin_flushed()
@@ -1682,6 +1691,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 sent.append(str(content))
                 if on_stdin_flushed is not None:
@@ -1725,6 +1735,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if on_stdin_flushed is not None:
                     self.ack_called = True
@@ -2076,6 +2087,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if self.mode == 'boom_before_ack':
                     raise RuntimeError('boom before stdin flush ack')
@@ -2505,6 +2517,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if on_stdin_flushed is not None:
                     on_stdin_flushed()
