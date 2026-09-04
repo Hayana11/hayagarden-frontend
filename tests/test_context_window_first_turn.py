@@ -695,6 +695,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if on_stdin_flushed is not None:
                     on_stdin_flushed()
@@ -1003,6 +1004,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if on_stdin_flushed is not None:
                     on_stdin_flushed()
@@ -1682,6 +1684,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 sent.append(str(content))
                 if on_stdin_flushed is not None:
@@ -1725,6 +1728,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if on_stdin_flushed is not None:
                     self.ack_called = True
@@ -2076,6 +2080,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if self.mode == 'boom_before_ack':
                     raise RuntimeError('boom before stdin flush ack')
@@ -2505,6 +2510,7 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
                 commit_meta=None,
                 on_stdin_flushed=None,
                 idle_heartbeat_sec=None,
+                turn_lease=None,
             ):
                 if on_stdin_flushed is not None:
                     on_stdin_flushed()
