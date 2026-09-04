@@ -370,4 +370,3 @@ assert.match(chatSrc, /已经换了一扇新窗/);
 ok('ChatScreen wiring');
 
 console.log(`manual-context-window: ${passed} checks passed`);
-
