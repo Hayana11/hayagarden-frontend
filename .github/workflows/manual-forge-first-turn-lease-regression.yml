@@ -28,8 +28,8 @@ jobs:
           new1 = """        gateway_user_id = _insert_msg(self.db, 'hayana', '想想再说')\n        seen = {}\n\n        class _FakeStaged:\n"""
           old2 = """            ):\n                if on_stdin_flushed is not None:\n                    on_stdin_flushed()\n                yield ('think', '先感受一下。')\n"""
           new2 = """            ):\n                seen['turn_lease'] = turn_lease\n                if on_stdin_flushed is not None:\n                    on_stdin_flushed()\n                yield ('think', '先感受一下。')\n"""
-          old3 = """        self.assertIn('\\\"ok\\\": true', joined)\n        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)\n\n        aid = int(self._intent()['first_assistant_message_id'])\n"""
-          new3 = """        self.assertIn('\\\"ok\\\": true', joined)\n        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)\n        lease = seen.get('turn_lease')\n        self.assertIsInstance(lease, dict)\n        self.assertEqual(lease.get('turn_mode'), 'chat')\n        self.assertEqual(lease.get('issued_from'), 'default_policy')\n        self.assertTrue(str(lease.get('turn_id') or '').startswith('context-window-first-turn:'))\n\n        aid = int(self._intent()['first_assistant_message_id'])\n"""
+          old3 = """        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)\n\n        aid = int(self._intent()['first_assistant_message_id'])\n"""
+          new3 = """        self.assertEqual(self._intent()['status'], INTENT_COMMITTED)\n        lease = seen.get('turn_lease')\n        self.assertIsInstance(lease, dict)\n        self.assertEqual(lease.get('turn_mode'), 'chat')\n        self.assertEqual(lease.get('issued_from'), 'default_policy')\n        self.assertTrue(str(lease.get('turn_id') or '').startswith('context-window-first-turn:'))\n\n        aid = int(self._intent()['first_assistant_message_id'])\n"""
           for label, old, new in [('setup', old1, new1), ('capture', old2, new2), ('assert', old3, new3)]:
               if s.count(old) != 1:
                   raise SystemExit(f'{label} anchor count drifted: {s.count(old)}')
