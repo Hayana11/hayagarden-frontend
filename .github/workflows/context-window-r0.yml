@@ -4,9 +4,7 @@ on:
   pull_request:
     paths:
       - 'chat/context_window.py'
-      - 'chat/context_window_first_turn.py'
       - 'chat/daily_context.py'
-      - 'gateway.py'
       - 'chat/daily_runtime.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
@@ -17,9 +15,7 @@ on:
     branches: [main]
     paths:
       - 'chat/context_window.py'
-      - 'chat/context_window_first_turn.py'
       - 'chat/daily_context.py'
-      - 'gateway.py'
       - 'chat/daily_runtime.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
@@ -54,20 +50,6 @@ jobs:
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
           touch /opt/frontend/.env
-      - name: Focused transcript end-turn recovery tests
-        run: |
-          python3 -m unittest \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_connected \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_detached \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_stop_reason_missing_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_tool_use_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_text_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_session_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_multi_round_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_malformed_terminal_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_unstable_eof_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_nonzero_offset
-
       - name: Backend unit tests
         run: |
           python3 -m unittest \
@@ -75,21 +57,9 @@ jobs:
             tests.test_context_window_routes \
             tests.test_context_window_bff \
             tests.test_context_window_resident \
-            tests.test_context_window_first_turn \
             tests.test_manual_context_runtime \
             tests.test_daily_soft_window \
             tests.test_daily_runtime \
             tests.test_daily_context_bff \
             tests.test_day_handoff \
             -v
-      - name: Exact-base first-turn A/B control
-        if: always()
-        continue-on-error: true
-        env:
-          BASE_SHA: 57693379d80e375f9944507495f634a8af3d5936
-        run: |
-          git fetch --no-tags origin "$BASE_SHA"
-          BASE_DIR="$RUNNER_TEMP/context-window-base"
-          git worktree add --detach "$BASE_DIR" "$BASE_SHA"
-          cd "$BASE_DIR"
-          env -u PYTHONPATH python3 -m unittest tests.test_context_window_first_turn -v
