@@ -1430,8 +1430,8 @@ def attest_first_turn_transcript_terminal(
     *,
     streamed_text: str,
     db_path: str,
-    stability_reads: int = 2,
-    stability_delay_s: float = 0.02,
+    stability_reads: int = 3,
+    stability_delay_s: float = 0.05,
 ) -> FirstTurnTranscriptAttestation:
     """Prove a completed no-tool turn from the target transcript before abort.
 
@@ -1460,12 +1460,24 @@ def attest_first_turn_transcript_terminal(
         intent = _intent_row(conn, session.switch_request_id)
         if intent is None:
             fail('intent_missing')
+        if str(intent.get('request_id') or '') != str(
+            session.switch_request_id
+        ):
+            fail('intent_request_id_mismatch')
         if str(intent.get('status') or '') != INTENT_COMMITTED:
             fail('intent_not_committed')
         if str(intent.get('first_turn_request_id') or '') != str(
             session.first_turn_request_id
         ):
             fail('first_turn_request_mismatch')
+        if int(intent.get('first_user_message_id') or -1) != int(
+            session.user_message_id
+        ):
+            fail('first_user_message_mismatch')
+        if int(intent.get('target_context_id') or -1) != int(
+            session.target_context_id
+        ):
+            fail('intent_target_context_mismatch')
         if intent.get('first_assistant_message_id') is not None:
             fail('assistant_already_persisted')
         if intent.get('first_turn_completed_at') is not None:
@@ -1479,29 +1491,74 @@ def attest_first_turn_transcript_terminal(
         ).fetchone())
         if target is None:
             fail('target_missing')
+        target_session_id = str(intent.get('target_session_id') or '').strip()
+        if not target_session_id:
+            fail('target_session_missing')
         if (
             int(target['context_epoch']) != int(session.target_context_epoch)
             or int(target['resident_generation']) != int(session.target_resident_generation)
         ):
             fail('target_identity_mismatch')
-        if target.get('closed_at') is not None:
-            fail('target_closed')
+        if str(target.get('switch_request_id') or '') != str(
+            session.switch_request_id
+        ):
+            fail('target_switch_request_mismatch')
+        if str(target.get('claude_session_id') or '') != target_session_id:
+            fail('target_session_mismatch')
         if str(target.get('window_mode') or '') != WINDOW_MODE_MANUAL:
             fail('target_not_manual')
+        if target.get('closed_at') is not None:
+            fail('target_closed')
+
+        locked_chat_id = str(intent.get('chat_id') or DEFAULT_CHAT_ID)
         canonical = resolve_canonical_context_row_conn(
-            conn, chat_id=DEFAULT_CHAT_ID, now=_shanghai_now(),
+            conn, chat_id=locked_chat_id, now=_shanghai_now(),
         )
-        if canonical is None or int(canonical['id']) != int(session.target_context_id):
+        if canonical is None:
             fail('target_not_canonical')
-        lease = conn.execute(
-            'SELECT lease_owner FROM daily_resident_turn_leases '
+        if (
+            int(canonical['id']) != int(session.target_context_id)
+            or int(canonical['context_epoch']) != int(session.target_context_epoch)
+            or int(canonical['resident_generation'])
+            != int(session.target_resident_generation)
+        ):
+            fail('canonical_target_identity_mismatch')
+
+        message_rows = conn.execute(
+            'SELECT context_id, context_epoch, resident_generation, role '
+            'FROM daily_message_contexts WHERE message_id=?',
+            (int(session.user_message_id),),
+        ).fetchall()
+        if len(message_rows) != 1:
+            fail('user_message_mapping_missing_or_ambiguous')
+        message_mapping = dict(message_rows[0])
+        if (
+            int(message_mapping['context_id']) != int(session.target_context_id)
+            or int(message_mapping['context_epoch'])
+            != int(session.target_context_epoch)
+            or int(message_mapping['resident_generation'])
+            != int(session.target_resident_generation)
+            or str(message_mapping.get('role') or '') != 'user'
+        ):
+            fail('user_message_mapping_mismatch')
+
+        lease_rows = conn.execute(
+            'SELECT lease_owner, request_message_id '
+            'FROM daily_resident_turn_leases '
             'WHERE context_id=? AND resident_generation=?',
             (int(session.target_context_id), int(session.target_resident_generation)),
-        ).fetchone()
-        if lease is None or str(dict(lease)['lease_owner']) != str(
-            session.first_turn_request_id
+        ).fetchall()
+        if len(lease_rows) != 1:
+            fail('lease_missing_or_ambiguous')
+        lease = dict(lease_rows[0])
+        if (
+            str(lease.get('lease_owner') or '') != str(
+                session.first_turn_request_id
+            )
+            or int(lease.get('request_message_id') or -1)
+            != int(session.user_message_id)
         ):
-            fail('lease_mismatch')
+            fail('lease_identity_mismatch')
     finally:
         conn.close()
 
@@ -1524,6 +1581,12 @@ def attest_first_turn_transcript_terminal(
         != int(session.target_resident_generation)
     ):
         fail('registry_identity_mismatch')
+    if str(registry.get('claude_session_id') or '').strip() != target_session_id:
+        fail('registry_session_mismatch')
+    if str(registry.get('scan_status') or '') != 'READY':
+        fail('registry_not_ready')
+    if str(registry.get('scan_error_code') or '').strip():
+        fail('registry_scan_error')
     if not registered_path:
         fail('registry_transcript_missing')
     if str(actual_path) != registered_path:
@@ -1533,6 +1596,8 @@ def attest_first_turn_transcript_terminal(
     start_offset = int(session.start_offset)
     if start_offset < 0:
         fail('start_offset_invalid')
+    if int(registry.get('scan_offset') or -1) != start_offset:
+        fail('registry_scan_offset_mismatch')
 
     def _text_from_event(event) -> str:
         message = event.raw.get('message')
@@ -1630,9 +1695,11 @@ def attest_first_turn_transcript_terminal(
             fail('graph_session_mismatch')
         return before, graph, _signature(graph)
 
+    required_stable_reads = max(3, int(stability_reads))
+    stable_streak = 0
     previous = None
     stable = None
-    for _ in range(max(2, int(stability_reads))):
+    for read_index in range(required_stable_reads):
         snapshot = _read_snapshot()
         terminal_identity = None
         if snapshot[1].events:
@@ -1644,16 +1711,23 @@ def attest_first_turn_transcript_terminal(
                 (terminal.raw.get('message') or {}).get('stop_reason')
                 if isinstance(terminal.raw.get('message'), dict) else None,
             )
-        if previous is not None and (
-            snapshot[0] == previous[0]
-            and snapshot[2] == previous[2]
-            and terminal_identity == previous[3]
-        ):
+        identity = (snapshot[0], snapshot[2], terminal_identity)
+        if previous is not None and identity == previous:
+            stable_streak += 1
+        else:
+            stable_streak = 1
+        if stable_streak >= required_stable_reads:
             stable = snapshot
             break
-        previous = (snapshot[0], snapshot[1], snapshot[2], terminal_identity)
-        if stability_delay_s:
-            time.sleep(float(stability_delay_s))
+        previous = identity
+        if read_index < required_stable_reads - 1:
+            delay = (
+                float(stability_delay_s)
+                if read_index == 0
+                else 0.15
+            )
+            if delay > 0:
+                time.sleep(delay)
     if stable is None:
         fail('unstable_eof')
 
