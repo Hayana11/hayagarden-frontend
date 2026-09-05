@@ -130,6 +130,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import './ChatMarkdown.css';
+import './ChatMessage.css';
 import { MixedSectionLabel } from '../components/MixedSectionLabel';
 import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typography';
 import { TaskTimerCard } from '../components/TaskTimerCard';

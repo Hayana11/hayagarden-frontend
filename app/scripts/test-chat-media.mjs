@@ -38,12 +38,18 @@ assert.deepEqual(chatMediaLayerPose(-1, 1, -1), { x: 0, y: 0, rotate: 0, scale: 
 
 const here = dirname(fileURLToPath(import.meta.url));
 const chatScreen = readFileSync(join(here, '../src/screens/ChatScreen.tsx'), 'utf8');
+const chatMessage = readFileSync(join(here, '../src/screens/ChatMessage.css'), 'utf8');
+const mediaCss = readFileSync(join(here, '../src/components/ChatMediaGroup.css'), 'utf8');
 const mediaGroup = readFileSync(join(here, '../src/components/ChatMediaGroup.tsx'), 'utf8');
 const userRenderer = chatScreen.slice(chatScreen.indexOf('function renderUserMsg'), chatScreen.indexOf('function renderOrderedAssistantContent'));
 const assistantRenderer = chatScreen.slice(chatScreen.indexOf('function renderAssistantMsg'), chatScreen.indexOf('function renderLive'));
-assert.match(userRenderer, /chat-message-content-user[\s\S]*ChatMediaGroup[\s\S]*chat-message-bubble-user/);
+assert.match(chatScreen, /import ['"]\.\/ChatMessage\.css['"];?/);
+assert.match(chatMessage, /\.chat-message-bubble-user\s*\{[\s\S]*background:\s*var\(--bubble\)[\s\S]*border-radius:\s*18px 18px 6px 18px[\s\S]*padding:\s*12px 16px[\s\S]*box-shadow:\s*0 6px 16px var\(--shadow\)/);
+assert.doesNotMatch(mediaCss, /\.chat-message-content(?:-user|-assistant)?\b|\.chat-message-bubble(?:-user)?\b/);
+assert.match(userRenderer, /<div className="chat-message-content chat-message-content-user">[\s\S]*\{mediaItems\.length > 0 && <ChatMediaGroup[\s\S]*<div className="chat-message-bubble chat-message-bubble-user">/);
+assert.doesNotMatch(userRenderer, /chat-message-bubble-user[\s\S]*ChatMediaGroup/);
 assert.doesNotMatch(userRenderer, /chat-message-bubble-user[\s\S]*<img/);
-assert.match(assistantRenderer, /chat-message-content-assistant[\s\S]*ChatMediaGroup[\s\S]*renderOrderedAssistantContent/);
+assert.match(assistantRenderer, /<div className="chat-message-content chat-message-content-assistant">[\s\S]*\{mediaItems\.length > 0 && <ChatMediaGroup[\s\S]*renderOrderedAssistantContent/);
 assert.match(mediaGroup, /data-testid="chat-photo-stack"/);
 assert.match(mediaGroup, /onTransitionEnd/);
 assert.doesNotMatch(mediaGroup, /280/);
