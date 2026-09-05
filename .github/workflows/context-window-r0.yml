@@ -50,41 +50,6 @@ jobs:
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
           touch /opt/frontend/.env
-      - name: TEMP focused transcript recovery tests
-        run: |
-          python3 -m unittest \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_connected \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_detached \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_stop_reason_missing_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_tool_use_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_text_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_session_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_multi_round_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_malformed_terminal_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_unstable_eof_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_nonzero_offset \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_intent_target_context_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_intent_user_message_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_target_switch_request_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_registry_session_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_registry_and_transcript_session_collusion_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_user_mapping_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_lease_message_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_registry_not_ready_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_registry_offset_mismatch_fail_closed \
-            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_recovery_non_default_chat_id_canonical_success
-      - name: TEMP full first-turn suite
-        if: always()
-        continue-on-error: true
-        run: python3 -m unittest tests.test_context_window_first_turn -v
-      - name: TEMP exact-base A/B
-        if: always()
-        continue-on-error: true
-        run: |
-          git fetch --no-tags origin 57693379d80e375f9944507495f634a8af3d5936
-          git worktree add /tmp/context-window-base 57693379d80e375f9944507495f634a8af3d5936
-          cd /tmp/context-window-base
-          python3 -m unittest tests.test_context_window_first_turn -v
       - name: Backend unit tests
         run: |
           python3 -m unittest \
