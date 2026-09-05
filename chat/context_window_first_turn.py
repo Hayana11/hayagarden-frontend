@@ -1566,6 +1566,11 @@ def attest_first_turn_transcript_terminal(
     def _has_forbidden_terminal_state(raw) -> bool:
         if not isinstance(raw, dict):
             return True
+        message = raw.get('message')
+        if isinstance(message, dict) and str(
+            message.get('stop_reason') or ''
+        ) == 'tool_deferred':
+            return True
         if str(raw.get('stop_reason') or '') == 'tool_deferred':
             return True
         if str(raw.get('subtype') or '') == 'tool_deferred':
@@ -1582,7 +1587,13 @@ def attest_first_turn_transcript_terminal(
             return False
         return any(
             isinstance(block, dict)
-            and block.get('type') in {'tool_use', 'tool_result', 'tool_deferred'}
+            and (
+                block.get('type') in {'tool_use', 'tool_result', 'tool_deferred'}
+                or block.get('approval_id')
+                or block.get('status') in {
+                    'waiting_for_confirmation', 'pending_approval',
+                }
+            )
             for block in content
         )
 
@@ -1652,6 +1663,8 @@ def attest_first_turn_transcript_terminal(
         fail('offset_regressed')
     if len(graph.candidate_rounds) != 1:
         fail('candidate_round_count')
+    if any(_has_forbidden_terminal_state(event.raw) for event in graph.events):
+        fail('forbidden_transcript_event')
     round_ = graph.candidate_rounds[0]
     if round_.has_sidechain_impact or not round_.event_uuids:
         fail('sidechain_or_empty_round')
