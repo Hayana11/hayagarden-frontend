@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from chat import daily_context as dc
 from chat.context_window import (
     INTENT_COMMITTING,
+    INTENT_FORGING,
     INTENT_HANDOFF_PENDING,
     INTENT_RELEASED,
     get_active_switch_intent,
@@ -29,8 +30,19 @@ from chat.context_window_fallback import (
     inspect_failed_first_turn,
     recover_from_last_good,
 )
-from chat.daily_context import _connect, get_selected_carryover_messages
+from chat.context_window_forge_publish import EMPTY_SHA256
+from chat.context_window_target_prepare import (
+    PREPARE_STATUS_READY,
+    offline_target_prepare_hooks,
+    prepare_context_window_target,
+)
+from chat.daily_context import (
+    WINDOW_MODE_MANUAL_STAGED,
+    _connect,
+    get_selected_carryover_messages,
+)
 from chat.daily_history import build_daily_window_context
+from chat.session_registry import register_context_claude_session
 
 
 class ContextWindowFallbackTests(unittest.TestCase):
@@ -53,6 +65,38 @@ class ContextWindowFallbackTests(unittest.TestCase):
     def test_A_owner_abandon_recover_from_last_good(self):
         """Path A: abandon + recovery materials from last-good safe_cursor."""
         fx = self.fx
+        target_before = dc.get_daily_context_by_id(
+            fx['failed_target_id'], db_path=self.db,
+        )
+        self.assertEqual(target_before['window_mode'], WINDOW_MODE_MANUAL_STAGED)
+        self.assertEqual(target_before['status'], dc.STATUS_PROVISIONAL)
+        mapping_before = sqlite3.connect(self.db).execute(
+            '''SELECT message_id, context_id, context_epoch, resident_generation, role
+               FROM daily_message_contexts
+               WHERE context_id=? ORDER BY message_id''',
+            (int(fx['failed_target_id']),),
+        ).fetchall()
+        target_registry_session = str(uuid.uuid4())
+        register_context_claude_session(
+            context_id=int(fx['failed_target_id']),
+            context_epoch=int(target_before['context_epoch']),
+            resident_generation=int(target_before['resident_generation']),
+            chat_id=self.chat_id,
+            claude_session_id=target_registry_session,
+            cwd=str(self.cwd),
+            source='fallback-test-target',
+            scan_offset=0,
+            claude_home=str(self.home),
+            db_path=self.db,
+        )
+        registry_before = sqlite3.connect(self.db).execute(
+            '''SELECT claude_session_id, context_id, context_epoch,
+                      resident_generation, chat_id, cwd, source, scan_offset
+               FROM context_claude_sessions
+               WHERE context_id=? ORDER BY claude_session_id''',
+            (int(fx['failed_target_id']),),
+        ).fetchall()
+        self.assertTrue(registry_before)
         insp = inspect_failed_first_turn(
             request_id=fx['failed_request_id'], db_path=self.db, chat_id=self.chat_id,
         )
@@ -79,6 +123,7 @@ class ContextWindowFallbackTests(unittest.TestCase):
         self.assertEqual(intent['status'], INTENT_RELEASED)
         self.assertEqual(intent['error_code'], 'FIRST_TURN_ABANDONED_BY_OWNER')
         self.assertEqual(intent['orphan_jsonl_state'], 'precommit_dirty')  # evidence kept
+        self.assertEqual(int(intent['first_user_message_id']), int(fx['failed_user_message_id']))
         self.assertIsNotNone(intent['owner_abandoned_at'])
         self.assertEqual(int(intent['fallback_context_id']), result.fallback_context_id)
 
@@ -155,6 +200,90 @@ class ContextWindowFallbackTests(unittest.TestCase):
         lg = dc.get_daily_context_by_id(fx['last_good_context_id'], db_path=self.db)
         self.assertIsNotNone(lg.get('closed_at'))
         self.assertEqual(lg.get('close_reason'), 'cold_fallback')
+
+        # The failed target remains as evidence, but no longer blocks prepare.
+        failed_target_after = dc.get_daily_context_by_id(
+            fx['failed_target_id'], db_path=self.db,
+        )
+        self.assertIsNotNone(failed_target_after)
+        self.assertEqual(failed_target_after['window_mode'], 'manual')
+        self.assertEqual(failed_target_after['status'], dc.STATUS_PROVISIONAL)
+        self.assertIsNotNone(failed_target_after['closed_at'])
+        self.assertEqual(failed_target_after['close_reason'], 'cold_fallback')
+        self.assertEqual(
+            failed_target_after['switch_request_id'],
+            target_before['switch_request_id'],
+        )
+        conn = sqlite3.connect(self.db)
+        try:
+            mapping_after = conn.execute(
+                '''SELECT message_id, context_id, context_epoch, resident_generation, role
+                   FROM daily_message_contexts
+                   WHERE context_id=? ORDER BY message_id''',
+                (int(fx['failed_target_id']),),
+            ).fetchall()
+            registry_after = conn.execute(
+                '''SELECT claude_session_id, context_id, context_epoch,
+                          resident_generation, chat_id, cwd, source, scan_offset
+                   FROM context_claude_sessions
+                   WHERE context_id=? ORDER BY claude_session_id''',
+                (int(fx['failed_target_id']),),
+            ).fetchall()
+            staged_n = conn.execute(
+                '''SELECT COUNT(*) FROM daily_contexts
+                   WHERE chat_id=? AND window_mode=?''',
+                (self.chat_id, WINDOW_MODE_MANUAL_STAGED),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(mapping_after, mapping_before)
+        self.assertEqual(registry_after, registry_before)
+        self.assertEqual(int(staged_n), 0)
+        self.assertEqual(int(intent['target_context_id']), int(fx['failed_target_id']))
+
+        # Real target-prepare path can now create a fresh staged target.
+        recovery = dc.get_daily_context_by_id(
+            result.fallback_context_id, db_path=self.db,
+        )
+        prepare_request_id = str(uuid.uuid4())
+        prepare_session_id = str(uuid.uuid4())
+        now_s = '2026-08-01 12:00:00'
+        conn = _connect(self.db)
+        try:
+            conn.execute(
+                '''INSERT INTO context_switch_intents (
+                    request_id, chat_id, payload_hash, status,
+                    source_context_id, source_context_epoch, source_version,
+                    source_resident_generation, source_boundary_message_id,
+                    carryover_count, selected_message_ids_json,
+                    target_session_id, target_jsonl_sha256, target_jsonl_size,
+                    preview_id, thinking_policy, orphan_jsonl_state,
+                    created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (
+                    prepare_request_id, self.chat_id, 'prepare-regression',
+                    INTENT_FORGING,
+                    int(recovery['id']), int(recovery['context_epoch']),
+                    int(recovery['version']), int(recovery['resident_generation']),
+                    int(recovery['boundary_message_id']), 0, '[]',
+                    prepare_session_id, EMPTY_SHA256, 0, prepare_request_id,
+                    'drop', 'none', now_s, now_s,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        prepared = prepare_context_window_target(
+            request_id=prepare_request_id,
+            db_path=self.db,
+            hooks=offline_target_prepare_hooks(Path(self.tmp) / 'next-prepare'),
+            now=__import__('datetime').datetime(2026, 8, 1, 12, 0, 0),
+        )
+        self.assertEqual(prepared.prepare_status, PREPARE_STATUS_READY)
+        next_target = dc.get_daily_context_by_id(
+            prepared.target_context_id, db_path=self.db,
+        )
+        self.assertEqual(next_target['window_mode'], WINDOW_MODE_MANUAL_STAGED)
 
     def test_B_locked_without_owner_confirm(self):
         """Path B: dirty/committing stay locked without full owner confirm."""
@@ -254,7 +383,74 @@ class ContextWindowFallbackTests(unittest.TestCase):
         self.assertEqual(after_intent[0], before_intents[0])
         self.assertEqual(after_intent[1], before_intents[1])
         self.assertEqual(after_intent[0], INTENT_COMMITTING)
+        unchanged_target = dc.get_daily_context_by_id(
+            fx['failed_target_id'], db_path=self.db,
+        )
+        self.assertEqual(unchanged_target['window_mode'], WINDOW_MODE_MANUAL_STAGED)
+        self.assertIsNone(unchanged_target['closed_at'])
+        self.assertEqual(
+            sqlite3.connect(self.db).execute(
+                '''SELECT COUNT(*) FROM daily_resident_turn_leases
+                   WHERE context_id=? AND resident_generation=?''',
+                (int(fx['failed_target_id']), 1),
+            ).fetchone()[0],
+            1,
+        )
         self.assertIsNotNone(get_active_switch_intent(chat_id=self.chat_id, db_path=self.db))
+
+    def test_C_committing_target_identity_mismatch_rolls_back(self):
+        """A failed target identity mismatch must leave recovery fully untouched."""
+        fx = self.fx
+        before_contexts = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_contexts',
+        ).fetchone()[0]
+        conn = _connect(self.db)
+        try:
+            conn.execute(
+                '''UPDATE daily_contexts SET switch_request_id=?
+                   WHERE id=? AND chat_id=?''',
+                ('wrong-request-id', int(fx['failed_target_id']), self.chat_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaises(FallbackError) as ar:
+            recover_from_last_good(
+                request_id=fx['failed_request_id'],
+                expected_status=fx['expected_status'],
+                expected_first_turn_request_id=fx['expected_first_turn_request_id'],
+                reason='identity mismatch',
+                confirm_abandon_failed_turn=True,
+                db_path=self.db,
+                chat_id=self.chat_id,
+                now=__import__('datetime').datetime(2026, 8, 1, 12, 0, 0),
+            )
+        self.assertEqual(ar.exception.error_code, FALLBACK_PRECONDITION_FAILED)
+        after_contexts = sqlite3.connect(self.db).execute(
+            'SELECT COUNT(*) FROM daily_contexts',
+        ).fetchone()[0]
+        self.assertEqual(after_contexts, before_contexts)
+        target = dc.get_daily_context_by_id(fx['failed_target_id'], db_path=self.db)
+        self.assertEqual(target['window_mode'], WINDOW_MODE_MANUAL_STAGED)
+        self.assertIsNone(target['closed_at'])
+        self.assertEqual(target['switch_request_id'], 'wrong-request-id')
+        intent = sqlite3.connect(self.db).execute(
+            '''SELECT status, target_context_id, fallback_context_id,
+                      orphan_jsonl_state
+               FROM context_switch_intents WHERE request_id=?''',
+            (fx['failed_request_id'],),
+        ).fetchone()
+        self.assertEqual(intent[0], INTENT_COMMITTING)
+        self.assertEqual(int(intent[1]), int(fx['failed_target_id']))
+        self.assertIsNone(intent[2])
+        self.assertEqual(intent[3], 'precommit_dirty')
+        staged_n = sqlite3.connect(self.db).execute(
+            '''SELECT COUNT(*) FROM daily_contexts
+               WHERE chat_id=? AND window_mode=?''',
+            (self.chat_id, WINDOW_MODE_MANUAL_STAGED),
+        ).fetchone()[0]
+        self.assertEqual(int(staged_n), 1)
 
     def test_A_handoff_pending_closes_target_not_source(self):
         """handoff_pending: canonical is failed target; close target with cold_fallback."""
