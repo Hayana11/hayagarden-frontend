@@ -8,9 +8,9 @@ const profile = fs.readFileSync(path.join(root, 'src/screens/ProfileScreen.tsx')
 const api = fs.readFileSync(path.join(root, 'src/lib/displayThinking.ts'), 'utf8');
 const app = fs.readFileSync(path.join(root, '..', 'app.py'), 'utf8');
 
-const persona = profile.indexOf('费佳的完整人设');
-const thinking = profile.indexOf('可见思绪');
-const tools = profile.indexOf('费佳的工具直觉');
+const persona = profile.indexOf('profile-section-title">费佳的完整人设');
+const thinking = profile.indexOf('profile-section-title">可见思绪');
+const tools = profile.indexOf('profile-section-title">费佳的工具直觉');
 assert.ok(persona >= 0 && thinking > persona && tools > thinking, 'profile order must be persona -> thinking -> tools');
 assert.match(profile, /aria-label="可见思绪 prompt"/);
 assert.match(profile, /恢复默认/);
