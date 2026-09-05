@@ -1491,8 +1491,8 @@ def attest_first_turn_transcript_terminal(
         ).fetchone())
         if target is None:
             fail('target_missing')
-        target_session_id = str(intent.get('target_session_id') or '').strip()
-        if not target_session_id:
+        intent_target_session_id = str(intent.get('target_session_id') or '').strip()
+        if not intent_target_session_id:
             fail('target_session_missing')
         if (
             int(target['context_epoch']) != int(session.target_context_epoch)
@@ -1503,7 +1503,7 @@ def attest_first_turn_transcript_terminal(
             session.switch_request_id
         ):
             fail('target_switch_request_mismatch')
-        if str(target.get('claude_session_id') or '') != target_session_id:
+        if str(target.get('claude_session_id') or '') != intent_target_session_id:
             fail('target_session_mismatch')
         if str(target.get('window_mode') or '') != WINDOW_MODE_MANUAL:
             fail('target_not_manual')
@@ -1569,10 +1569,10 @@ def attest_first_turn_transcript_terminal(
     )
     if registry is None:
         fail('registry_missing')
-    target_session_id = str(registry.get('claude_session_id') or '').strip()
+    registry_session_id = str(registry.get('claude_session_id') or '').strip()
     registered_path = str(registry.get('transcript_path') or '').strip()
     actual_path = Path(session.jsonl_path)
-    if not target_session_id:
+    if not registry_session_id:
         fail('registry_session_missing')
     if (
         int(registry.get('context_id') or -1) != int(session.target_context_id)
@@ -1581,7 +1581,7 @@ def attest_first_turn_transcript_terminal(
         != int(session.target_resident_generation)
     ):
         fail('registry_identity_mismatch')
-    if str(registry.get('claude_session_id') or '').strip() != target_session_id:
+    if registry_session_id != intent_target_session_id:
         fail('registry_session_mismatch')
     if str(registry.get('scan_status') or '') != 'READY':
         fail('registry_not_ready')
@@ -1689,9 +1689,9 @@ def attest_first_turn_transcript_terminal(
             fail('transcript_growing')
         if not graph.events:
             fail('empty_range')
-        if any(str(event.session_id or '') != target_session_id for event in graph.events):
+        if any(str(event.session_id or '') != intent_target_session_id for event in graph.events):
             fail('event_session_mismatch')
-        if graph.session_id and str(graph.session_id) != target_session_id:
+        if graph.session_id and str(graph.session_id) != intent_target_session_id:
             fail('graph_session_mismatch')
         return before, graph, _signature(graph)
 
