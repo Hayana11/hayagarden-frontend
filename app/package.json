@@ -29,6 +29,7 @@
     "test:chrome78-geometry-sweep": "vite-node scripts/test-chrome78-geometry-sweep.mjs",
     "test:chat-cold-start": "vite-node scripts/test-chat-cold-start.mjs",
     "test:chat-warm-return": "vite-node scripts/test-chat-warm-return.mjs",
+    "test:chat-scroll-stability": "vite-node scripts/test-chat-scroll-stability.mjs",
     "test:chat-capacity-header": "vite-node scripts/test-chat-capacity-header.mjs",
     "test:task-timer-real-data-wiring": "vite-node scripts/test-task-timer-real-data-wiring.mjs",
     "test:toolroom-contract": "vite-node scripts/test-toolroom-contract.mjs",
