@@ -25,6 +25,64 @@ function ok(label) {
   void label;
 }
 
+
+function cssBraceDepth(source) {
+  let depth = 0;
+  let state = 'code';
+  let quote = '';
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+
+    if (state === 'comment') {
+      if (char === '*' && next === '/') {
+        state = 'code';
+        index += 1;
+      }
+      continue;
+    }
+
+    if (state === 'string') {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (char === quote) {
+        state = 'code';
+        quote = '';
+      }
+      continue;
+    }
+
+    if (char === '/' && next === '*') {
+      state = 'comment';
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      state = 'string';
+      quote = char;
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      assert.ok(depth >= 0, 'CSS brace depth went negative at offset ' + index);
+    }
+  }
+
+  assert.equal(state, 'code', 'CSS ended inside a ' + state);
+  return depth;
+}
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const controllerPath = path.join(__dirname, '../src/lib/manualContextWindowController.ts');
 const controllerSrc = fs.readFileSync(controllerPath, 'utf8');
@@ -359,6 +417,12 @@ const css = fs.readFileSync(path.join(__dirname, '../src/components/dailySoftWin
 assert.match(css, /box-sizing:\s*border-box/);
 assert.match(css, /width:\s*334px/);
 assert.match(css, /max-width:\s*100%/);
+assert.match(
+  css,
+  /@media\s*\(\s*max-width\s*:\s*374px\s*\)\s*\{\s*body\[data-legacy-native-compat=['"]true['"]\]\s+\.daily-window-dialog\s*\{\s*padding-left\s*:\s*18px\s*;\s*padding-right\s*:\s*18px\s*;\s*\}\s*\}\s*$/,
+);
+assert.equal(cssBraceDepth(css), 0);
+ok('legacy-native narrow media closed and CSS balanced');
 ok('334px dialog css');
 
 // ChatScreen wiring
@@ -368,6 +432,23 @@ assert.match(chatSrc, /title="换一扇窗"/);
 assert.ok(!chatSrc.includes('useDailySoftWindow({ live: true })'));
 assert.ok(!chatSrc.includes('CarryoverPickerCard'));
 assert.match(chatSrc, /已经换了一扇新窗/);
+assert.match(chatSrc, /import ['"]\.\/ChatMessage\.css['"];?/);
+const userRendererStart = chatSrc.indexOf('function renderUserMsg');
+const assistantRendererStart = chatSrc.indexOf('function renderAssistantMsg');
+const assistantRendererEnd = chatSrc.indexOf('function renderLive');
+assert.ok(userRendererStart >= 0 && assistantRendererStart > userRendererStart);
+assert.ok(assistantRendererStart >= 0 && assistantRendererEnd > assistantRendererStart);
+const userRenderer = chatSrc.slice(userRendererStart, assistantRendererStart);
+const assistantRenderer = chatSrc.slice(assistantRendererStart, assistantRendererEnd);
+assert.match(userRenderer, /<div className="chat-message-content chat-message-content-user">[\s\S]*\{mediaItems\.length > 0 && <ChatMediaGroup[\s\S]*<div className="chat-message-bubble chat-message-bubble-user">/);
+assert.doesNotMatch(userRenderer, /chat-message-bubble-user[\s\S]*ChatMediaGroup/);
+assert.doesNotMatch(userRenderer, /chat-message-bubble-user[\s\S]*<img/);
+assert.match(assistantRenderer, /<div className="chat-message-content chat-message-content-assistant">[\s\S]*\{mediaItems\.length > 0 && <ChatMediaGroup[\s\S]*renderOrderedAssistantContent/);
+const messageCss = fs.readFileSync(path.join(__dirname, '../src/screens/ChatMessage.css'), 'utf8');
+const mediaCss = fs.readFileSync(path.join(__dirname, '../src/components/ChatMediaGroup.css'), 'utf8');
+assert.match(messageCss, /\.chat-message-bubble-user\s*\{[\s\S]*background:\s*var\(--bubble\)[\s\S]*border-radius:\s*18px 18px 6px 18px[\s\S]*padding:\s*12px 16px[\s\S]*box-shadow:\s*0 6px 16px var\(--shadow\)/);
+assert.doesNotMatch(mediaCss, /\.chat-message-content(?:-user|-assistant)?\b|\.chat-message-bubble(?:-user)?\b/);
+ok('ChatMessage ownership and media contracts');
 ok('ChatScreen wiring');
 
 console.log(`manual-context-window: ${passed} checks passed`);
