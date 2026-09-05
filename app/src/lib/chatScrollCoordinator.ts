@@ -47,7 +47,7 @@ export function writeChatScroll(
   probe?: (record: ChatScrollProbeRecord) => void,
 ): number {
   const beforeScrollTop = container.scrollTop;
-  const targetScrollTop = request.intent === 'follow-latest' && request.followLatest
+  const targetScrollTop = request.intent === 'follow-latest'
     ? clampChatScrollTop(container, container.scrollHeight)
     : clampChatScrollTop(container, request.targetScrollTop ?? beforeScrollTop);
 
