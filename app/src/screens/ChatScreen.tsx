@@ -2511,8 +2511,8 @@ export function ChatScreen() {
               disabled={posting}
               onChange={(e) => {
                 if (postingRef.current) return;
+                const value = e.target.value;
                 const ta = e.target;
-                const value = ta.value;
                 composerDraftRevisionRef.current += 1;
                 writeChatComposerDraft(value);
                 setInput(value);
