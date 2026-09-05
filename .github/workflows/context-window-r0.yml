@@ -81,6 +81,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
+          git fetch --no-tags origin 57693379d80e375f9944507495f634a8af3d5936
           git worktree add /tmp/context-window-base 57693379d80e375f9944507495f634a8af3d5936
           cd /tmp/context-window-base
           python3 -m unittest tests.test_context_window_first_turn -v
