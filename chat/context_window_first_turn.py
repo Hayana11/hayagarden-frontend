@@ -1440,7 +1440,6 @@ def attest_first_turn_transcript_terminal(
     """
     from chat.claude_event_mapping import _assert_complete_terminal_round
     from chat.claude_event_mapping import MappingRejected
-    from chat.claude_event_mapping import _content_has_tool_use
     from chat.claude_event_mapping import _content_has_text
     from chat.claude_transcript_model import EventRole
     from chat.claude_transcript_reader import read_transcript_range
@@ -1661,6 +1660,15 @@ def attest_first_turn_transcript_terminal(
     end_offset, graph, _ = stable
     if end_offset < start_offset:
         fail('offset_regressed')
+    if graph.unknown_uuids or any(
+        str(warning).startswith((
+            'multiple_session_ids:',
+            'unattributed_sidechain:',
+            'sidechain_parent_cycle:',
+        ))
+        for warning in graph.warnings
+    ):
+        fail('transcript_graph_ambiguous')
     if len(graph.candidate_rounds) != 1:
         fail('candidate_round_count')
     if any(_has_forbidden_terminal_state(event.raw) for event in graph.events):
