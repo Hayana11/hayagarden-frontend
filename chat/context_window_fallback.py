@@ -40,6 +40,7 @@ from chat.daily_context import (
     DEFAULT_CHAT_ID,
     DEFAULT_TIMEZONE,
     STATUS_PROVISIONAL,
+    WINDOW_MODE_MANUAL_STAGED,
     _active_epoch_high_water,
     _connect,
     _row_to_dict,
@@ -746,19 +747,68 @@ def recover_from_last_good(
             )
 
         target_id = intent.get('target_context_id')
+        target_id_int = None
+        failed_target_generation = None
+        failed_target_version = None
+        if live_status == INTENT_COMMITTING and target_id is None:
+            conn.rollback()
+            raise FallbackError(
+                'committing intent target missing',
+                error_code=FALLBACK_PRECONDITION_FAILED,
+            )
         if target_id is not None:
+            try:
+                target_id_int = int(target_id)
+            except (TypeError, ValueError):
+                conn.rollback()
+                raise FallbackError(
+                    'target id mismatch',
+                    error_code=FALLBACK_PRECONDITION_FAILED,
+                ) from None
             trow = _row_to_dict(conn.execute(
                 'SELECT * FROM daily_contexts WHERE id=?',
-                (int(target_id),),
+                (target_id_int,),
             ).fetchone())
-            if trow is not None:
-                tgen = int(trow.get('resident_generation') or 1)
-                if _is_resident_turn_active_conn(conn, int(target_id), tgen, now_dt):
+            if trow is None:
+                if live_status == INTENT_COMMITTING:
+                    conn.rollback()
+                    raise FallbackError(
+                        'committing intent target missing',
+                        error_code=FALLBACK_PRECONDITION_FAILED,
+                    )
+            else:
+                try:
+                    tgen = int(trow['resident_generation'])
+                    tversion = int(trow['version'])
+                except (KeyError, TypeError, ValueError):
+                    conn.rollback()
+                    raise FallbackError(
+                        'target identity incomplete',
+                        error_code=FALLBACK_PRECONDITION_FAILED,
+                    ) from None
+                if _is_resident_turn_active_conn(conn, target_id_int, tgen, now_dt):
                     conn.rollback()
                     raise FallbackError(
                         'target lease still active',
                         error_code=FALLBACK_PRECONDITION_FAILED,
                     )
+                if live_status == INTENT_COMMITTING:
+                    if (
+                        int(trow.get('id') or 0) != target_id_int
+                        or str(trow.get('chat_id') or '') != str(chat_id)
+                        or str(trow.get('switch_request_id') or '') != req_id
+                        or str(trow.get('window_mode') or '') != WINDOW_MODE_MANUAL_STAGED
+                        or str(trow.get('status') or '') != STATUS_PROVISIONAL
+                        or trow.get('closed_at') is not None
+                        or tgen != 1
+                    ):
+                        conn.rollback()
+                        raise FallbackError(
+                            'failed target identity mismatch',
+                            error_code=FALLBACK_PRECONDITION_FAILED,
+                        )
+                    failed_target_generation = tgen
+                    failed_target_version = tversion
 
         try:
             canonical = resolve_canonical_context_row_conn(
@@ -844,6 +894,30 @@ def recover_from_last_good(
 
         floor_cursor = int(checkpoint['history_cursor_message_id'])
 
+        # Retire a failed COMMITTING target in this same transaction. Keep
+        # the target and all first-turn evidence for forensic inspection.
+        if live_status == INTENT_COMMITTING:
+            retire_cur = conn.execute(
+                '''UPDATE daily_contexts
+                   SET window_mode=?, closed_at=?, close_reason=?,
+                       version=version+1, updated_at=?
+                 WHERE id=? AND chat_id=? AND switch_request_id=?
+                   AND window_mode=? AND status=? AND closed_at IS NULL
+                   AND resident_generation=? AND version=?''',
+                (
+                    WINDOW_MODE_MANUAL, now_s, CLOSE_REASON_COLD_FALLBACK,
+                    now_s, target_id_int, chat_id, req_id,
+                    WINDOW_MODE_MANUAL_STAGED, STATUS_PROVISIONAL,
+                    failed_target_generation, failed_target_version,
+                ),
+            )
+            if retire_cur.rowcount != 1:
+                conn.rollback()
+                raise FallbackError(
+                    'failed target retire CAS failed',
+                    error_code=FALLBACK_PRECONDITION_FAILED,
+                )
+
         # Close the failure-scene open canonical.
         close_cur = conn.execute(
             '''UPDATE daily_contexts SET closed_at=?, close_reason=?, version=version+1,
@@ -907,17 +981,17 @@ def recover_from_last_good(
             ordinal += 1
 
         # Drop expired / matching failed target lease only.
-        if target_id is not None:
+        if target_id_int is not None:
             trow2 = _row_to_dict(conn.execute(
                 'SELECT resident_generation FROM daily_contexts WHERE id=?',
-                (int(target_id),),
+                (target_id_int,),
             ).fetchone())
             if trow2 is not None:
                 tgen = int(trow2['resident_generation'])
                 lease = conn.execute(
                     'SELECT lease_owner, expires_at FROM daily_resident_turn_leases '
                     'WHERE context_id=? AND resident_generation=?',
-                    (int(target_id), tgen),
+                    (target_id_int, tgen),
                 ).fetchone()
                 if lease is not None:
                     from chat.daily_context import _parse_local_dt
