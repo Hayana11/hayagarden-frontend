@@ -15,7 +15,7 @@ assert.ok(persona >= 0 && thinking > persona && tools > thinking, 'profile order
 assert.match(profile, /aria-label="可见思绪 prompt"/);
 assert.match(profile, /恢复默认/);
 assert.match(api, /DISPLAY_THINKING_PROMPT/);
-assert.match(api, /api/profile/display-thinking-prompt/);
+assert.ok(api.includes('/api/profile/display-thinking-prompt'));
 const routeStart = app.indexOf("@app.route('/api/profile/display-thinking-prompt'");
 const routeEnd = app.indexOf('# ── User Profile', routeStart);
 assert.ok(routeStart >= 0 && routeEnd > routeStart, 'display-thinking profile route must exist');
