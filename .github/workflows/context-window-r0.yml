@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - 'chat/context_window.py'
+      - 'chat/context_window_first_turn.py'
       - 'chat/daily_context.py'
+      - 'gateway.py'
       - 'chat/daily_runtime.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
@@ -15,7 +17,9 @@ on:
     branches: [main]
     paths:
       - 'chat/context_window.py'
+      - 'chat/context_window_first_turn.py'
       - 'chat/daily_context.py'
+      - 'gateway.py'
       - 'chat/daily_runtime.py'
       - 'context_window_routes.py'
       - 'context_window_bff.py'
@@ -57,6 +61,7 @@ jobs:
             tests.test_context_window_routes \
             tests.test_context_window_bff \
             tests.test_context_window_resident \
+            tests.test_context_window_first_turn \
             tests.test_manual_context_runtime \
             tests.test_daily_soft_window \
             tests.test_daily_runtime \
