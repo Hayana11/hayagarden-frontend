@@ -2996,6 +2996,31 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         complete.assert_not_called()
         abort.assert_called_once()
 
+    def test_transcript_recovery_registry_and_transcript_session_collusion_fail_closed(self):
+        def mutate():
+            intent = self._intent()
+            target = dc.get_daily_context_by_id(
+                int(intent['target_context_id']), db_path=self.db,
+            )
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE context_claude_sessions SET claude_session_id=? '
+                    'WHERE context_id=? AND resident_generation=?',
+                    ('wrong-session', int(intent['target_context_id']),
+                     int(target['resident_generation'])),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            transcript_session='wrong-session',
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
     def test_transcript_recovery_user_mapping_mismatch_fail_closed(self):
         def mutate():
             intent = self._intent()
