@@ -405,6 +405,7 @@ class DisplayThinkingStreamTests(unittest.TestCase):
             plan = SimpleNamespace(
                 user_content=user_content,
                 user_image_url=image_url,
+                user_attachments=[],
                 provider_display_thinking_suffix='',
                 assembly={
                     'state': 'ORIGINAL_STATE',
