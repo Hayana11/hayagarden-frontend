@@ -50,6 +50,29 @@ jobs:
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
           touch /opt/frontend/.env
+      - name: TEMP focused transcript recovery tests
+        run: |
+          python3 -m unittest \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_connected \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_detached \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_stop_reason_missing_fail_closed \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_tool_use_fail_closed
+      - name: TEMP full first-turn suite
+        if: always()
+        continue-on-error: true
+        run: python3 -m unittest tests.test_context_window_first_turn -v
+      - name: TEMP exact-base A/B
+        if: always()
+        continue-on-error: true
+        env:
+          BASE_SHA: 57693379d80e375f9944507495f634a8af3d5936
+        run: |
+          git fetch --no-tags origin "$BASE_SHA"
+          BASE_DIR="$RUNNER_TEMP/context-window-base"
+          git worktree add --detach "$BASE_DIR" "$BASE_SHA"
+          cd "$BASE_DIR"
+          env -u PYTHONPATH python3 -m unittest tests.test_context_window_first_turn -v
+
       - name: Backend unit tests
         run: |
           python3 -m unittest \
