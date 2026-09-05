@@ -1832,6 +1832,7 @@ def complete_first_turn_round(
         if str(intent.get('status') or '') != INTENT_COMMITTED:
             conn.rollback()
             raise FirstTurnError('not committed', error_code='FIRST_TURN_INTENT_STATUS')
+        chat_id = str(intent.get('chat_id') or DEFAULT_CHAT_ID)
         if intent.get('first_turn_completed_at') and intent.get('first_assistant_message_id'):
             assistant_id = int(intent['first_assistant_message_id'])
             if _last_good_checkpoint_complete(intent):
