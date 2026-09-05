@@ -235,19 +235,17 @@ html[data-theme='blue'] {
 
 .daily-window-overlay {
   position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
+  inset: 0;
   z-index: 1000;
 
   display: flex;
   align-items: center;
   justify-content: center;
 
-  padding: 24px 16px;
-  padding-top: max(24px, env(safe-area-inset-top));
-  padding-bottom: max(24px, env(safe-area-inset-bottom));
+  padding:
+    max(24px, env(safe-area-inset-top))
+    16px
+    max(24px, env(safe-area-inset-bottom));
 
   overflow-y: auto;
 
@@ -260,22 +258,18 @@ html[data-theme='blue'] {
    主弹窗
    ========================================================= */
 
-.daily-window-dialog > * + * {
-  margin-top: 18px;
-}
-
 .daily-window-dialog {
   position: relative;
 
   display: flex;
   flex-direction: column;
 
-  box-sizing: border-box;
-  width: 334px;
-  max-width: 100%;
-  max-height: calc(100vh - 56px - 6vh);
+  gap: 18px;
 
-  /* Chrome 78 has no flex gap; preserve the rhythm with sibling margins. */
+  box-sizing: border-box;
+  width: min(334px, 100%);
+  max-width: 100%;
+  max-height: calc(100dvh - 56px - 6vh);
 
   /* handoff 的弹窗中心在 47%，不是正中；靠 margin 把它抬起 3vh */
   margin-bottom: 6vh;
@@ -308,10 +302,7 @@ html[data-theme='blue'] {
 .daily-window-dialog.is-loading::after {
   content: "";
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
+  inset: 0;
   z-index: 10;
 
   background: rgba(255, 249, 249, 0.48);
@@ -376,15 +367,12 @@ html[data-theme='blue'] {
   min-height: 0;
 }
 
-.daily-window-hero-copy > * + * {
-  margin-top: 4px;
-}
-
 .daily-window-hero-copy {
   min-width: 0;
 
   display: flex;
   flex-direction: column;
+  gap: 4px;
 }
 
 .daily-window-title {
@@ -430,6 +418,7 @@ html[data-theme='blue'] {
 
   display: flex;
   flex-direction: column;
+  gap: 18px;
 
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -441,10 +430,6 @@ html[data-theme='blue'] {
   display: none;
 }
 
-.daily-window-scroll > * + * {
-  margin-top: 18px;
-}
-
 /* =========================================================
    分区
    ========================================================= */
@@ -453,27 +438,25 @@ html[data-theme='blue'] {
 .daily-window-section {
   display: flex;
   flex-direction: column;
+  gap: 10px;
 
   margin: 0;
 }
 
-.daily-window-section > * + * {
-  margin-top: 10px;
-}
-
 /* handoff 里三个分区的内部 gap 不一样：10 / 12 / 9 */
-.daily-window-section--snippets > * + * {
-  margin-top: 12px;
+.daily-window-section--snippets {
+  gap: 12px;
 }
 
-.daily-window-section--left-behind > * + * {
-  margin-top: 9px;
+.daily-window-section--left-behind {
+  gap: 9px;
 }
 
 /* 分区标题是暖灰棕 + 1px 字距，不是粉色 */
 .daily-window-section-title {
   display: flex;
   align-items: center;
+  gap: 6px;
 
   margin: 0;
 
@@ -490,7 +473,6 @@ html[data-theme='blue'] {
   content: "✦";
 
   flex: 0 0 auto;
-  margin-right: 6px;
 
   color: rgba(212, 138, 158, 0.92);
   font-size: 12px;
@@ -504,10 +486,7 @@ html[data-theme='blue'] {
 /* 一行排开、各占等宽，不是 2x2 —— 2x2 是「笨重」的主因 */
 .daily-window-options {
   display: flex;
-}
-
-.daily-window-options > * + * {
-  margin-left: 8px;
+  gap: 8px;
 }
 
 .daily-window-option {
@@ -585,6 +564,7 @@ html[data-theme='blue'] {
 
   display: flex;
   align-items: center;
+  gap: 8px;
 
   margin: 0;
 }
@@ -607,7 +587,6 @@ html[data-theme='blue'] {
 /* 中心是 ✦，不是菱形色块 */
 .daily-window-divider-mark {
   flex-shrink: 0;
-  margin: 0 4px;
 
   color: var(--window-accent-soft);
 
@@ -680,10 +659,7 @@ html[data-theme='blue'] {
 /* 三个标签等宽平分一行 */
 .daily-window-tags {
   display: flex;
-}
-
-.daily-window-tags > * + * {
-  margin-left: 8px;
+  gap: 8px;
 }
 
 .daily-window-tag {
@@ -693,6 +669,7 @@ html[data-theme='blue'] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 3px;
 
   padding: 7px 6px;
 
@@ -711,10 +688,6 @@ html[data-theme='blue'] {
 }
 
 /* 「提醒 · 7」在 handoff 里是一整串同字体，数字不单独做样式 */
-.daily-window-tag > * + * {
-  margin-left: 3px;
-}
-
 .daily-window-tag-count {
   color: inherit;
 
@@ -730,12 +703,9 @@ html[data-theme='blue'] {
   flex: 0 0 auto;
 
   display: flex;
+  gap: 10px;
 
   margin: 0;
-}
-
-.daily-window-actions > * + * {
-  margin-left: 10px;
 }
 
 .daily-window-button {
@@ -798,13 +768,6 @@ html[data-theme='blue'] {
   background: #c25874;
 }
 
-.daily-window-button:focus,
-.daily-window-option:focus,
-.daily-window-close:focus {
-  /* Chrome 78 otherwise paints its UA focus rectangle around the close button. */
-  outline: none;
-}
-
 .daily-window-button:focus-visible,
 .daily-window-option:focus-visible,
 .daily-window-close:focus-visible {
@@ -846,7 +809,6 @@ html[data-theme='blue'] {
 
 .daily-window-toast {
   position: fixed;
-  bottom: 36px;
   bottom: max(36px, env(safe-area-inset-bottom));
   left: 50%;
   transform: translateX(-50%);
@@ -908,8 +870,7 @@ html[data-theme='dark'] .daily-window-toast {
 
 @media (max-width: 374px) {
   .daily-window-dialog {
-    padding-left: 18px;
-    padding-right: 18px;
+    padding-inline: 18px;
   }
 
   .daily-window-title {
@@ -932,27 +893,13 @@ html[data-theme='dark'] .daily-window-toast {
 
   /* 宽度按 handoff 钉死 334，桌面端不放大 */
   .daily-window-dialog {
-    max-height: 760px;
-    max-height: calc(100vh - 64px - 6vh);
+    max-height: min(760px, calc(100dvh - 64px - 6vh));
   }
 }
 
 /* =========================================================
    动效
    ========================================================= */
-
-/* Dynamic viewport sizing is an enhancement for current browsers. */
-@supports (height: 100dvh) {
-  .daily-window-dialog {
-    max-height: calc(100dvh - 56px - 6vh);
-  }
-}
-
-@media (min-width: 768px) {
-  .daily-window-dialog {
-    max-height: min(760px, calc(100dvh - 64px - 6vh));
-  }
-}
 
 @keyframes daily-window-overlay-in {
   from { opacity: 0; }
@@ -982,3 +929,96 @@ html[data-theme='dark'] .daily-window-toast {
     transition: none;
   }
 }
+/* Legacy native WebView fallback: keep this out of the normal web layout. */
+body[data-legacy-native-compat='true'] .daily-window-overlay {
+  inset: auto;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 24px 16px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-dialog {
+  width: 334px;
+  max-width: 100%;
+  /* Let the overlay scroll instead of shrinking the modal contents. */
+  max-height: none;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-dialog > * + *,
+body[data-legacy-native-compat='true'] .daily-window-scroll > * + * {
+  margin-top: 18px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-hero-copy > * + * {
+  margin-top: 4px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-section > * + * {
+  margin-top: 10px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-section--snippets > * + * {
+  margin-top: 12px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-section--left-behind > * + * {
+  margin-top: 9px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-section-title::before {
+  margin-right: 6px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-options > * + * {
+  margin-left: 8px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-divider {
+  gap: 0;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-divider-mark {
+  margin: 0 4px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-tags > * + * {
+  margin-left: 8px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-tag {
+  gap: 0;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-tag > * + * {
+  margin-left: 3px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-actions > * + * {
+  margin-left: 10px;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-button:focus,
+body[data-legacy-native-compat='true'] .daily-window-option:focus,
+body[data-legacy-native-compat='true'] .daily-window-close:focus {
+  outline: none;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-dialog.is-loading::after {
+  inset: auto;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+body[data-legacy-native-compat='true'] .daily-window-toast {
+  bottom: 36px;
+}
+
+@media (max-width: 374px) {
+  body[data-legacy-native-compat='true'] .daily-window-dialog {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
