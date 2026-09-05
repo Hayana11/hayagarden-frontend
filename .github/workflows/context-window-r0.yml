@@ -68,3 +68,14 @@ jobs:
             tests.test_daily_context_bff \
             tests.test_day_handoff \
             -v
+      - name: Exact-base first-turn A/B control
+        if: always()
+        continue-on-error: true
+        env:
+          BASE_SHA: 57693379d80e375f9944507495f634a8af3d5936
+        run: |
+          git fetch --no-tags origin "$BASE_SHA"
+          BASE_DIR="$RUNNER_TEMP/context-window-base"
+          git worktree add --detach "$BASE_DIR" "$BASE_SHA"
+          cd "$BASE_DIR"
+          env -u PYTHONPATH python3 -m unittest tests.test_context_window_first_turn -v
