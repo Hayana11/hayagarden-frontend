@@ -2652,6 +2652,152 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], 'partial full')
 
+
+    def _transcript_stall_fake(self, path: Path, session_id: str, text: str,
+                               *, stop_reason='end_turn', extra=None):
+        import cc_resident
+
+        written = {'done': False}
+        user_uuid = 'recovery-user-' + uuid.uuid4().hex
+        assistant_uuid = 'recovery-assistant-' + uuid.uuid4().hex
+
+        def write_terminal():
+            if written['done']:
+                return
+            user = json.loads(_line(
+                user_uuid, 'user', session=session_id, parent=None,
+                content='recovery user',
+            ))
+            assistant = json.loads(_line(
+                assistant_uuid, 'assistant', session=session_id,
+                parent=user_uuid, content=[{'type': 'text', 'text': text}],
+            ))
+            assistant['message']['stop_reason'] = stop_reason
+            if extra:
+                assistant.update(extra)
+            _append_jsonl(path, [
+                json.dumps(user, ensure_ascii=False),
+                json.dumps(assistant, ensure_ascii=False),
+            ])
+            written['done'] = True
+
+        class _FakeStaged:
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+                turn_lease=None,
+            ):
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                try:
+                    yield ('text', text)
+                    write_terminal()
+                    raise cc_resident.ResidentError('simulated stall')
+                except GeneratorExit:
+                    write_terminal()
+                    raise cc_resident.ResidentError('simulated stall')
+
+            def _kill(self, quiet=True):
+                return None
+
+        return _FakeStaged()
+
+    def _run_transcript_stall_case(self, *, detached=False, text='complete',
+                                   stop_reason='end_turn', extra=None,
+                                   transcript_text=None):
+        import gateway
+
+        self._seed_source_and_forge()
+        intent = self._intent()
+        target_session = str(intent['target_session_id'])
+        path = self._jsonl_path(target_session)
+        visible = str(text)
+        transcript = visible if transcript_text is None else str(transcript_text)
+        fake = self._transcript_stall_fake(
+            path, target_session, transcript, stop_reason=stop_reason, extra=extra,
+        )
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'recovery user')
+        turn = {'user_message_id': gateway_user_id}
+        hooks = self._gateway_first_turn_hooks(fake)
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks), \
+             mock.patch('chat.context_window_first_turn.complete_first_turn_round',
+                        wraps=ft_mod.complete_first_turn_round) as complete, \
+             mock.patch('chat.context_window_first_turn.abort_first_turn_postcommit') as abort:
+            gen = gateway._stream_cc_first_turn(turn, 'recovery user', self._intent())
+            if detached:
+                first = next(gen)
+                self.assertIn('"t": "text"', first)
+                gen.close()
+                chunks = []
+            else:
+                chunks = list(gen)
+            return self._intent(), target_session, complete, abort, chunks
+
+    def test_transcript_endturn_recovery_connected(self):
+        intent, target_session, complete, abort, chunks = (
+            self._run_transcript_stall_case(text='complete')
+        )
+        self.assertIn('"t": "done", "ok": true', ''.join(chunks))
+        complete.assert_called_once()
+        abort.assert_not_called()
+        self.assertIsNone(intent['first_turn_error_code'])
+        self.assertIsNotNone(intent['first_assistant_message_id'])
+        self.assertIsNotNone(intent['first_turn_completed_at'])
+        cache = sqlite3.connect(self.db).execute(
+            'SELECT cache_info FROM chat_messages WHERE id=?',
+            (int(intent['first_assistant_message_id']),),
+        ).fetchone()[0]
+        self.assertEqual(
+            json.loads(cache)['first_turn_terminal_recovery'],
+            'transcript_end_turn',
+        )
+
+    def test_transcript_endturn_recovery_detached(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            detached=True, text='complete',
+        )
+        complete.assert_called_once()
+        abort.assert_not_called()
+        self.assertIsNone(intent['first_turn_error_code'])
+        self.assertIsNotNone(intent['first_assistant_message_id'])
+        self.assertIsNotNone(intent['first_turn_completed_at'])
+
+    def test_transcript_endturn_recovery_stop_reason_missing_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            stop_reason=None,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+        self.assertEqual(
+            intent['first_turn_error_code'], FIRST_TURN_POSTCOMMIT_ABORT,
+        )
+
+    def test_transcript_endturn_recovery_tool_use_fail_closed(self):
+        tool = {'message': {'content': [{'type': 'tool_use', 'id': 'tool-1'}]}}
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            extra=tool,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+        self.assertEqual(
+            intent['first_turn_error_code'], FIRST_TURN_POSTCOMMIT_ABORT,
+        )
+
+    def test_transcript_endturn_recovery_text_mismatch_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            text='visible', transcript_text='different',
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+        self.assertEqual(
+            intent['first_turn_error_code'], FIRST_TURN_POSTCOMMIT_ABORT,
+        )
+
+
     def test_db_commit_then_swap_fail_recovery(self):
         """3) same-process HANDOFF_PENDING: first delta once, no second user/asst."""
         self._seed_source_and_forge()

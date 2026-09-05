@@ -210,3 +210,19 @@ success unchanged. Reject legacy `switched_at` / `window_mode` /
 1. prepare → existing user claim → buffer → first-text handoff → single assistant → done  
 2. clean failure → same `user_message_id` retry; source canonical; target staged  
 3. same-process HANDOFF_PENDING → recover once; first text once; no second user/assistant  
+
+
+## Transcript-attested first-turn recovery
+
+Provider stdout abnormal exit remains fail-closed by default. Before
+`abort_first_turn_postcommit`, the Manual Context Window first-turn path may
+use the exact `first_turn_start_offset -> stable EOF` transcript range only
+when all of the following are proven: target Registry/session identity matches,
+the range contains exactly one unique main-chain candidate round, the terminal
+assistant is non-sidechain and non-empty with `message.stop_reason=end_turn`,
+the range contains no tools or pending approval, and the transcript text is
+equal to the text already streamed by Gateway. EOF must be stable across
+consecutive reads. On success the existing `complete_first_turn_round`
+transaction is reused, with no resident-generation bump and no
+`FIRST_TURN_POSTCOMMIT_ABORT`. Any failed or ambiguous proof preserves the
+existing abort behavior.
