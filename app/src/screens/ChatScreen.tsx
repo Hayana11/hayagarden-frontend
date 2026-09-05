@@ -136,11 +136,24 @@ import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typo
 import { TaskTimerCard } from '../components/TaskTimerCard';
 import { isTaskTimerFixtureEnabled, useTaskTimerController } from '../lib/taskTimer';
 import { ChatMediaGallery, ChatMediaGroup } from '../components/ChatMediaGroup';
+import {
+  resizeChatTextarea,
+  type ChatScrollProbeRecord,
+  type ChatScrollSource,
+  writeChatScroll,
+} from '../lib/chatScrollCoordinator';
 
 installObjectHasOwnCompat();
 
 const FONT_SIZES = [13.5, 14.5, 16, 17.5, 19];
 const INPUT_FONT_SIZE = FONT_SIZES[0];
+
+function isChatScrollProbeEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  const explicit = (window as Window & { __chatScrollProbe?: boolean }).__chatScrollProbe === true;
+  const queryEnabled = new URLSearchParams(window.location.search).get('chatScrollProbe') === '1';
+  return explicit || (import.meta.env.DEV && queryEnabled);
+}
 
 function isSafeMarkdownHref(href: string): boolean {
   const value = href.trim();
@@ -583,12 +596,31 @@ export function ChatScreen() {
     toastTimer.current = setTimeout(() => setToast(null), 2200);
   }, []);
 
-  const scrollBottom = useCallback((smooth = false) => {
+  const reportChatScroll = useCallback((record: ChatScrollProbeRecord) => {
+    if (!isChatScrollProbeEnabled()) return;
+    console.debug('[CHAT_SCROLL_PROBE]', record);
+  }, []);
+
+  const scrollBottom = useCallback((options: boolean | { smooth?: boolean; source?: ChatScrollSource } = false) => {
+    const smooth = typeof options === 'boolean' ? options : Boolean(options.smooth);
+    const source = typeof options === 'boolean'
+      ? 'explicit-scroll-bottom'
+      : (options.source ?? 'explicit-scroll-bottom');
     requestAnimationFrame(() => {
       const c = scrollRef.current;
-      if (c) c.scrollTo({ top: c.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+      if (!c) return;
+      writeChatScroll(
+        c,
+        {
+          source,
+          intent: 'follow-latest',
+          followLatest: followLatestRef.current,
+          behavior: smooth ? 'smooth' : 'auto',
+        },
+        reportChatScroll,
+      );
     });
-  }, []);
+  }, [reportChatScroll]);
 
   const bumpHistoryGen = useCallback(() => bumpHistoryGenState(coldStartRaceRef.current), []);
 
@@ -702,7 +734,7 @@ export function ChatScreen() {
       if (!mountedRef.current) return;
       ensureDeferredColdStartInit({ loadedCount: page.messages.length });
     });
-    if (toBottom) scrollBottom();
+    if (toBottom) scrollBottom({ source: 'initial-history' });
   }, [scrollBottom, bumpHistoryGen, cancelInFlightWarmUp, ensureDeferredColdStartInit]);
 
   const revalidateWarmReturn = useCallback(async () => {
@@ -719,7 +751,7 @@ export function ChatScreen() {
       );
       setMsgs(reconciled.messages);
       setHasMoreBefore(reconciled.hasMoreBefore);
-      if (followLatestRef.current) scrollBottom();
+      if (followLatestRef.current) scrollBottom({ source: 'warm-restore' });
       scheduleAfterFirstPaint(() => {
         if (!mountedRef.current) return;
         ensureDeferredColdStartInit({ loadedCount: page.messages.length });
@@ -806,7 +838,7 @@ export function ChatScreen() {
         if (!mountedRef.current) return;
         setMsgs(page.messages);
         setHasMoreBefore(page.hasMoreBefore);
-        scrollBottom();
+        scrollBottom({ source: 'initial-history' });
         markChatColdStart('initial_history_ready');
         scheduleAfterFirstPaint(() => {
           if (cancelled || !mountedRef.current) return;
@@ -870,7 +902,19 @@ export function ChatScreen() {
       pendingAnchorIdRef.current = null;
       const el = document.getElementById(`msg-${jumpId}`);
       const c = scrollRef.current;
-      if (el && c) c.scrollTo({ top: Math.max(0, el.offsetTop - 80), behavior: 'smooth' });
+      if (el && c) {
+        writeChatScroll(
+          c,
+          {
+            source: 'search-jump',
+            intent: 'explicit-target',
+            followLatest: followLatestRef.current,
+            targetScrollTop: el.offsetTop - 80,
+            behavior: 'smooth',
+          },
+          reportChatScroll,
+        );
+      }
       return;
     }
     const anchorId = pendingAnchorIdRef.current;
@@ -878,8 +922,19 @@ export function ChatScreen() {
     pendingAnchorIdRef.current = null;
     const el = document.getElementById(`msg-${anchorId}`);
     const c = scrollRef.current;
-    if (el && c) c.scrollTop = Math.max(0, el.offsetTop - 80);
-  }, [txWin, msgs, legacyCompat]);
+    if (el && c) {
+      writeChatScroll(
+        c,
+        {
+          source: 'history-window',
+          intent: 'explicit-target',
+          followLatest: followLatestRef.current,
+          targetScrollTop: el.offsetTop - 80,
+        },
+        reportChatScroll,
+      );
+    }
+  }, [txWin, msgs, legacyCompat, reportChatScroll]);
 
   useLayoutEffect(() => {
     const snapshot = warmRestoreRef.current;
@@ -887,16 +942,23 @@ export function ChatScreen() {
     warmRestoreRef.current = null;
     const container = scrollRef.current;
     if (!container) return;
-    if (snapshot.followLatest) container.scrollTop = container.scrollHeight;
-    else container.scrollTop = snapshot.scrollTop;
-  }, []);
+    writeChatScroll(
+      container,
+      {
+        source: 'warm-restore',
+        intent: snapshot.followLatest ? 'follow-latest' : 'preserve-position',
+        followLatest: snapshot.followLatest,
+        targetScrollTop: snapshot.scrollTop,
+      },
+      reportChatScroll,
+    );
+  }, [reportChatScroll]);
 
   useLayoutEffect(() => {
     const textarea = taRef.current;
     if (!textarea) return;
-    textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`;
-  }, [input]);
+    resizeChatTextarea(textarea, scrollRef.current, followLatestRef.current, reportChatScroll);
+  }, [input, reportChatScroll]);
 
   useEffect(() => {
     if (!initialHistoryReady) return;
@@ -946,7 +1008,9 @@ export function ChatScreen() {
               return fresh.length ? [...c2, ...fresh] : c2;
             });
             // Legacy browsing older window: do not yank to latest on background poll.
-            if (!legacyCompat || followLatestRef.current) scrollBottom(true);
+            if (!legacyCompat || followLatestRef.current) {
+              scrollBottom({ smooth: true, source: 'background-poll' });
+            }
           }
         });
         return cur;
@@ -1013,19 +1077,19 @@ export function ChatScreen() {
         {
           onThink: (d) => {
             updateLive((l) => appendThinkingDelta(l, d));
-            scrollBottom();
+            scrollBottom({ source: 'stream-follow' });
           },
           onText: (d) => {
             updateLive((l) => appendTextDelta(l, d));
-            scrollBottom();
+            scrollBottom({ source: 'stream-follow' });
           },
           onToolUse: (idx, tc) => {
             updateLive((l) => upsertToolUse(l, idx, tc));
-            scrollBottom();
+            scrollBottom({ source: 'stream-follow' });
           },
           onToolResult: (idx, tc) => {
             updateLive((l) => applyToolResult(l, idx, tc));
-            scrollBottom();
+            scrollBottom({ source: 'stream-follow' });
           },
           onNotice: (s) => showToast(s),
         },
@@ -1104,7 +1168,6 @@ export function ChatScreen() {
     setSending(true);
     setChatError(null);
     setInput('');
-    if (taRef.current) taRef.current.style.height = 'auto';
     const extra = { files: attempt.files, imageFiles: attempt.images.map((image) => image.file) };
     postingRef.current = true;
     composerMutationRevisionRef.current += 1;
@@ -1346,11 +1409,23 @@ export function ChatScreen() {
       setTimeout(() => {
         const el = document.getElementById(`msg-${id}`);
         const c = scrollRef.current;
-        if (el && c) c.scrollTo({ top: Math.max(0, el.offsetTop - 80), behavior: 'smooth' });
+        if (el && c) {
+          writeChatScroll(
+            c,
+            {
+              source: 'search-jump',
+              intent: 'explicit-target',
+              followLatest: followLatestRef.current,
+              targetScrollTop: el.offsetTop - 80,
+              behavior: 'smooth',
+            },
+            reportChatScroll,
+          );
+        }
       }, 250);
     }
     setTimeout(() => setFlashId((f) => (f === id ? null : f)), 2200);
-  }, [legacyCompat, msgs]);
+  }, [legacyCompat, msgs, reportChatScroll]);
 
   const searchResults = useMemo(() => {
     const q = searchQ.trim().toLowerCase();
@@ -2437,12 +2512,11 @@ export function ChatScreen() {
               onChange={(e) => {
                 if (postingRef.current) return;
                 const value = e.target.value;
+                const ta = e.target;
                 composerDraftRevisionRef.current += 1;
                 writeChatComposerDraft(value);
                 setInput(value);
-                const ta = e.target;
-                ta.style.height = 'auto';
-                ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
+                resizeChatTextarea(ta, scrollRef.current, followLatestRef.current, reportChatScroll);
               }}
               onKeyDown={(e) => {
                 if (postingRef.current) return;
@@ -2626,4 +2700,3 @@ export function ChatScreen() {
     </div>
   );
 }
-
