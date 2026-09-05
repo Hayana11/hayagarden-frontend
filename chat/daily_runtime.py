@@ -164,6 +164,7 @@ class DailyTurnPlan:
     user_image_url: str = ''
     user_attachments: tuple[dict[str, str], ...] = ()
     provider_display_thinking_suffix: str = field(default='', repr=False)
+    provider_display_thinking_prompt: str = field(default='', repr=False)
     lease_acquired: bool = False
     lease_released: bool = False
     db_path: Optional[str] = None
@@ -1889,9 +1890,11 @@ def _adopt_reprepared_plan_in_place(
     cursor CAS → Mapping. Reprepare must therefore mutate that same object.
     """
     provider_suffix = getattr(current, 'provider_display_thinking_suffix', '')
+    provider_prompt = getattr(current, 'provider_display_thinking_prompt', '')
     for f in fields(DailyTurnPlan):
         setattr(current, f.name, getattr(replacement, f.name))
     current.provider_display_thinking_suffix = provider_suffix
+    current.provider_display_thinking_prompt = provider_prompt
     if resident is not None:
         key = current.resident_key
         current._resident_close_fn = (

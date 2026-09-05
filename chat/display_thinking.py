@@ -13,6 +13,8 @@ from typing import Any
 OPEN_TAG = '<思绪>'
 CLOSE_TAG = '</思绪>'
 VALID_MODES = frozenset({'off', 'native', 'authored', 'auto'})
+DISPLAY_THINKING_PROMPT_KEY = 'DISPLAY_THINKING_PROMPT'
+MAX_DISPLAY_THINKING_PROMPT_CHARS = 12000
 
 AUTHORED_THINKING_INSTRUCTION = """正式回复之前，先写一小段只用于界面展示的内心独白，并严格包在：
 
@@ -55,11 +57,61 @@ def get_display_thinking_mode(getter=None) -> str:
     return normalize_display_thinking_mode(value)
 
 
-def authored_thinking_instruction_suffix(mode: Any) -> str:
+def validate_display_thinking_prompt(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError('可见思绪 prompt 必须是文本')
+    prompt = value.strip()
+    if not prompt:
+        raise ValueError('可见思绪 prompt 不能为空')
+    if len(prompt) > MAX_DISPLAY_THINKING_PROMPT_CHARS:
+        raise ValueError(
+            '可见思绪 prompt 不能超过 %d 个字符'
+            % MAX_DISPLAY_THINKING_PROMPT_CHARS
+        )
+    if OPEN_TAG not in prompt or CLOSE_TAG not in prompt:
+        raise ValueError('可见思绪 prompt 必须同时包含 <思绪> 和 </思绪>')
+    if prompt.index(CLOSE_TAG) < prompt.index(OPEN_TAG):
+        raise ValueError('可见思绪 prompt 中 </思绪> 必须位于 <思绪> 之后')
+    return prompt
+
+
+def get_display_thinking_prompt(getter=None) -> str:
+    if getter is None:
+        import config_store
+        getter = config_store.get
+    try:
+        value = getter(DISPLAY_THINKING_PROMPT_KEY, '')
+        if isinstance(value, str) and value.strip():
+            return validate_display_thinking_prompt(value)
+    except Exception:
+        pass
+    return AUTHORED_THINKING_INSTRUCTION
+
+
+def get_display_thinking_snapshot(getter=None) -> tuple[str, str]:
+    """Read mode and effective authored prompt once for one provider turn."""
+    if getter is None:
+        import config_store
+        getter = config_store.get
+    return (
+        get_display_thinking_mode(getter),
+        get_display_thinking_prompt(getter),
+    )
+
+
+def authored_thinking_instruction_suffix(
+    mode: Any,
+    prompt: Any = None,
+) -> str:
     mode = normalize_display_thinking_mode(mode)
     if mode not in ('authored', 'auto'):
         return ''
-    return '\n\n' + AUTHORED_THINKING_INSTRUCTION
+    instruction = (
+        AUTHORED_THINKING_INSTRUCTION
+        if prompt is None
+        else validate_display_thinking_prompt(prompt)
+    )
+    return '\n\n' + instruction
 
 
 def append_display_thinking_suffix(content: Any, suffix: Any):
@@ -74,16 +126,31 @@ def append_display_thinking_suffix(content: Any, suffix: Any):
     return content
 
 
-def append_authored_thinking_instruction(content: Any, mode: Any):
+def append_authored_thinking_instruction(
+    content: Any,
+    mode: Any,
+    prompt: Any = None,
+):
     """Append the authored instruction without mutating caller-owned content."""
     return append_display_thinking_suffix(
-        content, authored_thinking_instruction_suffix(mode),
+        content, authored_thinking_instruction_suffix(mode, prompt),
     )
 
 
-def prepare_daily_display_thinking_plan(plan: Any, mode: Any):
+def prepare_daily_display_thinking_plan(
+    plan: Any,
+    mode: Any,
+    prompt: Any = None,
+):
     """Set a non-persistent provider-only Daily turn suffix."""
-    plan.provider_display_thinking_suffix = authored_thinking_instruction_suffix(mode)
+    plan.provider_display_thinking_suffix = authored_thinking_instruction_suffix(
+        mode, prompt,
+    )
+    plan.provider_display_thinking_prompt = (
+        AUTHORED_THINKING_INSTRUCTION
+        if prompt is None
+        else validate_display_thinking_prompt(prompt)
+    )
     return plan
 
 
