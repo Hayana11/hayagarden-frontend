@@ -2655,22 +2655,25 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
 
     def _transcript_stall_fake(self, path: Path, session_id: str, text: str,
                                *, stop_reason='end_turn',
-                               transcript_text=None, extra=None):
+                               transcript_text=None, extra=None,
+                               transcript_session=None, second_round=False,
+                               malformed=False):
         import cc_resident
 
         written = {'done': False}
         user_uuid = 'recovery-user-' + uuid.uuid4().hex
         assistant_uuid = 'recovery-assistant-' + uuid.uuid4().hex
+        event_session = transcript_session or session_id
 
         def write_terminal():
             if written['done']:
                 return
             user = json.loads(_line(
-                user_uuid, 'user', session=session_id, parent=None,
+                user_uuid, 'user', session=event_session, parent=None,
                 content='recovery user',
             ))
             assistant = json.loads(_line(
-                assistant_uuid, 'assistant', session=session_id,
+                assistant_uuid, 'assistant', session=event_session,
                 parent=user_uuid,
                 content=[{'type': 'text', 'text': (
                     text if transcript_text is None else transcript_text
@@ -2679,10 +2682,27 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             assistant['message']['stop_reason'] = stop_reason
             if extra:
                 assistant.update(extra)
-            _append_jsonl(path, [
+            lines = [
                 json.dumps(user, ensure_ascii=False),
                 json.dumps(assistant, ensure_ascii=False),
-            ])
+            ]
+            if second_round:
+                user2_uuid = 'recovery-user-2-' + uuid.uuid4().hex
+                assistant2_uuid = 'recovery-assistant-2-' + uuid.uuid4().hex
+                lines.extend([
+                    _line(
+                        user2_uuid, 'user', session=event_session,
+                        parent=assistant_uuid, content='second user',
+                    ),
+                    _line(
+                        assistant2_uuid, 'assistant', session=event_session,
+                        parent=user2_uuid,
+                        content=[{'type': 'text', 'text': 'second reply'}],
+                    ),
+                ])
+            if malformed:
+                lines.append('{"type":"assistant"')
+            _append_jsonl(path, lines)
             written['done'] = True
 
         class _FakeStaged:
@@ -2711,7 +2731,9 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
 
     def _run_transcript_stall_case(self, *, detached=False, text='complete',
                                    stop_reason='end_turn', extra=None,
-                                   transcript_text=None):
+                                   transcript_text=None, transcript_session=None,
+                                   second_round=False, malformed=False,
+                                   nonzero_offset=False):
         import gateway
 
         self._seed_source_and_forge()
@@ -2720,9 +2742,29 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         path = self._jsonl_path(target_session)
         visible = str(text)
         transcript = visible if transcript_text is None else str(transcript_text)
+        if nonzero_offset:
+            prefix = _line(
+                'recovery-prefix-' + uuid.uuid4().hex,
+                'system',
+                session=target_session,
+                parent=None,
+                content='prior transcript',
+            )
+            start_offset = _write_jsonl(path, [prefix])
+            conn = sqlite3.connect(self.db)
+            conn.execute(
+                'UPDATE context_claude_sessions SET scan_offset=? '
+                'WHERE context_id=? AND resident_generation=?',
+                (start_offset, int(intent['target_context_id']),
+                 int(intent['target_resident_generation'])),
+            )
+            conn.commit()
+            conn.close()
         fake = self._transcript_stall_fake(
             path, target_session, visible, stop_reason=stop_reason,
             transcript_text=transcript, extra=extra,
+            transcript_session=transcript_session,
+            second_round=second_round, malformed=malformed,
         )
         gateway_user_id = _insert_msg(self.db, 'hayana', 'recovery user')
         turn = {'user_message_id': gateway_user_id}
@@ -2795,6 +2837,53 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         complete.assert_not_called()
         abort.assert_called_once()
         # abort is intentionally mocked here; DB error persistence is covered by the existing abort regression tests.
+
+    def test_transcript_endturn_recovery_session_mismatch_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            transcript_session='wrong-session',
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_multi_round_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            second_round=True,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_malformed_terminal_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            malformed=True,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_unstable_eof_fail_closed(self):
+        def grow_transcript(_delay):
+            _append_jsonl(
+                self._jsonl_path(str(self._intent()['target_session_id'])),
+                [_line(
+                    'recovery-growth-' + uuid.uuid4().hex,
+                    'system',
+                    session=str(self._intent()['target_session_id']),
+                    parent=None,
+                    content='late growth',
+                )],
+            )
+
+        with mock.patch.object(ft_mod.time, 'sleep', side_effect=grow_transcript):
+            intent, _, complete, abort, _ = self._run_transcript_stall_case()
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_nonzero_offset(self):
+        intent, _, complete, abort, chunks = self._run_transcript_stall_case(
+            nonzero_offset=True,
+        )
+        complete.assert_called_once()
+        abort.assert_not_called()
+        self.assertIn('"t": "done", "ok": true', ''.join(chunks))
 
 
     def test_db_commit_then_swap_fail_recovery(self):
