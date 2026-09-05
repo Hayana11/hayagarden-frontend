@@ -1,25 +1,4 @@
-.chat-message-content {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  width: 100%;
-}
-
-.chat-message-content > * + * {
-  margin-top: 8px;
-}
-
-.chat-message-content-user {
-  width: auto;
-  max-width: 82%;
-  align-items: flex-end;
-}
-
-.chat-message-content-assistant {
-  align-items: flex-start;
-}
-
-.chat-message-content > .chat-media-group {
+.chat-media-group {
   flex: 0 0 auto;
 }
 
