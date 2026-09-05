@@ -132,6 +132,18 @@ const probeRecords = [];
   assertLegalScroll(c);
 }
 
+// T8: follow-latest intent is authoritative even when metadata says not following.
+{
+  const c = container({ scrollHeight: 1000, clientHeight: 500, scrollTop: 120 });
+  writeChatScroll(c, {
+    source: 'explicit-scroll-bottom',
+    intent: 'follow-latest',
+    followLatest: false,
+  });
+  assert.equal(c.scrollTop, c.scrollHeight - c.clientHeight);
+  assertLegalScroll(c);
+}
+
 assert.equal((screen.match(/resizeChatTextarea\(/g) || []).length, 2);
 assert.match(screen, /from ['"]\.\.\/lib\/chatScrollCoordinator['"]/);
 assert.match(screen, /source: 'search-jump'/);
@@ -166,4 +178,4 @@ assert.equal(probeRecords[0].source, 'textarea-resize');
 assert.equal(probeRecords[0].followLatest, true);
 assert.equal(probeRecords[0].textareaHeight, 120);
 
-console.log('test:chat-scroll-stability — T1-T7 all checks passed');
+console.log('test:chat-scroll-stability — T1-T8 all checks passed');
