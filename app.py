@@ -1530,6 +1530,62 @@ def save_persona():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+# ── Display thinking prompt ──
+
+@app.route('/api/profile/display-thinking-prompt', methods=['GET'])
+def get_display_thinking_prompt_config():
+    from chat.display_thinking import (
+        DISPLAY_THINKING_PROMPT_KEY,
+        get_display_thinking_prompt,
+        AUTHORED_THINKING_INSTRUCTION,
+    )
+    try:
+        return jsonify({
+            'ok': True,
+            'prompt': get_display_thinking_prompt(),
+            'default_prompt': AUTHORED_THINKING_INSTRUCTION,
+            'overridden': config_store.exists(DISPLAY_THINKING_PROMPT_KEY),
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/profile/display-thinking-prompt', methods=['PUT', 'DELETE'])
+def set_display_thinking_prompt_config():
+    from chat.display_thinking import (
+        DISPLAY_THINKING_PROMPT_KEY,
+        get_display_thinking_prompt,
+        validate_display_thinking_prompt,
+        AUTHORED_THINKING_INSTRUCTION,
+    )
+    if request.method == 'DELETE':
+        try:
+            config_store.delete(DISPLAY_THINKING_PROMPT_KEY)
+            return jsonify({
+                'ok': True,
+                'prompt': AUTHORED_THINKING_INSTRUCTION,
+                'default_prompt': AUTHORED_THINKING_INSTRUCTION,
+                'overridden': False,
+            })
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)}), 500
+
+    data = request.get_json(silent=True) or {}
+    try:
+        prompt = validate_display_thinking_prompt(data.get('prompt'))
+        config_store.set(DISPLAY_THINKING_PROMPT_KEY, prompt)
+        return jsonify({
+            'ok': True,
+            'prompt': get_display_thinking_prompt(),
+            'default_prompt': AUTHORED_THINKING_INSTRUCTION,
+            'overridden': True,
+        })
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 # ── User Profile (chatnest-compatible) ──
 
 @app.route('/api/profile', methods=['GET'])

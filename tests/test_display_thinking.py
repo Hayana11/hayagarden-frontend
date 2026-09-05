@@ -6,10 +6,14 @@ from unittest import mock
 
 from chat.display_thinking import (
     AUTHORED_THINKING_INSTRUCTION,
+    DISPLAY_THINKING_PROMPT_KEY,
     append_authored_thinking_instruction,
     filter_display_thinking_events,
     get_display_thinking_mode,
+    get_display_thinking_prompt,
+    get_display_thinking_snapshot,
     normalize_display_thinking_mode,
+    validate_display_thinking_prompt,
     prepare_daily_display_thinking_plan,
 )
 
@@ -494,6 +498,74 @@ class DisplayThinkingStreamTests(unittest.TestCase):
             text = content_text(text_content)
             self.assertIn('CURRENT', text)
             self.assertEqual(0, text.count(AUTHORED_THINKING_INSTRUCTION))
+
+    def test_r17_runtime_prompt_fallback_save_and_turn_snapshot(self):
+        custom = '<思绪>custom</思绪> 请保持简短。'
+        state = {'DISPLAY_THINKING_MODE': 'auto', DISPLAY_THINKING_PROMPT_KEY: ''}
+
+        def getter(key, default):
+            return state.get(key, default)
+
+        self.assertEqual(AUTHORED_THINKING_INSTRUCTION, get_display_thinking_prompt(getter))
+        state[DISPLAY_THINKING_PROMPT_KEY] = custom
+        self.assertEqual(custom, get_display_thinking_prompt(getter))
+
+        frozen = get_display_thinking_snapshot(getter)
+        state[DISPLAY_THINKING_PROMPT_KEY] = '<思绪>new</思绪>'
+        self.assertEqual(('auto', custom), frozen)
+        self.assertEqual('<思绪>new</思绪>', get_display_thinking_prompt(getter))
+
+    def test_r18_prompt_validation_and_owner_contract(self):
+        valid = '<思绪>custom</思绪> 请保持简短。'
+        self.assertEqual(valid, validate_display_thinking_prompt(valid))
+        for invalid in ('', '没有标签', '</思绪><思绪>反序'):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    validate_display_thinking_prompt(invalid)
+        self.assertEqual('hello', append_authored_thinking_instruction(
+            'hello', 'off', valid,
+        ))
+        prepared = append_authored_thinking_instruction(
+            'hello', 'auto', valid,
+        )
+        self.assertEqual(1, prepared.count(valid))
+        self.assertNotIn('[image]', prepared)
+
+    def test_r19_daily_plan_keeps_one_frozen_prompt_for_rebuild(self):
+        valid = '<思绪>daily</思绪> 请保持简短。'
+        plan = SimpleNamespace()
+        prepare_daily_display_thinking_plan(plan, 'authored', valid)
+        self.assertEqual(valid, plan.provider_display_thinking_prompt)
+        self.assertEqual(1, plan.provider_display_thinking_suffix.count(valid))
+
+    def test_r20_profile_route_does_not_touch_persona(self):
+        source = (ROOT / 'app.py').read_text(encoding='utf-8')
+        start = source.index("@app.route('/api/profile/display-thinking-prompt'")
+        end = source.index("# ── User Profile", start)
+        route = source[start:end]
+        self.assertIn("config_store.set(DISPLAY_THINKING_PROMPT_KEY", route)
+        self.assertIn("config_store.delete(DISPLAY_THINKING_PROMPT_KEY)", route)
+        self.assertNotIn('persona.md', route)
+        gateway = (ROOT / 'gateway.py').read_text(encoding='utf-8')
+        self.assertIn('get_display_thinking_snapshot()', gateway)
+        self.assertIn('display_thinking_prompt=display_thinking_prompt', gateway)
+
+    def test_r21_runtime_config_set_and_reset_falls_back_to_source_default(self):
+        import config_store
+        from tempfile import TemporaryDirectory
+
+        custom = '<思绪>stored</思绪> 请保持简短。'
+        original_db_path = config_store.DB_PATH
+        with TemporaryDirectory() as tmp:
+            try:
+                config_store.DB_PATH = str(Path(tmp) / 'runtime.sqlite3')
+                config_store._init_table()
+                config_store.set(DISPLAY_THINKING_PROMPT_KEY, custom)
+                self.assertEqual(custom, get_display_thinking_prompt())
+                config_store.delete(DISPLAY_THINKING_PROMPT_KEY)
+                self.assertEqual(AUTHORED_THINKING_INSTRUCTION, get_display_thinking_prompt())
+            finally:
+                config_store.DB_PATH = original_db_path
 
 
 if __name__ == '__main__':

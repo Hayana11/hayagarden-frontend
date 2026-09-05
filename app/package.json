@@ -11,6 +11,7 @@
     "test:daily-soft-window": "vite-node scripts/test-daily-soft-window.mjs",
     "test:daily-soft-window-machine": "vite-node scripts/test-daily-soft-window-machine.mjs",
     "test:manual-context-window": "vite-node scripts/test-manual-context-window.mjs",
+    "test:profile-display-thinking": "vite-node scripts/test-profile-display-thinking.mjs",
     "test:period-cycle": "vite-node scripts/test-period-cycle.mjs",
     "test:model-1a-provider-switch": "vite-node scripts/test-model-1a-provider-switch.mjs",
     "test:chat-effort": "node scripts/test-chat-effort.mjs",

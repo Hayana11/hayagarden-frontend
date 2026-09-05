@@ -9,6 +9,12 @@ import {
   type ToolCompanionTool,
 } from '../lib/toolCompanionHints';
 import { fetchCapabilityStates, type CapabilityState } from '../lib/capabilityStates';
+import {
+  fetchDisplayThinkingPrompt,
+  resetDisplayThinkingPrompt,
+  saveDisplayThinkingPrompt,
+  validateDisplayThinkingPrompt,
+} from '../lib/displayThinking';
 import { FONT_CN, FONT_DISPLAY } from '../lib/typography';
 import './ProfileScreen.css';
 
@@ -100,6 +106,12 @@ export function ProfileScreen() {
   const [draftPersona, setDraftPersona] = useState('');
   const [personaLoaded, setPersonaLoaded] = useState(false);
   const [personaLoadError, setPersonaLoadError] = useState('');
+  const [savedDisplayThinkingPrompt, setSavedDisplayThinkingPrompt] = useState('');
+  const [draftDisplayThinkingPrompt, setDraftDisplayThinkingPrompt] = useState('');
+  const [displayThinkingDefaultPrompt, setDisplayThinkingDefaultPrompt] = useState('');
+  const [displayThinkingLoaded, setDisplayThinkingLoaded] = useState(false);
+  const [displayThinkingLoadError, setDisplayThinkingLoadError] = useState('');
+  const [resetDisplayThinking, setResetDisplayThinking] = useState(false);
   const [savedHints, setSavedHints] = useState<ToolCompanionHints | null>(null);
   const [draftHints, setDraftHints] = useState<ToolCompanionHints | null>(null);
   const [toolHintsLoadError, setToolHintsLoadError] = useState('');
@@ -115,7 +127,9 @@ export function ProfileScreen() {
     [draftHints, savedHints],
   );
   const hasResetIntent = Object.values(resetCapabilities).some(Boolean);
-  const dirty = personaDirty || toolDirty || hasResetIntent;
+  const displayThinkingDirty = displayThinkingLoaded
+    && (draftDisplayThinkingPrompt !== savedDisplayThinkingPrompt || resetDisplayThinking);
+  const dirty = personaDirty || displayThinkingDirty || toolDirty || hasResetIntent;
   const characterCount = useMemo(() => Array.from(draftPersona).length, [draftPersona]);
   const lineCount = useMemo(() => draftPersona ? draftPersona.split(/\r?\n/).length : 0, [draftPersona]);
 
@@ -127,12 +141,14 @@ export function ProfileScreen() {
   const load = useCallback(async () => {
     setLoading(true);
     setPersonaLoadError('');
+    setDisplayThinkingLoadError('');
     setToolHintsLoadError('');
     setCapabilityStateLoadError('');
     setCapabilityStates([]);
     setResetCapabilities({});
-    const [personaResult, hintsResult, capabilityStateResult] = await Promise.allSettled([
+    const [personaResult, displayThinkingResult, hintsResult, capabilityStateResult] = await Promise.allSettled([
       http.get<PersonaResponse>('/api/persona'),
+      fetchDisplayThinkingPrompt(),
       fetchToolCompanionHints(),
       fetchCapabilityStates(),
     ]);
@@ -151,6 +167,26 @@ export function ProfileScreen() {
         : error instanceof Error ? error.message : '人设加载失败';
       setPersonaLoaded(false);
       setPersonaLoadError(detail);
+      showToast(detail);
+    }
+
+    if (displayThinkingResult.status === 'fulfilled' && displayThinkingResult.value.ok !== false) {
+      const response = displayThinkingResult.value;
+      const prompt = typeof response.prompt === 'string' ? response.prompt : '';
+      setSavedDisplayThinkingPrompt(prompt);
+      setDraftDisplayThinkingPrompt(prompt);
+      setDisplayThinkingDefaultPrompt(typeof response.default_prompt === 'string' ? response.default_prompt : '');
+      setDisplayThinkingLoaded(true);
+      setResetDisplayThinking(false);
+    } else {
+      const error = displayThinkingResult.status === 'rejected'
+        ? displayThinkingResult.reason
+        : new Error(displayThinkingResult.value.error || '可见思绪加载失败');
+      const detail = error instanceof HttpError && error.detail
+        ? error.detail
+        : error instanceof Error ? error.message : '可见思绪加载失败';
+      setDisplayThinkingLoaded(false);
+      setDisplayThinkingLoadError(detail);
       showToast(detail);
     }
 
@@ -214,12 +250,34 @@ export function ProfileScreen() {
       showToast('为了避免误操作，人设正文不能保存为空');
       return;
     }
+    if (displayThinkingDirty && !resetDisplayThinking) {
+      const validationError = validateDisplayThinkingPrompt(draftDisplayThinkingPrompt);
+      if (validationError) {
+        showToast(validationError);
+        return;
+      }
+    }
     setSaving(true);
     try {
       if (personaDirty) {
         const response = await http.post<PersonaResponse>('/api/persona', { content: draftPersona });
         if (response.ok === false) throw new Error(response.error || '人设保存失败');
         setSavedPersona(draftPersona);
+      }
+      if (displayThinkingDirty) {
+        const response = resetDisplayThinking
+          ? await resetDisplayThinkingPrompt()
+          : await saveDisplayThinkingPrompt(draftDisplayThinkingPrompt);
+        if (response.ok === false) throw new Error(response.error || '可见思绪保存失败');
+        const prompt = typeof response.prompt === 'string' ? response.prompt : draftDisplayThinkingPrompt;
+        setSavedDisplayThinkingPrompt(prompt);
+        setDraftDisplayThinkingPrompt(prompt);
+        setDisplayThinkingDefaultPrompt(
+          typeof response.default_prompt === 'string'
+            ? response.default_prompt
+            : displayThinkingDefaultPrompt,
+        );
+        setResetDisplayThinking(false);
       }
       let latest = savedHints ? cloneHints(savedHints) : null;
       if (draftHints && savedHints && (toolDirty || hasResetIntent)) {
@@ -251,6 +309,7 @@ export function ProfileScreen() {
       setResetCapabilities({});
       const messages = [];
       if (personaDirty) messages.push('费佳人设已保存，聊天网关正在重启');
+      if (displayThinkingDirty) messages.push('可见思绪已保存；下一轮聊天生效，未修改 persona.md');
       if (toolDirty || hasResetIntent) messages.push('工具直觉已保存；下一次 resident 启动时生效，未重启聊天网关');
       showToast(messages.join('；'));
     } catch (error) {
@@ -261,7 +320,22 @@ export function ProfileScreen() {
     } finally {
       setSaving(false);
     }
-  }, [dirty, draftHints, draftPersona, hasResetIntent, personaDirty, resetCapabilities, savedHints, saving, showToast, toolDirty]);
+  }, [
+    dirty,
+    displayThinkingDefaultPrompt,
+    displayThinkingDirty,
+    draftDisplayThinkingPrompt,
+    draftHints,
+    draftPersona,
+    hasResetIntent,
+    personaDirty,
+    resetDisplayThinking,
+    resetCapabilities,
+    savedHints,
+    saving,
+    showToast,
+    toolDirty,
+  ]);
 
   const editTool = useCallback((capabilityId: string, field: 'display_label' | 'companion_hint', value: string) => {
     setDraftHints((current) => current ? updateTool(current, capabilityId, { [field]: value }) : current);
@@ -323,6 +397,43 @@ export function ProfileScreen() {
                 <div className="profile-help-text">读取 persona.md 失败：{personaLoadError}。当前不展示伪造的人设内容，请稍后重新读取。</div>
               ) : (
                 <textarea className="profile-persona-editor" value={draftPersona} spellCheck={false} aria-label="费佳的完整人设正文" onChange={(event) => setDraftPersona(event.target.value)} />
+              )}
+            </div>
+          </section>
+
+          <section className="profile-section">
+            <div className="profile-persona-heading">
+              <div>
+                <div className="profile-section-title">可见思绪</div>
+                <div className="profile-help-text">控制回复前 &lt;思绪&gt;...&lt;/思绪&gt; 的写法。只影响界面展示的角色内心独白，不修改完整人设。</div>
+              </div>
+              <button
+                type="button"
+                className="profile-reload-button"
+                disabled={saving || !displayThinkingDefaultPrompt}
+                onClick={() => {
+                  setDraftDisplayThinkingPrompt(displayThinkingDefaultPrompt);
+                  setResetDisplayThinking(true);
+                }}
+              >
+                恢复默认
+              </button>
+            </div>
+            <div className="profile-persona-card">
+              {displayThinkingLoadError ? (
+                <div className="profile-help-text">读取可见思绪失败：{displayThinkingLoadError}。当前不展示伪造的 prompt，请稍后重新读取。</div>
+              ) : (
+                <textarea
+                  className="profile-persona-editor profile-thinking-editor"
+                  value={draftDisplayThinkingPrompt}
+                  spellCheck={false}
+                  aria-label="可见思绪 prompt"
+                  maxLength={12000}
+                  onChange={(event) => {
+                    setDraftDisplayThinkingPrompt(event.target.value);
+                    setResetDisplayThinking(false);
+                  }}
+                />
               )}
             </div>
           </section>

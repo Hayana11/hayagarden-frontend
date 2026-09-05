@@ -138,6 +138,16 @@ def set(key, value):
     conn.close()
 
 
+def delete(key):
+    """Remove a runtime override so callers can fall back to their source default."""
+    conn = sqlite3.connect(DB_PATH, timeout=3)
+    try:
+        conn.execute('DELETE FROM runtime_config WHERE key=?', (key,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def mutate(key, default, mutator):
     """在同一连接里 BEGIN IMMEDIATE 后读-改-写，避免并发丢更新。"""
     conn = sqlite3.connect(DB_PATH, timeout=3)
