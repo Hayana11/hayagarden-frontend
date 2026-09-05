@@ -5618,6 +5618,7 @@ def _stream_cc_first_turn(
         ingest_first_turn_text_delta,
         mark_first_turn_stdin_sent,
         recover_first_turn_handoff_pending,
+        attest_first_turn_transcript_terminal,
     )
 
     user_message_id = int(_turn_data['user_message_id'])
@@ -5806,6 +5807,68 @@ def _stream_cc_first_turn(
         )
         return _DRAIN_COMPLETED
 
+
+    _TRANSCRIPT_RECOVERY_NOT_PROVEN = 'TRANSCRIPT_RECOVERY_NOT_PROVEN'
+    _TRANSCRIPT_RECOVERY_COMPLETED = 'TRANSCRIPT_RECOVERY_COMPLETED'
+    _TRANSCRIPT_RECOVERY_FINALIZE_PENDING = 'TRANSCRIPT_RECOVERY_FINALIZE_PENDING'
+
+    def _recover_transcript_terminal() -> str:
+        """Recover only an attested durable no-tool end_turn before abort."""
+        nonlocal complete_started
+        if (
+            not first_released
+            or complete_started
+            or session is None
+            or not getattr(session, '_db_committed', False)
+            or not getattr(session, '_handoff_complete', False)
+        ):
+            return _TRANSCRIPT_RECOVERY_NOT_PROVEN
+        try:
+            attested = attest_first_turn_transcript_terminal(
+                session,
+                streamed_text=''.join(text_acc),
+                db_path=DB_PATH,
+            )
+        except Exception:
+            log.exception('first_turn transcript terminal attestation failed')
+            return _TRANSCRIPT_RECOVERY_NOT_PROVEN
+
+        complete_started = True
+        recovery_cache_info = json.dumps({
+            'first_turn_terminal_recovery': 'transcript_end_turn',
+            'provider_result_observed': False,
+        }, ensure_ascii=False, sort_keys=True)
+        try:
+            done = complete_first_turn_round(
+                session,
+                assistant_content=attested.assistant_content,
+                end_offset=attested.end_offset,
+                db_path=DB_PATH,
+                thinking=attested.thinking,
+                cache_info=recovery_cache_info,
+                choices='',
+                display_segments=display_segments.to_json(),
+            )
+        except Exception:
+            log.exception(
+                'first_turn transcript terminal recovery complete failed',
+            )
+            return _TRANSCRIPT_RECOVERY_FINALIZE_PENDING
+
+        log.info(
+            'first_turn_transcript_terminal_recovered '
+            'switch_request_id=%s first_turn_request_id=%s '
+            'target_context_id=%s resident_generation=%s '
+            'assistant_message_id=%s transcript_end_offset=%s',
+            switch_request_id,
+            ft_req,
+            session.target_context_id,
+            session.target_resident_generation,
+            done.assistant_message_id,
+            attested.end_offset,
+        )
+        return _TRANSCRIPT_RECOVERY_COMPLETED
+
     def _drain_first_turn_after_client_detach() -> str:
         """Keep consuming staged resident after SSE drop; avoid killing mid-round."""
         nonlocal event_iter
@@ -5838,6 +5901,10 @@ def _stream_cc_first_turn(
         """Return True when detach must not POSTCOMMIT_ABORT."""
         drain_result = _drain_first_turn_after_client_detach()
         if _detach_avoids_postcommit_abort(drain_result):
+            pending.clear()
+            return True
+        recovery_result = _recover_transcript_terminal()
+        if recovery_result != _TRANSCRIPT_RECOVERY_NOT_PROVEN:
             pending.clear()
             return True
         _close_event_iter()
@@ -6062,7 +6129,17 @@ def _stream_cc_first_turn(
             return
 
         # Post-commit incomplete stream: drain before killing staged resident.
-        if _detach_avoids_postcommit_abort(_drain_first_turn_after_client_detach()):
+        drain_result = _drain_first_turn_after_client_detach()
+        if _detach_avoids_postcommit_abort(drain_result):
+            pending.clear()
+            return
+
+        recovery_result = _recover_transcript_terminal()
+        if recovery_result == _TRANSCRIPT_RECOVERY_COMPLETED:
+            pending.clear()
+            yield _sse_json({'t': 'done', 'ok': True})
+            return
+        if recovery_result == _TRANSCRIPT_RECOVERY_FINALIZE_PENDING:
             pending.clear()
             return
 
@@ -6089,11 +6166,26 @@ def _stream_cc_first_turn(
         raise
     except Exception as exc:
         log.exception('first_turn stream failed')
-        _close_event_iter()
         if first_released:
+            recovery_result = _recover_transcript_terminal()
+            if recovery_result == _TRANSCRIPT_RECOVERY_COMPLETED:
+                pending.clear()
+                yield _sse_json({'t': 'done', 'ok': True})
+                return
+            if recovery_result == _TRANSCRIPT_RECOVERY_FINALIZE_PENDING:
+                pending.clear()
+                yield _sse_json({
+                    't': 'err',
+                    'd': '回答已保存但收尾未完成，请勿重复发送。',
+                    'code': 'FIRST_TURN_TRANSCRIPT_RECOVERY_FINALIZE_PENDING',
+                })
+                yield _sse_json({'t': 'done', 'ok': False})
+                return
             # Not FIRST_TURN_COMPLETE_FAILED (that path returns earlier, fail-closed).
+            _close_event_iter()
             _postcommit_terminal('stream_exception')
         elif session is not None:
+            _close_event_iter()
             _precommit('stream_exception')
         pending.clear()
         yield _sse_json({

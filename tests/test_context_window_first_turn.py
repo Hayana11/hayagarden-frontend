@@ -2652,6 +2652,482 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0], 'partial full')
 
+
+    def _transcript_stall_fake(self, path: Path, session_id: str, text: str,
+                               *, stop_reason='end_turn',
+                               transcript_text=None, extra=None,
+                               transcript_session=None, second_round=False,
+                               malformed=False, mutate_after_transcript=None):
+        import cc_resident
+
+        written = {'done': False}
+        user_uuid = 'recovery-user-' + uuid.uuid4().hex
+        assistant_uuid = 'recovery-assistant-' + uuid.uuid4().hex
+        event_session = transcript_session or session_id
+
+        def write_terminal():
+            if written['done']:
+                return
+            user = json.loads(_line(
+                user_uuid, 'user', session=event_session, parent=None,
+                content='recovery user',
+            ))
+            assistant = json.loads(_line(
+                assistant_uuid, 'assistant', session=event_session,
+                parent=user_uuid,
+                content=[{'type': 'text', 'text': (
+                    text if transcript_text is None else transcript_text
+                )}],
+            ))
+            assistant['message']['stop_reason'] = stop_reason
+            if extra:
+                assistant.update(extra)
+            lines = [
+                json.dumps(user, ensure_ascii=False),
+                json.dumps(assistant, ensure_ascii=False),
+            ]
+            if second_round:
+                user2_uuid = 'recovery-user-2-' + uuid.uuid4().hex
+                assistant2_uuid = 'recovery-assistant-2-' + uuid.uuid4().hex
+                lines.extend([
+                    _line(
+                        user2_uuid, 'user', session=event_session,
+                        parent=assistant_uuid, content='second user',
+                    ),
+                    _line(
+                        assistant2_uuid, 'assistant', session=event_session,
+                        parent=user2_uuid,
+                        content=[{'type': 'text', 'text': 'second reply'}],
+                    ),
+                ])
+            if malformed:
+                lines.append('{"type":"assistant"')
+            _append_jsonl(path, lines)
+            written['done'] = True
+            if mutate_after_transcript is not None:
+                mutate_after_transcript()
+
+        class _FakeStaged:
+            def send_turn(
+                self,
+                content,
+                commit_meta=None,
+                on_stdin_flushed=None,
+                idle_heartbeat_sec=None,
+                turn_lease=None,
+            ):
+                if on_stdin_flushed is not None:
+                    on_stdin_flushed()
+                try:
+                    yield ('text', text)
+                    write_terminal()
+                    raise cc_resident.ResidentError('simulated stall')
+                except GeneratorExit:
+                    write_terminal()
+                    raise cc_resident.ResidentError('simulated stall')
+
+            def _kill(self, quiet=True):
+                return None
+
+        return _FakeStaged()
+
+    def _run_transcript_stall_case(self, *, detached=False, text='complete',
+                                   stop_reason='end_turn', extra=None,
+                                   transcript_text=None, transcript_session=None,
+                                   second_round=False, malformed=False,
+                                   nonzero_offset=False, mutate_after_transcript=None,
+                                   non_default_chat_id=False):
+        import gateway
+
+        self._seed_source_and_forge()
+        intent = self._intent()
+        target_session = str(intent['target_session_id'])
+        path = self._jsonl_path(target_session)
+        visible = str(text)
+        transcript = visible if transcript_text is None else str(transcript_text)
+        if nonzero_offset:
+            prefix = _line(
+                'recovery-prefix-' + uuid.uuid4().hex,
+                'system',
+                session=target_session,
+                parent=None,
+                content='prior transcript',
+            )
+            start_offset = _write_jsonl(path, [prefix])
+            conn = sqlite3.connect(self.db)
+            target_row = dc.get_daily_context_by_id(
+                int(intent['target_context_id']), db_path=self.db,
+            )
+            conn.execute(
+                'UPDATE context_claude_sessions SET scan_offset=? '
+                'WHERE context_id=? AND resident_generation=?',
+                (start_offset, int(intent['target_context_id']),
+                 int(target_row['resident_generation'])),
+            )
+            conn.commit()
+            conn.close()
+        mutation = mutate_after_transcript
+        if non_default_chat_id:
+            prior_mutation = mutation
+
+            def mutation():
+                conn = sqlite3.connect(self.db)
+                try:
+                    conn.execute(
+                        'UPDATE context_switch_intents SET chat_id=? '
+                        'WHERE request_id=?',
+                        ('non-default-chat', self.switch_request_id),
+                    )
+                    conn.execute(
+                        'UPDATE daily_contexts SET chat_id=? WHERE id IN (?,?)',
+                        ('non-default-chat', self.context_id,
+                         int(intent['target_context_id'])),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                if prior_mutation is not None:
+                    prior_mutation()
+
+        fake = self._transcript_stall_fake(
+            path, target_session, visible, stop_reason=stop_reason,
+            transcript_text=transcript, extra=extra,
+            transcript_session=transcript_session,
+            second_round=second_round, malformed=malformed,
+            mutate_after_transcript=mutation,
+        )
+        gateway_user_id = _insert_msg(self.db, 'hayana', 'recovery user')
+        turn = {'user_message_id': gateway_user_id}
+        hooks = self._gateway_first_turn_hooks(fake)
+        with mock.patch.object(gateway, 'DB_PATH', self.db), \
+             mock.patch.object(gateway, '_gw_build_first_turn_hooks', return_value=hooks), \
+             mock.patch('chat.context_window_first_turn.complete_first_turn_round',
+                        wraps=ft_mod.complete_first_turn_round) as complete, \
+             mock.patch('chat.context_window_first_turn.abort_first_turn_postcommit') as abort:
+            gen = gateway._stream_cc_first_turn(turn, 'recovery user', self._intent())
+            if detached:
+                first = next(gen)
+                self.assertIn('"t": "text"', first)
+                gen.close()
+                chunks = []
+            else:
+                chunks = list(gen)
+            return self._intent(), target_session, complete, abort, chunks
+
+    def test_transcript_endturn_recovery_connected(self):
+        intent, target_session, complete, abort, chunks = (
+            self._run_transcript_stall_case(text='complete')
+        )
+        self.assertIn('"t": "done", "ok": true', ''.join(chunks))
+        complete.assert_called_once()
+        abort.assert_not_called()
+        self.assertIsNone(intent['first_turn_error_code'])
+        self.assertIsNotNone(intent['first_assistant_message_id'])
+        self.assertIsNotNone(intent['first_turn_completed_at'])
+        cache = sqlite3.connect(self.db).execute(
+            'SELECT cache_info FROM chat_messages WHERE id=?',
+            (int(intent['first_assistant_message_id']),),
+        ).fetchone()[0]
+        self.assertEqual(
+            json.loads(cache)['first_turn_terminal_recovery'],
+            'transcript_end_turn',
+        )
+
+    def test_transcript_endturn_recovery_detached(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            detached=True, text='complete',
+        )
+        complete.assert_called_once()
+        abort.assert_not_called()
+        self.assertIsNone(intent['first_turn_error_code'])
+        self.assertIsNotNone(intent['first_assistant_message_id'])
+        self.assertIsNotNone(intent['first_turn_completed_at'])
+
+    def test_transcript_endturn_recovery_stop_reason_missing_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            stop_reason=None,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+        # abort is intentionally mocked here; DB error persistence is covered by the existing abort regression tests.
+
+    def test_transcript_endturn_recovery_tool_use_fail_closed(self):
+        tool = {'message': {'content': [{'type': 'tool_use', 'id': 'tool-1'}]}}
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            extra=tool,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+        # abort is intentionally mocked here; DB error persistence is covered by the existing abort regression tests.
+
+    def test_transcript_endturn_recovery_text_mismatch_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            text='visible', transcript_text='different',
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+        # abort is intentionally mocked here; DB error persistence is covered by the existing abort regression tests.
+
+    def test_transcript_endturn_recovery_session_mismatch_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            transcript_session='wrong-session',
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_multi_round_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            second_round=True,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_malformed_terminal_fail_closed(self):
+        intent, _, complete, abort, _ = self._run_transcript_stall_case(
+            malformed=True,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_unstable_eof_fail_closed(self):
+        def grow_transcript(_delay):
+            _append_jsonl(
+                self._jsonl_path(str(self._intent()['target_session_id'])),
+                [_line(
+                    'recovery-growth-' + uuid.uuid4().hex,
+                    'system',
+                    session=str(self._intent()['target_session_id']),
+                    parent=None,
+                    content='late growth',
+                )],
+            )
+
+        with mock.patch.object(ft_mod.time, 'sleep', side_effect=grow_transcript):
+            intent, _, complete, abort, _ = self._run_transcript_stall_case()
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_endturn_recovery_nonzero_offset(self):
+        intent, _, complete, abort, chunks = self._run_transcript_stall_case(
+            nonzero_offset=True,
+        )
+        complete.assert_called_once()
+        abort.assert_not_called()
+        self.assertIn('"t": "done", "ok": true', ''.join(chunks))
+
+
+    def test_transcript_recovery_intent_target_context_mismatch_fail_closed(self):
+        def mutate():
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE context_switch_intents SET target_context_id=? '
+                    'WHERE request_id=?',
+                    (self.context_id, self.switch_request_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_intent_user_message_mismatch_fail_closed(self):
+        def mutate():
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE context_switch_intents SET first_user_message_id=? '
+                    'WHERE request_id=?',
+                    (999999, self.switch_request_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_target_switch_request_mismatch_fail_closed(self):
+        def mutate():
+            target_id = int(self._intent()['target_context_id'])
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE daily_contexts SET switch_request_id=? WHERE id=?',
+                    ('wrong-switch', target_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_registry_session_mismatch_fail_closed(self):
+        def mutate():
+            intent = self._intent()
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE context_claude_sessions SET claude_session_id=? '
+                    'WHERE context_id=? AND resident_generation=?',
+                    ('wrong-session', int(intent['target_context_id']),
+                     int(dc.get_daily_context_by_id(
+                         int(intent['target_context_id']), db_path=self.db,
+                     )['resident_generation'])),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_registry_and_transcript_session_collusion_fail_closed(self):
+        def mutate():
+            intent = self._intent()
+            target = dc.get_daily_context_by_id(
+                int(intent['target_context_id']), db_path=self.db,
+            )
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE context_claude_sessions SET claude_session_id=? '
+                    'WHERE context_id=? AND resident_generation=?',
+                    ('wrong-session', int(intent['target_context_id']),
+                     int(target['resident_generation'])),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            transcript_session='wrong-session',
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_user_mapping_mismatch_fail_closed(self):
+        def mutate():
+            intent = self._intent()
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE daily_message_contexts SET role=? '
+                    'WHERE message_id=?',
+                    ('assistant', int(intent['first_user_message_id'])),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_lease_message_mismatch_fail_closed(self):
+        def mutate():
+            intent = self._intent()
+            target = dc.get_daily_context_by_id(
+                int(intent['target_context_id']), db_path=self.db,
+            )
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE daily_resident_turn_leases SET request_message_id=? '
+                    'WHERE context_id=? AND resident_generation=?',
+                    (999999, int(intent['target_context_id']),
+                     int(target['resident_generation'])),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_registry_not_ready_fail_closed(self):
+        def mutate():
+            intent = self._intent()
+            target = dc.get_daily_context_by_id(
+                int(intent['target_context_id']), db_path=self.db,
+            )
+            conn = sqlite3.connect(self.db)
+            try:
+                conn.execute(
+                    'UPDATE context_claude_sessions SET scan_status=? '
+                    'WHERE context_id=? AND resident_generation=?',
+                    ('BLOCKED', int(intent['target_context_id']),
+                     int(target['resident_generation'])),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_registry_offset_mismatch_fail_closed(self):
+        def mutate():
+            intent = self._intent()
+            target = dc.get_daily_context_by_id(
+                int(intent['target_context_id']), db_path=self.db,
+            )
+            conn = sqlite3.connect(self.db)
+            try:
+                row = conn.execute(
+                    'SELECT scan_offset FROM context_claude_sessions '
+                    'WHERE context_id=? AND resident_generation=?',
+                    (int(intent['target_context_id']),
+                     int(target['resident_generation'])),
+                ).fetchone()
+                conn.execute(
+                    'UPDATE context_claude_sessions SET scan_offset=? '
+                    'WHERE context_id=? AND resident_generation=?',
+                    (int(row[0]) + 1, int(intent['target_context_id']),
+                     int(target['resident_generation'])),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        _, _, complete, abort, _ = self._run_transcript_stall_case(
+            mutate_after_transcript=mutate,
+        )
+        complete.assert_not_called()
+        abort.assert_called_once()
+
+    def test_transcript_recovery_non_default_chat_id_canonical_success(self):
+        _, _, complete, abort, chunks = self._run_transcript_stall_case(
+            non_default_chat_id=True,
+        )
+        complete.assert_called_once()
+        abort.assert_not_called()
+        self.assertIn('"t": "done", "ok": true', ''.join(chunks))
+
+
     def test_db_commit_then_swap_fail_recovery(self):
         """3) same-process HANDOFF_PENDING: first delta once, no second user/asst."""
         self._seed_source_and_forge()

@@ -5,9 +5,12 @@ from the start. Does not wire Gateway or production callers.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
 import datetime
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -1410,6 +1413,391 @@ def _target_cursor_matches_assistant_conn(
     return int(dict(row)['history_cursor_message_id']) == int(assistant_message_id)
 
 
+
+@dataclass(frozen=True)
+class FirstTurnTranscriptAttestation:
+    """Durable, exact-range proof for a terminal no-tool first turn."""
+
+    assistant_content: str
+    thinking: str
+    end_offset: int
+    terminal_event_uuid: str
+    terminal_stop_reason: str
+
+
+def attest_first_turn_transcript_terminal(
+    session: FirstTurnSession,
+    *,
+    streamed_text: str,
+    db_path: str,
+    stability_reads: int = 3,
+    stability_delay_s: float = 0.05,
+) -> FirstTurnTranscriptAttestation:
+    """Prove a completed no-tool turn from the target transcript before abort.
+
+    This helper is read-only. It deliberately refuses any ambiguous, growing,
+    mismatched, multi-round, sidechain, tool, or non-end_turn transcript.
+    """
+    from chat.claude_event_mapping import _assert_complete_terminal_round
+    from chat.claude_event_mapping import MappingRejected
+    from chat.claude_event_mapping import _content_has_text
+    from chat.claude_transcript_model import EventRole
+    from chat.claude_transcript_reader import read_transcript_range
+
+    def fail(reason: str):
+        raise FirstTurnError(
+            'transcript terminal attestation failed: ' + str(reason),
+            error_code='FIRST_TURN_TRANSCRIPT_ATTESTATION_FAILED',
+        )
+
+    if not session._db_committed or not session._handoff_complete:
+        fail('handoff_not_committed')
+    if not str(session.first_turn_request_id or '').strip():
+        fail('first_turn_request_missing')
+
+    conn = _connect(db_path)
+    try:
+        intent = _intent_row(conn, session.switch_request_id)
+        if intent is None:
+            fail('intent_missing')
+        if str(intent.get('request_id') or '') != str(
+            session.switch_request_id
+        ):
+            fail('intent_request_id_mismatch')
+        if str(intent.get('status') or '') != INTENT_COMMITTED:
+            fail('intent_not_committed')
+        if str(intent.get('first_turn_request_id') or '') != str(
+            session.first_turn_request_id
+        ):
+            fail('first_turn_request_mismatch')
+        if int(intent.get('first_user_message_id') or -1) != int(
+            session.user_message_id
+        ):
+            fail('first_user_message_mismatch')
+        if int(intent.get('target_context_id') or -1) != int(
+            session.target_context_id
+        ):
+            fail('intent_target_context_mismatch')
+        if intent.get('first_assistant_message_id') is not None:
+            fail('assistant_already_persisted')
+        if intent.get('first_turn_completed_at') is not None:
+            fail('already_completed')
+        if str(intent.get('first_turn_error_code') or ''):
+            fail('intent_already_terminalized')
+
+        target = _row_to_dict(conn.execute(
+            'SELECT * FROM daily_contexts WHERE id=?',
+            (int(session.target_context_id),),
+        ).fetchone())
+        if target is None:
+            fail('target_missing')
+        intent_target_session_id = str(intent.get('target_session_id') or '').strip()
+        if not intent_target_session_id:
+            fail('target_session_missing')
+        if (
+            int(target['context_epoch']) != int(session.target_context_epoch)
+            or int(target['resident_generation']) != int(session.target_resident_generation)
+        ):
+            fail('target_identity_mismatch')
+        if str(target.get('switch_request_id') or '') != str(
+            session.switch_request_id
+        ):
+            fail('target_switch_request_mismatch')
+        if str(target.get('claude_session_id') or '') != intent_target_session_id:
+            fail('target_session_mismatch')
+        if str(target.get('window_mode') or '') != WINDOW_MODE_MANUAL:
+            fail('target_not_manual')
+        if target.get('closed_at') is not None:
+            fail('target_closed')
+
+        locked_chat_id = str(intent.get('chat_id') or DEFAULT_CHAT_ID)
+        canonical = resolve_canonical_context_row_conn(
+            conn, chat_id=locked_chat_id, now=_shanghai_now(),
+        )
+        if canonical is None:
+            fail('target_not_canonical')
+        if (
+            int(canonical['id']) != int(session.target_context_id)
+            or int(canonical['context_epoch']) != int(session.target_context_epoch)
+            or int(canonical['resident_generation'])
+            != int(session.target_resident_generation)
+        ):
+            fail('canonical_target_identity_mismatch')
+
+        message_rows = conn.execute(
+            'SELECT context_id, context_epoch, resident_generation, role '
+            'FROM daily_message_contexts WHERE message_id=?',
+            (int(session.user_message_id),),
+        ).fetchall()
+        if len(message_rows) != 1:
+            fail('user_message_mapping_missing_or_ambiguous')
+        message_mapping = dict(message_rows[0])
+        if (
+            int(message_mapping['context_id']) != int(session.target_context_id)
+            or int(message_mapping['context_epoch'])
+            != int(session.target_context_epoch)
+            or int(message_mapping['resident_generation'])
+            != int(session.target_resident_generation)
+            or str(message_mapping.get('role') or '') != 'user'
+        ):
+            fail('user_message_mapping_mismatch')
+
+        lease_rows = conn.execute(
+            'SELECT lease_owner, request_message_id '
+            'FROM daily_resident_turn_leases '
+            'WHERE context_id=? AND resident_generation=?',
+            (int(session.target_context_id), int(session.target_resident_generation)),
+        ).fetchall()
+        if len(lease_rows) != 1:
+            fail('lease_missing_or_ambiguous')
+        lease = dict(lease_rows[0])
+        if (
+            str(lease.get('lease_owner') or '') != str(
+                session.first_turn_request_id
+            )
+            or int(lease.get('request_message_id') or -1)
+            != int(session.user_message_id)
+        ):
+            fail('lease_identity_mismatch')
+    finally:
+        conn.close()
+
+    registry = get_context_claude_session(
+        int(session.target_context_id),
+        int(session.target_resident_generation),
+        db_path=db_path,
+    )
+    if registry is None:
+        fail('registry_missing')
+    registry_session_id = str(registry.get('claude_session_id') or '').strip()
+    registered_path = str(registry.get('transcript_path') or '').strip()
+    actual_path = Path(session.jsonl_path)
+    if not registry_session_id:
+        fail('registry_session_missing')
+    if (
+        int(registry.get('context_id') or -1) != int(session.target_context_id)
+        or int(registry.get('context_epoch') or -1) != int(session.target_context_epoch)
+        or int(registry.get('resident_generation') or -1)
+        != int(session.target_resident_generation)
+    ):
+        fail('registry_identity_mismatch')
+    if registry_session_id != intent_target_session_id:
+        fail('registry_session_mismatch')
+    if str(registry.get('scan_status') or '') != 'READY':
+        fail('registry_not_ready')
+    if str(registry.get('scan_error_code') or '').strip():
+        fail('registry_scan_error')
+    if not registered_path:
+        fail('registry_transcript_missing')
+    if str(actual_path) != registered_path:
+        fail('transcript_path_mismatch')
+    if actual_path.is_symlink() or not actual_path.is_file():
+        fail('transcript_path_invalid')
+    start_offset = int(session.start_offset)
+    if start_offset < 0:
+        fail('start_offset_invalid')
+    if int(registry.get('scan_offset') or -1) != start_offset:
+        fail('registry_scan_offset_mismatch')
+
+    def _text_from_event(event) -> str:
+        message = event.raw.get('message')
+        if not isinstance(message, dict):
+            return ''
+        content = message.get('content')
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ''
+        return ''.join(
+            str(block.get('text') or '')
+            for block in content
+            if isinstance(block, dict) and block.get('type') == 'text'
+        )
+
+    def _thinking_from_event(event) -> str:
+        message = event.raw.get('message')
+        if not isinstance(message, dict):
+            return ''
+        content = message.get('content')
+        if not isinstance(content, list):
+            return ''
+        return ''.join(
+            str(block.get('thinking') or '')
+            for block in content
+            if isinstance(block, dict) and block.get('type') == 'thinking'
+        )
+
+    def _has_forbidden_terminal_state(raw) -> bool:
+        if not isinstance(raw, dict):
+            return True
+        message = raw.get('message')
+        if isinstance(message, dict) and str(
+            message.get('stop_reason') or ''
+        ) == 'tool_deferred':
+            return True
+        if str(raw.get('stop_reason') or '') == 'tool_deferred':
+            return True
+        if str(raw.get('subtype') or '') == 'tool_deferred':
+            return True
+        if str(raw.get('status') or '') in {
+            'waiting_for_confirmation', 'pending_approval',
+        }:
+            return True
+        if raw.get('approval_id') or raw.get('pending_approval'):
+            return True
+        message = raw.get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return False
+        return any(
+            isinstance(block, dict)
+            and (
+                block.get('type') in {'tool_use', 'tool_result', 'tool_deferred'}
+                or block.get('approval_id')
+                or block.get('status') in {
+                    'waiting_for_confirmation', 'pending_approval',
+                }
+            )
+            for block in content
+        )
+
+    def _signature(graph):
+        rows = []
+        for event in graph.events:
+            rows.append({
+                'uuid': event.event_uuid,
+                'parent': event.parent_uuid,
+                'session': event.session_id,
+                'role': str(event.event_role),
+                'type': str(event.event_type),
+                'sidechain': bool(event.is_sidechain),
+                'offset': event.byte_offset,
+                'raw': event.raw,
+            })
+        return hashlib.sha256(
+            json.dumps(rows, ensure_ascii=False, sort_keys=True).encode('utf-8')
+        ).hexdigest()
+
+    def _read_snapshot():
+        try:
+            before = int(actual_path.stat().st_size)
+            graph = read_transcript_range(actual_path, start_offset, before)
+            after = int(actual_path.stat().st_size)
+        except Exception as exc:
+            fail('reader:' + str(exc))
+        if before != after:
+            fail('transcript_growing')
+        if not graph.events:
+            fail('empty_range')
+        if any(str(event.session_id or '') != intent_target_session_id for event in graph.events):
+            fail('event_session_mismatch')
+        if graph.session_id and str(graph.session_id) != intent_target_session_id:
+            fail('graph_session_mismatch')
+        return before, graph, _signature(graph)
+
+    required_stable_reads = max(3, int(stability_reads))
+    stable_streak = 0
+    previous = None
+    stable = None
+    for read_index in range(required_stable_reads):
+        snapshot = _read_snapshot()
+        terminal_identity = None
+        if snapshot[1].events:
+            terminal = snapshot[1].events[-1]
+            terminal_identity = (
+                terminal.event_uuid,
+                str(terminal.event_role),
+                bool(terminal.is_sidechain),
+                (terminal.raw.get('message') or {}).get('stop_reason')
+                if isinstance(terminal.raw.get('message'), dict) else None,
+            )
+        identity = (snapshot[0], snapshot[2], terminal_identity)
+        if previous is not None and identity == previous:
+            stable_streak += 1
+        else:
+            stable_streak = 1
+        if stable_streak >= required_stable_reads:
+            stable = snapshot
+            break
+        previous = identity
+        if read_index < required_stable_reads - 1:
+            delay = (
+                float(stability_delay_s)
+                if read_index == 0
+                else 0.15
+            )
+            if delay > 0:
+                time.sleep(delay)
+    if stable is None:
+        fail('unstable_eof')
+
+    end_offset, graph, _ = stable
+    if end_offset < start_offset:
+        fail('offset_regressed')
+    if graph.unknown_uuids or any(
+        str(warning).startswith((
+            'multiple_session_ids:',
+            'unattributed_sidechain:',
+            'sidechain_parent_cycle:',
+        ))
+        for warning in graph.warnings
+    ):
+        fail('transcript_graph_ambiguous')
+    if len(graph.candidate_rounds) != 1:
+        fail('candidate_round_count')
+    if any(_has_forbidden_terminal_state(event.raw) for event in graph.events):
+        fail('forbidden_transcript_event')
+    round_ = graph.candidate_rounds[0]
+    if round_.has_sidechain_impact or not round_.event_uuids:
+        fail('sidechain_or_empty_round')
+    if graph.tool_uses or graph.tool_results:
+        fail('tool_round_not_supported')
+    try:
+        _assert_complete_terminal_round(graph, round_)
+    except MappingRejected as exc:
+        fail('incomplete_round:' + str(getattr(exc, 'error_code', exc)))
+    terminal = graph.by_uuid.get(round_.event_uuids[-1])
+    if terminal is None:
+        fail('terminal_missing')
+    if (
+        terminal.event_role != EventRole.ASSISTANT
+        or terminal.is_sidechain
+        or not _content_has_text(terminal)
+        or _has_forbidden_terminal_state(terminal.raw)
+    ):
+        fail('terminal_not_plain_assistant')
+    if any(
+        graph.by_uuid[uid].event_role == EventRole.UNKNOWN
+        or _has_forbidden_terminal_state(graph.by_uuid[uid].raw)
+        for uid in round_.event_uuids
+    ):
+        fail('unknown_or_forbidden_round_event')
+
+    message = terminal.raw.get('message')
+    if not isinstance(message, dict):
+        fail('terminal_message_missing')
+    if str(message.get('stop_reason') or '') != 'end_turn':
+        fail('terminal_stop_reason_not_end_turn')
+    assistant_content = _text_from_event(terminal)
+    if not assistant_content.strip():
+        fail('terminal_text_empty')
+    if str(streamed_text or '').strip() != assistant_content.strip():
+        fail('streamed_text_mismatch')
+
+    thinking = ''.join(
+        _thinking_from_event(graph.by_uuid[uid])
+        for uid in round_.event_uuids
+        if graph.by_uuid[uid].event_role == EventRole.ASSISTANT
+    )
+    return FirstTurnTranscriptAttestation(
+        assistant_content=assistant_content,
+        thinking=thinking,
+        end_offset=int(end_offset),
+        terminal_event_uuid=str(terminal.event_uuid),
+        terminal_stop_reason='end_turn',
+    )
+
+
 @_serialize_context_switch
 def complete_first_turn_round(
     session: FirstTurnSession,
@@ -1444,6 +1832,7 @@ def complete_first_turn_round(
         if str(intent.get('status') or '') != INTENT_COMMITTED:
             conn.rollback()
             raise FirstTurnError('not committed', error_code='FIRST_TURN_INTENT_STATUS')
+        chat_id = str(intent.get('chat_id') or DEFAULT_CHAT_ID)
         if intent.get('first_turn_completed_at') and intent.get('first_assistant_message_id'):
             assistant_id = int(intent['first_assistant_message_id'])
             if _last_good_checkpoint_complete(intent):
