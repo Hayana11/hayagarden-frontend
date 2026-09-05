@@ -2654,7 +2654,8 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
 
 
     def _transcript_stall_fake(self, path: Path, session_id: str, text: str,
-                               *, stop_reason='end_turn', extra=None):
+                               *, stop_reason='end_turn',
+                               transcript_text=None, extra=None):
         import cc_resident
 
         written = {'done': False}
@@ -2670,7 +2671,10 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             ))
             assistant = json.loads(_line(
                 assistant_uuid, 'assistant', session=session_id,
-                parent=user_uuid, content=[{'type': 'text', 'text': text}],
+                parent=user_uuid,
+                content=[{'type': 'text', 'text': (
+                    text if transcript_text is None else transcript_text
+                )}],
             ))
             assistant['message']['stop_reason'] = stop_reason
             if extra:
@@ -2717,7 +2721,8 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
         visible = str(text)
         transcript = visible if transcript_text is None else str(transcript_text)
         fake = self._transcript_stall_fake(
-            path, target_session, transcript, stop_reason=stop_reason, extra=extra,
+            path, target_session, visible, stop_reason=stop_reason,
+            transcript_text=transcript, extra=extra,
         )
         gateway_user_id = _insert_msg(self.db, 'hayana', 'recovery user')
         turn = {'user_message_id': gateway_user_id}

@@ -1518,6 +1518,13 @@ def attest_first_turn_transcript_terminal(
     actual_path = Path(session.jsonl_path)
     if not target_session_id:
         fail('registry_session_missing')
+    if (
+        int(registry.get('context_id') or -1) != int(session.target_context_id)
+        or int(registry.get('context_epoch') or -1) != int(session.target_context_epoch)
+        or int(registry.get('resident_generation') or -1)
+        != int(session.target_resident_generation)
+    ):
+        fail('registry_identity_mismatch')
     if not registered_path:
         fail('registry_transcript_missing')
     if str(actual_path) != registered_path:
