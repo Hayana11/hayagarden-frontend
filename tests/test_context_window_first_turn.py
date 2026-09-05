@@ -2752,11 +2752,14 @@ class ContextWindowFirstTurnTests(unittest.TestCase):
             )
             start_offset = _write_jsonl(path, [prefix])
             conn = sqlite3.connect(self.db)
+            target_row = dc.get_daily_context_by_id(
+                int(intent['target_context_id']), db_path=self.db,
+            )
             conn.execute(
                 'UPDATE context_claude_sessions SET scan_offset=? '
                 'WHERE context_id=? AND resident_generation=?',
                 (start_offset, int(intent['target_context_id']),
-                 int(intent['target_resident_generation'])),
+                 int(target_row['resident_generation'])),
             )
             conn.commit()
             conn.close()
