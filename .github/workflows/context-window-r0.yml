@@ -62,6 +62,11 @@ jobs:
             tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_stop_reason_missing_fail_closed \
             tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_tool_use_fail_closed \
             tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_text_mismatch_fail_closed
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_session_mismatch_fail_closed \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_multi_round_fail_closed \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_malformed_terminal_fail_closed \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_unstable_eof_fail_closed \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_nonzero_offset
 
       - name: Backend unit tests
         run: |
