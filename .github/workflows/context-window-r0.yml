@@ -54,6 +54,15 @@ jobs:
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
           touch /opt/frontend/.env
+      - name: Focused transcript end-turn recovery tests
+        run: |
+          python3 -m unittest \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_connected \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_detached \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_stop_reason_missing_fail_closed \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_tool_use_fail_closed \
+            tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_transcript_endturn_recovery_text_mismatch_fail_closed
+
       - name: Backend unit tests
         run: |
           python3 -m unittest \
