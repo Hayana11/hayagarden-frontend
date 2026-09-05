@@ -91,7 +91,7 @@ class ContextWindowFallbackTests(unittest.TestCase):
         )
         registry_before = sqlite3.connect(self.db).execute(
             '''SELECT claude_session_id, context_id, context_epoch,
-                      resident_generation, chat_id, cwd, source, scan_offset
+                      resident_generation, chat_id, transcript_path, source, scan_offset
                FROM context_claude_sessions
                WHERE context_id=? ORDER BY claude_session_id''',
             (int(fx['failed_target_id']),),
@@ -224,7 +224,7 @@ class ContextWindowFallbackTests(unittest.TestCase):
             ).fetchall()
             registry_after = conn.execute(
                 '''SELECT claude_session_id, context_id, context_epoch,
-                          resident_generation, chat_id, cwd, source, scan_offset
+                          resident_generation, chat_id, transcript_path, source, scan_offset
                    FROM context_claude_sessions
                    WHERE context_id=? ORDER BY claude_session_id''',
                 (int(fx['failed_target_id']),),
