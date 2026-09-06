@@ -1186,6 +1186,8 @@ export function ChatScreen() {
       : undefined;
     const ok = await runStream(null, {
       confirmation: { approvalId, pendingActionId, decision },
+      operationKind: 'confirmation',
+      operationIdentity: approvalId,
       realityContext,
     });
     if (decision === 'reject') {
@@ -1258,7 +1260,7 @@ export function ChatScreen() {
     clearLivePresentation(Boolean(ok && chatHandoffRef.current?.finalMessageId !== null));
     setSending(false);
     taRef.current?.focus();
-  }, [clearLivePresentation, input, pendingFiles, pendingImages, sending, uploadingFileCount, compressingImageCount, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+  }, [bindFinalMessage, clearLivePresentation, input, pendingFiles, pendingImages, sending, uploadingFileCount, compressingImageCount, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const sendChoice = useCallback(async (text: string): Promise<boolean> => {
     const choice = text.trim();
@@ -1290,7 +1292,7 @@ export function ChatScreen() {
     clearLivePresentation(Boolean(ok && chatHandoffRef.current?.finalMessageId !== null));
     setSending(false);
     return true;
-  }, [clearLivePresentation, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
+  }, [bindFinalMessage, clearLivePresentation, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
 
   const chooseOption = useCallback(async (text: string, msgId: number) => {
     if (sending || isChoicesAnswered(msgId, msgs)) return;
@@ -2101,6 +2103,7 @@ export function ChatScreen() {
     clearLivePresentation();
   */
   // live-segment- now resolves through the stable presentation slot.
+  // Durable display-text- segments retain their existing handoff slot.
   const activeHandoff = chatHandoffRef.current;
   const activeLive = liveRef.current;
   let handoffFinalMessageId = activeHandoff?.finalMessageId ?? null;
