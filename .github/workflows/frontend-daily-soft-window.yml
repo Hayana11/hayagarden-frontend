@@ -60,6 +60,7 @@ jobs:
           npm run test:chat-cold-start
           npm run test:chat-warm-return
           npm run test:chat-scroll-stability
+          npm run test:chat-stream-handoff
           npm run test:chat-capacity-header
           npm run test:task-timer-real-data-wiring
           npm run test:memory-cold-start

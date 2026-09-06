@@ -38,7 +38,8 @@
     "test:rewrite-finalize-retry": "vite-node scripts/test-rewrite-finalize-retry.mjs",
     "test:reality-lifecycle": "vite-node scripts/test-reality-lifecycle.mjs",
     "test:ledger": "vite-node scripts/test-ledger-integrity.mjs",
-    "test:ledger:e2e": "playwright test e2e/ledger-integrity.spec.ts e2e/dash-ledger.spec.ts"
+    "test:ledger:e2e": "playwright test e2e/ledger-integrity.spec.ts e2e/dash-ledger.spec.ts",
+    "test:chat-stream-handoff": "vite-node scripts/test-chat-stream-handoff.mjs"
   },
   "dependencies": {
     "react": "^19.2.7",
