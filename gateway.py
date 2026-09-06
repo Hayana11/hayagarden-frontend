@@ -5522,8 +5522,9 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
                     done_text, _thinking = payload[0], payload[1]
 
         final_text = str(done_text or ''.join(text_acc)).strip()
+        assistant_id = None
         if final_text:
-            _persist_turn_assistant(
+            assistant_id = _persist_turn_assistant(
                 {},
                 content=final_text,
                 thinking=''.join(think_acc),
@@ -5542,7 +5543,10 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
                     'resident_turn_count', 'respawn_reason',
                 ) if k in usage
             }})
-        yield _sse_json({'t': 'done', 'ok': True})
+        done_event = {'t': 'done', 'ok': True}
+        if assistant_id is not None:
+            done_event['assistant_message_id'] = assistant_id
+        yield _sse_json(done_event)
     except Exception as exc:
         yield _sse_json({'t': 'err', 'd': str(exc), 'code': str(exc)})
         yield _sse_json({'t': 'done', 'ok': False})
@@ -6109,7 +6113,10 @@ def _stream_cc_first_turn(
                         'first_turn_complete assistant_id=%s',
                         done.assistant_message_id,
                     )
-                    yield _sse_json({'t': 'done', 'ok': True})
+                    yield _sse_json({
+                        't': 'done', 'ok': True,
+                        'assistant_message_id': done.assistant_message_id,
+                    })
                     return
         except GeneratorExit:
             if _handle_client_detach():
@@ -6602,7 +6609,9 @@ def _stream_cc_daily_soft_window(
                     if _k in cc_usage:
                         _usage_evt[_k] = cc_usage[_k]
             yield 'data: ' + json.dumps(_usage_evt) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': True}) + SSE_END
+        yield 'data: ' + json.dumps({
+            't': 'done', 'ok': True, 'assistant_message_id': assistant_id,
+        }) + SSE_END
         return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True
@@ -6752,6 +6761,7 @@ def chat_stream():
             _released = [False]
             _persisted = [False]
             _turn_data: dict = {}
+            assistant_id = None
             phase = 'prepare_turn'
             try:
                 _request_data = request.get_json(silent=True) or {}
@@ -7095,6 +7105,8 @@ def chat_stream():
                                 _usage_evt[_k] = cc_usage[_k]
                     yield 'data: ' + json.dumps(_usage_evt) + SSE_END
                 _done = {'t': 'done', 'ok': bool(text)}
+                if assistant_id is not None and not _rewrite_id:
+                    _done['assistant_message_id'] = assistant_id
                 if _rewrite_id:
                     _done['rewrite_id'] = _rewrite_id
                 if not text and _rewrite_id:
@@ -7146,6 +7158,7 @@ def chat_stream():
         _conv = DEFAULT_CONVERSATION_ID
         _persisted = [False]
         _turn_data: dict = {}
+        assistant_id = None
         _request_data = request.get_json(silent=True) or {}
         request_reality_context = _normalize_reality_context(
             _request_data.pop('reality_context', None)
@@ -7222,6 +7235,7 @@ def chat_stream():
                 return re.sub(r'```tool_result\s.*?```\s*', '', t, flags=re.DOTALL).strip()
 
             def _persist(p_text, p_thinking):
+                nonlocal assistant_id
                 if not p_text or _persisted[0]:
                     return
                 _ci_payload = _build_cache_info_payload(
@@ -7640,6 +7654,8 @@ def chat_stream():
                                 pass
                         _persisted[0] = True
                     _done = {'t': 'done', 'ok': bool(_dt)}
+                    if assistant_id is not None and not _rewrite_id:
+                        _done['assistant_message_id'] = assistant_id
                     if _rewrite_id:
                         _done['rewrite_id'] = _rewrite_id
                     yield 'data: ' + json.dumps(_done) + SSE_END
