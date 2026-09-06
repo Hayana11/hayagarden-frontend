@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import {
+  bindChatHandoffFinalMessage,
+  buildChatPresentationEntries,
   canHandoffToFinal,
   clearChatStreamHandoff,
   createChatStreamHandoff,
-  finalOnlyContentMayAnimate,
   findAssistantAfter,
   findPersistedAssistantForHandoff,
   isLiveSegmentFresh,
@@ -40,10 +41,11 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
   const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
   handoff.freshSegmentIds.add(0);
   markChatHandoffFinalized(handoff);
+  assert.equal(bindChatHandoffFinalMessage(handoff, 11), true);
   const finalId = findPersistedAssistantForHandoff([
     message(10, 'user', 'prompt'),
     message(11, 'assistant', 'hello', [{ type: 'text', text: 'hello' }]),
-  ], handoff, [liveText]);
+  ], handoff);
   handoff.finalMessageId = finalId;
   assert.equal(finalId, 11);
   assert.equal(canHandoffToFinal(handoff), true);
@@ -53,11 +55,12 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
 {
   const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
   markChatHandoffFinalized(handoff);
+  assert.equal(bindChatHandoffFinalMessage(handoff, 12), true);
   assert.equal(findPersistedAssistantForHandoff([
     message(10, 'user', 'prompt'),
     message(11, 'assistant', 'unrelated', [{ type: 'text', text: 'other' }]),
     message(12, 'assistant', 'hello', [{ type: 'text', text: 'hello' }]),
-  ], handoff, [liveText]), 12);
+  ], handoff), 12);
 }
 
 // T4: segment order remains thinking, text, tool, text.
@@ -70,13 +73,14 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
     { id: 2, type: 'text', text: 'B' },
   ];
   markChatHandoffFinalized(handoff);
+  assert.equal(bindChatHandoffFinalMessage(handoff, 11), true);
   const final = message(11, 'assistant', 'AB', [
     { type: 'thinking', text: 'think' },
     { type: 'text', text: 'A' },
     { type: 'tool', toolIndex: 0 },
     { type: 'text', text: 'B' },
   ], [{ name: 'lookup', running: false }]);
-  assert.equal(findPersistedAssistantForHandoff([message(10, 'user', 'prompt'), final], handoff, segments), 11);
+  assert.equal(findPersistedAssistantForHandoff([message(10, 'user', 'prompt'), final], handoff), 11);
 }
 
 // T5: finalization disables live fresh animation eligibility.
@@ -88,11 +92,16 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
   assert.equal(isLiveSegmentFresh(handoff, liveText), false);
 }
 
-// T6: final-only content retains first-appearance eligibility.
+// T6: final-only content remains renderable without a live segment.
 {
   const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
-  assert.equal(finalOnlyContentMayAnimate([], false), true);
-  assert.equal(finalOnlyContentMayAnimate([liveText], true), false);
+  const entries = buildChatPresentationEntries({
+    messages: [message(11, 'assistant', 'final-only', [{ type: 'text', text: 'final-only' }])],
+    handoff,
+    finalMessageId: 11,
+    liveVisible: false,
+  });
+  assert.equal(entries.some((entry) => entry.kind === 'message' && entry.message.id === 11), true);
   assert.equal(thinkingStateKey(handoff, 0), presentationSegmentKey(handoff, 0) + '-thinking');
 }
 
@@ -149,4 +158,75 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
   assert.doesNotMatch(source, /\.at\(/);
 }
 
-console.log('test:chat-stream-handoff — T1-T12 all checks passed');
+// T13: normal live and final payloads occupy one unified keyed sibling slot.
+{
+  const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  const liveEntries = buildChatPresentationEntries({
+    messages: [message(10, 'user', 'prompt')],
+    handoff,
+    finalMessageId: null,
+    liveVisible: true,
+  });
+  const finalEntries = buildChatPresentationEntries({
+    messages: [
+      message(10, 'user', 'prompt'),
+      message(11, 'assistant', 'hello', [{ type: 'text', text: 'hello' }]),
+    ],
+    handoff,
+    finalMessageId: 11,
+    liveVisible: false,
+  });
+  const liveSlot = liveEntries.find((entry) => entry.kind === 'live');
+  const finalSlot = finalEntries.find((entry) => entry.kind === 'message' && entry.message.id === 11);
+  assert.equal(liveSlot?.key, handoff.presentationKey);
+  assert.equal(finalSlot?.key, handoff.presentationKey);
+  assert.equal(liveSlot?.key, finalSlot?.key);
+}
+
+// T14: canonical final text may differ from live markers while authoritative ID binds.
+{
+  const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  markChatHandoffFinalized(handoff);
+  assert.equal(bindChatHandoffFinalMessage(handoff, 12), true);
+  const live = [{ id: 0, type: 'text', text: '正文[[SAVE: x]]' }];
+  const final = message(12, 'assistant', '正文', [{ type: 'text', text: '正文' }]);
+  assert.equal(findPersistedAssistantForHandoff([final], handoff), 12);
+  assert.notEqual(live[0].text, final.text);
+}
+
+// T15: authoritative ID isolates the current Chat final from an unrelated assistant row.
+{
+  const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  markChatHandoffFinalized(handoff);
+  assert.equal(bindChatHandoffFinalMessage(handoff, 42), true);
+  const background = message(41, 'assistant', 'workspace update', [{ type: 'text', text: 'workspace update' }]);
+  const current = message(42, 'assistant', 'current reply', [{ type: 'text', text: 'current reply' }]);
+  assert.equal(findPersistedAssistantForHandoff([background, current], handoff), 42);
+  assert.notEqual(findPersistedAssistantForHandoff([background, current], handoff), background.id);
+}
+
+// T16: production ChatScreen consumes the unified presentation-entry collection.
+{
+  const source = await (await import('node:fs/promises')).readFile(
+    new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8',
+  );
+  assert.match(source, /buildChatPresentationEntries\(\{/);
+  assert.match(source, /const rendered = presentationEntries\.map/);
+  assert.doesNotMatch(source, /\{rendered\}[\\s\\S]*renderLive\(activeLive, activeHandoff\)/);
+  const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  const before = buildChatPresentationEntries({
+    messages: [message(10, 'user', 'prompt')],
+    handoff,
+    finalMessageId: null,
+    liveVisible: true,
+  });
+  const after = buildChatPresentationEntries({
+    messages: [message(10, 'user', 'prompt'), message(11, 'assistant', 'canonical', [])],
+    handoff,
+    finalMessageId: 11,
+    liveVisible: false,
+  });
+  assert.equal(before.find((entry) => entry.kind === 'live')?.key, after.find((entry) => entry.kind === 'message')?.key);
+}
+
+console.log('test:chat-stream-handoff — T1-T16 all checks passed');
