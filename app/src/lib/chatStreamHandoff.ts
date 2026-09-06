@@ -113,12 +113,14 @@ function liveMatchesPersisted(message: ChatMsg, liveSegments: LiveSegment[]): bo
   if (persisted.length !== liveSegments.length) return false;
   return liveSegments.every((segment, index) => {
     const candidate = persisted[index];
-    if (!candidate || candidate.type !== segment.type) return false;
-    if (segment.type === 'tool' && candidate.type === 'tool') {
+    if (!candidate) return false;
+    if (segment.type === 'tool') {
+      if (candidate.type !== 'tool') return false;
       return candidate.toolIndex === segment.idx
         && normalizedToolName(candidate.tool) === normalizedToolName(segment.tool);
     }
-    return candidate.type === segment.type && candidate.text === segment.text;
+    if (candidate.type === 'tool') return false;
+    return candidate.text === segment.text;
   });
 }
 
