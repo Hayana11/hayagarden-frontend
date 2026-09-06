@@ -2104,6 +2104,10 @@ export function ChatScreen() {
   */
   // live-segment- now resolves through the stable presentation slot.
   // Durable display-text- segments retain their existing handoff slot.
+  /*
+  await refetchLatest();
+    clearLivePresentation();
+  */
   const activeHandoff = chatHandoffRef.current;
   const activeLive = liveRef.current;
   let handoffFinalMessageId = activeHandoff?.finalMessageId ?? null;
