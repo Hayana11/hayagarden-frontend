@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
-  bindChatHandoffFinalMessage,
   buildChatPresentationEntries,
+  commitChatPresentationBinding,
   canHandoffToFinal,
   clearChatStreamHandoff,
   createChatStreamHandoff,
@@ -11,6 +11,7 @@ import {
   markChatHandoffFailed,
   markChatHandoffFinalized,
   presentationSegmentKey,
+  pruneChatPresentationBindings,
   thinkingStateKey,
 } from '../src/lib/chatStreamHandoff.ts';
 
@@ -41,7 +42,7 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
   const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
   handoff.freshSegmentIds.add(0);
   markChatHandoffFinalized(handoff);
-  assert.equal(bindChatHandoffFinalMessage(handoff, 11), true);
+  assert.equal(commitChatPresentationBinding(handoff, 11, new Map()), true);
   const finalId = findPersistedAssistantForHandoff([
     message(10, 'user', 'prompt'),
     message(11, 'assistant', 'hello', [{ type: 'text', text: 'hello' }]),
@@ -55,7 +56,7 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
 {
   const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
   markChatHandoffFinalized(handoff);
-  assert.equal(bindChatHandoffFinalMessage(handoff, 12), true);
+  assert.equal(commitChatPresentationBinding(handoff, 12, new Map()), true);
   assert.equal(findPersistedAssistantForHandoff([
     message(10, 'user', 'prompt'),
     message(11, 'assistant', 'unrelated', [{ type: 'text', text: 'other' }]),
@@ -73,7 +74,7 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
     { id: 2, type: 'text', text: 'B' },
   ];
   markChatHandoffFinalized(handoff);
-  assert.equal(bindChatHandoffFinalMessage(handoff, 11), true);
+  assert.equal(commitChatPresentationBinding(handoff, 11, new Map()), true);
   const final = message(11, 'assistant', 'AB', [
     { type: 'thinking', text: 'think' },
     { type: 'text', text: 'A' },
@@ -187,7 +188,7 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
 {
   const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
   markChatHandoffFinalized(handoff);
-  assert.equal(bindChatHandoffFinalMessage(handoff, 12), true);
+  assert.equal(commitChatPresentationBinding(handoff, 12, new Map()), true);
   const live = [{ id: 0, type: 'text', text: '正文[[SAVE: x]]' }];
   const final = message(12, 'assistant', '正文', [{ type: 'text', text: '正文' }]);
   assert.equal(findPersistedAssistantForHandoff([final], handoff), 12);
@@ -198,7 +199,7 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
 {
   const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
   markChatHandoffFinalized(handoff);
-  assert.equal(bindChatHandoffFinalMessage(handoff, 42), true);
+  assert.equal(commitChatPresentationBinding(handoff, 42, new Map()), true);
   const background = message(41, 'assistant', 'workspace update', [{ type: 'text', text: 'workspace update' }]);
   const current = message(42, 'assistant', 'current reply', [{ type: 'text', text: 'current reply' }]);
   assert.equal(findPersistedAssistantForHandoff([background, current], handoff), 42);
@@ -232,4 +233,81 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
   );
 }
 
-console.log('test:chat-stream-handoff — T1-T16 all checks passed');
+
+// T17: authoritative presentation binding survives the next turn and a refetch.
+{
+  const presentationKeys = new Map();
+  const first = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  const second = createChatStreamHandoff({ kind: 'send', userMessageId: 12 });
+  markChatHandoffFinalized(first);
+  assert.equal(commitChatPresentationBinding(first, 11, presentationKeys), true);
+  pruneChatPresentationBindings(presentationKeys, [
+    message(11, 'assistant', 'first reply', [{ type: 'text', text: 'first reply' }]),
+  ]);
+  assert.equal(presentationKeys.get(11), first.presentationKey);
+  assert.notEqual(first.presentationKey, second.presentationKey);
+}
+
+// T18: refetch pruning removes stale bindings but retains every current message ID.
+{
+  const presentationKeys = new Map([
+    [11, 'presentation-11'],
+    [12, 'presentation-12'],
+    [999, 'stale-presentation'],
+  ]);
+  pruneChatPresentationBindings(presentationKeys, [
+    message(11, 'assistant', 'reply 11', []),
+    message(12, 'assistant', 'reply 12', []),
+  ]);
+  assert.equal(presentationKeys.get(11), 'presentation-11');
+  assert.equal(presentationKeys.get(12), 'presentation-12');
+  assert.equal(presentationKeys.has(999), false);
+  assert.equal(presentationKeys.size, 2);
+}
+
+// T19: an authoritative ID may arrive before its row; live stays visible until the row mounts.
+{
+  const presentationKeys = new Map();
+  const handoff = createChatStreamHandoff({ kind: 'send', userMessageId: 10 });
+  markChatHandoffFinalized(handoff);
+  assert.equal(commitChatPresentationBinding(handoff, 11, presentationKeys), true);
+  const beforeRow = buildChatPresentationEntries({
+    messages: [message(10, 'user', 'prompt')],
+    handoff,
+    finalMessageId: handoff.finalMessageId,
+    liveVisible: true,
+    presentationKeys,
+  });
+  assert.equal(beforeRow.some((entry) => entry.kind === 'live'), true);
+  const withRow = buildChatPresentationEntries({
+    messages: [
+      message(10, 'user', 'prompt'),
+      message(11, 'assistant', 'reply', [{ type: 'text', text: 'reply' }]),
+    ],
+    handoff,
+    finalMessageId: handoff.finalMessageId,
+    liveVisible: false,
+    presentationKeys,
+  });
+  assert.equal(withRow.some((entry) => entry.kind === 'live'), false);
+  assert.equal(
+    withRow.find((entry) => entry.kind === 'message' && entry.message.id === 11)?.key,
+    handoff.presentationKey,
+  );
+}
+
+// T20: live and final render through the same immediate .chat-msg shell.
+{
+  const source = await (await import('node:fs/promises')).readFile(
+    new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8',
+  );
+  const liveSource = source.slice(source.indexOf('function renderLive'), source.indexOf('\n  // Modern:', source.indexOf('function renderLive')));
+  assert.match(liveSource, /return \(\s*<div className="chat-msg/);
+  assert.doesNotMatch(liveSource, /<div key=\{presentationKey\}>/);
+  assert.match(source, /const knownFinalMessageId/);
+  assert.match(source, /const mountedFinalMessageId/);
+  assert.match(source, /presentationSegmentKey\(presentationKey, index\)/);
+  assert.match(source, /thinkingStateKey\(presentationKey, index\)/);
+}
+
+console.log('test:chat-stream-handoff — T1-T20 all checks passed');
