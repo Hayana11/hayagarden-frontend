@@ -63,12 +63,24 @@ export function findAssistantAfter(messages: ChatMsg[], sourceMessageId: number 
   return candidate?.id ?? null;
 }
 
-export function presentationSegmentKey(handoff: ChatStreamHandoff, segmentIndex: number): string {
-  return handoff.presentationKey + '-segment-' + segmentIndex;
+function handoffPresentationKey(
+  handoffOrKey: Pick<ChatStreamHandoff, 'presentationKey'> | string,
+): string {
+  return typeof handoffOrKey === 'string' ? handoffOrKey : handoffOrKey.presentationKey;
 }
 
-export function thinkingStateKey(handoff: ChatStreamHandoff, segmentIndex: number): string {
-  return presentationSegmentKey(handoff, segmentIndex) + '-thinking';
+export function presentationSegmentKey(
+  handoffOrKey: Pick<ChatStreamHandoff, 'presentationKey'> | string,
+  segmentIndex: number,
+): string {
+  return handoffPresentationKey(handoffOrKey) + '-segment-' + segmentIndex;
+}
+
+export function thinkingStateKey(
+  handoffOrKey: Pick<ChatStreamHandoff, 'presentationKey'> | string,
+  segmentIndex: number,
+): string {
+  return presentationSegmentKey(handoffOrKey, segmentIndex) + '-thinking';
 }
 
 export function isLiveSegmentFresh(handoff: ChatStreamHandoff, segment: LiveSegment): boolean {
@@ -79,22 +91,31 @@ export function canHandoffToFinal(handoff: ChatStreamHandoff): boolean {
   return handoff.terminal === 'success' && handoff.finalizationConfirmed && handoff.finalMessageId !== null;
 }
 
-export function finalOnlyContentMayAnimate(liveSegments: LiveSegment[], finalContentWasLive: boolean): boolean {
-  return !finalContentWasLive || liveSegments.length === 0;
-}
-
 export type ChatPresentationEntry =
   | { kind: 'date'; key: string; dateKey: string; messageId: number }
   | { kind: 'message'; key: string; message: ChatMsg; presentationKey: string }
   | { kind: 'live'; key: string; presentationKey: string };
 
-export function bindChatHandoffFinalMessage(
+export function commitChatPresentationBinding(
   handoff: ChatStreamHandoff,
   assistantMessageId: number | null | undefined,
+  presentationKeys: Map<number, string>,
 ): boolean {
   if (!Number.isSafeInteger(assistantMessageId) || Number(assistantMessageId) <= 0) return false;
-  handoff.finalMessageId = Number(assistantMessageId);
+  const finalMessageId = Number(assistantMessageId);
+  handoff.finalMessageId = finalMessageId;
+  presentationKeys.set(finalMessageId, handoff.presentationKey);
   return true;
+}
+
+export function pruneChatPresentationBindings(
+  presentationKeys: Map<number, string>,
+  retainedMessages: ChatMsg[],
+): void {
+  const retainedIds = new Set(retainedMessages.map((message) => message.id));
+  for (const messageId of presentationKeys.keys()) {
+    if (!retainedIds.has(messageId)) presentationKeys.delete(messageId);
+  }
 }
 
 export function buildChatPresentationEntries(args: {
