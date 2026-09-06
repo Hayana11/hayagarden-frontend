@@ -133,8 +133,6 @@ import {
   markChatHandoffFinalized,
   type ChatHandoffKind,
   type ChatStreamHandoff,
-  presentationSegmentKey,
-  thinkingStateKey,
 } from '../lib/chatStreamHandoff';
 import { installObjectHasOwnCompat } from '../lib/objectHasOwnCompat';
 import ReactMarkdown, { type Components } from 'react-markdown';
@@ -1904,17 +1902,11 @@ export function ChatScreen() {
     return (
       <div key={presentationKey + '-segments'} className="vstack vstack-12">
         {m.displaySegments.map((segment, index) => {
-          const segmentKey = presentationSegmentKey(
-            chatHandoffRef.current || createChatStreamHandoff({ kind: 'send', userMessageId: m.id }),
-            index,
-          );
+          const segmentKey = presentationKey + '-segment-' + index;
           if (segment.type === 'thinking') {
             return (
               <Fragment key={segmentKey}>
-                {renderThinkBlock(m, segment.text, thinkingStateKey(
-                  chatHandoffRef.current || createChatStreamHandoff({ kind: 'send', userMessageId: m.id }),
-                  index,
-                ))}
+                {renderThinkBlock(m, segment.text, segmentKey + '-thinking')}
               </Fragment>
             );
           }
