@@ -741,6 +741,7 @@ export function ChatScreen() {
     if (gen !== coldStartRaceRef.current.historyGen) return null;
     if (!mountedRef.current) return null;
     onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
+    presentationByMessageRef.current.clear();
     setMsgs(page.messages);
     setHasMoreBefore(page.hasMoreBefore);
     scheduleAfterFirstPaint(() => {
@@ -759,6 +760,7 @@ export function ChatScreen() {
       if (gen !== coldStartRaceRef.current.historyGen) return;
       if (!mountedRef.current) return;
       onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
+      presentationByMessageRef.current.clear();
       const reconciled = reconcileChatWarmReturn(
         { messages: msgsRef.current, hasMoreBefore: hasMoreBeforeRef.current },
         page,
@@ -1053,6 +1055,7 @@ export function ChatScreen() {
       pendingImagesRef.current = [];
       compressingImageIdsRef.current.clear();
       mountedRef.current = false;
+      presentationByMessageRef.current.clear();
       cancelInFlightWarmUpState(coldStartRaceRef.current);
       bumpHistoryGenState(coldStartRaceRef.current);
       warmUpInflightRef.current = null;
