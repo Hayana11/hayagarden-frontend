@@ -4,6 +4,7 @@
 // (branch/switch, regen prepare/finalize), edit-with-truncate, model catalog.
 // Mounted at /dash/chat, parallel to the legacy /chat page.
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type UIEvent } from 'react';
+import type { ReactElement } from 'react';
 import { Link } from 'react-router-dom';
 import { ROUTES } from '../navigation';
 import { CarryoverModal } from '../components/dailySoftWindow';
@@ -2156,7 +2157,7 @@ export function ChatScreen() {
           : renderAssistantMsg(message, entry.presentationKey)}
       </div>
     );
-  }).filter((entry): entry is React.ReactElement => entry !== null);
+  }).filter((entry): entry is ReactElement => entry !== null);
   const toolbarIcon = compactToolbar ? 32 : 35;
   const modalUiState: SoftWindowUiState =
     manualWindow.uiState === 'probing' || manualWindow.uiState === 'idle'
