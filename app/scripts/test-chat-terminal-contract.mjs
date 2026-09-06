@@ -16,7 +16,6 @@ globalThis.fetch = async () => new Response([
   'data: {"t":"ping"}\n\n',
   'data: {"t":"text","d":"partial"}\n\n',
   'data: {"t":"err","d":"回复收尾异常，已保留收到的内容，可以继续发送。","code":"result_missing_after_end_turn"}\n\n',
-  'data: {"t":"done","ok":false}\n\n',
 ].join(''), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 
 try {
