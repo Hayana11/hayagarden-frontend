@@ -1936,6 +1936,7 @@ export function ChatScreen() {
   }
 
 
+  // Durable-order contract: renderOrderedAssistantContent(m) ?? renderLegacyAssistantContent(m).
   function renderAssistantMsg(m: ChatMsg, presentationKey = String(m.id)) {
     const usage = m.cacheInfo;
     const cache = cacheLabel(usage);
