@@ -310,4 +310,29 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
   assert.match(source, /thinkingStateKey\(presentationKey, index\)/);
 }
 
-console.log('test:chat-stream-handoff — T1-T20 all checks passed');
+
+const gatewaySource = await (await import('node:fs/promises')).readFile(
+  new URL('../../gateway.py', import.meta.url), 'utf8',
+);
+
+// Gateway contract: successful persisted paths expose the real assistant ID.
+assert.match(
+  gatewaySource,
+  /yield _sse_json\(\{\s*'t': 'done', 'ok': True,\s*'assistant_message_id': done\.assistant_message_id,/s,
+);
+assert.match(
+  gatewaySource,
+  /done_event = \{'t': 'done', 'ok': True\}[\s\S]{0,240}assistant_message_id/s,
+);
+
+// Terminal P0 result-loss remains an error-only abnormal path with no fabricated success ID.
+const resultMissingStart = gatewaySource.indexOf(
+  "if getattr(exc, 'error_code', None) == 'result_missing_after_end_turn'",
+);
+assert.notEqual(resultMissingStart, -1);
+const resultMissingBlock = gatewaySource.slice(resultMissingStart, gatewaySource.indexOf(
+  "if _daily_plan:", resultMissingStart,
+));
+assert.doesNotMatch(resultMissingBlock, /assistant_message_id/);
+
+console.log('test:chat-stream-handoff — T1-T20 + gateway terminal ID contract all checks passed');
