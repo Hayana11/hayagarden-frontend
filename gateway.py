@@ -6295,6 +6295,7 @@ def _stream_cc_daily_soft_window(
     text_acc: list[str] = []
     think_acc: list[str] = []
     assistant_persisted = False
+    cc_tool_calls = []
 
     def _rescue_and_abort(error_code, *, respawn=True):
         nonlocal assistant_persisted
