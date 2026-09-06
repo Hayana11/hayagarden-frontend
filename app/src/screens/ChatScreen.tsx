@@ -1343,7 +1343,7 @@ export function ChatScreen() {
       }
       setSending(false);
     },
-    [clearLivePresentation, sending, refetchLatest, runStream, showToast],
+    [bindFinalMessage, clearLivePresentation, sending, refetchLatest, runStream, showToast],
   );
 
   const saveEdit = useCallback(
