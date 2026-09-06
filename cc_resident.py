@@ -1311,10 +1311,22 @@ class ResidentSession:
                         terminal_reason[0] = 'result_missing_after_end_turn'
                         self._kill(quiet=True)
                         break
-                    poll_interval = heartbeat_interval if use_idle_heartbeat else 0.2
-                    ready, _, _ = select.select(
-                        [proc.stdout], [], [], poll_interval,
-                    )
+                    # Keep the established blocking readline contract for
+                    # ordinary turns. Poll only when a timer must wake us for
+                    # synthetic heartbeats or the post-end_turn result grace.
+                    polling_required = use_idle_heartbeat or terminal.end_turn_seen
+                    ready = True
+                    if polling_required:
+                        poll_interval = heartbeat_interval if use_idle_heartbeat else 0.2
+                        try:
+                            ready, _, _ = select.select(
+                                [proc.stdout], [], [], poll_interval,
+                            )
+                        except (AttributeError, OSError, TypeError, ValueError):
+                            # In-memory StringIO fixtures have no file descriptor.
+                            # They remain on direct readline semantics; real pipes
+                            # take the polling path above.
+                            ready = True
                     if not ready:
                         if proc.poll() is not None:
                             break
