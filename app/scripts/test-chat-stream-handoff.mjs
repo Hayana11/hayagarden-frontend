@@ -226,7 +226,10 @@ const message = (id, role, text, displaySegments, toolCalls = []) => ({
     finalMessageId: 11,
     liveVisible: false,
   });
-  assert.equal(before.find((entry) => entry.kind === 'live')?.key, after.find((entry) => entry.kind === 'message')?.key);
+  assert.equal(
+    before.find((entry) => entry.kind === 'live')?.key,
+    after.find((entry) => entry.kind === 'message' && entry.message.role === 'assistant')?.key,
+  );
 }
 
 console.log('test:chat-stream-handoff — T1-T16 all checks passed');
