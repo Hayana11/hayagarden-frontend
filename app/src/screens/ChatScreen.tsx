@@ -126,9 +126,12 @@ import {
   subscribeThemePerf,
 } from '../lib/themePerfProbe';
 import {
+  commitChatPresentationBinding,
   createChatStreamHandoff,
-  bindChatHandoffFinalMessage,
   buildChatPresentationEntries,
+  pruneChatPresentationBindings,
+  presentationSegmentKey,
+  thinkingStateKey,
   findAssistantAfter,
   findPersistedAssistantForHandoff,
   isLiveSegmentFresh,
@@ -741,7 +744,7 @@ export function ChatScreen() {
     if (gen !== coldStartRaceRef.current.historyGen) return null;
     if (!mountedRef.current) return null;
     onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
-    presentationByMessageRef.current.clear();
+    pruneChatPresentationBindings(presentationByMessageRef.current, page.messages);
     setMsgs(page.messages);
     setHasMoreBefore(page.hasMoreBefore);
     scheduleAfterFirstPaint(() => {
@@ -760,11 +763,11 @@ export function ChatScreen() {
       if (gen !== coldStartRaceRef.current.historyGen) return;
       if (!mountedRef.current) return;
       onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
-      presentationByMessageRef.current.clear();
       const reconciled = reconcileChatWarmReturn(
         { messages: msgsRef.current, hasMoreBefore: hasMoreBeforeRef.current },
         page,
       );
+      pruneChatPresentationBindings(presentationByMessageRef.current, reconciled.messages);
       setMsgs(reconciled.messages);
       setHasMoreBefore(reconciled.hasMoreBefore);
       if (followLatestRef.current) scrollBottom({ source: 'warm-restore' });
@@ -1086,11 +1089,10 @@ export function ChatScreen() {
 
   const bindFinalMessage = useCallback((messages: ChatMsg[] | null) => {
     const handoff = chatHandoffRef.current;
-    if (!handoff || !messages || handoff.finalMessageId !== null) return;
+    if (!handoff || !messages) return;
     const finalMessageId = findPersistedAssistantForHandoff(messages, handoff);
     if (finalMessageId === null) return;
-    handoff.finalMessageId = finalMessageId;
-    presentationByMessageRef.current.set(finalMessageId, handoff.presentationKey);
+    commitChatPresentationBinding(handoff, finalMessageId, presentationByMessageRef.current);
   }, []);
 
   const runStream = useCallback(
@@ -1154,7 +1156,7 @@ export function ChatScreen() {
       );
       if (res.ok && !res.deferredTool && !opts.rewriteId) {
         markChatHandoffFinalized(handoff);
-        bindChatHandoffFinalMessage(handoff, res.assistantMessageId);
+        commitChatPresentationBinding(handoff, res.assistantMessageId, presentationByMessageRef.current);
       }
       if (res.deferredTool) {
         setPendingConfirmation({
@@ -1907,11 +1909,11 @@ export function ChatScreen() {
     return (
       <div key={presentationKey + '-segments'} className="vstack vstack-12">
         {m.displaySegments.map((segment, index) => {
-          const segmentKey = presentationKey + '-segment-' + index;
+          const segmentKey = presentationSegmentKey(presentationKey, index);
           if (segment.type === 'thinking') {
             return (
               <Fragment key={segmentKey}>
-                {renderThinkBlock(m, segment.text, segmentKey + '-thinking')}
+                {renderThinkBlock(m, segment.text, thinkingStateKey(presentationKey, index))}
               </Fragment>
             );
           }
@@ -2037,12 +2039,11 @@ export function ChatScreen() {
     const lastSegment = l.segments[l.segments.length - 1];
     const presentationKey = handoff?.presentationKey || 'chat-live-fallback';
     return (
-      <div key={presentationKey}>
-        <div className="chat-msg vstack vstack-12" style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+      <div className="chat-msg vstack vstack-12" style={{ alignItems: 'flex-start', borderRadius: 16 }}>
           <div className="chat-message-content chat-message-content-assistant">
             <div key={presentationKey + '-segments'} className="vstack vstack-12">
               {l.segments.map((segment: LiveSegment) => {
-                const segmentKey = presentationKey + '-segment-' + segment.id;
+                const segmentKey = presentationSegmentKey(presentationKey, segment.id);
                 if (segment.type === 'thinking') {
                   const active = l.lastEvent === 'thinking' && lastSegment?.id === segment.id;
                   const lines = segment.text.split('\n').filter(Boolean).slice(-3);
@@ -2088,7 +2089,6 @@ export function ChatScreen() {
             </div>
           </div>
         </div>
-      </div>
     );
   }
 
@@ -2112,23 +2112,25 @@ export function ChatScreen() {
   */
   const activeHandoff = chatHandoffRef.current;
   const activeLive = liveRef.current;
-  let handoffFinalMessageId = activeHandoff?.finalMessageId ?? null;
-  if (activeHandoff && activeLive && activeHandoff.finalizationConfirmed && handoffFinalMessageId === null) {
+  if (activeHandoff && activeLive && activeHandoff.finalizationConfirmed && activeHandoff.finalMessageId === null) {
     const matched = findPersistedAssistantForHandoff(msgs, activeHandoff);
     if (matched !== null) {
-      activeHandoff.finalMessageId = matched;
-      presentationByMessageRef.current.set(matched, activeHandoff.presentationKey);
-      handoffFinalMessageId = matched;
+      commitChatPresentationBinding(activeHandoff, matched, presentationByMessageRef.current);
     }
   }
+  const knownFinalMessageId = activeHandoff?.finalMessageId ?? null;
+  const mountedFinalMessageId = knownFinalMessageId !== null
+    && visibleMsgs.some((message) => message.id === knownFinalMessageId)
+    ? knownFinalMessageId
+    : null;
 
   const liveSlotVisible = Boolean(
-    activeLive && activeHandoff && handoffFinalMessageId === null,
+    activeLive && activeHandoff && mountedFinalMessageId === null,
   );
   const presentationEntries = buildChatPresentationEntries({
     messages: visibleMsgs,
     handoff: activeHandoff,
-    finalMessageId: handoffFinalMessageId,
+    finalMessageId: mountedFinalMessageId,
     liveVisible: liveSlotVisible,
     presentationKeys: presentationByMessageRef.current,
   });
