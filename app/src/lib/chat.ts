@@ -407,12 +407,20 @@ export async function streamChatReply(
     realityContext?: string | null;
   } = {},
 ): Promise<StreamResult> {
-  let safety: ReturnType<typeof setTimeout> | undefined;
-  const armSafety = () => {
-    clearTimeout(safety);
-    safety = setTimeout(() => ctrl.abort(), 150000);
+  const transportTimeoutMs = 150000;
+  const providerTimeoutMs = 420000;
+  let transportSafety: ReturnType<typeof setTimeout> | undefined;
+  let providerSafety: ReturnType<typeof setTimeout> | undefined;
+  const armTransport = () => {
+    clearTimeout(transportSafety);
+    transportSafety = setTimeout(() => ctrl.abort(), transportTimeoutMs);
   };
-  armSafety();
+  const armProvider = () => {
+    clearTimeout(providerSafety);
+    providerSafety = setTimeout(() => ctrl.abort(), providerTimeoutMs);
+  };
+  armTransport();
+  armProvider();
   try {
     const body: Record<string, unknown> = {};
     if (userMessageId) body.user_message_id = userMessageId;
@@ -452,25 +460,29 @@ export async function streamChatReply(
           continue;
         }
         if (ev.dup) continue; // legacy-compat duplicate events
-        armSafety();
+        armTransport();
         switch (ev.t) {
           case 'ping':
-            // Transport keepalive only: armSafety already ran above; do not
-            // dispatch synthetic heartbeats into any visible Chat handler.
+            // Keepalive refreshes transport liveness only; it never proves
+            // provider progress or a terminal result.
             break;
           case 'think':
+            armProvider();
             handlers.onThink(String(ev.d ?? ''));
             break;
           case 'text':
+            armProvider();
             handlers.onText(String(ev.d ?? ''));
             break;
           case 'tool_use': {
+            armProvider();
             const tool = { running: true, ...(ev.d as ChatToolCall) };
             if (tool.deferred_tool_use) deferredTool = tool;
             handlers.onToolUse(ev.idx ?? 0, tool);
             break;
           }
           case 'tool_result':
+            armProvider();
             handlers.onToolResult(ev.idx ?? 0, { running: false, ...(ev.d as ChatToolCall) });
             break;
           case 'trace_summary':
@@ -511,7 +523,8 @@ export async function streamChatReply(
     if (ctrl.signal.aborted) return { ok: false, error: '连接超时或被中止' };
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   } finally {
-    clearTimeout(safety);
+    clearTimeout(transportSafety);
+    clearTimeout(providerSafety);
   }
 }
 

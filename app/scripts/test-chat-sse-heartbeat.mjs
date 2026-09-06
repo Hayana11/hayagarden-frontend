@@ -52,7 +52,12 @@ try {
   assert.deepEqual(seen.notices, []);
   assert.ok(
     safetyDelays.filter(({ delay }) => delay === 150000).length >= 4,
-    'initial stream and each parsed SSE event must re-arm the safety watchdog',
+    'transport watchdog is re-armed by the initial stream and every SSE event',
+  );
+  assert.equal(
+    safetyDelays.filter(({ delay }) => delay === 420000).length,
+    2,
+    'provider watchdog is armed initially and only by real provider text',
   );
 } finally {
   globalThis.fetch = originalFetch;

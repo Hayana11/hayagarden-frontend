@@ -43,6 +43,7 @@ jobs:
           npm run build
           npm run test:chat-image-compression
           npm run test:chat-sse-heartbeat
+          npm run test:chat-terminal-contract
           npm run test:file-choices-contract
           npm run test:chat-live-timeline
           npm run test:chat-durable-order
@@ -109,6 +110,7 @@ jobs:
           HAYAGARDEN_ENV_PATH: ${{ runner.temp }}/chat-durable-order.env
         run: |
           python -m unittest tests.test_chat_durable_order
+          python -m unittest tests.test_chat_terminal_contract
           python -m unittest tests.test_daily_runtime.DailyRuntimeTurnTests.test_cold_turn_atomic_persist_and_cursor
           python -m unittest tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_happy_path_first_delta_commit_and_complete
           python -m unittest tests.test_rewrite_activation_atomicity

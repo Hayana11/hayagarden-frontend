@@ -18,6 +18,7 @@
     "test:file-choices-contract": "vite-node scripts/test-file-choices-contract.mjs",
     "test:chat-image-compression": "vite-node scripts/test-chat-image-compression.mjs",
     "test:chat-sse-heartbeat": "vite-node scripts/test-chat-sse-heartbeat.mjs",
+    "test:chat-terminal-contract": "vite-node scripts/test-chat-terminal-contract.mjs",
     "test:chat-markdown": "vite-node scripts/test-chat-markdown.mjs",
     "test:chat-live-timeline": "vite-node scripts/test-chat-live-timeline.mjs",
     "test:chat-durable-order": "vite-node scripts/test-chat-durable-order.mjs",

@@ -6295,6 +6295,60 @@ def _stream_cc_daily_soft_window(
     text_acc: list[str] = []
     think_acc: list[str] = []
     assistant_persisted = False
+    cc_tool_calls = []
+
+    def _rescue_and_abort(error_code, *, respawn=True):
+        nonlocal assistant_persisted
+        if _daily_plan is None:
+            return {'partial_rescue_performed': False, 'lease_released': False}
+        partial_rescue = False
+        if not assistant_persisted:
+            partial_raw = ''.join(text_acc).strip()
+            if partial_raw:
+                partial_text, partial_unexpected = _daily_rt.strip_daily_save_markers(partial_raw)
+                partial_text = str(partial_text or '').strip()
+                if partial_text:
+                    partial_tools = ''
+                    if cc_tool_calls:
+                        partial_tools = json.dumps(
+                            [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
+                            ensure_ascii=False,
+                        )
+                    try:
+                        _daily_rt.persist_partial_daily_stream_rescue(
+                            _daily_plan,
+                            content=partial_text,
+                            thinking=''.join(think_acc),
+                            tool_calls=partial_tools,
+                        )
+                        assistant_persisted = True
+                        partial_rescue = True
+                        _turn_data['_daily_partial_rescued'] = True
+                        if partial_unexpected:
+                            _daily_plan.manifest['unexpected_save_marker'] = True
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            'daily_window partial stream rescue failed',
+                        )
+        lease_released = False
+        try:
+            _daily_rt.abort_daily_turn(
+                _daily_plan,
+                error_code=error_code,
+                resident=_CC_RESIDENT,
+                respawn=respawn,
+            )
+            lease_released = True
+        except Exception:
+            logging.getLogger(__name__).exception(
+                'daily_window terminal cleanup failed error_code=%s',
+                error_code,
+            )
+        return {
+            'partial_rescue_performed': partial_rescue,
+            'lease_released': lease_released,
+        }
+
     try:
         from chat.display_thinking import (
             filter_display_thinking_events,
@@ -6653,6 +6707,23 @@ def _stream_cc_daily_soft_window(
         yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except Exception as exc:
+        if getattr(exc, 'error_code', None) == 'result_missing_after_end_turn':
+            cleanup = _rescue_and_abort('result_missing_after_end_turn', respawn=True)
+            turn_terminal = True
+            diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
+            diagnostics.update({
+                'partial_rescue_performed': bool(cleanup.get('partial_rescue_performed')),
+                'lock_released': False,
+            })
+            _turn_data['_terminal_contract_diag'] = diagnostics
+            yield _sse_json({
+                't': 'err',
+                'd': '回复收尾异常，已保留收到的内容，可以继续发送。',
+                'retryable': True,
+                'code': 'result_missing_after_end_turn',
+                'partial_rescue': bool(cleanup.get('partial_rescue_performed')),
+            })
+            return None
         if _daily_plan:
             _daily_rt.handle_provider_failure(
                 _daily_plan,
@@ -6667,46 +6738,7 @@ def _stream_cc_daily_soft_window(
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
-            if not assistant_persisted:
-                partial_raw = ''.join(text_acc).strip()
-                if partial_raw:
-                    partial_text, _partial_unexpected = _daily_rt.strip_daily_save_markers(
-                        partial_raw,
-                    )
-                    partial_text = str(partial_text or '').strip()
-                    if partial_text:
-                        _partial_tool_calls = ''
-                        if cc_tool_calls:
-                            _partial_tool_calls = json.dumps(
-                                [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
-                                ensure_ascii=False,
-                            )
-                        try:
-                            _daily_rt.persist_partial_daily_stream_rescue(
-                                _daily_plan,
-                                content=partial_text,
-                                thinking=''.join(think_acc),
-                                tool_calls=_partial_tool_calls,
-                            )
-                            assistant_persisted = True
-                            _turn_data['_daily_partial_rescued'] = True
-                            if _partial_unexpected:
-                                _daily_plan.manifest['unexpected_save_marker'] = True
-                        except Exception:
-                            logging.getLogger(__name__).exception(
-                                'daily_window partial stream rescue failed',
-                            )
-            try:
-                _daily_rt.abort_daily_turn(
-                    _daily_plan,
-                    error_code='client_stream_cancelled',
-                    resident=_CC_RESIDENT,
-                    respawn=True,
-                )
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    'daily_window client_stream_cancelled cleanup failed',
-                )
+            _rescue_and_abort('client_stream_cancelled', respawn=True)
 
 
 @app.route('/chat/stream', methods=['POST'])
@@ -6813,6 +6845,14 @@ def chat_stream():
                             _gen_release(None)
                         else:
                             _gen_release(None)
+                    _terminal_diag = _turn_data.get('_terminal_contract_diag')
+                    if _terminal_diag:
+                        _terminal_diag = dict(_terminal_diag)
+                        _terminal_diag['lock_released'] = True
+                        logging.getLogger('gateway').warning(
+                            'chat_terminal_contract %s',
+                            json.dumps(_terminal_diag, ensure_ascii=False, sort_keys=True),
+                        )
                     return
                 text, thinking = None, None
                 cc_cache_read, cc_cache_create = 0, 0
