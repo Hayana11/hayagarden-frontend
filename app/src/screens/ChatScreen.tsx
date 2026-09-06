@@ -2135,7 +2135,7 @@ export function ChatScreen() {
       ? activeHandoff?.presentationKey
       : presentationByMessageRef.current.get(m.id);
     rendered.push(
-      <div key={m.id}>
+      <div key={m.role === 'assistant' ? (presentationKey || String(m.id)) : m.id}>
         {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m, presentationKey || String(m.id))}
       </div>,
     );
