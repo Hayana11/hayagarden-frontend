@@ -44,7 +44,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'chat' / 'daily_runtime.py').read_text(encoding='utf-8')
         for marker in ("'stream_interrupted': True", "'turn_incomplete': True", "'partial_rescue': True"):
             self.assertIn(marker, source)
-        self.assertIn("display_segments=''", source)
+        self.assertIn("display_segments: str = ''", source)
 
     def test_t6_gateway_emits_one_abnormal_terminal_envelope(self):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
