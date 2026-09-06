@@ -805,6 +805,7 @@ export function ChatScreen() {
     abortRef.current?.abort();
     abortRef.current = null;
     liveRef.current = null;
+    chatHandoffRef.current = null;
     setLive(null);
     setSending(false);
     try {
