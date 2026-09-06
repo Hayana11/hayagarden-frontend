@@ -124,9 +124,10 @@ import {
   setThemeProbeMode,
   subscribeThemePerf,
 } from '../lib/themePerfProbe';
-import type { ReactElement } from 'react';
 import {
   createChatStreamHandoff,
+  bindChatHandoffFinalMessage,
+  buildChatPresentationEntries,
   findAssistantAfter,
   findPersistedAssistantForHandoff,
   isLiveSegmentFresh,
@@ -1153,6 +1154,7 @@ export function ChatScreen() {
       );
       if (res.ok && !res.deferredTool && !opts.rewriteId) {
         markChatHandoffFinalized(handoff);
+        bindChatHandoffFinalMessage(handoff, res.assistantMessageId);
       }
       if (res.deferredTool) {
         setPendingConfirmation({
@@ -2112,7 +2114,7 @@ export function ChatScreen() {
   const activeLive = liveRef.current;
   let handoffFinalMessageId = activeHandoff?.finalMessageId ?? null;
   if (activeHandoff && activeLive && activeHandoff.finalizationConfirmed && handoffFinalMessageId === null) {
-    const matched = findPersistedAssistantForHandoff(msgs, activeHandoff, activeLive.segments);
+    const matched = findPersistedAssistantForHandoff(msgs, activeHandoff);
     if (matched !== null) {
       activeHandoff.finalMessageId = matched;
       presentationByMessageRef.current.set(matched, activeHandoff.presentationKey);
@@ -2120,42 +2122,41 @@ export function ChatScreen() {
     }
   }
 
-  const rendered: ReactElement[] = [];
-  let lastDate = '';
-  visibleMsgs.forEach((m) => {
-    // First visible message always gets a date separator (even mid-day slice).
-    if (m.dateKey && m.dateKey !== lastDate) {
-      lastDate = m.dateKey;
-      const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
-      rendered.push(
-        <div key={`d-${m.dateKey}-${m.id}`} style={{ textAlign: 'center', fontFamily: fontFamilyForText(label), fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
+  const liveSlotVisible = Boolean(
+    activeLive && activeHandoff && handoffFinalMessageId === null,
+  );
+  const presentationEntries = buildChatPresentationEntries({
+    messages: visibleMsgs,
+    handoff: activeHandoff,
+    finalMessageId: handoffFinalMessageId,
+    liveVisible: liveSlotVisible,
+    presentationKeys: presentationByMessageRef.current,
+  });
+  const rendered = presentationEntries.map((entry) => {
+    if (entry.kind === 'date') {
+      const label = entry.dateKey === new Date().toISOString().slice(0, 10)
+        ? dateLabel
+        : entry.dateKey.replace(/-/g, '.');
+      return (
+        <div key={entry.key} style={{ textAlign: 'center', fontFamily: fontFamilyForText(label), fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
           {label}
-        </div>,
+        </div>
       );
     }
-
-    const replaceSourceWithLive = Boolean(
-      activeLive
-      && activeHandoff
-      && handoffFinalMessageId === null
-      && activeHandoff.sourceAssistantId === m.id
-      && m.role === 'assistant',
-    );
-    if (replaceSourceWithLive) {
-      rendered.push(renderLive(activeLive!, activeHandoff!));
-      return;
+    if (entry.kind === 'live') {
+      return activeLive && activeHandoff
+        ? <div key={entry.key}>{renderLive(activeLive, activeHandoff)}</div>
+        : null;
     }
-
-    const presentationKey = handoffFinalMessageId === m.id
-      ? activeHandoff?.presentationKey
-      : presentationByMessageRef.current.get(m.id);
-    rendered.push(
-      <div key={m.role === 'assistant' ? (presentationKey || String(m.id)) : m.id}>
-        {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m, presentationKey || String(m.id))}
-      </div>,
+    const { message } = entry;
+    return (
+      <div key={entry.key}>
+        {message.role === 'user'
+          ? renderUserMsg(message)
+          : renderAssistantMsg(message, entry.presentationKey)}
+      </div>
     );
-  });
-
+  }).filter((entry): entry is React.ReactElement => entry !== null);
   const toolbarIcon = compactToolbar ? 32 : 35;
   const modalUiState: SoftWindowUiState =
     manualWindow.uiState === 'probing' || manualWindow.uiState === 'idle'
@@ -2395,10 +2396,6 @@ export function ChatScreen() {
             </div>
           )}
           {rendered}
-          {activeLive
-            && handoffFinalMessageId === null
-            && !(activeHandoff?.sourceAssistantId != null && visibleMsgs.some((message) => message.id === activeHandoff.sourceAssistantId))
-            && renderLive(activeLive, activeHandoff)}
           {pendingConfirmation && renderToolCard('pending-confirmation', pendingConfirmation)}
           {canShowNewerLoaded && (
             <div className="vstack vstack-8" style={{ padding: '4px 0 2px' }}>
