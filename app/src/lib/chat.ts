@@ -475,6 +475,7 @@ export async function streamChatReply(
             handlers.onText(String(ev.d ?? ''));
             break;
           case 'tool_use': {
+            armProvider();
             const tool = { running: true, ...(ev.d as ChatToolCall) };
             if (tool.deferred_tool_use) deferredTool = tool;
             handlers.onToolUse(ev.idx ?? 0, tool);
