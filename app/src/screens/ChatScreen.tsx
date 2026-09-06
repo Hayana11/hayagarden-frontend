@@ -1084,11 +1084,7 @@ export function ChatScreen() {
   const bindFinalMessage = useCallback((messages: ChatMsg[] | null) => {
     const handoff = chatHandoffRef.current;
     if (!handoff || !messages || handoff.finalMessageId !== null) return;
-    const finalMessageId = findPersistedAssistantForHandoff(
-      messages,
-      handoff,
-      liveRef.current?.segments || [],
-    );
+    const finalMessageId = findPersistedAssistantForHandoff(messages, handoff);
     if (finalMessageId === null) return;
     handoff.finalMessageId = finalMessageId;
     presentationByMessageRef.current.set(finalMessageId, handoff.presentationKey);
