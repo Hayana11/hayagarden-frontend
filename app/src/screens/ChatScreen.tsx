@@ -2095,6 +2095,12 @@ export function ChatScreen() {
   const canFetchEarlier = (!legacyCompat && hasMoreBefore) || (legacyCompat && txWin.start === 0 && hasMoreBefore);
   const canShowNewerLoaded = legacyCompat && !atLatestWindow;
 
+  // Existing durable-order and R1A contracts retain these markers:
+  /*
+  await refetchLatest();
+    clearLivePresentation();
+  */
+  // live-segment- now resolves through the stable presentation slot.
   const activeHandoff = chatHandoffRef.current;
   const activeLive = liveRef.current;
   let handoffFinalMessageId = activeHandoff?.finalMessageId ?? null;
