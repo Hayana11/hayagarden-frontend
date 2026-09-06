@@ -23,6 +23,7 @@ import config_store
 NL = chr(10)
 CC_STREAM_TIMEOUT = 360  # stall / inactivity seconds (runtime-tunable)
 CC_STREAM_HARD_TIMEOUT = 1800  # absolute per-turn ceiling (runtime-tunable)
+CC_STREAM_RESULT_GRACE = 30  # wait for result after provider end_turn (runtime-tunable)
 IDLE_REAP_SECONDS = 3 * 60 * 60
 TOOL_PROFILE_LEGACY = 'legacy'
 TOOL_PROFILE_TEXT_ONLY = 'text_only'
@@ -76,6 +77,87 @@ def _claude_event_is_activity(d):
             return block.get('type') == 'tool_use'
         return False
     return False
+
+
+class ProviderTerminalTracker:
+    """Tracks provider progress and the authoritative result boundary."""
+
+    def __init__(self, grace_seconds):
+        self.grace_seconds = max(0.1, float(grace_seconds))
+        self.turn_identity = uuid.uuid4().hex
+        self.last_provider_event_type = None
+        self.last_provider_activity_at = None
+        self.end_turn_seen = False
+        self.end_turn_seen_at = None
+        self.result_seen = False
+        self.terminal_reason = None
+
+    @staticmethod
+    def _stop_reason(event):
+        if not isinstance(event, dict):
+            return None
+        t = event.get('type')
+        if t == 'stream_event':
+            streamed = event.get('event') or {}
+            delta = streamed.get('delta') or {}
+            return (
+                delta.get('stop_reason')
+                or streamed.get('stop_reason')
+                or (streamed.get('message') or {}).get('stop_reason')
+            )
+        if t == 'assistant':
+            return (
+                (event.get('message') or {}).get('stop_reason')
+                or event.get('stop_reason')
+            )
+        return None
+
+    def observe(self, event):
+        if self.terminal_reason is not None or not isinstance(event, dict):
+            return
+        event_type = event.get('type')
+        if event_type == 'stream_event':
+            streamed = event.get('event') or {}
+            label = 'stream_event:%s' % (streamed.get('type') or 'unknown')
+        else:
+            label = str(event_type or 'unknown')
+        self.last_provider_event_type = label
+        if event_type == 'result':
+            self.result_seen = True
+            self.terminal_reason = 'result'
+            self.last_provider_activity_at = time.time()
+            return
+        if _claude_event_is_activity(event):
+            self.last_provider_activity_at = time.time()
+        if self._stop_reason(event) == 'end_turn' and not self.end_turn_seen:
+            self.end_turn_seen = True
+            self.end_turn_seen_at = time.monotonic()
+
+    def grace_expired(self, now=None):
+        if self.terminal_reason is not None or not self.end_turn_seen:
+            return False
+        current = time.monotonic() if now is None else float(now)
+        if current - float(self.end_turn_seen_at) < self.grace_seconds:
+            return False
+        self.terminal_reason = 'result_missing_after_end_turn'
+        return True
+
+    def snapshot(self, *, terminal_reason=None, partial_rescue_performed=False,
+                 lock_released=None):
+        return {
+            'turn_identity': self.turn_identity,
+            'resident_generation': None,
+            'resident_pid': None,
+            'claude_session_id': None,
+            'last_provider_event_type': self.last_provider_event_type,
+            'last_provider_activity_at': self.last_provider_activity_at,
+            'end_turn_seen': bool(self.end_turn_seen),
+            'end_turn_seen_at': self.end_turn_seen_at,
+            'result_seen': bool(self.result_seen),
+            'terminal_reason': terminal_reason or self.terminal_reason,
+            'partial_rescue_performed': bool(partial_rescue_performed),
+            'lock_released': lock_released,
+        }
 
 
 class StreamWatchdog:
@@ -195,9 +277,11 @@ class StreamWatchdog:
 
 
 class ResidentError(RuntimeError):
-    def __init__(self, message, *, usage=None):
+    def __init__(self, message, *, usage=None, diagnostics=None, error_code=None):
         super().__init__(message)
         self.usage = usage or empty_usage()
+        self.diagnostics = dict(diagnostics or {})
+        self.error_code = error_code
 
 
 def empty_usage(**overrides):
@@ -1189,12 +1273,16 @@ class ResidentSession:
             raise
 
         timeout_reason = [None]  # 'stall' | 'hard'
+        terminal_reason = [None]
         # Stall = inactivity; hard = absolute ceiling. Defaults stay 360 / 1800.
         stall_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
         hard_timeout = _cfg_int('CC_STREAM_HARD_TIMEOUT', CC_STREAM_HARD_TIMEOUT)
+        result_grace = _cfg_int('CC_STREAM_RESULT_GRACE', CC_STREAM_RESULT_GRACE)
+        terminal = ProviderTerminalTracker(result_grace)
 
         def _kill_on_timeout(reason):
             timeout_reason[0] = reason
+            terminal_reason[0] = reason
             self._kill(quiet=True)
 
         watchdog = StreamWatchdog(
@@ -1217,16 +1305,27 @@ class ResidentSession:
         try:
             try:
                 while True:
-                    if use_idle_heartbeat:
-                        ready, _, _ = select.select(
-                            [proc.stdout], [], [], heartbeat_interval,
-                        )
-                        if not ready:
-                            if proc.poll() is not None:
-                                break
+                    # A provider end_turn is not a successful terminal event. Give
+                    # Claude a bounded chance to emit the authoritative result.
+                    if terminal.grace_expired():
+                        terminal_reason[0] = 'result_missing_after_end_turn'
+                        self._kill(quiet=True)
+                        break
+                    poll_interval = heartbeat_interval if use_idle_heartbeat else 0.2
+                    ready, _, _ = select.select(
+                        [proc.stdout], [], [], poll_interval,
+                    )
+                    if not ready:
+                        if proc.poll() is not None:
+                            break
+                        if terminal.grace_expired():
+                            terminal_reason[0] = 'result_missing_after_end_turn'
+                            self._kill(quiet=True)
+                            break
+                        if use_idle_heartbeat:
                             # Synthetic SSE heartbeat — not Claude activity.
                             yield ('heartbeat', None)
-                            continue
+                        continue
                     raw_line = proc.stdout.readline()
                     if raw_line == '':
                         break
@@ -1239,6 +1338,7 @@ class ResidentSession:
                         continue
                     # Refresh stall deadline before heavier event handling so a
                     # concurrent watchdog knock observes the new activity.
+                    terminal.observe(d)
                     if _claude_event_is_activity(d):
                         watchdog.note_activity()
                     self._maybe_set_session_id(d)
@@ -1459,6 +1559,13 @@ class ResidentSession:
         usage['_obs_resident_generation'] = self._generation
         usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
         usage['_obs_claude_session_id'] = self._session_id
+        usage['_obs_last_provider_event_type'] = terminal.last_provider_event_type
+        usage['_obs_last_provider_activity_at'] = terminal.last_provider_activity_at
+        usage['_obs_end_turn_seen'] = bool(terminal.end_turn_seen)
+        usage['_obs_end_turn_seen_at'] = terminal.end_turn_seen_at
+        usage['_obs_result_seen'] = bool(terminal.result_seen)
+        usage['_obs_terminal_reason'] = terminal_reason[0] or terminal.terminal_reason
+        usage['_obs_turn_identity'] = terminal.turn_identity
         usage['_obs_effort'] = getattr(self, '_effort_value', None)
         usage['_obs_keepwarm_lease_expires_at'] = self._keepwarm_lease_expires_at
         surface = self._tool_surface_snapshot or {}
@@ -1474,15 +1581,46 @@ class ResidentSession:
             raise ResidentError(
                 'claude code 长时间无活动 (%ds)，resident 进程已重启' % stall_timeout,
                 usage=usage,
+                diagnostics=terminal.snapshot(terminal_reason='stall'),
+                error_code='provider_stall_timeout',
             )
         if timeout_reason[0] == 'hard':
             raise ResidentError(
                 'claude code 单轮超过绝对上限 (%ds)，resident 进程已重启' % hard_timeout,
                 usage=usage,
+                diagnostics=terminal.snapshot(terminal_reason='hard_timeout'),
+                error_code='provider_hard_timeout',
+            )
+        if terminal_reason[0] == 'result_missing_after_end_turn':
+            self._kill(quiet=True)
+            diagnostics = terminal.snapshot(
+                terminal_reason='result_missing_after_end_turn',
+            )
+            diagnostics.update({
+                'resident_generation': self._generation,
+                'resident_pid': getattr(proc, 'pid', None),
+                'claude_session_id': self._session_id,
+            })
+            raise ResidentError(
+                '回复收尾异常：provider 已报告 end_turn，但 result 未到达',
+                usage=usage,
+                diagnostics=diagnostics,
+                error_code='result_missing_after_end_turn',
             )
         if not saw_result:
             self._kill(quiet=True)
-            raise ResidentError('resident 进程在本轮回复完成前退出', usage=usage)
+            diagnostics = terminal.snapshot(terminal_reason='result_missing_before_terminal')
+            diagnostics.update({
+                'resident_generation': self._generation,
+                'resident_pid': getattr(proc, 'pid', None),
+                'claude_session_id': self._session_id,
+            })
+            raise ResidentError(
+                'resident 进程在本轮回复完成前退出',
+                usage=usage,
+                diagnostics=diagnostics,
+                error_code='result_missing_before_terminal',
+            )
         if is_err:
             # payload 已写入 resident：kill 强制下一轮冷启动，避免脏会话继续热轮
             self._kill(quiet=True)
