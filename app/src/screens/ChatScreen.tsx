@@ -1936,7 +1936,7 @@ export function ChatScreen() {
   }
 
 
-  function renderAssistantMsg(m: ChatMsg) {
+  function renderAssistantMsg(m: ChatMsg, presentationKey = String(m.id)) {
     const usage = m.cacheInfo;
     const cache = cacheLabel(usage);
     const mediaItems = messageMediaItems(m);
@@ -2128,7 +2128,7 @@ export function ChatScreen() {
       && m.role === 'assistant',
     );
     if (replaceSourceWithLive) {
-      rendered.push(renderLive(activeLive, activeHandoff));
+      rendered.push(renderLive(activeLive!, activeHandoff!));
       return;
     }
 
