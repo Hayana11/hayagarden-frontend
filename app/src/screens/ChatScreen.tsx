@@ -2045,13 +2045,13 @@ export function ChatScreen() {
                   return (
                     <Fragment key={segmentKey}>
                       <div
-                        onClick={() => setDrawer({ text: segment.text, label: active ? '思考中…' : \`思考了 \${segment.text.length} 字\` })}
+                        onClick={() => setDrawer({ text: segment.text, label: active ? '思考中…' : `思考了 ${segment.text.length} 字` })}
                         className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}
                       >
                         <span style={{ display: 'flex', animation: active ? 'chatBreathe 1.6s ease-in-out infinite' : 'none' }}>
                           <Svg d={IC.brain} size={17} sw={1.5} />
                         </span>
-                        <span style={{ fontSize: 13, letterSpacing: 1 }}>{active ? '思考中…' : \`思考了 \${segment.text.length} 字\`}</span>
+                        <span style={{ fontSize: 13, letterSpacing: 1 }}>{active ? '思考中…' : `思考了 ${segment.text.length} 字`}</span>
                       </div>
                       {active && (
                         <div style={{ position: 'relative', height: 76, overflow: 'hidden', borderRadius: 14, background: 'var(--card2)' }}>
@@ -2114,7 +2114,7 @@ export function ChatScreen() {
       lastDate = m.dateKey;
       const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
       rendered.push(
-        <div key={\`d-\${m.dateKey}-\${m.id}\`} style={{ textAlign: 'center', fontFamily: fontFamilyForText(label), fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
+        <div key={`d-${m.dateKey}-${m.id}`} style={{ textAlign: 'center', fontFamily: fontFamilyForText(label), fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
           {label}
         </div>,
       );
