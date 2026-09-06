@@ -370,6 +370,7 @@ export interface StreamResult {
   ok: boolean;
   error?: string;
   deferredTool?: ChatToolCall;
+  assistantMessageId?: number;
 }
 
 interface SseEvent {
@@ -389,6 +390,7 @@ interface SseEvent {
   last_round_context?: number;
   resident_turn_count?: number;
   respawn_reason?: string;
+  assistant_message_id?: number;
 }
 
 /**
@@ -506,9 +508,15 @@ export async function streamChatReply(
           case 'notice':
             handlers.onNotice?.(String(ev.d ?? ''));
             break;
-          case 'done':
-            result = { ok: ev.ok !== false, deferredTool };
+          case 'done': {
+            const assistantMessageId = ev.ok === false && ev.assistant_message_id === undefined
+              ? undefined
+              : Number.isSafeInteger(ev.assistant_message_id)
+                ? Number(ev.assistant_message_id)
+                : undefined;
+            result = { ok: ev.ok !== false, deferredTool, assistantMessageId };
             break;
+          }
           case 'err':
             result = { ok: false, error: String(ev.d ?? '未知错误') };
             break;
