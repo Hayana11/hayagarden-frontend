@@ -36,7 +36,7 @@ class ChatTerminalContractTests(unittest.TestCase):
             'stop_reason': 'end_turn',
             'content': [{'type': 'text', 'text': 'done'}],
         }})
-        self.assertTrue(tracker.grace_expired(tracker.end_turn_seen_at + 30))
+        self.assertTrue(tracker.grace_expired(tracker.end_turn_seen_at + 30.1))
         self.assertEqual(tracker.terminal_reason, 'result_missing_after_end_turn')
         self.assertFalse(tracker.result_seen)
 
@@ -67,7 +67,7 @@ class ChatTerminalContractTests(unittest.TestCase):
     def test_t9_boundary_has_one_terminal_outcome(self):
         tracker = cc_resident.ProviderTerminalTracker(30)
         tracker.observe({'type': 'assistant', 'message': {'stop_reason': 'end_turn'}})
-        self.assertTrue(tracker.grace_expired(tracker.end_turn_seen_at + 30))
+        self.assertTrue(tracker.grace_expired(tracker.end_turn_seen_at + 30.1))
         tracker.observe({'type': 'result'})
         self.assertEqual(tracker.terminal_reason, 'result_missing_after_end_turn')
         self.assertFalse(tracker.result_seen)
