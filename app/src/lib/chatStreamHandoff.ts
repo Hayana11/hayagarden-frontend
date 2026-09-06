@@ -1,4 +1,4 @@
-import type { ChatMsg, ChatToolCall } from './chat';
+import type { ChatMsg } from './chat';
 import type { LiveSegment } from './chatLiveTimeline';
 
 export type ChatHandoffKind = 'send' | 'choice' | 'regen' | 'edit' | 'confirmation';
@@ -83,51 +83,83 @@ export function finalOnlyContentMayAnimate(liveSegments: LiveSegment[], finalCon
   return !finalContentWasLive || liveSegments.length === 0;
 }
 
-function normalizedToolName(tool: ChatToolCall | undefined): string {
-  return tool?.name || '';
+export type ChatPresentationEntry =
+  | { kind: 'date'; key: string; dateKey: string; messageId: number }
+  | { kind: 'message'; key: string; message: ChatMsg; presentationKey: string }
+  | { kind: 'live'; key: string; presentationKey: string };
+
+export function bindChatHandoffFinalMessage(
+  handoff: ChatStreamHandoff,
+  assistantMessageId: number | null | undefined,
+): boolean {
+  if (!Number.isSafeInteger(assistantMessageId) || Number(assistantMessageId) <= 0) return false;
+  handoff.finalMessageId = Number(assistantMessageId);
+  return true;
 }
 
-function persistedSegments(message: ChatMsg): Array<
-  { type: 'thinking' | 'text'; text: string } |
-  { type: 'tool'; toolIndex: number; tool: ChatToolCall | undefined }
-> {
-  if (message.displaySegments?.length) {
-    return message.displaySegments.map((segment) => (
-      segment.type === 'tool'
-        ? { type: 'tool', toolIndex: segment.toolIndex, tool: message.toolCalls[segment.toolIndex] }
-        : { type: segment.type, text: segment.text }
-    ));
-  }
-  const result: Array<
-    { type: 'thinking' | 'text'; text: string } |
-    { type: 'tool'; toolIndex: number; tool: ChatToolCall | undefined }
-  > = [];
-  if (message.thinking) result.push({ type: 'thinking', text: message.thinking });
-  if (message.text) result.push({ type: 'text', text: message.text });
-  message.toolCalls.forEach((tool, toolIndex) => result.push({ type: 'tool', toolIndex, tool }));
-  return result;
-}
+export function buildChatPresentationEntries(args: {
+  messages: ChatMsg[];
+  handoff: Pick<ChatStreamHandoff, 'presentationKey' | 'sourceAssistantId'> | null;
+  finalMessageId: number | null;
+  liveVisible: boolean;
+  presentationKeys?: Map<number, string>;
+}): ChatPresentationEntry[] {
+  const entries: ChatPresentationEntry[] = [];
+  const presentationKeys = args.presentationKeys || new Map<number, string>();
+  let lastDate = '';
+  let sourceReplaced = false;
 
-function liveMatchesPersisted(message: ChatMsg, liveSegments: LiveSegment[]): boolean {
-  const persisted = persistedSegments(message);
-  if (persisted.length !== liveSegments.length) return false;
-  return liveSegments.every((segment, index) => {
-    const candidate = persisted[index];
-    if (!candidate) return false;
-    if (segment.type === 'tool') {
-      if (candidate.type !== 'tool') return false;
-      return candidate.toolIndex === segment.idx
-        && normalizedToolName(candidate.tool) === normalizedToolName(segment.tool);
+  args.messages.forEach((message) => {
+    if (message.dateKey && message.dateKey !== lastDate) {
+      lastDate = message.dateKey;
+      entries.push({
+        kind: 'date',
+        key: 'd-' + message.dateKey + '-' + message.id,
+        dateKey: message.dateKey,
+        messageId: message.id,
+      });
     }
-    if (candidate.type === 'tool') return false;
-    return candidate.text === segment.text;
+
+    if (
+      args.liveVisible
+      && args.finalMessageId === null
+      && args.handoff
+      && args.handoff.sourceAssistantId === message.id
+      && message.role === 'assistant'
+    ) {
+      entries.push({
+        kind: 'live',
+        key: args.handoff.presentationKey,
+        presentationKey: args.handoff.presentationKey,
+      });
+      sourceReplaced = true;
+      return;
+    }
+
+    const presentationKey = args.finalMessageId === message.id && args.handoff
+      ? args.handoff.presentationKey
+      : presentationKeys.get(message.id) || String(message.id);
+    entries.push({
+      kind: 'message',
+      key: message.role === 'assistant' ? presentationKey : String(message.id),
+      message,
+      presentationKey,
+    });
   });
+
+  if (args.liveVisible && args.handoff && !sourceReplaced) {
+    entries.push({
+      kind: 'live',
+      key: args.handoff.presentationKey,
+      presentationKey: args.handoff.presentationKey,
+    });
+  }
+  return entries;
 }
 
 export function findPersistedAssistantForHandoff(
   messages: ChatMsg[],
   handoff: ChatStreamHandoff,
-  liveSegments: LiveSegment[],
 ): number | null {
   if (!handoff.finalizationConfirmed || handoff.terminal === 'failed') return null;
   if (handoff.finalMessageId !== null) {
@@ -140,12 +172,5 @@ export function findPersistedAssistantForHandoff(
       message.id === handoff.sourceAssistantId && message.role === 'assistant'
     )) ? handoff.sourceAssistantId : null;
   }
-  if (handoff.userMessageId === null) return null;
-  const sourceIndex = messages.findIndex((message) => message.id === handoff.userMessageId);
-  if (sourceIndex < 0) return null;
-  const candidates = messages.slice(sourceIndex + 1).filter((message) => message.role === 'assistant');
-  const matched = candidates.find((message) => (
-    liveSegments.length === 0 || liveMatchesPersisted(message, liveSegments)
-  ));
-  return matched?.id ?? null;
+  return null;
 }
