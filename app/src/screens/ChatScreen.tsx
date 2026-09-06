@@ -125,6 +125,17 @@ import {
   subscribeThemePerf,
 } from '../lib/themePerfProbe';
 import type { ReactElement } from 'react';
+import {
+  createChatStreamHandoff,
+  findAssistantAfter,
+  findPersistedAssistantForHandoff,
+  isLiveSegmentFresh,
+  markChatHandoffFinalized,
+  type ChatHandoffKind,
+  type ChatStreamHandoff,
+  presentationSegmentKey,
+  thinkingStateKey,
+} from '../lib/chatStreamHandoff';
 import { installObjectHasOwnCompat } from '../lib/objectHasOwnCompat';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -448,6 +459,8 @@ export function ChatScreen() {
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const mountedRef = useRef(true);
   const liveRef = useRef<LiveState | null>(null);
+  const chatHandoffRef = useRef<ChatStreamHandoff | null>(null);
+  const presentationByMessageRef = useRef(new Map<number, string>());
   const postingRef = useRef(false);
   const warmUpInflightRef = useRef<Promise<void> | null>(null);
   const coldStartRaceRef = useRef<ColdStartRaceState>(createColdStartRaceState());
@@ -725,8 +738,8 @@ export function ChatScreen() {
     const gen = bumpHistoryGen();
     cancelInFlightWarmUp();
     const page = await fetchChatMessages({ limit: CHAT_AUTHORITATIVE_LIMIT });
-    if (gen !== coldStartRaceRef.current.historyGen) return;
-    if (!mountedRef.current) return;
+    if (gen !== coldStartRaceRef.current.historyGen) return null;
+    if (!mountedRef.current) return null;
     onAuthoritativeHistorySuccess(coldStartRaceRef.current, page.messages.length);
     setMsgs(page.messages);
     setHasMoreBefore(page.hasMoreBefore);
@@ -735,6 +748,7 @@ export function ChatScreen() {
       ensureDeferredColdStartInit({ loadedCount: page.messages.length });
     });
     if (toBottom) scrollBottom({ source: 'initial-history' });
+    return page.messages;
   }, [scrollBottom, bumpHistoryGen, cancelInFlightWarmUp, ensureDeferredColdStartInit]);
 
   const revalidateWarmReturn = useCallback(async () => {
@@ -1047,13 +1061,36 @@ export function ChatScreen() {
   }, []);
 
   const updateLive = useCallback((fn: (l: LiveState) => LiveState) => {
-    liveRef.current = fn(liveRef.current ?? createLiveState());
-    setLive(liveRef.current);
+    const previous = liveRef.current;
+    const next = fn(previous ?? createLiveState());
+    const handoff = chatHandoffRef.current;
+    if (handoff) {
+      const previousIds = new Set((previous?.segments || []).map((segment) => segment.id));
+      next.segments.forEach((segment) => {
+        if (!previousIds.has(segment.id)) handoff.freshSegmentIds.add(segment.id);
+      });
+    }
+    liveRef.current = next;
+    setLive(next);
   }, []);
 
-  const clearLivePresentation = useCallback(() => {
+  const clearLivePresentation = useCallback((preserveHandoff = false) => {
     liveRef.current = null;
     setLive(null);
+    if (!preserveHandoff) chatHandoffRef.current = null;
+  }, []);
+
+  const bindFinalMessage = useCallback((messages: ChatMsg[] | null) => {
+    const handoff = chatHandoffRef.current;
+    if (!handoff || !messages || handoff.finalMessageId !== null) return;
+    const finalMessageId = findPersistedAssistantForHandoff(
+      messages,
+      handoff,
+      liveRef.current?.segments || [],
+    );
+    if (finalMessageId === null) return;
+    handoff.finalMessageId = finalMessageId;
+    presentationByMessageRef.current.set(finalMessageId, handoff.presentationKey);
   }, []);
 
   const runStream = useCallback(
@@ -1063,11 +1100,24 @@ export function ChatScreen() {
         rewriteId?: string | null;
         realityContext?: string;
         confirmation?: { approvalId: string; pendingActionId?: string | null; decision: 'approve' | 'reject' };
+        operationKind?: ChatHandoffKind;
+        operationIdentity?: string | null;
+        sourceAssistantId?: number | null;
+        handoffUserMessageId?: number | null;
       } = {},
     ): Promise<boolean> => {
       // Invariant: any path entering live streaming pins the DOM window to latest
       // so live replies never render under an old browsing window.
       pinTranscriptToLatest();
+      const handoff = createChatStreamHandoff({
+        kind: opts.operationKind
+          || (opts.rewriteId ? 'regen' : userMessageId === null ? 'confirmation' : 'send'),
+        operationIdentity: opts.operationIdentity,
+        rewriteId: opts.rewriteId,
+        userMessageId: opts.handoffUserMessageId ?? userMessageId,
+        sourceAssistantId: opts.sourceAssistantId,
+      });
+      chatHandoffRef.current = handoff;
       liveRef.current = createLiveState();
       setLive(liveRef.current);
       const ctrl = new AbortController();
@@ -1102,6 +1152,9 @@ export function ChatScreen() {
           realityContext: opts.realityContext,
         },
       );
+      if (res.ok && !res.deferredTool && !opts.rewriteId) {
+        markChatHandoffFinalized(handoff);
+      }
       if (res.deferredTool) {
         setPendingConfirmation({
           ...res.deferredTool,
@@ -1200,9 +1253,10 @@ export function ChatScreen() {
     }
     pinTranscriptToLatest();
     await refetchLatest();
-    await runStream(messageId, { realityContext });
-    await refetchLatest();
-    clearLivePresentation();
+    const ok = await runStream(messageId, { realityContext });
+    const latest = await refetchLatest();
+    if (ok) bindFinalMessage(latest);
+    clearLivePresentation(Boolean(ok && chatHandoffRef.current?.finalMessageId !== null));
     setSending(false);
     taRef.current?.focus();
   }, [clearLivePresentation, input, pendingFiles, pendingImages, sending, uploadingFileCount, compressingImageCount, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
@@ -1231,9 +1285,10 @@ export function ChatScreen() {
     }
     pinTranscriptToLatest();
     await refetchLatest();
-    await runStream(messageId, { realityContext });
-    await refetchLatest();
-    clearLivePresentation();
+    const ok = await runStream(messageId, { operationKind: 'choice', realityContext });
+    const latest = await refetchLatest();
+    if (ok) bindFinalMessage(latest);
+    clearLivePresentation(Boolean(ok && chatHandoffRef.current?.finalMessageId !== null));
     setSending(false);
     return true;
   }, [clearLivePresentation, sending, refetchLatest, runStream, showToast, pinTranscriptToLatest]);
@@ -1264,7 +1319,11 @@ export function ChatScreen() {
       }
       // Keep old assistant visible until candidate activates.
       // runStream pins latest before live mounts (mutation invariant).
-      const ok = await runStream(prep.userMessageId, { rewriteId: prep.rewriteId });
+      const ok = await runStream(prep.userMessageId, {
+        rewriteId: prep.rewriteId,
+        operationKind: 'regen',
+        sourceAssistantId: prep.sourceAssistantId,
+      });
       let committed = false;
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
@@ -1273,8 +1332,14 @@ export function ChatScreen() {
         if (!fin) showToast('重答结果未确认，正在刷新…');
         else if (fin.effectsPending) showToast('重答已切换，收尾未完成，可再试一次');
       }
-      await refetchLatest();
-      if (committed) clearLivePresentation();
+      if (committed) markChatHandoffFinalized(chatHandoffRef.current!);
+      const latest = await refetchLatest();
+      if (committed) {
+        bindFinalMessage(latest);
+        clearLivePresentation(chatHandoffRef.current?.finalMessageId !== null);
+      } else {
+        clearLivePresentation();
+      }
       setSending(false);
     },
     [clearLivePresentation, sending, refetchLatest, runStream, showToast],
@@ -1295,7 +1360,13 @@ export function ChatScreen() {
       }
       // Active transcript stays intact until finalize succeeds.
       // runStream pins latest before live mounts (mutation invariant).
-      const ok = await runStream(null, { rewriteId: edit.rewriteId });
+      const sourceAssistantId = findAssistantAfter(msgs, edit.sourceMessageId);
+      const ok = await runStream(null, {
+        rewriteId: edit.rewriteId,
+        operationKind: 'edit',
+        sourceAssistantId,
+        handoffUserMessageId: edit.sourceMessageId,
+      });
       let committed = false;
       if (ok) {
         // finalize retries transport-ambiguous / effects_pending internally (same rewrite_id).
@@ -1311,11 +1382,17 @@ export function ChatScreen() {
           showToast('修改已切换，收尾未完成，可再试一次');
         }
       }
-      await refetchLatest();
-      if (committed) clearLivePresentation();
+      if (committed) markChatHandoffFinalized(chatHandoffRef.current!);
+      const latest = await refetchLatest();
+      if (committed) {
+        bindFinalMessage(latest);
+        clearLivePresentation(chatHandoffRef.current?.finalMessageId !== null);
+      } else {
+        clearLivePresentation();
+      }
       setSending(false);
     },
-    [clearLivePresentation, editText, sending, refetchLatest, runStream, showToast],
+    [bindFinalMessage, clearLivePresentation, editText, msgs, sending, refetchLatest, runStream, showToast],
   );
 
   const branchSwitch = useCallback(
@@ -1819,44 +1896,52 @@ export function ChatScreen() {
     );
   }
 
-  function renderOrderedAssistantContent(m: ChatMsg) {
+  function renderOrderedAssistantContent(m: ChatMsg, presentationKey = String(m.id)) {
     if (!m.displaySegments?.length) return null;
     if (m.displaySegments.some((segment) => (
       segment.type === 'tool' && segment.toolIndex >= m.toolCalls.length
     ))) return null;
     return (
-      <div className="vstack vstack-12">
+      <div key={presentationKey + '-segments'} className="vstack vstack-12">
         {m.displaySegments.map((segment, index) => {
+          const segmentKey = presentationSegmentKey(
+            chatHandoffRef.current || createChatStreamHandoff({ kind: 'send', userMessageId: m.id }),
+            index,
+          );
           if (segment.type === 'thinking') {
             return (
-              <Fragment key={String(m.id) + '-display-think-' + index}>
-                {renderThinkBlock(m, segment.text, String(m.id) + '-display-think-' + index)}
+              <Fragment key={segmentKey}>
+                {renderThinkBlock(m, segment.text, thinkingStateKey(
+                  chatHandoffRef.current || createChatStreamHandoff({ kind: 'send', userMessageId: m.id }),
+                  index,
+                ))}
               </Fragment>
             );
           }
           if (segment.type === 'text') return (
-            <Fragment key={`${m.id}-display-text-${index}`}>
+            <Fragment key={segmentKey}>
               {segment.text && renderMarkdown(segment.text)}
             </Fragment>
           );
           const tool = m.toolCalls[segment.toolIndex];
           return tool
-            ? renderToolItems(`${m.id}-display-tool-${index}`, [tool])
+            ? renderToolItems(segmentKey, [tool])
             : null;
         })}
       </div>
     );
   }
 
-  function renderLegacyAssistantContent(m: ChatMsg) {
+  function renderLegacyAssistantContent(m: ChatMsg, presentationKey = String(m.id)) {
     return (
       <>
-        {renderThinkBlock(m)}
-        {renderToolItems(String(m.id), m.toolCalls)}
+        {renderThinkBlock(m, m.thinking, presentationKey + '-thinking')}
+        {renderToolItems(presentationKey + '-tools', m.toolCalls)}
         {m.text && renderMarkdown(m.text)}
       </>
     );
   }
+
 
   function renderAssistantMsg(m: ChatMsg) {
     const usage = m.cacheInfo;
@@ -1867,8 +1952,8 @@ export function ChatScreen() {
         <div className="chat-message-content chat-message-content-assistant">
           {mediaItems.length > 0 && <ChatMediaGroup items={mediaItems} onOpenGallery={openMediaGallery} />}
           {m.displaySegments?.length
-            ? (renderOrderedAssistantContent(m) ?? renderLegacyAssistantContent(m))
-            : renderLegacyAssistantContent(m)}
+            ? (renderOrderedAssistantContent(m, presentationKey) ?? renderLegacyAssistantContent(m, presentationKey))
+            : renderLegacyAssistantContent(m, presentationKey)}
         </div>
         {renderChoices(m)}
         <div className="vstack vstack-7">
@@ -1950,52 +2035,61 @@ export function ChatScreen() {
     );
   }
 
-  function renderLive(l: LiveState) {
+  function renderLive(l: LiveState, handoff: ChatStreamHandoff | null) {
     const lastSegment = l.segments[l.segments.length - 1];
+    const presentationKey = handoff?.presentationKey || 'chat-live-fallback';
     return (
-      <div className="vstack vstack-12">
-        {l.segments.map((segment: LiveSegment) => {
-          if (segment.type === 'thinking') {
-            const active = l.lastEvent === 'thinking' && lastSegment?.id === segment.id;
-            const lines = segment.text.split('\n').filter(Boolean).slice(-3);
-            return (
-              <Fragment key={`live-segment-${segment.id}`}>
-                <div
-                  onClick={() => setDrawer({ text: segment.text, label: active ? '思考中…' : `思考了 ${segment.text.length} 字` })}
-                  className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}
-                >
-                  <span style={{ display: 'flex', animation: active ? 'chatBreathe 1.6s ease-in-out infinite' : 'none' }}>
-                    <Svg d={IC.brain} size={17} sw={1.5} />
-                  </span>
-                  <span style={{ fontSize: 13, letterSpacing: 1 }}>{active ? '思考中…' : `思考了 ${segment.text.length} 字`}</span>
-                </div>
-                {active && (
-                  <div style={{ position: 'relative', height: 76, overflow: 'hidden', borderRadius: 14, background: 'var(--card2)' }}>
-                    <div className="vstack vstack-4" style={{ position: 'absolute', bottom: 10, left: 16, right: 16 }}>
-                      {lines.map((ln, i) => (
-                        <span key={`${segment.id}-${i}-${ln.slice(0, 8)}`} style={{ fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.6, animation: 'chatFadeIn .4s ease', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
-                          {ln}
+      <div key={presentationKey}>
+        <div className="chat-msg vstack vstack-12" style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+          <div className="chat-message-content chat-message-content-assistant">
+            <div key={presentationKey + '-segments'} className="vstack vstack-12">
+              {l.segments.map((segment: LiveSegment) => {
+                const segmentKey = presentationKey + '-segment-' + segment.id;
+                if (segment.type === 'thinking') {
+                  const active = l.lastEvent === 'thinking' && lastSegment?.id === segment.id;
+                  const lines = segment.text.split('\n').filter(Boolean).slice(-3);
+                  const fresh = handoff ? isLiveSegmentFresh(handoff, segment) : true;
+                  return (
+                    <Fragment key={segmentKey}>
+                      <div
+                        onClick={() => setDrawer({ text: segment.text, label: active ? '思考中…' : \`思考了 \${segment.text.length} 字\` })}
+                        className="hstack hstack-8" style={{ cursor: 'pointer', color: 'var(--faint)' }}
+                      >
+                        <span style={{ display: 'flex', animation: active ? 'chatBreathe 1.6s ease-in-out infinite' : 'none' }}>
+                          <Svg d={IC.brain} size={17} sw={1.5} />
                         </span>
-                      ))}
-                    </div>
-                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 30, background: 'linear-gradient(var(--card2),transparent)' }} />
-                  </div>
-                )}
-              </Fragment>
-            );
-          }
-          if (segment.type === 'text') {
-            const caret = isTextCaretActive(l) && lastSegment?.id === segment.id;
-            return <Fragment key={`live-segment-${segment.id}`}>{renderMarkdown(segment.text, caret)}</Fragment>;
-          }
-          return <Fragment key={`live-segment-${segment.id}`}>{renderToolItems(`live-${segment.id}`, [segment.tool])}</Fragment>;
-        })}
-        {!l.segments.length ? (
-          <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
-            <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
-            正在连接回复…
+                        <span style={{ fontSize: 13, letterSpacing: 1 }}>{active ? '思考中…' : \`思考了 \${segment.text.length} 字\`}</span>
+                      </div>
+                      {active && (
+                        <div style={{ position: 'relative', height: 76, overflow: 'hidden', borderRadius: 14, background: 'var(--card2)' }}>
+                          <div className="vstack vstack-4" style={{ position: 'absolute', bottom: 10, left: 16, right: 16 }}>
+                            {lines.map((ln, i) => (
+                              <span key={presentationKey + '-segment-' + segment.id + '-line-' + i} style={{ fontSize: 12.5, color: 'var(--mut)', lineHeight: 1.6, animation: fresh ? 'chatFadeIn .4s ease' : 'none', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                                {ln}
+                              </span>
+                            ))}
+                          </div>
+                          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 30, background: 'linear-gradient(var(--card2),transparent)' }} />
+                        </div>
+                      )}
+                    </Fragment>
+                  );
+                }
+                if (segment.type === 'text') {
+                  const caret = isTextCaretActive(l) && lastSegment?.id === segment.id;
+                  return <Fragment key={segmentKey}>{renderMarkdown(segment.text, caret)}</Fragment>;
+                }
+                return <Fragment key={segmentKey}>{renderToolItems(segmentKey, [segment.tool])}</Fragment>;
+              })}
+              {!l.segments.length ? (
+                <div className="hstack hstack-8" style={{ color: 'var(--faint)', fontSize: 13 }}>
+                  <span style={{ width: 13, height: 13, borderRadius: '50%', border: '2px solid var(--rosebg)', borderTopColor: 'var(--rose)', animation: 'chatSpin .8s linear infinite' }} />
+                  正在连接回复…
+                </div>
+              ) : null}
+            </div>
           </div>
-        ) : null}
+        </div>
       </div>
     );
   }
@@ -2007,6 +2101,18 @@ export function ChatScreen() {
   const canFetchEarlier = (!legacyCompat && hasMoreBefore) || (legacyCompat && txWin.start === 0 && hasMoreBefore);
   const canShowNewerLoaded = legacyCompat && !atLatestWindow;
 
+  const activeHandoff = chatHandoffRef.current;
+  const activeLive = liveRef.current;
+  let handoffFinalMessageId = activeHandoff?.finalMessageId ?? null;
+  if (activeHandoff && activeLive && activeHandoff.finalizationConfirmed && handoffFinalMessageId === null) {
+    const matched = findPersistedAssistantForHandoff(msgs, activeHandoff, activeLive.segments);
+    if (matched !== null) {
+      activeHandoff.finalMessageId = matched;
+      presentationByMessageRef.current.set(matched, activeHandoff.presentationKey);
+      handoffFinalMessageId = matched;
+    }
+  }
+
   const rendered: ReactElement[] = [];
   let lastDate = '';
   visibleMsgs.forEach((m) => {
@@ -2015,14 +2121,30 @@ export function ChatScreen() {
       lastDate = m.dateKey;
       const label = m.dateKey === new Date().toISOString().slice(0, 10) ? dateLabel : m.dateKey.replace(/-/g, '.');
       rendered.push(
-        <div key={`d-${m.dateKey}-${m.id}`} style={{ textAlign: 'center', fontFamily: fontFamilyForText(label), fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
+        <div key={\`d-\${m.dateKey}-\${m.id}\`} style={{ textAlign: 'center', fontFamily: fontFamilyForText(label), fontSize: 12, letterSpacing: 2, color: 'var(--ghost)', padding: '2px 0' }}>
           {label}
         </div>,
       );
     }
+
+    const replaceSourceWithLive = Boolean(
+      activeLive
+      && activeHandoff
+      && handoffFinalMessageId === null
+      && activeHandoff.sourceAssistantId === m.id
+      && m.role === 'assistant',
+    );
+    if (replaceSourceWithLive) {
+      rendered.push(renderLive(activeLive, activeHandoff));
+      return;
+    }
+
+    const presentationKey = handoffFinalMessageId === m.id
+      ? activeHandoff?.presentationKey
+      : presentationByMessageRef.current.get(m.id);
     rendered.push(
       <div key={m.id}>
-        {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m)}
+        {m.role === 'user' ? renderUserMsg(m) : renderAssistantMsg(m, presentationKey || String(m.id))}
       </div>,
     );
   });
@@ -2266,7 +2388,10 @@ export function ChatScreen() {
             </div>
           )}
           {rendered}
-          {live && renderLive(live)}
+          {activeLive
+            && handoffFinalMessageId === null
+            && !(activeHandoff?.sourceAssistantId != null && visibleMsgs.some((message) => message.id === activeHandoff.sourceAssistantId))
+            && renderLive(activeLive, activeHandoff)}
           {pendingConfirmation && renderToolCard('pending-confirmation', pendingConfirmation)}
           {canShowNewerLoaded && (
             <div className="vstack vstack-8" style={{ padding: '4px 0 2px' }}>
