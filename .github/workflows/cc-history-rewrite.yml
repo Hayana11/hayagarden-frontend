@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install route test dependency
-        run: python -m pip install Flask
+        run: python -m pip install Flask cryptography
       - name: Prepare /opt/frontend for runtime modules
         run: |
           sudo mkdir -p /opt
