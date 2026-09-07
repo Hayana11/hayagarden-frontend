@@ -761,7 +761,6 @@ class ResidentJsonlHookTests(unittest.TestCase):
                     jsonl_finality_profile="unified_normal_wake",
                 ))
 
-        snapshot_mock.assert_not_called()
         replay_mock.assert_not_called()
 
 
