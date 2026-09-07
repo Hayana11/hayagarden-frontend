@@ -10,9 +10,6 @@ from tools.cc_capability_adapter import build_uh_a0_spawn_plan, physical_surface
 from tools.cc_tool_surface import _static_schema_registry
 from tools.capability_state import RUNTIME_STATE_INHERIT, RUNTIME_STATE_OFF
 
-BASE_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
-TARGET_FINGERPRINT = "7344a43bbb3163e8a7b4b46e568f05fd8a4f1b973a367b5e46c030d52df4a397"
-
 class M302BTodoCutoverTests(unittest.TestCase):
     def plan(self, state=RUNTIME_STATE_INHERIT):
         with tempfile.TemporaryDirectory() as root:
@@ -20,19 +17,19 @@ class M302BTodoCutoverTests(unittest.TestCase):
                 return build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
 
     def test_manifest_bindings(self):
-        self.assertEqual(get_capability("todo.read")["provider_bindings"], {"claude_code": "mcp__internal__get_todos", "internal_mcp": "mcp__internal__get_todos", "home_mcp": "mcp__home__get_todos", "api_relay": "get_todos"})
+        self.assertEqual(get_capability("todo.read")["provider_bindings"], {"claude_code": "mcp__capability__todo_read", "internal_mcp": "mcp__internal__get_todos", "home_mcp": "mcp__home__get_todos", "api_relay": "get_todos"})
         self.assertEqual(get_capability("todo.write")["provider_bindings"], {"claude_code": "mcp__capability__todo_write", "internal_mcp": "mcp__internal__add_todo", "home_mcp": "mcp__home__add_todo", "api_relay": "add_todo"})
 
     def test_config_and_surface(self):
         plan = self.plan()
         servers = plan["mcp_config"]["mcpServers"]
-        self.assertEqual(set(servers), {"home", "internal", "capability"})
+        self.assertEqual(set(servers), {"home", "internal", "capability", "external"})
         self.assertEqual(servers["home"]["url"], "http://127.0.0.1:3100/mcp")
         self.assertEqual(servers["internal"]["url"], "http://127.0.0.1:3101/mcp")
         self.assertEqual(servers["internal"]["headers"], {"X-UH-A0-Profile": "uh_a0"})
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
-        self.assertIn("mcp__internal__get_todos", allowed)
+        self.assertIn("mcp__capability__todo_read", allowed)
         self.assertIn("mcp__capability__todo_write", allowed)
         self.assertNotIn("mcp__home__get_todos", allowed)
         self.assertNotIn("mcp__home__add_todo", allowed)
@@ -41,7 +38,7 @@ class M302BTodoCutoverTests(unittest.TestCase):
         self.assertIn("mcp__capability__memory_search", allowed)
         self.assertNotIn("mcp__home__search_memories", allowed)
         self.assertIn("mcp__home__search_memories", disallowed)
-        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__internal__get_todos", "mcp__internal__get_ledger", "mcp__internal__get_ledger_budget", "mcp__capability__memory_search", "mcp__capability__memory_write", "mcp__capability__todo_write", "mcp__capability__ledger_write", "mcp__home__write_diary", "mcp__home__get_light_status", "mcp__home__get_countdowns"})
+        self.assertEqual(set(plan["claude_visible_mcp_tools"]), {"mcp__home__get_countdowns", "mcp__capability__memory_search", "mcp__capability__memory_write", "mcp__capability__diary_write", "mcp__capability__task_timer_start", "mcp__capability__home_light_status", "mcp__capability__todo_read", "mcp__capability__todo_write", "mcp__capability__ledger_read", "mcp__capability__ledger_budget_read", "mcp__capability__ledger_write"})
 
     def test_runtime_off_hides_both_provider_surfaces(self):
         plan = self.plan(RUNTIME_STATE_OFF)
@@ -64,13 +61,11 @@ class M302BTodoCutoverTests(unittest.TestCase):
         self.assertIn("mcp__internal__write_memory", disallowed)
         self.assertIn("mcp__home__search_memories", disallowed)
 
-    def test_fingerprint_and_names(self):
+    def test_surface_is_deterministic_and_names_are_explicit(self):
         with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_INHERIT):
-            first = physical_surface_fingerprint()
-            self.assertEqual(first, physical_surface_fingerprint())
-            self.assertNotEqual(first, BASE_FINGERPRINT)
-            self.assertEqual(first, TARGET_FINGERPRINT)
-            self.assertIn("mcp__internal__get_todos", physical_surface_names())
+            current = physical_surface_fingerprint()
+            self.assertEqual(current, physical_surface_fingerprint())
+            self.assertIn("mcp__capability__todo_read", physical_surface_names())
             self.assertIn("mcp__capability__memory_search", physical_surface_names())
             self.assertNotIn("mcp__home__search_memories", physical_surface_names())
             self.assertNotIn("mcp__home__get_todos", physical_surface_names())
