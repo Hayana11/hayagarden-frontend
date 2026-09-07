@@ -20,6 +20,8 @@ jobs:
           python-version: '3.11'
       - name: Install test dependencies
         run: python -m pip install Flask Pillow Markdown cryptography
+      - name: Prepare runtime import path
+        run: sudo mkdir -p /opt/frontend && sudo touch /opt/frontend/memories.db
       - name: Reproduce canonical baseline failure
         shell: bash
         run: |
