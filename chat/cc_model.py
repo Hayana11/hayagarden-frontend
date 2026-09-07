@@ -110,6 +110,20 @@ def cc_model_args(model: str | None = None) -> list[str]:
     return args
 
 
+def cc_model_args_from_identity(identity: str) -> list[str]:
+    """Convert a frozen CC authority identity to argv without reading config."""
+    identity = str(identity or '').strip()
+    if identity == 'default':
+        return []
+    prefix = 'explicit:'
+    if not identity.startswith(prefix):
+        raise ValueError('invalid CC model identity: %s' % (identity or '<empty>'))
+    model = identity[len(prefix):].strip()
+    if not model or not is_allowed_cc_model(model):
+        raise ValueError('invalid CC model identity: %s' % identity)
+    return ['--model', model]
+
+
 def describe_cc_model_state() -> dict[str, Any]:
     model = get_cc_chat_model()
     mode = cc_model_mode(model)
