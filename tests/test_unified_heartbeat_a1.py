@@ -712,6 +712,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         import gateway
         from cc_resident import ResidentSession
         from chat import cc_history_rewrite
+        from chat import display_thinking
         from tools import cc_jsonl_usage as replay
         from tools import lease_signer
 
@@ -879,7 +880,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 side_effect=lambda events: events,
             ),
             mock.patch.object(
-                uh.display_thinking, 'get_display_thinking_snapshot',
+                display_thinking, 'get_display_thinking_snapshot',
                 return_value=(False, ''),
             ),
             mock.patch.object(
@@ -908,6 +909,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
     def test_current_main_wake_never_final_failure_finishes_delivery_false(self):
         import gateway
         from chat import cc_history_rewrite
+        from chat import display_thinking
         from tools import lease_signer
 
         resident = _FakeResident(events=[
@@ -956,7 +958,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 side_effect=lambda events: events,
             ),
             mock.patch.object(
-                uh.display_thinking, 'get_display_thinking_snapshot',
+                display_thinking, 'get_display_thinking_snapshot',
                 return_value=(False, ''),
             ),
             mock.patch.object(
