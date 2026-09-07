@@ -694,6 +694,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
             merged = resident._attach_jsonl_usage_with_retry(usage)
 
         self.assertFalse(merged["jsonl_usage"]["stream_totals_match"])
+        self.assertNotIn("finality_state", merged["jsonl_usage"])
         self.assertEqual(replay_mock.call_count, 4)
         self.assertEqual(
             [call.args[0] for call in sleep_mock.call_args_list],
@@ -719,9 +720,9 @@ class ResidentJsonlHookTests(unittest.TestCase):
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._proc = FakeProc(lines)
         with (
-            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
-            mock.patch.object(replay, "replay_session_jsonl", return_value=None),
-            mock.patch("cc_resident.time.sleep"),
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None) as snapshot_mock,
+            mock.patch.object(replay, "replay_session_jsonl", return_value=None) as replay_mock,
+            mock.patch("cc_resident.time.sleep") as sleep_mock,
         ):
             with self.assertRaises(Exception) as raised:
                 list(resident.send_turn(
@@ -731,6 +732,9 @@ class ResidentJsonlHookTests(unittest.TestCase):
 
         self.assertEqual(getattr(raised.exception, "error_code", None),
                          "result_missing_before_terminal")
+        snapshot_mock.assert_not_called()
+        replay_mock.assert_not_called()
+        sleep_mock.assert_not_called()
 
     def test_resident_retries_until_all_jsonl_requests_arrive(self):
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
