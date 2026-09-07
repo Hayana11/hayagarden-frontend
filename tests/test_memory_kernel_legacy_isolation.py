@@ -1,7 +1,9 @@
 """Run existing memory contracts with synthetic data and no production access."""
 from __future__ import annotations
 
+import grp
 import os
+import pwd
 import sqlite3
 import subprocess
 import sys
@@ -11,6 +13,28 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _current_workspace_identity():
+    return (
+        pwd.getpwuid(os.getuid()).pw_name,
+        grp.getgrgid(os.getgid()).gr_name,
+    )
+
+
+def _prepare_workspace_env(root, env):
+    workspace = root / "workspace"
+    (workspace / "tools").mkdir(parents=True, exist_ok=True)
+    user, group = _current_workspace_identity()
+    env.update(
+        EXEC_CWD=str(workspace),
+        EXEC_ENABLED="0",
+        EXEC_USER=user,
+        EXEC_GROUP=group,
+    )
+    return workspace
+
+
 # Apply before importing application modules. Record denials so that catching
 # a blocked operation cannot hide an attempted production access.
 _RUNNER = r"""
@@ -59,7 +83,7 @@ def audit(event, args):
         flags = args[2] or 0
         writing = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC))
         blocked = (
-            str(path).startswith(('/opt/frontend/', '/opt/ombre/', '/root/'))
+            str(path).startswith(('/opt/frontend/', '/opt/ombre/', '/opt/workspace/', '/root/'))
             or (writing and not path.is_relative_to(sandbox))
         )
     if blocked:
@@ -98,6 +122,7 @@ class LegacyIsolationTests(unittest.TestCase):
                             updated_at TEXT
                         )"""
                     )
+                _prepare_workspace_env(root, env)
                 env.update(
                     TMPDIR=folder, TEMP=folder, TMP=folder,
                     HAYAGARDEN_CONFIG_DB_PATH=str(config_path),
@@ -121,6 +146,7 @@ class LegacyIsolationTests(unittest.TestCase):
                     "CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)"
                 )
             env = os.environ.copy()
+            _prepare_workspace_env(root, env)
             env.update(
                 HAYAGARDEN_CONFIG_DB_PATH=str(config_path),
                 HAYAGARDEN_ENV_PATH=str(root / "fixture.env"),
