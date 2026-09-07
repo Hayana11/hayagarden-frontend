@@ -1204,16 +1204,19 @@ class ResidentSession:
             )
             last_merged = attach_jsonl_usage(usage, last_replay)
             if self._jsonl_usage_complete(last_merged):
-                return self._with_jsonl_finality_state(last_merged, 'FINAL')
+                if finality_profile == JSONL_FINALITY_PROFILE_UNIFIED_NORMAL_WAKE:
+                    return self._with_jsonl_finality_state(last_merged, 'FINAL')
+                return last_merged
             has_usage = any(
                 int(usage.get(key) or 0) > 0
                 for key in ('cache_creation', 'input_tokens', 'output_tokens')
             )
             if not has_usage:
                 break
-            last_merged = self._with_jsonl_finality_state(
-                last_merged, 'FINALITY_PENDING',
-            )
+            if finality_profile == JSONL_FINALITY_PROFILE_UNIFIED_NORMAL_WAKE:
+                last_merged = self._with_jsonl_finality_state(
+                    last_merged, 'FINALITY_PENDING',
+                )
         return last_merged
 
     def send_turn(
@@ -1602,18 +1605,6 @@ class ResidentSession:
             respawn_reason=respawn_reason,
             max_round_context=self._max_round_context,
         )
-        # JSONL 只补 request identity / TTL bucket / model；stream totals 保持权威。
-        try:
-            if jsonl_finality_profile == JSONL_FINALITY_PROFILE_DEFAULT:
-                usage = self._attach_jsonl_usage_with_retry(usage, jsonl_cursor)
-            else:
-                usage = self._attach_jsonl_usage_with_retry(
-                    usage,
-                    jsonl_cursor,
-                    finality_profile=jsonl_finality_profile,
-                )
-        except Exception:
-            pass
         # 观测辅助字段：不改变既有 Usage v2 公开语义，供 gateway 组装 runtime
         usage['_obs_idle_seconds_before_turn'] = idle_seconds_before_turn
         usage['_obs_resident_generation'] = self._generation
@@ -1685,6 +1676,22 @@ class ResidentSession:
             # payload 已写入 resident：kill 强制下一轮冷启动，避免脏会话继续热轮
             self._kill(quiet=True)
             raise ResidentError('claude code 返回错误: ' + is_err, usage=usage)
+
+        # Only a successful authoritative provider terminal may enter JSONL
+        # durable-finality proof.  Terminal failures deliberately skip replay;
+        # in particular, Wake's extended profile must never mask a missing
+        # result, stall, hard timeout, or provider error.
+        try:
+            if jsonl_finality_profile == JSONL_FINALITY_PROFILE_DEFAULT:
+                usage = self._attach_jsonl_usage_with_retry(usage, jsonl_cursor)
+            else:
+                usage = self._attach_jsonl_usage_with_retry(
+                    usage,
+                    jsonl_cursor,
+                    finality_profile=jsonl_finality_profile,
+                )
+        except Exception:
+            pass
 
         self._cold = False
         self._last_used = time.time()
