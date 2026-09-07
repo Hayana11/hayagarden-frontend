@@ -789,18 +789,8 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             ],
         }
 
-        class Fence:
-            def __init__(self):
-                self.finishes = []
-
-            def finish(self, succeeded, **kwargs):
-                self.finishes.append(bool(succeeded))
-                return True
-
-        fence = Fence()
         commit_calls = []
         release_calls = []
-
         def main_stream(*args, **kwargs):
             self.assertEqual(
                 kwargs.get('jsonl_finality_profile'),
@@ -851,9 +841,16 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 gateway, '_gen_acquire_or_wait', return_value=('own', None),
             ),
             mock.patch.object(
+                gateway, '_gen_mark_pending_delivery',
+                side_effect=lambda token: None,
+            ),
+            mock.patch.object(
                 gateway, '_gen_release',
                 side_effect=lambda *args, **kwargs: release_calls.append(True),
             ),
+            mock.patch.object(
+                uh, 'retire_shared_resident_after_failed_delivery',
+            ) as retire,
             mock.patch.object(
                 gateway, '_cc_resident_stream_gen', side_effect=main_stream,
             ),
@@ -863,10 +860,6 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             mock.patch.object(
                 uh, 'prepare_shared_transcript_watermark',
                 return_value=(self.watermark(), 'ok'),
-            ),
-            mock.patch.object(
-                uh, 'begin_shared_wake_delivery_fence',
-                return_value=fence,
             ),
             mock.patch.object(
                 uh, 'commit_shared_transcript_watermark',
@@ -897,11 +890,10 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertEqual(resident._replay_calls, 3)
         self.assertTrue(result['cache_info']['jsonl_usage']['stream_totals_match'])
         self.assertEqual(len(commit_calls), 1)
-        self.assertIs(result['_shared_delivery_fence'], fence)
-        self.assertEqual(fence.finishes, [])
+        fence = result['_shared_delivery_fence']
         fence.finish(True, cache_info=result['cache_info'])
-        self.assertEqual(fence.finishes, [True])
         self.assertEqual(len(release_calls), 1)
+        retire.assert_not_called()
         self.assertEqual(resident.followup_calls, 0)
         list(resident.send_turn('follow-up'))
         self.assertEqual(resident.followup_calls, 1)
@@ -924,8 +916,6 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 },
             }, {})),
         ])
-        fence = mock.Mock()
-        fence.finish.return_value = True
         commit = mock.Mock()
         def main_stream(*args, **kwargs):
             yield from resident.events
@@ -947,9 +937,13 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 return_value=(self.watermark(), 'ok'),
             ),
             mock.patch.object(
-                uh, 'begin_shared_wake_delivery_fence',
-                return_value=fence,
+                gateway, '_gen_mark_pending_delivery',
+                side_effect=lambda token: None,
             ),
+            mock.patch.object(gateway, '_gen_release'),
+            mock.patch.object(
+                uh, 'retire_shared_resident_after_failed_delivery',
+            ) as retire,
             mock.patch.object(
                 uh, 'commit_shared_transcript_watermark', commit,
             ),
@@ -976,8 +970,7 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 )
 
         commit.assert_not_called()
-        fence.finish.assert_called_once()
-        self.assertFalse(fence.finish.call_args.args[0])
+        retire.assert_called_once()
 
 
 if __name__ == '__main__':
