@@ -93,6 +93,25 @@ def audit(event, args):
 sys.addaudithook(audit)
 suite = unittest.defaultTestLoader.loadTestsFromName(sys.argv[1])
 result = unittest.TextTestRunner(verbosity=1).run(suite)
+fixture_failures = []
+executor = sys.modules.get('tools.workspace_executor')
+if executor is not None:
+    exec_cwd = Path(executor.EXEC_CWD).resolve()
+    if not exec_cwd.is_relative_to(sandbox) or exec_cwd == Path('/opt/workspace'):
+        fixture_failures.append(f'workspace_executor.EXEC_CWD={exec_cwd}')
+registry = sys.modules.get('tools.workspace_registry')
+if registry is not None:
+    tools_dir = Path(registry._TOOLS_DIR).resolve()
+    if not tools_dir.is_relative_to(sandbox):
+        fixture_failures.append(f'workspace_registry._TOOLS_DIR={tools_dir}')
+if fixture_failures:
+    violations.extend(fixture_failures)
+print(
+    'WORKSPACE_FIXTURE',
+    'exec_cwd=', getattr(executor, 'EXEC_CWD', None),
+    'registry_tools=', getattr(registry, '_TOOLS_DIR', None),
+    'failures=', fixture_failures,
+)
 print('ISOLATION', sys.argv[1], 'tests=', result.testsRun, 'blocked_access=', violations)
 raise SystemExit(0 if result.wasSuccessful() and not violations else 1)
 """
