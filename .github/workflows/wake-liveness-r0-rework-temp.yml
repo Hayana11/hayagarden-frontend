@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - codex/wake-liveness-r0
+  pull_request:
+    branches:
+      - main
 
 jobs:
   focused-rework:
