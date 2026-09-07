@@ -271,6 +271,27 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         self.assertIn('_try_invoke_shared_renderer', b3)
         self.assertIn('NORMAL_WAKE_UNIFIED_UNOWNED_SKIP', gateway)
 
+    def test_unified_normal_wake_selects_bounded_jsonl_finality_profile(self):
+        from pathlib import Path
+        gateway = Path(__file__).resolve().parents[1].joinpath('gateway.py').read_text(
+            encoding='utf-8'
+        )
+        start = gateway.index('def _run_unified_normal_main_chat_turn')
+        end = gateway.index('def _cross_surface_recap_from_solo_chat', start)
+        section = gateway[start:end]
+        self.assertIn(
+            "jsonl_finality_profile='unified_normal_wake'",
+            section,
+        )
+        self.assertIn(
+            "commit_shared_transcript_watermark(",
+            section,
+        )
+        self.assertIn(
+            "jsonl_finality.get('stream_totals_match') is not True",
+            section,
+        )
+
     def test_unified_normal_wake_reuses_main_chat_display_filter(self):
         gateway = Path(__file__).resolve().parents[1].joinpath('gateway.py').read_text(
             encoding='utf-8'
