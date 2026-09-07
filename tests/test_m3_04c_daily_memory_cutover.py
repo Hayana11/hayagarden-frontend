@@ -46,14 +46,14 @@ class DailyMemoryCutoverTests(unittest.TestCase):
                 "home_mcp": HOME_MEMORY,
             },
         )
-        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("diary.write", "home.light.status", "countdown.read"))
-        self.assertEqual(
-            INTERNAL_MCP_CAPABILITY_IDS,
-            ("todo.read", "ledger.read", "ledger.budget.read"),
-        )
+        self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
+        self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ())
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
             (
+                "mcp__internal__get_ledger",
+                "mcp__internal__get_ledger_budget",
+                "mcp__internal__get_todos",
                 "mcp__internal__search_memories",
                 "mcp__internal__write_memory",
                 "mcp__internal__add_todo",
@@ -68,11 +68,7 @@ class DailyMemoryCutoverTests(unittest.TestCase):
 
     def test_normal_surface_has_only_internal_memory(self):
         plan = self.plan()
-        self.assertEqual(set(uh_a0_home_mcp_tools()), {
-            "mcp__home__write_diary",
-            "mcp__home__get_light_status",
-            "mcp__home__get_countdowns",
-        })
+        self.assertEqual(set(uh_a0_home_mcp_tools()), {"mcp__home__get_countdowns"})
         self.assertIn(INTERNAL_MEMORY, uh_a0_capability_proxy_tools())
         self.assertIn(INTERNAL_MEMORY, plan["surface_allowlist"])
         self.assertNotIn(HOME_MEMORY, plan["surface_allowlist"])
@@ -84,7 +80,7 @@ class DailyMemoryCutoverTests(unittest.TestCase):
         self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
 
     def test_home_legacy_and_fence_lookup_remain_explicit(self):
-        self.assertEqual(uh_a0_home_legacy_tools()[-1], HOME_MEMORY)
+        self.assertEqual(uh_a0_home_legacy_tools()[-1], "mcp__home__get_light_status")
         self.assertEqual(execution_fence.capability_for_tool(INTERNAL_MEMORY), "memory.search")
         self.assertEqual(execution_fence.capability_for_tool(LEGACY_INTERNAL_MEMORY), "memory.search")
         self.assertEqual(execution_fence.capability_for_tool(HOME_MEMORY), "memory.search")
