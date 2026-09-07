@@ -1,0 +1,44 @@
+name: Memory Kernel CORE-0
+
+on:
+  pull_request:
+    paths:
+      - "tools/memory_kernel.py"
+      - "tools/memory_kernel_schema.py"
+      - "tests/test_memory_kernel.py"
+      - "tests/test_memory_kernel_legacy_isolation.py"
+      - "docs/memory-kernel-core-0.md"
+      - ".github/workflows/memory-kernel-core-0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test-only dependencies
+        run: python -m pip install ruff==0.12.12 Flask requests Markdown -r requirements.txt
+      - name: Lint CORE-0
+        run: >-
+          python -m ruff check
+          tools/memory_kernel.py tools/memory_kernel_schema.py
+          tests/test_memory_kernel.py tests/test_memory_kernel_legacy_isolation.py
+      - name: Semantic, migration, and legacy isolation contracts
+        run: >-
+          python -m unittest
+          tests.test_memory_kernel tests.test_memory_kernel_legacy_isolation -v
+      - name: Whitespace check
+        run: git diff --check
