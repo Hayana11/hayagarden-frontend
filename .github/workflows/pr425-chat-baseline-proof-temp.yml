@@ -30,4 +30,25 @@ jobs:
           status=$?
           cat /tmp/pr425-baseline.log
           test "$status" -ne 0
-          grep -F "Object of type MagicMock is not JSON serializable" /tmp/pr425-baseline.log
+      - name: Inspect baseline SSE error payload
+        run: |
+          python - <<'PY'
+          from tests.test_chat_write_confirmation import (
+              DeferredConfirmationBridgeTests,
+              _FakeConfirmationResident,
+          )
+          case = DeferredConfirmationBridgeTests()
+          case.setUp()
+          events = case.run_bridge(
+              _FakeConfirmationResident(case.pending),
+              "approve",
+          )
+          print(events)
+          errors = [
+              event for event in events
+              if event.get("t") == "err"
+          ]
+          assert errors, events
+          assert "MagicMock" in str(errors[0]), errors
+          assert "not JSON serializable" in str(errors[0]), errors
+          PY
