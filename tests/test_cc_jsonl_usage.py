@@ -400,7 +400,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(usage["request_ids"], ["req-1"])
         self.assertEqual(usage["cache_creation_1h"], 100)
         self.assertEqual(usage["cache_creation_5m"], 0)
-        self.assertEqual(usage["jsonl_usage"]["finality_state"], "FINAL")
+        self.assertNotIn("finality_state", usage["jsonl_usage"])
 
 
     def test_resident_captures_session_id_from_camelcase_jsonl_events(self):
