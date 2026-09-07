@@ -734,6 +734,37 @@ class ResidentJsonlHookTests(unittest.TestCase):
                          "result_missing_before_terminal")
         replay_mock.assert_not_called()
 
+    def test_provider_error_skips_wake_extended_replay(self):
+        session = "wake-provider-error"
+        lines = [
+            json.dumps({
+                "type": "result",
+                "session_id": session,
+                "is_error": True,
+                "result": "provider failed",
+            }),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        with (
+            mock.patch.object(
+                replay, "snapshot_session_jsonl", return_value=None,
+            ) as snapshot_mock,
+            mock.patch.object(
+                replay, "replay_session_jsonl", return_value=None,
+            ) as replay_mock,
+            mock.patch("cc_resident.time.sleep"),
+        ):
+            with self.assertRaises(Exception):
+                list(resident.send_turn(
+                    "hello",
+                    jsonl_finality_profile="unified_normal_wake",
+                ))
+
+        snapshot_mock.assert_not_called()
+        replay_mock.assert_not_called()
+
+
     def test_resident_retries_until_all_jsonl_requests_arrive(self):
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._session_id = "65305691-efff-4fd6-9df5-2fc4ea4aa43f"
