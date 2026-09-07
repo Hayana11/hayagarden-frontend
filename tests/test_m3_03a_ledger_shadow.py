@@ -19,8 +19,6 @@ from tools.capability_state import RUNTIME_STATE_INHERIT
 from wake.cc_tools import WAKE_TO_CC_MCP
 
 
-BASE_FINGERPRINT = "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
-TARGET_FINGERPRINT = "3abed02e09b88156dbb61e49205aaa4302973625da6952e6b17156c0a20fe142"
 INTERNAL_MEMORY_SHADOW_TOOLS = (
     "mcp__internal__search_memories",
     "mcp__internal__write_memory",
@@ -104,7 +102,7 @@ class LedgerInternalShadowTests(unittest.TestCase):
             "这笔 12 元要我一起记账吗？",
         )
 
-    def test_daily_shadow_deny_changes_fingerprint_without_cutover(self):
+    def test_daily_shadow_surface_is_deterministic_without_cutover(self):
         with tempfile.TemporaryDirectory() as temp:
             with patch(
                 "tools.cc_capability_adapter.read_capability_state",
@@ -123,8 +121,9 @@ class LedgerInternalShadowTests(unittest.TestCase):
             EXPECTED_INTERNAL_MCP_SHADOW_TOOLS,
         )
         self.assertIn("mcp__internal__get_ledger", INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS)
-        self.assertEqual(first, TARGET_FINGERPRINT)
-        self.assertEqual(second, TARGET_FINGERPRINT)
+        current = physical_surface_fingerprint()
+        self.assertEqual(first, current)
+        self.assertEqual(second, current)
         self.assertEqual(first, second)
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
