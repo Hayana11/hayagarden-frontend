@@ -315,6 +315,15 @@ class EffortRouteTests(unittest.TestCase):
         self.assertEqual(post_response.status_code, 409)
         self.assertEqual(config_store.get('CC_CHAT_EFFORT'), 'high')
 
+    def test_provider_post_writes_canonical_chat_provider_only(self):
+        config_store.set('GW_PROVIDER', 'claude_code')
+        response = self.client.post('/api/config/provider', json={'provider': 'api_relay'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['ok'])
+        self.assertEqual(response.get_json()['provider'], 'api_relay')
+        self.assertEqual(config_store.get('CHAT_PROVIDER'), 'api_relay')
+        self.assertEqual(config_store.get('GW_PROVIDER'), 'claude_code')
+
 
 if __name__ == '__main__':
     unittest.main()

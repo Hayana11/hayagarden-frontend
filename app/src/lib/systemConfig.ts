@@ -5,9 +5,9 @@ export type ChatProvider = 'api_relay' | 'claude_code';
 export type ChatModelMode = 'default' | 'explicit' | 'unknown' | '';
 
 export interface ProviderConfig {
-  /** GW_PROVIDER config value (what /api/config/provider writes). */
+  /** Canonical/effective primary generation provider (CHAT_PROVIDER write target). */
   provider: ChatProvider;
-  /** resolve_provider('chat') — authoritative for chat model space. */
+  /** Same authority as provider: resolve_generation_provider() / resolve_provider('chat'). */
   effectiveChatProvider: ChatProvider;
   ccTokenSet: boolean;
 }
@@ -22,7 +22,7 @@ function normalizeProviderConfig(data: {
   cc_token_set?: boolean;
 }): ProviderConfig {
   const provider = asChatProvider(data.provider);
-  // Fall back to GW only when server omitted the field (old builds).
+  // Old builds omitted effective_chat_provider; provider is already the canonical state.
   const effectiveChatProvider = data.effective_chat_provider === undefined
     ? provider
     : asChatProvider(data.effective_chat_provider);
@@ -33,8 +33,8 @@ function normalizeProviderConfig(data: {
   };
 }
 
-/** Immediate chat-model UI space for an effective chat provider (MODEL-1A/1B).
- * Pass resolve_provider('chat') / effective_chat_provider — never the raw POST body.
+/** Immediate chat-model UI space for the primary generation provider (MODEL-1A/1B).
+ * Pass resolve_generation_provider() / effective_chat_provider — never a raw GW write value.
  *
  * MODEL-1B: entering Claude Code does NOT imply default. Until model-catalog /
  * model GET confirms model_mode, UI must treat CC as unknown (never fake "默认").

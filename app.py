@@ -2219,15 +2219,14 @@ def _env_set(key, value):
         lines.append(key + '=' + value)
     open(path, 'w').write('\n'.join(lines) + '\n')
 
-def _provider_payload(gw_provider=None):
-    """GW config + effective chat provider (resolve_provider('chat')).
+def _provider_payload():
+    """Primary generation provider state.
 
-    MODEL-1A: UI model space must follow effective_chat_provider, not the
-    bare GW_PROVIDER write value (CHAT_PROVIDER may still win).
+    CHAT_PROVIDER is the canonical write target. GW_PROVIDER remains only as
+    a compatibility read fallback inside the authority resolver.
     """
-    from chat.provider_router import resolve_provider
-    gw = (gw_provider if gw_provider is not None else config_store.get('GW_PROVIDER', 'api_relay')) or 'api_relay'
-    gw = str(gw).strip() or 'api_relay'
+    from chat.provider_router import resolve_generation_provider
+    provider = resolve_generation_provider()
     has_token = False
     try:
         for line in open('/opt/frontend/.env'):
@@ -2236,8 +2235,8 @@ def _provider_payload(gw_provider=None):
     except Exception:
         pass
     return {
-        'provider': gw,
-        'effective_chat_provider': resolve_provider('chat'),
+        'provider': provider,
+        'effective_chat_provider': provider,
         'cc_token_set': has_token,
     }
 
@@ -2253,8 +2252,8 @@ def config_set_provider():
     if provider not in ('api_relay', 'claude_code'):
         return jsonify({'error': 'provider must be api_relay or claude_code'}), 400
     try:
-        config_store.set('GW_PROVIDER', provider)
-        payload = _provider_payload(gw_provider=provider)
+        config_store.set('CHAT_PROVIDER', provider)
+        payload = _provider_payload()
         payload['ok'] = True
         return jsonify(payload)
     except Exception as e:

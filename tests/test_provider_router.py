@@ -20,8 +20,11 @@ os.environ.setdefault(
 
 import config_store
 from chat.provider_router import (
+    GenerationClass,
     ProviderConfigError,
+    capture_generation_authority,
     fallback_for_http_status,
+    resolve_generation_provider,
     resolve_provider,
 )
 
@@ -37,13 +40,197 @@ class ProviderRouterTests(unittest.TestCase):
         with mock.patch.object(config_store, 'get', side_effect=fake_get({
             'CHAT_PROVIDER': 'claude_code', 'GW_PROVIDER': 'api_relay',
         })):
+            self.assertEqual(resolve_generation_provider(), 'claude_code')
             self.assertEqual(resolve_provider('chat'), 'claude_code')
 
     def test_chat_missing_new_key_falls_back_to_legacy(self):
         with mock.patch.object(config_store, 'get', side_effect=fake_get({
             'CHAT_PROVIDER': '', 'GW_PROVIDER': 'claude_code',
         })):
+            self.assertEqual(resolve_generation_provider(), 'claude_code')
             self.assertEqual(resolve_provider('chat'), 'claude_code')
+
+    def test_chat_api_relay_is_generation_authority(self):
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'CHAT_PROVIDER': 'api_relay', 'GW_PROVIDER': 'claude_code',
+        })):
+            self.assertEqual(resolve_generation_provider(), 'api_relay')
+            self.assertEqual(resolve_provider('chat'), 'api_relay')
+
+    def test_wake_and_background_never_influence_generation_authority(self):
+        for wake, background in (
+            ('api_relay', 'claude_code'),
+            ('claude_code', 'api_relay'),
+            ('inherit', 'claude_code'),
+        ):
+            with self.subTest(wake=wake, background=background), \
+                    mock.patch.object(config_store, 'get', side_effect=fake_get({
+                        'CHAT_PROVIDER': 'claude_code',
+                        'GW_PROVIDER': 'api_relay',
+                        'WAKE_PROVIDER': wake,
+                        'BACKGROUND_PROVIDER': background,
+                    })):
+                self.assertEqual(resolve_generation_provider(), 'claude_code')
+
+    def test_snapshot_does_not_read_legacy_surface_or_fallback_keys(self):
+        calls = []
+
+        def _get(key, default=None):
+            calls.append(key)
+            return {'CHAT_PROVIDER': 'claude_code'}.get(key, default)
+
+        with mock.patch.object(config_store, 'get', side_effect=_get), \
+                mock.patch('chat.cc_model.cc_model_identity', return_value='default'):
+            capture_generation_authority()
+        self.assertNotIn('WAKE_PROVIDER', calls)
+        self.assertNotIn('BACKGROUND_PROVIDER', calls)
+        self.assertNotIn('FALLBACK_PROVIDER', calls)
+
+    def test_chat_scope_is_compatibility_delegation(self):
+        with mock.patch(
+            'chat.provider_router.resolve_generation_provider',
+            return_value='api_relay',
+        ) as resolver:
+            self.assertEqual(resolve_provider('chat'), 'api_relay')
+        resolver.assert_called_once_with()
+
+    def test_snapshot_is_frozen_after_runtime_config_changes(self):
+        values = {
+            'CHAT_PROVIDER': 'claude_code',
+            'GW_PROVIDER': 'api_relay',
+        }
+        with mock.patch.object(config_store, 'get', side_effect=fake_get(values)), \
+                mock.patch('chat.cc_model.cc_model_identity', return_value='explicit:claude-sonnet-5'):
+            snapshot = capture_generation_authority()
+            values['CHAT_PROVIDER'] = 'api_relay'
+            self.assertEqual(snapshot.provider, 'claude_code')
+            self.assertEqual(snapshot.model_identity, 'explicit:claude-sonnet-5')
+
+    def test_cc_snapshot_uses_official_cc_model_resolver(self):
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'CHAT_PROVIDER': 'claude_code',
+        })), mock.patch(
+            'chat.cc_model.cc_model_identity',
+            return_value='explicit:claude-opus-5',
+        ) as cc_resolver:
+            snapshot = capture_generation_authority()
+        self.assertEqual(snapshot.provider, 'claude_code')
+        self.assertEqual(snapshot.model_identity, 'explicit:claude-opus-5')
+        cc_resolver.assert_called_once_with()
+
+    def test_relay_snapshot_uses_active_relay_model_authority(self):
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'CHAT_PROVIDER': 'api_relay',
+            'MODEL': 'must-not-be-used',
+            'WS_MODEL': 'must-not-be-used',
+        })), mock.patch(
+            'relay.manager.resolve_active_relay_model_identity',
+            return_value='claude-opus-5',
+        ) as relay_resolver:
+            snapshot = capture_generation_authority()
+        self.assertEqual(snapshot.provider, 'api_relay')
+        self.assertEqual(snapshot.model_identity, 'claude-opus-5')
+        relay_resolver.assert_called_once_with()
+
+    def test_relay_snapshot_preserves_explicit_unknown_model(self):
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'CHAT_PROVIDER': 'api_relay',
+        })), mock.patch(
+            'relay.manager.resolve_active_relay_model_identity',
+            return_value='unknown',
+        ):
+            self.assertEqual(capture_generation_authority().model_identity, 'unknown')
+
+    def test_relay_preset_model_wins_over_global_model(self):
+        from relay.manager import resolve_active_relay_model_identity
+
+        with mock.patch(
+            'relay.manager._lookup_active_relay',
+            return_value={'default_model': 'preset-model'},
+        ), mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'MODEL': 'global-model',
+            'WS_MODEL': 'ws-model',
+        })):
+            self.assertEqual(resolve_active_relay_model_identity(), 'preset-model')
+
+    def test_empty_preset_model_falls_back_to_global_model(self):
+        from relay.manager import resolve_active_relay_model_identity
+
+        with mock.patch(
+            'relay.manager._lookup_active_relay',
+            return_value={'default_model': ''},
+        ), mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'MODEL': 'global-model',
+            'WS_MODEL': 'ws-model',
+        })):
+            self.assertEqual(resolve_active_relay_model_identity(), 'global-model')
+
+    def test_missing_active_preset_falls_back_to_global_model(self):
+        from relay.manager import resolve_active_relay_model_identity
+
+        with mock.patch('relay.manager._lookup_active_relay', return_value=None), \
+                mock.patch.object(config_store, 'get', side_effect=fake_get({
+                    'MODEL': 'global-model',
+                    'WS_MODEL': 'ws-model',
+                })):
+            self.assertEqual(resolve_active_relay_model_identity(), 'global-model')
+
+    def test_empty_preset_and_model_are_explicit_unknown(self):
+        from relay.manager import resolve_active_relay_model_identity
+
+        with mock.patch('relay.manager._lookup_active_relay', return_value=None), \
+                mock.patch.object(config_store, 'get', side_effect=fake_get({
+                    'MODEL': '',
+                    'WS_MODEL': 'ws-model',
+                })):
+            self.assertEqual(resolve_active_relay_model_identity(), 'unknown')
+
+    def test_ws_model_never_enters_relay_model_authority(self):
+        from relay.manager import RelayManager, resolve_active_relay_model_identity
+
+        with mock.patch(
+            'relay.manager._lookup_active_relay',
+            return_value={'url': 'http://relay.example', 'key': 'k', 'default_model': ''},
+        ), mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'CHAT_PROVIDER': 'api_relay',
+            'MODEL': 'global-model',
+            'WS_MODEL': 'ws-must-not-win',
+        })):
+            identity = resolve_active_relay_model_identity()
+            manager = RelayManager(env_path='/no/such/.env')
+        self.assertEqual(identity, 'global-model')
+        self.assertEqual(manager.model, 'global-model')
+        self.assertNotEqual(identity, 'ws-must-not-win')
+        self.assertNotEqual(manager.model, 'ws-must-not-win')
+
+    def test_snapshot_relay_model_matches_relay_manager_default(self):
+        from relay.manager import RelayManager
+
+        cases = (
+            ({'url': 'http://relay.example', 'key': 'k', 'default_model': 'preset-model'}, 'global-model', 'preset-model'),
+            ({'url': 'http://relay.example', 'key': 'k', 'default_model': ''}, 'global-model', 'global-model'),
+            (None, 'global-model', 'global-model'),
+            (None, '', 'unknown'),
+        )
+        for active, global_model, expected in cases:
+            with self.subTest(active=active, global_model=global_model), \
+                    mock.patch('relay.manager._lookup_active_relay', return_value=active), \
+                    mock.patch.object(config_store, 'get', side_effect=fake_get({
+                        'CHAT_PROVIDER': 'api_relay',
+                        'MODEL': global_model,
+                        'WS_MODEL': 'ws-must-not-win',
+                    })):
+                manager = RelayManager(env_path='/no/such/.env')
+                snapshot = capture_generation_authority()
+                manager_identity = str(manager.model or '').strip() or 'unknown'
+                self.assertEqual(snapshot.provider, 'api_relay')
+                self.assertEqual(snapshot.model_identity, expected)
+                self.assertEqual(snapshot.model_identity, manager_identity)
+
+    def test_generation_classification_contract(self):
+        self.assertEqual(GenerationClass.IDENTITY_BEARING.value, 'identity_bearing')
+        self.assertEqual(GenerationClass.CONTINUITY_AUTHORING.value, 'continuity_authoring')
+        self.assertEqual(GenerationClass.INFRASTRUCTURE_HELPER.value, 'infrastructure_helper')
 
     def test_wake_inherit_and_background_are_explicit(self):
         with mock.patch.object(config_store, 'get', side_effect=fake_get({
