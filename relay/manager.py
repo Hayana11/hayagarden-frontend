@@ -37,6 +37,20 @@ def _lookup_active_relay():
     return None
 
 
+def resolve_active_relay_model_identity() -> str:
+    """Return the active relay preset's formal model identity, or ``unknown``.
+
+    Primary generation authority must not guess from RelayManager's legacy
+    global MODEL fallback (nor WS_MODEL). No active preset/default model is an
+    explicit unknown, not an inferred provider default.
+    """
+    active = _lookup_active_relay()
+    if not active:
+        return 'unknown'
+    model = str(active.get('default_model') or '').strip()
+    return model or 'unknown'
+
+
 class RelayManager:
     def __init__(self, env_path="/opt/frontend/.env"):
         self.env_path = env_path
