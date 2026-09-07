@@ -3946,6 +3946,7 @@ def _cc_resident_stream_gen(
     rebuild_messages_fn=None, pending_respawn_reason=None,
     display_thinking_mode='off', display_thinking_prompt=None,
     turn_lease=None, reality_context='',
+    jsonl_finality_profile='default',
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4417,6 +4418,8 @@ def _cc_resident_stream_gen(
     _send_kwargs = {'commit_meta': commit_meta}
     if turn_lease is not None:
         _send_kwargs['turn_lease'] = copy.deepcopy(turn_lease)
+    if jsonl_finality_profile != 'default':
+        _send_kwargs['jsonl_finality_profile'] = jsonl_finality_profile
     for evt, payload in _CC_RESIDENT.send_turn(content, **_send_kwargs):
         if evt == 'tool_result' and isinstance(payload, dict):
             tool_result_chunks.append(str(payload.get('result') or ''))
@@ -4624,6 +4627,7 @@ def _run_unified_normal_main_chat_turn(
                 display_thinking_mode=display_thinking_mode,
                 display_thinking_prompt=display_thinking_prompt,
                 turn_lease=lease,
+                jsonl_finality_profile='unified_normal_wake',
             )
 
         text_acc = []

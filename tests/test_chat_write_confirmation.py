@@ -71,7 +71,11 @@ class DeferredConfirmationBridgeTests(unittest.TestCase):
             "approval_id": approval_id or self.pending["approval_id"],
         }
         with mock.patch.object(gateway, "_CC_RESIDENT", resident), \
-             mock.patch.object(gateway, "_persist_turn_assistant"):
+             mock.patch.object(
+                 gateway,
+                 "_persist_turn_assistant",
+                 return_value=123,
+             ):
             return _decode_sse(
                 gateway._stream_cc_deferred_confirmation(payload)
             )
@@ -97,6 +101,7 @@ class DeferredConfirmationBridgeTests(unittest.TestCase):
         self.assertEqual(events[1]["d"]["result"], "mock post result")
         self.assertEqual(events[2]["d"], "已记好")
         self.assertTrue(events[4]["ok"])
+        self.assertEqual(events[4]["assistant_message_id"], 123)
 
         replay = self.run_bridge(resident, "approve")
         self.assertEqual(resident.write_count, 1)

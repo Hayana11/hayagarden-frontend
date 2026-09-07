@@ -400,6 +400,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(usage["request_ids"], ["req-1"])
         self.assertEqual(usage["cache_creation_1h"], 100)
         self.assertEqual(usage["cache_creation_5m"], 0)
+        self.assertNotIn("finality_state", usage["jsonl_usage"])
 
 
     def test_resident_captures_session_id_from_camelcase_jsonl_events(self):
@@ -537,6 +538,231 @@ class ResidentJsonlHookTests(unittest.TestCase):
         ):
             list(resident.send_turn("hello"))
         select_mock.assert_not_called()
+
+    def test_unified_normal_wake_waits_for_multitool_late_flush(self):
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._session_id = "wake-late-flush"
+        usage = {
+            "input_tokens": 3,
+            "output_tokens": 6,
+            "cache_read": 0,
+            "cache_creation": 30,
+            "rounds": [
+                {"index": 1, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+                {"index": 2, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+                {"index": 3, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+            ],
+        }
+        partial = replay.replay_jsonl_lines([
+            _assistant_line("req-1", cache_creation=10, cache_creation_1h=10),
+        ])
+        complete = replay.replay_jsonl_lines([
+            _assistant_line("req-1", cache_creation=10, cache_creation_1h=10),
+            _assistant_line("req-2", cache_creation=10, cache_creation_1h=10),
+            _assistant_line("req-3", cache_creation=10, cache_creation_1h=10),
+        ])
+        cursors = []
+        with (
+            mock.patch.object(
+                replay,
+                "snapshot_session_jsonl",
+                return_value={"path": "/tmp/wake-late-flush.jsonl", "offset": 42},
+            ),
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                side_effect=lambda *args, **kwargs: (
+                    cursors.append(kwargs["cursor"])
+                    or (partial if len(cursors) < 3 else complete)
+                ),
+            ),
+            mock.patch("cc_resident.time.sleep") as sleep_mock,
+        ):
+            merged = resident._attach_jsonl_usage_with_retry(
+                usage,
+                finality_profile="unified_normal_wake",
+            )
+
+        self.assertTrue(merged["jsonl_usage"]["stream_totals_match"])
+        self.assertEqual(merged["jsonl_usage"]["finality_state"], "FINAL")
+        self.assertEqual(len(cursors), 3)
+        self.assertEqual(cursors[0], cursors[1])
+        self.assertEqual(cursors[1], cursors[2])
+        self.assertEqual(
+            [call.args[0] for call in sleep_mock.call_args_list],
+            [0.05, 0.15],
+        )
+
+    def test_unified_normal_wake_never_catches_up_and_stays_pending(self):
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._session_id = "wake-never-final"
+        usage = {
+            "input_tokens": 3,
+            "output_tokens": 6,
+            "cache_read": 0,
+            "cache_creation": 30,
+            "rounds": [
+                {"index": 1, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+                {"index": 2, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+                {"index": 3, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+            ],
+        }
+        partial = replay.replay_jsonl_lines([
+            _assistant_line("req-1", cache_creation=10, cache_creation_1h=10),
+        ])
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(replay, "replay_session_jsonl", return_value=partial) as replay_mock,
+            mock.patch("cc_resident.time.sleep") as sleep_mock,
+        ):
+            merged = resident._attach_jsonl_usage_with_retry(
+                usage,
+                finality_profile="unified_normal_wake",
+            )
+
+        self.assertFalse(merged["jsonl_usage"]["stream_totals_match"])
+        self.assertEqual(merged["jsonl_usage"]["finality_state"], "FINALITY_PENDING")
+        self.assertEqual(replay_mock.call_count, 5)
+        self.assertEqual(
+            [call.args[0] for call in sleep_mock.call_args_list],
+            [0.05, 0.15, 0.35, 0.45],
+        )
+
+    def test_unified_normal_wake_true_totals_mismatch_never_releases(self):
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._session_id = "wake-conflict"
+        usage = {
+            "input_tokens": 3,
+            "output_tokens": 6,
+            "cache_read": 0,
+            "cache_creation": 30,
+            "rounds": [
+                {"index": 1, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+                {"index": 2, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+                {"index": 3, "input_tokens": 1, "output_tokens": 2,
+                 "cache_read": 0, "cache_creation": 10},
+            ],
+        }
+        conflict = replay.replay_jsonl_lines([
+            _assistant_line("req-1", input_tokens=2, output_tokens=2,
+                            cache_creation=10, cache_creation_1h=10),
+            _assistant_line("req-2", input_tokens=1, output_tokens=2,
+                            cache_creation=10, cache_creation_1h=10),
+            _assistant_line("req-3", input_tokens=1, output_tokens=2,
+                            cache_creation=10, cache_creation_1h=10),
+        ])
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(replay, "replay_session_jsonl", return_value=conflict),
+            mock.patch("cc_resident.time.sleep"),
+        ):
+            merged = resident._attach_jsonl_usage_with_retry(
+                usage,
+                finality_profile="unified_normal_wake",
+            )
+
+        self.assertFalse(merged["jsonl_usage"]["stream_totals_match"])
+        self.assertEqual(merged["jsonl_usage"]["finality_state"], "FINALITY_PENDING")
+
+    def test_normal_chat_keeps_original_bounded_jsonl_window(self):
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._session_id = "normal-chat"
+        usage = {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cache_read": 0,
+            "cache_creation": 10,
+            "rounds": [{"index": 1, "input_tokens": 1, "output_tokens": 2,
+                        "cache_read": 0, "cache_creation": 10}],
+        }
+        partial = replay.replay_jsonl_lines([
+            _assistant_line("req-1", cache_creation=5, cache_creation_1h=5),
+        ])
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(replay, "replay_session_jsonl", return_value=partial) as replay_mock,
+            mock.patch("cc_resident.time.sleep") as sleep_mock,
+        ):
+            merged = resident._attach_jsonl_usage_with_retry(usage)
+
+        self.assertFalse(merged["jsonl_usage"]["stream_totals_match"])
+        self.assertNotIn("finality_state", merged["jsonl_usage"])
+        self.assertEqual(replay_mock.call_count, 4)
+        self.assertEqual(
+            [call.args[0] for call in sleep_mock.call_args_list],
+            [0.05, 0.15, 0.35],
+        )
+
+    def test_provider_without_authoritative_result_keeps_terminal_failure(self):
+        session = "wake-no-result"
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "sessionId": session,
+                "message": {
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 2,
+                        "cache_creation_input_tokens": 10,
+                    },
+                },
+            }),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None) as snapshot_mock,
+            mock.patch.object(replay, "replay_session_jsonl", return_value=None) as replay_mock,
+            mock.patch("cc_resident.time.sleep") as sleep_mock,
+        ):
+            with self.assertRaises(Exception) as raised:
+                list(resident.send_turn(
+                    "hello",
+                    jsonl_finality_profile="unified_normal_wake",
+                ))
+
+        self.assertEqual(getattr(raised.exception, "error_code", None),
+                         "result_missing_before_terminal")
+        replay_mock.assert_not_called()
+
+    def test_provider_error_skips_wake_extended_replay(self):
+        session = "wake-provider-error"
+        lines = [
+            json.dumps({
+                "type": "result",
+                "session_id": session,
+                "is_error": True,
+                "result": "provider failed",
+            }),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+        with (
+            mock.patch.object(
+                replay, "snapshot_session_jsonl", return_value=None,
+            ) as snapshot_mock,
+            mock.patch.object(
+                replay, "replay_session_jsonl", return_value=None,
+            ) as replay_mock,
+            mock.patch("cc_resident.time.sleep"),
+        ):
+            with self.assertRaises(Exception):
+                list(resident.send_turn(
+                    "hello",
+                    jsonl_finality_profile="unified_normal_wake",
+                ))
+
+        replay_mock.assert_not_called()
+
 
     def test_resident_retries_until_all_jsonl_requests_arrive(self):
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")

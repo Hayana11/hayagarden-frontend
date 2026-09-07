@@ -29,6 +29,17 @@ TOOL_PROFILE_LEGACY = 'legacy'
 TOOL_PROFILE_TEXT_ONLY = 'text_only'
 TOOL_PROFILE_UH_A0 = 'uh_a0'
 
+JSONL_FINALITY_PROFILE_DEFAULT = 'default'
+JSONL_FINALITY_PROFILE_UNIFIED_NORMAL_WAKE = 'unified_normal_wake'
+JSONL_FINALITY_RETRY_DELAYS = (0.0, 0.05, 0.15, 0.35)
+# The normal Wake provider result is authoritative before JSONL has necessarily
+# flushed its final multi-tool assistant rows.  This remains a bounded proof:
+# every read replays the same frozen session cursor and only an exact totals
+# match can release the caller.
+UNIFIED_NORMAL_WAKE_JSONL_FINALITY_RETRY_DELAYS = (
+    0.0, 0.05, 0.15, 0.35, 0.45,
+)
+
 # Claude stdout events that refresh the stall / inactivity deadline.
 # Gateway/SSE heartbeats are synthetic and must NOT be listed here.
 _CLAUDE_ACTIVITY_STREAM_EVENTS = frozenset({
@@ -1149,14 +1160,40 @@ class ResidentSession:
         jsonl_usage = (merged or {}).get('jsonl_usage') or {}
         return jsonl_usage.get('stream_totals_match') is True
 
-    def _attach_jsonl_usage_with_retry(self, usage, jsonl_cursor=None):
-        """JSONL 落盘可能略晚于 stdout；短退避重试直到 stream totals 对齐。"""
+    @staticmethod
+    def _with_jsonl_finality_state(merged, state):
+        jsonl_usage = (merged or {}).get('jsonl_usage')
+        if not isinstance(jsonl_usage, dict):
+            return merged
+        out = dict(merged)
+        out['jsonl_usage'] = dict(jsonl_usage)
+        out['jsonl_usage']['finality_state'] = state
+        return out
+
+    def _attach_jsonl_usage_with_retry(
+        self,
+        usage,
+        jsonl_cursor=None,
+        *,
+        finality_profile=JSONL_FINALITY_PROFILE_DEFAULT,
+    ):
+        """Prove durable JSONL finality against one frozen session cursor.
+
+        FINALITY_PENDING is only an intermediate state.  The caller may
+        proceed only after stream_totals_match is exactly True; a bounded
+        timeout returns the last non-final proof so existing fail-closed
+        handling remains in force.
+        """
         from tools.cc_jsonl_usage import attach_jsonl_usage, replay_session_jsonl
 
         if not self._session_id:
             return usage
         replay_cursor = self._jsonl_replay_cursor(jsonl_cursor)
-        delays = (0.0, 0.05, 0.15, 0.35)
+        delays = (
+            UNIFIED_NORMAL_WAKE_JSONL_FINALITY_RETRY_DELAYS
+            if finality_profile == JSONL_FINALITY_PROFILE_UNIFIED_NORMAL_WAKE
+            else JSONL_FINALITY_RETRY_DELAYS
+        )
         last_replay = None
         last_merged = usage
         for delay in delays:
@@ -1167,6 +1204,8 @@ class ResidentSession:
             )
             last_merged = attach_jsonl_usage(usage, last_replay)
             if self._jsonl_usage_complete(last_merged):
+                if finality_profile == JSONL_FINALITY_PROFILE_UNIFIED_NORMAL_WAKE:
+                    return self._with_jsonl_finality_state(last_merged, 'FINAL')
                 return last_merged
             has_usage = any(
                 int(usage.get(key) or 0) > 0
@@ -1174,6 +1213,10 @@ class ResidentSession:
             )
             if not has_usage:
                 break
+            if finality_profile == JSONL_FINALITY_PROFILE_UNIFIED_NORMAL_WAKE:
+                last_merged = self._with_jsonl_finality_state(
+                    last_merged, 'FINALITY_PENDING',
+                )
         return last_merged
 
     def send_turn(
@@ -1184,6 +1227,7 @@ class ResidentSession:
         idle_heartbeat_sec=None,
         turn_lease=None,
         turn_runtime=None,
+        jsonl_finality_profile=JSONL_FINALITY_PROFILE_DEFAULT,
     ):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
@@ -1561,11 +1605,6 @@ class ResidentSession:
             respawn_reason=respawn_reason,
             max_round_context=self._max_round_context,
         )
-        # JSONL 只补 request identity / TTL bucket / model；stream totals 保持权威。
-        try:
-            usage = self._attach_jsonl_usage_with_retry(usage, jsonl_cursor)
-        except Exception:
-            pass
         # 观测辅助字段：不改变既有 Usage v2 公开语义，供 gateway 组装 runtime
         usage['_obs_idle_seconds_before_turn'] = idle_seconds_before_turn
         usage['_obs_resident_generation'] = self._generation
@@ -1637,6 +1676,22 @@ class ResidentSession:
             # payload 已写入 resident：kill 强制下一轮冷启动，避免脏会话继续热轮
             self._kill(quiet=True)
             raise ResidentError('claude code 返回错误: ' + is_err, usage=usage)
+
+        # Only a successful authoritative provider terminal may enter JSONL
+        # durable-finality proof.  Terminal failures deliberately skip replay;
+        # in particular, Wake's extended profile must never mask a missing
+        # result, stall, hard timeout, or provider error.
+        try:
+            if jsonl_finality_profile == JSONL_FINALITY_PROFILE_DEFAULT:
+                usage = self._attach_jsonl_usage_with_retry(usage, jsonl_cursor)
+            else:
+                usage = self._attach_jsonl_usage_with_retry(
+                    usage,
+                    jsonl_cursor,
+                    finality_profile=jsonl_finality_profile,
+                )
+        except Exception:
+            pass
 
         self._cold = False
         self._last_used = time.time()
