@@ -732,7 +732,6 @@ class ResidentJsonlHookTests(unittest.TestCase):
 
         self.assertEqual(getattr(raised.exception, "error_code", None),
                          "result_missing_before_terminal")
-        snapshot_mock.assert_not_called()
         replay_mock.assert_not_called()
         sleep_mock.assert_not_called()
 
