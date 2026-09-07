@@ -19,7 +19,9 @@ from chat.provider_router import GenerationAuthoritySnapshot
 class BackgroundGenerationRequest:
     system_text: str
     prompt_text: str
-    max_tokens: int
+    # Best-effort output budget: Relay applies it as a hard max_tokens ceiling;
+    # the pinned Claude Code CLI has no equivalent hard output-token flag.
+    max_tokens_hint: int
     timeout_sec: float
     task_kind: str = ''
 
@@ -37,8 +39,23 @@ class BackgroundGenerationError(RuntimeError):
     """The selected provider failed; this adapter never cross-falls back."""
 
 
-def _cc_text_from_stream(stdout: str) -> tuple[str, dict[str, Any] | None]:
-    text = ''
+@dataclass(frozen=True)
+class _CcTerminal:
+    result_seen: bool
+    result_subtype: str
+    result_is_error: object
+    result_text: str
+    usage: dict[str, Any] | None
+    init_model: str
+    delta_text: str
+
+
+def _cc_terminal_from_stream(stdout: str) -> _CcTerminal:
+    result_seen = False
+    result_subtype = ''
+    result_is_error: object = None
+    result_text = ''
+    init_model = ''
     deltas: list[str] = []
     usage: dict[str, Any] | None = None
     for line in str(stdout or '').splitlines():
@@ -48,8 +65,13 @@ def _cc_text_from_stream(stdout: str) -> tuple[str, dict[str, Any] | None]:
             continue
         if not isinstance(event, dict):
             continue
-        if event.get('type') == 'result' and isinstance(event.get('result'), str):
-            text = event['result']
+        if event.get('type') == 'system' and event.get('subtype') == 'init':
+            init_model = str(event.get('model') or '').strip()
+        if event.get('type') == 'result':
+            result_seen = True
+            result_subtype = str(event.get('subtype') or '').strip()
+            result_is_error = event.get('is_error')
+            result_text = str(event.get('result') or '') if isinstance(event.get('result'), str) else ''
             candidate = event.get('usage')
             usage = dict(candidate) if isinstance(candidate, dict) else usage
         stream_event = event.get('event')
@@ -59,7 +81,15 @@ def _cc_text_from_stream(stdout: str) -> tuple[str, dict[str, Any] | None]:
                 chunk = delta.get('text')
                 if isinstance(chunk, str):
                     deltas.append(chunk)
-    return (text or ''.join(deltas)).strip(), usage
+    return _CcTerminal(
+        result_seen=result_seen,
+        result_subtype=result_subtype,
+        result_is_error=result_is_error,
+        result_text=result_text,
+        usage=usage,
+        init_model=init_model,
+        delta_text=''.join(deltas),
+    )
 
 
 def _generate_claude_code(
@@ -77,10 +107,11 @@ def _generate_claude_code(
     if not token:
         raise BackgroundGenerationError('cc_background_token_unavailable')
 
-    from chat.cc_model import cc_model_args_from_identity
+    from chat.cc_model import cc_model_args_from_identity, cc_model_from_identity
     from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, repo_root, require_pinned_claude_version
 
     try:
+        expected_model = cc_model_from_identity(authority.model_identity)
         model_args = cc_model_args_from_identity(authority.model_identity)
     except ValueError as exc:
         raise BackgroundGenerationError('cc_background_invalid_model_identity') from exc
@@ -104,6 +135,8 @@ def _generate_claude_code(
                 '--max-turns', '1',
                 '--tools', '',
                 '--system-prompt', request.system_text,
+                '--safe-mode',
+                '--no-session-persistence',
                 root=root,
             ) + model_args,
             cwd=str(root),
@@ -123,13 +156,26 @@ def _generate_claude_code(
             'cc_background_exit_%s:%s'
             % (proc.returncode, (proc.stderr or proc.stdout or '')[:300])
         )
-    text, usage = _cc_text_from_stream(proc.stdout)
+    terminal = _cc_terminal_from_stream(proc.stdout)
+    if not terminal.result_seen:
+        raise BackgroundGenerationError('cc_background_result_missing')
+    if terminal.result_subtype != 'success' or terminal.result_is_error is not False:
+        raise BackgroundGenerationError(
+            'cc_background_result_not_success:%s' % (terminal.result_subtype or '<missing>')
+        )
+    if expected_model and not terminal.init_model:
+        raise BackgroundGenerationError('cc_background_model_unattested')
+    if expected_model and terminal.init_model != expected_model:
+        raise BackgroundGenerationError('cc_background_model_mismatch')
+    usage = dict(terminal.usage or {})
+    if terminal.init_model:
+        usage['actual_init_model'] = terminal.init_model
     return BackgroundGenerationResult(
-        text=text,
+        text=(terminal.result_text or terminal.delta_text).strip(),
         provider='claude_code',
         model_identity=authority.model_identity,
         actual_executor='claude_code_background_oneshot',
-        usage=usage,
+        usage=usage or None,
     )
 
 
@@ -150,7 +196,7 @@ def _generate_api_relay(
         response = manager.call(
             {
                 'model': model,
-                'max_tokens': int(request.max_tokens),
+                'max_tokens': int(request.max_tokens_hint),
                 'system': request.system_text,
                 'messages': [{'role': 'user', 'content': request.prompt_text}],
             },

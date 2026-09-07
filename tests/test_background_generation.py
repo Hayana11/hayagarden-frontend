@@ -28,7 +28,7 @@ import config_store  # noqa: E402
 REQUEST = BackgroundGenerationRequest(
     system_text='SYSTEM-X',
     prompt_text='PROMPT-Y',
-    max_tokens=321,
+    max_tokens_hint=321,
     timeout_sec=12,
     task_kind='test',
 )
@@ -54,7 +54,11 @@ class FakeRelayManager:
 
 
 class BackgroundGenerationTests(unittest.TestCase):
-    def _cc_run(self, stdout='{"type":"result","result":"cc output","usage":{"input_tokens":1}}'):
+    def _cc_run(self, stdout=None):
+        stdout = stdout or '\n'.join((
+            '{"type":"system","subtype":"init","model":"claude-opus-5"}',
+            '{"type":"result","subtype":"success","is_error":false,"result":"cc output","usage":{"input_tokens":1}}',
+        ))
         proc = mock.Mock(returncode=0, stdout=stdout, stderr='')
         return mock.patch('chat.background_generation.subprocess.run', return_value=proc)
 
@@ -74,19 +78,26 @@ class BackgroundGenerationTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('-p') + 1], 'PROMPT-Y')
         self.assertEqual(argv[argv.index('--tools') + 1], '')
         self.assertEqual(argv[argv.index('--max-turns') + 1], '1')
+        self.assertIn('--safe-mode', argv)
+        self.assertIn('--no-session-persistence', argv)
+        self.assertNotIn('--resume', argv)
+        self.assertNotIn('--continue', argv)
         self.assertEqual(result.provider, 'claude_code')
         self.assertEqual(result.model_identity, authority.model_identity)
         self.assertEqual(result.actual_executor, 'claude_code_background_oneshot')
         self.assertEqual(result.text, 'cc output')
 
     def test_cc_default_model_omits_model_argv(self):
-        with self._cc_runtime(), self._cc_run() as run:
-            generate_background(
+        with self._cc_runtime(), self._cc_run(
+            '{"type":"result","subtype":"success","is_error":false,"result":"cc output"}',
+        ) as run:
+            result = generate_background(
                 REQUEST,
                 GenerationAuthoritySnapshot('claude_code', 'default'),
                 cc_token_getter=lambda: 'fake-token',
             )
         self.assertNotIn('--model', run.call_args.args[0])
+        self.assertIsNone(result.usage)
 
     def test_cc_invalid_identity_fails_before_spawn(self):
         with mock.patch('chat.background_generation.subprocess.run') as run:
@@ -114,6 +125,53 @@ class BackgroundGenerationTests(unittest.TestCase):
                 )
         relay_factory.assert_not_called()
 
+    def test_cc_error_result_fails_closed_despite_zero_exit(self):
+        stdout = '\n'.join((
+            '{"type":"system","subtype":"init","model":"claude-opus-5"}',
+            '{"type":"result","subtype":"error_max_turns","is_error":true,"result":"partial"}',
+        ))
+        with self._cc_runtime(), self._cc_run(stdout):
+            with self.assertRaisesRegex(BackgroundGenerationError, 'result_not_success'):
+                generate_background(
+                    REQUEST,
+                    GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5'),
+                    cc_token_getter=lambda: 'fake-token',
+                )
+
+    def test_cc_missing_result_fails_closed_despite_text_deltas(self):
+        stdout = (
+            '{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"partial"}}}'
+        )
+        with self._cc_runtime(), self._cc_run(stdout):
+            with self.assertRaisesRegex(BackgroundGenerationError, 'result_missing'):
+                generate_background(
+                    REQUEST,
+                    GenerationAuthoritySnapshot('claude_code', 'default'),
+                    cc_token_getter=lambda: 'fake-token',
+                )
+
+    def test_cc_result_missing_is_error_fails_closed(self):
+        stdout = '{"type":"result","subtype":"success","result":"partial"}'
+        with self._cc_runtime(), self._cc_run(stdout):
+            with self.assertRaisesRegex(BackgroundGenerationError, 'result_not_success'):
+                generate_background(
+                    REQUEST,
+                    GenerationAuthoritySnapshot('claude_code', 'default'),
+                    cc_token_getter=lambda: 'fake-token',
+                )
+
+    def test_cc_explicit_model_requires_matching_init_attestation(self):
+        authority = GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5')
+        mismatch = '\n'.join((
+            '{"type":"system","subtype":"init","model":"claude-sonnet-5"}',
+            '{"type":"result","subtype":"success","is_error":false,"result":"text"}',
+        ))
+        missing = '{"type":"result","subtype":"success","is_error":false,"result":"text"}'
+        for stdout, error in ((mismatch, 'model_mismatch'), (missing, 'model_unattested')):
+            with self.subTest(error=error), self._cc_runtime(), self._cc_run(stdout):
+                with self.assertRaisesRegex(BackgroundGenerationError, error):
+                    generate_background(REQUEST, authority, cc_token_getter=lambda: 'fake-token')
+
     def test_cc_failure_never_calls_relay(self):
         proc = mock.Mock(returncode=1, stdout='', stderr='failed')
         relay_factory = mock.Mock()
@@ -133,6 +191,11 @@ class BackgroundGenerationTests(unittest.TestCase):
         self.assertNotIn('_CC_RESIDENT', source)
         self.assertNotIn('_CC_WAKE_RESIDENT', source)
         self.assertNotIn('transcript', source.lower())
+        self.assertIn("'--safe-mode'", source)
+        self.assertIn("'--no-session-persistence'", source)
+        self.assertIn("'--tools', ''", source)
+        for isolated_from in ('CLAUDE.md', 'skills', 'plugins', 'hooks', 'mcp-config', 'agents'):
+            self.assertNotIn(isolated_from, source)
 
     def test_relay_uses_frozen_model_and_transparent_payload(self):
         manager = FakeRelayManager({'model': 'model-A', 'content': [{'type': 'text', 'text': 'ok'}]})
