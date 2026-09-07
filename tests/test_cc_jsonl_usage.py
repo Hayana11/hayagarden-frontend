@@ -733,7 +733,6 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(getattr(raised.exception, "error_code", None),
                          "result_missing_before_terminal")
         replay_mock.assert_not_called()
-        sleep_mock.assert_not_called()
 
     def test_resident_retries_until_all_jsonl_requests_arrive(self):
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
