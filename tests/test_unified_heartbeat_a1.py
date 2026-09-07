@@ -185,8 +185,8 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
             'context_epoch': binding.context_epoch,
             'resident_generation': binding.resident_generation,
         }
-        with mock.patch.object(dr, 'get_local_binding', return_value=binding), \\
-             mock.patch.object(dc, 'get_daily_context_by_id', return_value=context), \\
+        with mock.patch.object(dr, 'get_local_binding', return_value=binding), \
+             mock.patch.object(dc, 'get_daily_context_by_id', return_value=context), \
              mock.patch.object(dc, 'get_resident_owner', return_value=owner):
             ready, reason = b3._hot_chat_resident_ready(
                 resident,
@@ -314,13 +314,13 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         fake_gateway._gen_mark_pending_delivery = mark
         fake_gateway._gen_release = release
         with app.test_request_context('/wake', method='POST', json={'mode': 'normal'}):
-            with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \\
-                 mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \\
-                 mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \\
-                 mock.patch('config_store.get_bool', return_value=True), \\
-                 mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \\
-                 mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \\
-                 mock.patch.dict(sys.modules, {'gateway': fake_gateway}), \\
+            with mock.patch.object(b3, 'unified_normal_wake_enabled', return_value=True), \
+                 mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
+                 mock.patch.object(uh, 'prepare_shared_transcript_watermark', return_value=(self.watermark(), 'ok')), \
+                 mock.patch('config_store.get_bool', return_value=True), \
+                 mock.patch.object(uh.dr, 'get_local_binding', return_value=self.binding()), \
+                 mock.patch.object(uh.dr, 'close_local_resident_if_bound', return_value=True) as close, \
+                 mock.patch.dict(sys.modules, {'gateway': fake_gateway}), \
                  mock.patch.object(b3, 'invoke_renderer_relay') as relay:
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -706,6 +706,276 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertEqual(len(resident.sent), 1)
         self.assertTrue(close.called)
         self.assertEqual(released, [None])
+
+
+    def test_current_main_wake_multitool_late_flush_success_keeps_resident_reusable(self):
+        import gateway
+        from cc_resident import ResidentSession
+        from chat import cc_history_rewrite
+        from tools import cc_jsonl_usage as replay
+        from tools import lease_signer
+
+        class IntegrationResident(_FakeResident):
+            def __init__(self):
+                super().__init__(events=[])
+                self._model_identity = 'model:integration'
+                self.followup_calls = 0
+                self.jsonl_helper = ResidentSession(
+                    '/tmp/cc-test', '', '/tmp/mcp.json',
+                )
+                self.jsonl_helper._session_id = 'wake-integration'
+                self._replay_calls = 0
+
+            def send_turn(self, content, **kwargs):
+                self.followup_calls += 1
+                yield ('done', ('follow-up', '', {
+                    'jsonl_usage': {'stream_totals_match': True},
+                }, {}))
+
+        resident = IntegrationResident()
+        replay_partial = replay.replay_jsonl_lines([
+            json.dumps({
+                'type': 'assistant',
+                'requestId': 'req-1',
+                'message': {'usage': {
+                    'input_tokens': 1,
+                    'output_tokens': 2,
+                    'cache_creation_input_tokens': 10,
+                }},
+            }),
+        ])
+        replay_complete = replay.replay_jsonl_lines([
+            json.dumps({
+                'type': 'assistant',
+                'requestId': 'req-1',
+                'message': {'usage': {
+                    'input_tokens': 1,
+                    'output_tokens': 2,
+                    'cache_creation_input_tokens': 10,
+                }},
+            }),
+            json.dumps({
+                'type': 'assistant',
+                'requestId': 'req-2',
+                'message': {'usage': {
+                    'input_tokens': 1,
+                    'output_tokens': 2,
+                    'cache_creation_input_tokens': 10,
+                }},
+            }),
+            json.dumps({
+                'type': 'assistant',
+                'requestId': 'req-3',
+                'message': {'usage': {
+                    'input_tokens': 1,
+                    'output_tokens': 2,
+                    'cache_creation_input_tokens': 10,
+                }},
+            }),
+        ])
+        stream_usage = {
+            'input_tokens': 3,
+            'output_tokens': 6,
+            'cache_read': 0,
+            'cache_creation': 30,
+            'rounds': [
+                {'index': 1, 'input_tokens': 1, 'output_tokens': 2,
+                 'cache_read': 0, 'cache_creation': 10},
+                {'index': 2, 'input_tokens': 1, 'output_tokens': 2,
+                 'cache_read': 0, 'cache_creation': 10},
+                {'index': 3, 'input_tokens': 1, 'output_tokens': 2,
+                 'cache_read': 0, 'cache_creation': 10},
+            ],
+        }
+
+        class Fence:
+            def __init__(self):
+                self.finishes = []
+
+            def finish(self, succeeded, **kwargs):
+                self.finishes.append(bool(succeeded))
+                return True
+
+        fence = Fence()
+        commit_calls = []
+        release_calls = []
+
+        def main_stream(*args, **kwargs):
+            self.assertEqual(
+                kwargs.get('jsonl_finality_profile'),
+                'unified_normal_wake',
+            )
+            yield ('tool_use', {
+                'id': 'tool-1', 'name': 'lookup', 'args': {'q': 'one'},
+            })
+            yield ('tool_result', {
+                'tool_use_id': 'tool-1', 'result': 'one', 'is_error': False,
+            })
+            yield ('tool_use', {
+                'id': 'tool-2', 'name': 'lookup', 'args': {'q': 'two'},
+            })
+            yield ('tool_result', {
+                'tool_use_id': 'tool-2', 'result': 'two', 'is_error': False,
+            })
+            yield ('tool_use', {
+                'id': 'tool-3', 'name': 'lookup', 'args': {'q': 'three'},
+            })
+            yield ('tool_result', {
+                'tool_use_id': 'tool-3', 'result': 'three', 'is_error': False,
+            })
+            with (
+                mock.patch.object(
+                    replay,
+                    'snapshot_session_jsonl',
+                    return_value={'path': '/tmp/wake.jsonl', 'offset': 40},
+                ),
+                mock.patch.object(
+                    replay,
+                    'replay_session_jsonl',
+                    side_effect=[replay_partial, replay_partial, replay_complete],
+                ) as replay_mock,
+                mock.patch('cc_resident.time.sleep'),
+            ):
+                attached = resident.jsonl_helper._attach_jsonl_usage_with_retry(
+                    stream_usage,
+                    finality_profile='unified_normal_wake',
+                )
+            resident._replay_calls = replay_mock.call_count
+            yield ('text', 'wake text')
+            yield ('done', ('wake text', '', attached, {}))
+
+        with (
+            mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch.object(
+                gateway, '_gen_acquire_or_wait', return_value=('own', None),
+            ),
+            mock.patch.object(
+                gateway, '_gen_release',
+                side_effect=lambda *args, **kwargs: release_calls.append(True),
+            ),
+            mock.patch.object(
+                gateway, '_cc_resident_stream_gen', side_effect=main_stream,
+            ),
+            mock.patch.object(
+                b3, '_hot_chat_resident_ready', return_value=(True, 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'prepare_shared_transcript_watermark',
+                return_value=(self.watermark(), 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'begin_shared_wake_delivery_fence',
+                return_value=fence,
+            ),
+            mock.patch.object(
+                uh, 'commit_shared_transcript_watermark',
+                side_effect=lambda *args, **kwargs: (
+                    commit_calls.append(kwargs.get('jsonl_finality'))
+                    or {'committed': True}
+                ),
+            ),
+            mock.patch.object(
+                cc_history_rewrite, 'guard_cc_generation',
+                side_effect=lambda events: events,
+            ),
+            mock.patch.object(
+                uh.display_thinking, 'get_display_thinking_snapshot',
+                return_value=(False, ''),
+            ),
+            mock.patch.object(
+                lease_signer, 'issue_turn_lease', return_value={'turn_id': 'wake'},
+            ),
+        ):
+            result = gateway._run_unified_normal_main_chat_turn(
+                wake_run_id='wake-integration',
+                now=__import__('datetime').datetime.now(),
+                t2_hours=1.0,
+                t_hours=2.0,
+            )
+
+        self.assertEqual(resident._replay_calls, 3)
+        self.assertTrue(result['cache_info']['jsonl_usage']['stream_totals_match'])
+        self.assertEqual(len(commit_calls), 1)
+        self.assertIs(result['_shared_delivery_fence'], fence)
+        self.assertEqual(fence.finishes, [])
+        fence.finish(True, cache_info=result['cache_info'])
+        self.assertEqual(fence.finishes, [True])
+        self.assertEqual(len(release_calls), 1)
+        self.assertEqual(resident.followup_calls, 0)
+        list(resident.send_turn('follow-up'))
+        self.assertEqual(resident.followup_calls, 1)
+
+    def test_current_main_wake_never_final_failure_finishes_delivery_false(self):
+        import gateway
+        from chat import cc_history_rewrite
+        from tools import lease_signer
+
+        resident = _FakeResident(events=[
+            ('tool_use', {'id': 'tool-1', 'name': 'lookup', 'args': {}}),
+            ('tool_result', {
+                'tool_use_id': 'tool-1', 'result': 'done', 'is_error': False,
+            }),
+            ('done', ('wake text', '', {
+                'jsonl_usage': {
+                    'stream_totals_match': False,
+                    'finality_state': 'FINALITY_PENDING',
+                },
+            }, {})),
+        ])
+        fence = mock.Mock()
+        fence.finish.return_value = True
+        commit = mock.Mock()
+        def main_stream(*args, **kwargs):
+            yield from resident.events
+
+        with (
+            mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch.object(
+                gateway, '_gen_acquire_or_wait', return_value=('own', None),
+            ),
+            mock.patch.object(gateway, '_gen_release'),
+            mock.patch.object(
+                gateway, '_cc_resident_stream_gen', side_effect=main_stream,
+            ),
+            mock.patch.object(
+                b3, '_hot_chat_resident_ready', return_value=(True, 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'prepare_shared_transcript_watermark',
+                return_value=(self.watermark(), 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'begin_shared_wake_delivery_fence',
+                return_value=fence,
+            ),
+            mock.patch.object(
+                uh, 'commit_shared_transcript_watermark', commit,
+            ),
+            mock.patch.object(
+                cc_history_rewrite, 'guard_cc_generation',
+                side_effect=lambda events: events,
+            ),
+            mock.patch.object(
+                uh.display_thinking, 'get_display_thinking_snapshot',
+                return_value=(False, ''),
+            ),
+            mock.patch.object(
+                lease_signer, 'issue_turn_lease', return_value={'turn_id': 'wake'},
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, 'normal_wake_main_chat_jsonl_not_final',
+            ):
+                gateway._run_unified_normal_main_chat_turn(
+                    wake_run_id='wake-never-final',
+                    now=__import__('datetime').datetime.now(),
+                    t2_hours=1.0,
+                    t_hours=2.0,
+                )
+
+        commit.assert_not_called()
+        fence.finish.assert_called_once()
+        self.assertFalse(fence.finish.call_args.args[0])
 
 
 if __name__ == '__main__':
