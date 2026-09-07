@@ -886,14 +886,14 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 t2_hours=1.0,
                 t_hours=2.0,
             )
+            fence = result['_shared_delivery_fence']
+            fence.finish(True, cache_info=result['cache_info'])
+            self.assertEqual(len(release_calls), 1)
+            retire.assert_not_called()
 
         self.assertEqual(resident._replay_calls, 3)
         self.assertTrue(result['cache_info']['jsonl_usage']['stream_totals_match'])
         self.assertEqual(len(commit_calls), 1)
-        fence = result['_shared_delivery_fence']
-        fence.finish(True, cache_info=result['cache_info'])
-        self.assertEqual(len(release_calls), 1)
-        retire.assert_not_called()
         self.assertEqual(resident.followup_calls, 0)
         list(resident.send_turn('follow-up'))
         self.assertEqual(resident.followup_calls, 1)
