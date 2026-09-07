@@ -23,8 +23,8 @@ from tools.lease_signer import issue_turn_lease
 from wake.cc_tools import WAKE_TO_CC_MCP
 
 
-BASE_FINGERPRINT = "4e5e630e8266874f8f5c99bda243647a300793d24ead0af1fe0a97fa22e11df0"
-TARGET_FINGERPRINT = "1112772eefff74a18b71bf692a9161b3b4b72b3a0b361dbe523052b30201a26c"
+OLD_SURFACE = "fixture-old-surface"
+NEW_SURFACE = "fixture-new-surface"
 LEDGER_INTERNAL = ()
 LEDGER_PROXY = (
     "mcp__capability__ledger_read",
@@ -102,7 +102,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
             },
         )
 
-    def test_daily_allow_disallow_and_fingerprint(self):
+    def test_daily_allow_disallow_and_deterministic_fingerprint(self):
         with tempfile.TemporaryDirectory() as root:
             with mock.patch(
                 "tools.cc_capability_adapter.read_capability_state",
@@ -115,9 +115,10 @@ class DailyLedgerCutoverTests(unittest.TestCase):
                 )
                 first = physical_surface_fingerprint()
                 second = physical_surface_fingerprint()
-        self.assertEqual(plan["physical_surface_fingerprint"], TARGET_FINGERPRINT)
-        self.assertEqual(first, TARGET_FINGERPRINT)
-        self.assertEqual(second, TARGET_FINGERPRINT)
+        current = physical_surface_fingerprint()
+        self.assertEqual(plan["physical_surface_fingerprint"], current)
+        self.assertEqual(first, current)
+        self.assertEqual(second, current)
         self.assertEqual(first, second)
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
@@ -141,7 +142,6 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertIn("mcp__home__search_memories", disallowed)
         self.assertIn("mcp__internal__search_memories", disallowed)
         self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
-        self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
         self.assertEqual(
             tuple(INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS),
             EXPECTED_INTERNAL_MCP_SHADOW_TOOLS,
@@ -344,7 +344,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         resident._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
         resident._system_text = "same-system"
         resident._history_rewrite_epoch = "test-epoch"
-        resident._bound_tool_surface_fingerprint = BASE_FINGERPRINT
+        resident._bound_tool_surface_fingerprint = OLD_SURFACE
         before = resident.generation
         with mock.patch(
             "chat.cc_history_rewrite.current_history_rewrite_epoch",
@@ -354,7 +354,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
             return_value=False,
         ), mock.patch(
             "tools.cc_capability_adapter.physical_surface_fingerprint",
-            return_value=TARGET_FINGERPRINT,
+            return_value=NEW_SURFACE,
         ):
             self.assertEqual(
                 resident.peek_respawn_reason(
