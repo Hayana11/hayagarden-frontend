@@ -141,6 +141,17 @@ class ProviderRouterTests(unittest.TestCase):
         ):
             self.assertEqual(capture_generation_authority().model_identity, 'unknown')
 
+    def test_relay_model_authority_uses_only_active_preset_default(self):
+        from relay.manager import resolve_active_relay_model_identity
+
+        with mock.patch(
+            'relay.manager._lookup_active_relay',
+            return_value={'default_model': 'claude-opus-5'},
+        ):
+            self.assertEqual(resolve_active_relay_model_identity(), 'claude-opus-5')
+        with mock.patch('relay.manager._lookup_active_relay', return_value=None):
+            self.assertEqual(resolve_active_relay_model_identity(), 'unknown')
+
     def test_generation_classification_contract(self):
         self.assertEqual(GenerationClass.IDENTITY_BEARING.value, 'identity_bearing')
         self.assertEqual(GenerationClass.CONTINUITY_AUTHORING.value, 'continuity_authoring')
