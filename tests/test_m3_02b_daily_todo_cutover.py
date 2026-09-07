@@ -29,7 +29,7 @@ class M302BTodoCutoverTests(unittest.TestCase):
         self.assertEqual(servers["internal"]["headers"], {"X-UH-A0-Profile": "uh_a0"})
         allowed = set(plan["surface_allowlist"])
         disallowed = set(plan["disallowed_tools"])
-        self.assertIn("mcp__internal__get_todos", allowed)
+        self.assertIn("mcp__capability__todo_read", allowed)
         self.assertIn("mcp__capability__todo_write", allowed)
         self.assertNotIn("mcp__home__get_todos", allowed)
         self.assertNotIn("mcp__home__add_todo", allowed)
