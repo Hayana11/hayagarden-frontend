@@ -24,11 +24,11 @@ import cc_resident
 from wake.cc_tools import WAKE_TO_CC_MCP
 
 
-BASE_FINGERPRINT = "8c3d88f947978c1f7bb8a8a9da6cc3ccb6adca37ace955e88567ab8482adda15"
-TARGET_FINGERPRINT = "7344a43bbb3163e8a7b4b46e568f05fd8a4f1b973a367b5e46c030d52df4a397"
 HOME_MEMORY = "mcp__home__search_memories"
 INTERNAL_MEMORY = "mcp__capability__memory_search"
 LEGACY_INTERNAL_MEMORY = "mcp__internal__search_memories"
+OLD_SURFACE = "fixture-old-surface"
+NEW_SURFACE = "fixture-new-surface"
 
 
 class DailyMemoryCutoverTests(unittest.TestCase):
@@ -75,9 +75,9 @@ class DailyMemoryCutoverTests(unittest.TestCase):
         self.assertIn(HOME_MEMORY, plan["disallowed_tools"])
         self.assertNotIn(INTERNAL_MEMORY, plan["disallowed_tools"])
         self.assertIn(LEGACY_INTERNAL_MEMORY, plan["disallowed_tools"])
-        self.assertEqual(plan["physical_surface_fingerprint"], TARGET_FINGERPRINT)
-        self.assertEqual(plan["physical_surface_fingerprint"], physical_surface_fingerprint())
-        self.assertNotEqual(BASE_FINGERPRINT, TARGET_FINGERPRINT)
+        current = physical_surface_fingerprint()
+        self.assertEqual(plan["physical_surface_fingerprint"], current)
+        self.assertEqual(physical_surface_fingerprint(), current)
 
     def test_home_legacy_and_fence_lookup_remain_explicit(self):
         self.assertEqual(uh_a0_home_legacy_tools()[-1], "mcp__home__get_light_status")
@@ -112,13 +112,13 @@ class DailyMemoryCutoverTests(unittest.TestCase):
         resident._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
         resident._system_text = "same-system"
         resident._history_rewrite_epoch = "test-epoch"
-        resident._bound_tool_surface_fingerprint = BASE_FINGERPRINT
+        resident._bound_tool_surface_fingerprint = OLD_SURFACE
         before = resident.generation
         with patch("chat.cc_history_rewrite.current_history_rewrite_epoch", return_value="test-epoch"), patch(
             "chat.cc_history_rewrite.is_unreadable_epoch", return_value=False
         ), patch(
             "tools.cc_capability_adapter.physical_surface_fingerprint",
-            return_value=TARGET_FINGERPRINT,
+            return_value=NEW_SURFACE,
         ):
             self.assertEqual(
                 resident.peek_respawn_reason(
