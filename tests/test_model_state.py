@@ -23,7 +23,7 @@ os.environ['HAYAGARDEN_CONFIG_DB_PATH'] = str(
 )
 
 from chat.model_state import describe_chat_model_state  # noqa: E402
-from chat.provider_router import resolve_provider  # noqa: E402
+from chat.provider_router import resolve_generation_provider, resolve_provider  # noqa: E402
 import config_store  # noqa: E402
 
 
@@ -102,9 +102,8 @@ class EffectiveChatProviderTests(unittest.TestCase):
         })):
             self.assertEqual(resolve_provider('chat'), 'claude_code')
 
-    def test_gw_write_does_not_override_explicit_chat_provider(self):
-        """Simulates: CHAT_PROVIDER=claude_code, POST GW_PROVIDER=api_relay.
-        Effective chat remains claude_code → model space stays CC."""
+    def test_provider_setting_writes_chat_provider_not_gw_provider(self):
+        """POST /api/config/provider writes CHAT_PROVIDER only; GW is not dual-written."""
         cfg = {
             'CHAT_PROVIDER': 'claude_code',
             'GW_PROVIDER': 'claude_code',
@@ -119,15 +118,27 @@ class EffectiveChatProviderTests(unittest.TestCase):
 
         with mock.patch.object(config_store, 'get', side_effect=_get), \
              mock.patch.object(config_store, 'set', side_effect=_set):
-            # POST /api/config/provider only writes GW_PROVIDER.
-            config_store.set('GW_PROVIDER', 'api_relay')
-            self.assertEqual(cfg['GW_PROVIDER'], 'api_relay')
+            config_store.set('CHAT_PROVIDER', 'api_relay')
+            self.assertEqual(cfg['CHAT_PROVIDER'], 'api_relay')
+            self.assertEqual(cfg['GW_PROVIDER'], 'claude_code')
             effective = resolve_provider('chat')
-            self.assertEqual(effective, 'claude_code')
-            space = describe_chat_model_state(effective)
-            self.assertEqual(space['provider'], 'claude_code')
-            self.assertEqual(space['model_mode'], 'default')
-            self.assertIsNone(space['configured_model'])
+            self.assertEqual(effective, 'api_relay')
+            self.assertEqual(resolve_generation_provider(), 'api_relay')
+            space = describe_chat_model_state(
+                effective,
+                relay_id='2',
+                relay_model='claude-opus-4-6',
+            )
+            self.assertEqual(space['provider'], 'api_relay')
+            self.assertEqual(space['configured_model'], 'claude-opus-4-6')
+
+    def test_empty_chat_provider_still_reads_legacy_gw_provider(self):
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'CHAT_PROVIDER': '',
+            'GW_PROVIDER': 'claude_code',
+        })):
+            self.assertEqual(resolve_generation_provider(), 'claude_code')
+            self.assertEqual(resolve_provider('chat'), 'claude_code')
 
 
 if __name__ == '__main__':

@@ -71,8 +71,8 @@ def capture_generation_authority() -> GenerationAuthoritySnapshot:
         from chat.cc_model import cc_model_identity
         model_identity = cc_model_identity()
     else:
-        # This reads only the selected relay preset's default_model. It never
-        # uses WS_MODEL or the legacy/global MODEL fallback.
+        # RelayManager's own default-model seam: preset.default_model, then
+        # the RelayManager legacy MODEL fallback. Never WS_MODEL.
         from relay.manager import resolve_active_relay_model_identity
         model_identity = resolve_active_relay_model_identity()
     return GenerationAuthoritySnapshot(

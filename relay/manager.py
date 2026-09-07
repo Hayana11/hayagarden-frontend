@@ -37,18 +37,28 @@ def _lookup_active_relay():
     return None
 
 
-def resolve_active_relay_model_identity() -> str:
-    """Return the active relay preset's formal model identity, or ``unknown``.
+_UNSET = object()
 
-    Primary generation authority must not guess from RelayManager's legacy
-    global MODEL fallback (nor WS_MODEL). No active preset/default model is an
-    explicit unknown, not an inferred provider default.
+
+def resolve_relay_default_model(active=_UNSET):
+    """RelayManager's formal default model: preset.default_model or MODEL.
+
+    Shared by ``_reload_env()`` and generation-authority snapshots so the two
+    cannot drift. Never reads WS_MODEL or request/surface model overrides.
     """
-    active = _lookup_active_relay()
-    if not active:
-        return 'unknown'
-    model = str(active.get('default_model') or '').strip()
-    return model or 'unknown'
+    import config_store as _cfg
+    if active is _UNSET:
+        active = _lookup_active_relay()
+    return (active or {}).get('default_model') or _cfg.get('MODEL')
+
+
+def resolve_active_relay_model_identity(active=_UNSET) -> str:
+    """Snapshot identity for RelayManager's current default executor model.
+
+    Empty preset + empty MODEL is explicit ``unknown``, not a guessed CLI
+    default. WS_MODEL is never part of this authority.
+    """
+    return str(resolve_relay_default_model(active) or '').strip() or 'unknown'
 
 
 class RelayManager:
@@ -78,8 +88,7 @@ class RelayManager:
             self.api_url = active['url'] or self.api_url
             self.api_key = active['key'] or self.api_key
 
-        global_model = _cfg.get('MODEL')
-        self.model = (active or {}).get('default_model') or global_model
+        self.model = resolve_relay_default_model(active)
         self.ws_model = _cfg.get('WS_MODEL')
 
     @property
