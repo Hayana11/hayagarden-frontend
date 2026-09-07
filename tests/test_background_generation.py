@@ -98,6 +98,22 @@ class BackgroundGenerationTests(unittest.TestCase):
                 )
         run.assert_not_called()
 
+    def test_cc_timeout_is_reported_without_relay_fallback(self):
+        relay_factory = mock.Mock()
+        with self._cc_runtime(), \
+                mock.patch(
+                    'chat.background_generation.subprocess.run',
+                    side_effect=__import__('subprocess').TimeoutExpired('claude', 12),
+                ):
+            with self.assertRaisesRegex(BackgroundGenerationError, 'cc_background_timeout'):
+                generate_background(
+                    REQUEST,
+                    GenerationAuthoritySnapshot('claude_code', 'default'),
+                    cc_token_getter=lambda: 'fake-token',
+                    relay_factory=relay_factory,
+                )
+        relay_factory.assert_not_called()
+
     def test_cc_failure_never_calls_relay(self):
         proc = mock.Mock(returncode=1, stdout='', stderr='failed')
         relay_factory = mock.Mock()
@@ -185,11 +201,26 @@ class BackgroundGenerationTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--model') + 1], 'claude-opus-5')
 
     def test_old_relay_snapshot_survives_config_change(self):
-        authority = GenerationAuthoritySnapshot('api_relay', 'model-A')
         manager = FakeRelayManager({'model': 'model-A', 'content': []})
-        with mock.patch.object(config_store, 'get', return_value='model-B'):
+        values = {'CHAT_PROVIDER': 'api_relay'}
+        with mock.patch.object(config_store, 'get', side_effect=lambda key, default=None: values.get(key, default)), \
+                mock.patch('relay.manager.resolve_active_relay_model_identity', return_value='model-A'):
+            authority = capture_generation_authority()
+            values.update({'CHAT_PROVIDER': 'claude_code', 'MODEL': 'model-B'})
             generate_background(REQUEST, authority, relay_factory=lambda: manager)
         self.assertEqual(manager.calls[0][0]['model'], 'model-A')
+
+    def test_unknown_provider_fails_closed(self):
+        with self.assertRaisesRegex(BackgroundGenerationError, 'unknown_provider'):
+            generate_background(REQUEST, GenerationAuthoritySnapshot('invalid', 'model-A'))
+
+    def test_adapter_has_no_persistence_or_surface_dependencies(self):
+        source = Path(ROOT, 'chat', 'background_generation.py').read_text()
+        for forbidden in (
+            'chat_messages', 'memory_tool', 'dream_pool', 'auto_diary',
+            'dream_generator', 'wake.runners', 'behavior_authority_b3',
+        ):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == '__main__':
