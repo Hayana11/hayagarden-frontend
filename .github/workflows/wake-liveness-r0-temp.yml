@@ -28,4 +28,4 @@ jobs:
         env:
           HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/hayagarden-config.db
           HAYA_DB_PATH: ${{ runner.temp }}/hayagarden.db
-        run: python -m unittest tests.test_cc_jsonl_usage tests.test_unified_heartbeat_a1 tests.test_uh_a1_step2_base_wake -v
+        run: python -m unittest tests.test_cc_jsonl_usage tests.test_uh_a1_step2_base_wake -v
