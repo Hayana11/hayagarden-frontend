@@ -386,4 +386,3 @@ def inspect_wake_plan(
             )
         ) if provider == 'claude_code' else False,
     }
-

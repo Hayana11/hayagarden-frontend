@@ -16,4 +16,3 @@ def read_cc_oauth_token(env_path: str | Path | None = None) -> str:
     except OSError:
         pass
     return ''
-
