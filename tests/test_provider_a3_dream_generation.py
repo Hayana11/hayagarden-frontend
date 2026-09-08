@@ -232,13 +232,14 @@ class DreamBehaviorTests(unittest.TestCase):
     def test_dream_newline_semantics_and_retry_context(self):
         gen = self._load_generator()
         authority = types.SimpleNamespace(provider='claude_code', model_identity='explicit:model-A')
-        with self._fake_runtime(authority, ['THOUGHTS: hidden\nACTION: send\nCONTENT: MODEL CONTENT']) as (calls, *_):
+        with self._fake_runtime(authority, ['THOUGHTS: hidden\nACTION: send\nCONTENT: MODEL CONTENT']) as (calls, _, _, builder):
             request = gen._dream_background_request('drifting', 'PRIMER', extra='HINT')
             content, executor, ok = gen._generate_dream_model(
                 'drifting', 'PRIMER', authority, 1, extra='HINT',
             )
         self.assertEqual(request.system_text, 'PERSONA\n\nSUFFIX')
         self.assertEqual(calls[0][0].system_text, 'PERSONA\n\nSUFFIX')
+        self.assertEqual(builder.build_prompt_suffix.call_args.args[1]['dream_primer'], 'PRIMER\n\nHINT')
         self.assertNotIn('\\n', calls[0][0].system_text)
         self.assertNotIn('\\n', gen._dream_background_request.__code__.co_consts)
 
