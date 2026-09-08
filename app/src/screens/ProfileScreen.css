@@ -59,8 +59,8 @@
 }
 
 .profile-save-button:disabled {
-  opacity: 0.35;
-  color: var(--faint);
+  opacity: 1;
+  color: var(--ghost);
   cursor: default;
 }
 
