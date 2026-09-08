@@ -136,6 +136,21 @@ app.register_blueprint(create_moments_blueprint(
 app.register_blueprint(create_external_mcp_admin_blueprint())
 app.register_blueprint(create_monopoly_blueprint(MonopolyService(db_path=DB_PATH)))
 
+from nexus_routes import create_nexus_blueprint
+from nexus_runtime import NexusRuntime
+
+def _nexus_context_usage_snapshot():
+    try:
+        snap = context_usage_store.get_snapshot(DB_PATH)
+        return snap if snap else None
+    except Exception:
+        return None
+
+app.register_blueprint(
+    create_nexus_blueprint(
+        NexusRuntime(context_usage_getter=_nexus_context_usage_snapshot)
+    )
+)
 
 
 @app.route('/api/client-error', methods=['POST'])
