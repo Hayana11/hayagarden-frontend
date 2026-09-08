@@ -337,6 +337,7 @@ class PersonaActiveReaderFailClosedTests(unittest.TestCase):
 
     def test_T17_auto_diary_fail_closed(self):
         import auto_diary
+        import types
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -345,6 +346,13 @@ class PersonaActiveReaderFailClosedTests(unittest.TestCase):
         repo = Path(tmp.name) / 'seed.md'
         repo.write_text('SEED', encoding='utf-8')
 
+        capture = mock.Mock()
+        adapter = mock.Mock()
+        provider_router = types.ModuleType('chat.provider_router')
+        provider_router.capture_generation_authority = capture
+        background = types.ModuleType('chat.background_generation')
+        background.generate_background = adapter
+
         with mock.patch.object(persona_store, 'RUNTIME_PERSONA_PATH', str(runtime)), \
              mock.patch.object(persona_store, 'REPO_PERSONA_FALLBACK_PATH', str(repo)), \
              mock.patch.object(auto_diary, 'today_diary_exists', return_value=False), \
@@ -352,11 +360,21 @@ class PersonaActiveReaderFailClosedTests(unittest.TestCase):
                  auto_diary, 'fetch_today_messages',
                  return_value=[{'author': 'hayana', 'content': 'hi'}],
              ), \
-             mock.patch.object(auto_diary, 'call_api') as call_api, \
-             mock.patch.object(auto_diary, 'load_key', return_value='k'):
+             mock.patch.object(
+                 auto_diary, 'read_persona',
+                 side_effect=persona_store.PersonaStoreError('runtime empty'),
+             ), \
+             mock.patch.object(auto_diary, 'save_diary') as save_diary, \
+             mock.patch.dict(sys.modules, {
+                 'chat.provider_router': provider_router,
+                 'chat.background_generation': background,
+             }):
             with self.assertRaises(persona_store.PersonaStoreError):
                 auto_diary.generate()
-            call_api.assert_not_called()
+
+        capture.assert_not_called()
+        adapter.assert_not_called()
+        save_diary.assert_not_called()
 
     def test_T18_thought_gen_fail_closed(self):
         import importlib.util
@@ -388,3 +406,4 @@ class PersonaActiveReaderFailClosedTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

@@ -1,34 +1,23 @@
 #!/usr/bin/env python3
 """每晚 23:50 自动生成费奥多尔的日记，也可以被 Flask API 调用。"""
-import os, sqlite3, json, datetime, re, urllib.request, urllib.error
+import sqlite3
+import datetime
+import re
 
-DB_PATH  = '/opt/frontend/memories.db'
-ENV_PATH = '/opt/frontend/.env'
-API_URL  = None  # 从 .env 读取，见 call_api()
-MODEL    = 'claude-opus-4-6'
+DB_PATH = '/opt/frontend/memories.db'
 
-def load_env():
-    env = {}
-    try:
-        for line in open(ENV_PATH):
-            k, _, v = line.partition('=')
-            env[k.strip()] = v.strip()
-    except Exception:
-        pass
-    return env
-
-def load_key():
-    return load_env().get('ANTHROPIC_API_KEY', '')
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def read_persona():
     """Fail-closed: invalid/unreadable runtime persona aborts diary generation."""
     from chat.persona_store import read_persona as _read_runtime_persona
     return _read_runtime_persona().strip()
+
 
 def fetch_today_messages():
     """返回今天（北京时间）的聊天记录，按时间正序。"""
@@ -44,38 +33,16 @@ def fetch_today_messages():
     conn.close()
     return rows
 
+
 def format_chat(rows):
     lines = []
     for r in rows:
-        name = '费奥多尔' if r['author'] in ('fyodor','claude','assistant') else '哈娅'
+        name = '费奥多尔' if r['author'] in ('fyodor', 'claude', 'assistant') else '哈娅'
         content = (r['content'] or '').strip()
         if content:
             lines.append(f'{name}：{content}')
     return '\n'.join(lines)
 
-def call_api(system, user_msg, api_key, api_url=None):
-    payload = json.dumps({
-        'model': MODEL,
-        'max_tokens': 1024,
-        'system': system,
-        'messages': [{'role': 'user', 'content': user_msg}],
-    }).encode()
-    url = api_url or load_env().get('API_URL', 'https://api.anthropic.com/v1/messages')
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            'Content-Type': 'application/json',
-            'x-api-key': api_key,
-            'anthropic-version': '2023-06-01',
-        }
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        result = json.loads(resp.read())
-    return ''.join(
-        b.get('text', '') for b in result.get('content', [])
-        if b.get('type') == 'text'
-    )
 
 def save_diary(text):
     import sys
@@ -83,6 +50,7 @@ def save_diary(text):
         sys.path.insert(0, '/opt/frontend/tools')
     import memory_tool
     memory_tool.save_memory(text, type='DIARY', layer='recent')
+
 
 def today_diary_exists():
     today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
@@ -95,18 +63,17 @@ def today_diary_exists():
     conn.close()
     return row is not None
 
+
 def generate():
     """生成今天的日记。成功返回日记文本，跳过返回 None，失败抛异常。"""
     if today_diary_exists():
-        return None   # 今天已有日记，跳过
+        return None
     rows = fetch_today_messages()
     if not rows:
-        return None   # 今天没有聊天，跳过
+        return None
 
     chat_text = format_chat(rows)
-    persona   = read_persona()
-    api_key   = load_key()
-
+    persona = read_persona()
     user_msg = (
         f'这是我们今天的对话记录：\n\n{chat_text}\n\n'
         '请以费奥多尔的第一人称写一篇简短的日记，'
@@ -115,14 +82,38 @@ def generate():
         '不要写得太长，三到五段。'
     )
 
-    diary = call_api(persona, user_msg, api_key)
+    from chat.background_generation import (
+        BackgroundGenerationRequest,
+        generate_background,
+    )
+    from chat.cc_auth import read_cc_oauth_token
+    from chat.provider_router import capture_generation_authority
+
+    authority = capture_generation_authority()
+    request = BackgroundGenerationRequest(
+        system_text=persona,
+        prompt_text=user_msg,
+        max_tokens_hint=1024,
+        timeout_sec=120,
+        task_kind='auto_diary',
+    )
+    result = generate_background(
+        request,
+        authority,
+        cc_token_getter=read_cc_oauth_token,
+    )
+    diary = str(result.text or '')
     if not diary:
-        raise RuntimeError('API 返回空内容')
+        raise RuntimeError('Background generation returned empty content')
 
     # strip <thinking>...</thinking> blocks the model may have emitted
     diary = re.sub(r'<thinking>.*?</thinking>\s*', '', diary, flags=re.DOTALL).strip()
+    if not diary:
+        raise RuntimeError('Background generation returned empty content')
+
     save_diary(diary)
     return diary
+
 
 if __name__ == '__main__':
     import sys
@@ -136,3 +127,4 @@ if __name__ == '__main__':
     except Exception as e:
         print(f'错误：{e}', file=sys.stderr)
         sys.exit(1)
+
