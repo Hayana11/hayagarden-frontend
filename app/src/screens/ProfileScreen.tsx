@@ -1,14 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { HttpError, http } from '../lib/http';
-import {
-  fetchToolCompanionHints,
-  patchToolCompanionHint,
-  type ToolCompanionGroup,
-  type ToolCompanionHints,
-  type ToolCompanionTool,
-} from '../lib/toolCompanionHints';
-import { fetchCapabilityStates, type CapabilityState } from '../lib/capabilityStates';
+import { fetchToolCompanionHints, type ToolCompanionHints } from '../lib/toolCompanionHints';
 import {
   fetchDisplayThinkingPrompt,
   resetDisplayThinkingPrompt,
@@ -42,49 +35,29 @@ function cloneHints(value: ToolCompanionHints): ToolCompanionHints {
   return JSON.parse(JSON.stringify(value)) as ToolCompanionHints;
 }
 
-function findTool(groups: ToolCompanionGroup[], capabilityId: string): ToolCompanionTool | null {
-  for (const group of groups) {
-    const tool = group.tools.find((item) => item.capability_id === capabilityId);
-    if (tool) return tool;
+/** Same local heuristic as tools/cc_usage_observability.py: CJK≈1, other≈4 chars/token. */
+function estimatePersonaTokens(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    const o = ch.charCodeAt(0);
+    if (
+      (o >= 0x4E00 && o <= 0x9FFF)
+      || (o >= 0x3400 && o <= 0x4DBF)
+      || (o >= 0xF900 && o <= 0xFAFF)
+      || (o >= 0x2E80 && o <= 0x2EFF)
+      || (o >= 0x3000 && o <= 0x303F)
+      || (o >= 0xFF00 && o <= 0xFFEF)
+      || (o >= 0x3040 && o <= 0x30FF)
+      || (o >= 0xAC00 && o <= 0xD7AF)
+    ) {
+      cjk += 1;
+    } else {
+      other += 1;
+    }
   }
-  return null;
-}
-
-function updateTool(
-  value: ToolCompanionHints,
-  capabilityId: string,
-  update: Partial<Pick<ToolCompanionTool, 'display_label' | 'companion_hint'>>,
-): ToolCompanionHints {
-  const next = cloneHints(value);
-  next.groups = next.groups.map((group) => ({
-    ...group,
-    tools: group.tools.map((tool) => (
-      tool.capability_id === capabilityId ? { ...tool, ...update } : tool
-    )),
-  }));
-  return next;
-}
-
-const RUNTIME_STATE_LABELS: Record<CapabilityState['runtime_state'], string> = {
-  INHERIT: '默认开启',
-  ON: '已开启',
-  OFF: '已关闭',
-  DENY: '不可用',
-};
-
-function presentCapabilityState(state: CapabilityState | undefined) {
-  if (!state) {
-    return {
-      runtimeLabel: '状态未知',
-      availabilityLabel: '当前不可确认',
-      className: 'missing',
-    };
-  }
-  return {
-    runtimeLabel: RUNTIME_STATE_LABELS[state.runtime_state],
-    availabilityLabel: state.effective_enabled ? '当前可用' : '当前不可用',
-    className: state.runtime_state.toLowerCase(),
-  };
+  return cjk + (other ? Math.ceil(other / 4) : 0);
 }
 
 export function ProfileScreen() {
@@ -112,26 +85,16 @@ export function ProfileScreen() {
   const [displayThinkingLoaded, setDisplayThinkingLoaded] = useState(false);
   const [displayThinkingLoadError, setDisplayThinkingLoadError] = useState('');
   const [resetDisplayThinking, setResetDisplayThinking] = useState(false);
-  const [savedHints, setSavedHints] = useState<ToolCompanionHints | null>(null);
   const [draftHints, setDraftHints] = useState<ToolCompanionHints | null>(null);
   const [toolHintsLoadError, setToolHintsLoadError] = useState('');
-  const [capabilityStates, setCapabilityStates] = useState<CapabilityState[]>([]);
-  const [capabilityStateLoadError, setCapabilityStateLoadError] = useState('');
-  const [resetCapabilities, setResetCapabilities] = useState<Record<string, boolean>>({});
-  const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
 
   const personaDirty = personaLoaded && draftPersona !== savedPersona;
-  const toolDirty = useMemo(
-    () => Boolean(draftHints && savedHints)
-      && JSON.stringify(draftHints?.groups || []) !== JSON.stringify(savedHints?.groups || []),
-    [draftHints, savedHints],
-  );
-  const hasResetIntent = Object.values(resetCapabilities).some(Boolean);
   const displayThinkingDirty = displayThinkingLoaded
     && (draftDisplayThinkingPrompt !== savedDisplayThinkingPrompt || resetDisplayThinking);
-  const dirty = personaDirty || displayThinkingDirty || toolDirty || hasResetIntent;
+  const dirty = personaDirty || displayThinkingDirty;
   const characterCount = useMemo(() => Array.from(draftPersona).length, [draftPersona]);
   const lineCount = useMemo(() => draftPersona ? draftPersona.split(/\r?\n/).length : 0, [draftPersona]);
+  const personaTokenCount = useMemo(() => estimatePersonaTokens(draftPersona), [draftPersona]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -143,14 +106,10 @@ export function ProfileScreen() {
     setPersonaLoadError('');
     setDisplayThinkingLoadError('');
     setToolHintsLoadError('');
-    setCapabilityStateLoadError('');
-    setCapabilityStates([]);
-    setResetCapabilities({});
-    const [personaResult, displayThinkingResult, hintsResult, capabilityStateResult] = await Promise.allSettled([
+    const [personaResult, displayThinkingResult, hintsResult] = await Promise.allSettled([
       http.get<PersonaResponse>('/api/persona'),
       fetchDisplayThinkingPrompt(),
       fetchToolCompanionHints(),
-      fetchCapabilityStates(),
     ]);
 
     if (personaResult.status === 'fulfilled' && personaResult.value.ok !== false) {
@@ -191,38 +150,19 @@ export function ProfileScreen() {
     }
 
     if (hintsResult.status === 'fulfilled') {
-      setSavedHints(cloneHints(hintsResult.value));
       setDraftHints(cloneHints(hintsResult.value));
     } else {
       const detail = hintsResult.reason instanceof HttpError && hintsResult.reason.detail
         ? hintsResult.reason.detail
         : hintsResult.reason instanceof Error ? hintsResult.reason.message : '工具直觉加载失败';
-      setSavedHints(null);
       setDraftHints(null);
       setToolHintsLoadError(detail);
-      showToast(detail);
-    }
-    if (capabilityStateResult.status === 'fulfilled') {
-      setCapabilityStates(capabilityStateResult.value.states);
-    } else {
-      const detail = capabilityStateResult.reason instanceof HttpError && capabilityStateResult.reason.detail
-        ? capabilityStateResult.reason.detail
-        : capabilityStateResult.reason instanceof Error
-          ? capabilityStateResult.reason.message
-          : '真实能力状态暂时读不到';
-      setCapabilityStates([]);
-      setCapabilityStateLoadError(detail);
       showToast(detail);
     }
     setLoading(false);
   }, [showToast]);
 
   useEffect(() => { void load(); }, [load]);
-
-  const capabilityStateById = useMemo(
-    () => new Map(capabilityStates.map((state) => [state.capability_id, state])),
-    [capabilityStates],
-  );
 
   useEffect(() => {
     const warnBeforeLeave = (event: BeforeUnloadEvent) => {
@@ -279,38 +219,9 @@ export function ProfileScreen() {
         );
         setResetDisplayThinking(false);
       }
-      let latest = savedHints ? cloneHints(savedHints) : null;
-      if (draftHints && savedHints && (toolDirty || hasResetIntent)) {
-        latest = cloneHints(savedHints);
-        for (const group of draftHints.groups) {
-          for (const tool of group.tools) {
-            const original = findTool(savedHints.groups, tool.capability_id);
-            if (!original) continue;
-            if (resetCapabilities[tool.capability_id]) {
-              latest = await patchToolCompanionHint({
-                capability_id: tool.capability_id,
-                reset: true,
-              });
-              continue;
-            }
-            if (original.display_label === tool.display_label && original.companion_hint === tool.companion_hint) continue;
-            latest = await patchToolCompanionHint({
-              capability_id: tool.capability_id,
-              display_label: tool.display_label,
-              companion_hint: tool.companion_hint,
-            });
-          }
-        }
-      }
-      if (latest) {
-        setSavedHints(cloneHints(latest));
-        setDraftHints(cloneHints(latest));
-      }
-      setResetCapabilities({});
       const messages = [];
       if (personaDirty) messages.push('费佳人设已保存，聊天网关正在重启');
       if (displayThinkingDirty) messages.push('可见思绪已保存；下一轮聊天生效，未修改 persona.md');
-      if (toolDirty || hasResetIntent) messages.push('工具直觉已保存；下一次 resident 启动时生效，未重启聊天网关');
       showToast(messages.join('；'));
     } catch (error) {
       const detail = error instanceof HttpError && error.detail
@@ -325,35 +236,12 @@ export function ProfileScreen() {
     displayThinkingDefaultPrompt,
     displayThinkingDirty,
     draftDisplayThinkingPrompt,
-    draftHints,
     draftPersona,
-    hasResetIntent,
     personaDirty,
     resetDisplayThinking,
-    resetCapabilities,
-    savedHints,
     saving,
     showToast,
-    toolDirty,
   ]);
-
-  const editTool = useCallback((capabilityId: string, field: 'display_label' | 'companion_hint', value: string) => {
-    setDraftHints((current) => current ? updateTool(current, capabilityId, { [field]: value }) : current);
-    setResetCapabilities((current) => {
-      if (!current[capabilityId]) return current;
-      const next = { ...current };
-      delete next[capabilityId];
-      return next;
-    });
-  }, []);
-
-  const resetTool = useCallback((tool: ToolCompanionTool) => {
-    setDraftHints((current) => current ? updateTool(current, tool.capability_id, {
-      display_label: tool.default_display_label,
-      companion_hint: tool.default_companion_hint,
-    }) : current);
-    setResetCapabilities((current) => ({ ...current, [tool.capability_id]: true }));
-  }, []);
 
   return (
     <div className="profile-root dash-fullscreen-page" style={{ ...(vars as CSSProperties) }}>
@@ -363,11 +251,9 @@ export function ProfileScreen() {
             <button type="button" className="profile-round-button" aria-label="关闭费佳档案" onClick={close}>×</button>
             <div className="profile-title">Fyodor Profile</div>
             <button type="button" className="profile-save-button" aria-label="保存费佳档案" disabled={!dirty || saving} onClick={() => void persist()}>
-              {saving ? '…' : '保存'}
+              {saving ? '…' : '✓'}
             </button>
           </header>
-
-          <div className="profile-subtitle">身份 · 关系 · 工具直觉</div>
 
           <section className="profile-hero">
             <div className="profile-avatar" aria-hidden="true">Θ</div>
@@ -381,13 +267,13 @@ export function ProfileScreen() {
           <section className="profile-meta-grid" aria-label="人设信息">
             <div className="profile-meta-card"><strong>{characterCount.toLocaleString()}</strong><span>字符</span></div>
             <div className="profile-meta-card"><strong>{lineCount.toLocaleString()}</strong><span>行</span></div>
-            <div className="profile-meta-card"><strong className="profile-live-dot">48h</strong><span>工具试用</span></div>
+            <div className="profile-meta-card"><strong>{personaTokenCount.toLocaleString()}</strong><span>完整人设所用的token</span></div>
           </section>
 
           <section className="profile-section">
             <div className="profile-persona-heading">
               <div>
-                <div className="profile-section-title">费佳的完整人设</div>
+                <div className="profile-section-title">PROFILE</div>
                 <div className="profile-help-text">这里直接读取实际生效的 persona.md。保存会写入 persona.md，并沿用现有行为重启聊天网关。</div>
               </div>
               <button type="button" className="profile-reload-button" disabled={saving} onClick={reload}>重新读取</button>
@@ -404,7 +290,7 @@ export function ProfileScreen() {
           <section className="profile-section">
             <div className="profile-persona-heading">
               <div>
-                <div className="profile-section-title">可见思绪</div>
+                <div className="profile-section-title">think</div>
                 <div className="profile-help-text">控制回复前 &lt;思绪&gt;...&lt;/思绪&gt; 的写法。只影响界面展示的角色内心独白，不修改完整人设。</div>
               </div>
               <button
@@ -441,11 +327,13 @@ export function ProfileScreen() {
           <section className="profile-section">
             <div className="profile-tool-heading">
               <div>
-                <div className="profile-section-title">费佳的工具直觉</div>
-                <div className="profile-help-text">48h 试用 · 只编辑工具名称与自然语言说明；真实能力边界由系统固定。</div>
+                <div className="profile-section-title">TOOL</div>
+                <div className="profile-help-text">只展示当前注入预览；真实能力边界由系统固定。工具名称与说明请到工具房修改。</div>
               </div>
             </div>
-            {draftHints?.prompt_preview ? (
+            {toolHintsLoadError ? (
+              <div className="profile-help-text">工具直觉暂时读不到：{toolHintsLoadError}。当前不展示伪造的注入预览，请稍后重新读取。</div>
+            ) : draftHints?.prompt_preview ? (
               <div className="profile-tool-prompt-preview">
                 <div className="profile-tool-prompt-preview__title">
                   <span>Prompt / Usage</span>
@@ -453,58 +341,12 @@ export function ProfileScreen() {
                 </div>
                 <p>{draftHints.prompt_preview}</p>
               </div>
-            ) : null}
-            {capabilityStateLoadError && (
-              <div className="profile-capability-state-error" role="status">
-                真实能力状态暂时读不到：{capabilityStateLoadError}。工具直觉仍可编辑，当前不臆测开启状态。
-              </div>
+            ) : (
+              <div className="profile-help-text">当前没有可展示的工具直觉注入预览。</div>
             )}
-            <div className="profile-tool-groups">
-              {toolHintsLoadError ? (
-                <div className="profile-help-text">工具直觉暂时读不到：{toolHintsLoadError}。当前不展示伪造的工具数据，请稍后重新读取。</div>
-              ) : (draftHints?.groups || []).map((group) => (
-                <div className="profile-tool-group" key={group.id}>
-                  <div className="profile-tool-group-title">{group.label}</div>
-                  {group.tools.map((tool) => {
-                    const open = Boolean(openTools[tool.capability_id]);
-                    const capabilityState = capabilityStateById.get(tool.capability_id);
-                    const statePresentation = presentCapabilityState(capabilityState);
-                    const longHint = Array.from(tool.companion_hint).length > 800;
-                    const preview = `【${tool.display_label}】\n${tool.companion_hint}\n真实能力边界：${tool.physical_boundary}`;
-                    return (
-                      <div className="profile-tool-card" key={tool.capability_id}>
-                        <button type="button" className="profile-tool-card-toggle" onClick={() => setOpenTools((current) => ({ ...current, [tool.capability_id]: !open }))}>
-                          <span>{tool.display_label}</span><span className="profile-tool-status">{tool.status_label}</span><span>{open ? '⌃' : '⌄'}</span>
-                        </button>
-                        <div className="profile-tool-boundary">{tool.physical_boundary}</div>
-                        <div
-                          className={`profile-capability-state-badge profile-capability-state-badge--${statePresentation.className}`}
-                          data-runtime-state={capabilityState?.runtime_state ?? 'MISSING'}
-                          aria-label={`能力状态：${statePresentation.runtimeLabel}，${statePresentation.availabilityLabel}`}
-                        >
-                          <span className="profile-capability-state-badge__label">真实能力</span>
-                          <strong>{statePresentation.runtimeLabel}</strong>
-                          <span>{statePresentation.availabilityLabel}</span>
-                        </div>
-                        {open && (
-                          <div className="profile-tool-editor">
-                            <label>小猫看到的工具名字<input value={tool.display_label} onChange={(event) => editTool(tool.capability_id, 'display_label', event.target.value)} /></label>
-                            <label>Prompt / Usage · 费佳看到的说明<textarea value={tool.companion_hint} onChange={(event) => editTool(tool.capability_id, 'companion_hint', event.target.value)} /></label>
-                            {longHint && <div className="profile-tool-warning">这段说明比较长，会增加下一次 resident 启动的静态上下文；系统不会自动压缩或改写它。</div>}
-                            <div className="profile-tool-preview-title">费佳实际会看到 · 逐字预览</div>
-                            <pre className="profile-tool-preview">{preview}</pre>
-                            <button type="button" className="profile-reset-button" onClick={() => resetTool(tool)}>恢复初始说明</button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
           </section>
 
-          <div className="profile-persona-note">Persona 保存会写入 persona.md 并重启 frontend-gw。工具直觉保存写入 runtime_config，不重启 frontend-gw；它会在下一次既有 resident static-system 生命周期生效，不会按 turn 广播。系统不会自动截断或改写原文。</div>
+          <div className="profile-persona-note">Persona 保存会写入 persona.md 并重启 frontend-gw。可见思绪保存只影响界面展示的内心独白，不修改 persona.md。系统不会自动截断或改写原文。</div>
         </div>
       )}
       {toast && <div className="profile-toast"><span>{toast}</span></div>}
