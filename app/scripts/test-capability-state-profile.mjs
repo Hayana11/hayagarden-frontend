@@ -29,27 +29,24 @@ for (const state of ['INHERIT', 'ON', 'OFF', 'DENY']) {
   assert.match(client, new RegExp(state));
 }
 
-assert.match(profile, /fetchCapabilityStates/);
+assert.match(profile, /fetchToolCompanionHints/);
 assert.match(profile, /Promise\.allSettled/);
-assert.match(profile, /capabilityStateById\.get\(tool\.capability_id\)/);
-for (const label of ['默认开启', '已开启', '已关闭', '不可用']) {
-  assert.match(profile, new RegExp(label));
-}
-assert.match(profile, /状态未知/);
-assert.match(profile, /当前不可确认/);
-assert.match(profile, /const dirty = personaDirty \|\| toolDirty \|\| hasResetIntent;/);
-assert.match(profile, /profile-tool-card-toggle/);
-assert.match(profile, /setOpenTools/);
+assert.match(profile, /费佳的工具直觉/);
+assert.match(profile, /注入预览/);
+assert.doesNotMatch(profile, /fetchCapabilityStates/);
+assert.doesNotMatch(profile, /profile-tool-card/);
+assert.doesNotMatch(profile, /setOpenTools/);
 assert.doesNotMatch(profile, /patchCapabilityState|\/api\/capabilities\/[^']+\/state|http\.patch/);
+assert.doesNotMatch(profile, /patchToolCompanionHint/);
 
 const persistStart = profile.indexOf('const persist =');
-const editStart = profile.indexOf('const editTool =');
-assert.ok(persistStart >= 0 && editStart > persistStart);
-assert.doesNotMatch(profile.slice(persistStart, editStart), /capabilityState/);
+const persistEnd = profile.indexOf('return (');
+assert.ok(persistStart >= 0 && persistEnd > persistStart);
+assert.doesNotMatch(profile.slice(persistStart, persistEnd), /capabilityState|patchToolCompanionHint/);
 
 assert.match(hints, /\/api\/tools\/companion-hints/);
 assert.match(hints, /patchToolCompanionHint/);
-assert.match(css, /profile-capability-state-badge/);
-assert.doesNotMatch(css, /profile-capability-state-badge[\s\S]*profile-switch/);
+assert.doesNotMatch(css, /profile-capability-state-badge/);
+assert.doesNotMatch(css, /profile-tool-card/);
 
 console.log('test-capability-state-profile: ok');
