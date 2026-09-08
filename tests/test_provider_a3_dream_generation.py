@@ -124,9 +124,13 @@ class DreamBehaviorTests(unittest.TestCase):
             next_response = next(response_iter)
             if isinstance(next_response, BaseException):
                 raise next_response
+            if isinstance(next_response, tuple):
+                next_response, executor = next_response
+            else:
+                executor = 'fake-background'
             return types.SimpleNamespace(
                 text=next_response,
-                actual_executor='fake-background',
+                actual_executor=executor,
             )
 
         bg = types.ModuleType('chat.background_generation')
@@ -288,6 +292,7 @@ class DreamBehaviorTests(unittest.TestCase):
             self.assertTrue(metadata['regenerated'])
             self.assertFalse(metadata['fallback'])
             self.assertEqual(metadata['generation_attempts'], 2)
+            self.assertEqual(metadata['generation_executor'], 'fake-background')
             self.assertEqual(save_memory.call_args.args[0], valid)
 
     def test_behavior_5_provider_failure_uses_local_fallback_without_cross_provider(self):
@@ -303,6 +308,8 @@ class DreamBehaviorTests(unittest.TestCase):
                 self.assertEqual(content, 'LOCAL FALLBACK DREAM')
                 self.assertTrue(metadata['fallback'])
                 self.assertFalse(metadata['model_generation_succeeded'])
+                self.assertEqual(metadata['generation_attempts'], 1)
+                self.assertEqual(metadata['generation_executor'], 'local_fallback')
                 self.assertEqual(len(calls), 1)
 
     def test_behavior_6_authority_capture_failure_skips_model_and_persists_fallback(self):
@@ -320,6 +327,7 @@ class DreamBehaviorTests(unittest.TestCase):
             self.assertEqual(metadata['generation_provider'], 'unavailable')
             self.assertEqual(metadata['generation_model_identity'], 'unknown')
             self.assertEqual(metadata['generation_attempts'], 0)
+            self.assertEqual(metadata['generation_executor'], 'local_fallback')
             self.assertFalse(metadata['model_generation_succeeded'])
 
     def test_behavior_7_context_build_failure_skips_adapter_and_persists_fallback(self):
@@ -335,6 +343,8 @@ class DreamBehaviorTests(unittest.TestCase):
             content, metadata = self._stored_row(db_path)
             self.assertEqual(content, 'LOCAL FALLBACK DREAM')
             self.assertTrue(metadata['fallback'])
+            self.assertEqual(metadata['generation_attempts'], 0)
+            self.assertEqual(metadata['generation_executor'], 'local_fallback')
             self.assertEqual(calls, [])
 
     def test_behavior_8_severe_regen_persists_content_only(self):
@@ -356,6 +366,79 @@ class DreamBehaviorTests(unittest.TestCase):
             self.assertEqual(content, valid)
             self.assertEqual(save_memory.call_args.args[0], valid)
             self.assertTrue(metadata['regenerated'])
+
+    def test_provenance_1_first_success_then_regen_failure_keeps_first_executor(self):
+        gen = self._load_generator()
+        authority = types.SimpleNamespace(provider='claude_code', model_identity='explicit:model-A')
+        first = 'FIRST SEVERE DREAM ' + ('a' * 160) + '我终于明白了'
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._new_db(tmp)
+            self._prepare_generator(gen, db_path)
+            with self._fake_runtime(authority, [
+                ('THOUGHTS: x\nACTION: message\nCONTENT: ' + first,
+                 'claude_code_background_oneshot'),
+                RuntimeError('regen provider failed'),
+            ]) as (calls, *_):
+                self.assertTrue(gen.generate_dream())
+            content, metadata = self._stored_row(db_path)
+            self.assertEqual(content, first)
+            self.assertEqual(metadata['generation_executor'], 'claude_code_background_oneshot')
+            self.assertEqual(metadata['generation_attempts'], 2)
+            self.assertTrue(metadata['model_generation_succeeded'])
+            self.assertTrue(metadata['regenerated'])
+            self.assertFalse(metadata['fallback'])
+            self.assertEqual(len(calls), 2)
+
+    def test_provenance_2_context_failure_has_zero_provider_attempts(self):
+        gen = self._load_generator()
+        authority = types.SimpleNamespace(provider='claude_code', model_identity='explicit:model-A')
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._new_db(tmp)
+            self._prepare_generator(gen, db_path)
+            with self._fake_runtime(
+                authority, [], context_error=RuntimeError('request assembly failed'),
+            ) as (calls, *_):
+                self.assertTrue(gen.generate_dream())
+            content, metadata = self._stored_row(db_path)
+            self.assertEqual(content, 'LOCAL FALLBACK DREAM')
+            self.assertEqual(calls, [])
+            self.assertEqual(metadata['generation_attempts'], 0)
+            self.assertEqual(metadata['generation_executor'], 'local_fallback')
+            self.assertFalse(metadata['model_generation_succeeded'])
+
+    def test_provenance_3_authority_failure_has_zero_attempts_and_local_executor(self):
+        gen = self._load_generator()
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._new_db(tmp)
+            self._prepare_generator(gen, db_path)
+            with self._fake_runtime(
+                None, [], capture_error=ValueError('authority unavailable'),
+            ) as (calls, *_):
+                self.assertTrue(gen.generate_dream())
+            _content, metadata = self._stored_row(db_path)
+            self.assertEqual(calls, [])
+            self.assertEqual(metadata['generation_attempts'], 0)
+            self.assertEqual(metadata['generation_executor'], 'local_fallback')
+            self.assertFalse(metadata['model_generation_succeeded'])
+
+    def test_provenance_4_second_success_replaces_executor_source(self):
+        gen = self._load_generator()
+        authority = types.SimpleNamespace(provider='api_relay', model_identity='model-R')
+        first = 'FIRST SEVERE DREAM ' + ('b' * 160) + '我终于明白了'
+        second = 'SECOND VALID DREAM ' + ('c' * 160)
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._new_db(tmp)
+            self._prepare_generator(gen, db_path)
+            with self._fake_runtime(authority, [
+                ('THOUGHTS: x\nACTION: message\nCONTENT: ' + first, 'executor-A'),
+                ('THOUGHTS: x\nACTION: message\nCONTENT: ' + second, 'executor-B'),
+            ]) as (calls, *_):
+                self.assertTrue(gen.generate_dream())
+            content, metadata = self._stored_row(db_path)
+            self.assertEqual(content, second)
+            self.assertEqual(metadata['generation_executor'], 'executor-B')
+            self.assertEqual(metadata['generation_attempts'], 2)
+            self.assertEqual(len(calls), 2)
 
     def test_behavior_9_parser_passes_content_only_to_persistence(self):
         gen = self._load_generator()

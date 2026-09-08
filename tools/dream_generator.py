@@ -572,7 +572,9 @@ def _dream_background_request(tone, primer, extra=None):
     )
 
 
-def _generate_dream_model(tone, primer, authority, attempt, extra=None):
+def _generate_dream_model(
+    tone, primer, authority, attempt, extra=None, *, call_counter=None,
+):
     """Execute one frozen-authority Dream attempt and accept only message CONTENT."""
     from chat.background_generation import BackgroundGenerationError, generate_background
     from chat.cc_auth import read_cc_oauth_token
@@ -580,6 +582,8 @@ def _generate_dream_model(tone, primer, authority, attempt, extra=None):
 
     try:
         request = _dream_background_request(tone, primer, extra=extra)
+        if call_counter is not None:
+            call_counter[0] += 1
         result = generate_background(
             request,
             authority,
@@ -708,39 +712,43 @@ def generate_dream():
     generation_attempts = 0
     generation_executor = 'not_attempted'
     model_generation_succeeded = False
+    generation_call_counter = [0]
 
     from tools.dream_meta import sanitize_dream_content
 
     if authority_available:
-        generation_attempts += 1
-        raw_text, generation_executor, model_generation_succeeded = _generate_dream_model(
-            tone, primer, authority, generation_attempts,
+        raw_text, first_executor, model_generation_succeeded = _generate_dream_model(
+            tone, primer, authority, 1, call_counter=generation_call_counter,
         )
     else:
         raw_text = ''
+        first_executor = 'not_attempted'
     dream_text = sanitize_dream_content(raw_text)
     if not dream_text:
         dream_text = sanitize_dream_content(_fallback_dream(tone, conn))
         used_fallback = True
+        generation_executor = 'local_fallback'
         _log('using fallback dream text (model unavailable)')
     else:
+        generation_executor = first_executor
         reason = _severe_failure(dream_text, primer)
         if reason:
             regenerated = True
             hint = FAILURE_HINTS.get(reason, reason)
             _log(f'severe failure: {reason}, regenerating once')
-            generation_attempts += 1
-            raw_text, generation_executor, retry_succeeded = _generate_dream_model(
+            raw_text, retry_executor, retry_succeeded = _generate_dream_model(
                 tone,
                 primer,
                 authority,
-                generation_attempts,
+                generation_call_counter[0] + 1,
                 extra=f'上一次生成失败：{hint}，请避免。',
+                call_counter=generation_call_counter,
             )
             model_generation_succeeded = model_generation_succeeded or retry_succeeded
             dream2 = sanitize_dream_content(raw_text)
             if dream2:
                 dream_text = dream2
+                generation_executor = retry_executor
             failure_reason = _severe_failure(dream_text, primer)
             if failure_reason:
                 _log(f'still failing after regen: {failure_reason}; storing anyway')
@@ -757,6 +765,7 @@ def generate_dream():
     except Exception as e:
         _log(f'mark latents used failed: {e}')
 
+    generation_attempts = generation_call_counter[0]
     metadata = {
         'prompt_version': PROMPT_VERSION,
         'source_mix': materials['source_mix'],
