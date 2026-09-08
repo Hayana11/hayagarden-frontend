@@ -553,16 +553,16 @@ def _dream_background_request(tone, primer, extra=None):
     from wake.builder import build_prompt_suffix
     from chat.background_generation import BackgroundGenerationRequest
 
-    primer_payload = primer if not extra else f'{primer}\\n\\n{extra}'
+    primer_payload = primer if not extra else f'{primer}\n\n{extra}'
     context = {
-        'time': _now().strftime('%Y-%m-%d %H:%M:%S'),
+        'time': _now().strftime('%Y-%m-%d %H:%M'),
         'dream_tone': tone,
         'dream_tone_desc': TONE_PROMPTS.get(tone, TONE_PROMPTS['drifting']),
         'dream_primer': primer_payload,
     }
     persona = read_persona().strip()
     suffix = build_prompt_suffix('dream', context).strip()
-    system_text = '\\n\\n'.join(part for part in (persona, suffix) if part)
+    system_text = '\n\n'.join(part for part in (persona, suffix) if part)
     return BackgroundGenerationRequest(
         system_text=system_text,
         prompt_text='[做梦]',
@@ -578,8 +578,8 @@ def _generate_dream_model(tone, primer, authority, attempt, extra=None):
     from chat.cc_auth import read_cc_oauth_token
     from wake.parser import parse_response
 
-    request = _dream_background_request(tone, primer, extra=extra)
     try:
+        request = _dream_background_request(tone, primer, extra=extra)
         result = generate_background(
             request,
             authority,
@@ -659,11 +659,23 @@ def generate_dream():
     _log('dream generation started (v3 fragment-plan + latents)')
     # Capture exactly once before material collection. Every model attempt below
     # receives this immutable authority, even if runtime config changes mid-task.
-    from chat.provider_router import capture_generation_authority
-    authority = capture_generation_authority()
-    _log('dream authority provider=%s model=%s' % (
-        authority.provider, authority.model_identity,
-    ))
+    from chat.provider_router import (
+        GenerationAuthoritySnapshot,
+        capture_generation_authority,
+    )
+    authority_available = True
+    try:
+        authority = capture_generation_authority()
+    except Exception as exc:
+        # Authority failure is a selected-provider unavailability. Do not
+        # resolve another provider or call the adapter without a snapshot.
+        authority_available = False
+        authority = GenerationAuthoritySnapshot('unavailable', 'unknown')
+        _log('dream authority unavailable code=%s' % type(exc).__name__)
+    if authority_available:
+        _log('dream authority provider=%s model=%s' % (
+            authority.provider, authority.model_identity,
+        ))
 
     conn = _db()
     ensure_dream_pool_metadata(conn)
@@ -699,10 +711,13 @@ def generate_dream():
 
     from tools.dream_meta import sanitize_dream_content
 
-    generation_attempts += 1
-    raw_text, generation_executor, model_generation_succeeded = _generate_dream_model(
-        tone, primer, authority, generation_attempts,
-    )
+    if authority_available:
+        generation_attempts += 1
+        raw_text, generation_executor, model_generation_succeeded = _generate_dream_model(
+            tone, primer, authority, generation_attempts,
+        )
+    else:
+        raw_text = ''
     dream_text = sanitize_dream_content(raw_text)
     if not dream_text:
         dream_text = sanitize_dream_content(_fallback_dream(tone, conn))
@@ -828,5 +843,4 @@ def generate_dream():
 
 if __name__ == '__main__':
     generate_dream()
-
 
