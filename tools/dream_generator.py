@@ -4,7 +4,7 @@
 
 Layer 1: 按 FRAGMENT_PLAN 取材（近期加权随机 / 远期 / 日记或思绪 / 活动感官）
 Layer 2: 保守去语境化 + primer 拼装（只含材料、不含解释）
-Layer 3: 基调推断 → /wake 生成 → 严重失败检测（最多重生一次）→ 入库
+Layer 3: 基调推断 → surface-owned background generation → 严重失败检测（最多重生一次）→ 入库
 """
 import sqlite3, datetime, random, os, sys, json, re
 
@@ -12,7 +12,6 @@ if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
 
 DB_PATH    = '/opt/frontend/memories.db'
-GATEWAY    = 'http://localhost:5051'
 LOG_FILE   = '/var/log/dream_generator.log'
 
 PROMPT_VERSION = 'dream-v3'
@@ -546,42 +545,75 @@ def _severe_failure(dream_text, primer_text):
     return None
 
 
-# ── 调用 /wake + fallback ─────────────────────────────────
+# ── Dream surface-owned model generation + fallback ─────────
 
-def _call_wake_for_dream(tone, primer, extra=None):
-    import urllib.request
-    import urllib.error
+def _dream_background_request(tone, primer, extra=None):
+    """Build only the Dream surface contract; never inherit generic Wake context."""
+    from chat.system_builder import read_persona
+    from wake.builder import build_prompt_suffix
+    from chat.background_generation import BackgroundGenerationRequest
 
-    tone_desc = TONE_PROMPTS.get(tone, TONE_PROMPTS['drifting'])
-    primer_payload = primer
-    if extra:
-        primer_payload = f'{primer}\n\n{extra}'
-    payload = json.dumps({
-        'mode': 'dream',
+    primer_payload = primer if not extra else f'{primer}\n\n{extra}'
+    context = {
+        'time': _now().strftime('%Y-%m-%d %H:%M'),
         'dream_tone': tone,
+        'dream_tone_desc': TONE_PROMPTS.get(tone, TONE_PROMPTS['drifting']),
         'dream_primer': primer_payload,
-        'dream_tone_desc': tone_desc,
-    }).encode()
+    }
+    persona = read_persona().strip()
+    suffix = build_prompt_suffix('dream', context).strip()
+    system_text = '\n\n'.join(part for part in (persona, suffix) if part)
+    return BackgroundGenerationRequest(
+        system_text=system_text,
+        prompt_text='[做梦]',
+        max_tokens_hint=4096,
+        timeout_sec=90,
+        task_kind='dream',
+    )
+
+
+def _generate_dream_model(
+    tone, primer, authority, attempt, extra=None, *, call_counter=None,
+):
+    """Execute one frozen-authority Dream attempt and accept only message CONTENT."""
+    from chat.background_generation import BackgroundGenerationError, generate_background
+    from chat.cc_auth import read_cc_oauth_token
+    from wake.parser import parse_response
+
     try:
-        req = urllib.request.Request(
-            f'{GATEWAY}/wake',
-            data=payload,
-            method='POST',
-            headers={'Content-Type': 'application/json'},
+        request = _dream_background_request(tone, primer, extra=extra)
+        if call_counter is not None:
+            call_counter[0] += 1
+        result = generate_background(
+            request,
+            authority,
+            cc_token_getter=read_cc_oauth_token,
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode())
-            return (data.get('content') or data.get('text', '')).strip()
-    except urllib.error.HTTPError as e:
-        try:
-            body = e.read().decode('utf-8', 'replace')[:500]
-        except Exception:
-            body = ''
-        _log(f'wake call failed: HTTP {e.code} {e.reason} body={body}')
-        return None
-    except Exception as e:
-        _log(f'wake call failed: {type(e).__name__}: {e}')
-        return None
+    except BackgroundGenerationError as exc:
+        _log(
+            'dream background failed provider=%s model=%s attempt=%s code=%s' % (
+                authority.provider, authority.model_identity, attempt, type(exc).__name__,
+            )
+        )
+        return '', 'failed', False
+    except Exception as exc:
+        _log(
+            'dream background failed provider=%s model=%s attempt=%s code=%s' % (
+                authority.provider, authority.model_identity, attempt, type(exc).__name__,
+            )
+        )
+        return '', 'failed', False
+
+    _, action, content = parse_response(result.text or '')
+    executor = str(result.actual_executor or 'unknown')
+    if action != 'message' or not content.strip():
+        _log(
+            'dream background invalid provider=%s model=%s executor=%s attempt=%s' % (
+                authority.provider, authority.model_identity, executor, attempt,
+            )
+        )
+        return '', executor, False
+    return content, executor, True
 
 
 def _fallback_dream(tone, conn=None, *_args):
@@ -629,6 +661,26 @@ def _fallback_dream(tone, conn=None, *_args):
 
 def generate_dream():
     _log('dream generation started (v3 fragment-plan + latents)')
+    # Capture exactly once before material collection. Every model attempt below
+    # receives this immutable authority, even if runtime config changes mid-task.
+    from chat.provider_router import (
+        GenerationAuthoritySnapshot,
+        capture_generation_authority,
+    )
+    authority_available = True
+    try:
+        authority = capture_generation_authority()
+    except Exception as exc:
+        # Authority failure is a selected-provider unavailability. Do not
+        # resolve another provider or call the adapter without a snapshot.
+        authority_available = False
+        authority = GenerationAuthoritySnapshot('unavailable', 'unknown')
+        _log('dream authority unavailable code=%s' % type(exc).__name__)
+    if authority_available:
+        _log('dream authority provider=%s model=%s' % (
+            authority.provider, authority.model_identity,
+        ))
+
     conn = _db()
     ensure_dream_pool_metadata(conn)
 
@@ -657,25 +709,46 @@ def generate_dream():
     used_fallback = False
     regenerated = False
     failure_reason = None
+    generation_attempts = 0
+    generation_executor = 'not_attempted'
+    model_generation_succeeded = False
+    generation_call_counter = [0]
 
     from tools.dream_meta import sanitize_dream_content
 
-    dream_text = sanitize_dream_content(_call_wake_for_dream(tone, primer) or '')
+    if authority_available:
+        raw_text, first_executor, model_generation_succeeded = _generate_dream_model(
+            tone, primer, authority, 1, call_counter=generation_call_counter,
+        )
+    else:
+        raw_text = ''
+        first_executor = 'not_attempted'
+    dream_text = sanitize_dream_content(raw_text)
     if not dream_text:
         dream_text = sanitize_dream_content(_fallback_dream(tone, conn))
         used_fallback = True
-        _log('using fallback dream text (wake unavailable)')
+        generation_executor = 'local_fallback'
+        _log('using fallback dream text (model unavailable)')
     else:
+        generation_executor = first_executor
         reason = _severe_failure(dream_text, primer)
         if reason:
             regenerated = True
             hint = FAILURE_HINTS.get(reason, reason)
             _log(f'severe failure: {reason}, regenerating once')
-            dream2 = sanitize_dream_content(_call_wake_for_dream(
-                tone, primer, extra=f'上一次生成失败：{hint}，请避免。'
-            ) or '')
+            raw_text, retry_executor, retry_succeeded = _generate_dream_model(
+                tone,
+                primer,
+                authority,
+                generation_call_counter[0] + 1,
+                extra=f'上一次生成失败：{hint}，请避免。',
+                call_counter=generation_call_counter,
+            )
+            model_generation_succeeded = model_generation_succeeded or retry_succeeded
+            dream2 = sanitize_dream_content(raw_text)
             if dream2:
                 dream_text = dream2
+                generation_executor = retry_executor
             failure_reason = _severe_failure(dream_text, primer)
             if failure_reason:
                 _log(f'still failing after regen: {failure_reason}; storing anyway')
@@ -692,6 +765,7 @@ def generate_dream():
     except Exception as e:
         _log(f'mark latents used failed: {e}')
 
+    generation_attempts = generation_call_counter[0]
     metadata = {
         'prompt_version': PROMPT_VERSION,
         'source_mix': materials['source_mix'],
@@ -699,7 +773,11 @@ def generate_dream():
         'fallback': used_fallback,
         'regenerated': regenerated,
         'failure_reason': failure_reason,
-        'primer': primer,
+        'generation_provider': authority.provider,
+        'generation_model_identity': authority.model_identity,
+        'generation_executor': generation_executor,
+        'generation_attempts': generation_attempts,
+        'model_generation_succeeded': model_generation_succeeded,
     }
 
     try:
@@ -771,7 +849,6 @@ def generate_dream():
         except Exception:
             pass
         return False
-
 
 if __name__ == '__main__':
     generate_dream()

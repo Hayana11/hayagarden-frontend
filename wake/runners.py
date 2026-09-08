@@ -22,7 +22,7 @@ from wake.usage import build_wake_cache_info
 NL = chr(10)
 
 # Modes that stay on BACKGROUND_PROVIDER in B1 — api_relay only (scheme A).
-BACKGROUND_WAKE_MODES = frozenset(('dream', 'summarize'))
+BACKGROUND_WAKE_MODES = frozenset(('summarize',))
 # First-cut CC Wake modes.
 CC_WAKE_MODES = frozenset(('normal', 'morning', 'nightwatch', 'ritual', 'self_trigger'))
 
@@ -75,20 +75,21 @@ class WakeRunner(Protocol):
 
 
 def select_wake_provider(mode: str) -> str:
-    """dream/summarize → BACKGROUND_PROVIDER (api_relay only in B1);
-    else → WAKE_PROVIDER (inherit ok).
+    """Select only live legacy Wake routes.
 
-    Scheme A: BACKGROUND_PROVIDER=claude_code is a valid config_store value but
-    unsupported for dream/summarize here — raise at route/inspect time rather
-    than fail inside ClaudeCodeWakeRunner.
+    Dream is surface-owned since Provider-A3 and must never reach a Wake
+    runner. Summarize remains the sole BACKGROUND_PROVIDER legacy mode.
     """
     mode = str(mode or 'normal')
+    if mode == 'dream':
+        raise UnsupportedWakeModeError(
+            'dream generation 已迁移到 surface-owned Background Generation Adapter'
+        )
     if mode in BACKGROUND_WAKE_MODES:
         provider = resolve_provider('background')
         if provider != 'api_relay':
             raise UnsupportedWakeModeError(
-                'dream/summarize 仅支持 BACKGROUND_PROVIDER=api_relay'
-                '（B1 未实现 CC BackgroundRunner），当前为 %s' % provider
+                'summarize 仅支持 BACKGROUND_PROVIDER=api_relay，当前为 %s' % provider
             )
         return provider
     return resolve_provider('wake')
@@ -236,7 +237,7 @@ class ClaudeCodeWakeRunner:
         if request.mode not in CC_WAKE_MODES:
             raise UnsupportedWakeModeError(
                 'claude_code Wake 暂不支持 mode=%s；'
-                'dream/summarize 请保持 BACKGROUND_PROVIDER=api_relay'
+                'summarize 请保持 BACKGROUND_PROVIDER=api_relay'
                 % request.mode
             )
 

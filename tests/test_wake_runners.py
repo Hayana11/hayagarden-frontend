@@ -67,13 +67,17 @@ class WakeProviderSelectTests(unittest.TestCase):
             self.assertEqual(select_wake_provider('ritual'), 'claude_code')
             self.assertEqual(select_wake_provider('self_trigger'), 'claude_code')
 
-    def test_dream_summarize_use_background(self):
+    def test_dream_is_surface_owned_and_summarize_stays_background(self):
         with mock.patch.object(config_store, 'get', side_effect=fake_get({
             'CHAT_PROVIDER': 'claude_code',
             'WAKE_PROVIDER': 'inherit',
             'BACKGROUND_PROVIDER': 'api_relay',
         })):
-            self.assertEqual(select_wake_provider('dream'), 'api_relay')
+            with self.assertRaisesRegex(
+                UnsupportedWakeModeError,
+                'surface-owned Background Generation Adapter',
+            ):
+                select_wake_provider('dream')
             self.assertEqual(select_wake_provider('summarize'), 'api_relay')
 
     def test_background_claude_code_rejected_at_route_time(self):
@@ -770,5 +774,3 @@ class RelayDryRunNudgeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
-
