@@ -10,7 +10,7 @@ from typing import Literal
 
 
 FinalityStatus = Literal['completed', 'incomplete']
-SourceKind = Literal['completed_turn', 'autonomous_event']
+SourceKind = Literal['completed_turn', 'autonomous_event', 'attachment_span']
 
 
 @dataclass(frozen=True)
