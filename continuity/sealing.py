@@ -211,7 +211,10 @@ def validate_candidate_coverage(
             raise ValueError('candidate belongs to another source snapshot')
         if candidate.policy_version == '':
             raise ValueError('candidate policy version is required')
-        if len(candidate.source_seqs) != len(candidate.source_refs):
+        if (
+            len(candidate.source_seqs) != len(candidate.source_refs)
+            or len(candidate.source_seqs) != len(candidate.source_revisions)
+        ):
             raise ValueError('candidate source membership length mismatch')
         for seq, source_ref, source_revision in zip(
             candidate.source_seqs, candidate.source_refs, candidate.source_revisions,
