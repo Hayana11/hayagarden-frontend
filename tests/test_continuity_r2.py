@@ -117,6 +117,12 @@ class SealingTests(unittest.TestCase):
         self.assertNotEqual(first[0].candidate_id, second[0].candidate_id)
         self.assertNotEqual(first[0].policy_version, second[0].policy_version)
 
+        changed_policy = seal_snapshot(
+            snap,
+            SealingPolicy(version='continuity_sealing_v1', target_logical_size=100),
+        )
+        self.assertNotEqual(first[0].candidate_id, changed_policy[0].candidate_id)
+
     def test_candidate_membership_is_an_exact_partition(self):
         snap = snapshot(tuple(member(i, 100) for i in range(3)))
         blocks = seal_snapshot(snap)
