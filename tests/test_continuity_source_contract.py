@@ -180,10 +180,10 @@ class SourceSnapshotAndCoverageTests(unittest.TestCase):
         self.assertTrue(report.valid)
         self.assertEqual(report.source_hash, first.source_hash)
 
-    def test_validator_reports_duplicate_gap_and_revision_mismatch(self):
+    def test_validator_reports_duplicate_sequence_and_missing_source(self):
         members = (
-            SourceMember(0, 'completed_turn', 'turn:1:2', 'a', 'conversation', 'a'),
-            SourceMember(0, 'completed_turn', 'turn:1:2', 'b', 'conversation', 'not-b'),
+            SourceMember(0, 'completed_turn', 'turn:1:2', 'a', 'conversation', 'hash-a'),
+            SourceMember(0, 'completed_turn', 'turn:1:2', 'a', 'conversation', 'hash-a'),
         )
         report = validate_exact_coverage(
             members,
@@ -194,10 +194,48 @@ class SourceSnapshotAndCoverageTests(unittest.TestCase):
         self.assertTrue({
             'duplicate_seq',
             'duplicate_source',
-            'revision_hash_mismatch',
             'sequence_gap',
             'coverage_gap',
         }.issubset(codes))
+
+    def test_validator_marks_stale_revision_without_equating_revision_and_content_hash(self):
+        member = SourceMember(
+            0, 'attachment_span', 'attachment:file-a', 'rev-2', 'attachment',
+            'span-content-hash', 0, 10,
+        )
+        report = validate_exact_coverage(
+            (member,),
+            expected_source_refs=['attachment:file-a'],
+            expected_source_revisions={'attachment:file-a': 'rev-1'},
+        )
+        self.assertFalse(report.valid)
+        self.assertIn('source_revision_changed', {issue.code for issue in report.issues})
+        self.assertNotIn('revision_hash_mismatch', {issue.code for issue in report.issues})
+
+    def test_attachment_spans_allow_contiguous_ranges_and_reject_overlap_or_gap(self):
+        contiguous = (
+            SourceMember(0, 'attachment_span', 'attachment:file-a', 'rev-1', 'attachment', 'h1', 0, 10),
+            SourceMember(1, 'attachment_span', 'attachment:file-a', 'rev-1', 'attachment', 'h2', 10, 20),
+        )
+        self.assertTrue(validate_exact_coverage(contiguous).valid)
+
+        overlap = (
+            SourceMember(0, 'attachment_span', 'attachment:file-a', 'rev-1', 'attachment', 'h1', 0, 10),
+            SourceMember(1, 'attachment_span', 'attachment:file-a', 'rev-1', 'attachment', 'h2', 9, 20),
+        )
+        self.assertIn(
+            'coverage_overlap',
+            {issue.code for issue in validate_exact_coverage(overlap).issues},
+        )
+
+        gap = (
+            SourceMember(0, 'attachment_span', 'attachment:file-a', 'rev-1', 'attachment', 'h1', 0, 10),
+            SourceMember(1, 'attachment_span', 'attachment:file-a', 'rev-1', 'attachment', 'h2', 12, 20),
+        )
+        self.assertIn(
+            'span_gap',
+            {issue.code for issue in validate_exact_coverage(gap).issues},
+        )
 
 
 if __name__ == '__main__':
