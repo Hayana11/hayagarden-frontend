@@ -417,6 +417,41 @@ def materialize_job(
                 )
             elif tuple(row) != expected:
                 raise ContinuityStoreConflict('candidate identity conflict')
+            else:
+                stored_members = conn.execute(
+                    'SELECT candidate_id, ordinal, source_seq, source_ref, source_revision, '
+                    'content_hash, logical_size FROM continuity_candidate_members '
+                    'WHERE candidate_id=? ORDER BY ordinal',
+                    (candidate.candidate_id,),
+                ).fetchall()
+                expected_members = tuple(
+                    (
+                        candidate.candidate_id,
+                        ordinal,
+                        seq,
+                        ref,
+                        revision,
+                        revision,
+                        int(snapshot.members[seq].logical_size),
+                    )
+                    for ordinal, (seq, ref, revision)
+                    in enumerate(zip(
+                        candidate.source_seqs,
+                        candidate.source_refs,
+                        candidate.source_revisions,
+                    ))
+                )
+                if tuple(tuple(item) for item in stored_members) != expected_members:
+                    raise ContinuityStoreConflict('candidate membership conflict')
+
+        stored_candidate_ids = {
+            str(item[0]) for item in conn.execute(
+                'SELECT candidate_id FROM continuity_candidate_blocks WHERE job_id=?',
+                (job.job_id,),
+            ).fetchall()
+        }
+        if stored_candidate_ids != {candidate.candidate_id for candidate in candidates}:
+            raise ContinuityStoreConflict('candidate set conflict')
 
         conn.execute(
             "UPDATE continuity_jobs SET status='shadow', candidate_count=?, updated_at=? "
