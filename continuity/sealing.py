@@ -11,9 +11,10 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
-from chat.day_handoff import chat_day_for_timestamp
 from continuity.contracts import SourceMember, SourceSnapshot
 from continuity.coverage import CoverageReport, validate_exact_coverage
+
+MEASUREMENT_SEMANTICS = 'cc_usage_observability.heuristic_cjk1_ascii4_v1'
 
 
 def _canonical_json(value: object) -> str:
@@ -29,6 +30,7 @@ def policy_identity(policy: SealingPolicy) -> dict[str, object]:
         'version': policy.version,
         'target_logical_size': int(policy.target_logical_size),
         'max_completed_turns': int(policy.max_completed_turns),
+        'measurement_semantics': policy.measurement_semantics,
     }
 
 
@@ -39,6 +41,7 @@ class SealingPolicy:
     version: str = 'continuity_sealing_v1_12k_20turns'
     target_logical_size: int = 12_000
     max_completed_turns: int = 20
+    measurement_semantics: str = MEASUREMENT_SEMANTICS
 
     def __post_init__(self) -> None:
         if not str(self.version).strip():
@@ -47,6 +50,8 @@ class SealingPolicy:
             raise ValueError('target logical size must be positive')
         if int(self.max_completed_turns) <= 0:
             raise ValueError('max completed turns must be positive')
+        if not str(self.measurement_semantics).strip():
+            raise ValueError('measurement semantics must be non-empty')
 
 
 DEFAULT_SEALING_POLICY = SealingPolicy()
@@ -80,7 +85,9 @@ def _member_day(member: SourceMember) -> str:
         timestamp = dt.datetime.strptime(raw[:19], '%Y-%m-%d %H:%M:%S')
     except (TypeError, ValueError) as exc:
         raise ValueError('source member created_at must be YYYY-MM-DD HH:MM:SS') from exc
-    return chat_day_for_timestamp(timestamp)
+    # Continuity uses the natural local calendar day.  The legacy Day Handoff
+    # helper intentionally has different 04:00 chat-day semantics.
+    return timestamp.strftime('%Y-%m-%d')
 
 
 def _validate_snapshot_members(snapshot: SourceSnapshot) -> None:
