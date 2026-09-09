@@ -83,10 +83,8 @@ def validate_output(
     body = str(getattr(result, 'text', '') or '')
     if not body.strip():
         raise ValueError('empty_generation_output')
-    lowered = body.lower()
-    for marker in ('[static fallback]', 'generation failed', 'provider error'):
-        if marker in lowered:
-            raise ValueError('static_or_error_output')
+    if body.strip() == '[static fallback]':
+        raise ValueError('static_or_error_output')
     provider = str(getattr(result, 'provider', '') or '')
     model_identity = str(getattr(result, 'model_identity', '') or '')
     actual_executor = str(getattr(result, 'actual_executor', '') or '')
@@ -123,8 +121,13 @@ def _default_capture() -> Any:
 
 def _default_generate(request: Any, authority: Any) -> Any:
     from chat.background_generation import generate_background
+    from chat.cc_auth import read_cc_oauth_token
 
-    return generate_background(request, authority)
+    return generate_background(
+        request,
+        authority,
+        cc_token_getter=read_cc_oauth_token,
+    )
 
 
 def _default_request_factory(**kwargs: Any) -> Any:
@@ -254,17 +257,24 @@ def generate_continuity_chunk(
         mark_generation_failed(conn, generation_job_id, str(exc), now=now)
         raise
 
-    return publish_chunk_atomic(
-        conn=conn,
-        job=job,
-        candidate=candidate,
-        body=body,
-        body_hash=_body_hash(body),
-        source_token_estimate=current_source.source_token_estimate,
-        output_token_estimate=output_tokens,
-        provider=str(getattr(result, 'provider', '') or ''),
-        model_identity=str(getattr(result, 'model_identity', '') or ''),
-        actual_executor=str(getattr(result, 'actual_executor', '') or ''),
-        now=now,
-    )
+    try:
+        return publish_chunk_atomic(
+            conn=conn,
+            job=job,
+            candidate=candidate,
+            body=body,
+            body_hash=_body_hash(body),
+            source_token_estimate=current_source.source_token_estimate,
+            output_token_estimate=output_tokens,
+            provider=str(getattr(result, 'provider', '') or ''),
+            model_identity=str(getattr(result, 'model_identity', '') or ''),
+            actual_executor=str(getattr(result, 'actual_executor', '') or ''),
+            now=now,
+        )
+    except Exception:
+        # Persistence failures are retryable: retain the frozen authority and
+        # converge the job to the existing failure state without publishing a
+        # partial artifact.
+        mark_generation_failed(conn, generation_job_id, 'persistence_error', now=now)
+        raise
 
