@@ -1,0 +1,270 @@
+"""Pure source derivation for Continuity Compression R1.
+
+The module accepts durable ``chat_messages``-shaped rows and returns source
+contracts. It does not open production databases or mutate any state.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Iterable, Mapping
+from typing import Any
+
+from chat.attachment_contract import persisted_chat_attachments
+from chat.daily_context import SOURCE_KIND_CHAT, SOURCE_KIND_WAKE
+from continuity.contracts import AutonomousEvent, CanonicalTurn, EvidenceRef
+
+IDENTITY_ID = 'fyodor'
+CHAT_ID = 'default'
+POLICY_VERSION = 'continuity_source_v1'
+
+_USER_AUTHORS = frozenset({'hayana', 'haya', 'user'})
+_ASSISTANT_AUTHORS = frozenset({'fyodor', 'claude', 'assistant'})
+
+
+def _value(row: Any, key: str, default: Any = '') -> Any:
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _json_value(raw: Any, default: Any) -> Any:
+    if raw in (None, ''):
+        return default
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _source_kind(row: Any) -> str:
+    return str(_value(row, 'source_kind', '') or '').strip().lower()
+
+
+def _author(row: Any) -> str:
+    return str(_value(row, 'author', '') or '').strip().lower()
+
+
+def _attachments(row: Any) -> list[dict[str, str]]:
+    return persisted_chat_attachments(
+        _value(row, 'attachments', []),
+        legacy_file_url=_value(row, 'file_url', ''),
+        legacy_file_name=_value(row, 'file_name', ''),
+        legacy_image_url=_value(row, 'image_url', ''),
+    )
+
+
+def _active_branch_identity(row: Any) -> str:
+    """Describe the active persisted branch without inventing a global branch table.
+
+    The current product stores regen alternatives on one assistant row as
+    ``branches + branch_idx``. The exact active choice is therefore evidence,
+    not a separate durable branch entity. A switch changes this identity and
+    consequently the row/source revision.
+    """
+    branches = _json_value(_value(row, 'branches', ''), [])
+    try:
+        idx = int(_value(row, 'branch_idx', 0) or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    if isinstance(branches, list) and branches:
+        return f'message:{int(_value(row, "id", 0) or 0)}:branch:{idx}'
+    return 'active-transcript'
+
+
+def _row_payload(row: Any, *, include_thinking: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        'id': int(_value(row, 'id', 0) or 0),
+        'author': _author(row),
+        'content': str(_value(row, 'content', '') or ''),
+        'source_kind': _source_kind(row),
+        'tool_calls': _json_value(_value(row, 'tool_calls', ''), []),
+        'branches': _json_value(_value(row, 'branches', ''), []),
+        'branch_idx': int(_value(row, 'branch_idx', 0) or 0),
+        'cache_info': _json_value(_value(row, 'cache_info', ''), {}),
+        'attachments': _attachments(row),
+        'created_at': str(_value(row, 'created_at', '') or ''),
+    }
+    if include_thinking:
+        payload['thinking'] = str(_value(row, 'thinking', '') or '')
+    return payload
+
+
+def row_content_hash(row: Any) -> str:
+    """Hash provider-visible durable evidence; thinking is intentionally excluded."""
+    return _sha256_text(_canonical_json(_row_payload(row)))
+
+
+def row_revision(row: Any) -> str:
+    return row_content_hash(row)
+
+
+def evidence_ref(row: Any, *, prefix: str = 'message') -> EvidenceRef:
+    mid = int(_value(row, 'id', 0) or 0)
+    content_hash = row_content_hash(row)
+    return EvidenceRef(
+        source_ref=f'{prefix}:{mid}',
+        source_revision=content_hash,
+        content_hash=content_hash,
+    )
+
+
+def _explicitly_incomplete(row: Any) -> bool:
+    cache = _json_value(_value(row, 'cache_info', ''), {})
+    return isinstance(cache, dict) and cache.get('turn_incomplete') is True
+
+
+def _is_formal_user(row: Any) -> bool:
+    return _author(row) in _USER_AUTHORS and _source_kind(row) in ('', SOURCE_KIND_CHAT)
+
+
+def _is_formal_assistant(row: Any) -> bool:
+    return _author(row) in _ASSISTANT_AUTHORS and _source_kind(row) in ('', SOURCE_KIND_CHAT)
+
+
+def _tool_outcome_refs(assistant_row: Any) -> tuple[EvidenceRef, ...]:
+    raw = _json_value(_value(assistant_row, 'tool_calls', ''), [])
+    if not isinstance(raw, list):
+        return ()
+    refs: list[EvidenceRef] = []
+    mid = int(_value(assistant_row, 'id', 0) or 0)
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        outcome = {
+            'name': item.get('name'),
+            'result': item.get('result'),
+            'success': item.get('success'),
+            'artifact': item.get('artifact'),
+            'diff': item.get('diff'),
+        }
+        digest = _sha256_text(_canonical_json(outcome))
+        refs.append(EvidenceRef(
+            source_ref=f'message:{mid}:tool_outcome:{index}',
+            source_revision=digest,
+            content_hash=digest,
+        ))
+    return tuple(refs)
+
+
+def _turn_revision(user_row: Any, assistant_row: Any) -> str:
+    payload = {
+        'user': row_revision(user_row),
+        'assistant': row_revision(assistant_row),
+        'branch': _active_branch_identity(assistant_row),
+        'tools': [ref.source_revision for ref in _tool_outcome_refs(assistant_row)],
+    }
+    return _sha256_text(_canonical_json(payload))
+
+
+def derive_completed_turns(
+    rows: Iterable[Any],
+    *,
+    identity_id: str = IDENTITY_ID,
+    chat_id: str = CHAT_ID,
+) -> tuple[CanonicalTurn, ...]:
+    """Derive completed user→assistant turns from active durable transcript rows.
+
+    Fail-closed V1 rules, matching the current persistence shape:
+    - one formal user starts one candidate turn;
+    - exactly one formal assistant before the next formal user is required;
+    - explicit ``turn_incomplete=true`` assistant rescues are excluded;
+    - Wake and other non-chat source kinds never become user turns;
+    - thinking is never source evidence;
+    - tool outcomes remain refs inside the same turn.
+    """
+    ordered = sorted(rows, key=lambda row: int(_value(row, 'id', 0) or 0))
+    completed: list[CanonicalTurn] = []
+    current_user: Any | None = None
+    assistants: list[Any] = []
+
+    def flush() -> None:
+        nonlocal current_user, assistants
+        if current_user is None:
+            assistants = []
+            return
+        if len(assistants) == 1 and not _explicitly_incomplete(assistants[0]):
+            assistant = assistants[0]
+            uid = int(_value(current_user, 'id', 0) or 0)
+            aid = int(_value(assistant, 'id', 0) or 0)
+            completed.append(CanonicalTurn(
+                turn_id=f'turn:{uid}:{aid}',
+                identity_id=identity_id,
+                chat_id=chat_id,
+                branch_id=_active_branch_identity(assistant),
+                user_input_ref=evidence_ref(current_user),
+                assistant_committed_output_refs=(evidence_ref(assistant),),
+                tool_outcome_refs=_tool_outcome_refs(assistant),
+                started_at=str(_value(current_user, 'created_at', '') or ''),
+                committed_at=str(_value(assistant, 'created_at', '') or ''),
+                finality_status='completed',
+                source_revision=_turn_revision(current_user, assistant),
+            ))
+        current_user = None
+        assistants = []
+
+    for row in ordered:
+        if _is_formal_user(row):
+            flush()
+            current_user = row
+            continue
+        if _is_formal_assistant(row) and current_user is not None:
+            assistants.append(row)
+    flush()
+    return tuple(completed)
+
+
+def _canonical_normal_wake(row: Any) -> bool:
+    if _source_kind(row) != SOURCE_KIND_WAKE or _author(row) not in _ASSISTANT_AUTHORS:
+        return False
+    cache = _json_value(_value(row, 'cache_info', ''), {})
+    if not isinstance(cache, dict):
+        return False
+    return bool(
+        cache.get('wake_mode') == 'normal'
+        and cache.get('canonical_chat_history') is True
+        and cache.get('unified_chat_resident') is True
+        and cache.get('b3_authority') is True
+        and cache.get('source') == SOURCE_KIND_WAKE
+        and cache.get('provider') == 'claude_code'
+        and str(_value(row, 'content', '') or '').strip()
+    )
+
+
+def derive_autonomous_events(
+    rows: Iterable[Any],
+    *,
+    identity_id: str = IDENTITY_ID,
+    chat_id: str = CHAT_ID,
+) -> tuple[AutonomousEvent, ...]:
+    events: list[AutonomousEvent] = []
+    for row in sorted(rows, key=lambda item: int(_value(item, 'id', 0) or 0)):
+        if not _canonical_normal_wake(row):
+            continue
+        mid = int(_value(row, 'id', 0) or 0)
+        revision = row_revision(row)
+        events.append(AutonomousEvent(
+            event_id=f'wake:{mid}',
+            identity_id=identity_id,
+            chat_id=chat_id,
+            branch_id='active-transcript',
+            event_kind='wake',
+            committed_content_ref=evidence_ref(row),
+            created_at=str(_value(row, 'created_at', '') or ''),
+            finality_status='completed',
+            source_revision=revision,
+        ))
+    return tuple(events)
