@@ -64,6 +64,7 @@ def validate_exact_coverage(
     unspanned_refs: set[str] = set()
     seen_seq: set[int] = set()
     spans: dict[tuple[str, str], list[tuple[int, int]]] = defaultdict(list)
+    span_revisions: dict[str, str] = {}
 
     for member in ordered:
         if member.seq in seen_seq:
@@ -102,6 +103,16 @@ def validate_exact_coverage(
                     detail='span must be a non-empty half-open range',
                 ))
             else:
+                if member.source_ref in span_revisions:
+                    previous_revision = span_revisions[member.source_ref]
+                    if previous_revision != member.source_revision:
+                        issues.append(CoverageIssue(
+                            code='source_revision_conflict',
+                            source_ref=member.source_ref,
+                            detail='one spanned source_ref has multiple revisions',
+                        ))
+                else:
+                    span_revisions[member.source_ref] = member.source_revision
                 spans[(member.source_ref, member.source_revision)].append((start, end))
         else:
             if member.source_ref in unspanned_refs:

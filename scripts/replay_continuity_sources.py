@@ -14,12 +14,20 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from continuity.coverage import validate_exact_coverage
+from chat.daily_context import is_formal_chat_message
 from continuity.sources import (
     build_source_members,
     derive_autonomous_events,
     derive_completed_turns,
+    enumerate_candidate_source_refs,
+    is_incomplete_source_row,
 )
 
 KNOWN_COLUMNS = (
@@ -65,24 +73,26 @@ def replay(db_path: str, *, days: int = 30) -> dict:
     turns = derive_completed_turns(rows)
     events = derive_autonomous_events(rows)
     members = build_source_members(turns, events)
+    # Enumerate expected units from raw rows in a separate pass.  Comparing
+    # against the already-derived turns/events would make coverage self-validating.
+    expected_refs = enumerate_candidate_source_refs(rows)
     report = validate_exact_coverage(
         members,
-        expected_source_refs=[turn.turn_id for turn in turns] + [event.event_id for event in events],
+        expected_source_refs=expected_refs,
     )
 
     formal_users = sum(
         1 for row in rows
-        if str(row.get('author') or '').lower() in {'hayana', 'haya', 'user'}
-        and str(row.get('source_kind') or 'chat').lower() in {'', 'chat'}
+        if str(row.get('author') or '').strip().lower() in {'hayana', 'haya', 'user'}
+        and is_formal_chat_message(row)
     )
     explicit_incomplete = 0
     for row in rows:
-        raw = row.get('cache_info')
-        try:
-            info = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
-        except (TypeError, ValueError):
-            info = {}
-        if isinstance(info, dict) and info.get('turn_incomplete') is True:
+        if (
+            str(row.get('author') or '').strip().lower()
+            in {'assistant', 'fyodor', 'claude'}
+            and is_incomplete_source_row(row)
+        ):
             explicit_incomplete += 1
 
     by_day = Counter(turn.started_at[:10] for turn in turns if turn.started_at)
