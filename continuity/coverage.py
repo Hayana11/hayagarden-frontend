@@ -44,9 +44,6 @@ def source_hash(members: Iterable[SourceMember]) -> str:
             'content_hash': m.content_hash,
             'span_start': m.span_start,
             'span_end': m.span_end,
-            'logical_size': m.logical_size,
-            'created_at': m.created_at,
-            'branch_id': m.branch_id,
         }
         for m in ordered
     ]
