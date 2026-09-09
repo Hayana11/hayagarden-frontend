@@ -12,7 +12,10 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from chat.attachment_contract import persisted_chat_attachments
-from chat.daily_context import SOURCE_KIND_CHAT, SOURCE_KIND_WAKE
+from chat.daily_context import (
+    SOURCE_KIND_WAKE,
+    is_formal_chat_message,
+)
 from continuity.contracts import (
     AutonomousEvent,
     CanonicalTurn,
@@ -160,11 +163,11 @@ def _explicitly_incomplete(row: Any) -> bool:
 
 
 def _is_formal_user(row: Any) -> bool:
-    return _author(row) in _USER_AUTHORS and _source_kind(row) in ('', SOURCE_KIND_CHAT)
+    return _author(row) in _USER_AUTHORS and is_formal_chat_message(row)
 
 
 def _is_formal_assistant(row: Any) -> bool:
-    return _author(row) in _ASSISTANT_AUTHORS and _source_kind(row) in ('', SOURCE_KIND_CHAT)
+    return _author(row) in _ASSISTANT_AUTHORS and is_formal_chat_message(row)
 
 
 def _tool_outcome_refs(assistant_row: Any) -> tuple[EvidenceRef, ...]:
