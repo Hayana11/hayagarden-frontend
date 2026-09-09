@@ -13,6 +13,7 @@ import json
 import sqlite3
 import sys
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -115,7 +116,12 @@ def replay(db_path: str, *, days: int = 30) -> dict:
     candidate_count = 0
     source_unit_count = 0
     for day, day_members_list in sorted(grouped.items()):
-        day_members = tuple(day_members_list)
+        # Each daily snapshot has its own contiguous membership sequence.  The
+        # canonical source identity and every other field remain unchanged.
+        day_members = tuple(
+            replace(member, seq=ordinal)
+            for ordinal, member in enumerate(day_members_list)
+        )
         day_refs = {member.source_ref for member in day_members}
         day_turns = tuple(turn for turn in turns if turn.turn_id in day_refs)
         day_events = tuple(event for event in events if event.event_id in day_refs)
