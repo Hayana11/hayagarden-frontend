@@ -158,8 +158,21 @@ def evidence_ref(row: Any, *, prefix: str = 'message') -> EvidenceRef:
     )
 
 
+_INCOMPLETE_MARKERS = (
+    'turn_incomplete',
+    'partial_rescue',
+    'stream_interrupted',
+)
+
+
 def _explicitly_incomplete(row: Any) -> bool:
-    return _semantic_cache_info(row).get('turn_incomplete') is True
+    cache = _semantic_cache_info(row)
+    return any(cache.get(key) is True for key in _INCOMPLETE_MARKERS)
+
+
+def is_incomplete_source_row(row: Any) -> bool:
+    """Return whether durable provenance marks a row as non-final."""
+    return _explicitly_incomplete(row)
 
 
 def _is_formal_user(row: Any) -> bool:
@@ -180,7 +193,11 @@ def _tool_outcome_refs(assistant_row: Any) -> tuple[EvidenceRef, ...]:
         if not isinstance(item, dict):
             continue
         outcome = {
+            # Arguments are part of the durable invocation identity.  Keeping
+            # them in the outcome ref prevents equal results from different
+            # tool calls collapsing into one evidence object.
             'name': item.get('name'),
+            'args': item.get('args'),
             'result': item.get('result'),
             'success': item.get('success'),
             'artifact': item.get('artifact'),
@@ -263,6 +280,7 @@ def _canonical_normal_wake(row: Any) -> bool:
         and cache.get('b3_authority') is True
         and cache.get('source') == SOURCE_KIND_WAKE
         and cache.get('provider') == 'claude_code'
+        and not _explicitly_incomplete(row)
         and str(_value(row, 'content', '') or '').strip()
     )
 
@@ -291,6 +309,46 @@ def derive_autonomous_events(
             source_revision=revision,
         ))
     return tuple(events)
+
+
+def enumerate_candidate_source_refs(rows: Iterable[Any]) -> tuple[str, ...]:
+    """Enumerate raw eligible unit ids independently of member materialization.
+
+    Replay uses this pass as the expected set so a future derivation or member
+    builder regression cannot make coverage validate only against its own output.
+    """
+    ordered = sorted(rows, key=lambda row: int(_value(row, 'id', 0) or 0))
+    refs: list[str] = []
+    current_user: Any | None = None
+    assistants: list[Any] = []
+
+    def flush() -> None:
+        nonlocal current_user, assistants
+        if (
+            current_user is not None
+            and len(assistants) == 1
+            and not _explicitly_incomplete(assistants[0])
+        ):
+            uid = int(_value(current_user, 'id', 0) or 0)
+            aid = int(_value(assistants[0], 'id', 0) or 0)
+            refs.append(f'turn:{uid}:{aid}')
+        current_user = None
+        assistants = []
+
+    for row in ordered:
+        if _is_formal_user(row):
+            flush()
+            current_user = row
+        elif _is_formal_assistant(row) and current_user is not None:
+            assistants.append(row)
+    flush()
+
+    refs.extend(
+        f'wake:{int(_value(row, "id", 0) or 0)}'
+        for row in ordered
+        if _canonical_normal_wake(row)
+    )
+    return tuple(refs)
 
 
 def build_source_members(
