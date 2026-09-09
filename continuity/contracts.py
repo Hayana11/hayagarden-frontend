@@ -20,6 +20,8 @@ class EvidenceRef:
     source_ref: str
     source_revision: str
     content_hash: str
+    # R2 measure only; defaults keep the R1 positional contract intact.
+    logical_size: int = 0
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,10 @@ class SourceMember:
     content_hash: str
     span_start: int | None = None
     span_end: int | None = None
+    # Additive R2 sealing metadata.  Existing R1 callers may omit it.
+    logical_size: int = 0
+    created_at: str = ''
+    branch_id: str = 'active-transcript'
 
 
 @dataclass(frozen=True)
@@ -83,3 +89,4 @@ class SourceSnapshot:
     status: str
     created_at: str
     members: tuple[SourceMember, ...]
+
