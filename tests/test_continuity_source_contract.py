@@ -11,6 +11,7 @@ from continuity.sources import (
     build_source_snapshot,
     derive_autonomous_events,
     derive_completed_turns,
+    enumerate_candidate_source_refs,
     row_revision,
 )
 
@@ -59,6 +60,16 @@ class CanonicalTurnTests(unittest.TestCase):
             turns[0].source_revision,
         )
 
+        args_changed = copy.deepcopy(rows)
+        changed_tools = json.loads(args_changed[1]['tool_calls'])
+        changed_tools[0]['args']['q'] = 'different'
+        args_changed[1]['tool_calls'] = json.dumps(changed_tools)
+        changed_turn = derive_completed_turns(args_changed)[0]
+        self.assertNotEqual(
+            changed_turn.tool_outcome_refs[0].source_revision,
+            turns[0].tool_outcome_refs[0].source_revision,
+        )
+
     def test_missing_multiple_or_explicit_incomplete_assistant_fail_closed(self):
         rows = [
             row(1, 'hayana', 'no answer'),
@@ -104,6 +115,19 @@ class CanonicalTurnTests(unittest.TestCase):
             new.source_revision,
         )
 
+    def test_all_incomplete_markers_fail_closed(self):
+        for marker in ('turn_incomplete', 'partial_rescue', 'stream_interrupted'):
+            rows = [
+                row(1, 'hayana', 'u'),
+                row(2, 'assistant', 'a', cache_info=json.dumps({marker: True})),
+            ]
+            self.assertEqual(
+                derive_completed_turns(rows),
+                (),
+                marker,
+            )
+
+
     def test_attachment_revision_change_stales_row(self):
         original = row(1, 'hayana', 'file', attachments=json.dumps([
             {'type': 'file', 'url': '/static/uploads/files/aaaaaaaa_a.txt', 'name': 'a.txt'},
@@ -132,6 +156,9 @@ class AutonomousEventTests(unittest.TestCase):
             })),
             row(12, 'assistant', 'dream', source_kind='wake', cache_info=json.dumps({
                 **good_cache, 'wake_mode': 'dream',
+            })),
+            row(13, 'assistant', 'partial', source_kind='wake', cache_info=json.dumps({
+                **good_cache, 'turn_incomplete': True,
             })),
         ]
         events = derive_autonomous_events(rows)
@@ -180,6 +207,30 @@ class SourceSnapshotAndCoverageTests(unittest.TestCase):
         self.assertTrue(report.valid)
         self.assertEqual(report.source_hash, first.source_hash)
 
+    def test_candidate_refs_are_independent_expected_membership(self):
+        turns, events = self._units()
+        rows = [
+            row(1, 'hayana', 'u'),
+            row(2, 'assistant', 'a'),
+            row(3, 'assistant', 'w', source_kind='wake', cache_info=json.dumps({
+                'wake_mode': 'normal',
+                'canonical_chat_history': True,
+                'unified_chat_resident': True,
+                'b3_authority': True,
+                'source': 'wake',
+                'provider': 'claude_code',
+            })),
+        ]
+        self.assertEqual(
+            set(enumerate_candidate_source_refs(rows)),
+            {'turn:1:2', 'wake:3'},
+        )
+        self.assertEqual(
+            {turn.turn_id for turn in turns} | {event.event_id for event in events},
+            {'turn:1:2', 'wake:3'},
+        )
+
+
     def test_validator_reports_duplicate_sequence_and_missing_source(self):
         members = (
             SourceMember(0, 'completed_turn', 'turn:1:2', 'a', 'conversation', 'hash-a'),
@@ -211,6 +262,19 @@ class SourceSnapshotAndCoverageTests(unittest.TestCase):
         self.assertFalse(report.valid)
         self.assertIn('source_revision_changed', {issue.code for issue in report.issues})
         self.assertNotIn('revision_hash_mismatch', {issue.code for issue in report.issues})
+
+    def test_validator_rejects_conflicting_revisions_for_one_spanned_source(self):
+        members = (
+            SourceMember(0, 'attachment_span', 'attachment:file-a', 'rev-1', 'attachment', 'h1', 0, 10),
+            SourceMember(1, 'attachment_span', 'attachment:file-a', 'rev-2', 'attachment', 'h2', 10, 20),
+        )
+        report = validate_exact_coverage(members)
+        self.assertFalse(report.valid)
+        self.assertIn(
+            'source_revision_conflict',
+            {issue.code for issue in report.issues},
+        )
+
 
     def test_attachment_spans_allow_contiguous_ranges_and_reject_overlap_or_gap(self):
         contiguous = (
