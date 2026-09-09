@@ -115,6 +115,14 @@ def _candidate(
         'seqs': seqs,
         'refs': refs,
         'revisions': revisions,
+        'measurements': [
+            {
+                'logical_size': int(member.logical_size),
+                'created_at': member.created_at,
+                'branch_id': member.branch_id,
+            }
+            for member in members
+        ],
     })
     identity = {
         'snapshot_id': snapshot.snapshot_id,
