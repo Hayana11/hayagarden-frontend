@@ -26,8 +26,9 @@ def _read_only_connection(path: str) -> sqlite3.Connection:
 
 
 def _source_rows(conn: sqlite3.Connection) -> tuple[dict[str, object], ...]:
-    rows = conn.execute(f'SELECT {_SOURCE_COLUMNS} FROM chat_messages ORDER BY id').fetchall()
-    columns = tuple(item[0] for item in conn.description)
+    cursor = conn.execute(f'SELECT {_SOURCE_COLUMNS} FROM chat_messages ORDER BY id')
+    rows = cursor.fetchall()
+    columns = tuple(item[0] for item in cursor.description)
     return tuple(dict(zip(columns, row)) for row in rows)
 
 
