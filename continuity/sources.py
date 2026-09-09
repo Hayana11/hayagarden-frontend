@@ -140,8 +140,17 @@ def _row_payload(row: Any) -> dict[str, Any]:
     }
 
 
+def _row_payload_json(row: Any) -> str:
+    return _canonical_json(_row_payload(row))
+
+
 def row_content_hash(row: Any) -> str:
-    return _sha256_text(_canonical_json(_row_payload(row)))
+    return _sha256_text(_row_payload_json(row))
+
+
+def row_logical_size(row: Any) -> int:
+    """Stable UTF-8 size of the canonical provider-visible row evidence."""
+    return len(_row_payload_json(row).encode('utf-8'))
 
 
 def row_revision(row: Any) -> str:
@@ -150,11 +159,13 @@ def row_revision(row: Any) -> str:
 
 def evidence_ref(row: Any, *, prefix: str = 'message') -> EvidenceRef:
     mid = int(_value(row, 'id', 0) or 0)
-    digest = row_content_hash(row)
+    payload = _row_payload_json(row)
+    digest = _sha256_text(payload)
     return EvidenceRef(
         source_ref=f'{prefix}:{mid}',
         source_revision=digest,
         content_hash=digest,
+        logical_size=len(payload.encode('utf-8')),
     )
 
 
@@ -203,11 +214,13 @@ def _tool_outcome_refs(assistant_row: Any) -> tuple[EvidenceRef, ...]:
             'artifact': item.get('artifact'),
             'diff': item.get('diff'),
         }
-        digest = _sha256_text(_canonical_json(outcome))
+        serialized = _canonical_json(outcome)
+        digest = _sha256_text(serialized)
         refs.append(EvidenceRef(
             source_ref=f'message:{mid}:tool_outcome:{index}',
             source_revision=digest,
             content_hash=digest,
+            logical_size=len(serialized.encode('utf-8')),
         ))
     return tuple(refs)
 
@@ -355,11 +368,30 @@ def build_source_members(
     turns: Iterable[CanonicalTurn],
     events: Iterable[AutonomousEvent],
 ) -> tuple[SourceMember, ...]:
-    units: list[tuple[str, str, str, str, str]] = []
+    units: list[tuple[str, str, str, str, str, int, str]] = []
     for turn in turns:
-        units.append((turn.started_at, 'completed_turn', turn.turn_id, turn.source_revision, 'conversation'))
+        size = turn.user_input_ref.logical_size
+        size += sum(ref.logical_size for ref in turn.assistant_committed_output_refs)
+        size += sum(ref.logical_size for ref in turn.tool_outcome_refs)
+        units.append((
+            turn.started_at,
+            'completed_turn',
+            turn.turn_id,
+            turn.source_revision,
+            'conversation',
+            size,
+            turn.branch_id,
+        ))
     for event in events:
-        units.append((event.created_at, 'autonomous_event', event.event_id, event.source_revision, 'assistant'))
+        units.append((
+            event.created_at,
+            'autonomous_event',
+            event.event_id,
+            event.source_revision,
+            'assistant',
+            event.committed_content_ref.logical_size,
+            event.branch_id,
+        ))
     units.sort(key=lambda item: (item[0], item[2]))
     return tuple(
         SourceMember(
@@ -369,8 +401,12 @@ def build_source_members(
             source_revision=revision,
             role=role,
             content_hash=revision,
+            logical_size=max(0, int(logical_size)),
+            created_at=created_at,
+            branch_id=branch_id or 'active-transcript',
         )
-        for index, (_created, kind, ref, revision, role) in enumerate(units)
+        for index, (created_at, kind, ref, revision, role, logical_size, branch_id)
+        in enumerate(units)
     )
 
 
@@ -401,3 +437,4 @@ def build_source_snapshot(
         created_at=created_at,
         members=members,
     )
+
