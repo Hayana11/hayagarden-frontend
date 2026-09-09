@@ -21,7 +21,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from continuity.coverage import validate_exact_coverage
-from chat.day_handoff import chat_day_for_timestamp
 from chat.daily_context import is_formal_chat_message
 from continuity.sources import (
     build_source_snapshot,
@@ -66,15 +65,6 @@ def _rows(conn: sqlite3.Connection, *, days: int) -> list[dict]:
     return [dict(row) for row in result]
 
 
-def _chat_day(row: dict) -> str:
-    raw = str(row.get('created_at') or '')[:19]
-    try:
-        timestamp = dt.datetime.strptime(raw, '%Y-%m-%d %H:%M:%S')
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError('chat_messages.created_at is not a local timestamp') from exc
-    return chat_day_for_timestamp(timestamp)
-
-
 def replay(db_path: str, *, days: int = 30) -> dict:
     conn = _open_ro(db_path)
     try:
@@ -110,9 +100,12 @@ def replay(db_path: str, *, days: int = 30) -> dict:
     by_day = Counter(turn.started_at[:10] for turn in turns if turn.started_at)
     wake_by_day = Counter(event.created_at[:10] for event in events if event.created_at)
 
-    grouped: dict[str, list[dict]] = {}
-    for row in rows:
-        grouped.setdefault(_chat_day(row), []).append(row)
+    # Derive canonical turns/events over the complete replay window first.
+    # Grouping raw rows before derivation would split a turn across midnight.
+    grouped: dict[str, list] = {}
+    for member in members:
+        day = str(member.created_at or '')[:10]
+        grouped.setdefault(day, []).append(member)
     daily_candidate_distribution: dict[str, int] = {}
     completed_turns_per_block: list[int] = []
     logical_size_per_block: list[int] = []
@@ -121,15 +114,19 @@ def replay(db_path: str, *, days: int = 30) -> dict:
     deterministic = True
     candidate_count = 0
     source_unit_count = 0
-    for day, day_rows in sorted(grouped.items()):
-        day_turns = derive_completed_turns(day_rows)
-        day_events = derive_autonomous_events(day_rows)
-        day_members = build_source_members(day_turns, day_events)
-        day_expected = enumerate_candidate_source_refs(day_rows)
+    for day, day_members_list in sorted(grouped.items()):
+        day_members = tuple(day_members_list)
+        day_refs = {member.source_ref for member in day_members}
+        day_turns = tuple(turn for turn in turns if turn.turn_id in day_refs)
+        day_events = tuple(event for event in events if event.event_id in day_refs)
+        day_expected = tuple(ref for ref in expected_refs if ref in day_refs)
         day_report = validate_exact_coverage(day_members, expected_source_refs=day_expected)
         candidate_coverage_valid = candidate_coverage_valid and day_report.valid
         source_unit_count += len(day_members)
-        watermark = max((int(row.get('id') or 0) for row in day_rows), default=0)
+        watermark = max(
+            (int(ref.rsplit(':', 1)[-1]) for ref in day_refs if ref.rsplit(':', 1)[-1].isdigit()),
+            default=0,
+        )
         day_snapshot = build_source_snapshot(
             turns=day_turns,
             events=day_events,
