@@ -8,19 +8,23 @@ import unittest
 
 from continuity.contracts import SourceMember, SourceSnapshot
 from continuity.coverage import source_hash
+from continuity.sources import row_logical_size
 from continuity.sealing import (
     SealingPolicy,
     validate_candidate_coverage,
     seal_snapshot,
 )
 from continuity.store import (
+    ContinuityStoreConflict,
     TABLES,
     enqueue_job,
     ensure_schema,
     load_candidates,
     load_job,
     materialize_job,
+    save_source_snapshot,
 )
+from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
 
 def member(
@@ -30,6 +34,7 @@ def member(
     source_kind: str = 'completed_turn',
     day: str = '2026-09-08',
     branch: str = 'active-transcript',
+    created_at: str | None = None,
 ) -> SourceMember:
     prefix = 'turn' if source_kind == 'completed_turn' else 'wake'
     return SourceMember(
@@ -40,7 +45,7 @@ def member(
         role='conversation' if source_kind == 'completed_turn' else 'assistant',
         content_hash=f'hash-{seq}',
         logical_size=size,
-        created_at=f'{day} 04:00:00',
+        created_at=created_at or f'{day} 04:00:00',
         branch_id=branch,
     )
 
@@ -74,11 +79,55 @@ class SealingTests(unittest.TestCase):
 
     def test_natural_day_boundary_seals_partial_block(self):
         blocks = seal_snapshot(snapshot((
-            member(0, 100, day='2026-09-08'),
-            member(1, 100, day='2026-09-09'),
+            member(0, 100, created_at='2026-09-08 23:59:00'),
+            member(1, 100, created_at='2026-09-09 00:01:00'),
+            member(2, 100, created_at='2026-09-09 03:59:00'),
         )))
         self.assertEqual([block.local_day for block in blocks], ['2026-09-08', '2026-09-09'])
         self.assertEqual(blocks[0].close_reason, 'day_boundary')
+        self.assertEqual(blocks[1].source_refs, ('turn:1', 'turn:2'))
+
+    def test_policy_identity_freezes_measurement_semantics(self):
+        snap = snapshot((member(0, 100),))
+        first = seal_snapshot(snap, SealingPolicy(version='v1'))
+        changed_measurement = seal_snapshot(
+            snap,
+            SealingPolicy(version='v1', measurement_semantics='other-estimator-v1'),
+        )
+        self.assertNotEqual(first[0].candidate_id, changed_measurement[0].candidate_id)
+
+    def test_source_size_uses_deterministic_token_estimate_for_chinese(self):
+        row = {
+            'id': 1,
+            'author': 'hayana',
+            'content': '猫' * 40,
+            'source_kind': 'chat',
+            'created_at': '2026-09-08 23:59:00',
+            'attachments': '[]',
+            'cache_info': '',
+            'tool_calls': '',
+            'branches': '',
+            'branch_idx': 0,
+        }
+        size = row_logical_size(row)
+        self.assertEqual(
+            size,
+            estimate_tokens_heuristic_cjk1_ascii4_v1(
+                json.dumps({
+                    'id': 1,
+                    'author': 'hayana',
+                    'content': '猫' * 40,
+                    'source_kind': 'chat',
+                    'tool_calls': [],
+                    'branches': [],
+                    'branch_idx': 0,
+                    'cache_info': {},
+                    'attachments': [],
+                    'created_at': '2026-09-08 23:59:00',
+                }, ensure_ascii=False, sort_keys=True, separators=(',', ':')),
+            ),
+        )
+        self.assertLess(size, len(('猫' * 40).encode('utf-8')))
 
     def test_oversize_turn_is_one_marked_unsplit_block(self):
         blocks = seal_snapshot(snapshot((member(0, 12001),)))
@@ -175,6 +224,69 @@ class StoreTests(unittest.TestCase):
             self.conn.execute('SELECT COUNT(*) FROM continuity_candidate_members').fetchone()[0], 2
         )
 
+    def test_same_source_revision_spans_are_idempotent_membership(self):
+        members = (
+            SourceMember(
+                seq=0, source_kind='attachment_span', source_ref='attachment:file-1',
+                source_revision='revision-1', role='attachment', content_hash='content-1',
+                span_start=0, span_end=4, logical_size=4,
+                created_at='2026-09-08 23:59:00', branch_id='active-transcript',
+            ),
+            SourceMember(
+                seq=1, source_kind='attachment_span', source_ref='attachment:file-1',
+                source_revision='revision-1', role='attachment', content_hash='content-1',
+                span_start=4, span_end=9, logical_size=5,
+                created_at='2026-09-08 23:59:01', branch_id='active-transcript',
+            ),
+        )
+        snap = snapshot(members, source_id='source:spans')
+        save_source_snapshot(self.conn, snap)
+        save_source_snapshot(self.conn, snap)
+        rows = self.conn.execute(
+            'SELECT source_ref, source_revision, span_start, span_end '
+            'FROM continuity_source_members WHERE snapshot_id=? ORDER BY seq',
+            (snap.snapshot_id,),
+        ).fetchall()
+        self.assertEqual(
+            [tuple(row) for row in rows],
+            [
+                ('attachment:file-1', 'revision-1', 0, 4),
+                ('attachment:file-1', 'revision-1', 4, 9),
+            ],
+        )
+
+    def test_materialized_members_keep_content_hash_distinct_from_revision(self):
+        original = member(0, 100)
+        snap = snapshot((SourceMember(
+            seq=original.seq,
+            source_kind=original.source_kind,
+            source_ref=original.source_ref,
+            source_revision='revision-original',
+            role=original.role,
+            content_hash='content-original',
+            logical_size=original.logical_size,
+            created_at=original.created_at,
+            branch_id=original.branch_id,
+        ),), source_id='source:content-hash')
+        policy = SealingPolicy()
+        job = enqueue_job(self.conn, snap, policy)
+        materialize_job(self.conn, job.job_id, policy)
+        row = self.conn.execute(
+            'SELECT source_revision, content_hash FROM continuity_candidate_members'
+        ).fetchone()
+        self.assertEqual(tuple(row), ('revision-original', 'content-original'))
+
+    def test_materialize_rejects_policy_parameter_drift_under_same_version(self):
+        snap = snapshot((member(0, 100),), source_id='source:policy-drift')
+        enqueue_policy = SealingPolicy(version='v1', target_logical_size=12000)
+        job = enqueue_job(self.conn, snap, enqueue_policy)
+        with self.assertRaises(ContinuityStoreConflict):
+            materialize_job(
+                self.conn,
+                job.job_id,
+                SealingPolicy(version='v1', target_logical_size=100),
+            )
+
 
 class ReplayFixtureTests(unittest.TestCase):
     def test_incomplete_source_is_not_replayed_into_candidates(self):
@@ -243,6 +355,42 @@ class ReplayFixtureTests(unittest.TestCase):
         self.assertEqual(result['source_unit_count'], 2)
         self.assertEqual(result['candidate_count'], 1)
         self.assertEqual(result['daily_candidate_distribution'], {'2026-09-08': 1})
+        self.assertTrue(result['candidate_coverage_valid'])
+        self.assertTrue(result['determinism_valid'])
+
+    def test_replay_keeps_cross_midnight_turn_atomic(self):
+        from scripts.replay_continuity_sources import replay
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = f'{directory}/midnight.db'
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                '''CREATE TABLE chat_messages (
+                    id INTEGER PRIMARY KEY, author TEXT, content TEXT, thinking TEXT,
+                    created_at TEXT, tool_calls TEXT, branches TEXT, branch_idx INTEGER,
+                    cache_info TEXT, source_kind TEXT, attachments TEXT, image_url TEXT,
+                    file_url TEXT, file_name TEXT
+                )'''
+            )
+            conn.executemany(
+                'INSERT INTO chat_messages '
+                '(id, author, content, thinking, created_at, tool_calls, branches, branch_idx, '
+                'cache_info, source_kind, attachments, image_url, file_url, file_name) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                [
+                    (1, 'hayana', 'u', '', '2026-09-08 23:59:00', '', '', 0, '', 'chat', '[]', '', '', ''),
+                    (2, 'assistant', 'a', '', '2026-09-09 00:01:00', '', '', 0, '', 'chat', '[]', '', '', ''),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            result = replay(db_path, days=30)
+
+        self.assertEqual(result['completed_turns'], 1)
+        self.assertEqual(result['completed_turns_by_day'], {'2026-09-08': 1})
+        self.assertEqual(result['source_unit_count'], 1)
+        self.assertTrue(result['coverage_valid'])
         self.assertTrue(result['candidate_coverage_valid'])
         self.assertTrue(result['determinism_valid'])
 
