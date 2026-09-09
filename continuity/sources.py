@@ -16,6 +16,7 @@ from chat.daily_context import (
     SOURCE_KIND_WAKE,
     is_formal_chat_message,
 )
+from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 from continuity.contracts import (
     AutonomousEvent,
     CanonicalTurn,
@@ -149,8 +150,8 @@ def row_content_hash(row: Any) -> str:
 
 
 def row_logical_size(row: Any) -> int:
-    """Stable UTF-8 size of the canonical provider-visible row evidence."""
-    return len(_row_payload_json(row).encode('utf-8'))
+    """Stable source-token estimate of canonical provider-visible evidence."""
+    return int(estimate_tokens_heuristic_cjk1_ascii4_v1(_row_payload_json(row)))
 
 
 def row_revision(row: Any) -> str:
@@ -165,7 +166,7 @@ def evidence_ref(row: Any, *, prefix: str = 'message') -> EvidenceRef:
         source_ref=f'{prefix}:{mid}',
         source_revision=digest,
         content_hash=digest,
-        logical_size=len(payload.encode('utf-8')),
+        logical_size=int(estimate_tokens_heuristic_cjk1_ascii4_v1(payload)),
     )
 
 
@@ -220,7 +221,7 @@ def _tool_outcome_refs(assistant_row: Any) -> tuple[EvidenceRef, ...]:
             source_ref=f'message:{mid}:tool_outcome:{index}',
             source_revision=digest,
             content_hash=digest,
-            logical_size=len(serialized.encode('utf-8')),
+            logical_size=int(estimate_tokens_heuristic_cjk1_ascii4_v1(serialized)),
         ))
     return tuple(refs)
 
