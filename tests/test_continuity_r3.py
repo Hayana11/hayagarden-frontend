@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,6 +22,10 @@ from continuity.materialization import (
     UnsupportedSourceError,
     _candidate_source_revision,
     materialize_candidate,
+)
+from scripts.generate_continuity_chunk_shadow import (
+    _read_only_connection,
+    _source_rows,
 )
 from continuity.sealing import CandidateBlock, SealingPolicy, seal_snapshot
 from continuity.sources import build_source_snapshot, derive_autonomous_events, derive_completed_turns
@@ -132,6 +137,35 @@ class MaterializationTests(unittest.TestCase):
     def test_tool_outcome_is_rendered_once(self):
         body = materialize_candidate(self.snapshot, self.candidate, _rows()).body
         self.assertEqual(body.count('unique-tool-result'), 1)
+
+    def test_tool_outcome_preserves_all_canonical_facts(self):
+        rows = _rows()
+        rows[1] = {
+            **rows[1],
+            'tool_calls': json.dumps([{
+                'name': 'apply_patch',
+                'args': {'path': 'x.py', 'line': 3},
+                'result': 'unique-full-result',
+                'success': False,
+                'artifact': 'artifact-id-7',
+                'diff': '-old\n+new',
+            }], ensure_ascii=False),
+        }
+        turns = derive_completed_turns(rows)
+        snapshot = build_source_snapshot(
+            turns=turns, events=(), local_day='2026-09-08', source_watermark=2,
+            created_at='2026-09-09T00:00:00Z',
+        )
+        body = materialize_candidate(
+            snapshot, _single_candidate(snapshot, snapshot.members[0]), rows,
+        ).body
+        self.assertIn('NAME: apply_patch', body)
+        self.assertIn('ARGS: {"line":3,"path":"x.py"}', body)
+        self.assertIn('RESULT: unique-full-result', body)
+        self.assertIn('SUCCESS: false', body)
+        self.assertIn('ARTIFACT: artifact-id-7', body)
+        self.assertIn('DIFF: -old\n+new', body)
+        self.assertEqual(body.count('unique-full-result'), 1)
 
     def test_thinking_is_excluded(self):
         body = materialize_candidate(self.snapshot, self.candidate, _rows()).body
@@ -324,13 +358,38 @@ class GenerationTests(unittest.TestCase):
         with patch('continuity.chunk_generation.publish_chunk_atomic', side_effect=RuntimeError('disk')):
             self.assertRaises(RuntimeError, self.run_generation)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM continuity_chunks').fetchone()[0], 0)
-        self.assertEqual(load_generation_job(self.conn, self.job.generation_job_id).status, 'generating')
+        failed = load_generation_job(self.conn, self.job.generation_job_id)
+        self.assertEqual(failed.status, 'failed')
+        self.assertEqual((failed.frozen_provider, failed.frozen_model_identity), ('claude_code', 'model-A'))
+
+        def capture_must_not_run():
+            raise AssertionError('authority must remain frozen on retry')
+
+        chunk = self.run_generation(capture=capture_must_not_run)
+        self.assertEqual(chunk.status, 'ready')
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM continuity_chunks').fetchone()[0], 1)
 
     def test_ready_body_is_immutable(self):
         chunk = self.run_generation()
-        with self.assertRaises(sqlite3.IntegrityError):
-            self.conn.execute('UPDATE continuity_chunks SET body=? WHERE chunk_id=?', ('mutated', chunk.chunk_id))
-        self.conn.rollback()
+        for column, value in (
+            ('body', 'mutated'),
+            ('candidate_id', 'candidate:other'),
+            ('source_token_estimate', 1),
+            ('provider', 'api_relay'),
+        ):
+            with self.subTest(column=column), self.assertRaises(sqlite3.IntegrityError):
+                self.conn.execute(
+                    f'UPDATE continuity_chunks SET {column}=? WHERE chunk_id=?',
+                    (value, chunk.chunk_id),
+                )
+                self.conn.commit()
+            self.conn.rollback()
+        self.conn.execute(
+            "UPDATE continuity_chunks SET status='stale' WHERE chunk_id=?",
+            (chunk.chunk_id,),
+        )
+        self.conn.commit()
+        self.assertEqual(load_chunk(self.conn, chunk.chunk_id).status, 'stale')
         self.assertEqual(load_chunk(self.conn, chunk.chunk_id).body, 'valid chunk')
 
     def test_policy_identity_change_creates_new_generation_job(self):
@@ -365,6 +424,18 @@ class GenerationTests(unittest.TestCase):
             'static_or_error_output',
         )
 
+    def test_legitimate_failure_facts_are_allowed_in_body(self):
+        result = self.result(
+            'The previous generation failed with a provider error; retry remains unresolved.'
+        )
+        body, tokens = validate_output(
+            result,
+            authority=self.authority,
+            source=SimpleNamespace(source_token_estimate=20),
+        )
+        self.assertIn('provider error', body)
+        self.assertGreater(tokens, 0)
+
     def test_no_cross_provider_fallback(self):
         calls = []
 
@@ -374,6 +445,44 @@ class GenerationTests(unittest.TestCase):
 
         self.assertRaises(RuntimeError, self.run_generation, generate_fn=fail)
         self.assertEqual(calls, ['claude_code'])
+
+
+class RunnerTests(unittest.TestCase):
+    def test_source_loader_uses_cursor_metadata_and_read_only_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = f'{directory}/source.db'
+            conn = sqlite3.connect(path)
+            conn.execute(
+                'CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT, '
+                'thinking TEXT, created_at TEXT, tool_calls TEXT, branches TEXT, branch_idx INTEGER, '
+                'cache_info TEXT, source_kind TEXT, attachments TEXT, image_url TEXT, file_url TEXT, file_name TEXT)'
+            )
+            conn.execute(
+                'INSERT INTO chat_messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (1, 'hayana', 'source', 'private thinking', '2026-09-08 23:59:00', '', '', 0, '', 'chat', '[]', '', '', ''),
+            )
+            conn.commit()
+            conn.close()
+
+            read_only = _read_only_connection(path)
+            try:
+                rows = _source_rows(read_only)
+                self.assertEqual(rows[0]['id'], 1)
+                self.assertEqual(rows[0]['thinking'], 'private thinking')
+                with self.assertRaises(sqlite3.OperationalError):
+                    read_only.execute('DELETE FROM chat_messages')
+            finally:
+                read_only.close()
+
+    def test_default_cc_adapter_passes_existing_token_getter(self):
+        from continuity.chunk_generation import _default_generate
+
+        request = SimpleNamespace()
+        authority = SimpleNamespace(provider='claude_code', model_identity='model-A')
+        with patch('chat.background_generation.generate_background', return_value='result') as generate, \
+             patch('chat.cc_auth.read_cc_oauth_token') as token_getter:
+            self.assertEqual(_default_generate(request, authority), 'result')
+        generate.assert_called_once_with(request, authority, cc_token_getter=token_getter)
 
 
 if __name__ == '__main__':
