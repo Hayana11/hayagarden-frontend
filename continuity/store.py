@@ -213,8 +213,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_continuity_chunks_generation_job
             ON continuity_chunks(generation_job_id);
         CREATE TRIGGER IF NOT EXISTS continuity_chunks_immutable_body
-        BEFORE UPDATE OF body, body_hash, provider, model_identity, actual_executor,
-            generation_id, generator_policy_version, prompt_policy_version
+        BEFORE UPDATE OF chunk_id, generation_job_id, candidate_id, snapshot_id,
+            artifact_revision, body, body_hash, source_token_estimate,
+            output_token_estimate, generator_policy_version, prompt_policy_version,
+            provider, model_identity, actual_executor, generation_id, created_at
         ON continuity_chunks
         BEGIN
             SELECT RAISE(ABORT, 'continuity chunk body/provenance is immutable');
