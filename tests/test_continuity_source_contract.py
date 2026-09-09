@@ -8,6 +8,7 @@ import unittest
 from continuity.contracts import SourceMember
 from continuity.coverage import validate_exact_coverage
 from continuity.sources import (
+    build_source_members,
     build_source_snapshot,
     derive_autonomous_events,
     derive_completed_turns,
@@ -230,6 +231,40 @@ class SourceSnapshotAndCoverageTests(unittest.TestCase):
             {'turn:1:2', 'wake:3'},
         )
 
+
+    def test_validator_catches_materialization_gap_for_wake(self):
+        rows = [
+            row(1, 'hayana', 'u'),
+            row(2, 'assistant', 'a'),
+            row(3, 'assistant', 'w', source_kind='wake', cache_info=json.dumps({
+                'wake_mode': 'normal',
+                'canonical_chat_history': True,
+                'unified_chat_resident': True,
+                'b3_authority': True,
+                'source': 'wake',
+                'provider': 'claude_code',
+            })),
+        ]
+        expected = enumerate_candidate_source_refs(rows)
+
+        members = build_source_members(
+            derive_completed_turns(rows),
+            derive_autonomous_events(rows),
+        )
+
+        # Simulate a future materialization regression that drops the wake.
+        broken_members = members[:-1]
+        report = validate_exact_coverage(
+            broken_members,
+            expected_source_refs=expected,
+        )
+
+        self.assertFalse(report.valid)
+        self.assertTrue(any(
+            issue.code == 'coverage_gap'
+            and issue.source_ref == 'wake:3'
+            for issue in report.issues
+        ))
 
     def test_validator_reports_duplicate_sequence_and_missing_source(self):
         members = (
