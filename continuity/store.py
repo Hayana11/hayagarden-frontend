@@ -87,7 +87,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             branch_id TEXT NOT NULL,
             PRIMARY KEY (snapshot_id, seq),
-            UNIQUE (snapshot_id, source_ref),
             FOREIGN KEY (snapshot_id) REFERENCES continuity_source_snapshots(snapshot_id)
         );
         CREATE INDEX IF NOT EXISTS idx_continuity_source_members_ref
@@ -367,6 +366,12 @@ def materialize_job(
     if job.policy_version != policy.version:
         raise ContinuityStoreConflict('policy version does not match job')
     snapshot = _load_snapshot_for_job(conn, job)
+    expected_job_id, expected_idempotency_key = _job_identity(snapshot, policy)
+    if (
+        expected_job_id != job.job_id
+        or expected_idempotency_key != job.idempotency_key
+    ):
+        raise ContinuityStoreConflict('continuity job identity does not match policy or snapshot')
     candidates = seal_snapshot(snapshot, policy)
     stamp = str(now or _stamp())
 
@@ -409,8 +414,15 @@ def materialize_job(
                     '(candidate_id, ordinal, source_seq, source_ref, source_revision, '
                     'content_hash, logical_size) VALUES (?,?,?,?,?,?,?)',
                     (
-                        (candidate.candidate_id, ordinal, seq, ref, revision, revision,
-                         int(snapshot.members[seq].logical_size))
+                        (
+                            candidate.candidate_id,
+                            ordinal,
+                            seq,
+                            ref,
+                            revision,
+                            snapshot.members[seq].content_hash,
+                            int(snapshot.members[seq].logical_size),
+                        )
                         for ordinal, (seq, ref, revision)
                         in enumerate(zip(candidate.source_seqs, candidate.source_refs, candidate.source_revisions))
                     ),
@@ -431,7 +443,7 @@ def materialize_job(
                         seq,
                         ref,
                         revision,
-                        revision,
+                        snapshot.members[seq].content_hash,
                         int(snapshot.members[seq].logical_size),
                     )
                     for ordinal, (seq, ref, revision)
