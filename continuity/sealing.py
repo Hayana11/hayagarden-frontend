@@ -24,6 +24,14 @@ def _sha256(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode('utf-8')).hexdigest()
 
 
+def policy_identity(policy: SealingPolicy) -> dict[str, object]:
+    return {
+        'version': policy.version,
+        'target_logical_size': int(policy.target_logical_size),
+        'max_completed_turns': int(policy.max_completed_turns),
+    }
+
+
 @dataclass(frozen=True)
 class SealingPolicy:
     """Versioned R2 boundary policy; changing a value requires a new version."""
@@ -111,7 +119,7 @@ def _candidate(
     identity = {
         'snapshot_id': snapshot.snapshot_id,
         'snapshot_source_hash': snapshot.source_hash,
-        'policy_version': policy.version,
+        'policy': policy_identity(policy),
         'block_seq': int(block_seq),
         'source_start_seq': seqs[0],
         'source_end_seq': seqs[-1] + 1,
