@@ -179,4 +179,3 @@ def validate_exact_coverage(
         source_hash=source_hash(ordered),
         issues=tuple(issues),
     )
-
