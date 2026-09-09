@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from continuity.contracts import SourceMember, SourceSnapshot
-from continuity.sealing import CandidateBlock, SealingPolicy, seal_snapshot
+from continuity.sealing import CandidateBlock, SealingPolicy, policy_identity, seal_snapshot
 
 
 TABLES = (
@@ -249,7 +249,7 @@ def _job_identity(snapshot: SourceSnapshot, policy: SealingPolicy) -> tuple[str,
     digest = _sha256({
         'snapshot_id': snapshot.snapshot_id,
         'source_hash': snapshot.source_hash,
-        'policy_version': policy.version,
+        'policy': policy_identity(policy),
     })
     return f'job:{digest[:32]}', f'continuity:{digest}'
 
