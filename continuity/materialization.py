@@ -15,7 +15,11 @@ from typing import Any
 from continuity.contracts import SourceMember, SourceSnapshot
 from continuity.coverage import source_hash
 from continuity.sealing import CandidateBlock
-from continuity.sources import derive_autonomous_events, derive_completed_turns
+from continuity.sources import (
+    canonical_tool_outcome,
+    derive_autonomous_events,
+    derive_completed_turns,
+)
 from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
 
@@ -63,6 +67,14 @@ def _canonical(value: Any) -> str:
 
 def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode('utf-8')).hexdigest()
+
+
+def _render_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return _canonical(value)
+    if value is None:
+        return ''
+    return str(value)
 
 
 def _candidate_source_revision(members: Iterable[SourceMember]) -> str:
@@ -126,11 +138,15 @@ def _render_tool_outcomes(assistant_row: Any) -> list[str]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        name = str(item.get('name') or 'tool')
-        result = item.get('result')
-        if result is None:
-            result = item.get('artifact')
-        rendered.append(f'{name}: {_canonical(result) if isinstance(result, (dict, list)) else str(result or "")}')
+        outcome = canonical_tool_outcome(item)
+        rendered.append('\n'.join((
+            f"NAME: {outcome['name'] or 'tool'}",
+            f"ARGS: {_render_value(outcome['args'])}",
+            f"RESULT: {_render_value(outcome['result'])}",
+            f"SUCCESS: {str(outcome['success']).lower()}",
+            f"ARTIFACT: {_render_value(outcome['artifact'])}",
+            f"DIFF: {_render_value(outcome['diff'])}",
+        )))
     return rendered
 
 
