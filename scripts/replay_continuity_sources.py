@@ -11,24 +11,27 @@ import argparse
 import datetime as dt
 import json
 import sqlite3
+import sys
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from continuity.coverage import validate_exact_coverage
+from chat.day_handoff import chat_day_for_timestamp
 from chat.daily_context import is_formal_chat_message
 from continuity.sources import (
+    build_source_snapshot,
     build_source_members,
     derive_autonomous_events,
     derive_completed_turns,
     enumerate_candidate_source_refs,
     is_incomplete_source_row,
 )
+from continuity.sealing import DEFAULT_SEALING_POLICY, seal_snapshot, validate_candidate_coverage
 
 KNOWN_COLUMNS = (
     'id', 'author', 'content', 'thinking', 'created_at', 'tool_calls',
@@ -61,6 +64,15 @@ def _rows(conn: sqlite3.Connection, *, days: int) -> list[dict]:
         (since,),
     ).fetchall()
     return [dict(row) for row in result]
+
+
+def _chat_day(row: dict) -> str:
+    raw = str(row.get('created_at') or '')[:19]
+    try:
+        timestamp = dt.datetime.strptime(raw, '%Y-%m-%d %H:%M:%S')
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError('chat_messages.created_at is not a local timestamp') from exc
+    return chat_day_for_timestamp(timestamp)
 
 
 def replay(db_path: str, *, days: int = 30) -> dict:
@@ -97,6 +109,47 @@ def replay(db_path: str, *, days: int = 30) -> dict:
 
     by_day = Counter(turn.started_at[:10] for turn in turns if turn.started_at)
     wake_by_day = Counter(event.created_at[:10] for event in events if event.created_at)
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(_chat_day(row), []).append(row)
+    daily_candidate_distribution: dict[str, int] = {}
+    completed_turns_per_block: list[int] = []
+    logical_size_per_block: list[int] = []
+    oversize_count = 0
+    candidate_coverage_valid = True
+    deterministic = True
+    candidate_count = 0
+    source_unit_count = 0
+    for day, day_rows in sorted(grouped.items()):
+        day_turns = derive_completed_turns(day_rows)
+        day_events = derive_autonomous_events(day_rows)
+        day_members = build_source_members(day_turns, day_events)
+        day_expected = enumerate_candidate_source_refs(day_rows)
+        day_report = validate_exact_coverage(day_members, expected_source_refs=day_expected)
+        candidate_coverage_valid = candidate_coverage_valid and day_report.valid
+        source_unit_count += len(day_members)
+        watermark = max((int(row.get('id') or 0) for row in day_rows), default=0)
+        day_snapshot = build_source_snapshot(
+            turns=day_turns,
+            events=day_events,
+            local_day=day,
+            source_watermark=watermark,
+            created_at=f'{day}T00:00:00Z',
+        )
+        first = seal_snapshot(day_snapshot, DEFAULT_SEALING_POLICY)
+        second = seal_snapshot(day_snapshot, DEFAULT_SEALING_POLICY)
+        deterministic = deterministic and first == second
+        candidate_coverage_valid = (
+            candidate_coverage_valid
+            and validate_candidate_coverage(day_snapshot, first).valid
+        )
+        daily_candidate_distribution[day] = len(first)
+        candidate_count += len(first)
+        completed_turns_per_block.extend(block.completed_turn_count for block in first)
+        logical_size_per_block.extend(block.logical_size for block in first)
+        oversize_count += sum(1 for block in first if block.oversize)
+
     return {
         'days': int(days),
         'rows_read': len(rows),
@@ -109,6 +162,14 @@ def replay(db_path: str, *, days: int = 30) -> dict:
         'source_hash': report.source_hash,
         'completed_turns_by_day': dict(sorted(by_day.items())),
         'autonomous_events_by_day': dict(sorted(wake_by_day.items())),
+        'source_unit_count': source_unit_count,
+        'candidate_count': candidate_count,
+        'daily_candidate_distribution': daily_candidate_distribution,
+        'completed_turns_per_block': completed_turns_per_block,
+        'logical_size_per_block': logical_size_per_block,
+        'oversize_count': oversize_count,
+        'candidate_coverage_valid': candidate_coverage_valid,
+        'determinism_valid': deterministic,
     }
 
 
@@ -119,8 +180,9 @@ def main() -> int:
     args = parser.parse_args()
     result = replay(args.db, days=args.days)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if result['coverage_valid'] else 1
+    return 0 if result['coverage_valid'] and result['candidate_coverage_valid'] and result['determinism_valid'] else 1
 
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
