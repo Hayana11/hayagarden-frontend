@@ -274,6 +274,30 @@ class ContextPlanTests(unittest.TestCase):
         self.assertEqual([item.source_seqs for item in plan.representations], [(0,), (1, 2)])
         self.assertTrue(any(item.code == 'recent_raw_priority' for item in plan.exclusions))
 
+    def test_recent_raw_range_is_expected_driven_when_newest_raw_is_missing(self):
+        members = tuple(_member(index, logical_size=10) for index in range(3))
+        binding = _binding(members, seqs=(2,), body='x' * 8)
+        plan = build_context_plan(
+            members,
+            raw_members=members[:2],
+            chunks=(binding,),
+            budget_policy=ContextBudgetPolicy(token_budget=100, recent_raw_target=10),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (2,))
+        selected_seqs = tuple(
+            seq for representation in plan.representations for seq in representation.source_seqs
+        )
+        self.assertNotIn(2, selected_seqs)
+        self.assertFalse(any(
+            item.kind == 'chunk' and 2 in item.source_seqs
+            for item in plan.representations
+        ))
+        self.assertTrue(any(
+            item.code == 'coverage_gap' and item.source_ref == members[2].source_ref
+            for item in plan.gaps
+        ))
+        self.assertFalse(plan.valid)
+
     def test_older_valid_chunk_remains_after_recent_raw_priority(self):
         members = tuple(_member(index, logical_size=4) for index in range(3))
         binding = _binding(members, seqs=(0,), body='x' * 8)
@@ -307,6 +331,39 @@ class ContextPlanTests(unittest.TestCase):
             for item in plan.exclusions
         ))
         self.assertFalse(any(item.code == 'coverage_gap' for item in plan.gaps))
+
+    def test_older_budget_drops_oldest_until_newest_suffix_fits(self):
+        members = tuple(_member(index, logical_size=1) for index in range(2))
+        older = (
+            _binding(members, seqs=(0,), chunk_id='a', body='a' * 16),
+            _binding(members, seqs=(1,), chunk_id='b', body='b' * 32),
+        )
+        over_budget = build_context_plan(
+            members,
+            chunks=older,
+            budget_policy=ContextBudgetPolicy(token_budget=7),
+        )
+        self.assertEqual(over_budget.representations, ())
+        self.assertEqual(
+            {
+                item.representation_id
+                for item in over_budget.budget_exclusions
+            },
+            {'chunk:a', 'chunk:b'},
+        )
+        fits_newest = build_context_plan(
+            members,
+            chunks=older,
+            budget_policy=ContextBudgetPolicy(token_budget=9),
+        )
+        self.assertEqual(
+            [item.source_seqs for item in fits_newest.representations],
+            [(1,)],
+        )
+        self.assertTrue(any(
+            item.code == 'budget_excluded' and item.representation_id == 'chunk:a'
+            for item in fits_newest.exclusions
+        ))
 
     def test_budget_exclusion_is_not_coverage_gap(self):
         members = tuple(_member(index, logical_size=5) for index in range(3))
