@@ -11,7 +11,11 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
-from continuity.contracts import SourceMember, SourceSnapshot
+from continuity.contracts import (
+    SourceMember,
+    SourceSnapshot,
+    candidate_source_revision,
+)
 from continuity.coverage import CoverageReport, validate_exact_coverage
 
 MEASUREMENT_SEMANTICS = 'cc_usage_observability.heuristic_cjk1_ascii4_v1'
@@ -118,19 +122,7 @@ def _candidate(
     refs = tuple(member.source_ref for member in members)
     revisions = tuple(member.source_revision for member in members)
     seqs = tuple(int(member.seq) for member in members)
-    source_revision = _sha256({
-        'seqs': seqs,
-        'refs': refs,
-        'revisions': revisions,
-        'measurements': [
-            {
-                'logical_size': int(member.logical_size),
-                'created_at': member.created_at,
-                'branch_id': member.branch_id,
-            }
-            for member in members
-        ],
-    })
+    source_revision = candidate_source_revision(members)
     identity = {
         'snapshot_id': snapshot.snapshot_id,
         'snapshot_source_hash': snapshot.source_hash,

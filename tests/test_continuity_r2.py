@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 
-from continuity.contracts import SourceMember, SourceSnapshot
+from continuity.contracts import SourceMember, SourceSnapshot, candidate_source_revision
 from continuity.coverage import source_hash
 from continuity.sources import row_logical_size
 from continuity.sealing import (
@@ -158,6 +158,18 @@ class SealingTests(unittest.TestCase):
         snap = snapshot(tuple(member(i, 4000) for i in range(7)))
         policy = SealingPolicy()
         self.assertEqual(seal_snapshot(snap, policy), seal_snapshot(snap, policy))
+
+    def test_candidate_source_revision_uses_contract_algorithm(self):
+        snap = snapshot((member(0, 100), member(1, 100)))
+        candidate = seal_snapshot(snap)[0]
+        candidate_members = tuple(
+            next(item for item in snap.members if item.seq == seq)
+            for seq in candidate.source_seqs
+        )
+        self.assertEqual(
+            candidate.source_revision,
+            candidate_source_revision(candidate_members),
+        )
 
     def test_policy_version_changes_candidate_identity(self):
         snap = snapshot((member(0, 100),))
