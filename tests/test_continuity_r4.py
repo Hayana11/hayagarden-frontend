@@ -9,6 +9,7 @@ from continuity.context_plan import (
     ContextBudgetPolicy,
     ContextChunkBinding,
     ContextPlanExclusion,
+    ContextSection,
     _identity_payload,
     _sha256,
     build_context_plan,
@@ -449,6 +450,191 @@ class ContextPlanTests(unittest.TestCase):
         self.assertEqual(first.plan_hash, second.plan_hash)
         self.assertNotEqual(first.plan_hash, changed.plan_hash)
 
+    @staticmethod
+    def _section(kind, *, source_ref=None, content_hash=None, estimated_tokens=3):
+        return ContextSection(
+            kind=kind,
+            source_ref=source_ref or f'{kind}:v1',
+            content_hash=content_hash or f'hash:{kind}:v1',
+            estimated_tokens=estimated_tokens,
+        )
+
+    def test_ordered_sections_use_canonical_order(self):
+        plan = build_context_plan(
+            tuple(_member(index, logical_size=5) for index in range(3)),
+            budget_policy=ContextBudgetPolicy(token_budget=100, recent_raw_target=5),
+            fixed_sections=(
+                self._section('current_request'),
+                self._section('accepted_open_loops'),
+                self._section('invariant_system'),
+                self._section('accepted_state'),
+            ),
+        )
+        self.assertEqual(
+            [section.kind for section in plan.ordered_sections],
+            [
+                'invariant_system',
+                'accepted_state',
+                'accepted_open_loops',
+                'older_continuity',
+                'recent_raw',
+                'current_request',
+            ],
+        )
+
+    def test_history_sections_reference_selected_representations(self):
+        plan = build_context_plan(
+            self.members,
+            fixed_sections=(self._section('accepted_state'),),
+        )
+        representation_ids = {item.representation_id for item in plan.representations}
+        history = [
+            section for section in plan.ordered_sections
+            if section.kind in {'older_continuity', 'recent_raw'}
+        ]
+        self.assertEqual(
+            {section.representation_id for section in history},
+            representation_ids,
+        )
+        self.assertTrue(all(
+            section.source_ref == section.representation_id
+            for section in history
+        ))
+
+    def test_sections_do_not_reselect_or_duplicate_history_members(self):
+        binding = _binding(self.members, seqs=(0, 1))
+        plan = build_context_plan(
+            self.members,
+            chunks=(binding,),
+            budget_policy=ContextBudgetPolicy(token_budget=100, recent_raw_target=10),
+        )
+        history_sections = [
+            section for section in plan.ordered_sections
+            if section.kind in {'older_continuity', 'recent_raw'}
+        ]
+        selected_ids = {
+            section.representation_id for section in history_sections
+        }
+        self.assertEqual(selected_ids, {
+            item.representation_id for item in plan.representations
+        })
+        selected_seqs = [
+            seq for item in plan.representations for seq in item.source_seqs
+        ]
+        self.assertEqual(selected_seqs, sorted(set(selected_seqs)))
+
+    def test_recent_raw_sections_follow_older_continuity(self):
+        members = tuple(_member(index, logical_size=5) for index in range(3))
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=100, recent_raw_target=5),
+        )
+        kinds = [section.kind for section in plan.ordered_sections]
+        self.assertLess(kinds.index('older_continuity'), kinds.index('recent_raw'))
+
+    def test_accepted_state_and_open_loops_precede_history(self):
+        plan = build_context_plan(
+            self.members,
+            fixed_sections=(
+                self._section('accepted_open_loops'),
+                self._section('accepted_state'),
+            ),
+        )
+        kinds = [section.kind for section in plan.ordered_sections]
+        self.assertLess(kinds.index('accepted_state'), kinds.index('older_continuity'))
+        self.assertLess(kinds.index('accepted_open_loops'), kinds.index('older_continuity'))
+
+    def test_absent_fixed_sections_have_no_empty_placeholders(self):
+        plan = build_context_plan(self.members)
+        self.assertEqual(
+            {section.kind for section in plan.ordered_sections},
+            {'older_continuity'},
+        )
+        self.assertNotIn('accepted_state', [section.kind for section in plan.ordered_sections])
+        self.assertNotIn('accepted_open_loops', [section.kind for section in plan.ordered_sections])
+
+    def test_current_request_is_last_semantic_section(self):
+        plan = build_context_plan(
+            self.members,
+            fixed_sections=(
+                self._section('invariant_system'),
+                self._section('current_request'),
+            ),
+        )
+        self.assertEqual(plan.ordered_sections[-1].kind, 'current_request')
+
+    def test_fixed_section_fingerprint_is_part_of_plan_identity(self):
+        first = build_context_plan(
+            self.members,
+            fixed_sections=(self._section('accepted_state', content_hash='state:a'),),
+        )
+        same = build_context_plan(
+            self.members,
+            fixed_sections=(self._section('accepted_state', content_hash='state:a'),),
+        )
+        changed = build_context_plan(
+            self.members,
+            fixed_sections=(self._section('accepted_state', content_hash='state:b'),),
+        )
+        self.assertEqual(first.plan_hash, same.plan_hash)
+        self.assertNotEqual(first.plan_hash, changed.plan_hash)
+        self.assertNotEqual(first.plan_id, changed.plan_id)
+
+    def test_current_request_fingerprint_is_part_of_plan_identity(self):
+        first = build_context_plan(
+            self.members,
+            fixed_sections=(self._section('current_request', content_hash='request:a'),),
+        )
+        changed = build_context_plan(
+            self.members,
+            fixed_sections=(self._section('current_request', content_hash='request:b'),),
+        )
+        self.assertNotEqual(first.plan_hash, changed.plan_hash)
+
+    def test_section_text_is_not_stored_or_used_for_identity(self):
+        section = self._section('accepted_state', content_hash='state:a')
+        plan = build_context_plan(self.members, fixed_sections=(section,))
+        self.assertFalse(hasattr(plan.ordered_sections[0], 'text'))
+        self.assertEqual(plan.ordered_sections[0].content_hash, 'state:a')
+
+    def test_ordered_section_token_accounting_includes_fixed_and_reserve(self):
+        members = tuple(_member(index, logical_size=5) for index in range(2))
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=20, reserve_budget=2),
+            fixed_sections=(
+                self._section('invariant_system', estimated_tokens=3),
+                self._section('accepted_state', estimated_tokens=4),
+                self._section('current_request', estimated_tokens=2),
+            ),
+        )
+        self.assertEqual(plan.selected_token_estimate, 10)
+        self.assertEqual(plan.fixed_section_token_estimate, 9)
+        self.assertEqual(plan.ordered_section_token_estimate, 19)
+        self.assertEqual(plan.total_token_estimate, 21)
+        self.assertEqual(plan.reserve_budget, 2)
+
+    def test_fixed_section_contract_rejects_history_and_duplicates(self):
+        with self.assertRaisesRegex(ValueError, 'history_sections_are_plan_owned'):
+            build_context_plan(
+                self.members,
+                fixed_sections=(ContextSection(
+                    kind='older_continuity',
+                    source_ref='representation:old',
+                    content_hash='hash:old',
+                    estimated_tokens=1,
+                    representation_id='representation:old',
+                ),),
+            )
+        with self.assertRaisesRegex(ValueError, 'duplicate_kind'):
+            build_context_plan(
+                self.members,
+                fixed_sections=(
+                    self._section('accepted_state', content_hash='a'),
+                    self._section('accepted_state', content_hash='b'),
+                ),
+            )
+
     def test_invalid_policy_fails_closed(self):
         with self.assertRaisesRegex(ValueError, 'token_budget_must_be_positive'):
             ContextBudgetPolicy(token_budget=0)
@@ -458,4 +644,5 @@ class ContextPlanTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
 
