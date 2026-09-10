@@ -24,6 +24,30 @@ from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v
 
 RepresentationKind = Literal['raw', 'chunk']
 BudgetStatus = Literal['unbounded', 'fit', 'overflow', 'blocked']
+SectionKind = Literal[
+    'invariant_system',
+    'accepted_state',
+    'accepted_open_loops',
+    'older_continuity',
+    'recent_raw',
+    'current_request',
+]
+
+_FIXED_SECTION_KINDS = frozenset({
+    'invariant_system',
+    'accepted_state',
+    'accepted_open_loops',
+    'current_request',
+})
+_HISTORY_SECTION_KINDS = frozenset({'older_continuity', 'recent_raw'})
+_SECTION_ORDER = (
+    'invariant_system',
+    'accepted_state',
+    'accepted_open_loops',
+    'older_continuity',
+    'recent_raw',
+    'current_request',
+)
 
 
 def _canonical(value: object) -> str:
@@ -105,6 +129,38 @@ class ContextBudgetPolicy:
 
 
 @dataclass(frozen=True)
+class ContextSection:
+    """A position in one plan, without duplicating representation content.
+
+    Fixed sections are accepted projections from an upstream authority and
+    carry metadata only. History sections reference an existing
+    ``ContextRepresentation`` by ``representation_id``.
+    """
+
+    kind: SectionKind
+    source_ref: str
+    content_hash: str
+    estimated_tokens: int
+    representation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, str) or self.kind not in _SECTION_ORDER:
+            raise ValueError(f'invalid_context_section:unknown_kind:{self.kind}')
+        if not isinstance(self.source_ref, str) or not self.source_ref.strip():
+            raise ValueError('invalid_context_section:source_ref_required')
+        if not isinstance(self.content_hash, str) or not self.content_hash.strip():
+            raise ValueError('invalid_context_section:content_hash_required')
+        if isinstance(self.estimated_tokens, bool) or not isinstance(self.estimated_tokens, int):
+            raise ValueError('invalid_context_section:estimated_tokens_must_be_integer')
+        if self.estimated_tokens < 0:
+            raise ValueError('invalid_context_section:estimated_tokens_must_be_non_negative')
+        if self.kind in _FIXED_SECTION_KINDS and self.representation_id is not None:
+            raise ValueError('invalid_context_section:fixed_section_cannot_reference_representation')
+        if self.kind in _HISTORY_SECTION_KINDS and not str(self.representation_id or '').strip():
+            raise ValueError('invalid_context_section:history_section_requires_representation')
+
+
+@dataclass(frozen=True)
 class ContextPlanExclusion:
     code: str
     source_ref: str
@@ -138,6 +194,7 @@ class ContextPlan:
     source_hash: str
     source_members: tuple[SourceMember, ...]
     representations: tuple[ContextRepresentation, ...]
+    ordered_sections: tuple[ContextSection, ...]
     exclusions: tuple[ContextPlanExclusion, ...]
     gaps: tuple[ContextPlanExclusion, ...]
     measurement_semantics: str = MEASUREMENT_SEMANTICS
@@ -166,6 +223,24 @@ class ContextPlan:
         return sum(int(item.estimated_tokens) for item in self.representations)
 
     @property
+    def fixed_section_token_estimate(self) -> int:
+        return sum(
+            int(section.estimated_tokens)
+            for section in self.ordered_sections
+            if section.kind in _FIXED_SECTION_KINDS
+        )
+
+    @property
+    def ordered_section_token_estimate(self) -> int:
+        return sum(int(section.estimated_tokens) for section in self.ordered_sections)
+
+    @property
+    def total_token_estimate(self) -> int:
+        """Fixed sections + selected continuity + reserved budget."""
+        reserve = self.reserve_budget or 0
+        return self.ordered_section_token_estimate + int(reserve)
+
+    @property
     def recent_raw_token_estimate(self) -> int:
         recent = frozenset(int(seq) for seq in self.recent_raw_source_seqs)
         return sum(
@@ -182,7 +257,11 @@ class ContextPlan:
     def remaining_budget(self) -> int | None:
         if self.usable_budget is None:
             return None
-        return self.usable_budget - self.selected_token_estimate
+        return (
+            self.usable_budget
+            - self.fixed_section_token_estimate
+            - self.selected_token_estimate
+        )
 
     @property
     def budget_overflow(self) -> bool:
@@ -264,12 +343,78 @@ def _exclusion(
     return ContextPlanExclusion(code, source_ref, detail, representation_id)
 
 
+def _validated_fixed_sections(
+    sections: Sequence[ContextSection],
+) -> dict[str, ContextSection]:
+    by_kind: dict[str, ContextSection] = {}
+    for section in tuple(sections):
+        if not isinstance(section, ContextSection):
+            raise ValueError('invalid_context_section:expected_context_section')
+        if section.kind not in _FIXED_SECTION_KINDS:
+            raise ValueError('invalid_context_section:history_sections_are_plan_owned')
+        if section.kind in by_kind:
+            raise ValueError(f'invalid_context_section:duplicate_kind:{section.kind}')
+        by_kind[section.kind] = section
+    return by_kind
+
+
+def _history_section(
+    representation: ContextRepresentation,
+    *,
+    kind: Literal['older_continuity', 'recent_raw'],
+) -> ContextSection:
+    return ContextSection(
+        kind=kind,
+        source_ref=representation.representation_id,
+        content_hash=representation.source_hash,
+        estimated_tokens=int(representation.estimated_tokens),
+        representation_id=representation.representation_id,
+    )
+
+
+def _build_ordered_sections(
+    fixed_sections: dict[str, ContextSection],
+    representations: Sequence[ContextRepresentation],
+    recent_raw_keys: set[tuple[Any, ...]],
+) -> tuple[ContextSection, ...]:
+    sections: list[ContextSection] = []
+    for kind in ('invariant_system', 'accepted_state', 'accepted_open_loops'):
+        section = fixed_sections.get(kind)
+        if section is not None:
+            sections.append(section)
+
+    for representation in representations:
+        member_keys = {_member_key(member) for member in representation.source_members}
+        section_kind: Literal['older_continuity', 'recent_raw'] = (
+            'recent_raw'
+            if representation.kind == 'raw' and member_keys and member_keys.issubset(recent_raw_keys)
+            else 'older_continuity'
+        )
+        sections.append(_history_section(representation, kind=section_kind))
+
+    current_request = fixed_sections.get('current_request')
+    if current_request is not None:
+        sections.append(current_request)
+    return tuple(sections)
+
+
+def _section_identity(section: ContextSection) -> dict[str, Any]:
+    return {
+        'kind': section.kind,
+        'source_ref': section.source_ref,
+        'content_hash': section.content_hash,
+        'estimated_tokens': int(section.estimated_tokens),
+        'representation_id': section.representation_id,
+    }
+
+
 def _identity_payload(
     expected: Sequence[SourceMember],
     selected: Sequence[ContextRepresentation],
     exclusions: Sequence[ContextPlanExclusion],
     gaps: Sequence[ContextPlanExclusion],
     *,
+    ordered_sections: Sequence[ContextSection] = (),
     budget_policy: ContextBudgetPolicy | None = None,
     budget_status: BudgetStatus = 'unbounded',
     recent_raw_source_seqs: Sequence[int] = (),
@@ -300,6 +445,7 @@ def _identity_payload(
             }
             for representation in selected
         ],
+        'ordered_sections': [_section_identity(section) for section in ordered_sections],
         # Details are human diagnostics only and deliberately do not affect
         # deterministic identity.
         'exclusions': sorted(
@@ -352,21 +498,41 @@ def _apply_budget(
     budget_policy: ContextBudgetPolicy | None,
     recent_raw_keys: set[tuple[Any, ...]],
     exclusions: list[ContextPlanExclusion],
+    fixed_token_estimate: int = 0,
 ) -> tuple[tuple[ContextRepresentation, ...], BudgetStatus]:
-    """Apply reserve, recent-raw priority, then oldest-first trimming."""
+    """Apply fixed/reserve costs, recent-raw priority, then oldest-first trimming."""
     if budget_policy is None:
         return tuple(representations), 'unbounded'
 
-    if budget_policy.usable_budget <= 0:
+    usable_budget = budget_policy.usable_budget
+    if usable_budget <= 0:
         exclusions.append(_exclusion(
             'reserve_exceeds_budget',
             'reserve_budget leaves no usable context budget',
         ))
+        if fixed_token_estimate > usable_budget:
+            exclusions.append(_exclusion(
+                'fixed_sections_exceed_budget',
+                'fixed sections exceed the usable context budget',
+            ))
         exclusions.extend(
             _budget_exclusion(item, 'representation excluded because reserve consumes the budget')
             for item in representations
         )
         return (), 'blocked'
+
+    if fixed_token_estimate > usable_budget:
+        exclusions.append(_exclusion(
+            'fixed_sections_exceed_budget',
+            'fixed sections exceed the usable context budget',
+        ))
+        exclusions.extend(
+            _budget_exclusion(item, 'representation excluded because fixed sections consume the budget')
+            for item in representations
+        )
+        return (), 'blocked'
+
+    history_budget = usable_budget - fixed_token_estimate
 
     recent = tuple(
         item for item in representations
@@ -375,7 +541,7 @@ def _apply_budget(
     )
     older = tuple(item for item in representations if item not in recent)
     recent_cost = sum(int(item.estimated_tokens) for item in recent)
-    if recent_cost > budget_policy.usable_budget:
+    if recent_cost > history_budget:
         exclusions.append(_exclusion(
             'budget_overflow',
             'recent raw suffix alone exceeds usable budget',
@@ -386,7 +552,7 @@ def _apply_budget(
         )
         return tuple(recent), 'overflow'
 
-    remaining = budget_policy.usable_budget - recent_cost
+    remaining = history_budget - recent_cost
     ordered_older = sorted(
         older,
         key=lambda value: (
@@ -413,9 +579,11 @@ def build_context_plan(
     raw_members: Sequence[SourceMember] | None = None,
     chunks: Sequence[ContextChunkBinding] = (),
     budget_policy: ContextBudgetPolicy | None = None,
+    fixed_sections: Sequence[ContextSection] = (),
 ) -> ContextPlan:
     """Select exact raw/chunk representations for one required source set."""
     expected = _ordered(expected_members)
+    accepted_fixed_sections = _validated_fixed_sections(fixed_sections)
     raw = _ordered(expected if raw_members is None else raw_members)
     expected_by_key = {_member_key(member): member for member in expected}
     exclusions: list[ContextPlanExclusion] = []
@@ -593,6 +761,10 @@ def build_context_plan(
         coverage_selected,
         budget_policy=budget_policy,
         recent_raw_keys=recent_raw_keys,
+        fixed_token_estimate=sum(
+            int(section.estimated_tokens)
+            for section in accepted_fixed_sections.values()
+        ),
         exclusions=exclusions,
     )
     selected = tuple(sorted(
@@ -604,11 +776,17 @@ def build_context_plan(
             representation.representation_id,
         ),
     ))
+    ordered_sections = _build_ordered_sections(
+        accepted_fixed_sections,
+        selected,
+        recent_raw_keys,
+    )
     identity = _identity_payload(
         expected,
         selected,
         exclusions,
         gaps,
+        ordered_sections=ordered_sections,
         budget_policy=budget_policy,
         budget_status=budget_status,
         recent_raw_source_seqs=tuple(
@@ -622,6 +800,7 @@ def build_context_plan(
         source_hash=source_hash(expected),
         source_members=expected,
         representations=tuple(selected),
+        ordered_sections=ordered_sections,
         exclusions=tuple(sorted(
             exclusions,
             key=lambda item: (item.code, item.source_ref, item.representation_id or '', item.detail),
@@ -641,6 +820,9 @@ __all__ = [
     'ContextPlan',
     'ContextPlanExclusion',
     'ContextRepresentation',
+    'ContextSection',
+    'SectionKind',
     'build_context_plan',
 ]
+
 
