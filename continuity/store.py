@@ -12,7 +12,12 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Iterable
 
-from continuity.contracts import SourceMember, SourceSnapshot
+from continuity.contracts import (
+    ContinuityChunk,
+    ContinuityGenerationJob,
+    SourceMember,
+    SourceSnapshot,
+)
 from continuity.sealing import CandidateBlock, SealingPolicy, policy_identity, seal_snapshot
 
 
@@ -22,6 +27,8 @@ TABLES = (
     'continuity_jobs',
     'continuity_candidate_blocks',
     'continuity_candidate_members',
+    'continuity_generation_jobs',
+    'continuity_chunks',
 )
 
 
@@ -42,6 +49,10 @@ class ContinuityJob:
     source_hash: str
     status: str
     candidate_count: int
+
+
+GENERATION_JOB_STATUSES = ('pending', 'generating', 'failed', 'stale', 'ready')
+CHUNK_STATUSES = ('ready', 'stale', 'superseded')
 
 
 def _canonical(value: object) -> str:
@@ -148,6 +159,68 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_continuity_candidate_members_ref
             ON continuity_candidate_members(source_ref);
+
+        CREATE TABLE IF NOT EXISTS continuity_generation_jobs (
+            generation_job_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            candidate_source_revision TEXT NOT NULL,
+            generator_policy_version TEXT NOT NULL,
+            prompt_policy_version TEXT NOT NULL,
+            measurement_semantics TEXT NOT NULL,
+            frozen_provider TEXT,
+            frozen_model_identity TEXT,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'generating', 'failed', 'stale', 'ready')),
+            attempt INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT,
+            generation_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (candidate_id) REFERENCES continuity_candidate_blocks(candidate_id),
+            FOREIGN KEY (snapshot_id) REFERENCES continuity_source_snapshots(snapshot_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_continuity_generation_jobs_candidate
+            ON continuity_generation_jobs(candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_continuity_generation_jobs_snapshot
+            ON continuity_generation_jobs(snapshot_id);
+
+        CREATE TABLE IF NOT EXISTS continuity_chunks (
+            chunk_id TEXT PRIMARY KEY,
+            generation_job_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            artifact_revision TEXT NOT NULL,
+            body TEXT NOT NULL,
+            body_hash TEXT NOT NULL,
+            source_token_estimate INTEGER NOT NULL,
+            output_token_estimate INTEGER NOT NULL,
+            generator_policy_version TEXT NOT NULL,
+            prompt_policy_version TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model_identity TEXT NOT NULL,
+            actual_executor TEXT NOT NULL,
+            generation_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('ready', 'stale', 'superseded')),
+            created_at TEXT NOT NULL,
+            UNIQUE (candidate_id, artifact_revision),
+            FOREIGN KEY (generation_job_id) REFERENCES continuity_generation_jobs(generation_job_id),
+            FOREIGN KEY (candidate_id) REFERENCES continuity_candidate_blocks(candidate_id),
+            FOREIGN KEY (snapshot_id) REFERENCES continuity_source_snapshots(snapshot_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_continuity_chunks_candidate
+            ON continuity_chunks(candidate_id, artifact_revision);
+        CREATE INDEX IF NOT EXISTS idx_continuity_chunks_generation_job
+            ON continuity_chunks(generation_job_id);
+        CREATE TRIGGER IF NOT EXISTS continuity_chunks_immutable_body
+        BEFORE UPDATE OF chunk_id, generation_job_id, candidate_id, snapshot_id,
+            artifact_revision, body, body_hash, source_token_estimate,
+            output_token_estimate, generator_policy_version, prompt_policy_version,
+            provider, model_identity, actual_executor, generation_id, created_at
+        ON continuity_chunks
+        BEGIN
+            SELECT RAISE(ABORT, 'continuity chunk body/provenance is immutable');
+        END;
         """
     )
     conn.commit()
@@ -504,4 +577,416 @@ def load_candidates(conn: sqlite3.Connection, job_id: str) -> tuple[CandidateBlo
             close_reason=str(row[12]), source_revision=str(row[8]),
         ))
     return tuple(output)
+
+
+def load_candidate(conn: sqlite3.Connection, candidate_id: str) -> CandidateBlock | None:
+    row = conn.execute(
+        'SELECT job_id FROM continuity_candidate_blocks WHERE candidate_id=?',
+        (candidate_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    candidates = load_candidates(conn, str(row[0]))
+    return next((candidate for candidate in candidates if candidate.candidate_id == candidate_id), None)
+
+
+def load_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> SourceSnapshot | None:
+    row = conn.execute(
+        'SELECT snapshot_id, identity_id, chat_id, branch_id, local_day, source_watermark, '
+        'source_policy_version, source_hash, status, created_at '
+        'FROM continuity_source_snapshots WHERE snapshot_id=?',
+        (snapshot_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    members = conn.execute(
+        'SELECT seq, source_kind, source_ref, source_revision, role, content_hash, '
+        'span_start, span_end, logical_size, created_at, branch_id '
+        'FROM continuity_source_members WHERE snapshot_id=? ORDER BY seq',
+        (snapshot_id,),
+    ).fetchall()
+    return SourceSnapshot(
+        snapshot_id=str(row[0]), identity_id=str(row[1]), chat_id=str(row[2]),
+        branch_id=str(row[3]), local_day=str(row[4]), source_watermark=int(row[5]),
+        policy_version=str(row[6]), source_hash=str(row[7]), status=str(row[8]),
+        created_at=str(row[9]), members=tuple(SourceMember(
+            seq=int(item[0]), source_kind=item[1], source_ref=str(item[2]),
+            source_revision=str(item[3]), role=str(item[4]), content_hash=str(item[5]),
+            span_start=item[6], span_end=item[7], logical_size=int(item[8]),
+            created_at=str(item[9]), branch_id=str(item[10]),
+        ) for item in members),
+    )
+
+
+def _generation_identity(
+    candidate: CandidateBlock,
+    snapshot: SourceSnapshot,
+    *,
+    generator_policy_version: str,
+    prompt_policy_version: str,
+    measurement_semantics: str,
+) -> tuple[str, str, str]:
+    identity = {
+        'candidate_id': candidate.candidate_id,
+        'snapshot_id': snapshot.snapshot_id,
+        'snapshot_source_hash': snapshot.source_hash,
+        'candidate_source_revision': candidate.source_revision,
+        'generator_policy_version': generator_policy_version,
+        'prompt_policy_version': prompt_policy_version,
+        'measurement_semantics': measurement_semantics,
+    }
+    digest = _sha256(identity)
+    return (
+        f'generation-job:{digest[:32]}',
+        f'continuity-generation:{digest}',
+        f'generation:{digest[:32]}',
+    )
+
+
+def _generation_job_from_row(row: sqlite3.Row | tuple) -> ContinuityGenerationJob:
+    values = tuple(row)
+    return ContinuityGenerationJob(
+        generation_job_id=str(values[0]),
+        idempotency_key=str(values[1]),
+        candidate_id=str(values[2]),
+        snapshot_id=str(values[3]),
+        candidate_source_revision=str(values[4]),
+        generator_policy_version=str(values[5]),
+        prompt_policy_version=str(values[6]),
+        measurement_semantics=str(values[7]),
+        frozen_provider=str(values[8]) if values[8] is not None else None,
+        frozen_model_identity=str(values[9]) if values[9] is not None else None,
+        status=str(values[10]),
+        attempt=int(values[11]),
+        error_code=str(values[12]) if values[12] is not None else None,
+        generation_id=str(values[13]),
+        created_at=str(values[14]),
+        updated_at=str(values[15]),
+    )
+
+
+_GENERATION_JOB_COLUMNS = (
+    'generation_job_id, idempotency_key, candidate_id, snapshot_id, '
+    'candidate_source_revision, generator_policy_version, prompt_policy_version, '
+    'measurement_semantics, frozen_provider, frozen_model_identity, status, attempt, '
+    'error_code, generation_id, created_at, updated_at'
+)
+
+
+def load_generation_job(
+    conn: sqlite3.Connection,
+    generation_job_id: str,
+) -> ContinuityGenerationJob | None:
+    row = conn.execute(
+        f'SELECT {_GENERATION_JOB_COLUMNS} FROM continuity_generation_jobs '
+        'WHERE generation_job_id=?',
+        (generation_job_id,),
+    ).fetchone()
+    return _generation_job_from_row(row) if row is not None else None
+
+
+def enqueue_generation_job(
+    conn: sqlite3.Connection,
+    candidate: CandidateBlock,
+    snapshot: SourceSnapshot,
+    *,
+    generator_policy_version: str,
+    prompt_policy_version: str,
+    measurement_semantics: str,
+    now: str | None = None,
+) -> ContinuityGenerationJob:
+    """Create one idempotent candidate-level generation job.
+
+    This table is intentionally separate from the R2 snapshot sealing job.
+    """
+    generation_job_id, idempotency_key, generation_id = _generation_identity(
+        candidate,
+        snapshot,
+        generator_policy_version=generator_policy_version,
+        prompt_policy_version=prompt_policy_version,
+        measurement_semantics=measurement_semantics,
+    )
+    stamp = str(now or _stamp())
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        row = conn.execute(
+            f'SELECT {_GENERATION_JOB_COLUMNS} FROM continuity_generation_jobs '
+            'WHERE candidate_id=? AND candidate_source_revision=? AND '
+            'generator_policy_version=? AND prompt_policy_version=? AND measurement_semantics=?',
+            (
+                candidate.candidate_id,
+                candidate.source_revision,
+                generator_policy_version,
+                prompt_policy_version,
+                measurement_semantics,
+            ),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                'INSERT INTO continuity_generation_jobs '
+                '(generation_job_id, idempotency_key, candidate_id, snapshot_id, '
+                'candidate_source_revision, generator_policy_version, prompt_policy_version, '
+                'measurement_semantics, status, attempt, generation_id, created_at, updated_at) '
+                "VALUES (?,?,?,?,?,?,?,?, 'pending',0,?,?,?)",
+                (
+                    generation_job_id,
+                    idempotency_key,
+                    candidate.candidate_id,
+                    snapshot.snapshot_id,
+                    candidate.source_revision,
+                    generator_policy_version,
+                    prompt_policy_version,
+                    measurement_semantics,
+                    generation_id,
+                    stamp,
+                    stamp,
+                ),
+            )
+            row = conn.execute(
+                f'SELECT {_GENERATION_JOB_COLUMNS} FROM continuity_generation_jobs '
+                'WHERE generation_job_id=?',
+                (generation_job_id,),
+            ).fetchone()
+        elif (
+            tuple(row)[0] != generation_job_id
+            or tuple(row)[1] != idempotency_key
+            or tuple(row)[3] != snapshot.snapshot_id
+        ):
+            raise ContinuityStoreConflict('continuity generation job identity conflict')
+        conflict = conn.execute(
+            f'SELECT {_GENERATION_JOB_COLUMNS} FROM continuity_generation_jobs '
+            'WHERE idempotency_key=?',
+            (idempotency_key,),
+        ).fetchone()
+        if conflict is not None and tuple(conflict) != tuple(row):
+            raise ContinuityStoreConflict('continuity generation idempotency conflict')
+        conn.commit()
+        return _generation_job_from_row(row)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def claim_generation_job(
+    conn: sqlite3.Connection,
+    generation_job_id: str,
+    *,
+    frozen_provider: str,
+    frozen_model_identity: str,
+    now: str | None = None,
+) -> ContinuityGenerationJob:
+    """Freeze authority exactly once and transition a job to generating."""
+    stamp = str(now or _stamp())
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        job = load_generation_job(conn, generation_job_id)
+        if job is None:
+            raise ContinuityStoreError('continuity generation job not found')
+        if job.status == 'ready':
+            conn.commit()
+            return job
+        if job.status == 'generating':
+            if (
+                job.frozen_provider != frozen_provider
+                or job.frozen_model_identity != frozen_model_identity
+            ):
+                raise ContinuityStoreConflict('generation job authority is already frozen')
+            raise ContinuityStoreConflict('continuity generation job is already generating')
+        if job.status == 'stale':
+            raise ContinuityStoreConflict('stale generation job cannot be retried')
+        if job.frozen_provider is not None or job.frozen_model_identity is not None:
+            if (
+                job.frozen_provider != frozen_provider
+                or job.frozen_model_identity != frozen_model_identity
+            ):
+                raise ContinuityStoreConflict('generation job authority drift')
+        conn.execute(
+            'UPDATE continuity_generation_jobs SET frozen_provider=?, '
+            'frozen_model_identity=?, status=\'generating\', attempt=attempt+1, '
+            'error_code=NULL, updated_at=? WHERE generation_job_id=?',
+            (frozen_provider, frozen_model_identity, stamp, generation_job_id),
+        )
+        conn.commit()
+        result = load_generation_job(conn, generation_job_id)
+        if result is None:
+            raise ContinuityStoreError('generation job disappeared after claim')
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def mark_generation_failed(
+    conn: sqlite3.Connection,
+    generation_job_id: str,
+    error_code: str,
+    *,
+    now: str | None = None,
+) -> ContinuityGenerationJob:
+    stamp = str(now or _stamp())
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        conn.execute(
+            'UPDATE continuity_generation_jobs SET status=\'failed\', error_code=?, '
+            'updated_at=? WHERE generation_job_id=? AND status != \'ready\'',
+            (str(error_code), stamp, generation_job_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    job = load_generation_job(conn, generation_job_id)
+    if job is None:
+        raise ContinuityStoreError('continuity generation job not found')
+    return job
+
+
+def mark_generation_stale(
+    conn: sqlite3.Connection,
+    generation_job_id: str,
+    *,
+    error_code: str = 'source_stale',
+    now: str | None = None,
+) -> ContinuityGenerationJob:
+    stamp = str(now or _stamp())
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        conn.execute(
+            'UPDATE continuity_generation_jobs SET status=\'stale\', error_code=?, '
+            'updated_at=? WHERE generation_job_id=? AND status != \'ready\'',
+            (str(error_code), stamp, generation_job_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    job = load_generation_job(conn, generation_job_id)
+    if job is None:
+        raise ContinuityStoreError('continuity generation job not found')
+    return job
+
+
+def load_chunk(conn: sqlite3.Connection, chunk_id: str) -> ContinuityChunk | None:
+    row = conn.execute(
+        'SELECT chunk_id, generation_job_id, candidate_id, snapshot_id, artifact_revision, '
+        'body, body_hash, source_token_estimate, output_token_estimate, '
+        'generator_policy_version, prompt_policy_version, provider, model_identity, '
+        'actual_executor, generation_id, status, created_at '
+        'FROM continuity_chunks WHERE chunk_id=?',
+        (chunk_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    values = tuple(row)
+    return ContinuityChunk(
+        chunk_id=str(values[0]), generation_job_id=str(values[1]), candidate_id=str(values[2]),
+        snapshot_id=str(values[3]), artifact_revision=str(values[4]), body=str(values[5]),
+        body_hash=str(values[6]), source_token_estimate=int(values[7]),
+        output_token_estimate=int(values[8]), generator_policy_version=str(values[9]),
+        prompt_policy_version=str(values[10]), provider=str(values[11]),
+        model_identity=str(values[12]), actual_executor=str(values[13]),
+        generation_id=str(values[14]), status=str(values[15]), created_at=str(values[16]),
+    )
+
+
+def load_ready_chunk_for_job(
+    conn: sqlite3.Connection,
+    generation_job_id: str,
+) -> ContinuityChunk | None:
+    row = conn.execute(
+        'SELECT chunk_id FROM continuity_chunks WHERE generation_job_id=? AND status=\'ready\' '
+        'ORDER BY artifact_revision DESC LIMIT 1',
+        (generation_job_id,),
+    ).fetchone()
+    return load_chunk(conn, str(row[0])) if row is not None else None
+
+
+def publish_chunk_atomic(
+    conn: sqlite3.Connection,
+    *,
+    job: ContinuityGenerationJob,
+    candidate: CandidateBlock,
+    body: str,
+    body_hash: str,
+    source_token_estimate: int,
+    output_token_estimate: int,
+    provider: str,
+    model_identity: str,
+    actual_executor: str,
+    now: str | None = None,
+) -> ContinuityChunk:
+    """Insert an immutable ready chunk and mark its job ready atomically."""
+    if job.status != 'generating':
+        raise ContinuityStoreConflict('generation job is not generating')
+    if job.frozen_provider != provider or job.frozen_model_identity != model_identity:
+        raise ContinuityStoreConflict('chunk provenance does not match frozen authority')
+    stamp = str(now or _stamp())
+    artifact_revision = _sha256({
+        'generation_id': job.generation_id,
+        'body_hash': body_hash,
+        'provider': provider,
+        'model_identity': model_identity,
+        'actual_executor': actual_executor,
+    })[:32]
+    chunk_id = f'chunk:{artifact_revision}'
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        existing = conn.execute(
+            'SELECT chunk_id, generation_job_id, candidate_id, snapshot_id, artifact_revision, '
+            'body, body_hash, source_token_estimate, output_token_estimate, '
+            'generator_policy_version, prompt_policy_version, provider, model_identity, '
+            'actual_executor, generation_id, status, created_at '
+            'FROM continuity_chunks WHERE candidate_id=? AND artifact_revision=?',
+            (candidate.candidate_id, artifact_revision),
+        ).fetchone()
+        if existing is not None:
+            stored = load_chunk(conn, str(existing[0]))
+            expected = (
+                str(existing[1]), str(existing[2]), str(existing[3]), str(existing[4]),
+                str(existing[5]), str(existing[6]), int(existing[7]), int(existing[8]),
+                str(existing[11]), str(existing[12]), str(existing[13]), str(existing[14]),
+            )
+            requested = (
+                job.generation_job_id, candidate.candidate_id, candidate.snapshot_id,
+                artifact_revision, body, body_hash, int(source_token_estimate),
+                int(output_token_estimate), provider, model_identity, actual_executor,
+                job.generation_id,
+            )
+            if stored is None or expected != requested:
+                raise ContinuityStoreConflict('immutable chunk identity conflict')
+            conn.execute(
+                'UPDATE continuity_generation_jobs SET status=\'ready\', error_code=NULL, '
+                'updated_at=? WHERE generation_job_id=?',
+                (stamp, job.generation_job_id),
+            )
+            conn.commit()
+            return stored
+
+        conn.execute(
+            'INSERT INTO continuity_chunks '
+            '(chunk_id, generation_job_id, candidate_id, snapshot_id, artifact_revision, body, '
+            'body_hash, source_token_estimate, output_token_estimate, generator_policy_version, '
+            'prompt_policy_version, provider, model_identity, actual_executor, generation_id, '
+            'status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,\'ready\',?)',
+            (
+                chunk_id, job.generation_job_id, candidate.candidate_id, candidate.snapshot_id,
+                artifact_revision, body, body_hash, int(source_token_estimate),
+                int(output_token_estimate), job.generator_policy_version,
+                job.prompt_policy_version, provider, model_identity, actual_executor,
+                job.generation_id, stamp,
+            ),
+        )
+        conn.execute(
+            'UPDATE continuity_generation_jobs SET status=\'ready\', error_code=NULL, '
+            'updated_at=? WHERE generation_job_id=?',
+            (stamp, job.generation_job_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    result = load_chunk(conn, chunk_id)
+    if result is None:
+        raise ContinuityStoreError('chunk disappeared after publish')
+    return result
 

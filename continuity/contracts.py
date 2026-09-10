@@ -90,3 +90,48 @@ class SourceSnapshot:
     created_at: str
     members: tuple[SourceMember, ...]
 
+
+@dataclass(frozen=True)
+class ContinuityGenerationJob:
+    """Candidate-level R3 generation job with frozen execution provenance."""
+
+    generation_job_id: str
+    idempotency_key: str
+    candidate_id: str
+    snapshot_id: str
+    candidate_source_revision: str
+    generator_policy_version: str
+    prompt_policy_version: str
+    measurement_semantics: str
+    frozen_provider: str | None
+    frozen_model_identity: str | None
+    status: str
+    attempt: int
+    error_code: str | None
+    generation_id: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ContinuityChunk:
+    """Immutable generated shadow artifact; lifecycle status is metadata only."""
+
+    chunk_id: str
+    generation_job_id: str
+    candidate_id: str
+    snapshot_id: str
+    artifact_revision: str
+    body: str
+    body_hash: str
+    source_token_estimate: int
+    output_token_estimate: int
+    generator_policy_version: str
+    prompt_policy_version: str
+    provider: str
+    model_identity: str
+    actual_executor: str
+    generation_id: str
+    status: str
+    created_at: str
+

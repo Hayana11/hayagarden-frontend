@@ -204,17 +204,7 @@ def _tool_outcome_refs(assistant_row: Any) -> tuple[EvidenceRef, ...]:
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             continue
-        outcome = {
-            # Arguments are part of the durable invocation identity.  Keeping
-            # them in the outcome ref prevents equal results from different
-            # tool calls collapsing into one evidence object.
-            'name': item.get('name'),
-            'args': item.get('args'),
-            'result': item.get('result'),
-            'success': item.get('success'),
-            'artifact': item.get('artifact'),
-            'diff': item.get('diff'),
-        }
+        outcome = canonical_tool_outcome(item)
         serialized = _canonical_json(outcome)
         digest = _sha256_text(serialized)
         refs.append(EvidenceRef(
@@ -224,6 +214,21 @@ def _tool_outcome_refs(assistant_row: Any) -> tuple[EvidenceRef, ...]:
             logical_size=int(estimate_tokens_heuristic_cjk1_ascii4_v1(serialized)),
         ))
     return tuple(refs)
+
+
+def canonical_tool_outcome(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the single durable tool-outcome payload used by R1 and R3."""
+    return {
+        # Arguments are part of the durable invocation identity. Keeping them
+        # in the outcome ref prevents equal results from different calls from
+        # collapsing into one evidence object.
+        'name': item.get('name'),
+        'args': item.get('args'),
+        'result': item.get('result'),
+        'success': item.get('success'),
+        'artifact': item.get('artifact'),
+        'diff': item.get('diff'),
+    }
 
 
 def _turn_revision(user_row: Any, assistant_row: Any) -> str:
