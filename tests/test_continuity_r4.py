@@ -626,7 +626,7 @@ class ContextPlanTests(unittest.TestCase):
         members = tuple(_member(index, logical_size=5) for index in range(2))
         plan = build_context_plan(
             members,
-            budget_policy=ContextBudgetPolicy(token_budget=20, reserve_budget=2),
+            budget_policy=ContextBudgetPolicy(token_budget=21, reserve_budget=2),
             fixed_sections=(
                 self._section('invariant_system', estimated_tokens=3),
                 self._section('accepted_state', estimated_tokens=4),
@@ -637,7 +637,68 @@ class ContextPlanTests(unittest.TestCase):
         self.assertEqual(plan.fixed_section_token_estimate, 9)
         self.assertEqual(plan.ordered_section_token_estimate, 19)
         self.assertEqual(plan.total_token_estimate, 21)
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.remaining_budget, 0)
         self.assertEqual(plan.reserve_budget, 2)
+
+    def test_fixed_sections_reduce_history_budget(self):
+        members = tuple(_member(index, logical_size=5) for index in range(3))
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=20,
+                reserve_budget=2,
+                recent_raw_target=5,
+            ),
+            fixed_sections=(
+                self._section('invariant_system', estimated_tokens=3),
+                self._section('accepted_state', estimated_tokens=4),
+                self._section('current_request', estimated_tokens=2),
+            ),
+        )
+        self.assertEqual(plan.usable_budget, 18)
+        self.assertEqual(plan.fixed_section_token_estimate, 9)
+        self.assertEqual(plan.remaining_budget, 4)
+        self.assertEqual(plan.recent_raw_source_seqs, (2,))
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(2,)],
+        )
+        self.assertTrue(any(item.code == 'budget_excluded' for item in plan.exclusions))
+        self.assertTrue(plan.valid)
+
+    def test_fit_total_never_exceeds_entire_context_budget(self):
+        plan = build_context_plan(
+            self.members,
+            budget_policy=ContextBudgetPolicy(token_budget=100, reserve_budget=7),
+            fixed_sections=(
+                self._section('invariant_system', estimated_tokens=11),
+                self._section('accepted_state', estimated_tokens=13),
+                self._section('accepted_open_loops', estimated_tokens=5),
+                self._section('current_request', estimated_tokens=9),
+            ),
+        )
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertLessEqual(plan.total_token_estimate, plan.token_budget)
+        self.assertGreaterEqual(plan.remaining_budget, 0)
+
+    def test_fixed_sections_exceed_usable_budget_blocks_plan(self):
+        plan = build_context_plan(
+            self.members,
+            budget_policy=ContextBudgetPolicy(token_budget=10, reserve_budget=2),
+            fixed_sections=(
+                self._section('invariant_system', estimated_tokens=9),
+            ),
+        )
+        self.assertEqual(plan.fixed_section_token_estimate, 9)
+        self.assertEqual(plan.budget_status, 'blocked')
+        self.assertFalse(plan.valid)
+        self.assertTrue(any(
+            item.code == 'fixed_sections_exceed_budget'
+            for item in plan.exclusions
+        ))
+        self.assertEqual(plan.representations, ())
 
     def test_fixed_section_contract_rejects_history_and_duplicates(self):
         with self.assertRaisesRegex(ValueError, 'history_sections_are_plan_owned'):
