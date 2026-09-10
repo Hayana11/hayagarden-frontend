@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 from continuity.context_plan import (
     ContextChunkBinding,
+    ContextPlanExclusion,
+    _identity_payload,
+    _sha256,
     build_context_plan,
 )
 from continuity.contracts import SourceMember, SourceSnapshot, candidate_source_revision
@@ -109,11 +112,14 @@ class ContextPlanTests(unittest.TestCase):
         self.assertTrue(plan.valid)
         self.assertEqual([item.kind for item in plan.representations], ['raw'])
         self.assertEqual(plan.representations[0].source_seqs, (0, 1, 2))
-        self.assertEqual(plan.covered_source_refs, tuple(item.source_ref for item in self.members))
+        self.assertEqual(
+            tuple(item.source_ref for item in plan.covered_source_members),
+            tuple(item.source_ref for item in self.members),
+        )
 
     def test_chunk_replaces_exactly_covered_raw_members(self):
         binding = _binding(self.members, seqs=(0, 1))
-        plan = build_context_plan(self.members, ready_chunks=(binding,))
+        plan = build_context_plan(self.members, chunks=(binding,))
         self.assertEqual([item.kind for item in plan.representations], ['chunk', 'raw'])
         self.assertEqual(plan.representations[0].source_seqs, (0, 1))
         self.assertEqual(plan.representations[1].source_seqs, (2,))
@@ -153,7 +159,6 @@ class ContextPlanTests(unittest.TestCase):
         plan = build_context_plan(
             self.members,
             raw_members=(self.members[0],),
-            expected_source_members=self.members,
         )
         self.assertFalse(plan.valid)
         self.assertEqual(
@@ -221,6 +226,23 @@ class ContextPlanTests(unittest.TestCase):
         plan = build_context_plan(members)
         self.assertTrue(plan.valid)
         self.assertEqual(plan.representations[0].source_seqs, (10, 20))
+
+    def test_plan_hash_ignores_exclusion_detail_text(self):
+        binding = _binding(self.members, seqs=(0,))
+        plan = build_context_plan(self.members, chunks=(binding,))
+        first = _identity_payload(
+            plan.source_members,
+            plan.representations,
+            (ContextPlanExclusion('chunk_rejected', '', 'detail-a', 'chunk:x'),),
+            plan.gaps,
+        )
+        second = _identity_payload(
+            plan.source_members,
+            plan.representations,
+            (ContextPlanExclusion('chunk_rejected', '', 'detail-b', 'chunk:x'),),
+            plan.gaps,
+        )
+        self.assertEqual(_sha256(first), _sha256(second))
 
 
 if __name__ == '__main__':
