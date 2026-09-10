@@ -144,11 +144,11 @@ class ContextSection:
     representation_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.kind not in _SECTION_ORDER:
+        if not isinstance(self.kind, str) or self.kind not in _SECTION_ORDER:
             raise ValueError(f'invalid_context_section:unknown_kind:{self.kind}')
-        if not str(self.source_ref).strip():
+        if not isinstance(self.source_ref, str) or not self.source_ref.strip():
             raise ValueError('invalid_context_section:source_ref_required')
-        if not str(self.content_hash).strip():
+        if not isinstance(self.content_hash, str) or not self.content_hash.strip():
             raise ValueError('invalid_context_section:content_hash_required')
         if isinstance(self.estimated_tokens, bool) or not isinstance(self.estimated_tokens, int):
             raise ValueError('invalid_context_section:estimated_tokens_must_be_integer')
