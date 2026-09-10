@@ -497,8 +497,8 @@ def _apply_budget(
     *,
     budget_policy: ContextBudgetPolicy | None,
     recent_raw_keys: set[tuple[Any, ...]],
-    fixed_token_estimate: int,
     exclusions: list[ContextPlanExclusion],
+    fixed_token_estimate: int = 0,
 ) -> tuple[tuple[ContextRepresentation, ...], BudgetStatus]:
     """Apply fixed/reserve costs, recent-raw priority, then oldest-first trimming."""
     if budget_policy is None:
