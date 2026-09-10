@@ -5,12 +5,40 @@ select context, mutate runtime state, or write persistence.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Literal
 
 
 FinalityStatus = Literal['completed', 'incomplete']
 SourceKind = Literal['completed_turn', 'autonomous_event', 'attachment_span']
+
+
+def candidate_source_revision(members: tuple['SourceMember', ...] | list['SourceMember']) -> str:
+    """Return the canonical R2 candidate membership revision.
+
+    The identity is defined with the source order, revisions, and stable
+    sealing measurements.  Keeping it beside the immutable contracts lets
+    read-only consumers validate the same identity without importing a module
+    that also discovers/materializes chat rows.
+    """
+    ordered = tuple(members)
+    payload = {
+        'seqs': tuple(int(member.seq) for member in ordered),
+        'refs': tuple(member.source_ref for member in ordered),
+        'revisions': tuple(member.source_revision for member in ordered),
+        'measurements': [
+            {
+                'logical_size': int(member.logical_size),
+                'created_at': member.created_at,
+                'branch_id': member.branch_id,
+            }
+            for member in ordered
+        ],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
 
 
 @dataclass(frozen=True)
