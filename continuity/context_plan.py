@@ -56,7 +56,6 @@ def _member_identity(member: SourceMember) -> dict[str, Any]:
         'span_start': member.span_start,
         'span_end': member.span_end,
         'logical_size': int(member.logical_size),
-        'created_at': str(member.created_at),
         'branch_id': str(member.branch_id),
     }
 
