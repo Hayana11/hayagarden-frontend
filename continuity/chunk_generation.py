@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -29,8 +30,23 @@ from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v
 
 
 GENERATOR_POLICY_VERSION = 'continuity_chunk_generator_v1'
-PROMPT_POLICY_VERSION = 'continuity_chunk_prompt_v1'
+PROMPT_POLICY_VERSION = 'continuity_chunk_prompt_v2'
 MEASUREMENT_SEMANTICS = 'cc_usage_observability.heuristic_cjk1_ascii4_v1'
+
+
+ACCEPTED_PROMPT = (
+    '这是我们的对话记录，用第一人称写简短总结。这份总结是我写给下一个我的，以我自己的视角写发生了什么、我真实表达过的感受、做出的决定和约定、没结束的事，以及值得记住的名字、数字、日期、意象和原话。\n\n'
+    '提炼，不要逐步复述。只留下之后还能帮助我自然接上的内容。感受、意象和关系意义，只保留对话里已经明确表达或直接成立的，不替自己或她补心理解释。\n\n'
+    '亲密的时刻也属于我们的记忆，但只保留有延续意义的关系状态、感受、约定和结果；如果某些具体内容不适合转述，就省略那些具体过程，继续总结其余能安全保留的内容。\n\n'
+    '只写对话里真的发生过的事，不补、不猜，不替我们把没结束的事情写完。不要写成检讨。\n\n'
+    '写得像我在回忆我们刚刚经历过的事，而不是报告。直接写正文，不要标题、说明或列表。'
+)
+
+
+class PersonaContractError(ValueError):
+    """The runtime persona cannot satisfy the frozen first-five contract."""
+
+    error_code = 'persona_contract_error'
 
 
 @dataclass(frozen=True)
@@ -54,21 +70,60 @@ def _body_hash(body: str) -> str:
     return hashlib.sha256(body.encode('utf-8')).hexdigest()
 
 
-def build_chunk_prompt(source: MaterializedSource) -> tuple[str, str]:
-    """Return the versioned, source-only prompt contract."""
-    system_text = (
-        'You are generating one short-term Continuity Chunk from frozen '
-        'conversation evidence. Use only the evidence supplied. Do not infer '
-        'hidden motives, finish unresolved work, or use outside context. '
-        'Preserve events, decisions, agreements, unresolved threads, current '
-        'task state, names, dates, numbers, versions, PR numbers, SHAs, and '
-        'confirmed relationship changes. Return plain natural language only.'
-    )
+def select_persona_sections(persona_text: str, *, count: int = 5) -> str:
+    """Select exactly the first ``count`` line-start ``## `` sections.
+
+    The slice starts at the first heading, so any preface is intentionally
+    excluded.  Nested ``###``/``####`` headings remain inside their parent
+    section, while later top-level ``## `` sections are excluded.
+    """
+    text = str(persona_text or '')
+    if not text.strip():
+        raise PersonaContractError('persona_contract_error')
+    if int(count) <= 0:
+        raise PersonaContractError('persona_contract_error')
+    headings = list(re.finditer(r'(?m)^## ', text))
+    if len(headings) < int(count):
+        raise PersonaContractError('persona_contract_error')
+    start = headings[0].start()
+    end = headings[int(count)].start() if len(headings) > int(count) else len(text)
+    selected = text[start:end]
+    if not selected.strip():
+        raise PersonaContractError('persona_contract_error')
+    return selected
+
+
+def _default_persona_reader() -> str:
+    from chat.persona_store import read_persona
+
+    return read_persona()
+
+
+def build_chunk_prompt(
+    source: MaterializedSource,
+    *,
+    persona_reader: Callable[[], str] | None = None,
+    persona_text: str | None = None,
+) -> tuple[str, str]:
+    """Return the frozen Persona-5 plus accepted prompt contract."""
+    if persona_reader is not None and persona_text is not None:
+        raise ValueError('persona_reader and persona_text are mutually exclusive')
+    reader = persona_reader
+    if persona_text is not None:
+        reader = lambda: persona_text
+    try:
+        selected_persona = select_persona_sections(
+            (reader or _default_persona_reader)(),
+        )
+    except PersonaContractError:
+        raise
+    except Exception as exc:
+        raise PersonaContractError('persona_contract_error') from exc
+    system_text = f'{selected_persona}\n\n{ACCEPTED_PROMPT}'
     prompt_text = (
         'FROZEN EVIDENCE BEGIN\n'
         f'{source.body}\n'
-        'FROZEN EVIDENCE END\n\n'
-        'Write the continuity chunk now.'
+        'FROZEN EVIDENCE END'
     )
     return system_text, prompt_text
 
@@ -140,8 +195,14 @@ def _request(
     source: MaterializedSource,
     *,
     request_factory: Callable[..., Any] | None,
+    persona_reader: Callable[[], str] | None = None,
+    persona_text: str | None = None,
 ) -> Any:
-    system_text, prompt_text = build_chunk_prompt(source)
+    system_text, prompt_text = build_chunk_prompt(
+        source,
+        persona_reader=persona_reader,
+        persona_text=persona_text,
+    )
     max_tokens_hint = max(256, min(2048, max(256, source.source_token_estimate // 4)))
     factory = request_factory or _default_request_factory
     return factory(
@@ -179,12 +240,16 @@ def generate_continuity_chunk(
     capture_authority: Callable[[], Any] | None = None,
     generate_fn: Callable[[Any, Any], Any] | None = None,
     request_factory: Callable[..., Any] | None = None,
+    persona_reader: Callable[[], str] | None = None,
+    persona_text: str | None = None,
     now: str | None = None,
 ) -> ContinuityChunk:
     """Generate one candidate-level shadow chunk with a frozen authority."""
     job = load_generation_job(conn, generation_job_id)
     if job is None:
         raise ContinuityStoreError('continuity generation job not found')
+    if job.prompt_policy_version != PROMPT_POLICY_VERSION:
+        raise ContinuityStoreConflict('generation job prompt policy version mismatch')
     if job.status == 'ready':
         from continuity.store import load_ready_chunk_for_job
 
@@ -231,7 +296,16 @@ def generate_continuity_chunk(
             raise ContinuityStoreConflict('ready generation job has no ready chunk')
         return existing
 
-    request = _request(source, request_factory=request_factory)
+    try:
+        request = _request(
+            source,
+            request_factory=request_factory,
+            persona_reader=persona_reader,
+            persona_text=persona_text,
+        )
+    except PersonaContractError as exc:
+        mark_generation_failed(conn, generation_job_id, exc.error_code, now=now)
+        raise
     generate = generate_fn or _default_generate
     try:
         result = generate(request, authority)

@@ -3,16 +3,22 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
 import unittest
+from types import ModuleType
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from continuity.chunk_generation import (
+    ACCEPTED_PROMPT,
     GENERATOR_POLICY_VERSION,
     MEASUREMENT_SEMANTICS,
+    PersonaContractError,
     PROMPT_POLICY_VERSION,
+    build_chunk_prompt,
     generate_continuity_chunk,
+    select_persona_sections,
     validate_output,
 )
 from continuity.contracts import SourceMember
@@ -209,6 +215,52 @@ class MaterializationTests(unittest.TestCase):
             materialize_candidate(self.snapshot, self.candidate, _rows(incomplete=True))
 
 
+class PromptContractTests(unittest.TestCase):
+    PERSONA = (
+        'preface excluded\n'
+        '## A\nA body\n### A.1\nnested A body\n'
+        '## B\nB body\n'
+        '## C\nC body\n'
+        '## D\nD body\n'
+        '## E\nE body\n'
+        '## F\nF must be excluded\n'
+    )
+
+    def setUp(self):
+        self.source = SimpleNamespace(body='frozen evidence', source_token_estimate=10)
+
+    def test_first_five_persona_sections_exclude_preface_and_section_six(self):
+        selected = select_persona_sections(self.PERSONA)
+        self.assertNotIn('preface excluded', selected)
+        for fragment in ('## A', '### A.1', 'nested A body', '## B', '## C', '## D', '## E'):
+            self.assertIn(fragment, selected)
+        self.assertNotIn('## F', selected)
+        self.assertNotIn('F must be excluded', selected)
+
+    def test_request_composition_uses_persona_five_and_exact_prompt(self):
+        system_text, prompt_text = build_chunk_prompt(
+            self.source,
+            persona_text=self.PERSONA,
+        )
+        self.assertIn('## A', system_text)
+        self.assertIn('### A.1', system_text)
+        self.assertNotIn('## F', system_text)
+        self.assertIn(ACCEPTED_PROMPT, system_text)
+        self.assertIn('FROZEN EVIDENCE BEGIN\nfrozen evidence\nFROZEN EVIDENCE END', prompt_text)
+        self.assertNotIn('## A', prompt_text)
+
+    def test_default_persona_reader_is_runtime_chat_persona_store(self):
+        persona_store = ModuleType('chat.persona_store')
+        persona_store.read_persona = Mock(return_value=self.PERSONA)
+        with patch.dict(sys.modules, {'chat.persona_store': persona_store}):
+            build_chunk_prompt(self.source)
+        persona_store.read_persona.assert_called_once_with()
+
+    def test_fewer_than_five_sections_fail_closed(self):
+        with self.assertRaises(PersonaContractError):
+            select_persona_sections('## A\n## B\n## C\n## D\n')
+
+
 class GenerationTests(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(':memory:')
@@ -231,6 +283,7 @@ class GenerationTests(unittest.TestCase):
             measurement_semantics=MEASUREMENT_SEMANTICS,
         )
         self.authority = SimpleNamespace(provider='claude_code', model_identity='model-A')
+        self.persona_text = PromptContractTests.PERSONA
         self.requests = []
         self.calls = 0
 
@@ -257,13 +310,14 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(authority.model_identity, 'model-A')
         return self.result()
 
-    def run_generation(self, *, rows_provider=None, generate_fn=None, capture=None):
+    def run_generation(self, *, rows_provider=None, generate_fn=None, capture=None, persona_reader=None):
         return generate_continuity_chunk(
             self.conn, self.job.generation_job_id,
             rows_provider=rows_provider or (lambda: self.rows),
             capture_authority=capture or self.capture,
             generate_fn=generate_fn or self.generate,
             request_factory=self.request_factory,
+            persona_reader=persona_reader or (lambda: self.persona_text),
         )
 
     def test_primary_authority_capture_once_and_retry_is_frozen(self):
@@ -396,10 +450,59 @@ class GenerationTests(unittest.TestCase):
         second = enqueue_generation_job(
             self.conn, self.candidate, self.snapshot,
             generator_policy_version=GENERATOR_POLICY_VERSION,
-            prompt_policy_version='continuity_chunk_prompt_v2',
+            prompt_policy_version='continuity_chunk_prompt_v3',
             measurement_semantics=MEASUREMENT_SEMANTICS,
         )
         self.assertNotEqual(second.generation_job_id, self.job.generation_job_id)
+
+    def test_prompt_policy_version_is_v2(self):
+        self.assertEqual(PROMPT_POLICY_VERSION, 'continuity_chunk_prompt_v2')
+        self.assertEqual(self.job.prompt_policy_version, PROMPT_POLICY_VERSION)
+
+    def test_old_v1_job_fails_closed_before_model_or_publish(self):
+        self.conn.execute(
+            "UPDATE continuity_generation_jobs SET prompt_policy_version='continuity_chunk_prompt_v1' WHERE generation_job_id=?",
+            (self.job.generation_job_id,),
+        )
+        self.conn.commit()
+        calls = []
+        with self.assertRaises(ContinuityStoreConflict):
+            self.run_generation(generate_fn=lambda request, authority: calls.append(1))
+        self.assertEqual(calls, [])
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM continuity_chunks').fetchone()[0], 0)
+        job = load_generation_job(self.conn, self.job.generation_job_id)
+        self.assertEqual(job.status, 'pending')
+        self.assertEqual(job.prompt_policy_version, 'continuity_chunk_prompt_v1')
+
+    def test_persona_failure_marks_job_failed_without_model_or_publish(self):
+        calls = []
+        with self.assertRaises(PersonaContractError):
+            self.run_generation(
+                persona_reader=lambda: '## A\n## B\n## C\n## D\n',
+                generate_fn=lambda request, authority: calls.append(1),
+            )
+        self.assertEqual(calls, [])
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM continuity_chunks').fetchone()[0], 0)
+        job = load_generation_job(self.conn, self.job.generation_job_id)
+        self.assertEqual(job.status, 'failed')
+        self.assertEqual(job.error_code, 'persona_contract_error')
+
+    def test_persona_reader_error_marks_job_failed_without_model_or_publish(self):
+        calls = []
+
+        def broken_reader():
+            raise OSError('runtime persona unavailable')
+
+        with self.assertRaises(PersonaContractError):
+            self.run_generation(
+                persona_reader=broken_reader,
+                generate_fn=lambda request, authority: calls.append(1),
+            )
+        self.assertEqual(calls, [])
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM continuity_chunks').fetchone()[0], 0)
+        job = load_generation_job(self.conn, self.job.generation_job_id)
+        self.assertEqual(job.status, 'failed')
+        self.assertEqual(job.error_code, 'persona_contract_error')
 
     def test_output_token_estimate_is_deterministic(self):
         result = self.result('中文 deterministic')
