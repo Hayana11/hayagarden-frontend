@@ -322,19 +322,15 @@ def _member_overlap(left: SourceMember, right: SourceMember) -> bool:
 
 def _recent_raw_suffix(
     expected: Sequence[SourceMember],
-    raw_keys: set[tuple[Any, ...]],
     target: int,
 ) -> set[tuple[Any, ...]]:
-    """Return a whole-member suffix, walking newest source toward older source."""
+    """Return the expected newest whole-member suffix for the raw priority."""
     if target <= 0:
         return set()
     selected: set[tuple[Any, ...]] = set()
     estimate = 0
     for member in reversed(tuple(expected)):
-        key = _member_key(member)
-        if key not in raw_keys:
-            break
-        selected.add(key)
+        selected.add(_member_key(member))
         estimate += max(0, int(member.logical_size))
         if estimate >= target:
             break
@@ -391,25 +387,23 @@ def _apply_budget(
         return tuple(recent), 'overflow'
 
     remaining = budget_policy.usable_budget - recent_cost
-    selected_older: list[ContextRepresentation] = []
-    for item in sorted(
+    ordered_older = sorted(
         older,
         key=lambda value: (
             value.source_seqs[0] if value.source_seqs else 0,
             value.source_seqs[-1] if value.source_seqs else 0,
             value.representation_id,
         ),
-        reverse=True,
-    ):
-        cost = int(item.estimated_tokens)
-        if cost <= remaining:
-            selected_older.append(item)
-            remaining -= cost
-        else:
-            exclusions.append(_budget_exclusion(
-                item,
-                'older representation excluded from the remaining budget',
-            ))
+    )
+    selected_older = list(ordered_older)
+    older_cost = sum(int(item.estimated_tokens) for item in selected_older)
+    while selected_older and older_cost > remaining:
+        item = selected_older.pop(0)
+        older_cost -= int(item.estimated_tokens)
+        exclusions.append(_budget_exclusion(
+            item,
+            'oldest older representation excluded from the remaining budget',
+        ))
     return tuple(recent) + tuple(selected_older), 'fit'
 
 
@@ -446,7 +440,6 @@ def build_context_plan(
 
     recent_raw_keys = _recent_raw_suffix(
         expected,
-        raw_keys,
         budget_policy.recent_raw_target if budget_policy else 0,
     )
 
