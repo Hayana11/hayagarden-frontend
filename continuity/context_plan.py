@@ -495,7 +495,7 @@ def _apply_budget(
     recent_raw_keys: set[tuple[Any, ...]],
     exclusions: list[ContextPlanExclusion],
 ) -> tuple[tuple[ContextRepresentation, ...], BudgetStatus]:
-    """Apply reserve, recent-raw priority, then newest-first older selection."""
+    """Apply reserve, recent-raw priority, then oldest-first trimming."""
     if budget_policy is None:
         return tuple(representations), 'unbounded'
 
