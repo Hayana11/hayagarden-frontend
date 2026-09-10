@@ -82,10 +82,6 @@ class ContextPlanExclusion:
     detail: str
     representation_id: str | None = None
 
-    @property
-    def reason(self) -> str:
-        return self.code
-
 
 @dataclass(frozen=True)
 class ContextRepresentation:
