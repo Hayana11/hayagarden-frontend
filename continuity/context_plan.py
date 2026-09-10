@@ -23,6 +23,7 @@ from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v
 
 
 RepresentationKind = Literal['raw', 'chunk']
+BudgetStatus = Literal['unbounded', 'fit', 'overflow', 'blocked']
 
 
 def _canonical(value: object) -> str:
@@ -76,6 +77,34 @@ class ContextChunkBinding:
 
 
 @dataclass(frozen=True)
+class ContextBudgetPolicy:
+    """Explicit, pure budget inputs for one shadow ContextPlan."""
+
+    token_budget: int
+    reserve_budget: int = 0
+    recent_raw_target: int = 0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ('token_budget', self.token_budget),
+            ('reserve_budget', self.reserve_budget),
+            ('recent_raw_target', self.recent_raw_target),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f'invalid_budget_policy:{name}_must_be_integer')
+        if self.token_budget <= 0:
+            raise ValueError('invalid_budget_policy:token_budget_must_be_positive')
+        if self.reserve_budget < 0:
+            raise ValueError('invalid_budget_policy:reserve_budget_must_be_non_negative')
+        if self.recent_raw_target < 0:
+            raise ValueError('invalid_budget_policy:recent_raw_target_must_be_non_negative')
+
+    @property
+    def usable_budget(self) -> int:
+        return self.token_budget - self.reserve_budget
+
+
+@dataclass(frozen=True)
 class ContextPlanExclusion:
     code: str
     source_ref: str
@@ -112,10 +141,56 @@ class ContextPlan:
     exclusions: tuple[ContextPlanExclusion, ...]
     gaps: tuple[ContextPlanExclusion, ...]
     measurement_semantics: str = MEASUREMENT_SEMANTICS
+    budget_policy: ContextBudgetPolicy | None = None
+    budget_status: BudgetStatus = 'unbounded'
+    recent_raw_source_seqs: tuple[int, ...] = ()
 
     @property
     def valid(self) -> bool:
-        return not self.gaps
+        return not self.gaps and self.budget_status not in ('overflow', 'blocked')
+
+    @property
+    def token_budget(self) -> int | None:
+        return self.budget_policy.token_budget if self.budget_policy else None
+
+    @property
+    def reserve_budget(self) -> int | None:
+        return self.budget_policy.reserve_budget if self.budget_policy else None
+
+    @property
+    def usable_budget(self) -> int | None:
+        return self.budget_policy.usable_budget if self.budget_policy else None
+
+    @property
+    def selected_token_estimate(self) -> int:
+        return sum(int(item.estimated_tokens) for item in self.representations)
+
+    @property
+    def recent_raw_token_estimate(self) -> int:
+        recent = frozenset(int(seq) for seq in self.recent_raw_source_seqs)
+        return sum(
+            int(item.estimated_tokens)
+            for item in self.representations
+            if item.kind == 'raw' and frozenset(item.source_seqs).issubset(recent)
+        )
+
+    @property
+    def older_representation_token_estimate(self) -> int:
+        return self.selected_token_estimate - self.recent_raw_token_estimate
+
+    @property
+    def remaining_budget(self) -> int | None:
+        if self.usable_budget is None:
+            return None
+        return self.usable_budget - self.selected_token_estimate
+
+    @property
+    def budget_overflow(self) -> bool:
+        return self.budget_status == 'overflow'
+
+    @property
+    def budget_exclusions(self) -> tuple[ContextPlanExclusion, ...]:
+        return tuple(item for item in self.exclusions if item.code == 'budget_excluded')
 
     @property
     def covered_source_members(self) -> tuple[SourceMember, ...]:
@@ -194,9 +269,23 @@ def _identity_payload(
     selected: Sequence[ContextRepresentation],
     exclusions: Sequence[ContextPlanExclusion],
     gaps: Sequence[ContextPlanExclusion],
+    *,
+    budget_policy: ContextBudgetPolicy | None = None,
+    budget_status: BudgetStatus = 'unbounded',
+    recent_raw_source_seqs: Sequence[int] = (),
 ) -> dict[str, Any]:
     return {
         'measurement_semantics': MEASUREMENT_SEMANTICS,
+        'budget_policy': (
+            {
+                'token_budget': budget_policy.token_budget,
+                'reserve_budget': budget_policy.reserve_budget,
+                'recent_raw_target': budget_policy.recent_raw_target,
+            }
+            if budget_policy is not None else None
+        ),
+        'budget_status': budget_status,
+        'recent_raw_source_seqs': [int(seq) for seq in recent_raw_source_seqs],
         'source_members': [_member_identity(member) for member in expected],
         'representations': [
             {
@@ -231,11 +320,105 @@ def _member_overlap(left: SourceMember, right: SourceMember) -> bool:
     return True
 
 
+def _recent_raw_suffix(
+    expected: Sequence[SourceMember],
+    raw_keys: set[tuple[Any, ...]],
+    target: int,
+) -> set[tuple[Any, ...]]:
+    """Return a whole-member suffix, walking newest source toward older source."""
+    if target <= 0:
+        return set()
+    selected: set[tuple[Any, ...]] = set()
+    estimate = 0
+    for member in reversed(tuple(expected)):
+        key = _member_key(member)
+        if key not in raw_keys:
+            break
+        selected.add(key)
+        estimate += max(0, int(member.logical_size))
+        if estimate >= target:
+            break
+    return selected
+
+
+def _budget_exclusion(representation: ContextRepresentation, detail: str) -> ContextPlanExclusion:
+    return _exclusion(
+        'budget_excluded',
+        detail,
+        source_ref=','.join(representation.source_refs),
+        representation_id=representation.representation_id,
+    )
+
+
+def _apply_budget(
+    representations: Sequence[ContextRepresentation],
+    *,
+    budget_policy: ContextBudgetPolicy | None,
+    recent_raw_keys: set[tuple[Any, ...]],
+    exclusions: list[ContextPlanExclusion],
+) -> tuple[tuple[ContextRepresentation, ...], BudgetStatus]:
+    """Apply reserve, recent-raw priority, then newest-first older selection."""
+    if budget_policy is None:
+        return tuple(representations), 'unbounded'
+
+    if budget_policy.usable_budget <= 0:
+        exclusions.append(_exclusion(
+            'reserve_exceeds_budget',
+            'reserve_budget leaves no usable context budget',
+        ))
+        exclusions.extend(
+            _budget_exclusion(item, 'representation excluded because reserve consumes the budget')
+            for item in representations
+        )
+        return (), 'blocked'
+
+    recent = tuple(
+        item for item in representations
+        if item.kind == 'raw'
+        and bool(set(_member_key(member) for member in item.source_members) & recent_raw_keys)
+    )
+    older = tuple(item for item in representations if item not in recent)
+    recent_cost = sum(int(item.estimated_tokens) for item in recent)
+    if recent_cost > budget_policy.usable_budget:
+        exclusions.append(_exclusion(
+            'budget_overflow',
+            'recent raw suffix alone exceeds usable budget',
+        ))
+        exclusions.extend(
+            _budget_exclusion(item, 'older representation excluded after recent raw overflow')
+            for item in older
+        )
+        return tuple(recent), 'overflow'
+
+    remaining = budget_policy.usable_budget - recent_cost
+    selected_older: list[ContextRepresentation] = []
+    for item in sorted(
+        older,
+        key=lambda value: (
+            value.source_seqs[0] if value.source_seqs else 0,
+            value.source_seqs[-1] if value.source_seqs else 0,
+            value.representation_id,
+        ),
+        reverse=True,
+    ):
+        cost = int(item.estimated_tokens)
+        if cost <= remaining:
+            selected_older.append(item)
+            remaining -= cost
+        else:
+            exclusions.append(_budget_exclusion(
+                item,
+                'older representation excluded from the remaining budget',
+            ))
+    return tuple(recent) + tuple(selected_older), 'fit'
+
+
 def build_context_plan(
     expected_members: Sequence[SourceMember],
     *,
     raw_members: Sequence[SourceMember] | None = None,
     chunks: Sequence[ContextChunkBinding] = (),
+    budget_policy: ContextBudgetPolicy | None = None,
 ) -> ContextPlan:
     """Select exact raw/chunk representations for one required source set."""
     expected = _ordered(expected_members)
@@ -260,6 +443,12 @@ def build_context_plan(
             ))
         else:
             raw_keys.add(key)
+
+    recent_raw_keys = _recent_raw_suffix(
+        expected,
+        raw_keys,
+        budget_policy.recent_raw_target if budget_policy else 0,
+    )
 
     valid_chunks: list[tuple[ContextRepresentation, set[tuple[Any, ...]]]] = []
     for binding in tuple(chunks):
@@ -345,18 +534,27 @@ def build_context_plan(
     for index, (representation, member_keys) in enumerate(valid_chunks):
         if index in conflicting:
             continue
+        if member_keys & recent_raw_keys:
+            exclusions.append(_exclusion(
+                'recent_raw_priority',
+                'chunk excluded so the recent raw suffix remains raw',
+                representation_id=representation.representation_id,
+            ))
+            continue
         selected_chunks.append(representation)
         covered_by_chunk.update(member_keys)
 
     selected_raw_keys = raw_keys - covered_by_chunk
     raw_selected: list[ContextRepresentation] = []
     current: list[SourceMember] = []
+    current_is_recent: bool | None = None
     for member in expected:
         key = _member_key(member)
         if key not in selected_raw_keys:
             if current:
                 raw_selected.append(_raw_representation(current))
                 current = []
+                current_is_recent = None
             if key in covered_by_chunk and key in raw_keys:
                 exclusions.append(_exclusion(
                     'covered_by_chunk',
@@ -364,6 +562,11 @@ def build_context_plan(
                     source_ref=member.source_ref,
                 ))
             continue
+        is_recent = key in recent_raw_keys
+        if current and current_is_recent != is_recent:
+            raw_selected.append(_raw_representation(current))
+            current = []
+        current_is_recent = is_recent
         current.append(member)
     if current:
         raw_selected.append(_raw_representation(current))
@@ -377,9 +580,10 @@ def build_context_plan(
             representation.representation_id,
         ),
     )
+    coverage_selected = tuple(selected)
     selected_keys = {
         _member_key(member)
-        for representation in selected
+        for representation in coverage_selected
         for member in representation.source_members
     }
     gaps = [
@@ -392,7 +596,32 @@ def build_context_plan(
         if _member_key(member) not in selected_keys
     ]
 
-    identity = _identity_payload(expected, selected, exclusions, gaps)
+    selected, budget_status = _apply_budget(
+        coverage_selected,
+        budget_policy=budget_policy,
+        recent_raw_keys=recent_raw_keys,
+        exclusions=exclusions,
+    )
+    selected = tuple(sorted(
+        selected,
+        key=lambda representation: (
+            representation.source_seqs[0] if representation.source_seqs else 0,
+            representation.source_seqs[-1] if representation.source_seqs else 0,
+            representation.kind,
+            representation.representation_id,
+        ),
+    ))
+    identity = _identity_payload(
+        expected,
+        selected,
+        exclusions,
+        gaps,
+        budget_policy=budget_policy,
+        budget_status=budget_status,
+        recent_raw_source_seqs=tuple(
+            sorted(int(member.seq) for member in expected if _member_key(member) in recent_raw_keys)
+        ),
+    )
     digest = _sha256(identity)
     return ContextPlan(
         plan_id=f'plan:{digest[:32]}',
@@ -405,10 +634,16 @@ def build_context_plan(
             key=lambda item: (item.code, item.source_ref, item.representation_id or '', item.detail),
         )),
         gaps=tuple(sorted(gaps, key=lambda item: (item.source_ref, item.code))),
+        budget_policy=budget_policy,
+        budget_status=budget_status,
+        recent_raw_source_seqs=tuple(
+            sorted(int(member.seq) for member in expected if _member_key(member) in recent_raw_keys)
+        ),
     )
 
 
 __all__ = [
+    'ContextBudgetPolicy',
     'ContextChunkBinding',
     'ContextPlan',
     'ContextPlanExclusion',
