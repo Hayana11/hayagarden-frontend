@@ -793,6 +793,7 @@ __all__ = [
     'ContextPlanExclusion',
     'ContextRepresentation',
     'ContextSection',
+    'SectionKind',
     'build_context_plan',
 ]
 
