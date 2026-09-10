@@ -591,6 +591,31 @@ class ContextPlanTests(unittest.TestCase):
         )
         self.assertNotEqual(first.plan_hash, changed.plan_hash)
 
+    def test_fixed_section_input_order_does_not_change_plan_identity(self):
+        sections = (
+            self._section('invariant_system'),
+            self._section('accepted_state'),
+            self._section('accepted_open_loops'),
+            self._section('current_request'),
+        )
+        first = build_context_plan(self.members, fixed_sections=sections)
+        reordered = build_context_plan(
+            self.members,
+            fixed_sections=(sections[3], sections[1], sections[0], sections[2]),
+        )
+        self.assertEqual(first.ordered_sections, reordered.ordered_sections)
+        self.assertEqual(first.plan_hash, reordered.plan_hash)
+
+    def test_history_section_metadata_matches_representation(self):
+        plan = build_context_plan(self.members)
+        by_id = {item.representation_id: item for item in plan.representations}
+        for section in plan.ordered_sections:
+            if section.representation_id is None:
+                continue
+            representation = by_id[section.representation_id]
+            self.assertEqual(section.content_hash, representation.source_hash)
+            self.assertEqual(section.estimated_tokens, representation.estimated_tokens)
+
     def test_section_text_is_not_stored_or_used_for_identity(self):
         section = self._section('accepted_state', content_hash='state:a')
         plan = build_context_plan(self.members, fixed_sections=(section,))
