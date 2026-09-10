@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from continuity.contracts import SourceMember, SourceSnapshot
+from continuity.contracts import SourceMember, SourceSnapshot, candidate_source_revision
 from continuity.coverage import source_hash
 from continuity.sealing import CandidateBlock
 from continuity.sources import (
@@ -77,21 +77,7 @@ def _render_value(value: Any) -> str:
     return str(value)
 
 
-def _candidate_source_revision(members: Iterable[SourceMember]) -> str:
-    ordered = tuple(members)
-    return _sha256({
-        'seqs': tuple(int(member.seq) for member in ordered),
-        'refs': tuple(member.source_ref for member in ordered),
-        'revisions': tuple(member.source_revision for member in ordered),
-        'measurements': [
-            {
-                'logical_size': int(member.logical_size),
-                'created_at': member.created_at,
-                'branch_id': member.branch_id,
-            }
-            for member in ordered
-        ],
-    })
+_candidate_source_revision = candidate_source_revision
 
 
 def _rows_by_id(rows: Iterable[Any]) -> dict[int, Any]:
