@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 from continuity.context_plan import (
+    ContextBudgetPolicy,
     ContextChunkBinding,
     ContextPlanExclusion,
     _identity_payload,
@@ -243,6 +244,159 @@ class ContextPlanTests(unittest.TestCase):
             plan.gaps,
         )
         self.assertEqual(_sha256(first), _sha256(second))
+
+    def test_recent_raw_target_selects_newest_whole_member_suffix(self):
+        members = tuple(_member(index, logical_size=10) for index in range(3))
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=50,
+                reserve_budget=0,
+                recent_raw_target=15,
+            ),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2))
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(0,), (1, 2)],
+        )
+        self.assertEqual(plan.recent_raw_token_estimate, 20)
+
+    def test_recent_raw_wins_over_chunk_covering_newest_range(self):
+        members = tuple(_member(index, logical_size=10) for index in range(3))
+        binding = _binding(members, seqs=(1, 2), body='x' * 8)
+        plan = build_context_plan(
+            members,
+            chunks=(binding,),
+            budget_policy=ContextBudgetPolicy(token_budget=50, recent_raw_target=15),
+        )
+        self.assertEqual([item.kind for item in plan.representations], ['raw', 'raw'])
+        self.assertEqual([item.source_seqs for item in plan.representations], [(0,), (1, 2)])
+        self.assertTrue(any(item.code == 'recent_raw_priority' for item in plan.exclusions))
+
+    def test_older_valid_chunk_remains_after_recent_raw_priority(self):
+        members = tuple(_member(index, logical_size=4) for index in range(3))
+        binding = _binding(members, seqs=(0,), body='x' * 8)
+        plan = build_context_plan(
+            members,
+            chunks=(binding,),
+            budget_policy=ContextBudgetPolicy(token_budget=10, recent_raw_target=4),
+        )
+        self.assertTrue(plan.valid)
+        self.assertEqual(
+            [(item.kind, item.source_seqs) for item in plan.representations],
+            [('chunk', (0,)), ('raw', (1,)), ('raw', (2,))],
+        )
+        self.assertEqual(plan.selected_token_estimate, 10)
+        self.assertEqual(plan.remaining_budget, 0)
+
+    def test_oldest_older_representation_drops_first(self):
+        members = tuple(_member(index, logical_size=5) for index in range(4))
+        bindings = tuple(
+            _binding(members, seqs=(index,), chunk_id=f'chunk:{index}', body='x' * 8)
+            for index in range(3)
+        )
+        plan = build_context_plan(
+            members,
+            chunks=bindings,
+            budget_policy=ContextBudgetPolicy(token_budget=10, recent_raw_target=5),
+        )
+        self.assertEqual([item.source_seqs for item in plan.representations], [(1,), (2,), (3,)])
+        self.assertTrue(any(
+            item.code == 'budget_excluded' and item.representation_id == 'chunk:chunk:0'
+            for item in plan.exclusions
+        ))
+        self.assertFalse(any(item.code == 'coverage_gap' for item in plan.gaps))
+
+    def test_budget_exclusion_is_not_coverage_gap(self):
+        members = tuple(_member(index, logical_size=5) for index in range(3))
+        bindings = tuple(
+            _binding(members, seqs=(index,), chunk_id=f'chunk:{index}', body='x' * 8)
+            for index in range(2)
+        )
+        plan = build_context_plan(
+            members,
+            chunks=bindings,
+            budget_policy=ContextBudgetPolicy(token_budget=5, recent_raw_target=0),
+        )
+        self.assertTrue(plan.valid)
+        self.assertTrue(plan.budget_exclusions)
+        self.assertEqual(plan.gaps, ())
+
+    def test_true_missing_representation_remains_coverage_gap(self):
+        members = tuple(_member(index, logical_size=5) for index in range(3))
+        plan = build_context_plan(
+            members,
+            raw_members=(members[0],),
+            budget_policy=ContextBudgetPolicy(token_budget=100, recent_raw_target=0),
+        )
+        self.assertFalse(plan.valid)
+        self.assertEqual(
+            [item.source_ref for item in plan.gaps],
+            [members[1].source_ref, members[2].source_ref],
+        )
+        self.assertFalse(plan.budget_exclusions)
+
+    def test_recent_raw_alone_overflow_is_explicit(self):
+        members = tuple(_member(index, logical_size=10) for index in range(2))
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=15, recent_raw_target=15),
+        )
+        self.assertFalse(plan.valid)
+        self.assertTrue(plan.budget_overflow)
+        self.assertEqual(plan.budget_status, 'overflow')
+        self.assertEqual(plan.recent_raw_token_estimate, 20)
+        self.assertEqual(plan.remaining_budget, -5)
+        self.assertTrue(any(item.code == 'budget_overflow' for item in plan.exclusions))
+
+    def test_reserve_at_total_budget_is_explicitly_blocked(self):
+        members = tuple(_member(index, logical_size=5) for index in range(2))
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=10, reserve_budget=10),
+        )
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'blocked')
+        self.assertEqual(plan.usable_budget, 0)
+        self.assertTrue(any(item.code == 'reserve_exceeds_budget' for item in plan.exclusions))
+
+    def test_oversize_newest_member_is_kept_whole(self):
+        members = (
+            _member(0, logical_size=3),
+            _member(1, logical_size=50),
+        )
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=100, recent_raw_target=10),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (1,))
+        self.assertEqual([item.source_seqs for item in plan.representations], [(0,), (1,)])
+        self.assertEqual(plan.recent_raw_token_estimate, 50)
+
+    def test_budget_policy_is_part_of_deterministic_identity(self):
+        members = tuple(_member(index, logical_size=3) for index in range(3))
+        first = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=10, recent_raw_target=3),
+        )
+        second = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=10, recent_raw_target=3),
+        )
+        changed = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(token_budget=11, recent_raw_target=3),
+        )
+        self.assertEqual(first.plan_id, second.plan_id)
+        self.assertEqual(first.plan_hash, second.plan_hash)
+        self.assertNotEqual(first.plan_hash, changed.plan_hash)
+
+    def test_invalid_policy_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, 'token_budget_must_be_positive'):
+            ContextBudgetPolicy(token_budget=0)
+        with self.assertRaisesRegex(ValueError, 'reserve_budget_must_be_non_negative'):
+            ContextBudgetPolicy(token_budget=10, reserve_budget=-1)
 
 
 if __name__ == '__main__':
