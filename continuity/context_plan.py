@@ -257,7 +257,11 @@ class ContextPlan:
     def remaining_budget(self) -> int | None:
         if self.usable_budget is None:
             return None
-        return self.usable_budget - self.selected_token_estimate
+        return (
+            self.usable_budget
+            - self.fixed_section_token_estimate
+            - self.selected_token_estimate
+        )
 
     @property
     def budget_overflow(self) -> bool:
@@ -493,22 +497,42 @@ def _apply_budget(
     *,
     budget_policy: ContextBudgetPolicy | None,
     recent_raw_keys: set[tuple[Any, ...]],
+    fixed_token_estimate: int,
     exclusions: list[ContextPlanExclusion],
 ) -> tuple[tuple[ContextRepresentation, ...], BudgetStatus]:
-    """Apply reserve, recent-raw priority, then oldest-first trimming."""
+    """Apply fixed/reserve costs, recent-raw priority, then oldest-first trimming."""
     if budget_policy is None:
         return tuple(representations), 'unbounded'
 
-    if budget_policy.usable_budget <= 0:
+    usable_budget = budget_policy.usable_budget
+    if usable_budget <= 0:
         exclusions.append(_exclusion(
             'reserve_exceeds_budget',
             'reserve_budget leaves no usable context budget',
         ))
+        if fixed_token_estimate > usable_budget:
+            exclusions.append(_exclusion(
+                'fixed_sections_exceed_budget',
+                'fixed sections exceed the usable context budget',
+            ))
         exclusions.extend(
             _budget_exclusion(item, 'representation excluded because reserve consumes the budget')
             for item in representations
         )
         return (), 'blocked'
+
+    if fixed_token_estimate > usable_budget:
+        exclusions.append(_exclusion(
+            'fixed_sections_exceed_budget',
+            'fixed sections exceed the usable context budget',
+        ))
+        exclusions.extend(
+            _budget_exclusion(item, 'representation excluded because fixed sections consume the budget')
+            for item in representations
+        )
+        return (), 'blocked'
+
+    history_budget = usable_budget - fixed_token_estimate
 
     recent = tuple(
         item for item in representations
@@ -517,7 +541,7 @@ def _apply_budget(
     )
     older = tuple(item for item in representations if item not in recent)
     recent_cost = sum(int(item.estimated_tokens) for item in recent)
-    if recent_cost > budget_policy.usable_budget:
+    if recent_cost > history_budget:
         exclusions.append(_exclusion(
             'budget_overflow',
             'recent raw suffix alone exceeds usable budget',
@@ -528,7 +552,7 @@ def _apply_budget(
         )
         return tuple(recent), 'overflow'
 
-    remaining = budget_policy.usable_budget - recent_cost
+    remaining = history_budget - recent_cost
     ordered_older = sorted(
         older,
         key=lambda value: (
@@ -737,6 +761,10 @@ def build_context_plan(
         coverage_selected,
         budget_policy=budget_policy,
         recent_raw_keys=recent_raw_keys,
+        fixed_token_estimate=sum(
+            int(section.estimated_tokens)
+            for section in accepted_fixed_sections.values()
+        ),
         exclusions=exclusions,
     )
     selected = tuple(sorted(
