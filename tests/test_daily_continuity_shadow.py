@@ -198,7 +198,7 @@ class DailyContinuityShadowTests(unittest.TestCase):
         first = self._run().plan.plan_hash
         rows = _history_rows() + [
             _row(5, 'hayana', 'current request', '2026-09-09 05:00:00',
-                 attachments='[{"type":"image","url":"/static/uploads/images/a.png","name":"a.png"}]'),
+                 attachments='[{"type":"image","url":"/static/uploads/a.png","name":"a.png"}]'),
         ]
         _write_source(self.source_path, rows)
         second_result = self._run()
