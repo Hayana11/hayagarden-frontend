@@ -2729,9 +2729,11 @@ def _observe_continuity_shadow(
                         'chunk_surface': str(result.chunk_surface),
                         'source_member_count': int(result.source_member_count),
                         'chunk_binding_count': int(result.chunk_binding_count),
-                        'installed_context_proven': True,
                     })
                     shadow_plan = result.plan
+                    observation['installed_context_proven'] = bool(
+                        shadow_plan is not None
+                    )
                     if shadow_plan is not None:
                         representations = tuple(shadow_plan.representations)
                         budget_policy = shadow_plan.budget_policy

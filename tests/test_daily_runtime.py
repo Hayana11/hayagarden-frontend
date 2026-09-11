@@ -3490,6 +3490,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                      'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
                      return_value=result,
                  ) as adapter, \
+                 mock.patch.object(dr.logger, 'info') as log, \
                  mock.patch('chat.cold_bootstrap_budget.cold_prompt_target', return_value=100), \
                  mock.patch('chat.cold_bootstrap_budget.cold_safety_margin', return_value=8):
                 resident, _events = self._stream(plan)
@@ -3505,7 +3506,9 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                 ['invariant_system'],
             )
             self.assertEqual(len(resident.sent_objects), 1)
-            self.assertEqual(self._observations(mock.Mock()), [])
+            self.assertTrue(
+                self._observations(log)[-1]['installed_context_proven'],
+            )
         finally:
             os.unlink(db)
 
@@ -3577,9 +3580,13 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                  mock.patch(
                      'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
                      return_value=unavailable,
-                 ) as adapter:
+                 ) as adapter, \
+                 mock.patch.object(dr.logger, 'info') as log:
                 resident, _events = self._stream(plan)
             adapter.assert_called_once()
+            self.assertFalse(
+                self._observations(log)[-1]['installed_context_proven'],
+            )
             self.assertEqual(len(resident.sent_objects), 1)
         finally:
             os.unlink(db)
@@ -3594,10 +3601,14 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                      'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
                      side_effect=RuntimeError('observer fault'),
                  ) as adapter, \
-                 mock.patch.object(dr.logger, 'exception') as log_exception:
+                 mock.patch.object(dr.logger, 'exception') as log_exception, \
+                 mock.patch.object(dr.logger, 'info') as log_info:
                 resident, _events = self._stream(plan)
             adapter.assert_called_once()
             log_exception.assert_called_once()
+            self.assertFalse(
+                self._observations(log_info)[-1]['installed_context_proven'],
+            )
             self.assertEqual(len(resident.sent_objects), 1)
         finally:
             os.unlink(db)
