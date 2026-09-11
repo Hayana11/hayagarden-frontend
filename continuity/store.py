@@ -901,6 +901,20 @@ def load_ready_chunk_for_job(
     return load_chunk(conn, str(row[0])) if row is not None else None
 
 
+def load_ready_chunks(conn: sqlite3.Connection) -> tuple[ContinuityChunk, ...]:
+    """Read every ready chunk in deterministic order without changing the store."""
+    rows = conn.execute(
+        "SELECT chunk_id FROM continuity_chunks WHERE status='ready' "
+        'ORDER BY chunk_id ASC'
+    ).fetchall()
+    chunks: list[ContinuityChunk] = []
+    for row in rows:
+        chunk = load_chunk(conn, str(row[0]))
+        if chunk is not None:
+            chunks.append(chunk)
+    return tuple(chunks)
+
+
 def publish_chunk_atomic(
     conn: sqlite3.Connection,
     *,
