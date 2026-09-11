@@ -24,8 +24,10 @@ from continuity.sources import (
     derive_autonomous_events,
     derive_completed_turns,
     evidence_ref,
+    is_formal_user_source_row,
 )
 from continuity.store import (
+    ContinuityStoreError,
     load_candidate,
     load_ready_chunks,
     load_snapshot,
@@ -220,6 +222,8 @@ def build_daily_continuity_shadow_plan(
             expected_members = build_source_members(turns, events)
         except (TypeError, ValueError):
             return _blocked('source_rows_unavailable')
+        if not is_formal_user_source_row(current_row):
+            return _blocked('invalid_current_request')
         try:
             current_request = _current_request_section(current_row)
         except (TypeError, ValueError):
@@ -232,7 +236,7 @@ def build_daily_continuity_shadow_plan(
         try:
             _check_store_schema(store_conn)
             bindings = _bindings(store_conn)
-        except (OSError, sqlite3.Error, TypeError, ValueError, _ChunkSurfaceUnavailable):
+        except (OSError, sqlite3.Error, TypeError, ValueError, ContinuityStoreError, _ChunkSurfaceUnavailable):
             return _blocked('chunk_surface_unavailable')
         finally:
             store_conn.close()
@@ -259,14 +263,8 @@ def build_daily_continuity_shadow_plan(
         return _failed()
 
 
-def build_daily_continuity_shadow(**kwargs: object) -> DailyContinuityShadowResult:
-    """Compatibility spelling for the explicit shadow-plan adapter."""
-    return build_daily_continuity_shadow_plan(**kwargs)  # type: ignore[arg-type]
-
-
 __all__ = [
     'DailyContinuityShadowResult',
-    'build_daily_continuity_shadow',
     'build_daily_continuity_shadow_plan',
 ]
 

@@ -187,7 +187,7 @@ def is_incomplete_source_row(row: Any) -> bool:
     return _explicitly_incomplete(row)
 
 
-def _is_formal_user(row: Any) -> bool:
+def is_formal_user_source_row(row: Any) -> bool:
     return _author(row) in _USER_AUTHORS and is_formal_chat_message(row)
 
 
@@ -279,7 +279,7 @@ def derive_completed_turns(
         assistants = []
 
     for row in ordered:
-        if _is_formal_user(row):
+        if is_formal_user_source_row(row):
             flush()
             current_user = row
         elif _is_formal_assistant(row) and current_user is not None:
@@ -355,7 +355,7 @@ def enumerate_candidate_source_refs(rows: Iterable[Any]) -> tuple[str, ...]:
         assistants = []
 
     for row in ordered:
-        if _is_formal_user(row):
+        if is_formal_user_source_row(row):
             flush()
             current_user = row
         elif _is_formal_assistant(row) and current_user is not None:

@@ -180,6 +180,27 @@ class DailyContinuityShadowTests(unittest.TestCase):
         self.assertEqual(result.source_member_count, 2)
         self.assertNotIn('turn:5:', [m.source_ref for m in result.plan.source_members])
 
+    def test_assistant_current_request_is_rejected(self):
+        rows = _history_rows() + [
+            _row(5, 'assistant', 'assistant current', '2026-09-09 05:00:00'),
+        ]
+        _write_source(self.source_path, rows)
+        result = self._run()
+        self.assertEqual(result.status, 'blocked')
+        self.assertEqual(result.error_code, 'invalid_current_request')
+        self.assertIsNone(result.plan)
+
+    def test_nonformal_user_current_request_is_rejected(self):
+        rows = _history_rows() + [
+            _row(5, 'hayana', 'system current', '2026-09-09 05:00:00',
+                 source_kind='system'),
+        ]
+        _write_source(self.source_path, rows)
+        result = self._run()
+        self.assertEqual(result.status, 'blocked')
+        self.assertEqual(result.error_code, 'invalid_current_request')
+        self.assertIsNone(result.plan)
+
     def test_members_match_r1_derivation_and_canonical_wake_filter(self):
         rows = _history_rows()
         expected = build_source_members(
@@ -202,6 +223,8 @@ class DailyContinuityShadowTests(unittest.TestCase):
         ]
         _write_source(self.source_path, rows)
         second_result = self._run()
+        self.assertEqual(second_result.status, 'ready')
+        self.assertIsNotNone(second_result.plan)
         self.assertNotEqual(first, second_result.plan.plan_hash)
         request = second_result.plan.ordered_sections[-1]
         self.assertEqual(request.source_ref, 'message:5')
@@ -279,6 +302,15 @@ class DailyContinuityShadowTests(unittest.TestCase):
         self.assertEqual(result.chunk_surface, 'ready')
         self.assertEqual(result.chunk_binding_count, 1)
         self.assertTrue(any(item.kind == 'chunk' for item in result.plan.representations))
+
+    def test_ready_id_without_chunk_is_unavailable(self):
+        self._materialize_ready_chunk()
+        with patch('continuity.store.load_chunk', return_value=None):
+            result = self._run()
+        self.assertEqual(result.status, 'blocked')
+        self.assertEqual(result.error_code, 'chunk_surface_unavailable')
+        self.assertEqual(result.chunk_surface, 'unavailable')
+        self.assertIsNone(result.plan)
 
     def test_explicit_budget_policy_is_required(self):
         result = build_daily_continuity_shadow_plan(

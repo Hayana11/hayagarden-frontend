@@ -910,8 +910,9 @@ def load_ready_chunks(conn: sqlite3.Connection) -> tuple[ContinuityChunk, ...]:
     chunks: list[ContinuityChunk] = []
     for row in rows:
         chunk = load_chunk(conn, str(row[0]))
-        if chunk is not None:
-            chunks.append(chunk)
+        if chunk is None:
+            raise ContinuityStoreError('ready chunk disappeared during read')
+        chunks.append(chunk)
     return tuple(chunks)
 
 
