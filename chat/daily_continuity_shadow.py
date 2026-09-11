@@ -191,7 +191,10 @@ def build_daily_continuity_shadow_plan(
         return _blocked('invalid_current_request')
 
     try:
-        accepted = tuple(accepted_fixed_sections)
+        try:
+            accepted = tuple(accepted_fixed_sections)
+        except (TypeError, ValueError):
+            return _blocked('invalid_fixed_sections')
         if any(not isinstance(section, ContextSection) for section in accepted):
             return _blocked('invalid_fixed_sections')
         if any(getattr(section, 'kind', None) == 'current_request' for section in accepted):
@@ -211,10 +214,16 @@ def build_daily_continuity_shadow_plan(
         finally:
             source_conn.close()
 
-        turns = derive_completed_turns(history_rows)
-        events = derive_autonomous_events(history_rows)
-        expected_members = build_source_members(turns, events)
-        current_request = _current_request_section(current_row)
+        try:
+            turns = derive_completed_turns(history_rows)
+            events = derive_autonomous_events(history_rows)
+            expected_members = build_source_members(turns, events)
+        except (TypeError, ValueError):
+            return _blocked('source_rows_unavailable')
+        try:
+            current_request = _current_request_section(current_row)
+        except (TypeError, ValueError):
+            return _blocked('invalid_current_request')
 
         try:
             store_conn = _read_only_connection(shadow_store_path)
