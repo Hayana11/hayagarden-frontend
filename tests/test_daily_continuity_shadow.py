@@ -246,7 +246,7 @@ class DailyContinuityShadowTests(unittest.TestCase):
             turns=derive_completed_turns(rows), events=derive_autonomous_events(rows),
             local_day='2026-09-09', source_watermark=3, created_at='2026-09-09T05:00:00Z',
         )
-        policy = SealingPolicy(version='test-policy', target_logical_size=1, target_turns=20)
+        policy = SealingPolicy(version='test-policy', target_logical_size=1, max_completed_turns=20)
         conn = sqlite3.connect(str(self.store_path))
         save_source_snapshot(conn, snapshot)
         job = enqueue_job(conn, snapshot, policy)
