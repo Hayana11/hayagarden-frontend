@@ -2511,6 +2511,270 @@ def _commit_capacity_swap_after_stdin_flush(plan: DailyTurnPlan) -> None:
     plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
 
 
+
+def _continuity_shadow_canonical(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+
+
+def _continuity_shadow_fingerprint(value: Any) -> tuple[str, int, str]:
+    if isinstance(value, str):
+        serialized = value
+        kind = 'text'
+    elif isinstance(value, (list, dict)):
+        serialized = _continuity_shadow_canonical(value)
+        kind = 'multimodal'
+    else:
+        serialized = _continuity_shadow_canonical(value)
+        kind = type(value).__name__
+    digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+    from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
+    estimate = int(estimate_tokens_heuristic_cjk1_ascii4_v1(serialized))
+    return digest, estimate, kind
+
+
+def _build_continuity_shadow_fixed_sections(
+    *,
+    plan: DailyTurnPlan,
+    resident: Any,
+    static_system: str,
+) -> tuple[Any, ...]:
+    from continuity.context_plan import ContextSection
+    from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
+
+    resident_system = getattr(resident, '_system_text', '')
+    if not isinstance(resident_system, str) or not resident_system.strip():
+        resident_system = str(static_system or '')
+    sections = []
+    system_hash = _sha256_text(resident_system)
+    sections.append(ContextSection(
+        kind='invariant_system',
+        source_ref='system:%s' % system_hash[:32],
+        content_hash=system_hash,
+        estimated_tokens=int(
+            estimate_tokens_heuristic_cjk1_ascii4_v1(resident_system)
+        ),
+    ))
+
+    assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
+    state = assembly.get('state')
+    if state:
+        state_serialized = state if isinstance(state, str) else _continuity_shadow_canonical(state)
+        state_hash = _sha256_text(state_serialized)
+        sections.append(ContextSection(
+            kind='accepted_state',
+            source_ref='state:%s' % state_hash[:32],
+            content_hash=state_hash,
+            estimated_tokens=int(
+                estimate_tokens_heuristic_cjk1_ascii4_v1(state_serialized)
+            ),
+        ))
+
+    handoff = assembly.get('day_handoff_content')
+    open_loops = handoff.get('open_loops') if isinstance(handoff, dict) else None
+    if open_loops:
+        loops_serialized = (
+            open_loops
+            if isinstance(open_loops, str)
+            else _continuity_shadow_canonical(open_loops)
+        )
+        loops_hash = _sha256_text(loops_serialized)
+        manifest = assembly.get('manifest')
+        manifest = manifest if isinstance(manifest, dict) else {}
+        identity = {
+            key: value
+            for key, value in (
+                ('source_day', handoff.get('source_day')),
+                ('source_sha256', handoff.get('source_sha256')),
+                ('source_last_message_id', handoff.get('source_last_message_id')),
+                ('source_epoch', handoff.get('source_epoch') or manifest.get('context_epoch')),
+                ('boundary_message_id', handoff.get('boundary_message_id') or manifest.get('boundary_message_id')),
+            )
+            if value not in (None, '')
+        }
+        identity_hash = _sha256_text(_continuity_shadow_canonical(identity))
+        sections.append(ContextSection(
+            kind='accepted_open_loops',
+            source_ref='handoff:%s' % identity_hash[:32],
+            content_hash=loops_hash,
+            estimated_tokens=int(
+                estimate_tokens_heuristic_cjk1_ascii4_v1(loops_serialized)
+            ),
+        ))
+    return tuple(sections)
+
+
+def _observe_continuity_shadow(
+    *,
+    plan: DailyTurnPlan,
+    resident: Any,
+    static_system: str,
+    content: Any,
+) -> None:
+    manifest = plan.manifest if isinstance(plan.manifest, dict) else {}
+    turn_kind = str(manifest.get('turn_kind') or '').strip()
+    if not turn_kind:
+        turn_kind = (
+            'respawn' if plan.is_respawn
+            else 'cold' if plan.is_cold
+            else 'hot'
+        )
+    observation = {
+        'event': 'continuity_shadow_observation',
+        'status': 'failed',
+        'error_code': 'unexpected_exception',
+        'request_id': str(plan.request_id),
+        'chat_id': str(plan.chat_id),
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+        'resident_generation': int(plan.resident_generation),
+        'turn_kind': turn_kind,
+        'production_content_hash': None,
+        'production_content_token_estimate': None,
+        'production_content_kind': None,
+        'source_member_count': 0,
+        'chunk_binding_count': 0,
+        'chunk_surface': 'unavailable',
+        'plan_id': None,
+        'plan_hash': None,
+        'plan_valid': None,
+        'budget_status': None,
+        'token_budget': None,
+        'reserve_budget': None,
+        'recent_raw_target': None,
+        'selected_token_estimate': None,
+        'fixed_section_token_estimate': None,
+        'total_token_estimate': None,
+        'remaining_budget': None,
+        'raw_representation_count': 0,
+        'chunk_representation_count': 0,
+        'gap_codes': [],
+        'exclusion_codes': [],
+        'runtime_transition_source': turn_kind,
+        'installed_context_proven': False,
+    }
+    try:
+        content_hash, content_tokens, content_kind = _continuity_shadow_fingerprint(content)
+        observation.update({
+            'production_content_hash': content_hash,
+            'production_content_token_estimate': content_tokens,
+            'production_content_kind': content_kind,
+        })
+        if turn_kind not in ('cold', 'respawn'):
+            observation.update({
+                'status': 'blocked',
+                'error_code': 'installed_context_policy_unmapped',
+            })
+        else:
+            store_path = str(os.environ.get(
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH', ''
+            ) or '').strip()
+            if not store_path:
+                observation.update({
+                    'status': 'blocked',
+                    'error_code': 'shadow_store_unconfigured',
+                })
+            else:
+                assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
+                manifest = assembly.get('manifest')
+                manifest = manifest if isinstance(manifest, dict) else {}
+                try:
+                    recent_raw_target = int(manifest.get('cold_history_budget'))
+                except (TypeError, ValueError):
+                    recent_raw_target = 0
+                if recent_raw_target <= 0:
+                    observation.update({
+                        'status': 'blocked',
+                        'error_code': 'budget_policy_unmapped',
+                    })
+                else:
+                    from chat.cold_bootstrap_budget import (
+                        cold_prompt_target,
+                        cold_safety_margin,
+                    )
+                    from chat.daily_continuity_shadow import (
+                        build_daily_continuity_shadow_plan,
+                    )
+                    from continuity.context_plan import ContextBudgetPolicy
+
+                    target = int(cold_prompt_target())
+                    reserve = int(cold_safety_margin())
+                    if target <= 0 or reserve < 0:
+                        raise ValueError('cold budget policy is invalid')
+                    policy = ContextBudgetPolicy(
+                        token_budget=target + reserve,
+                        reserve_budget=reserve,
+                        recent_raw_target=recent_raw_target,
+                    )
+                    result = build_daily_continuity_shadow_plan(
+                        source_db_path=plan.db_path or dc.DEFAULT_DB_PATH,
+                        shadow_store_path=store_path,
+                        current_user_message_id=int(plan.user_message_id),
+                        budget_policy=policy,
+                        accepted_fixed_sections=(
+                            _build_continuity_shadow_fixed_sections(
+                                plan=plan,
+                                resident=resident,
+                                static_system=static_system,
+                            )
+                        ),
+                    )
+                    observation.update({
+                        'status': str(result.status),
+                        'error_code': result.error_code,
+                        'chunk_surface': str(result.chunk_surface),
+                        'source_member_count': int(result.source_member_count),
+                        'chunk_binding_count': int(result.chunk_binding_count),
+                        'installed_context_proven': True,
+                    })
+                    shadow_plan = result.plan
+                    if shadow_plan is not None:
+                        representations = tuple(shadow_plan.representations)
+                        budget_policy = shadow_plan.budget_policy
+                        observation.update({
+                            'plan_id': shadow_plan.plan_id,
+                            'plan_hash': shadow_plan.plan_hash,
+                            'plan_valid': bool(shadow_plan.valid),
+                            'budget_status': shadow_plan.budget_status,
+                            'token_budget': shadow_plan.token_budget,
+                            'reserve_budget': shadow_plan.reserve_budget,
+                            'recent_raw_target': (
+                                budget_policy.recent_raw_target
+                                if budget_policy is not None else None
+                            ),
+                            'selected_token_estimate': shadow_plan.selected_token_estimate,
+                            'fixed_section_token_estimate': shadow_plan.fixed_section_token_estimate,
+                            'total_token_estimate': shadow_plan.total_token_estimate,
+                            'remaining_budget': shadow_plan.remaining_budget,
+                            'raw_representation_count': sum(
+                                1 for item in representations if item.kind == 'raw'
+                            ),
+                            'chunk_representation_count': sum(
+                                1 for item in representations if item.kind == 'chunk'
+                            ),
+                            'gap_codes': sorted({
+                                str(item.code) for item in shadow_plan.gaps
+                            }),
+                            'exclusion_codes': sorted({
+                                str(item.code) for item in shadow_plan.exclusions
+                            }),
+                        })
+    except Exception:
+        logger.exception('continuity shadow observation failed', exc_info=True)
+        observation.update({
+            'status': 'failed',
+            'error_code': 'unexpected_exception',
+        })
+    logger.info(
+        'continuity_shadow_observation %s',
+        _continuity_shadow_canonical(observation),
+    )
+
+
 def ensure_resident_and_stream(
     plan: DailyTurnPlan,
     *,
@@ -2798,6 +3062,13 @@ def ensure_resident_and_stream(
                     'resident send_turn signature unavailable for UH-A0',
                     error_code='uh_a0_turn_lease_unsupported',
                 )
+
+        _observe_continuity_shadow(
+            plan=plan,
+            resident=resident,
+            static_system=effective_system,
+            content=content,
+        )
 
         try:
             for evt, payload in resident.send_turn(content, **send_kwargs):

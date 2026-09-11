@@ -3388,5 +3388,314 @@ class DailyAttachmentReplayTests(unittest.TestCase):
         self.assertNotIn('carry body', content)
 
 
+
+class ContinuityShadowObservationTests(unittest.TestCase):
+    def setUp(self):
+        dr.reset_bindings_for_tests()
+
+    class _Resident(_FakeResident):
+        def __init__(self):
+            super().__init__()
+            self.sent_objects = []
+            self.sent_kwargs = []
+
+        def send_turn(self, content, commit_meta=None, turn_lease=None):
+            self.sent_objects.append(content)
+            self.sent_kwargs.append({
+                'commit_meta': commit_meta,
+                'turn_lease': turn_lease,
+            })
+            yield ('text', 'daily reply')
+            yield ('done', ('daily reply', '', {}, {}))
+
+    @staticmethod
+    def _result(*, surface='empty', status='ready', error_code=None, representations=()):
+        policy = types.SimpleNamespace(recent_raw_target=24)
+        plan = types.SimpleNamespace(
+            plan_id='shadow-plan',
+            plan_hash='shadow-hash',
+            valid=(status == 'ready'),
+            budget_status='fit' if status == 'ready' else 'blocked',
+            token_budget=100,
+            reserve_budget=8,
+            recent_raw_target=24,
+            budget_policy=policy,
+            selected_token_estimate=12,
+            fixed_section_token_estimate=5,
+            total_token_estimate=25,
+            remaining_budget=75,
+            representations=tuple(representations),
+            gaps=(),
+            exclusions=(),
+        )
+        return types.SimpleNamespace(
+            status=status,
+            error_code=error_code,
+            plan=plan if status == 'ready' else None,
+            chunk_surface=surface,
+            source_member_count=1,
+            chunk_binding_count=1 if surface == 'ready' else 0,
+        )
+
+    @staticmethod
+    def _observations(log):
+        out = []
+        for call in log.call_args_list:
+            if call.args and call.args[0] == 'continuity_shadow_observation %s':
+                out.append(json.loads(call.args[1]))
+        return out
+
+    def _plan(self, db, *, content='hello'):
+        _init_chat_messages(db)
+        uid = _insert(db, 'hayana', content, '2026-07-27 10:00:00')
+        plan = _prepare_turn(db, uid, static_system='STATIC')
+        plan.assembly.setdefault('manifest', {})['cold_history_budget'] = 24
+        return plan
+
+    def _stream(self, plan, *, env=None):
+        resident = self._Resident()
+        events = list(dr.stream_daily_resident_turn(
+            plan,
+            resident=resident,
+            env=env or {},
+            static_system='STATIC',
+        ))
+        return resident, events
+
+    def test_unconfigured_cold_shadow_is_blocked_and_send_once(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(dr.logger, 'info') as log, \
+                 mock.patch('chat.daily_continuity_shadow.build_daily_continuity_shadow_plan') as adapter:
+                resident, events = self._stream(plan)
+            adapter.assert_not_called()
+            self.assertEqual(len(resident.sent_objects), 1)
+            self.assertTrue(any(evt == 'done' for evt, _payload in events))
+            self.assertEqual(self._observations(log)[-1]['error_code'], 'shadow_store_unconfigured')
+        finally:
+            os.unlink(db)
+
+    def test_cold_ready_uses_explicit_path_policy_and_fixed_sections(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db, content='中文 production body')
+            result = self._result()
+            shadow_path = os.path.join(tempfile.gettempdir(), 'continuity-shadow-r4c.db')
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': shadow_path,
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=result,
+                 ) as adapter, \
+                 mock.patch('chat.cold_bootstrap_budget.cold_prompt_target', return_value=100), \
+                 mock.patch('chat.cold_bootstrap_budget.cold_safety_margin', return_value=8):
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            kwargs = adapter.call_args.kwargs
+            self.assertEqual(kwargs['source_db_path'], db)
+            self.assertEqual(kwargs['shadow_store_path'], shadow_path)
+            self.assertEqual(kwargs['budget_policy'].token_budget, 108)
+            self.assertEqual(kwargs['budget_policy'].reserve_budget, 8)
+            self.assertEqual(kwargs['budget_policy'].recent_raw_target, 24)
+            self.assertEqual(
+                [section.kind for section in kwargs['accepted_fixed_sections']],
+                ['invariant_system', 'accepted_state'],
+            )
+            self.assertEqual(len(resident.sent_objects), 1)
+            self.assertEqual(self._observations(mock.Mock()), [])
+        finally:
+            os.unlink(db)
+
+    def test_respawn_ready_chunk_and_final_send_once(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            plan.is_respawn = True
+            plan.is_cold = False
+            plan.manifest['turn_kind'] = 'respawn'
+            result = self._result(
+                surface='ready',
+                representations=(types.SimpleNamespace(kind='chunk'),),
+            )
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=result,
+                 ) as adapter:
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            self.assertEqual(len(resident.sent_objects), 1)
+        finally:
+            os.unlink(db)
+
+    def test_hot_and_capacity_swap_block_without_adapter(self):
+        for turn_kind in ('hot', 'capacity_swap'):
+            db = _tmp_db()
+            try:
+                plan = self._plan(db)
+                plan.is_cold = False
+                plan.is_respawn = False
+                plan.manifest['turn_kind'] = turn_kind
+                with mock.patch.dict(os.environ, {
+                    'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+                }, clear=False), \
+                     mock.patch(
+                         'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     ) as adapter, \
+                     mock.patch.object(dr.logger, 'info') as log:
+                    dr._observe_continuity_shadow(
+                        plan=plan,
+                        resident=self._Resident(),
+                        static_system='STATIC',
+                        content='hot body',
+                    )
+                adapter.assert_not_called()
+                self.assertEqual(
+                    self._observations(log)[-1]['error_code'],
+                    'installed_context_policy_unmapped',
+                )
+            finally:
+                os.unlink(db)
+
+    def test_unavailable_and_exception_are_fail_open(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            unavailable = self._result(
+                status='blocked',
+                error_code='chunk_surface_unavailable',
+                surface='unavailable',
+            )
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=unavailable,
+                 ) as adapter:
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            self.assertEqual(len(resident.sent_objects), 1)
+        finally:
+            os.unlink(db)
+
+        db = _tmp_db()
+        try:
+            plan = self._plan(db, content='second')
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     side_effect=RuntimeError('observer fault'),
+                 ) as adapter, \
+                 mock.patch.object(dr.logger, 'exception') as log_exception:
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            log_exception.assert_called_once()
+            self.assertEqual(len(resident.sent_objects), 1)
+        finally:
+            os.unlink(db)
+
+    def test_fingerprint_and_projection_are_deterministic_without_body_logging(self):
+        self.assertEqual(
+            dr._continuity_shadow_fingerprint('中文abc'),
+            dr._continuity_shadow_fingerprint('中文abc'),
+        )
+        first = dr._continuity_shadow_fingerprint(
+            [{'type': 'text', 'text': '中文'}, {'type': 'image', 'name': 'a'}],
+        )
+        second = dr._continuity_shadow_fingerprint(
+            [{'text': '中文', 'type': 'text'}, {'name': 'a', 'type': 'image'}],
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first[2], 'multimodal')
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            plan.assembly.update({
+                'state': 'STATE BODY',
+                'day_handoff_content': {
+                    'source_day': '2026-09-09',
+                    'source_sha256': 'handoff-hash',
+                    'source_last_message_id': 7,
+                    'open_loops': ['loop one'],
+                    'topics': ['must not affect projection'],
+                    'last_topic': 'also ignored',
+                },
+            })
+            resident = self._Resident()
+            resident._system_text = 'EFFECTIVE SYSTEM'
+            before = dict(plan.manifest)
+            sections = dr._build_continuity_shadow_fixed_sections(
+                plan=plan,
+                resident=resident,
+                static_system='FALLBACK SYSTEM',
+            )
+            self.assertEqual(
+                [section.kind for section in sections],
+                ['invariant_system', 'accepted_state', 'accepted_open_loops'],
+            )
+            self.assertEqual(
+                sections[0].content_hash,
+                hashlib.sha256(b'EFFECTIVE SYSTEM').hexdigest(),
+            )
+            self.assertEqual(plan.manifest, before)
+            log = mock.Mock()
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=self._result(),
+                 ):
+                with mock.patch.object(dr.logger, 'info') as info:
+                    dr._observe_continuity_shadow(
+                        plan=plan,
+                        resident=resident,
+                        static_system='FALLBACK SYSTEM',
+                        content='PRIVATE BODY MUST NOT APPEAR',
+                    )
+            serialized = ' '.join(
+                str(arg)
+                for call in info.call_args_list
+                for arg in call.args
+            )
+            self.assertNotIn('PRIVATE BODY MUST NOT APPEAR', serialized)
+        finally:
+            os.unlink(db)
+
+    def test_missing_cold_manifest_fails_closed(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            plan.assembly['manifest'].pop('cold_history_budget', None)
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                 ) as adapter, \
+                 mock.patch.object(dr.logger, 'info') as log:
+                dr._observe_continuity_shadow(
+                    plan=plan,
+                    resident=self._Resident(),
+                    static_system='STATIC',
+                    content='body',
+                )
+            adapter.assert_not_called()
+            self.assertEqual(
+                self._observations(log)[-1]['error_code'],
+                'budget_policy_unmapped',
+            )
+        finally:
+            os.unlink(db)
+
+
 if __name__ == '__main__':
     unittest.main()
