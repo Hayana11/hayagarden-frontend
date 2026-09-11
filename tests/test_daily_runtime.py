@@ -3502,7 +3502,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
             self.assertEqual(kwargs['budget_policy'].recent_raw_target, 24)
             self.assertEqual(
                 [section.kind for section in kwargs['accepted_fixed_sections']],
-                ['invariant_system', 'accepted_state'],
+                ['invariant_system'],
             )
             self.assertEqual(len(resident.sent_objects), 1)
             self.assertEqual(self._observations(mock.Mock()), [])
