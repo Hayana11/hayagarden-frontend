@@ -3558,9 +3558,14 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                         content='hot body',
                     )
                 adapter.assert_not_called()
+                expected_error = (
+                    'hot_budget_policy_unmapped'
+                    if turn_kind == 'hot'
+                    else 'installed_context_policy_unmapped'
+                )
                 self.assertEqual(
                     self._observations(log)[-1]['error_code'],
-                    'installed_context_policy_unmapped',
+                    expected_error,
                 )
             finally:
                 os.unlink(db)

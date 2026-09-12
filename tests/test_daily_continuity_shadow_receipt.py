@@ -109,7 +109,7 @@ class ReceiptContractTests(unittest.TestCase):
             fixed_section_fingerprints=(
                 ('invariant_system', 'system:x', 'hash', 4),
             ),
-            production_content_hash='body-hash',
+            production_content_hash='0123456789abcdef',
             production_content_token_estimate=8,
             source_turn_kind='cold',
         )
