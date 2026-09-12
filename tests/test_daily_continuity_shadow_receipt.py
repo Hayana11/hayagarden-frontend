@@ -787,6 +787,7 @@ class CapacitySwapReceiptContractTests(unittest.TestCase):
                 dr.abort_daily_turn(
                     plan,
                     error_code='provider_failed',
+                    resident=types.SimpleNamespace(),
                     respawn=False,
                 )
             self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
