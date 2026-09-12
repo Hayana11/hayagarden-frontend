@@ -104,9 +104,11 @@ class ContextChunkBinding:
 
 
 def _parse_context_budget_raw(raw: object, *, name: str, positive: bool) -> int:
-    if raw is None or not isinstance(raw, str) or not raw.strip():
+    if raw is None or not isinstance(raw, str) or not raw:
         raise ValueError(f'unmapped_context_budget_policy:{name}')
-    text = raw.strip()
+    if raw != raw.strip():
+        raise ValueError(f'invalid_context_budget_policy:{name}_must_be_decimal')
+    text = raw
     if text.startswith('-') and text[1:].isdigit():
         if positive:
             raise ValueError(f'invalid_context_budget_policy:{name}_must_be_positive')
