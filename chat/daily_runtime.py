@@ -1194,7 +1194,8 @@ def _load_context_source_rows(
 ) -> dict[int, dict[str, Any]]:
     if not message_ids:
         return {}
-    conn = dc._connect(db_path)
+    from continuity.store import open_continuity_read_only
+    conn = open_continuity_read_only(db_path)
     try:
         columns = {
             str(row[1])
