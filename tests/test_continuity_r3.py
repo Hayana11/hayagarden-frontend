@@ -646,6 +646,57 @@ class StrictReadySurfaceTests(unittest.TestCase):
         self.assertEqual(surface.status, 'corrupt')
         self.assertEqual(surface.error_code, 'generation_job_not_ready')
 
+    def _surface_after_sealing_job_mutation(self, sql, params=()):
+        self._publish_ready()
+        self.conn.execute(sql, params)
+        self.conn.commit()
+        directory, path = self._file_surface()
+        try:
+            with open(path, 'rb') as handle:
+                before = hashlib.sha256(handle.read()).hexdigest()
+            surface = read_ready_surface(path)
+            with open(path, 'rb') as handle:
+                after = hashlib.sha256(handle.read()).hexdigest()
+        finally:
+            directory.cleanup()
+        self.assertEqual(before, after)
+        return surface
+
+    def test_strict_surface_rejects_missing_sealing_job(self):
+        surface = self._surface_after_sealing_job_mutation(
+            'DELETE FROM continuity_jobs WHERE job_id=(SELECT job_id FROM continuity_candidate_blocks)'
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_missing')
+
+    def test_strict_surface_rejects_sealing_job_snapshot_mismatch(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET snapshot_id='snapshot:other'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_snapshot_mismatch')
+
+    def test_strict_surface_rejects_sealing_job_policy_mismatch(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET policy_version='policy:other'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_policy_mismatch')
+
+    def test_strict_surface_rejects_sealing_job_source_hash_mismatch(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET source_hash='hash:other'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_source_hash_mismatch')
+
+    def test_strict_surface_rejects_non_materialized_sealing_job(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET status='pending'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_not_materialized')
+
 
 class RunnerTests(unittest.TestCase):
     def test_source_loader_uses_cursor_metadata_and_read_only_database(self):

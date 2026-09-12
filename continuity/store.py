@@ -1178,6 +1178,21 @@ def _validate_ready_chunk(conn: sqlite3.Connection, chunk: ContinuityChunk) -> N
     if candidate.snapshot_id != snapshot.snapshot_id or candidate.source_revision != job.candidate_source_revision:
         _corrupt('candidate_revision_lineage_mismatch')
 
+    sealing_job = load_job(conn, str(candidate_row[0]))
+    if sealing_job is None:
+        _corrupt('sealing_job_missing')
+    if sealing_job.status != 'shadow':
+        _corrupt('sealing_job_not_materialized')
+    if (
+        sealing_job.snapshot_id != candidate.snapshot_id
+        or sealing_job.snapshot_id != snapshot.snapshot_id
+    ):
+        _corrupt('sealing_job_snapshot_mismatch')
+    if sealing_job.policy_version != candidate.policy_version:
+        _corrupt('sealing_job_policy_mismatch')
+    if sealing_job.source_hash != snapshot.source_hash:
+        _corrupt('sealing_job_source_hash_mismatch')
+
     member_rows = conn.execute(
         'SELECT ordinal, source_seq, source_ref, source_revision, content_hash, logical_size '
         'FROM continuity_candidate_members WHERE candidate_id=? ORDER BY ordinal',
