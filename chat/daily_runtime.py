@@ -1547,7 +1547,7 @@ def _assemble_plan(
         db_path=db_path,
         history_token_budget=history_token_budget,
         provider_claude_session_id=provider_sid,
-        history_override=[] if context_plan_consumer else None,
+        **({'history_override': []} if context_plan_consumer else {}),
     )
     manifest = _build_manifest_base(
         plan_fields={
