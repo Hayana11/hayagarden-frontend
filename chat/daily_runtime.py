@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -2663,7 +2664,15 @@ def _shadow_load_source_rows(
     ids = tuple(sorted({int(value) for value in message_ids if int(value) > 0}))
     if not ids:
         return []
-    conn = dc._connect(db_path)
+    path = os.path.abspath(db_path or dc.DEFAULT_DB_PATH)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    conn = sqlite3.connect(
+        Path(path).resolve().as_uri() + '?mode=ro',
+        uri=True,
+        timeout=30,
+    )
+    conn.row_factory = sqlite3.Row
     try:
         placeholders = ','.join('?' for _ in ids)
         rows = conn.execute(
@@ -2756,14 +2765,45 @@ def _shadow_receipt_pending_metadata(
     }
 
 
+def _log_continuity_shadow_receipt_event(
+    plan: DailyTurnPlan,
+    *,
+    status: str,
+    error_code: Optional[str] = None,
+    receipt: Any = None,
+) -> None:
+    payload = {
+        'event': 'continuity_shadow_receipt_commit',
+        'status': str(status),
+        'error_code': error_code,
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+        'resident_generation': int(plan.resident_generation),
+        'membership_hash': (
+            str(receipt.membership_hash)
+            if receipt is not None else None
+        ),
+        'member_count': (
+            len(receipt.installed_source_members)
+            if receipt is not None else 0
+        ),
+    }
+    logger.info(
+        'continuity_shadow_receipt_commit %s',
+        _continuity_shadow_canonical(payload),
+    )
+
+
 def _commit_continuity_shadow_receipt(
     plan: DailyTurnPlan,
     *,
     assistant_message_id: int,
 ) -> bool:
-    """Commit one receipt only after the existing full-success boundary."""
+    """Commit one process-local receipt after the existing full-success boundary."""
     if str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED':
-        plan.manifest['shadow_receipt_commit_error'] = 'mapping_not_mapped'
+        _log_continuity_shadow_receipt_event(
+            plan, status='skipped', error_code='mapping_not_mapped',
+        )
         return False
     sid = str(plan.transcript_claude_session_id or '').strip()
     process_generation = plan.transcript_process_generation
@@ -2772,8 +2812,8 @@ def _commit_continuity_shadow_receipt(
         or process_generation is None
         or int(process_generation) <= 0
     ):
-        plan.manifest['shadow_receipt_commit_error'] = (
-            'runtime_identity_unavailable'
+        _log_continuity_shadow_receipt_event(
+            plan, status='skipped', error_code='runtime_identity_unavailable',
         )
         return False
 
@@ -2789,8 +2829,10 @@ def _commit_continuity_shadow_receipt(
                 plan.resident_generation,
             )
             if prior is None:
-                plan.manifest['shadow_receipt_commit_error'] = (
-                    'installed_context_receipt_missing'
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='installed_context_receipt_missing',
                 )
                 return False
             if not prior.matches_live(
@@ -2801,8 +2843,10 @@ def _commit_continuity_shadow_receipt(
                 claude_session_id=sid,
                 process_generation=int(process_generation),
             ):
-                plan.manifest['shadow_receipt_commit_error'] = (
-                    'installed_context_receipt_identity_mismatch'
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='installed_context_receipt_identity_mismatch',
                 )
                 return False
             new_members = _shadow_derive_members_for_ids(
@@ -2810,8 +2854,10 @@ def _commit_continuity_shadow_receipt(
                 db_path=plan.db_path,
             )
             if len(new_members) != 1:
-                plan.manifest['shadow_receipt_commit_error'] = (
-                    'installed_source_projection_unavailable'
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='installed_source_projection_unavailable',
                 )
                 return False
             receipt = receipt_store.advance(
@@ -2833,8 +2879,10 @@ def _commit_continuity_shadow_receipt(
             )
         else:
             if not isinstance(pending, dict):
-                plan.manifest['shadow_receipt_commit_error'] = (
-                    'shadow_receipt_plan_metadata_missing'
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='shadow_receipt_plan_metadata_missing',
                 )
                 return False
             ids = list(_shadow_assembly_message_ids(plan))
@@ -2869,26 +2917,20 @@ def _commit_continuity_shadow_receipt(
                 source_turn_kind=turn_kind,
             )
         receipt_store.commit(receipt)
-        plan.manifest.update({
-            'shadow_receipt_state': 'committed',
-            'shadow_receipt_membership_hash': receipt.membership_hash,
-            'shadow_receipt_member_count': len(receipt.installed_source_members),
-        })
-        return True
-    except Exception as exc:
-        plan.manifest['shadow_receipt_commit_error'] = (
-            'installed_source_projection_unavailable'
+        _log_continuity_shadow_receipt_event(
+            plan, status='committed', receipt=receipt,
         )
-        logger.warning(
-            'continuity shadow receipt commit skipped: %s',
-            exc,
-            exc_info=True,
+        return True
+    except Exception:
+        _log_continuity_shadow_receipt_event(
+            plan,
+            status='skipped',
+            error_code='installed_source_projection_unavailable',
         )
         return False
     finally:
         if hasattr(plan, '_continuity_shadow_pending_receipt'):
             delattr(plan, '_continuity_shadow_pending_receipt')
-
 
 def _observe_continuity_shadow(
     *,
@@ -3703,11 +3745,9 @@ def handle_provider_success(
         unexpected_save_marker=unexpected_save_marker,
     )
     # Mapping only after assistant persist (Gateway) + cursor CAS success above.
-    manifest = finalize_transcript_mapping_after_success(
+    finalize_transcript_mapping_after_success(
         plan, assistant_message_id=int(assistant_message_id),
     )
-    if isinstance(manifest, dict):
-        plan.manifest.update(manifest)
     # Same-context last-good: only after full success (result + persist + JSONL + cursor).
     end_off = plan.transcript_end_offset
     start_off = plan.transcript_start_offset

@@ -28,10 +28,10 @@ class InstalledSourceMemberIdentity:
     source_revision: str
     source_kind: str
     content_hash: str
-    seq: int
+    installed_order: int
     span_start: Optional[int] = None
     span_end: Optional[int] = None
-    evidence_refs: tuple[str, ...] = ()
+    branch_id: str = 'active-transcript'
 
     @classmethod
     def from_member(cls, member: Any) -> 'InstalledSourceMemberIdentity':
@@ -41,7 +41,7 @@ class InstalledSourceMemberIdentity:
             source_revision=str(getattr(member, 'source_revision', '') or ''),
             source_kind=str(getattr(member, 'source_kind', '') or ''),
             content_hash=str(getattr(member, 'content_hash', '') or ''),
-            seq=int(getattr(member, 'seq', 0) or 0),
+            installed_order=int(getattr(member, 'seq', 0) or 0),
             span_start=(
                 int(member.span_start)
                 if getattr(member, 'span_start', None) is not None else None
@@ -50,7 +50,7 @@ class InstalledSourceMemberIdentity:
                 int(member.span_end)
                 if getattr(member, 'span_end', None) is not None else None
             ),
-            evidence_refs=(source_ref,) if source_ref else (),
+            branch_id=str(getattr(member, 'branch_id', '') or 'active-transcript'),
         )
 
     def as_metadata(self) -> dict[str, Any]:
@@ -59,10 +59,10 @@ class InstalledSourceMemberIdentity:
             'source_revision': self.source_revision,
             'source_kind': self.source_kind,
             'content_hash': self.content_hash,
-            'seq': self.seq,
+            'installed_order': self.installed_order,
             'span_start': self.span_start,
             'span_end': self.span_end,
-            'evidence_refs': self.evidence_refs,
+            'branch_id': self.branch_id,
         }
 
 
@@ -228,7 +228,7 @@ def advance(
 ) -> InstalledContextShadowReceipt:
     """Return an immutable replacement receipt with appended canonical members."""
     prior = tuple(receipt.installed_source_members)
-    offset = (int(prior[-1].seq) + 1) if prior else 0
+    offset = (int(prior[-1].installed_order) + 1) if prior else 0
     appended = []
     for index, member in enumerate(new_members):
         identity = (
@@ -236,7 +236,7 @@ def advance(
             if isinstance(member, InstalledSourceMemberIdentity)
             else InstalledSourceMemberIdentity.from_member(member)
         )
-        appended.append(replace(identity, seq=offset + index))
+        appended.append(replace(identity, installed_order=offset + index))
     combined = prior + tuple(appended)
     return replace(
         receipt,

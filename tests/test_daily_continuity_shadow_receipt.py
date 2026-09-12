@@ -118,6 +118,9 @@ class ReceiptContractTests(unittest.TestCase):
         self.assertNotIn('body', repr(receipt))
         self.assertNotIn('system text', repr(receipt))
         self.assertEqual(receipt.installed_source_members[0].source_ref, 'turn:1:2')
+        self.assertEqual(receipt.installed_source_members[0].installed_order, 0)
+        self.assertEqual(receipt.installed_source_members[0].branch_id, 'active-transcript')
+        self.assertFalse(hasattr(receipt.installed_source_members[0], 'evidence_refs'))
         self.assertEqual(receipt.measurement_semantics, rs.MEASUREMENT_SEMANTICS)
 
     def test_store_key_and_reset_are_process_local(self):
@@ -174,7 +177,7 @@ class ReceiptContractTests(unittest.TestCase):
         self.assertEqual(len(old.installed_source_members), 1)
         self.assertEqual(len(new.installed_source_members), 2)
         self.assertEqual(new.installed_source_members[-1].source_ref, 'turn:3:4')
-        self.assertEqual(new.installed_source_members[-1].seq, 1)
+        self.assertEqual(new.installed_source_members[-1].installed_order, 1)
         self.assertEqual(old.source_turn_kind, 'cold')
         self.assertEqual(new.source_turn_kind, 'hot')
 
@@ -303,3 +306,228 @@ class ReceiptRuntimeBoundaryTests(unittest.TestCase):
             self.assertEqual(observation['budget_error_code'], 'hot_budget_policy_unmapped')
         finally:
             os.unlink(db)
+
+
+    def test_cold_receipt_uses_exact_installed_ids_only(self):
+        db = _db_with_rows((
+            (1, 'hayana', 'older', 'chat', '{}', '2026-09-10 09:00:00'),
+            (2, 'fyodor', 'older reply', 'chat', '{}', '2026-09-10 09:00:01'),
+            (3, 'hayana', 'newer', 'chat', '{}', '2026-09-10 10:00:00'),
+            (4, 'fyodor', 'newer reply', 'chat', '{}', '2026-09-10 10:00:01'),
+        ))
+        try:
+            plan = _plan(db, pending=_pending())
+            plan.user_message_id = 3
+            plan.assembly['current_day_history'] = [{'id': 3}, {'id': 4}]
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=4,
+            ))
+            receipt = rs.get(7, 2, 3)
+            self.assertEqual(
+                [item.source_ref for item in receipt.installed_source_members],
+                ['turn:3:4'],
+            )
+            self.assertEqual(
+                [item.installed_order for item in receipt.installed_source_members],
+                [0],
+            )
+        finally:
+            os.unlink(db)
+
+    def test_carryover_round_enters_cold_receipt(self):
+        db = _db_with_rows((
+            (1, 'hayana', 'carry user', 'chat', '{}', '2026-09-10 09:00:00'),
+            (2, 'fyodor', 'carry reply', 'chat', '{}', '2026-09-10 09:00:01'),
+            (3, 'hayana', 'current user', 'chat', '{}', '2026-09-10 10:00:00'),
+            (4, 'fyodor', 'current reply', 'chat', '{}', '2026-09-10 10:00:01'),
+        ))
+        try:
+            plan = _plan(db, pending=_pending())
+            plan.user_message_id = 3
+            plan.assembly['carryover_messages'] = [{'id': 1}, {'id': 2}]
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=4,
+            ))
+            receipt = rs.get(7, 2, 3)
+            self.assertEqual(
+                [item.source_ref for item in receipt.installed_source_members],
+                ['turn:1:2', 'turn:3:4'],
+            )
+        finally:
+            os.unlink(db)
+
+    def test_canonical_wake_enters_as_autonomous_event(self):
+        wake_cache = json.dumps({
+            'wake_mode': 'normal',
+            'canonical_chat_history': True,
+            'unified_chat_resident': True,
+            'b3_authority': True,
+            'source': 'wake',
+            'provider': 'claude_code',
+        })
+        db = _db_with_rows((
+            (1, 'hayana', 'current user', 'chat', '{}', '2026-09-10 10:00:00'),
+            (2, 'fyodor', 'current reply', 'chat', '{}', '2026-09-10 10:00:01'),
+            (5, 'fyodor', 'wake content', 'wake', wake_cache, '2026-09-10 11:00:00'),
+        ))
+        try:
+            plan = _plan(db, pending=_pending())
+            plan.assembly['current_day_history'] = [{'id': 5}]
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=2,
+            ))
+            receipt = rs.get(7, 2, 3)
+            wake = [
+                item for item in receipt.installed_source_members
+                if item.source_ref == 'wake:5'
+            ]
+            self.assertEqual(len(wake), 1)
+            self.assertEqual(wake[0].source_kind, 'autonomous_event')
+        finally:
+            os.unlink(db)
+
+    def test_hot_identity_mismatch_fails_closed_without_adapter(self):
+        db = _db_with_rows((
+            (1, 'hayana', 'hello', 'chat', '{}', '2026-09-10 10:00:00'),
+            (2, 'fyodor', 'reply', 'chat', '{}', '2026-09-10 10:00:01'),
+        ))
+        try:
+            cold_plan = _plan(db, pending=_pending())
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                cold_plan, assistant_message_id=2,
+            ))
+            hot_plan = _plan(db, turn_kind='hot')
+            resident = types.SimpleNamespace(session_id='different-session', generation=9)
+            with mock.patch(
+                'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+            ) as adapter, mock.patch.object(dr.logger, 'info') as info:
+                dr._observe_continuity_shadow(
+                    plan=hot_plan,
+                    resident=resident,
+                    static_system='STATIC',
+                    content='hot',
+                )
+            adapter.assert_not_called()
+            observations = [
+                json.loads(call.args[1])
+                for call in info.call_args_list
+                if call.args and call.args[0] == 'continuity_shadow_observation %s'
+            ]
+            self.assertEqual(
+                observations[-1]['source_proof_error_code'],
+                'installed_context_receipt_identity_mismatch',
+            )
+            self.assertFalse(observations[-1]['installed_context_proven'])
+        finally:
+            os.unlink(db)
+
+    def test_incomplete_hot_turn_does_not_advance_receipt(self):
+        db = _db_with_rows((
+            (1, 'hayana', 'hello', 'chat', '{}', '2026-09-10 10:00:00'),
+            (2, 'fyodor', 'reply', 'chat', '{}', '2026-09-10 10:00:01'),
+            (3, 'hayana', 'next', 'chat', '{}', '2026-09-10 10:01:00'),
+            (4, 'fyodor', 'partial', 'chat',
+             '{"turn_incomplete": true}', '2026-09-10 10:01:01'),
+        ))
+        try:
+            cold_plan = _plan(db, pending=_pending())
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                cold_plan, assistant_message_id=2,
+            ))
+            prior = rs.get(7, 2, 3)
+            hot_plan = _plan(db, turn_kind='hot', pending=_pending('hot'))
+            hot_plan.user_message_id = 3
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                hot_plan, assistant_message_id=4,
+            ))
+            self.assertIs(rs.get(7, 2, 3), prior)
+        finally:
+            os.unlink(db)
+
+    def test_hot_mapping_not_mapped_does_not_advance_receipt(self):
+        db = _db_with_rows((
+            (1, 'hayana', 'hello', 'chat', '{}', '2026-09-10 10:00:00'),
+            (2, 'fyodor', 'reply', 'chat', '{}', '2026-09-10 10:00:01'),
+            (3, 'hayana', 'next', 'chat', '{}', '2026-09-10 10:01:00'),
+            (4, 'fyodor', 'next reply', 'chat', '{}', '2026-09-10 10:01:01'),
+        ))
+        try:
+            cold_plan = _plan(db, pending=_pending())
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                cold_plan, assistant_message_id=2,
+            ))
+            prior = rs.get(7, 2, 3)
+            hot_plan = _plan(db, turn_kind='hot', pending=_pending('hot'))
+            hot_plan.user_message_id = 3
+            hot_plan.manifest['transcript_mapping_status'] = 'BLOCKED'
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                hot_plan, assistant_message_id=4,
+            ))
+            self.assertIs(rs.get(7, 2, 3), prior)
+        finally:
+            os.unlink(db)
+
+    def test_receipt_commit_isolated_from_production_manifest(self):
+        db = _db_with_rows((
+            (1, 'hayana', 'hello', 'chat', '{}', '2026-09-10 10:00:00'),
+            (2, 'fyodor', 'reply', 'chat', '{}', '2026-09-10 10:00:01'),
+        ))
+        try:
+            plan = _plan(db, pending=_pending())
+            before = dict(plan.manifest)
+            with mock.patch.object(dr.logger, 'info') as info:
+                self.assertTrue(dr._commit_continuity_shadow_receipt(
+                    plan, assistant_message_id=2,
+                ))
+            self.assertEqual(plan.manifest, before)
+            event_calls = [
+                call for call in info.call_args_list
+                if call.args and call.args[0] == 'continuity_shadow_receipt_commit %s'
+            ]
+            self.assertEqual(len(event_calls), 1)
+            event = json.loads(event_calls[0].args[1])
+            self.assertEqual(event['status'], 'committed')
+            self.assertEqual(event['member_count'], 1)
+            self.assertIn('membership_hash', event)
+            self.assertNotIn('production_content_hash', event)
+        finally:
+            os.unlink(db)
+
+    def test_receipt_commit_failure_isolated_from_production_manifest(self):
+        missing = os.path.join(tempfile.gettempdir(), 'r4d1-missing-source.db')
+        if os.path.exists(missing):
+            os.unlink(missing)
+        plan = _plan(missing, pending=_pending())
+        before = dict(plan.manifest)
+        with mock.patch.object(dr.logger, 'info') as info:
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=2,
+            ))
+        self.assertEqual(plan.manifest, before)
+        event_calls = [
+            call for call in info.call_args_list
+            if call.args and call.args[0] == 'continuity_shadow_receipt_commit %s'
+        ]
+        self.assertEqual(len(event_calls), 1)
+        event = json.loads(event_calls[0].args[1])
+        self.assertEqual(event['status'], 'skipped')
+        self.assertEqual(event['error_code'], 'installed_source_projection_unavailable')
+        self.assertFalse(os.path.exists(missing))
+
+    def test_capacity_swap_does_not_create_or_advance_receipt(self):
+        plan = _plan('/tmp/unused-r4d1-source.db', turn_kind='capacity_swap')
+        plan.is_cold = False
+        plan.is_respawn = False
+        before = rs.get(7, 2, 3)
+        resident = types.SimpleNamespace(session_id='session-1', generation=9)
+        with mock.patch(
+            'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+        ) as adapter:
+            dr._observe_continuity_shadow(
+                plan=plan,
+                resident=resident,
+                static_system='STATIC',
+                content='capacity',
+            )
+        adapter.assert_not_called()
+        self.assertIs(rs.get(7, 2, 3), before)
