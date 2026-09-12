@@ -99,7 +99,20 @@ def _migrate_chat_columns():
     ensure_chat_messages_source_kind_logged(DB_PATH, connect_fn=lambda p: __import__('sqlite3').connect(p))
 
 
+def _register_continuity_schema():
+    """Register additive Continuity tables on the existing app database."""
+    from continuity.store import ensure_schema as _ensure_continuity_schema
+
+    conn = get_db()
+    try:
+        conn.execute('PRAGMA foreign_keys=ON')
+        _ensure_continuity_schema(conn)
+    finally:
+        conn.close()
+
+
 _migrate_chat_columns()
+_register_continuity_schema()
 group_chat_store.ensure_schema(DB_PATH)
 context_usage_store.ensure_schema(DB_PATH)
 moments_store.ensure_schema(DB_PATH, gallery_store.DB_PATH)
