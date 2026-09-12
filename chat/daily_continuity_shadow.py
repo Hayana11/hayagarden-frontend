@@ -180,6 +180,7 @@ def build_daily_continuity_shadow_plan(
     current_user_message_id: int,
     budget_policy: ContextBudgetPolicy | None,
     accepted_fixed_sections: Sequence[ContextSection] = (),
+    budget_policy_version: str = '',
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -248,6 +249,7 @@ def build_daily_continuity_shadow_plan(
                 chunks=bindings,
                 budget_policy=budget_policy,
                 fixed_sections=accepted + (current_request,),
+                budget_policy_version=str(budget_policy_version or '').strip(),
             )
         except ValueError:
             return _blocked('invalid_fixed_sections')

@@ -182,6 +182,8 @@ class DailyTurnPlan:
     transcript_claude_session_id: Optional[str] = None
     transcript_process_generation: Optional[int] = None
     transcript_observation_error_code: Optional[str] = None
+    continuity_plan: Any = field(default=None, repr=False)
+    continuity_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -1075,6 +1077,408 @@ def _build_manifest_base(
     return manifest
 
 
+
+
+def _context_plan_consumer_enabled() -> bool:
+    """Read the existing gate; any read/config error fails closed to OFF."""
+    try:
+        import config_store
+        return str(config_store.get(
+            'CONTEXT_PLAN_CONSUMER_ENABLED',
+            '0',
+        ) or '').strip() == '1'
+    except Exception:
+        return False
+
+
+def _context_plan_policy() -> tuple[Any, str]:
+    from continuity.context_plan import (
+        CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION,
+        parse_context_budget_policy,
+    )
+    import config_store
+    policy = parse_context_budget_policy(
+        config_store.get('CONTEXT_PLAN_TOKEN_BUDGET', ''),
+        config_store.get('CONTEXT_PLAN_RESERVE_BUDGET', ''),
+        config_store.get('CONTEXT_PLAN_RECENT_RAW_TARGET', ''),
+    )
+    return policy, CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION
+
+
+def _production_continuity_store_path(plan: DailyTurnPlan) -> str:
+    path = str(plan.db_path or dc.DEFAULT_DB_PATH or '').strip()
+    if not path:
+        raise DailyRuntimeError(
+            'canonical production continuity store path is unavailable',
+            error_code='context_plan_store_unavailable',
+        )
+    return path
+
+
+def _build_production_context_plan(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    static_system: str,
+) -> tuple[Any, dict[str, str]]:
+    """Build exactly one canonical plan from the explicit production DB."""
+    from continuity.store import read_ready_surface
+    policy, policy_version = _context_plan_policy()
+    store_path = _production_continuity_store_path(plan)
+    surface = read_ready_surface(store_path)
+    if surface.status == 'unavailable':
+        raise DailyRuntimeError(
+            'continuity store unavailable',
+            error_code='context_plan_store_unavailable',
+            retryable=True,
+        )
+    if surface.status == 'corrupt':
+        raise DailyRuntimeError(
+            'continuity store corrupt',
+            error_code='context_plan_store_corrupt',
+            retryable=False,
+        )
+    from chat.daily_continuity_shadow import build_daily_continuity_shadow_plan
+    fixed_sections = _build_continuity_shadow_fixed_sections(
+        plan=plan,
+        resident=resident,
+        static_system=static_system,
+    )
+    result = build_daily_continuity_shadow_plan(
+        source_db_path=store_path,
+        shadow_store_path=store_path,
+        current_user_message_id=int(plan.user_message_id),
+        budget_policy=policy,
+        accepted_fixed_sections=fixed_sections,
+        budget_policy_version=policy_version,
+    )
+    if result.plan is None:
+        raise DailyRuntimeError(
+            str(result.error_code or 'context_plan_unavailable'),
+            error_code=str(result.error_code or 'context_plan_unavailable'),
+            retryable=True,
+        )
+    if not result.plan.valid:
+        raise DailyRuntimeError(
+            'canonical ContextPlan is invalid',
+            error_code='context_plan_invalid',
+            retryable=False,
+        )
+    bodies = {
+        str(chunk.chunk_id): str(chunk.body)
+        for chunk in (surface.artifacts or ())
+    }
+    return result.plan, bodies
+
+
+def _context_source_message_ids(source_ref: str) -> tuple[int, ...]:
+    value = str(source_ref or '')
+    parts = value.split(':')
+    if len(parts) == 3 and parts[0] == 'turn':
+        try:
+            return (int(parts[1]), int(parts[2]))
+        except (TypeError, ValueError):
+            return ()
+    if len(parts) == 2 and parts[0] == 'wake':
+        try:
+            return (int(parts[1]),)
+        except (TypeError, ValueError):
+            return ()
+    return ()
+
+
+def _load_context_source_rows(
+    message_ids: set[int],
+    *,
+    db_path: str,
+) -> dict[int, dict[str, Any]]:
+    if not message_ids:
+        return {}
+    conn = dc._connect(db_path)
+    try:
+        columns = {
+            str(row[1])
+            for row in conn.execute('PRAGMA table_info(chat_messages)').fetchall()
+        }
+        selected = ['id', 'author', 'content', 'created_at']
+        for optional in ('attachments', 'image_url', 'file_url', 'file_name'):
+            if optional in columns:
+                selected.append(optional)
+        placeholders = ','.join('?' for _ in message_ids)
+        rows = conn.execute(
+            'SELECT %s FROM chat_messages WHERE id IN (%s)' % (
+                ', '.join(selected), placeholders,
+            ),
+            tuple(sorted(int(value) for value in message_ids)),
+        ).fetchall()
+        return {int(row['id']): dict(row) for row in rows}
+    finally:
+        conn.close()
+
+
+def _project_context_plan_history(
+    plan: DailyTurnPlan,
+    *,
+    context_plan: Any,
+    chunk_bodies: dict[str, str],
+) -> dict[str, Any]:
+    """Project canonical representations into the existing formatter fields."""
+    from continuity.sources import is_formal_user_source_row
+    store_path = _production_continuity_store_path(plan)
+    message_ids: set[int] = set()
+    for representation in context_plan.representations:
+        if representation.kind == 'raw':
+            for member in representation.source_members:
+                message_ids.update(_context_source_message_ids(member.source_ref))
+    rows = _load_context_source_rows(message_ids, db_path=store_path)
+    history: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for representation in context_plan.representations:
+        if representation.kind == 'chunk':
+            body = str(chunk_bodies.get(str(representation.chunk_id)) or '').strip()
+            if not body:
+                raise DailyRuntimeError(
+                    'selected continuity chunk body is unavailable',
+                    error_code='context_plan_chunk_unavailable',
+                )
+            history.append({
+                'role': 'assistant',
+                'content': body,
+                'message_id': 0,
+                'continuity_representation_id': str(
+                    representation.representation_id
+                ),
+            })
+            continue
+        for member in representation.source_members:
+            for message_id in _context_source_message_ids(member.source_ref):
+                if message_id == int(plan.user_message_id) or message_id in seen_ids:
+                    continue
+                row = rows.get(message_id)
+                if row is None:
+                    raise DailyRuntimeError(
+                        'selected continuity source row is unavailable',
+                        error_code='context_plan_source_unavailable',
+                    )
+                seen_ids.add(message_id)
+                history.append({
+                    'role': (
+                        'user' if is_formal_user_source_row(row)
+                        else 'assistant'
+                    ),
+                    'content': str(row.get('content') or ''),
+                    'message_id': message_id,
+                    'attachments': row.get('attachments') or [],
+                    'image_url': row.get('image_url') or '',
+                    'file_url': row.get('file_url') or '',
+                    'file_name': row.get('file_name') or '',
+                })
+    assembly = dict(plan.assembly)
+    assembly['current_day_history'] = history
+    layers = [
+        layer for layer in (assembly.get('layers') or ())
+        if str(layer.get('kind') or '') != 'current_day_history'
+    ]
+    if history:
+        layers.append({
+            'kind': 'current_day_history',
+            'messages': [dict(item) for item in history],
+        })
+    assembly['layers'] = layers
+    return assembly
+
+
+def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
+    from chat.context_receipt import ContextReceiptMember
+    context_plan = getattr(plan, 'continuity_plan', None)
+    if context_plan is None:
+        return ()
+    members: list[Any] = []
+    order = 0
+    for representation in context_plan.representations:
+        for source_member in representation.source_members:
+            members.append(ContextReceiptMember(
+                installed_order=order,
+                representation_id=str(representation.representation_id),
+                representation_kind=str(representation.kind),
+                source_ref=str(source_member.source_ref),
+                source_revision=str(source_member.source_revision),
+                source_kind=str(source_member.source_kind),
+                content_hash=str(source_member.content_hash),
+                span_start=source_member.span_start,
+                span_end=source_member.span_end,
+                branch_id=str(source_member.branch_id),
+            ))
+            order += 1
+    for section in context_plan.ordered_sections:
+        if section.kind == 'current_request':
+            members.append(ContextReceiptMember(
+                installed_order=order,
+                representation_id='current_request',
+                representation_kind='fixed',
+                source_ref=str(section.source_ref),
+                source_revision=str(section.content_hash),
+                source_kind='current_request',
+                content_hash=str(section.content_hash),
+                branch_id='',
+            ))
+            break
+    return tuple(members)
+
+
+def _commit_production_context_receipt(
+    plan: DailyTurnPlan,
+    *,
+    assistant_message_id: int,
+) -> bool:
+    """Commit durable metadata proof after the existing full-success boundary."""
+    from chat import context_receipt as receipt_store
+    sid = str(plan.transcript_claude_session_id or '').strip()
+    process_generation = plan.transcript_process_generation
+    if (
+        str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED'
+        or not sid
+        or process_generation is None
+        or int(process_generation) <= 0
+    ):
+        plan.manifest.update({
+            'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_error_code': 'context_receipt_unavailable',
+            'error_code': 'context_receipt_unavailable',
+        })
+        return False
+    context_plan = getattr(plan, 'continuity_plan', None)
+    if context_plan is None:
+        return False
+    members = _context_receipt_members(plan)
+    watermark = max(
+        (int(member.seq) for representation in context_plan.representations
+         for member in representation.source_members),
+        default=0,
+    )
+    try:
+        receipt = receipt_store.ContextReceipt.build(
+            context_id=int(plan.context_id),
+            context_epoch=int(plan.context_epoch),
+            resident_generation=int(plan.resident_generation),
+            resident_key=str(plan.resident_key),
+            provider=str(plan.manifest.get('provider') or 'claude_code'),
+            model_identity=str(plan.manifest.get('model') or 'unknown'),
+            session_id=sid,
+            process_generation=int(process_generation),
+            plan_id=str(context_plan.plan_id),
+            plan_hash=str(context_plan.plan_hash),
+            budget_policy_version=str(
+                context_plan.budget_policy_version
+                or 'continuity_context_budget_v1'
+            ),
+            measurement_semantics=str(context_plan.measurement_semantics),
+            installed_source_watermark=watermark,
+            members=members,
+        )
+        conn = dc._connect(plan.db_path)
+        try:
+            receipt_store.ensure_context_receipt_schema(conn)
+            existing = receipt_store.get_receipt(
+                conn,
+                context_id=int(plan.context_id),
+                context_epoch=int(plan.context_epoch),
+                resident_generation=int(plan.resident_generation),
+            )
+            if existing is None:
+                committed = receipt_store.create_receipt(conn, receipt, members)
+            else:
+                committed = receipt_store.hot_advance_receipt(
+                    conn,
+                    expected_receipt_revision=int(existing.receipt_revision),
+                    receipt=receipt,
+                    members=members,
+                )
+        finally:
+            conn.close()
+        plan.manifest.update({
+            'context_receipt_status': 'COMMITTED',
+            'context_receipt_plan_hash': str(committed.plan_hash),
+            'context_receipt_revision': int(committed.receipt_revision),
+            'context_receipt_assistant_message_id': int(assistant_message_id),
+        })
+        return True
+    except Exception:
+        logger.exception('production context receipt commit failed')
+        plan.manifest.update({
+            'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_error_code': 'context_receipt_unavailable',
+            'error_code': 'context_receipt_unavailable',
+        })
+        return False
+
+
+def _observe_production_context_plan(
+    *,
+    plan: DailyTurnPlan,
+    resident: Any,
+    content: Any,
+) -> None:
+    context_plan = getattr(plan, 'continuity_plan', None)
+    if context_plan is None:
+        return
+    content_hash, content_tokens, content_kind = _continuity_shadow_fingerprint(content)
+    representations = tuple(context_plan.representations)
+    observation = {
+        'event': 'continuity_shadow_observation',
+        'status': 'ready',
+        'error_code': None,
+        'request_id': str(plan.request_id),
+        'chat_id': str(plan.chat_id),
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+        'resident_generation': int(plan.resident_generation),
+        'turn_kind': _continuity_shadow_turn_kind(plan),
+        'production_content_hash': content_hash,
+        'production_content_token_estimate': content_tokens,
+        'production_content_kind': content_kind,
+        'source_member_count': len(context_plan.source_members),
+        'chunk_binding_count': sum(
+            1 for item in representations if item.kind == 'chunk'
+        ),
+        'chunk_surface': 'ready' if plan.continuity_chunk_bodies else 'empty',
+        'plan_id': str(context_plan.plan_id),
+        'plan_hash': str(context_plan.plan_hash),
+        'plan_valid': bool(context_plan.valid),
+        'budget_status': str(context_plan.budget_status),
+        'token_budget': context_plan.token_budget,
+        'reserve_budget': context_plan.reserve_budget,
+        'recent_raw_target': (
+            context_plan.budget_policy.recent_raw_target
+            if context_plan.budget_policy is not None else None
+        ),
+        'selected_token_estimate': context_plan.selected_token_estimate,
+        'fixed_section_token_estimate': context_plan.fixed_section_token_estimate,
+        'total_token_estimate': context_plan.total_token_estimate,
+        'remaining_budget': context_plan.remaining_budget,
+        'raw_representation_count': sum(
+            1 for item in representations if item.kind == 'raw'
+        ),
+        'chunk_representation_count': sum(
+            1 for item in representations if item.kind == 'chunk'
+        ),
+        'gap_codes': sorted(str(item.code) for item in context_plan.gaps),
+        'exclusion_codes': sorted(str(item.code) for item in context_plan.exclusions),
+        'runtime_transition_source': _continuity_shadow_turn_kind(plan),
+        'shadow_plan_available': True,
+        'installed_context_proven': True,
+        'source_proof_status': 'ready',
+        'source_proof_error_code': None,
+        'budget_error_code': None,
+        'resident_session_present': bool(
+            str(getattr(resident, 'session_id', None) or '').strip()
+        ),
+    }
+    logger.info(
+        'continuity_shadow_observation %s',
+        _continuity_shadow_canonical(observation),
+    )
+
 def _assemble_plan(
     *,
     req_id: str,
@@ -1119,6 +1523,7 @@ def _assemble_plan(
     )
     last_state: Optional[dict[str, str]] = None
     cold_like = bool(is_cold or is_respawn)
+    context_plan_consumer = bool(cold_like and _context_plan_consumer_enabled())
     if turn_kind == 'hot' and resident is not None:
         raw = getattr(resident, 'last_state_snapshot', None) or {}
         if isinstance(raw, dict):
@@ -1142,6 +1547,7 @@ def _assemble_plan(
         db_path=db_path,
         history_token_budget=history_token_budget,
         provider_claude_session_id=provider_sid,
+        history_override=[] if context_plan_consumer else None,
     )
     manifest = _build_manifest_base(
         plan_fields={
@@ -1168,7 +1574,7 @@ def _assemble_plan(
     task_feedback = _format_task_feedback(feedback_lines)
     if task_feedback:
         assembly['task_feedback'] = task_feedback
-    return DailyTurnPlan(
+    daily_plan = DailyTurnPlan(
         request_id=req_id,
         chat_id=chat_id,
         local_day=local_day,
@@ -1196,6 +1602,28 @@ def _assemble_plan(
         origin_local_day=origin_local_day or local_day,
         turn_started_at=turn_started_at or user_created_at,
     )
+    if context_plan_consumer:
+        context_plan, chunk_bodies = _build_production_context_plan(
+            daily_plan,
+            resident=resident,
+            static_system=static_system,
+        )
+        daily_plan.continuity_plan = context_plan
+        daily_plan.continuity_chunk_bodies = dict(chunk_bodies)
+        daily_plan.assembly = _project_context_plan_history(
+            daily_plan,
+            context_plan=context_plan,
+            chunk_bodies=chunk_bodies,
+        )
+        daily_plan.manifest.update({
+            'context_plan_consumer': 'canonical',
+            'context_plan_id': str(context_plan.plan_id),
+            'context_plan_hash': str(context_plan.plan_hash),
+            'context_plan_valid': bool(context_plan.valid),
+            'context_plan_budget_status': str(context_plan.budget_status),
+            'context_plan_source_hash': str(context_plan.source_hash),
+        })
+    return daily_plan
 
 
 def prepare_daily_turn(
@@ -3283,6 +3711,13 @@ def _observe_continuity_shadow(
     static_system: str,
     content: Any,
 ) -> None:
+    if getattr(plan, 'continuity_plan', None) is not None:
+        _observe_production_context_plan(
+            plan=plan,
+            resident=resident,
+            content=content,
+        )
+        return
     turn_kind = _continuity_shadow_turn_kind(plan)
     if hasattr(plan, '_continuity_shadow_pending_receipt'):
         delattr(plan, '_continuity_shadow_pending_receipt')
@@ -4146,10 +4581,16 @@ def handle_provider_success(
         )
     # The receipt is committed only after persist + cursor CAS + MAPPED and
     # the existing last-good success boundary.  It is process-local metadata.
-    _commit_continuity_shadow_receipt(
-        plan,
-        assistant_message_id=int(assistant_message_id),
-    )
+    if getattr(plan, 'continuity_plan', None) is not None:
+        _commit_production_context_receipt(
+            plan,
+            assistant_message_id=int(assistant_message_id),
+        )
+    else:
+        _commit_continuity_shadow_receipt(
+            plan,
+            assistant_message_id=int(assistant_message_id),
+        )
     _consume_feedback_after_success(plan)
     return dict(plan.manifest)
 

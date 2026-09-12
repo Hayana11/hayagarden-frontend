@@ -242,6 +242,7 @@ def build_daily_window_context(
     db_path: Optional[str] = None,
     history_token_budget: Optional[int] = None,
     provider_claude_session_id: Optional[str] = None,
+    history_override: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Assemble provider context layers for one daily epoch turn.
 
@@ -333,26 +334,30 @@ def build_daily_window_context(
         if after_cursor is None:
             raise HotTurnCursorError('hot turn requires resident history cursor')
 
-    current_day_history = _fetch_current_day_history(
-        boundary_message_id=int(ctx.get('boundary_message_id') or 0),
-        local_day=str(ctx['local_day']),
-        db_path=db_path,
-        after_message_id=after_cursor,
-        exclude_message_id=current_user_message_id,
-        up_to_message_id=current_user_message_id,
-        context_id=context_id,
-        context_epoch=int(ctx.get('context_epoch') or 0),
-        include_assistant_wake=cold_like,
-    )
-
     cold_history_stats: dict[str, Any] = {}
-    if cold_like:
-        from chat.daily_cold_history import select_newest_complete_rounds_under_budget
-        current_day_history, cold_history_stats = select_newest_complete_rounds_under_budget(
-            current_day_history,
-            history_token_budget=history_token_budget,
-            allow_assistant_only=cold_like,
+    if history_override is None:
+        current_day_history = _fetch_current_day_history(
+            boundary_message_id=int(ctx.get('boundary_message_id') or 0),
+            local_day=str(ctx['local_day']),
+            db_path=db_path,
+            after_message_id=after_cursor,
+            exclude_message_id=current_user_message_id,
+            up_to_message_id=current_user_message_id,
+            context_id=context_id,
+            context_epoch=int(ctx.get('context_epoch') or 0),
+            include_assistant_wake=cold_like,
         )
+        if cold_like:
+            from chat.daily_cold_history import select_newest_complete_rounds_under_budget
+            current_day_history, cold_history_stats = select_newest_complete_rounds_under_budget(
+                current_day_history,
+                history_token_budget=history_token_budget,
+                allow_assistant_only=cold_like,
+            )
+    else:
+        # Production ContextPlan projection supplies the complete selected
+        # history. This branch deliberately performs no legacy selection.
+        current_day_history = [dict(item) for item in history_override]
 
     if current_day_history:
         replayed_through_message_id = int(current_day_history[-1]['message_id'])
