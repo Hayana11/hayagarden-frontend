@@ -67,10 +67,16 @@ class InstalledSourceMemberIdentity:
 
 
 def membership_hash(members: Iterable[Any]) -> str:
-    identities = [
-        InstalledSourceMemberIdentity.from_member(member).as_metadata()
-        for member in members
-    ]
+    identities = []
+    for installed_order, member in enumerate(members):
+        identity = (
+            member
+            if isinstance(member, InstalledSourceMemberIdentity)
+            else InstalledSourceMemberIdentity.from_member(member)
+        )
+        identities.append(
+            replace(identity, installed_order=installed_order).as_metadata()
+        )
     return hashlib.sha256(_canonical(identities).encode('utf-8')).hexdigest()
 
 
@@ -144,8 +150,11 @@ class InstalledContextShadowReceipt:
         measurement_semantics: str = MEASUREMENT_SEMANTICS,
     ) -> 'InstalledContextShadowReceipt':
         members = tuple(
-            InstalledSourceMemberIdentity.from_member(member)
-            for member in source_members
+            replace(
+                InstalledSourceMemberIdentity.from_member(member),
+                installed_order=installed_order,
+            )
+            for installed_order, member in enumerate(source_members)
         )
         return cls(
             context_id=int(context_id),
@@ -166,7 +175,7 @@ class InstalledContextShadowReceipt:
             ),
             source_turn_kind=str(source_turn_kind),
             receipt_state=str(receipt_state),
-            membership_hash=hashlib.sha256(_canonical([item.as_metadata() for item in members]).encode('utf-8')).hexdigest(),
+            membership_hash=membership_hash(members),
             measurement_semantics=str(measurement_semantics),
         )
 

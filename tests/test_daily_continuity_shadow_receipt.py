@@ -88,7 +88,7 @@ class ReceiptContractTests(unittest.TestCase):
 
     def test_receipt_is_immutable_metadata_only(self):
         member = types.SimpleNamespace(
-            seq=0,
+            seq=42,
             source_ref='turn:1:2',
             source_revision='revision',
             source_kind='completed_turn',
