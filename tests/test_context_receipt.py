@@ -464,7 +464,7 @@ class ContextReceiptSupersedeTests(unittest.TestCase):
             with self.subTest(target_generation=target):
                 with self.assertRaisesRegex(
                     ValueError,
-                    r'resident_generation + 1',
+                    r'resident_generation \+ 1',
                 ):
                     mark_superseded(
                         conn,
