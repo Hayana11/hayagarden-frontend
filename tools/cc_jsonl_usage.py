@@ -282,6 +282,8 @@ def attach_jsonl_usage(
         "invalid_json_rows": _as_int(replay.get("invalid_json_rows")),
         "cache_creation_5m": out["cache_creation_5m"],
         "cache_creation_1h": out["cache_creation_1h"],
+        "stream_totals": stream_totals,
+        "jsonl_totals": jsonl_totals,
         "stream_totals_match": stream_totals == jsonl_totals,
     }
     models = list(replay.get("models") or [])

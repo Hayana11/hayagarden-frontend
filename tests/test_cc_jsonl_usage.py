@@ -194,6 +194,14 @@ class JsonlReplayTests(unittest.TestCase):
         self.assertEqual(enriched["request_ids"], ["req-1"])
         self.assertEqual(enriched["rounds"][0]["request_id"], "req-1")
         self.assertTrue(enriched["jsonl_usage"]["stream_totals_match"])
+        self.assertEqual(enriched["jsonl_usage"]["stream_totals"], {
+            "input_tokens": 1, "output_tokens": 2,
+            "cache_read": 0, "cache_creation": 100,
+        })
+        self.assertEqual(enriched["jsonl_usage"]["jsonl_totals"], {
+            "input_tokens": 1, "output_tokens": 2,
+            "cache_read": 0, "cache_creation": 100,
+        })
         self.assertEqual(enriched["_obs_model"], "claude-sonnet-4-6")
 
 

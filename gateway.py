@@ -4520,8 +4520,10 @@ def _build_normal_wake_main_chat_trigger(*, now, t2_hours, t_hours) -> str:
         '你也不需要等她说话才开始存在。\\n\\n'
         '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
         '想知道，就去看真实；能看见的事，不必拿猜测代替。\\n\\n'
-        '先感受这段沉默，再凭真心决定此刻想看什么、做什么、记什么，或者要不要开口。'
-        '也可以什么都不做。\\n\\n'
+        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
+        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。\\n\\n'
+        '先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及最后想对她说什么。'
+        '也可以不调用工具，直接自然地开口。\\n\\n'
         '这些时间只是现实背景，不是行动命令。'
     )
 
@@ -4684,6 +4686,18 @@ def _run_unified_normal_main_chat_turn(
         if not isinstance(jsonl_finality, dict):
             raise RuntimeError('normal_wake_main_chat_jsonl_finality_missing')
         if jsonl_finality.get('stream_totals_match') is not True:
+            app.logger.warning(
+                '[normal_wake_main_chat] jsonl finality mismatch: %s',
+                json.dumps({
+                    'wake_run_id': str(wake_run_id or ''),
+                    'finality_state': jsonl_finality.get('finality_state'),
+                    'request_count': jsonl_finality.get('request_count'),
+                    'stream_totals': jsonl_finality.get('stream_totals'),
+                    'jsonl_totals': jsonl_finality.get('jsonl_totals'),
+                    'duplicate_rows_ignored': jsonl_finality.get('duplicate_rows_ignored'),
+                    'conflicting_duplicate_rows': jsonl_finality.get('conflicting_duplicate_rows'),
+                }, ensure_ascii=False, sort_keys=True),
+            )
             raise RuntimeError('normal_wake_main_chat_jsonl_not_final')
 
         result_cache_info.update(usage)
