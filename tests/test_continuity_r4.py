@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+import continuity.context_plan as context_plan_module
 from continuity.context_plan import (
     CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION,
     ContextBudgetPolicy,
@@ -800,6 +801,22 @@ class ContextPlanTests(unittest.TestCase):
             reserve_budget=300,
             recent_raw_target=900,
         ))
+
+    def test_measurement_semantics_changes_plan_identity(self):
+        baseline = build_context_plan(
+            self.members,
+            budget_policy=ContextBudgetPolicy(token_budget=100),
+        )
+        original = context_plan_module.MEASUREMENT_SEMANTICS
+        try:
+            context_plan_module.MEASUREMENT_SEMANTICS = 'alternate_measurement_v1'
+            changed = build_context_plan(
+                self.members,
+                budget_policy=ContextBudgetPolicy(token_budget=100),
+            )
+        finally:
+            context_plan_module.MEASUREMENT_SEMANTICS = original
+        self.assertNotEqual(baseline.plan_hash, changed.plan_hash)
 
     def test_budget_policy_version_default_preserves_hash_and_explicit_version_changes_it(self):
         policy = ContextBudgetPolicy(token_budget=100, reserve_budget=7, recent_raw_target=5)
