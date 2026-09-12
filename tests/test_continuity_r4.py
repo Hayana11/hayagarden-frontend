@@ -787,6 +787,7 @@ class ContextPlanTests(unittest.TestCase):
             ('10', '2', '-1', 'recent_raw_target_must_be_non_negative'),
             ('10', '10', '0', 'reserve_must_be_less_than_token'),
             ('010', '2', '0', 'token_budget_must_be_decimal'),
+            (' 10', '2', '0', 'token_budget_must_be_decimal'),
         )
         for token, reserve, recent, message in cases:
             with self.subTest(message=message):
