@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -194,6 +195,11 @@ def reset_bindings_for_tests() -> None:
     try:
         from chat.context_window import clear_pending_old_resident_close_for_tests
         clear_pending_old_resident_close_for_tests()
+    except Exception:
+        pass
+    try:
+        from chat import daily_continuity_shadow_receipt as receipt_store
+        receipt_store.clear_for_tests()
     except Exception:
         pass
 
@@ -2608,6 +2614,324 @@ def _build_continuity_shadow_fixed_sections(
     return tuple(sections)
 
 
+def _continuity_shadow_turn_kind(plan: DailyTurnPlan) -> str:
+    manifest = plan.manifest if isinstance(plan.manifest, dict) else {}
+    value = str(manifest.get('turn_kind') or '').strip()
+    if value:
+        return value
+    return 'respawn' if plan.is_respawn else 'cold' if plan.is_cold else 'hot'
+
+
+def _shadow_fixed_section_fingerprints(sections: Any) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            str(getattr(section, 'kind', '') or ''),
+            str(getattr(section, 'source_ref', '') or ''),
+            str(getattr(section, 'content_hash', '') or ''),
+            int(getattr(section, 'estimated_tokens', 0) or 0),
+        )
+        for section in (sections or ())
+    )
+
+
+def _shadow_assembly_message_ids(plan: DailyTurnPlan) -> tuple[int, ...]:
+    assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
+    ids: list[int] = []
+
+    def add(items: Any) -> None:
+        for item in items or ():
+            if not isinstance(item, dict):
+                continue
+            value = item.get('message_id', item.get('id'))
+            try:
+                mid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if mid > 0 and mid not in ids:
+                ids.append(mid)
+
+    add(assembly.get('current_day_history'))
+    add(assembly.get('carryover_messages'))
+    return tuple(ids)
+
+
+def _shadow_load_source_rows(
+    message_ids: tuple[int, ...],
+    *,
+    db_path: Optional[str],
+) -> list[dict[str, Any]]:
+    """Read complete durable chat rows for R1 derivation; never writes."""
+    ids = tuple(sorted({int(value) for value in message_ids if int(value) > 0}))
+    if not ids:
+        return []
+    path = os.path.abspath(db_path or dc.DEFAULT_DB_PATH)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    conn = sqlite3.connect(
+        Path(path).resolve().as_uri() + '?mode=ro',
+        uri=True,
+        timeout=30,
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        placeholders = ','.join('?' for _ in ids)
+        rows = conn.execute(
+            'SELECT * FROM chat_messages WHERE id IN (%s) ORDER BY id ASC'
+            % placeholders,
+            ids,
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _shadow_source_member_message_ids(
+    turns: Any,
+    events: Any,
+) -> set[int]:
+    represented: set[int] = set()
+
+    def add_ref(value: Any) -> None:
+        source_ref = str(getattr(value, 'source_ref', '') or '')
+        parts = source_ref.split(':')
+        if len(parts) >= 2 and parts[0] == 'message':
+            try:
+                mid = int(parts[1])
+            except (TypeError, ValueError):
+                return
+            if mid > 0:
+                represented.add(mid)
+
+    for turn in turns:
+        add_ref(turn.user_input_ref)
+        for ref in turn.assistant_committed_output_refs:
+            add_ref(ref)
+        for ref in turn.tool_outcome_refs:
+            add_ref(ref)
+    for event in events:
+        add_ref(event.committed_content_ref)
+    return represented
+
+
+def _shadow_derive_members_for_ids(
+    message_ids: tuple[int, ...],
+    *,
+    db_path: Optional[str],
+) -> tuple[Any, ...]:
+    from continuity.sources import (
+        build_source_members,
+        derive_autonomous_events,
+        derive_completed_turns,
+    )
+
+    rows = _shadow_load_source_rows(message_ids, db_path=db_path)
+    loaded_ids = {int(row.get('id') or 0) for row in rows}
+    missing = sorted(set(message_ids) - loaded_ids)
+    if missing:
+        raise ValueError('installed source rows missing: %s' % missing)
+    turns = derive_completed_turns(rows)
+    events = derive_autonomous_events(rows)
+    members = build_source_members(turns, events)
+    represented = _shadow_source_member_message_ids(turns, events)
+    uncovered = sorted(set(message_ids) - represented)
+    if uncovered:
+        raise ValueError(
+            'installed source projection unavailable: %s' % uncovered
+        )
+    return tuple(members)
+
+
+def _shadow_receipt_pending_metadata(
+    *,
+    plan: DailyTurnPlan,
+    turn_kind: str,
+    production_content_hash: str,
+    production_content_token_estimate: int,
+    fixed_sections: Any,
+    base_plan_id: str,
+    base_plan_hash: str,
+) -> dict[str, Any]:
+    return {
+        'turn_kind': str(turn_kind),
+        'production_content_hash': str(production_content_hash or ''),
+        'production_content_token_estimate': int(
+            production_content_token_estimate or 0
+        ),
+        'fixed_section_fingerprints': _shadow_fixed_section_fingerprints(
+            fixed_sections,
+        ),
+        'base_plan_id': str(base_plan_id or ''),
+        'base_plan_hash': str(base_plan_hash or ''),
+    }
+
+
+def _log_continuity_shadow_receipt_event(
+    plan: DailyTurnPlan,
+    *,
+    status: str,
+    error_code: Optional[str] = None,
+    receipt: Any = None,
+) -> None:
+    payload = {
+        'event': 'continuity_shadow_receipt_commit',
+        'status': str(status),
+        'error_code': error_code,
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+        'resident_generation': int(plan.resident_generation),
+        'membership_hash': (
+            str(receipt.membership_hash)
+            if receipt is not None else None
+        ),
+        'member_count': (
+            len(receipt.installed_source_members)
+            if receipt is not None else 0
+        ),
+    }
+    logger.info(
+        'continuity_shadow_receipt_commit %s',
+        _continuity_shadow_canonical(payload),
+    )
+
+
+def _commit_continuity_shadow_receipt(
+    plan: DailyTurnPlan,
+    *,
+    assistant_message_id: int,
+) -> bool:
+    """Commit one process-local receipt after the existing full-success boundary."""
+    if str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED':
+        _log_continuity_shadow_receipt_event(
+            plan, status='skipped', error_code='mapping_not_mapped',
+        )
+        return False
+    sid = str(plan.transcript_claude_session_id or '').strip()
+    process_generation = plan.transcript_process_generation
+    if (
+        not sid
+        or process_generation is None
+        or int(process_generation) <= 0
+    ):
+        _log_continuity_shadow_receipt_event(
+            plan, status='skipped', error_code='runtime_identity_unavailable',
+        )
+        return False
+
+    from chat import daily_continuity_shadow_receipt as receipt_store
+
+    turn_kind = _continuity_shadow_turn_kind(plan)
+    pending = getattr(plan, '_continuity_shadow_pending_receipt', None)
+    try:
+        if turn_kind == 'hot':
+            prior = receipt_store.get(
+                plan.context_id,
+                plan.context_epoch,
+                plan.resident_generation,
+            )
+            if prior is None:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='installed_context_receipt_missing',
+                )
+                return False
+            if not prior.matches_live(
+                context_id=plan.context_id,
+                context_epoch=plan.context_epoch,
+                resident_generation=plan.resident_generation,
+                resident_key=plan.resident_key,
+                claude_session_id=sid,
+                process_generation=int(process_generation),
+            ):
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='installed_context_receipt_identity_mismatch',
+                )
+                return False
+            new_members = _shadow_derive_members_for_ids(
+                (int(plan.user_message_id), int(assistant_message_id)),
+                db_path=plan.db_path,
+            )
+            if len(new_members) != 1:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='installed_source_projection_unavailable',
+                )
+                return False
+            receipt = receipt_store.advance(
+                prior,
+                new_members=new_members,
+                production_content_hash=(
+                    pending.get('production_content_hash', prior.production_content_hash)
+                    if isinstance(pending, dict) else prior.production_content_hash
+                ),
+                production_content_token_estimate=(
+                    pending.get(
+                        'production_content_token_estimate',
+                        prior.production_content_token_estimate,
+                    )
+                    if isinstance(pending, dict)
+                    else prior.production_content_token_estimate
+                ),
+                source_turn_kind='hot',
+            )
+        else:
+            if not isinstance(pending, dict):
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='shadow_receipt_plan_metadata_missing',
+                )
+                return False
+            ids = list(_shadow_assembly_message_ids(plan))
+            ids.extend((int(plan.user_message_id), int(assistant_message_id)))
+            unique_ids: list[int] = []
+            for value in ids:
+                if value > 0 and value not in unique_ids:
+                    unique_ids.append(value)
+            members = _shadow_derive_members_for_ids(
+                tuple(unique_ids),
+                db_path=plan.db_path,
+            )
+            receipt = receipt_store.InstalledContextShadowReceipt.build(
+                context_id=plan.context_id,
+                context_epoch=plan.context_epoch,
+                resident_generation=plan.resident_generation,
+                resident_key=plan.resident_key,
+                claude_session_id=sid,
+                process_generation=int(process_generation),
+                base_plan_id=pending.get('base_plan_id', ''),
+                base_plan_hash=pending.get('base_plan_hash', ''),
+                source_members=members,
+                fixed_section_fingerprints=pending.get(
+                    'fixed_section_fingerprints', ()
+                ),
+                production_content_hash=pending.get(
+                    'production_content_hash', ''
+                ),
+                production_content_token_estimate=pending.get(
+                    'production_content_token_estimate', 0
+                ),
+                source_turn_kind=turn_kind,
+            )
+        receipt_store.commit(receipt)
+        _log_continuity_shadow_receipt_event(
+            plan, status='committed', receipt=receipt,
+        )
+        return True
+    except Exception:
+        _log_continuity_shadow_receipt_event(
+            plan,
+            status='skipped',
+            error_code='installed_source_projection_unavailable',
+        )
+        return False
+    finally:
+        if hasattr(plan, '_continuity_shadow_pending_receipt'):
+            delattr(plan, '_continuity_shadow_pending_receipt')
+
 def _observe_continuity_shadow(
     *,
     plan: DailyTurnPlan,
@@ -2615,14 +2939,9 @@ def _observe_continuity_shadow(
     static_system: str,
     content: Any,
 ) -> None:
-    manifest = plan.manifest if isinstance(plan.manifest, dict) else {}
-    turn_kind = str(manifest.get('turn_kind') or '').strip()
-    if not turn_kind:
-        turn_kind = (
-            'respawn' if plan.is_respawn
-            else 'cold' if plan.is_cold
-            else 'hot'
-        )
+    turn_kind = _continuity_shadow_turn_kind(plan)
+    if hasattr(plan, '_continuity_shadow_pending_receipt'):
+        delattr(plan, '_continuity_shadow_pending_receipt')
     observation = {
         'event': 'continuity_shadow_observation',
         'status': 'failed',
@@ -2655,7 +2974,11 @@ def _observe_continuity_shadow(
         'gap_codes': [],
         'exclusion_codes': [],
         'runtime_transition_source': turn_kind,
+        'shadow_plan_available': False,
         'installed_context_proven': False,
+        'source_proof_status': None,
+        'source_proof_error_code': None,
+        'budget_error_code': None,
     }
     try:
         content_hash, content_tokens, content_kind = _continuity_shadow_fingerprint(content)
@@ -2664,10 +2987,66 @@ def _observe_continuity_shadow(
             'production_content_token_estimate': content_tokens,
             'production_content_kind': content_kind,
         })
-        if turn_kind not in ('cold', 'respawn'):
+        if turn_kind == 'hot':
+            observation.update({
+                'status': 'blocked',
+                'error_code': 'hot_budget_policy_unmapped',
+                'budget_status': 'blocked',
+                'budget_error_code': 'hot_budget_policy_unmapped',
+            })
+            from chat import daily_continuity_shadow_receipt as receipt_store
+            live_sid = str(getattr(resident, 'session_id', None) or '').strip()
+            live_generation = int(
+                getattr(resident, 'generation', 0) or 0
+            )
+            receipt = receipt_store.get(
+                plan.context_id,
+                plan.context_epoch,
+                plan.resident_generation,
+            )
+            if receipt is None:
+                observation['source_proof_status'] = 'blocked'
+                observation['source_proof_error_code'] = (
+                    'installed_context_receipt_missing'
+                )
+            elif not receipt.matches_live(
+                context_id=plan.context_id,
+                context_epoch=plan.context_epoch,
+                resident_generation=plan.resident_generation,
+                resident_key=plan.resident_key,
+                claude_session_id=live_sid,
+                process_generation=live_generation,
+            ):
+                observation['source_proof_status'] = 'blocked'
+                observation['source_proof_error_code'] = (
+                    'installed_context_receipt_identity_mismatch'
+                )
+            else:
+                observation['source_proof_status'] = 'ready'
+                observation['installed_context_proven'] = True
+                plan._continuity_shadow_pending_receipt = (
+                    _shadow_receipt_pending_metadata(
+                        plan=plan,
+                        turn_kind='hot',
+                        production_content_hash=content_hash,
+                        production_content_token_estimate=content_tokens,
+                        fixed_sections=(),
+                        base_plan_id=receipt.base_plan_id,
+                        base_plan_hash=receipt.base_plan_hash,
+                    )
+                )
+            logger.info(
+                'continuity_shadow_observation %s',
+                _continuity_shadow_canonical(observation),
+            )
+            return
+
+        if turn_kind == 'capacity_swap':
             observation.update({
                 'status': 'blocked',
                 'error_code': 'installed_context_policy_unmapped',
+                'source_proof_status': 'blocked',
+                'source_proof_error_code': 'capacity_receipt_deferred',
             })
         else:
             store_path = str(os.environ.get(
@@ -2677,6 +3056,7 @@ def _observe_continuity_shadow(
                 observation.update({
                     'status': 'blocked',
                     'error_code': 'shadow_store_unconfigured',
+                    'source_proof_status': 'blocked',
                 })
             else:
                 assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
@@ -2690,6 +3070,7 @@ def _observe_continuity_shadow(
                     observation.update({
                         'status': 'blocked',
                         'error_code': 'budget_policy_unmapped',
+                        'source_proof_status': 'blocked',
                     })
                 else:
                     from chat.cold_bootstrap_budget import (
@@ -2710,18 +3091,17 @@ def _observe_continuity_shadow(
                         reserve_budget=reserve,
                         recent_raw_target=recent_raw_target,
                     )
+                    fixed_sections = _build_continuity_shadow_fixed_sections(
+                        plan=plan,
+                        resident=resident,
+                        static_system=static_system,
+                    )
                     result = build_daily_continuity_shadow_plan(
                         source_db_path=plan.db_path or dc.DEFAULT_DB_PATH,
                         shadow_store_path=store_path,
                         current_user_message_id=int(plan.user_message_id),
                         budget_policy=policy,
-                        accepted_fixed_sections=(
-                            _build_continuity_shadow_fixed_sections(
-                                plan=plan,
-                                resident=resident,
-                                static_system=static_system,
-                            )
-                        ),
+                        accepted_fixed_sections=fixed_sections,
                     )
                     observation.update({
                         'status': str(result.status),
@@ -2729,11 +3109,11 @@ def _observe_continuity_shadow(
                         'chunk_surface': str(result.chunk_surface),
                         'source_member_count': int(result.source_member_count),
                         'chunk_binding_count': int(result.chunk_binding_count),
+                        'shadow_plan_available': bool(result.plan is not None),
+                        'installed_context_proven': False,
+                        'source_proof_status': 'blocked',
                     })
                     shadow_plan = result.plan
-                    observation['installed_context_proven'] = bool(
-                        shadow_plan is not None
-                    )
                     if shadow_plan is not None:
                         representations = tuple(shadow_plan.representations)
                         budget_policy = shadow_plan.budget_policy
@@ -2765,11 +3145,23 @@ def _observe_continuity_shadow(
                                 str(item.code) for item in shadow_plan.exclusions
                             }),
                         })
+                        plan._continuity_shadow_pending_receipt = (
+                            _shadow_receipt_pending_metadata(
+                                plan=plan,
+                                turn_kind=turn_kind,
+                                production_content_hash=content_hash,
+                                production_content_token_estimate=content_tokens,
+                                fixed_sections=fixed_sections,
+                                base_plan_id=shadow_plan.plan_id,
+                                base_plan_hash=shadow_plan.plan_hash,
+                            )
+                        )
     except Exception:
         logger.exception('continuity shadow observation failed', exc_info=True)
         observation.update({
             'status': 'failed',
             'error_code': 'unexpected_exception',
+            'source_proof_status': 'failed',
         })
     logger.info(
         'continuity_shadow_observation %s',
@@ -3353,7 +3745,7 @@ def handle_provider_success(
         unexpected_save_marker=unexpected_save_marker,
     )
     # Mapping only after assistant persist (Gateway) + cursor CAS success above.
-    manifest = finalize_transcript_mapping_after_success(
+    finalize_transcript_mapping_after_success(
         plan, assistant_message_id=int(assistant_message_id),
     )
     # Same-context last-good: only after full success (result + persist + JSONL + cursor).
@@ -3380,6 +3772,12 @@ def handle_provider_success(
             source=resolve_finalize_registry_source(existing, default='daily_runtime'),
             transcript_end_offset=int(end_off) if end_off is not None else None,
         )
+    # The receipt is committed only after persist + cursor CAS + MAPPED and
+    # the existing last-good success boundary.  It is process-local metadata.
+    _commit_continuity_shadow_receipt(
+        plan,
+        assistant_message_id=int(assistant_message_id),
+    )
     _consume_feedback_after_success(plan)
     return dict(plan.manifest)
 

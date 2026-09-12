@@ -3506,9 +3506,9 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                 ['invariant_system'],
             )
             self.assertEqual(len(resident.sent_objects), 1)
-            self.assertTrue(
-                self._observations(log)[-1]['installed_context_proven'],
-            )
+            observation = self._observations(log)[-1]
+            self.assertTrue(observation['shadow_plan_available'])
+            self.assertFalse(observation['installed_context_proven'])
         finally:
             os.unlink(db)
 
@@ -3558,9 +3558,14 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                         content='hot body',
                     )
                 adapter.assert_not_called()
+                expected_error = (
+                    'hot_budget_policy_unmapped'
+                    if turn_kind == 'hot'
+                    else 'installed_context_policy_unmapped'
+                )
                 self.assertEqual(
                     self._observations(log)[-1]['error_code'],
-                    'installed_context_policy_unmapped',
+                    expected_error,
                 )
             finally:
                 os.unlink(db)
