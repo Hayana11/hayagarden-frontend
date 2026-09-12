@@ -2898,6 +2898,8 @@ def _observe_continuity_shadow(
     content: Any,
 ) -> None:
     turn_kind = _continuity_shadow_turn_kind(plan)
+    if hasattr(plan, '_continuity_shadow_pending_receipt'):
+        delattr(plan, '_continuity_shadow_pending_receipt')
     observation = {
         'event': 'continuity_shadow_observation',
         'status': 'failed',
@@ -3704,6 +3706,8 @@ def handle_provider_success(
     manifest = finalize_transcript_mapping_after_success(
         plan, assistant_message_id=int(assistant_message_id),
     )
+    if isinstance(manifest, dict):
+        plan.manifest.update(manifest)
     # Same-context last-good: only after full success (result + persist + JSONL + cursor).
     end_off = plan.transcript_end_offset
     start_off = plan.transcript_start_offset
