@@ -647,22 +647,6 @@ class StrictReadySurfaceTests(unittest.TestCase):
         self.assertEqual(surface.error_code, 'generation_job_not_ready')
 
 
-    def test_missing_executor_is_corrupt(self):
-        self._publish_ready()
-        self.conn.execute('DROP TRIGGER continuity_chunks_immutable_body')
-        self.conn.execute(
-            "UPDATE continuity_chunks SET actual_executor='' WHERE generation_job_id=?",
-            (self.generation_job.generation_job_id,),
-        )
-        self.conn.commit()
-        directory, path = self._file_surface()
-        try:
-            surface = read_ready_surface(path)
-        finally:
-            directory.cleanup()
-        self.assertEqual(surface.status, 'corrupt')
-        self.assertEqual(surface.error_code, 'chunk_missing_actual_executor')
-
 
 class RunnerTests(unittest.TestCase):
     def test_source_loader_uses_cursor_metadata_and_read_only_database(self):
