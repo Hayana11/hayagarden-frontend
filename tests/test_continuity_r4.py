@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 
 from continuity.context_plan import (
+    CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION,
     ContextBudgetPolicy,
     ContextChunkBinding,
     ContextPlanExclusion,
@@ -13,6 +19,7 @@ from continuity.context_plan import (
     _identity_payload,
     _sha256,
     build_context_plan,
+    parse_context_budget_policy,
 )
 from continuity.contracts import SourceMember, SourceSnapshot, candidate_source_revision
 from continuity.coverage import source_hash
@@ -103,6 +110,49 @@ def _binding(
         status=status,
     )
     return ContextChunkBinding(chunk=chunk, candidate=candidate, snapshot=snap)
+
+
+
+
+def _config_probe(code: str, *, env_contents: str = '') -> str:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        env_path = root / '.env'
+        env_path.write_text(env_contents, encoding='utf-8')
+        env = os.environ.copy()
+        env['HAYAGARDEN_CONFIG_DB_PATH'] = str(root / 'runtime.db')
+        env['HAYAGARDEN_ENV_PATH'] = str(env_path)
+        result = subprocess.run(
+            [sys.executable, '-c', code],
+            cwd=Path(__file__).resolve().parents[1],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+
+class ConfigStoreContextBudgetTests(unittest.TestCase):
+    def test_context_budget_defaults_are_gate_off_and_unmapped(self):
+        output = _config_probe(
+            "import config_store; print(repr(tuple(config_store.get(k) for k in ("
+            "'CONTEXT_PLAN_CONSUMER_ENABLED', 'CONTEXT_PLAN_TOKEN_BUDGET', "
+            "'CONTEXT_PLAN_RESERVE_BUDGET', 'CONTEXT_PLAN_RECENT_RAW_TARGET'))))"
+        )
+        self.assertEqual(output, "('0', '', '', '')")
+
+    def test_context_budget_keys_have_no_env_fallback_and_values_stay_raw(self):
+        output = _config_probe(
+            "import config_store; "
+            "print(repr(tuple(config_store._ENV_FALLBACK_KEYS.get(k) for k in ("
+            "'CONTEXT_PLAN_CONSUMER_ENABLED', 'CONTEXT_PLAN_TOKEN_BUDGET', "
+            "'CONTEXT_PLAN_RESERVE_BUDGET', 'CONTEXT_PLAN_RECENT_RAW_TARGET')))); "
+            "config_store.set('CONTEXT_PLAN_TOKEN_BUDGET', 'not-an-int'); "
+            "print(repr(config_store.get('CONTEXT_PLAN_TOKEN_BUDGET')))" ,
+            env_contents='CONTEXT_PLAN_TOKEN_BUDGET=999\\n',
+        )
+        self.assertEqual(output.splitlines(), ["(None, None, None, None)", "'not-an-int'"])
 
 
 class ContextPlanTests(unittest.TestCase):
@@ -726,6 +776,58 @@ class ContextPlanTests(unittest.TestCase):
             ContextBudgetPolicy(token_budget=0)
         with self.assertRaisesRegex(ValueError, 'reserve_budget_must_be_non_negative'):
             ContextBudgetPolicy(token_budget=10, reserve_budget=-1)
+
+    def test_parse_context_budget_policy_rejects_unmapped_and_noncanonical_values(self):
+        cases = (
+            (None, '2', '3', 'token_budget'),
+            ('10', '', '3', 'reserve_budget'),
+            ('10', '2.5', '3', 'reserve_budget_must_be_decimal'),
+            ('0', '0', '0', 'token_budget_must_be_positive'),
+            ('10', '-1', '0', 'reserve_budget_must_be_non_negative'),
+            ('10', '2', '-1', 'recent_raw_target_must_be_non_negative'),
+            ('10', '10', '0', 'reserve_must_be_less_than_token'),
+            ('010', '2', '0', 'token_budget_must_be_decimal'),
+        )
+        for token, reserve, recent, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    parse_context_budget_policy(token, reserve, recent)
+
+    def test_parse_context_budget_policy_returns_explicit_policy(self):
+        policy = parse_context_budget_policy('12000', '300', '900')
+        self.assertEqual(policy, ContextBudgetPolicy(
+            token_budget=12000,
+            reserve_budget=300,
+            recent_raw_target=900,
+        ))
+
+    def test_budget_policy_version_default_preserves_hash_and_explicit_version_changes_it(self):
+        policy = ContextBudgetPolicy(token_budget=100, reserve_budget=7, recent_raw_target=5)
+        baseline = build_context_plan(self.members, budget_policy=policy)
+        empty = build_context_plan(
+            self.members,
+            budget_policy=policy,
+            budget_policy_version='',
+        )
+        versioned = build_context_plan(
+            self.members,
+            budget_policy=policy,
+            budget_policy_version=CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION,
+        )
+        changed_policy = build_context_plan(
+            self.members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=101,
+                reserve_budget=7,
+                recent_raw_target=5,
+            ),
+            budget_policy_version=CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION,
+        )
+        self.assertEqual(baseline.plan_hash, empty.plan_hash)
+        self.assertNotEqual(baseline.plan_hash, versioned.plan_hash)
+        self.assertEqual(versioned.budget_policy_version,
+                         CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION)
+        self.assertNotEqual(versioned.plan_hash, changed_policy.plan_hash)
 
 
 if __name__ == '__main__':
