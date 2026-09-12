@@ -260,7 +260,7 @@ class ContextReceiptCasTests(unittest.TestCase):
         old_members = (_member(0), _member(1))
         receipt = _receipt(watermark=10, members=old_members)
         create_receipt(conn, receipt, old_members)
-        new_members = (_member(2, source_ref='turn:2'),)
+        new_members = (_member(0, source_ref='turn:2', representation_id='raw:2', content_hash='content:2'),)
         advanced = hot_advance_receipt(
             conn,
             expected_receipt_revision=0,
@@ -294,7 +294,7 @@ class ContextReceiptCasTests(unittest.TestCase):
                BEFORE INSERT ON context_receipt_members
                BEGIN SELECT RAISE(ABORT, 'injected member failure'); END'''
         )
-        new_members = (_member(2, source_ref='turn:2'),)
+        new_members = (_member(0, source_ref='turn:2', representation_id='raw:2', content_hash='content:2'),)
         with self.assertRaises(sqlite3.IntegrityError):
             hot_advance_receipt(
                 conn,
