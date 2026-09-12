@@ -64,6 +64,8 @@ def _plan(db, *, turn_kind='cold', pending=None):
         assembly={'current_day_history': [], 'carryover_messages': []},
         _continuity_shadow_pending_receipt=pending,
         _resident_close_fn=None,
+        lease_released=False,
+        lease_owner='test-lease',
     )
 
 
