@@ -2919,6 +2919,26 @@ def _commit_continuity_shadow_receipt(
                 if mid > 0 and mid not in selected_ids:
                     selected_ids.append(mid)
             current_user_id = int(plan.user_message_id)
+            candidate_sid = str(
+                capacity_pending.get('candidate_session_id') or ''
+            ).strip()
+            if candidate_sid and candidate_sid != sid:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_target_identity_mismatch',
+                )
+                return False
+            pending_target_generation = int(
+                capacity_pending.get('target_resident_generation') or 0
+            )
+            if pending_target_generation and pending_target_generation != int(plan.resident_generation):
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_target_identity_mismatch',
+                )
+                return False
             if current_user_id in selected_ids:
                 _log_continuity_shadow_receipt_event(
                     plan,
