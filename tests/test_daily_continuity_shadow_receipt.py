@@ -906,14 +906,48 @@ class CapacitySwapAttemptIsolationTests(unittest.TestCase):
         if register_error is not None:
             register.side_effect = register_error
 
-        with mock.patch.object(dr, 'is_capacity_swap_reason', return_value=True),              mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff),              mock.patch.object(dr, 'is_epoch_token_current', return_value=False),              mock.patch.object(dr.dc, 'get_daily_context_by_id', return_value={
-                 'id': 7, 'context_epoch': 2, 'resident_generation': 4,
-             }),              mock.patch.object(dr, 'install_capacity_swap_into_live_resident',
-                               return_value=install_state),              mock.patch.object(dr, 'reprepare_after_capacity_swap',
-                               side_effect=reprepare),              mock.patch.object(dr, '_adopt_reprepared_plan_in_place'),              mock.patch.object(dr, 'register_capacity_swap_generation',
-                               register),              mock.patch.object(dr, '_build_continuity_shadow_fixed_sections',
-                               side_effect=fixed),              mock.patch.object(dr, '_shadow_fixed_section_fingerprints',
-                               return_value=(('invariant_system', 'system', 'hash', 1),)),              mock.patch.object(dr, 'rollback_capacity_swap_install') as rollback,              mock.patch.object(dr.logger, 'exception') as log_exception:
+        with (
+            mock.patch.object(dr, 'is_capacity_swap_reason', return_value=True),
+            mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff),
+            mock.patch.object(dr, 'is_epoch_token_current', return_value=False),
+            mock.patch.object(
+                dr.dc,
+                'get_daily_context_by_id',
+                return_value={
+                    'id': 7,
+                    'context_epoch': 2,
+                    'resident_generation': 4,
+                },
+            ),
+            mock.patch.object(
+                dr,
+                'install_capacity_swap_into_live_resident',
+                return_value=install_state,
+            ),
+            mock.patch.object(
+                dr,
+                'reprepare_after_capacity_swap',
+                side_effect=reprepare,
+            ),
+            mock.patch.object(dr, '_adopt_reprepared_plan_in_place'),
+            mock.patch.object(
+                dr,
+                'register_capacity_swap_generation',
+                register,
+            ),
+            mock.patch.object(
+                dr,
+                '_build_continuity_shadow_fixed_sections',
+                side_effect=fixed,
+            ),
+            mock.patch.object(
+                dr,
+                '_shadow_fixed_section_fingerprints',
+                return_value=(('invariant_system', 'system', 'hash', 1),),
+            ),
+            mock.patch.object(dr, 'rollback_capacity_swap_install') as rollback,
+            mock.patch.object(dr.logger, 'exception') as log_exception,
+        ):
             result = dr._attempt_capacity_swap_before_stdin(
                 plan,
                 resident=resident,

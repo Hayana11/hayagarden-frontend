@@ -2587,8 +2587,6 @@ def _rollback_capacity_swap_if_unflushed(
     )
     plan._capacity_swap_install_state = None  # type: ignore[attr-defined]
     plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
-    if hasattr(plan, '_continuity_shadow_capacity_pending_error'):
-        delattr(plan, '_continuity_shadow_capacity_pending_error')
     for attr in (
         '_continuity_shadow_capacity_pending',
         '_continuity_shadow_capacity_pending_error',
