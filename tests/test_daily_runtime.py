@@ -3506,9 +3506,9 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                 ['invariant_system'],
             )
             self.assertEqual(len(resident.sent_objects), 1)
-            self.assertTrue(
-                self._observations(log)[-1]['installed_context_proven'],
-            )
+            observation = self._observations(log)[-1]
+            self.assertTrue(observation['shadow_plan_available'])
+            self.assertFalse(observation['installed_context_proven'])
         finally:
             os.unlink(db)
 
