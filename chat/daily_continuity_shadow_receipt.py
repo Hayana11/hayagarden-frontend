@@ -166,7 +166,7 @@ class InstalledContextShadowReceipt:
             ),
             source_turn_kind=str(source_turn_kind),
             receipt_state=str(receipt_state),
-            membership_hash=hashlib.sha256(_canonical([item.as_metadata() for item in members]).encode('utf-8')),
+            membership_hash=hashlib.sha256(_canonical([item.as_metadata() for item in members]).encode('utf-8')).hexdigest(),
             measurement_semantics=str(measurement_semantics),
         )
 
