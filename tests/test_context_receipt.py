@@ -360,6 +360,63 @@ class ContextReceiptCasTests(unittest.TestCase):
         conn.close()
 
 
+    def test_superseded_receipt_cannot_hot_advance_and_preserves_state(self):
+        conn = _connection()
+        old_members = (_member(0), _member(1))
+        receipt = _receipt(watermark=10, members=old_members)
+        create_receipt(conn, receipt, old_members)
+        superseded = mark_superseded(
+            conn,
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            expected_receipt_revision=0,
+            target_generation=2,
+        )
+        new_members = (
+            _member(
+                0,
+                source_ref='turn:2',
+                representation_id='raw:2',
+                content_hash='content:2',
+            ),
+        )
+        with self.assertRaisesRegex(ContextReceiptConflict, 'superseded'):
+            hot_advance_receipt(
+                conn,
+                expected_receipt_revision=superseded.receipt_revision,
+                receipt=_receipt(
+                    watermark=12,
+                    plan_hash='plan-2',
+                    members=new_members,
+                ),
+                members=new_members,
+            )
+        reread = get_receipt(
+            conn,
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+        )
+        self.assertIsNotNone(reread)
+        assert reread is not None
+        self.assertEqual(reread.result, RECEIPT_RESULT_SUPERSEDED)
+        self.assertEqual(
+            reread.superseded_by_generation,
+            superseded.superseded_by_generation,
+        )
+        self.assertEqual(reread.receipt_revision, superseded.receipt_revision)
+        self.assertEqual(
+            get_receipt_members(
+                conn,
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+            ),
+            old_members,
+        )
+        conn.close()
+
 class ContextReceiptSupersedeTests(unittest.TestCase):
     def test_supersede_requires_explicit_call_and_is_idempotent(self):
         conn = _connection()
@@ -396,6 +453,36 @@ class ContextReceiptSupersedeTests(unittest.TestCase):
                 expected_receipt_revision=1,
                 target_generation=3,
             )
+        conn.close()
+
+    def test_supersede_requires_next_capacity_generation(self):
+        conn = _connection()
+        receipt = _receipt()
+        members = (_member(0), _member(1))
+        create_receipt(conn, receipt, members)
+        for target in (0, 1, 3):
+            with self.subTest(target_generation=target):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r'resident_generation + 1',
+                ):
+                    mark_superseded(
+                        conn,
+                        context_id=7,
+                        context_epoch=3,
+                        resident_generation=1,
+                        expected_receipt_revision=0,
+                        target_generation=target,
+                    )
+        self.assertEqual(
+            get_receipt(
+                conn,
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+            ),
+            receipt,
+        )
         conn.close()
 
     def test_missing_receipt_returns_none_and_empty_members(self):

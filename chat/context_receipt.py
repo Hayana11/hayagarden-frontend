@@ -599,6 +599,13 @@ def hot_advance_receipt(
         )
         if current is None:
             raise ContextReceiptConflict('cannot advance a missing receipt')
+        if (
+            current.result != RECEIPT_RESULT_INSTALLED
+            or current.superseded_by_generation is not None
+        ):
+            raise ContextReceiptConflict(
+                'receipt is superseded and cannot advance'
+            )
         if current.receipt_revision != int(expected_receipt_revision):
             raise ContextReceiptConflict('receipt revision CAS mismatch')
         if receipt.installed_source_watermark < current.installed_source_watermark:
@@ -681,9 +688,9 @@ def mark_superseded(
     target_generation: int,
 ) -> ContextReceipt:
     """Mark a source generation superseded after its target is proven successful."""
-    if int(target_generation) == int(resident_generation):
-        raise ValueError('supersede target must be a different generation')
-    key = (int(context_id), int(context_epoch), int(resident_generation))
+    target = int(target_generation)
+    resident = int(resident_generation)
+    key = (int(context_id), int(context_epoch), resident)
     with _atomic(conn):
         current = get_receipt(
             conn,
@@ -694,16 +701,20 @@ def mark_superseded(
         if current is None:
             raise ContextReceiptConflict('cannot supersede a missing receipt')
         if current.result == RECEIPT_RESULT_SUPERSEDED:
-            if current.superseded_by_generation == int(target_generation):
+            if current.superseded_by_generation == target:
                 return current
             raise ContextReceiptConflict('receipt already superseded by another generation')
+        if target != resident + 1:
+            raise ValueError(
+                'supersede target must equal resident_generation + 1'
+            )
         if current.receipt_revision != int(expected_receipt_revision):
             raise ContextReceiptConflict('receipt revision CAS mismatch')
         updated = replace(
             current,
             receipt_revision=current.receipt_revision + 1,
             result=RECEIPT_RESULT_SUPERSEDED,
-            superseded_by_generation=int(target_generation),
+            superseded_by_generation=target,
             updated_at=_utc_now(),
         )
         changed = conn.execute(
