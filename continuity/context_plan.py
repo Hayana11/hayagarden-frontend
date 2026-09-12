@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -48,6 +49,8 @@ _SECTION_ORDER = (
     'recent_raw',
     'current_request',
 )
+
+CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION = 'continuity_context_budget_v1'
 
 
 def _canonical(value: object) -> str:
@@ -98,6 +101,54 @@ class ContextChunkBinding:
     chunk: ContinuityChunk
     candidate: CandidateBlock
     snapshot: SourceSnapshot
+
+
+def _parse_context_budget_raw(raw: object, *, name: str, positive: bool) -> int:
+    if raw is None or not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f'unmapped_context_budget_policy:{name}')
+    text = raw.strip()
+    if text.startswith('-') and text[1:].isdigit():
+        if positive:
+            raise ValueError(f'invalid_context_budget_policy:{name}_must_be_positive')
+        raise ValueError(f'invalid_context_budget_policy:{name}_must_be_non_negative')
+    if not re.fullmatch(r'(?:0|[1-9][0-9]*)', text):
+        raise ValueError(f'invalid_context_budget_policy:{name}_must_be_decimal')
+    value = int(text, 10)
+    if positive and value <= 0:
+        raise ValueError(f'invalid_context_budget_policy:{name}_must_be_positive')
+    return value
+
+
+def parse_context_budget_policy(
+    token_budget_raw: object,
+    reserve_budget_raw: object,
+    recent_raw_target_raw: object,
+) -> ContextBudgetPolicy:
+    """Parse the production raw config surface into one explicit pure policy."""
+    token_budget = _parse_context_budget_raw(
+        token_budget_raw,
+        name='token_budget',
+        positive=True,
+    )
+    reserve_budget = _parse_context_budget_raw(
+        reserve_budget_raw,
+        name='reserve_budget',
+        positive=False,
+    )
+    recent_raw_target = _parse_context_budget_raw(
+        recent_raw_target_raw,
+        name='recent_raw_target',
+        positive=False,
+    )
+    if reserve_budget >= token_budget:
+        raise ValueError(
+            'invalid_context_budget_policy:reserve_must_be_less_than_token'
+        )
+    return ContextBudgetPolicy(
+        token_budget=token_budget,
+        reserve_budget=reserve_budget,
+        recent_raw_target=recent_raw_target,
+    )
 
 
 @dataclass(frozen=True)
@@ -201,6 +252,7 @@ class ContextPlan:
     budget_policy: ContextBudgetPolicy | None = None
     budget_status: BudgetStatus = 'unbounded'
     recent_raw_source_seqs: tuple[int, ...] = ()
+    budget_policy_version: str = ''
 
     @property
     def valid(self) -> bool:
@@ -418,8 +470,9 @@ def _identity_payload(
     budget_policy: ContextBudgetPolicy | None = None,
     budget_status: BudgetStatus = 'unbounded',
     recent_raw_source_seqs: Sequence[int] = (),
+    budget_policy_version: str = '',
 ) -> dict[str, Any]:
-    return {
+    payload = {
         'measurement_semantics': MEASUREMENT_SEMANTICS,
         'budget_policy': (
             {
@@ -454,6 +507,12 @@ def _identity_payload(
         ),
         'gaps': sorted((item.code, item.source_ref) for item in gaps),
     }
+    # Empty is the backwards-compatible pre-R5 identity shape. An explicit
+    # version becomes part of identity so policy semantics cannot drift silently.
+    normalized_version = str(budget_policy_version or '').strip()
+    if normalized_version:
+        payload['budget_policy_version'] = normalized_version
+    return payload
 
 
 def _member_overlap(left: SourceMember, right: SourceMember) -> bool:
@@ -580,10 +639,12 @@ def build_context_plan(
     chunks: Sequence[ContextChunkBinding] = (),
     budget_policy: ContextBudgetPolicy | None = None,
     fixed_sections: Sequence[ContextSection] = (),
+    budget_policy_version: str = '',
 ) -> ContextPlan:
     """Select exact raw/chunk representations for one required source set."""
     expected = _ordered(expected_members)
     accepted_fixed_sections = _validated_fixed_sections(fixed_sections)
+    budget_policy_version = str(budget_policy_version or '').strip()
     raw = _ordered(expected if raw_members is None else raw_members)
     expected_by_key = {_member_key(member): member for member in expected}
     exclusions: list[ContextPlanExclusion] = []
@@ -789,6 +850,7 @@ def build_context_plan(
         ordered_sections=ordered_sections,
         budget_policy=budget_policy,
         budget_status=budget_status,
+        budget_policy_version=budget_policy_version,
         recent_raw_source_seqs=tuple(
             sorted(int(member.seq) for member in expected if _member_key(member) in recent_raw_keys)
         ),
@@ -811,10 +873,12 @@ def build_context_plan(
         recent_raw_source_seqs=tuple(
             sorted(int(member.seq) for member in expected if _member_key(member) in recent_raw_keys)
         ),
+        budget_policy_version=budget_policy_version,
     )
 
 
 __all__ = [
+    'CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION',
     'ContextBudgetPolicy',
     'ContextChunkBinding',
     'ContextPlan',
@@ -822,6 +886,7 @@ __all__ = [
     'ContextRepresentation',
     'ContextSection',
     'SectionKind',
+    'parse_context_budget_policy',
     'build_context_plan',
 ]
 
