@@ -79,6 +79,32 @@ def _pending(kind='cold'):
     }
 
 
+def _capacity_pending(
+    *,
+    status='ANCHOR_RETAINED',
+    selected=(1, 2, 3),
+    anchor_id=1,
+    source_generation=3,
+):
+    return {
+        'source_context_id': 7,
+        'source_context_epoch': 2,
+        'source_resident_generation': source_generation,
+        'target_resident_generation': 4,
+        'candidate_session_id': 'session-new',
+        'selected_message_ids': tuple(selected),
+        'anchor_status': status,
+        'anchor_message_id': anchor_id,
+        'capacity_baseline_sha256': 'published-jsonl-sha',
+        'trigger_reason': 'soft_context',
+        'fixed_section_fingerprints': (
+            ('invariant_system', 'system:x', 'hash', 2),
+            ('accepted_state', 'state:x', 'hash2', 1),
+        ),
+        'production_content_hash': 'prompt-hash',
+        'production_content_token_estimate': 4,
+    }
+
 class ReceiptContractTests(unittest.TestCase):
     def setUp(self):
         rs.clear_for_tests()
@@ -531,3 +557,158 @@ class ReceiptRuntimeBoundaryTests(unittest.TestCase):
             )
         adapter.assert_not_called()
         self.assertIs(rs.get(7, 2, 3), before)
+
+
+class CapacitySwapReceiptContractTests(unittest.TestCase):
+    def setUp(self):
+        rs.clear_for_tests()
+
+    def tearDown(self):
+        rs.clear_for_tests()
+
+    def _capacity_plan(self, db, pending, *, selected_user=False):
+        plan = _plan(db, turn_kind='capacity_swap')
+        plan.context_id = 7
+        plan.context_epoch = 2
+        plan.resident_generation = 4
+        plan.resident_key = 'default:2:4'
+        plan.user_message_id = 4
+        plan.transcript_claude_session_id = 'session-new'
+        plan.transcript_process_generation = 10
+        plan._continuity_shadow_capacity_pending = dict(pending)
+        if selected_user:
+            plan._continuity_shadow_capacity_pending['selected_message_ids'] = (
+                1, 2, 3, 4,
+            )
+        return plan
+
+    def _rows(self):
+        return _db_with_rows((
+            (1, 'hayana', 'anchor', 'chat', '{}', '2026-09-10 09:00:00'),
+            (2, 'hayana', 'tail user', 'chat', '{}', '2026-09-10 09:01:00'),
+            (3, 'fyodor', 'tail reply', 'chat', '{}', '2026-09-10 09:01:01'),
+            (4, 'hayana', 'current user', 'chat', '{}', '2026-09-10 09:02:00'),
+            (5, 'fyodor', 'current reply', 'chat', '{}', '2026-09-10 09:02:01'),
+        ))
+
+    def test_retained_anchor_is_explicit_and_excluded_from_membership_hash(self):
+        db = self._rows()
+        try:
+            plan = self._capacity_plan(
+                db, _capacity_pending(selected=(1, 2, 3), anchor_id=1),
+            )
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            receipt = rs.get(7, 2, 4)
+            self.assertIsNotNone(receipt.capacity_anchor)
+            self.assertEqual(receipt.capacity_anchor.source_ref, 'message:1')
+            self.assertEqual(receipt.capacity_anchor.source_revision,
+                             receipt.capacity_anchor.source_content_hash)
+            self.assertEqual(
+                [m.source_ref for m in receipt.installed_source_members],
+                ['turn:2:3', 'turn:4:5'],
+            )
+            self.assertEqual(receipt.capacity_baseline_sha256, 'published-jsonl-sha')
+            self.assertEqual(receipt.capacity_source_generation, 3)
+            self.assertEqual(
+                [f[0] for f in receipt.fixed_section_fingerprints],
+                ['invariant_system', 'accepted_state'],
+            )
+        finally:
+            os.unlink(db)
+
+    def test_degraded_anchor_is_retained_with_status(self):
+        db = self._rows()
+        try:
+            plan = self._capacity_plan(
+                db, _capacity_pending(
+                    status='ANCHOR_IMAGE_DEGRADED',
+                    selected=(1, 2, 3),
+                    anchor_id=1,
+                ),
+            )
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            self.assertEqual(
+                rs.get(7, 2, 4).capacity_anchor.anchor_status,
+                'ANCHOR_IMAGE_DEGRADED',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_unavailable_and_too_large_anchor_leave_no_anchor_evidence(self):
+        for status in ('ANCHOR_UNAVAILABLE', 'ANCHOR_TOO_LARGE'):
+            db = self._rows()
+            try:
+                plan = self._capacity_plan(
+                    db, _capacity_pending(
+                        status=status,
+                        selected=(2, 3),
+                        anchor_id=0,
+                    ),
+                )
+                self.assertTrue(dr._commit_continuity_shadow_receipt(
+                    plan, assistant_message_id=5,
+                ))
+                self.assertIsNone(rs.get(7, 2, 4).capacity_anchor)
+            finally:
+                os.unlink(db)
+            rs.clear_for_tests()
+
+    def test_anchor_requires_selected_formal_user(self):
+        db = self._rows()
+        try:
+            plan = self._capacity_plan(
+                db, _capacity_pending(selected=(2, 3), anchor_id=1),
+            )
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            self.assertIsNone(rs.get(7, 2, 4))
+        finally:
+            os.unlink(db)
+
+    def test_partial_tail_and_current_user_candidate_fail_closed(self):
+        db = self._rows()
+        try:
+            partial = self._capacity_plan(
+                db, _capacity_pending(selected=(2,), anchor_id=0,
+                                      status='ANCHOR_UNAVAILABLE'),
+            )
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                partial, assistant_message_id=5,
+            ))
+            self.assertIsNone(rs.get(7, 2, 4))
+            selected = self._capacity_plan(
+                db, _capacity_pending(selected=(1, 2, 3, 4), anchor_id=1),
+                selected_user=True,
+            )
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                selected, assistant_message_id=5,
+            ))
+            self.assertIsNone(rs.get(7, 2, 4))
+        finally:
+            os.unlink(db)
+
+    def test_capacity_success_drops_source_receipt_and_pending(self):
+        db = self._rows()
+        try:
+            source = rs.InstalledContextShadowReceipt.build(
+                context_id=7, context_epoch=2, resident_generation=3,
+                resident_key='default:2:3', claude_session_id='session-old',
+                process_generation=9, base_plan_id='p', base_plan_hash='h',
+                source_members=(), source_turn_kind='cold',
+            )
+            rs.commit(source)
+            plan = self._capacity_plan(
+                db, _capacity_pending(selected=(1, 2, 3), anchor_id=1),
+            )
+            self.assertTrue(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            self.assertIsNone(rs.get(7, 2, 3))
+            self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
+        finally:
+            os.unlink(db)

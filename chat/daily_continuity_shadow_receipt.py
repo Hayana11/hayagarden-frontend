@@ -1,4 +1,4 @@
-"""Process-local installed-context shadow receipt for Daily R4-R4D1.
+"""Process-local installed-context shadow receipt for Daily R4-R4D2.
 
 The receipt is an ephemeral proof artifact.  It deliberately contains only
 immutable identity and measurement metadata; it never persists or selects
@@ -109,6 +109,17 @@ def _freeze_fixed_fingerprints(value: Iterable[Any]) -> tuple[tuple[Any, ...], .
 
 
 @dataclass(frozen=True)
+class CapacityAnchorEvidence:
+    """Durable identity for the explicit capacity-swap anchor representation."""
+
+    message_id: int
+    source_ref: str
+    source_revision: str
+    source_content_hash: str
+    anchor_status: str
+    logical_size: int = 0
+
+@dataclass(frozen=True)
 class InstalledContextShadowReceipt:
     """Committed process-local proof of a resident's installed source."""
 
@@ -128,6 +139,9 @@ class InstalledContextShadowReceipt:
     receipt_state: str
     membership_hash: str
     measurement_semantics: str = MEASUREMENT_SEMANTICS
+    capacity_anchor: Optional[CapacityAnchorEvidence] = None
+    capacity_baseline_sha256: str = ''
+    capacity_source_generation: Optional[int] = None
 
     @classmethod
     def build(
@@ -148,6 +162,9 @@ class InstalledContextShadowReceipt:
         source_turn_kind: str,
         receipt_state: str = 'committed',
         measurement_semantics: str = MEASUREMENT_SEMANTICS,
+        capacity_anchor: Optional[CapacityAnchorEvidence] = None,
+        capacity_baseline_sha256: str = '',
+        capacity_source_generation: Optional[int] = None,
     ) -> 'InstalledContextShadowReceipt':
         members = tuple(
             replace(
@@ -177,6 +194,12 @@ class InstalledContextShadowReceipt:
             receipt_state=str(receipt_state),
             membership_hash=membership_hash(members),
             measurement_semantics=str(measurement_semantics),
+            capacity_anchor=capacity_anchor,
+            capacity_baseline_sha256=str(capacity_baseline_sha256 or ''),
+            capacity_source_generation=(
+                int(capacity_source_generation)
+                if capacity_source_generation is not None else None
+            ),
         )
 
     def matches_live(
@@ -282,6 +305,7 @@ def clear_for_tests() -> None:
 
 
 __all__ = [
+    'CapacityAnchorEvidence',
     'InstalledContextShadowReceipt',
     'InstalledSourceMemberIdentity',
     'MEASUREMENT_SEMANTICS',
