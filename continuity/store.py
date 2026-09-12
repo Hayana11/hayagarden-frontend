@@ -1,7 +1,9 @@
-"""Minimal SQLite persistence for Continuity Compression R2.
+"""SQLite persistence and read-only artifact validation for Continuity.
 
-The store persists source identity, candidate membership, and a shadow job
-skeleton only.  It deliberately has no generated text or runtime consumer.
+The store owns durable source, candidate, generation-job, and chunk records.
+It remains path-agnostic: callers provide connections (or an explicit path
+for the read-only surface), while source discovery and runtime assembly stay
+outside this module.
 """
 from __future__ import annotations
 
@@ -10,15 +12,20 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
+from urllib.parse import quote
 
 from continuity.contracts import (
     ContinuityChunk,
     ContinuityGenerationJob,
     SourceMember,
     SourceSnapshot,
+    candidate_source_revision,
 )
+from continuity.coverage import source_hash
 from continuity.sealing import CandidateBlock, SealingPolicy, policy_identity, seal_snapshot
+from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
 
 TABLES = (
@@ -54,6 +61,106 @@ class ContinuityJob:
 GENERATION_JOB_STATUSES = ('pending', 'generating', 'failed', 'stale', 'ready')
 CHUNK_STATUSES = ('ready', 'stale', 'superseded')
 
+READY_SURFACE_STATUSES = ('ready', 'empty', 'unavailable', 'corrupt')
+
+
+@dataclass(frozen=True)
+class ContinuityReadySurface:
+    """Validated production chunk surface returned without mutating storage."""
+
+    status: str
+    error_code: str | None = None
+    artifacts: tuple[ContinuityChunk, ...] = ()
+
+
+_REQUIRED_SCHEMA_COLUMNS = {
+    'continuity_source_snapshots': {
+        'snapshot_id', 'identity_id', 'chat_id', 'branch_id', 'local_day',
+        'source_watermark', 'source_policy_version', 'source_hash', 'status',
+        'created_at',
+    },
+    'continuity_source_members': {
+        'snapshot_id', 'seq', 'source_kind', 'source_ref', 'source_revision',
+        'role', 'content_hash', 'span_start', 'span_end', 'logical_size',
+        'created_at', 'branch_id',
+    },
+    'continuity_jobs': {
+        'job_id', 'idempotency_key', 'snapshot_id', 'policy_version', 'source_hash',
+        'status', 'candidate_count', 'error_code', 'created_at', 'updated_at',
+    },
+    'continuity_candidate_blocks': {
+        'candidate_id', 'job_id', 'snapshot_id', 'policy_version', 'block_seq',
+        'local_day', 'branch_id', 'source_start_seq', 'source_end_seq',
+        'source_revision', 'snapshot_source_hash', 'logical_size',
+        'completed_turn_count', 'oversize', 'close_reason', 'status', 'created_at',
+    },
+    'continuity_candidate_members': {
+        'candidate_id', 'ordinal', 'source_seq', 'source_ref', 'source_revision',
+        'content_hash', 'logical_size',
+    },
+    'continuity_generation_jobs': {
+        'generation_job_id', 'idempotency_key', 'candidate_id', 'snapshot_id',
+        'candidate_source_revision', 'generator_policy_version',
+        'prompt_policy_version', 'measurement_semantics', 'frozen_provider',
+        'frozen_model_identity', 'status', 'attempt', 'error_code', 'generation_id',
+        'created_at', 'updated_at',
+    },
+    'continuity_chunks': {
+        'chunk_id', 'generation_job_id', 'candidate_id', 'snapshot_id',
+        'artifact_revision', 'body', 'body_hash', 'source_token_estimate',
+        'output_token_estimate', 'generator_policy_version',
+        'prompt_policy_version', 'provider', 'model_identity', 'actual_executor',
+        'generation_id', 'status', 'created_at',
+    },
+}
+
+_REQUIRED_PRIMARY_KEYS = {
+    'continuity_source_snapshots': ('snapshot_id',),
+    'continuity_source_members': ('snapshot_id', 'seq'),
+    'continuity_jobs': ('job_id',),
+    'continuity_candidate_blocks': ('candidate_id',),
+    'continuity_candidate_members': ('candidate_id', 'ordinal'),
+    'continuity_generation_jobs': ('generation_job_id',),
+    'continuity_chunks': ('chunk_id',),
+}
+
+_REQUIRED_UNIQUES = {
+    'continuity_jobs': {('idempotency_key',), ('snapshot_id', 'policy_version')},
+    'continuity_candidate_blocks': {('job_id', 'block_seq')},
+    'continuity_candidate_members': {('candidate_id', 'source_seq')},
+    'continuity_generation_jobs': {('idempotency_key',)},
+    'continuity_chunks': {('candidate_id', 'artifact_revision')},
+}
+
+_REQUIRED_FOREIGN_KEYS = {
+    'continuity_source_members': {('snapshot_id', 'continuity_source_snapshots', 'snapshot_id')},
+    'continuity_jobs': {('snapshot_id', 'continuity_source_snapshots', 'snapshot_id')},
+    'continuity_candidate_blocks': {
+        ('job_id', 'continuity_jobs', 'job_id'),
+        ('snapshot_id', 'continuity_source_snapshots', 'snapshot_id'),
+    },
+    'continuity_candidate_members': {
+        ('candidate_id', 'continuity_candidate_blocks', 'candidate_id'),
+    },
+    'continuity_generation_jobs': {
+        ('candidate_id', 'continuity_candidate_blocks', 'candidate_id'),
+        ('snapshot_id', 'continuity_source_snapshots', 'snapshot_id'),
+    },
+    'continuity_chunks': {
+        ('generation_job_id', 'continuity_generation_jobs', 'generation_job_id'),
+        ('candidate_id', 'continuity_candidate_blocks', 'candidate_id'),
+        ('snapshot_id', 'continuity_source_snapshots', 'snapshot_id'),
+    },
+}
+
+_IMMUTABLE_CHUNK_COLUMNS = (
+    'chunk_id', 'generation_job_id', 'candidate_id', 'snapshot_id',
+    'artifact_revision', 'body', 'body_hash', 'source_token_estimate',
+    'output_token_estimate', 'generator_policy_version',
+    'prompt_policy_version', 'provider', 'model_identity', 'actual_executor',
+    'generation_id', 'created_at',
+)
+
 
 def _canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
@@ -65,6 +172,95 @@ def _sha256(value: object) -> str:
 
 def _stamp() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
+
+
+
+def open_continuity_read_only(path: str | Path) -> sqlite3.Connection:
+    """Open an explicitly selected SQLite store without creating or mutating it."""
+    if path is None or not str(path).strip():
+        raise ValueError('continuity store path is required')
+    resolved = Path(path).expanduser().resolve()
+    uri = f'file:{quote(resolved.as_posix(), safe="/:")}?mode=ro'
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys=ON')
+    return conn
+
+
+def _primary_key_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    return tuple(
+        str(row[1])
+        for row in sorted(rows, key=lambda row: int(row[5]))
+        if int(row[5])
+    )
+
+
+def _unique_column_sets(conn: sqlite3.Connection, table: str) -> set[tuple[str, ...]]:
+    indexes = conn.execute(f'PRAGMA index_list("{table}")').fetchall()
+    result: set[tuple[str, ...]] = set()
+    for index in indexes:
+        if not int(index[2]):
+            continue
+        name = str(index[1])
+        columns = conn.execute(f'PRAGMA index_info("{name}")').fetchall()
+        result.add(tuple(
+            str(column[2])
+            for column in sorted(columns, key=lambda row: int(row[0]))
+        ))
+    return result
+
+
+def _foreign_key_triples(conn: sqlite3.Connection, table: str) -> set[tuple[str, str, str]]:
+    rows = conn.execute(f'PRAGMA foreign_key_list("{table}")').fetchall()
+    return {(str(row[3]), str(row[2]), str(row[4])) for row in rows}
+
+
+def _schema_contract_status(conn: sqlite3.Connection) -> tuple[str, str | None]:
+    """Return the strict surface status without attempting schema repair."""
+    names = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    expected = set(TABLES)
+    if not names.intersection(expected):
+        return 'unavailable', 'continuity_schema_missing'
+    if not expected.issubset(names):
+        return 'corrupt', 'continuity_schema_partial'
+    try:
+        for table, required in _REQUIRED_SCHEMA_COLUMNS.items():
+            columns = {
+                str(row[1])
+                for row in conn.execute(f'PRAGMA table_info("{table}")')
+            }
+            if not required.issubset(columns):
+                return 'corrupt', f'continuity_schema_missing_columns:{table}'
+            if _primary_key_columns(conn, table) != _REQUIRED_PRIMARY_KEYS[table]:
+                return 'corrupt', f'continuity_schema_primary_key:{table}'
+            if not _REQUIRED_UNIQUES.get(table, set()).issubset(
+                _unique_column_sets(conn, table)
+            ):
+                return 'corrupt', f'continuity_schema_unique_key:{table}'
+            if not _REQUIRED_FOREIGN_KEYS.get(table, set()).issubset(
+                _foreign_key_triples(conn, table)
+            ):
+                return 'corrupt', f'continuity_schema_foreign_key:{table}'
+        trigger = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            ('continuity_chunks_immutable_body',),
+        ).fetchone()
+        trigger_sql = str(trigger[0] or '').lower() if trigger is not None else ''
+        if (
+            not trigger_sql
+            or 'before update of' not in trigger_sql
+            or any(column.lower() not in trigger_sql for column in _IMMUTABLE_CHUNK_COLUMNS)
+        ):
+            return 'corrupt', 'continuity_schema_immutability_trigger'
+    except sqlite3.Error:
+        return 'corrupt', 'continuity_schema_introspection_failed'
+    return 'ready', None
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -878,15 +1074,217 @@ def load_chunk(conn: sqlite3.Connection, chunk_id: str) -> ContinuityChunk | Non
     if row is None:
         return None
     values = tuple(row)
+    text_value = lambda value: '' if value is None else str(value)
     return ContinuityChunk(
-        chunk_id=str(values[0]), generation_job_id=str(values[1]), candidate_id=str(values[2]),
-        snapshot_id=str(values[3]), artifact_revision=str(values[4]), body=str(values[5]),
-        body_hash=str(values[6]), source_token_estimate=int(values[7]),
-        output_token_estimate=int(values[8]), generator_policy_version=str(values[9]),
-        prompt_policy_version=str(values[10]), provider=str(values[11]),
-        model_identity=str(values[12]), actual_executor=str(values[13]),
-        generation_id=str(values[14]), status=str(values[15]), created_at=str(values[16]),
+        chunk_id=text_value(values[0]), generation_job_id=text_value(values[1]),
+        candidate_id=text_value(values[2]), snapshot_id=text_value(values[3]),
+        artifact_revision=text_value(values[4]), body=text_value(values[5]),
+        body_hash=text_value(values[6]), source_token_estimate=int(values[7]),
+        output_token_estimate=int(values[8]), generator_policy_version=text_value(values[9]),
+        prompt_policy_version=text_value(values[10]), provider=text_value(values[11]),
+        model_identity=text_value(values[12]), actual_executor=text_value(values[13]),
+        generation_id=text_value(values[14]), status=text_value(values[15]),
+        created_at=text_value(values[16]),
     )
+
+
+
+def _artifact_revision(
+    *,
+    generation_id: str,
+    body_hash: str,
+    provider: str,
+    model_identity: str,
+    actual_executor: str,
+) -> str:
+    """Canonical immutable artifact revision used by writer and readers."""
+    return _sha256({
+        'generation_id': generation_id,
+        'body_hash': body_hash,
+        'provider': provider,
+        'model_identity': model_identity,
+        'actual_executor': actual_executor,
+    })[:32]
+
+
+def _corrupt(code: str) -> None:
+    raise ContinuityStoreConflict(code)
+
+
+def _validate_ready_chunk(conn: sqlite3.Connection, chunk: ContinuityChunk) -> None:
+    """Validate one complete, internally consistent ready artifact."""
+    if chunk.status != 'ready':
+        _corrupt('chunk_not_ready')
+    for field in (
+        'chunk_id', 'generation_job_id', 'candidate_id', 'snapshot_id',
+        'artifact_revision', 'body_hash', 'generator_policy_version',
+        'prompt_policy_version', 'provider', 'model_identity',
+        'actual_executor', 'generation_id',
+    ):
+        if not str(getattr(chunk, field) or '').strip():
+            _corrupt(f'chunk_missing_{field}')
+    if not chunk.body:
+        _corrupt('chunk_body_empty')
+    if hashlib.sha256(chunk.body.encode('utf-8')).hexdigest() != chunk.body_hash:
+        _corrupt('chunk_body_hash_mismatch')
+    if int(chunk.source_token_estimate) <= 0:
+        _corrupt('chunk_source_token_estimate_invalid')
+    expected_output_tokens = estimate_tokens_heuristic_cjk1_ascii4_v1(chunk.body)
+    if expected_output_tokens <= 0 or int(chunk.output_token_estimate) != expected_output_tokens:
+        _corrupt('chunk_output_token_estimate_mismatch')
+
+    job = load_generation_job(conn, chunk.generation_job_id)
+    if job is None:
+        _corrupt('generation_job_missing')
+    if job.status != 'ready':
+        _corrupt('generation_job_not_ready')
+    if (
+        job.generation_job_id != chunk.generation_job_id
+        or job.candidate_id != chunk.candidate_id
+        or job.snapshot_id != chunk.snapshot_id
+        or job.generation_id != chunk.generation_id
+        or job.generator_policy_version != chunk.generator_policy_version
+        or job.prompt_policy_version != chunk.prompt_policy_version
+        or not job.measurement_semantics
+        or not job.frozen_provider
+        or not job.frozen_model_identity
+        or job.frozen_provider != chunk.provider
+        or job.frozen_model_identity != chunk.model_identity
+    ):
+        _corrupt('generation_job_provenance_mismatch')
+
+    candidate_row = conn.execute(
+        'SELECT job_id, snapshot_id, policy_version, source_revision, '
+        'snapshot_source_hash, status FROM continuity_candidate_blocks WHERE candidate_id=?',
+        (chunk.candidate_id,),
+    ).fetchone()
+    if candidate_row is None:
+        _corrupt('candidate_missing')
+    if str(candidate_row[1]) != chunk.snapshot_id:
+        _corrupt('candidate_snapshot_lineage_mismatch')
+
+    snapshot = load_snapshot(conn, chunk.snapshot_id)
+    candidate = load_candidate(conn, chunk.candidate_id)
+    if snapshot is None:
+        _corrupt('snapshot_missing')
+    if candidate is None:
+        _corrupt('candidate_missing')
+    if str(candidate_row[5]) != 'shadow':
+        _corrupt('candidate_not_materialized')
+    if snapshot.source_hash != source_hash(snapshot.members):
+        _corrupt('snapshot_source_hash_mismatch')
+    if str(candidate_row[4]) != snapshot.source_hash:
+        _corrupt('candidate_snapshot_hash_mismatch')
+    if candidate.snapshot_id != snapshot.snapshot_id or candidate.source_revision != job.candidate_source_revision:
+        _corrupt('candidate_revision_lineage_mismatch')
+
+    sealing_job = load_job(conn, str(candidate_row[0]))
+    if sealing_job is None:
+        _corrupt('sealing_job_missing')
+    if sealing_job.status != 'shadow':
+        _corrupt('sealing_job_not_materialized')
+    if (
+        sealing_job.snapshot_id != candidate.snapshot_id
+        or sealing_job.snapshot_id != snapshot.snapshot_id
+    ):
+        _corrupt('sealing_job_snapshot_mismatch')
+    if sealing_job.policy_version != candidate.policy_version:
+        _corrupt('sealing_job_policy_mismatch')
+    if sealing_job.source_hash != snapshot.source_hash:
+        _corrupt('sealing_job_source_hash_mismatch')
+
+    member_rows = conn.execute(
+        'SELECT ordinal, source_seq, source_ref, source_revision, content_hash, logical_size '
+        'FROM continuity_candidate_members WHERE candidate_id=? ORDER BY ordinal',
+        (candidate.candidate_id,),
+    ).fetchall()
+    if len(member_rows) != len(candidate.source_seqs):
+        _corrupt('candidate_member_count_mismatch')
+    source_by_seq = {int(member.seq): member for member in snapshot.members}
+    exact_members: list[SourceMember] = []
+    for ordinal, row in enumerate(member_rows):
+        if int(row[0]) != ordinal:
+            _corrupt('candidate_member_ordinal_mismatch')
+        seq = int(row[1])
+        if (
+            seq != candidate.source_seqs[ordinal]
+            or str(row[2]) != candidate.source_refs[ordinal]
+            or str(row[3]) != candidate.source_revisions[ordinal]
+        ):
+            _corrupt('candidate_member_identity_mismatch')
+        member = source_by_seq.get(seq)
+        if member is None or member.source_ref != str(row[2]) or member.source_revision != str(row[3]):
+            _corrupt('candidate_member_source_missing')
+        if member.content_hash != str(row[4]) or int(member.logical_size) != int(row[5]):
+            _corrupt('candidate_member_measurement_mismatch')
+        exact_members.append(member)
+    if candidate_source_revision(tuple(exact_members)) != candidate.source_revision:
+        _corrupt('candidate_source_revision_mismatch')
+
+    artifact_revision = _artifact_revision(
+        generation_id=job.generation_id,
+        body_hash=chunk.body_hash,
+        provider=chunk.provider,
+        model_identity=chunk.model_identity,
+        actual_executor=chunk.actual_executor,
+    )
+    if chunk.artifact_revision != artifact_revision or chunk.chunk_id != f'chunk:{artifact_revision}':
+        _corrupt('artifact_revision_mismatch')
+
+
+def _read_ready_surface_connection(conn: sqlite3.Connection) -> ContinuityReadySurface:
+    orphaned_ready_job = conn.execute(
+        "SELECT 1 FROM continuity_generation_jobs AS job "
+        "WHERE job.status='ready' AND NOT EXISTS ("
+        "SELECT 1 FROM continuity_chunks AS chunk "
+        "WHERE chunk.generation_job_id=job.generation_job_id AND chunk.status='ready')"
+    ).fetchone()
+    if orphaned_ready_job is not None:
+        _corrupt('ready_generation_job_without_chunk')
+    rows = conn.execute(
+        "SELECT chunk_id FROM continuity_chunks WHERE status='ready' ORDER BY chunk_id ASC"
+    ).fetchall()
+    if not rows:
+        return ContinuityReadySurface(status='empty')
+    chunks: list[ContinuityChunk] = []
+    generation_jobs: set[str] = set()
+    candidates: set[str] = set()
+    for row in rows:
+        chunk = load_chunk(conn, str(row[0]))
+        if chunk is None:
+            _corrupt('ready_chunk_disappeared')
+        if chunk.generation_job_id in generation_jobs:
+            _corrupt('multiple_ready_chunks_for_generation_job')
+        if chunk.candidate_id in candidates:
+            _corrupt('competing_ready_chunks_for_candidate')
+        _validate_ready_chunk(conn, chunk)
+        generation_jobs.add(chunk.generation_job_id)
+        candidates.add(chunk.candidate_id)
+        chunks.append(chunk)
+    return ContinuityReadySurface(status='ready', artifacts=tuple(chunks))
+
+
+def read_ready_surface(path: str | Path) -> ContinuityReadySurface:
+    """Read the strict production chunk surface from an explicit SQLite path."""
+    try:
+        conn = open_continuity_read_only(path)
+    except (OSError, sqlite3.Error, ValueError):
+        return ContinuityReadySurface(status='unavailable', error_code='continuity_store_unavailable')
+    try:
+        try:
+            status, error_code = _schema_contract_status(conn)
+        except sqlite3.Error:
+            return ContinuityReadySurface(status='corrupt', error_code='continuity_schema_read_error')
+        if status != 'ready':
+            return ContinuityReadySurface(status=status, error_code=error_code)
+        try:
+            return _read_ready_surface_connection(conn)
+        except ContinuityStoreConflict as exc:
+            return ContinuityReadySurface(status='corrupt', error_code=str(exc))
+        except (sqlite3.Error, ValueError, TypeError):
+            return ContinuityReadySurface(status='corrupt', error_code='continuity_store_read_error')
+    finally:
+        conn.close()
 
 
 def load_ready_chunk_for_job(
@@ -936,13 +1334,13 @@ def publish_chunk_atomic(
     if job.frozen_provider != provider or job.frozen_model_identity != model_identity:
         raise ContinuityStoreConflict('chunk provenance does not match frozen authority')
     stamp = str(now or _stamp())
-    artifact_revision = _sha256({
-        'generation_id': job.generation_id,
-        'body_hash': body_hash,
-        'provider': provider,
-        'model_identity': model_identity,
-        'actual_executor': actual_executor,
-    })[:32]
+    artifact_revision = _artifact_revision(
+        generation_id=job.generation_id,
+        body_hash=body_hash,
+        provider=provider,
+        model_identity=model_identity,
+        actual_executor=actual_executor,
+    )
     chunk_id = f'chunk:{artifact_revision}'
     conn.execute('BEGIN IMMEDIATE')
     try:

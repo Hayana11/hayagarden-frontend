@@ -1,6 +1,7 @@
 """CONTINUITY-R3 — grounded shadow generation contracts."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -34,16 +35,21 @@ from scripts.generate_continuity_chunk_shadow import (
     _source_rows,
 )
 from continuity.sealing import CandidateBlock, SealingPolicy, seal_snapshot
+from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 from continuity.sources import build_source_snapshot, derive_autonomous_events, derive_completed_turns
 from continuity.store import (
     ContinuityStoreConflict,
+    claim_generation_job,
     enqueue_generation_job,
     enqueue_job,
     ensure_schema,
+    load_candidate,
     load_chunk,
     load_generation_job,
     load_candidates,
     materialize_job,
+    publish_chunk_atomic,
+    read_ready_surface,
     save_source_snapshot,
 )
 
@@ -548,6 +554,148 @@ class GenerationTests(unittest.TestCase):
 
         self.assertRaises(RuntimeError, self.run_generation, generate_fn=fail)
         self.assertEqual(calls, ['claude_code'])
+
+
+class StrictReadySurfaceTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(':memory:')
+        self.conn.row_factory = sqlite3.Row
+        ensure_schema(self.conn)
+        rows = _rows()
+        snapshot = build_source_snapshot(
+            turns=derive_completed_turns(rows), events=(), local_day='2026-09-08',
+            source_watermark=2, created_at='2026-09-09T00:00:00Z',
+        )
+        save_source_snapshot(self.conn, snapshot)
+        r2_job = enqueue_job(self.conn, snapshot, SealingPolicy())
+        materialize_job(self.conn, r2_job.job_id, SealingPolicy())
+        self.candidate = load_candidates(self.conn, r2_job.job_id)[0]
+        self.generation_job = enqueue_generation_job(
+            self.conn, self.candidate, snapshot,
+            generator_policy_version=GENERATOR_POLICY_VERSION,
+            prompt_policy_version=PROMPT_POLICY_VERSION,
+            measurement_semantics=MEASUREMENT_SEMANTICS,
+        )
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _publish_ready(self):
+        claimed = claim_generation_job(
+            self.conn, self.generation_job.generation_job_id,
+            frozen_provider='claude_code', frozen_model_identity='model-A',
+        )
+        body = 'valid chunk'
+        return publish_chunk_atomic(
+            self.conn,
+            job=claimed,
+            candidate=self.candidate,
+            body=body,
+            body_hash=hashlib.sha256(body.encode('utf-8')).hexdigest(),
+            source_token_estimate=10,
+            output_token_estimate=estimate_tokens_heuristic_cjk1_ascii4_v1(body),
+            provider='claude_code',
+            model_identity='model-A',
+            actual_executor='fake_background',
+        )
+
+    def _file_surface(self):
+        directory = tempfile.TemporaryDirectory()
+        path = f'{directory.name}/store.db'
+        target = sqlite3.connect(path)
+        self.conn.backup(target)
+        target.close()
+        return directory, path
+
+    def test_valid_ready_chunk_is_exposed_with_full_provenance(self):
+        chunk = self._publish_ready()
+        directory, path = self._file_surface()
+        try:
+            surface = read_ready_surface(path)
+        finally:
+            directory.cleanup()
+        self.assertEqual(surface.status, 'ready')
+        self.assertEqual([item.chunk_id for item in surface.artifacts], [chunk.chunk_id])
+
+    def test_ready_generation_job_without_chunk_is_corrupt(self):
+        self.conn.execute(
+            "UPDATE continuity_generation_jobs SET status='ready' WHERE generation_job_id=?",
+            (self.generation_job.generation_job_id,),
+        )
+        self.conn.commit()
+        directory, path = self._file_surface()
+        try:
+            surface = read_ready_surface(path)
+        finally:
+            directory.cleanup()
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'ready_generation_job_without_chunk')
+
+    def test_ready_chunk_with_non_ready_generation_job_is_corrupt(self):
+        self._publish_ready()
+        self.conn.execute(
+            "UPDATE continuity_generation_jobs SET status='pending' WHERE generation_job_id=?",
+            (self.generation_job.generation_job_id,),
+        )
+        self.conn.commit()
+        directory, path = self._file_surface()
+        try:
+            surface = read_ready_surface(path)
+        finally:
+            directory.cleanup()
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'generation_job_not_ready')
+
+    def _surface_after_sealing_job_mutation(self, sql, params=()):
+        self._publish_ready()
+        self.conn.execute(sql, params)
+        self.conn.commit()
+        directory, path = self._file_surface()
+        try:
+            with open(path, 'rb') as handle:
+                before = hashlib.sha256(handle.read()).hexdigest()
+            surface = read_ready_surface(path)
+            with open(path, 'rb') as handle:
+                after = hashlib.sha256(handle.read()).hexdigest()
+        finally:
+            directory.cleanup()
+        self.assertEqual(before, after)
+        return surface
+
+    def test_strict_surface_rejects_missing_sealing_job(self):
+        surface = self._surface_after_sealing_job_mutation(
+            'DELETE FROM continuity_jobs WHERE job_id=(SELECT job_id FROM continuity_candidate_blocks)'
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_missing')
+
+    def test_strict_surface_rejects_sealing_job_snapshot_mismatch(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET snapshot_id='snapshot:other'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_snapshot_mismatch')
+
+    def test_strict_surface_rejects_sealing_job_policy_mismatch(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET policy_version='policy:other'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_policy_mismatch')
+
+    def test_strict_surface_rejects_sealing_job_source_hash_mismatch(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET source_hash='hash:other'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_source_hash_mismatch')
+
+    def test_strict_surface_rejects_non_materialized_sealing_job(self):
+        surface = self._surface_after_sealing_job_mutation(
+            "UPDATE continuity_jobs SET status='pending'"
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'sealing_job_not_materialized')
 
 
 class RunnerTests(unittest.TestCase):

@@ -22,6 +22,7 @@ from continuity.store import (
     load_candidates,
     load_job,
     materialize_job,
+    read_ready_surface,
     save_source_snapshot,
 )
 from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
@@ -298,6 +299,31 @@ class StoreTests(unittest.TestCase):
                 job.job_id,
                 SealingPolicy(version='v1', target_logical_size=100),
             )
+
+
+    def test_read_ready_surface_reports_empty_without_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = f'{directory}/empty.db'
+            file_conn = sqlite3.connect(path)
+            ensure_schema(file_conn)
+            file_conn.close()
+            surface = read_ready_surface(path)
+        self.assertEqual(surface.status, 'empty')
+        self.assertEqual(surface.artifacts, ())
+
+    def test_read_ready_surface_distinguishes_missing_and_partial_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = read_ready_surface(f'{directory}/missing.db')
+            partial_path = f'{directory}/partial.db'
+            partial_conn = sqlite3.connect(partial_path)
+            partial_conn.execute(
+                'CREATE TABLE continuity_source_snapshots (snapshot_id TEXT PRIMARY KEY)'
+            )
+            partial_conn.commit()
+            partial_conn.close()
+            partial = read_ready_surface(partial_path)
+        self.assertEqual(missing.status, 'unavailable')
+        self.assertEqual(partial.status, 'corrupt')
 
 
 class ReplayFixtureTests(unittest.TestCase):
