@@ -42,6 +42,7 @@ from chat.daily_schema import (
     ensure_daily_meta_table,
     get_meta_int,
 )
+from chat.context_receipt import ensure_context_receipt_schema
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +497,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             _ensure_manual_window_indexes(conn)
             _ensure_context_switch_forge_schema(conn)
             _ensure_session_registry_mapping_schema(conn)
+            ensure_context_receipt_schema(conn)
             ensure_chat_messages_display_segments(conn)
             conn.commit()
         finally:
@@ -625,6 +627,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
         _ensure_manual_window_indexes(conn)
         _ensure_context_switch_forge_schema(conn)
         _ensure_session_registry_mapping_schema(conn)
+        ensure_context_receipt_schema(conn)
         if _table_columns(conn, 'chat_messages'):
             ensure_chat_messages_source_kind(conn, record_cutover=True)
         conn.commit()
