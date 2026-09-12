@@ -48,6 +48,7 @@ from continuity.store import (
     load_generation_job,
     load_candidates,
     materialize_job,
+    open_continuity_read_only,
     publish_chunk_atomic,
     read_ready_surface,
     save_source_snapshot,
@@ -646,6 +647,148 @@ class StrictReadySurfaceTests(unittest.TestCase):
         self.assertEqual(surface.status, 'corrupt')
         self.assertEqual(surface.error_code, 'generation_job_not_ready')
 
+
+
+    def _surface_after_mutation(self, mutation):
+        self._publish_ready()
+        mutation(self.conn)
+        self.conn.commit()
+        directory, path = self._file_surface()
+        try:
+            return read_ready_surface(path)
+        finally:
+            directory.cleanup()
+
+    def test_strict_surface_rejects_missing_generation_job(self):
+        surface = self._surface_after_mutation(
+            lambda conn: (
+                conn.execute('DROP TRIGGER continuity_chunks_immutable_body'),
+                conn.execute(
+                    'DELETE FROM continuity_generation_jobs WHERE generation_job_id=?',
+                    (self.generation_job.generation_job_id,),
+                ),
+            )
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'generation_job_missing')
+
+    def test_strict_surface_rejects_missing_candidate(self):
+        surface = self._surface_after_mutation(
+            lambda conn: (
+                conn.execute('DELETE FROM continuity_candidate_members'),
+                conn.execute('DELETE FROM continuity_candidate_blocks'),
+            )
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'candidate_missing')
+
+    def test_strict_surface_rejects_missing_snapshot(self):
+        surface = self._surface_after_mutation(
+            lambda conn: (
+                conn.execute('DELETE FROM continuity_source_members'),
+                conn.execute('DELETE FROM continuity_source_snapshots'),
+            )
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'snapshot_missing')
+
+    def test_strict_surface_rejects_snapshot_hash_drift(self):
+        surface = self._surface_after_mutation(
+            lambda conn: conn.execute(
+                "UPDATE continuity_source_snapshots SET source_hash='drift'"
+            )
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'snapshot_source_hash_mismatch')
+
+    def test_strict_surface_rejects_candidate_membership_drift(self):
+        surface = self._surface_after_mutation(
+            lambda conn: conn.execute('DELETE FROM continuity_candidate_members')
+        )
+        self.assertEqual(surface.status, 'corrupt')
+
+    def test_strict_surface_rejects_candidate_revision_drift(self):
+        surface = self._surface_after_mutation(
+            lambda conn: conn.execute(
+                "UPDATE continuity_candidate_blocks SET source_revision='drift'"
+            )
+        )
+        self.assertEqual(surface.status, 'corrupt')
+        self.assertEqual(surface.error_code, 'candidate_revision_lineage_mismatch')
+
+    def test_strict_surface_rejects_provider_model_provenance_drift(self):
+        for column, value in (('provider', 'other'), ('model_identity', 'other-model')):
+            with self.subTest(column=column):
+                surface = self._surface_after_mutation(
+                    lambda conn, c=column, v=value: (
+                        conn.execute('DROP TRIGGER continuity_chunks_immutable_body'),
+                        conn.execute(f'UPDATE continuity_chunks SET {c}=?', (v,)),
+                    )
+                )
+                self.assertEqual(surface.status, 'corrupt')
+                self.assertEqual(surface.error_code, 'generation_job_provenance_mismatch')
+
+    def test_strict_surface_rejects_body_and_token_drift(self):
+        mutations = (
+            ("UPDATE continuity_chunks SET body_hash='drift'", 'chunk_body_hash_mismatch'),
+            ("UPDATE continuity_chunks SET output_token_estimate=0", 'chunk_output_token_estimate_mismatch'),
+            ("UPDATE continuity_chunks SET source_token_estimate=0", 'chunk_source_token_estimate_invalid'),
+        )
+        for statement, error_code in mutations:
+            with self.subTest(statement=statement):
+                surface = self._surface_after_mutation(
+                    lambda conn, sql=statement: (
+                        conn.execute('DROP TRIGGER continuity_chunks_immutable_body'),
+                        conn.execute(sql),
+                    )
+                )
+                self.assertEqual(surface.status, 'corrupt')
+                self.assertEqual(surface.error_code, error_code)
+
+    def test_strict_surface_rejects_artifact_revision_and_chunk_id_drift(self):
+        for column, value in (('artifact_revision', 'drift'), ('chunk_id', 'chunk:drift')):
+            with self.subTest(column=column):
+                surface = self._surface_after_mutation(
+                    lambda conn, c=column, v=value: (
+                        conn.execute('DROP TRIGGER continuity_chunks_immutable_body'),
+                        conn.execute(f'UPDATE continuity_chunks SET {c}=?', (v,)),
+                    )
+                )
+                self.assertEqual(surface.status, 'corrupt')
+                self.assertEqual(surface.error_code, 'artifact_revision_mismatch')
+
+    def test_strict_surface_returns_empty_for_failed_or_stale_only(self):
+        self._publish_ready()
+        self.conn.execute("UPDATE continuity_chunks SET status='stale' WHERE status='ready'")
+        self.conn.execute(
+            "UPDATE continuity_generation_jobs SET status='failed' WHERE generation_job_id=?",
+            (self.generation_job.generation_job_id,),
+        )
+        self.conn.commit()
+        directory, path = self._file_surface()
+        try:
+            surface = read_ready_surface(path)
+        finally:
+            directory.cleanup()
+        self.assertEqual(surface.status, 'empty')
+        self.assertEqual(surface.artifacts, ())
+
+    def test_continuity_read_connection_is_read_only_with_foreign_keys(self):
+        directory = tempfile.TemporaryDirectory()
+        path = f'{directory.name}/store.db'
+        try:
+            writable = sqlite3.connect(path)
+            ensure_schema(writable)
+            writable.close()
+            conn = open_continuity_read_only(path)
+            try:
+                self.assertEqual(conn.execute('PRAGMA foreign_keys').fetchone()[0], 1)
+                with self.assertRaises(sqlite3.OperationalError):
+                    conn.execute('CREATE TABLE no_write (id INTEGER)')
+            finally:
+                conn.close()
+        finally:
+            directory.cleanup()
 
 
 class RunnerTests(unittest.TestCase):
