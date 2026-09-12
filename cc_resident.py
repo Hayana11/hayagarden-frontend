@@ -1228,6 +1228,7 @@ class ResidentSession:
         turn_lease=None,
         turn_runtime=None,
         jsonl_finality_profile=JSONL_FINALITY_PROFILE_DEFAULT,
+        on_stdin_begin=None,
     ):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
@@ -1289,6 +1290,12 @@ class ResidentSession:
             {'type': 'user', 'message': {'role': 'user', 'content': content}},
             ensure_ascii=False,
         )
+        if on_stdin_begin is not None:
+            try:
+                on_stdin_begin()
+            except Exception:
+                # Diagnostics must never change the provider send contract.
+                pass
         try:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
