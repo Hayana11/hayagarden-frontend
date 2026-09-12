@@ -712,3 +712,127 @@ class CapacitySwapReceiptContractTests(unittest.TestCase):
             self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
         finally:
             os.unlink(db)
+
+
+    def test_anchor_status_and_selected_membership_contradiction_fails_closed(self):
+        db = self._rows()
+        try:
+            plan = self._capacity_plan(
+                db, _capacity_pending(
+                    status='ANCHOR_UNAVAILABLE',
+                    selected=(1, 2, 3),
+                    anchor_id=1,
+                ),
+            )
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            self.assertIsNone(rs.get(7, 2, 4))
+        finally:
+            os.unlink(db)
+
+    def test_missing_anchor_row_fails_closed(self):
+        db = self._rows()
+        try:
+            plan = self._capacity_plan(
+                db, _capacity_pending(
+                    status='ANCHOR_RETAINED',
+                    selected=(99, 2, 3),
+                    anchor_id=99,
+                ),
+            )
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            self.assertIsNone(rs.get(7, 2, 4))
+        finally:
+            os.unlink(db)
+
+    def test_target_identity_mismatch_clears_pending_without_target(self):
+        db = self._rows()
+        try:
+            pending = _capacity_pending(selected=(1, 2, 3), anchor_id=1)
+            pending['candidate_session_id'] = 'different-session'
+            plan = self._capacity_plan(db, pending)
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
+            self.assertIsNone(rs.get(7, 2, 4))
+        finally:
+            os.unlink(db)
+
+    def test_mapping_failure_clears_capacity_pending(self):
+        db = self._rows()
+        try:
+            plan = self._capacity_plan(
+                db, _capacity_pending(selected=(1, 2, 3), anchor_id=1),
+            )
+            plan.manifest['transcript_mapping_status'] = 'BLOCKED'
+            self.assertFalse(dr._commit_continuity_shadow_receipt(
+                plan, assistant_message_id=5,
+            ))
+            self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
+        finally:
+            os.unlink(db)
+
+    def test_abort_clears_capacity_pending(self):
+        db = self._rows()
+        try:
+            plan = self._capacity_plan(
+                db, _capacity_pending(selected=(1, 2, 3), anchor_id=1),
+            )
+            with mock.patch.object(dr, 'is_epoch_token_current', return_value=False):
+                dr.abort_daily_turn(
+                    plan,
+                    error_code='provider_failed',
+                    respawn=False,
+                )
+            self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
+        finally:
+            os.unlink(db)
+
+    def test_capacity_observation_marks_pending_commit_without_adapter(self):
+        plan = _plan('/tmp/unused-r4d2-source.db', turn_kind='capacity_swap')
+        plan.is_cold = False
+        plan.is_respawn = False
+        plan._continuity_shadow_capacity_pending = _capacity_pending()
+        resident = types.SimpleNamespace(session_id='session-new', generation=10)
+        with mock.patch(
+            'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+        ) as adapter, mock.patch.object(dr.logger, 'info') as info:
+            dr._observe_continuity_shadow(
+                plan=plan,
+                resident=resident,
+                static_system='STATIC',
+                content='capacity',
+            )
+        adapter.assert_not_called()
+        observation = json.loads(info.call_args.args[1])
+        self.assertEqual(
+            observation['source_proof_error_code'],
+            'capacity_receipt_pending_commit',
+        )
+        self.assertFalse(observation['installed_context_proven'])
+        self.assertEqual(
+            plan._continuity_shadow_capacity_pending['production_content_hash'],
+            observation['production_content_hash'],
+        )
+
+    def test_capacity_observation_without_pending_is_deferred(self):
+        plan = _plan('/tmp/unused-r4d2-source.db', turn_kind='capacity_swap')
+        plan.is_cold = False
+        plan.is_respawn = False
+        resident = types.SimpleNamespace(session_id='session-new', generation=10)
+        with mock.patch.object(dr.logger, 'info') as info:
+            dr._observe_continuity_shadow(
+                plan=plan,
+                resident=resident,
+                static_system='STATIC',
+                content='capacity',
+            )
+        observation = json.loads(info.call_args.args[1])
+        self.assertEqual(
+            observation['source_proof_error_code'],
+            'capacity_receipt_deferred',
+        )
