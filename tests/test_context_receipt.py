@@ -173,6 +173,47 @@ class ContextReceiptWriteTests(unittest.TestCase):
             os.unlink(path)
         conn.close()
 
+    def test_same_source_ref_with_distinct_spans_is_allowed(self):
+        conn = _connection()
+        members = (
+            ContextReceiptMember(
+                installed_order=0,
+                representation_id='raw:span-a',
+                representation_kind='raw',
+                source_ref='turn:shared',
+                source_revision='revision:shared',
+                source_kind='completed_turn',
+                content_hash='content:a',
+                span_start=0,
+                span_end=4,
+                branch_id='active-transcript',
+            ),
+            ContextReceiptMember(
+                installed_order=1,
+                representation_id='raw:span-b',
+                representation_kind='raw',
+                source_ref='turn:shared',
+                source_revision='revision:shared',
+                source_kind='completed_turn',
+                content_hash='content:b',
+                span_start=5,
+                span_end=9,
+                branch_id='active-transcript',
+            ),
+        )
+        receipt = _receipt(members=members)
+        create_receipt(conn, receipt, members)
+        self.assertEqual(
+            get_receipt_members(
+                conn,
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+            ),
+            members,
+        )
+        conn.close()
+
     def test_same_create_exact_proof_is_idempotent(self):
         conn = _connection()
         receipt = _receipt()
