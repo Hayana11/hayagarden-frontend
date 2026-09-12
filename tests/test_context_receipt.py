@@ -236,20 +236,17 @@ class ContextReceiptWriteTests(unittest.TestCase):
         receipt = _receipt()
         members = (_member(0), _member(1))
         create_receipt(conn, receipt, members)
+        changed_members = (_member(0), _member(1, content_hash='different-content'))
         variants = (
-            replace(receipt, plan_hash='different-plan'),
-            _receipt(
-                members=(_member(0), _member(1, content_hash='different-content')),
-            ),
-            replace(receipt, provider='api_relay'),
-            replace(receipt, session_id='different-session'),
+            (replace(receipt, plan_hash='different-plan'), members),
+            (_receipt(members=changed_members), changed_members),
+            (replace(receipt, provider='api_relay'), members),
+            (replace(receipt, session_id='different-session'), members),
         )
-        for variant in variants:
+        for variant, variant_members in variants:
             with self.subTest(variant=variant):
                 with self.assertRaises(ContextReceiptConflict):
-                    create_receipt(conn, variant, members if variant.plan_hash != receipt.plan_hash else (
-                        _member(0), _member(1, content_hash='different-content')
-                    ))
+                    create_receipt(conn, variant, variant_members)
         conn.close()
 
 
