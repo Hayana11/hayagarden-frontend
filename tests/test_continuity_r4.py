@@ -113,7 +113,6 @@ def _binding(
 
 
 
-
 def _config_probe(code: str, *, env_contents: str = '') -> str:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -149,7 +148,7 @@ class ConfigStoreContextBudgetTests(unittest.TestCase):
             "'CONTEXT_PLAN_CONSUMER_ENABLED', 'CONTEXT_PLAN_TOKEN_BUDGET', "
             "'CONTEXT_PLAN_RESERVE_BUDGET', 'CONTEXT_PLAN_RECENT_RAW_TARGET')))); "
             "config_store.set('CONTEXT_PLAN_TOKEN_BUDGET', 'not-an-int'); "
-            "print(repr(config_store.get('CONTEXT_PLAN_TOKEN_BUDGET')))" ,
+            "print(repr(config_store.get('CONTEXT_PLAN_TOKEN_BUDGET')))",
             env_contents='CONTEXT_PLAN_TOKEN_BUDGET=999\\n',
         )
         self.assertEqual(output.splitlines(), ["(None, None, None, None)", "'not-an-int'"])
