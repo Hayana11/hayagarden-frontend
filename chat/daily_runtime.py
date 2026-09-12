@@ -2316,6 +2316,12 @@ def _attempt_capacity_swap_before_stdin(
     Registry is the pre-stdin commit flag; failures before it leave no target
     Registry row. Old last-good proc stays until CURRENT user stdin flush.
     """
+    for attr in (
+        '_continuity_shadow_capacity_pending',
+        '_continuity_shadow_capacity_pending_error',
+    ):
+        if hasattr(plan, attr):
+            delattr(plan, attr)
     if not is_capacity_swap_reason(trigger_reason):
         return {'ok': False, 'error_code': 'trigger_not_capacity'}
 
@@ -2465,6 +2471,88 @@ def _attempt_capacity_swap_before_stdin(
             'target_generation': target_gen,
         }
 
+    # Production commit succeeded. Shadow metadata is best-effort and fail-open.
+    try:
+        # Candidate metadata is private and transient. Attach it only after
+        # staged install, registry publication, and target binding all succeed.
+        candidate = handoff.candidate
+        fixed_sections = tuple(
+            section for section in _build_continuity_shadow_fixed_sections(
+                plan=plan,
+                resident=resident,
+                static_system=effective,
+            )
+            if str(getattr(section, 'kind', '') or '') in {
+                'invariant_system',
+                'accepted_state',
+            }
+        )
+        anchor_status = getattr(
+            getattr(candidate, 'anchor_status', None),
+            'value',
+            getattr(candidate, 'anchor_status', ''),
+        )
+        candidate_sid = str(
+            handoff.candidate_session_id
+            or getattr(candidate, 'candidate_session_id', '')
+            or ''
+        ).strip()
+        pending_source_context_id = int(handoff.source_context_id or 0)
+        pending_source_context_epoch = int(handoff.source_context_epoch or 0)
+        pending_source_generation = int(handoff.source_resident_generation or 0)
+        pending_target_generation = int(target_gen)
+        baseline_sha = str(handoff.jsonl_sha256 or '').strip()
+        if (
+            not candidate_sid
+            or pending_source_context_id != source_ctx
+            or pending_source_context_epoch != source_epoch
+            or pending_source_generation <= 0
+            or pending_target_generation <= 0
+            or pending_target_generation != pending_source_generation + 1
+            or pending_target_generation != int(plan.resident_generation)
+        ):
+            raise DailyRuntimeError(
+                'capacity shadow pending identity is incomplete',
+                error_code='capacity_target_identity_mismatch',
+            )
+        if not baseline_sha:
+            raise DailyRuntimeError(
+                'published capacity baseline sha256 is missing',
+                error_code='capacity_baseline_sha_missing',
+            )
+        selected_ids = tuple(
+            int(value) for value in getattr(
+                candidate, 'selected_message_ids', ()
+            ) if int(value) > 0
+        )
+        plan._continuity_shadow_capacity_pending = {
+            'source_context_id': pending_source_context_id,
+            'source_context_epoch': pending_source_context_epoch,
+            'source_resident_generation': pending_source_generation,
+            'target_resident_generation': pending_target_generation,
+            'candidate_session_id': candidate_sid,
+            'selected_message_ids': selected_ids,
+            'anchor_status': str(anchor_status or ''),
+            'anchor_message_id': int(
+                getattr(candidate, 'anchor_message_id', 0) or 0
+            ),
+            'capacity_baseline_sha256': baseline_sha,
+            'trigger_reason': str(trigger_reason),
+            'fixed_section_fingerprints': _shadow_fixed_section_fingerprints(
+                fixed_sections,
+            ),
+        }
+    except Exception as exc:
+        err = str(getattr(exc, 'error_code', None) or '')
+        if not err:
+            err = 'capacity_shadow_pending_build_failed'
+        plan._continuity_shadow_capacity_pending_error = err
+        logger.exception(
+            'capacity shadow pending build failed code=%s',
+            err,
+            exc_info=True,
+        )
+
     # Success: retain full install_state until CURRENT user stdin flush.
     plan._capacity_swap_install_state = install_state  # type: ignore[attr-defined]
     plan._capacity_swap_deferred_old_proc = install_state.get('old_proc')  # type: ignore[attr-defined]
@@ -2499,6 +2587,12 @@ def _rollback_capacity_swap_if_unflushed(
     )
     plan._capacity_swap_install_state = None  # type: ignore[attr-defined]
     plan._capacity_swap_deferred_old_proc = None  # type: ignore[attr-defined]
+    for attr in (
+        '_continuity_shadow_capacity_pending',
+        '_continuity_shadow_capacity_pending_error',
+    ):
+        if hasattr(plan, attr):
+            delattr(plan, attr)
     plan.manifest['capacity_swap_pre_flush_rollback'] = True
     return True
 
@@ -2771,6 +2865,7 @@ def _log_continuity_shadow_receipt_event(
     status: str,
     error_code: Optional[str] = None,
     receipt: Any = None,
+    extra_metadata: Optional[dict[str, Any]] = None,
 ) -> None:
     payload = {
         'event': 'continuity_shadow_receipt_commit',
@@ -2788,6 +2883,19 @@ def _log_continuity_shadow_receipt_event(
             if receipt is not None else 0
         ),
     }
+    # Capacity receipts expose only machine metadata; keep the whitelist local
+    # so source/body/provider payloads can never reach the structured sink.
+    if extra_metadata:
+        for key in (
+            'source_turn_kind',
+            'capacity_anchor_present',
+            'capacity_anchor_status',
+            'capacity_baseline_sha256',
+            'source_generation',
+            'target_generation',
+        ):
+            if key in extra_metadata:
+                payload[key] = extra_metadata[key]
     logger.info(
         'continuity_shadow_receipt_commit %s',
         _continuity_shadow_canonical(payload),
@@ -2800,10 +2908,20 @@ def _commit_continuity_shadow_receipt(
     assistant_message_id: int,
 ) -> bool:
     """Commit one process-local receipt after the existing full-success boundary."""
+    def _clear_pending() -> None:
+        for attr in (
+            '_continuity_shadow_pending_receipt',
+            '_continuity_shadow_capacity_pending',
+            '_continuity_shadow_capacity_pending_error',
+        ):
+            if hasattr(plan, attr):
+                delattr(plan, attr)
+
     if str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED':
         _log_continuity_shadow_receipt_event(
             plan, status='skipped', error_code='mapping_not_mapped',
         )
+        _clear_pending()
         return False
     sid = str(plan.transcript_claude_session_id or '').strip()
     process_generation = plan.transcript_process_generation
@@ -2815,13 +2933,240 @@ def _commit_continuity_shadow_receipt(
         _log_continuity_shadow_receipt_event(
             plan, status='skipped', error_code='runtime_identity_unavailable',
         )
+        _clear_pending()
         return False
 
     from chat import daily_continuity_shadow_receipt as receipt_store
 
     turn_kind = _continuity_shadow_turn_kind(plan)
     pending = getattr(plan, '_continuity_shadow_pending_receipt', None)
+    capacity_pending = getattr(plan, '_continuity_shadow_capacity_pending', None)
     try:
+        if turn_kind == 'capacity_swap':
+            if not isinstance(capacity_pending, dict):
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_receipt_pending_metadata_missing',
+                )
+                return False
+
+            selected_ids: list[int] = []
+            for value in capacity_pending.get('selected_message_ids', ()):
+                try:
+                    mid = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if mid > 0 and mid not in selected_ids:
+                    selected_ids.append(mid)
+            current_user_id = int(plan.user_message_id)
+            candidate_sid = str(
+                capacity_pending.get('candidate_session_id') or ''
+            ).strip()
+            pending_source_context_id = int(
+                capacity_pending.get('source_context_id') or 0
+            )
+            pending_source_context_epoch = int(
+                capacity_pending.get('source_context_epoch') or 0
+            )
+            source_generation = int(
+                capacity_pending.get('source_resident_generation') or 0
+            )
+            pending_target_generation = int(
+                capacity_pending.get('target_resident_generation') or 0
+            )
+            baseline_sha = str(
+                capacity_pending.get('capacity_baseline_sha256') or ''
+            ).strip()
+            if (
+                not candidate_sid
+                or candidate_sid != sid
+                or pending_source_context_id != int(plan.context_id)
+                or pending_source_context_epoch != int(plan.context_epoch)
+                or source_generation <= 0
+                or pending_target_generation <= 0
+                or pending_target_generation != int(plan.resident_generation)
+                or pending_target_generation != source_generation + 1
+            ):
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_target_identity_mismatch',
+                )
+                return False
+            if not baseline_sha:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_baseline_sha_missing',
+                )
+                return False
+            if current_user_id in selected_ids:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_current_user_in_candidate',
+                )
+                return False
+
+            anchor_status = str(
+                getattr(
+                    capacity_pending.get('anchor_status'),
+                    'value',
+                    capacity_pending.get('anchor_status', ''),
+                ) or ''
+            )
+            anchor_id = int(capacity_pending.get('anchor_message_id') or 0)
+            retained_statuses = {'ANCHOR_RETAINED', 'ANCHOR_IMAGE_DEGRADED'}
+            unavailable_statuses = {'ANCHOR_UNAVAILABLE', 'ANCHOR_TOO_LARGE'}
+            anchor = None
+            if anchor_status in retained_statuses:
+                if anchor_id <= 0 or anchor_id not in selected_ids:
+                    _log_continuity_shadow_receipt_event(
+                        plan,
+                        status='skipped',
+                        error_code='capacity_anchor_projection_unavailable',
+                    )
+                    return False
+                try:
+                    from continuity.sources import (
+                        evidence_ref,
+                        is_formal_user_source_row,
+                    )
+                    anchor_rows = _shadow_load_source_rows(
+                        (anchor_id,), db_path=plan.db_path,
+                    )
+                    if (
+                        len(anchor_rows) != 1
+                        or not is_formal_user_source_row(anchor_rows[0])
+                    ):
+                        raise ValueError('capacity anchor is not formal user')
+                    anchor_ref = evidence_ref(anchor_rows[0])
+                except Exception:
+                    _log_continuity_shadow_receipt_event(
+                        plan,
+                        status='skipped',
+                        error_code='capacity_anchor_projection_unavailable',
+                    )
+                    return False
+                anchor = receipt_store.CapacityAnchorEvidence(
+                    message_id=anchor_id,
+                    source_ref=str(anchor_ref.source_ref),
+                    source_revision=str(anchor_ref.source_revision),
+                    source_content_hash=str(anchor_ref.content_hash),
+                    anchor_status=anchor_status,
+                    logical_size=int(anchor_ref.logical_size),
+                )
+                tail_ids = tuple(mid for mid in selected_ids if mid != anchor_id)
+            elif anchor_status in unavailable_statuses:
+                if anchor_id > 0 and anchor_id in selected_ids:
+                    _log_continuity_shadow_receipt_event(
+                        plan,
+                        status='skipped',
+                        error_code='capacity_anchor_projection_unavailable',
+                    )
+                    return False
+                tail_ids = tuple(selected_ids)
+            else:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_anchor_projection_unavailable',
+                )
+                return False
+
+            try:
+                tail_members = _shadow_derive_members_for_ids(
+                    tail_ids,
+                    db_path=plan.db_path,
+                )
+            except Exception:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_tail_projection_unavailable',
+                )
+                return False
+            try:
+                current_members = _shadow_derive_members_for_ids(
+                    (current_user_id, int(assistant_message_id)),
+                    db_path=plan.db_path,
+                )
+            except Exception:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_current_turn_projection_unavailable',
+                )
+                return False
+            if len(current_members) != 1:
+                _log_continuity_shadow_receipt_event(
+                    plan,
+                    status='skipped',
+                    error_code='capacity_current_turn_projection_unavailable',
+                )
+                return False
+
+            target_generation = int(plan.resident_generation)
+            receipt = receipt_store.InstalledContextShadowReceipt.build(
+                context_id=int(plan.context_id),
+                context_epoch=int(plan.context_epoch),
+                resident_generation=target_generation,
+                resident_key=str(plan.resident_key),
+                claude_session_id=sid,
+                process_generation=int(process_generation),
+                base_plan_id='',
+                base_plan_hash='',
+                source_members=tuple(tail_members) + tuple(current_members),
+                fixed_section_fingerprints=capacity_pending.get(
+                    'fixed_section_fingerprints', ()
+                ),
+                production_content_hash=capacity_pending.get(
+                    'production_content_hash', ''
+                ),
+                production_content_token_estimate=capacity_pending.get(
+                    'production_content_token_estimate', 0
+                ),
+                source_turn_kind='capacity_swap',
+                capacity_anchor=anchor,
+                capacity_baseline_sha256=str(
+                    capacity_pending.get('capacity_baseline_sha256', '') or ''
+                ),
+                capacity_source_generation=(
+                    source_generation if source_generation > 0 else None
+                ),
+            )
+            receipt_store.commit(receipt)
+            if (
+                source_generation > 0
+                and (
+                    source_generation != target_generation
+                    or int(capacity_pending.get('source_context_id', plan.context_id))
+                    != int(plan.context_id)
+                    or int(capacity_pending.get('source_context_epoch', plan.context_epoch))
+                    != int(plan.context_epoch)
+                )
+            ):
+                receipt_store.drop(
+                    int(capacity_pending.get('source_context_id', plan.context_id)),
+                    int(capacity_pending.get('source_context_epoch', plan.context_epoch)),
+                    source_generation,
+                )
+            _log_continuity_shadow_receipt_event(
+                plan,
+                status='committed',
+                receipt=receipt,
+                extra_metadata={
+                    'source_turn_kind': 'capacity_swap',
+                    'capacity_anchor_present': bool(anchor),
+                    'capacity_anchor_status': anchor_status,
+                    'capacity_baseline_sha256': receipt.capacity_baseline_sha256,
+                    'source_generation': source_generation,
+                    'target_generation': target_generation,
+                },
+            )
+            return True
+
         if turn_kind == 'hot':
             prior = receipt_store.get(
                 plan.context_id,
@@ -2929,8 +3274,7 @@ def _commit_continuity_shadow_receipt(
         )
         return False
     finally:
-        if hasattr(plan, '_continuity_shadow_pending_receipt'):
-            delattr(plan, '_continuity_shadow_pending_receipt')
+        _clear_pending()
 
 def _observe_continuity_shadow(
     *,
@@ -3042,12 +3386,34 @@ def _observe_continuity_shadow(
             return
 
         if turn_kind == 'capacity_swap':
+            capacity_pending = getattr(
+                plan, '_continuity_shadow_capacity_pending', None,
+            )
             observation.update({
                 'status': 'blocked',
                 'error_code': 'installed_context_policy_unmapped',
                 'source_proof_status': 'blocked',
-                'source_proof_error_code': 'capacity_receipt_deferred',
+                'source_proof_error_code': (
+                    'capacity_receipt_pending_commit'
+                    if isinstance(capacity_pending, dict)
+                    else str(
+                        getattr(
+                            plan,
+                            '_continuity_shadow_capacity_pending_error',
+                            '',
+                        ) or 'capacity_receipt_deferred'
+                    )
+                ),
             })
+            if isinstance(capacity_pending, dict):
+                # Keep the full-success receipt boundary supplied with the
+                # current production prompt measurement without storing body.
+                updated_pending = dict(capacity_pending)
+                updated_pending.update({
+                    'production_content_hash': content_hash,
+                    'production_content_token_estimate': content_tokens,
+                })
+                plan._continuity_shadow_capacity_pending = updated_pending
         else:
             store_path = str(os.environ.get(
                 'HAYA_CONTINUITY_SHADOW_STORE_PATH', ''
@@ -3634,6 +4000,12 @@ def abort_daily_turn(
         except Exception:
             logger.exception('respawn_daily_resident failed')
     _release_lease(plan)
+    for attr in (
+        '_continuity_shadow_capacity_pending',
+        '_continuity_shadow_capacity_pending_error',
+    ):
+        if hasattr(plan, attr):
+            delattr(plan, attr)
     plan.manifest['error_code'] = error_code
     plan.manifest['abort_epoch_current'] = current
     return dict(plan.manifest)
