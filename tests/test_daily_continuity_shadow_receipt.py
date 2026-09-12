@@ -840,3 +840,202 @@ class CapacitySwapReceiptContractTests(unittest.TestCase):
             observation['source_proof_error_code'],
             'capacity_receipt_deferred',
         )
+
+
+class CapacitySwapAttemptIsolationTests(unittest.TestCase):
+    def setUp(self):
+        rs.clear_for_tests()
+        dr.reset_bindings_for_tests()
+
+    def tearDown(self):
+        rs.clear_for_tests()
+        dr.reset_bindings_for_tests()
+
+    def _plan_for_attempt(self):
+        plan = _plan('/tmp/r4d2-capacity-source.db', turn_kind='capacity_swap')
+        plan.cursor_before = None
+        plan.transcript_cwd = ''
+        plan.resident_generation = 3
+        plan.resident_key = 'default:2:3'
+        return plan
+
+    def _handoff(self, *, published_sha='published-jsonl-sha',
+                 candidate_session_id='candidate-session'):
+        candidate = types.SimpleNamespace(
+            candidate_session_id=candidate_session_id,
+            selected_message_ids=(1, 2, 3),
+            anchor_status='ANCHOR_RETAINED',
+            anchor_message_id=1,
+            output_sha256='candidate-output-sha',
+        )
+        return types.SimpleNamespace(
+            ok=True,
+            candidate=candidate,
+            staged_resident=types.SimpleNamespace(),
+            source_context_id=7,
+            source_context_epoch=2,
+            source_resident_generation=3,
+            target_resident_generation=4,
+            candidate_session_id=candidate_session_id,
+            jsonl_path=None,
+            jsonl_sha256=published_sha,
+            effective_system='EFFECTIVE',
+            warnings=[],
+        )
+
+    def _run_attempt(self, plan, handoff, *, fixed_sections=None,
+                     fixed_error=None, register_error=None):
+        resident = types.SimpleNamespace(
+            generation=10,
+            session_id='session-new',
+            cwd='',
+        )
+        install_state = {'old_proc': None, 'old_binding': None, 'old_attrs': {}}
+
+        def reprepare(*args, **kwargs):
+            plan.resident_generation = 4
+            plan.resident_key = 'default:2:4'
+            return plan
+
+        def fixed(*args, **kwargs):
+            if fixed_error is not None:
+                raise fixed_error
+            return tuple(fixed_sections or ())
+
+        register = mock.Mock()
+        if register_error is not None:
+            register.side_effect = register_error
+
+        with mock.patch.object(dr, 'is_capacity_swap_reason', return_value=True),              mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff),              mock.patch.object(dr, 'is_epoch_token_current', return_value=False),              mock.patch.object(dr.dc, 'get_daily_context_by_id', return_value={
+                 'id': 7, 'context_epoch': 2, 'resident_generation': 4,
+             }),              mock.patch.object(dr, 'install_capacity_swap_into_live_resident',
+                               return_value=install_state),              mock.patch.object(dr, 'reprepare_after_capacity_swap',
+                               side_effect=reprepare),              mock.patch.object(dr, '_adopt_reprepared_plan_in_place'),              mock.patch.object(dr, 'register_capacity_swap_generation',
+                               register),              mock.patch.object(dr, '_build_continuity_shadow_fixed_sections',
+                               side_effect=fixed),              mock.patch.object(dr, '_shadow_fixed_section_fingerprints',
+                               return_value=(('invariant_system', 'system', 'hash', 1),)),              mock.patch.object(dr, 'rollback_capacity_swap_install') as rollback,              mock.patch.object(dr.logger, 'exception') as log_exception:
+            result = dr._attempt_capacity_swap_before_stdin(
+                plan,
+                resident=resident,
+                static_system='STATIC',
+                env={},
+                trigger_reason='soft_context',
+                staged_hooks=object(),
+            )
+        return result, resident, rollback, log_exception
+
+    def test_shadow_fixed_section_failure_is_fail_open_after_production_commit(self):
+        plan = self._plan_for_attempt()
+        result, resident, rollback, log_exception = self._run_attempt(
+            plan,
+            self._handoff(),
+            fixed_error=RuntimeError('shadow fixed section bug'),
+        )
+        self.assertTrue(result['ok'])
+        self.assertEqual(dr.get_local_binding().resident_generation, 4)
+        rollback.assert_not_called()
+        self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
+        self.assertEqual(
+            plan._continuity_shadow_capacity_pending_error,
+            'capacity_shadow_pending_build_failed',
+        )
+        log_exception.assert_called_once()
+
+    def test_valid_shadow_metadata_creates_pending(self):
+        plan = self._plan_for_attempt()
+        result, _, rollback, _ = self._run_attempt(
+            plan,
+            self._handoff(),
+            fixed_sections=(),
+        )
+        self.assertTrue(result['ok'])
+        self.assertIsInstance(
+            plan._continuity_shadow_capacity_pending,
+            dict,
+        )
+        self.assertEqual(
+            plan._continuity_shadow_capacity_pending['capacity_baseline_sha256'],
+            'published-jsonl-sha',
+        )
+        rollback.assert_not_called()
+        self.assertFalse(
+            hasattr(plan, '_continuity_shadow_capacity_pending_error')
+        )
+
+    def test_missing_published_sha_is_fail_open_without_candidate_fallback(self):
+        plan = self._plan_for_attempt()
+        result, resident, rollback, _ = self._run_attempt(
+            plan,
+            self._handoff(published_sha=''),
+        )
+        self.assertTrue(result['ok'])
+        self.assertEqual(dr.get_local_binding().resident_generation, 4)
+        rollback.assert_not_called()
+        self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
+        self.assertEqual(
+            plan._continuity_shadow_capacity_pending_error,
+            'capacity_baseline_sha_missing',
+        )
+
+    def test_production_registry_failure_still_rolls_back(self):
+        plan = self._plan_for_attempt()
+        result, _, rollback, _ = self._run_attempt(
+            plan,
+            self._handoff(),
+            register_error=RuntimeError('registry failed'),
+        )
+        self.assertFalse(result['ok'])
+        rollback.assert_called_once()
+        self.assertFalse(hasattr(plan, '_continuity_shadow_capacity_pending'))
+        self.assertFalse(
+            hasattr(plan, '_continuity_shadow_capacity_pending_error')
+        )
+
+    def _strict_plan(self, pending):
+        plan = _plan('/tmp/r4d2-strict-source.db', turn_kind='capacity_swap')
+        plan.context_id = 7
+        plan.context_epoch = 2
+        plan.resident_generation = 4
+        plan.resident_key = 'default:2:4'
+        plan.user_message_id = 4
+        plan.transcript_claude_session_id = 'session-new'
+        plan.transcript_process_generation = 10
+        plan._continuity_shadow_capacity_pending = dict(pending)
+        return plan
+
+    def test_strict_pending_identity_rejects_empty_session(self):
+        pending = _capacity_pending()
+        pending['candidate_session_id'] = ''
+        plan = self._strict_plan(pending)
+        self.assertFalse(dr._commit_continuity_shadow_receipt(plan, assistant_message_id=5))
+        self.assertIsNone(rs.get(7, 2, 4))
+
+    def test_strict_pending_identity_rejects_generation_mismatch(self):
+        pending = _capacity_pending()
+        pending['target_resident_generation'] = 5
+        plan = self._strict_plan(pending)
+        self.assertFalse(dr._commit_continuity_shadow_receipt(plan, assistant_message_id=5))
+        self.assertIsNone(rs.get(7, 2, 4))
+
+    def test_strict_pending_identity_rejects_source_context_mismatch(self):
+        pending = _capacity_pending()
+        pending['source_context_epoch'] = 99
+        plan = self._strict_plan(pending)
+        self.assertFalse(dr._commit_continuity_shadow_receipt(plan, assistant_message_id=5))
+        self.assertIsNone(rs.get(7, 2, 4))
+
+    def test_abort_clears_capacity_pending_error(self):
+        plan = self._strict_plan(_capacity_pending())
+        plan._continuity_shadow_capacity_pending_error = (
+            'capacity_shadow_pending_build_failed'
+        )
+        with mock.patch.object(dr, 'is_epoch_token_current', return_value=False):
+            dr.abort_daily_turn(
+                plan,
+                error_code='provider_failed',
+                resident=types.SimpleNamespace(),
+                respawn=False,
+            )
+        self.assertFalse(
+            hasattr(plan, '_continuity_shadow_capacity_pending_error')
+        )
