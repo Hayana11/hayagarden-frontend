@@ -855,6 +855,7 @@ class CapacitySwapAttemptIsolationTests(unittest.TestCase):
         plan = _plan('/tmp/r4d2-capacity-source.db', turn_kind='capacity_swap')
         plan.cursor_before = None
         plan.transcript_cwd = ''
+        plan.tool_profile = 'test-tools'
         plan.resident_generation = 3
         plan.resident_key = 'default:2:3'
         return plan
