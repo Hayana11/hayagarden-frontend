@@ -3713,5 +3713,149 @@ class ContinuityShadowObservationTests(unittest.TestCase):
             os.unlink(db)
 
 
+class ContextPlanConsumerTests(unittest.TestCase):
+    def _fake_context_plan(self):
+        member = types.SimpleNamespace(
+            seq=0,
+            source_ref='turn:1:2',
+            source_revision='rev-turn',
+            source_kind='completed_turn',
+            content_hash='hash-turn',
+            span_start=None,
+            span_end=None,
+            branch_id='active-transcript',
+        )
+        representation = types.SimpleNamespace(
+            representation_id='raw:one',
+            kind='raw',
+            source_members=(member,),
+            estimated_tokens=4,
+        )
+        current_request = types.SimpleNamespace(
+            kind='current_request',
+            source_ref='message:3',
+            content_hash='hash-current',
+            estimated_tokens=1,
+        )
+        return types.SimpleNamespace(
+            plan_id='plan:one',
+            plan_hash='plan-hash-one',
+            source_hash='source-hash-one',
+            source_members=(member,),
+            representations=(representation,),
+            ordered_sections=(current_request,),
+            budget_policy=types.SimpleNamespace(recent_raw_target=1),
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            budget_status='fit',
+            valid=True,
+            token_budget=100,
+            reserve_budget=2,
+            selected_token_estimate=4,
+            fixed_section_token_estimate=1,
+            total_token_estimate=7,
+            remaining_budget=93,
+            gaps=(),
+            exclusions=(),
+        )
+
+    def test_gate_reads_existing_key_and_defaults_closed(self):
+        with mock.patch.object(
+            config_store,
+            'get',
+            side_effect=lambda key, default='': (
+                '1' if key == 'CONTEXT_PLAN_CONSUMER_ENABLED' else default
+            ),
+        ):
+            self.assertTrue(dr._context_plan_consumer_enabled())
+        with mock.patch.object(
+            config_store,
+            'get',
+            return_value='0',
+        ):
+            self.assertFalse(dr._context_plan_consumer_enabled())
+
+    def test_projection_uses_selected_raw_and_excludes_current_request(self):
+        db = _tmp_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                'CREATE TABLE chat_messages ('
+                'id INTEGER PRIMARY KEY, author TEXT, content TEXT, '
+                'created_at TEXT, source_kind TEXT)'
+            )
+            conn.executemany(
+                'INSERT INTO chat_messages (id,author,content,created_at,source_kind) '
+                'VALUES (?,?,?,?,?)',
+                [
+                    (1, 'hayana', 'old user', '2026-07-27 09:00:00', 'chat'),
+                    (2, 'assistant', 'old reply', '2026-07-27 09:01:00', 'chat'),
+                    (3, 'hayana', 'current', '2026-07-27 09:02:00', 'chat'),
+                ],
+            )
+            conn.commit()
+            conn.close()
+            plan = types.SimpleNamespace(
+                db_path=db,
+                user_message_id=3,
+                assembly={'layers': [], 'current_day_history': []},
+            )
+            assembly = dr._project_context_plan_history(
+                plan,
+                context_plan=self._fake_context_plan(),
+                chunk_bodies={},
+            )
+            self.assertEqual(
+                [item['message_id'] for item in assembly['current_day_history']],
+                [1, 2],
+            )
+            self.assertNotIn(3, {
+                int(item['message_id'])
+                for item in assembly['current_day_history']
+            })
+        finally:
+            os.unlink(db)
+
+    def test_durable_receipt_carries_plan_hash(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            plan = types.SimpleNamespace(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                db_path=db,
+                user_message_id=3,
+                transcript_claude_session_id='session-1',
+                transcript_process_generation=1,
+                manifest={
+                    'transcript_mapping_status': 'MAPPED',
+                    'provider': 'claude_code',
+                    'model': 'model-1',
+                },
+                continuity_plan=self._fake_context_plan(),
+            )
+            self.assertTrue(
+                dr._commit_production_context_receipt(
+                    plan,
+                    assistant_message_id=4,
+                )
+            )
+            from chat.context_receipt import get_receipt
+            conn = sqlite3.connect(db)
+            receipt = get_receipt(
+                conn,
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+            )
+            conn.close()
+            self.assertIsNotNone(receipt)
+            self.assertEqual(receipt.plan_hash, 'plan-hash-one')
+        finally:
+            os.unlink(db)
+
+
 if __name__ == '__main__':
     unittest.main()
