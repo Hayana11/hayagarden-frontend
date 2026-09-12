@@ -1059,6 +1059,32 @@ class CapacitySwapAttemptIsolationTests(unittest.TestCase):
         self.assertFalse(dr._commit_continuity_shadow_receipt(plan, assistant_message_id=5))
         self.assertIsNone(rs.get(7, 2, 4))
 
+    def test_pre_flush_rollback_clears_capacity_pending_and_error(self):
+        plan = self._plan_for_attempt()
+        plan._capacity_swap_install_state = {
+            'old_proc': None,
+            'old_binding': None,
+            'old_attrs': {},
+        }
+        plan._continuity_shadow_capacity_pending = {'candidate_session_id': 'x'}
+        plan._continuity_shadow_capacity_pending_error = (
+            'capacity_shadow_pending_build_failed'
+        )
+        with mock.patch.object(dr, 'rollback_capacity_swap_install') as rollback:
+            self.assertTrue(
+                dr._rollback_capacity_swap_if_unflushed(
+                    plan,
+                    resident=types.SimpleNamespace(),
+                )
+            )
+        rollback.assert_called_once()
+        self.assertFalse(
+            hasattr(plan, '_continuity_shadow_capacity_pending')
+        )
+        self.assertFalse(
+            hasattr(plan, '_continuity_shadow_capacity_pending_error')
+        )
+
     def test_abort_clears_capacity_pending_error(self):
         plan = self._strict_plan(_capacity_pending())
         plan._continuity_shadow_capacity_pending_error = (
