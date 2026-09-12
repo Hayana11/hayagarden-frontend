@@ -1074,14 +1074,17 @@ def load_chunk(conn: sqlite3.Connection, chunk_id: str) -> ContinuityChunk | Non
     if row is None:
         return None
     values = tuple(row)
+    text_value = lambda value: '' if value is None else str(value)
     return ContinuityChunk(
-        chunk_id=str(values[0]), generation_job_id=str(values[1]), candidate_id=str(values[2]),
-        snapshot_id=str(values[3]), artifact_revision=str(values[4]), body=str(values[5]),
-        body_hash=str(values[6]), source_token_estimate=int(values[7]),
-        output_token_estimate=int(values[8]), generator_policy_version=str(values[9]),
-        prompt_policy_version=str(values[10]), provider=str(values[11]),
-        model_identity=str(values[12]), actual_executor=str(values[13]),
-        generation_id=str(values[14]), status=str(values[15]), created_at=str(values[16]),
+        chunk_id=text_value(values[0]), generation_job_id=text_value(values[1]),
+        candidate_id=text_value(values[2]), snapshot_id=text_value(values[3]),
+        artifact_revision=text_value(values[4]), body=text_value(values[5]),
+        body_hash=text_value(values[6]), source_token_estimate=int(values[7]),
+        output_token_estimate=int(values[8]), generator_policy_version=text_value(values[9]),
+        prompt_policy_version=text_value(values[10]), provider=text_value(values[11]),
+        model_identity=text_value(values[12]), actual_executor=text_value(values[13]),
+        generation_id=text_value(values[14]), status=text_value(values[15]),
+        created_at=text_value(values[16]),
     )
 
 
