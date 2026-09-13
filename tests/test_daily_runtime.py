@@ -5282,5 +5282,109 @@ class ContextPlanConsumerTests(unittest.TestCase):
             os.unlink(db)
 
 
+class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
+    def test_capacity_first_stdin_contains_chunks_and_fixed_content_only(self):
+        assembly = {
+            'capacity_context_bootstrap': True,
+            'context_plan_representation_blocks': [{
+                'kind': 'chunk',
+                'representation_id': 'chunk:ready-1',
+                'body': 'CHUNK_CANONICAL',
+            }],
+            'context_plan_accepted_open_loops': ['OPEN_LOOP'],
+            'state': 'ACCEPTED_STATE_SNAPSHOT',
+            'current_day_history': [{
+                'role': 'user',
+                'content': 'RAW_REPLAY_FORBIDDEN',
+            }],
+            'day_handoff': 'LEGACY_HANDOFF_FORBIDDEN',
+            'carryover_messages': [{
+                'role': 'assistant',
+                'content': 'LEGACY_CARRYOVER_FORBIDDEN',
+            }],
+        }
+        content = dr.format_resident_turn_content(
+            assembly=assembly,
+            user_content='CURRENT_REQUEST',
+            is_cold=False,
+            is_respawn=False,
+        )
+        self.assertEqual(content.count('CHUNK_CANONICAL'), 1)
+        self.assertEqual(content.count('OPEN_LOOP'), 1)
+        self.assertEqual(content.count('ACCEPTED_STATE_SNAPSHOT'), 1)
+        self.assertEqual(content.count('CURRENT_REQUEST'), 1)
+        self.assertNotIn('RAW_REPLAY_FORBIDDEN', content)
+        self.assertNotIn('LEGACY_HANDOFF_FORBIDDEN', content)
+        self.assertNotIn('LEGACY_CARRYOVER_FORBIDDEN', content)
+
+    def test_capacity_source_receipt_supersession_uses_frozen_revision_once(self):
+        from chat import context_receipt as receipt_store
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            source = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='source-session',
+                process_generation=1,
+                plan_id='plan:source',
+                plan_hash='source-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=(),
+            )
+            receipt_store.create_receipt(conn, source, ())
+            conn.close()
+
+            plan = types.SimpleNamespace(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=2,
+                db_path=db,
+                manifest={},
+                capacity_source_receipt_frozen={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'receipt': source,
+                    'expected_receipt_revision': 0,
+                },
+            )
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+            self.assertEqual(
+                plan.manifest['capacity_source_receipt_supersession'],
+                'COMMITTED',
+            )
+            conn = sqlite3.connect(db)
+            row = conn.execute(
+                'SELECT receipt_revision, result, superseded_by_generation '
+                'FROM context_receipts '
+                'WHERE context_id=7 AND context_epoch=3 AND resident_generation=1',
+            ).fetchone()
+            conn.close()
+            self.assertEqual(row, (1, 'superseded', 2))
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+        finally:
+            os.unlink(db)
+
+
 if __name__ == '__main__':
     unittest.main()
