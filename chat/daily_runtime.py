@@ -1161,6 +1161,16 @@ def _build_production_context_plan(
             error_code=str(result.error_code or 'context_plan_unavailable'),
             retryable=True,
         )
+    if (
+        not str(result.plan.plan_id or '').startswith('plan:')
+        or not re.fullmatch(r'[0-9a-f]{64}', str(result.plan.plan_hash or ''))
+        or not re.fullmatch(r'[0-9a-f]{64}', str(result.plan.source_hash or ''))
+    ):
+        raise DailyRuntimeError(
+            'canonical ContextPlan identity is invalid',
+            error_code='context_plan_identity_invalid',
+            retryable=False,
+        )
     if not result.plan.valid:
         raise DailyRuntimeError(
             'canonical ContextPlan is invalid',
