@@ -45,7 +45,7 @@ _WAKE_LIVE_TRACE_FIELDS = frozenset({
     'delivery_fence', 'delivery_status', 'write_attempted', 'flushed',
     'tool_name', 'tool_success', 'tool_error', 'tool_decision',
     'provider_round_count', 'provider_result_seen', 'terminal_reason',
-    'stream_totals', 'jsonl_totals', 'stream_totals_match',
+    'stream_totals', 'jsonl_totals', 'stream_totals_match', 'jsonl_requests',
     'request_count', 'duplicate_rows_ignored', 'conflicting_duplicate_rows',
     'finality_state', 'assistant_message_id', 'wake_log_id',
     'frontend_visible', 'exception_type', 'error_code', 'action',
@@ -4048,6 +4048,7 @@ def _cc_resident_stream_gen(
     turn_lease=None, reality_context='',
     jsonl_finality_profile='default', on_stdin_begin=None,
     on_stdin_flushed=None, on_provider_done=None,
+    diagnostic_wake_run_id=None,
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4521,6 +4522,8 @@ def _cc_resident_stream_gen(
         _send_kwargs['on_stdin_begin'] = on_stdin_begin
     if on_stdin_flushed is not None:
         _send_kwargs['on_stdin_flushed'] = on_stdin_flushed
+    if diagnostic_wake_run_id:
+        _send_kwargs['diagnostic_wake_run_id'] = str(diagnostic_wake_run_id)
     if turn_lease is not None:
         _send_kwargs['turn_lease'] = copy.deepcopy(turn_lease)
     if jsonl_finality_profile != 'default':
@@ -4684,6 +4687,7 @@ def _run_unified_normal_main_chat_turn(
     watermark = None
     delivery_fence = None
     provider_done_seen = False
+    cleanup_reason = 'normal_wake_main_chat_failed'
     display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
     result_cache_info = {
         'provider': 'claude_code',
@@ -4832,6 +4836,7 @@ def _run_unified_normal_main_chat_turn(
                 jsonl_finality_profile='unified_normal_wake',
                 on_stdin_begin=on_stdin_begin,
                 on_stdin_flushed=on_stdin_flushed,
+                diagnostic_wake_run_id=wake_run_id,
                 on_provider_done=on_provider_done,
             )
 
@@ -4924,6 +4929,7 @@ def _run_unified_normal_main_chat_turn(
             'JSONL_FINALITY',
             stream_totals=jsonl_finality.get('stream_totals'),
             jsonl_totals=jsonl_finality.get('jsonl_totals'),
+            jsonl_requests=jsonl_finality.get('jsonl_requests'),
             stream_totals_match=jsonl_finality.get('stream_totals_match'),
             request_count=jsonl_finality.get('request_count'),
             duplicate_rows_ignored=jsonl_finality.get('duplicate_rows_ignored'),
@@ -4943,6 +4949,7 @@ def _run_unified_normal_main_chat_turn(
                     'conflicting_duplicate_rows': jsonl_finality.get('conflicting_duplicate_rows'),
                 }, ensure_ascii=False, sort_keys=True),
             )
+            cleanup_reason = 'normal_wake_main_chat_jsonl_not_final'
             raise RuntimeError('normal_wake_main_chat_jsonl_not_final')
 
         result_cache_info.update(usage)
@@ -4983,6 +4990,7 @@ def _run_unified_normal_main_chat_turn(
                 False,
                 cache_info=result_cache_info,
                 window_identity=window_identity,
+                reason='normal_wake_shared_unavailable',
             )
             _wake_live_trace(
                 trace_id,
@@ -5003,6 +5011,7 @@ def _run_unified_normal_main_chat_turn(
                 False,
                 cache_info=result_cache_info,
                 window_identity=window_identity,
+                reason=cleanup_reason,
             )
             _wake_live_trace(
                 trace_id,
@@ -8872,6 +8881,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                         False,
                         cache_info=main_turn.get('cache_info'),
                         window_identity=_wake_window_identity,
+                        reason='normal_wake_main_chat_failed',
                     )
             _wake_live_trace(
                 wake_run_id,
@@ -8902,6 +8912,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 delivery_succeeded,
                 cache_info=main_cache_info,
                 window_identity=_wake_window_identity,
+                reason=(
+                    'normal_wake_main_chat_delivery_failed'
+                    if not delivery_succeeded else 'delivery_succeeded'
+                ),
             )
         persisted_ids = _wake_live_persisted_ids(wake_run_id)
         _wake_live_trace(
