@@ -68,6 +68,12 @@ DEFAULT_LEASE_TTL = 480
 LEASE_HEARTBEAT_INTERVAL = 50
 WORKER_ID = '%s:%s' % (socket.gethostname(), os.getpid())
 DAILY_TOOL_PROFILE = cc_resident.TOOL_PROFILE_UH_A0
+_HOT_FIXED_SECTION_KINDS = frozenset({
+    'invariant_system',
+    'accepted_state',
+    'accepted_open_loops',
+})
+_HOT_HISTORICAL_REPRESENTATION_KINDS = frozenset({'raw', 'chunk'})
 
 
 class DailyRuntimeError(Exception):
@@ -185,6 +191,11 @@ class DailyTurnPlan:
     transcript_observation_error_code: Optional[str] = None
     continuity_plan: Any = field(default=None, repr=False)
     continuity_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
+    hot_desired_plan: Any = field(default=None, repr=False)
+    hot_desired_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
+    hot_receipt_frozen: Optional[dict[str, Any]] = field(default=None, repr=False)
+    hot_decision: Optional[str] = field(default=None, repr=False)
+    hot_decision_reason: Optional[str] = field(default=None, repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -1199,6 +1210,7 @@ def _build_production_context_plan(
         plan=plan,
         resident=resident,
         static_system=static_system,
+        require_full_state_snapshot=True,
     )
     result = build_daily_continuity_shadow_plan(
         source_db_path=store_path,
@@ -1445,9 +1457,16 @@ def _project_context_plan_history(
     return assembly
 
 
+def _context_plan_for_receipt(plan: DailyTurnPlan) -> Any:
+    context_plan = getattr(plan, 'continuity_plan', None)
+    if context_plan is not None:
+        return context_plan
+    return getattr(plan, 'hot_desired_plan', None)
+
+
 def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
     from chat.context_receipt import ContextReceiptMember
-    context_plan = getattr(plan, 'continuity_plan', None)
+    context_plan = _context_plan_for_receipt(plan)
     if context_plan is None:
         return ()
     members: list[Any] = []
@@ -1468,7 +1487,22 @@ def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
             ))
             order += 1
     for section in context_plan.ordered_sections:
-        if section.kind == 'current_request':
+        kind = str(getattr(section, 'kind', '') or '')
+        if kind not in _HOT_FIXED_SECTION_KINDS:
+            continue
+        members.append(ContextReceiptMember(
+            installed_order=order,
+            representation_id='fixed:%s' % kind,
+            representation_kind='fixed',
+            source_ref=str(section.source_ref),
+            source_revision=str(section.content_hash),
+            source_kind=kind,
+            content_hash=str(section.content_hash),
+            branch_id='',
+        ))
+        order += 1
+    for section in context_plan.ordered_sections:
+        if str(getattr(section, 'kind', '') or '') == 'current_request':
             members.append(ContextReceiptMember(
                 installed_order=order,
                 representation_id='current_request',
@@ -1481,6 +1515,808 @@ def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
             ))
             break
     return tuple(members)
+
+
+def _receipt_member_source_identity(member: Any) -> tuple[Any, ...]:
+    return (
+        str(getattr(member, 'source_ref', '') or ''),
+        str(getattr(member, 'source_revision', '') or ''),
+        str(getattr(member, 'source_kind', '') or ''),
+        str(getattr(member, 'content_hash', '') or ''),
+        getattr(member, 'span_start', None),
+        getattr(member, 'span_end', None),
+        str(getattr(member, 'branch_id', '') or ''),
+    )
+
+
+def _receipt_member_identity(member: Any) -> tuple[Any, ...]:
+    return (
+        str(getattr(member, 'representation_id', '') or ''),
+        str(getattr(member, 'representation_kind', '') or ''),
+        *_receipt_member_source_identity(member),
+    )
+
+
+def _source_member_identity(member: Any) -> tuple[Any, ...]:
+    return (
+        str(getattr(member, 'source_ref', '') or ''),
+        str(getattr(member, 'source_revision', '') or ''),
+        str(getattr(member, 'source_kind', '') or ''),
+        str(getattr(member, 'content_hash', '') or ''),
+        getattr(member, 'span_start', None),
+        getattr(member, 'span_end', None),
+        str(getattr(member, 'branch_id', '') or ''),
+    )
+
+
+def _message_id_from_source_ref(source_ref: Any) -> Optional[int]:
+    parts = str(source_ref or '').split(':')
+    if len(parts) != 2 or parts[0] != 'message':
+        return None
+    try:
+        value = int(parts[1])
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _freeze_hot_receipt(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+) -> dict[str, Any]:
+    """Read the durable receipt once and bind its revision to this turn."""
+    from chat import context_receipt as receipt_store
+    from continuity.store import open_continuity_read_only
+
+    receipt = None
+    receipt_members: tuple[Any, ...] = ()
+    receipt_read_error: Optional[str] = None
+    receipt_members_complete = True
+    try:
+        conn = open_continuity_read_only(_production_continuity_store_path(plan))
+        try:
+            try:
+                receipt = receipt_store.get_receipt(
+                    conn,
+                    context_id=int(plan.context_id),
+                    context_epoch=int(plan.context_epoch),
+                    resident_generation=int(plan.resident_generation),
+                )
+            except sqlite3.OperationalError as exc:
+                if 'no such table' not in str(exc).lower():
+                    raise
+                receipt = None
+            if receipt is not None:
+                try:
+                    receipt_members = receipt_store.get_receipt_members(
+                        conn,
+                        context_id=int(plan.context_id),
+                        context_epoch=int(plan.context_epoch),
+                        resident_generation=int(plan.resident_generation),
+                    )
+                except sqlite3.OperationalError as exc:
+                    if 'no such table' not in str(exc).lower():
+                        raise
+                    receipt_members_complete = False
+                    receipt_members = ()
+        finally:
+            conn.close()
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        receipt_read_error = type(exc).__name__
+        receipt = None
+        receipt_members = ()
+        receipt_members_complete = False
+
+    membership_valid = bool(receipt is None)
+    if receipt is not None and receipt_members_complete:
+        try:
+            membership_valid = (
+                receipt_store.installed_membership_hash(receipt_members)
+                == str(receipt.membership_hash)
+            )
+        except (TypeError, ValueError):
+            membership_valid = False
+
+    live_sid = str(getattr(resident, 'session_id', None) or '').strip()
+    live_process_generation = int(
+        getattr(resident, 'generation', 0) or 0
+    )
+    frozen = {
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+        'resident_generation': int(plan.resident_generation),
+        'resident_key': str(plan.resident_key),
+        'provider': str(plan.manifest.get('provider') or 'claude_code'),
+        'model_identity': str(plan.manifest.get('model') or 'unknown'),
+        'session_id': live_sid,
+        'process_generation': live_process_generation,
+        'receipt': receipt,
+        'receipt_revision': (
+            int(receipt.receipt_revision) if receipt is not None else None
+        ),
+        'plan_id': str(receipt.plan_id) if receipt is not None else None,
+        'plan_hash': str(receipt.plan_hash) if receipt is not None else None,
+        'membership_hash': (
+            str(receipt.membership_hash) if receipt is not None else None
+        ),
+        'installed_source_watermark': (
+            int(receipt.installed_source_watermark) if receipt is not None else None
+        ),
+        'members': tuple(receipt_members),
+        'receipt_missing': receipt is None,
+        'receipt_members_complete': bool(receipt_members_complete),
+        'membership_valid': bool(membership_valid),
+        'receipt_read_error': receipt_read_error,
+        'expected_receipt_revision': (
+            int(receipt.receipt_revision) if receipt is not None else None
+        ),
+    }
+    plan.hot_receipt_frozen = frozen
+    plan.manifest.update({
+        'context_plan_receipt_revision_frozen': frozen['expected_receipt_revision'],
+        'context_plan_receipt_present': not frozen['receipt_missing'],
+        'context_plan_receipt_membership_valid': bool(membership_valid),
+    })
+    return frozen
+
+
+def _hot_native_tail_proof(
+    plan: DailyTurnPlan,
+    *,
+    frozen: dict[str, Any],
+    registry: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Prove the previous receipt request+reply is the live native tail."""
+    from continuity.sources import (
+        build_source_members,
+        derive_completed_turns,
+        evidence_ref,
+    )
+    from continuity.store import open_continuity_read_only
+
+    members = tuple(frozen.get('members') or ())
+    request_members = tuple(
+        member for member in members
+        if str(getattr(member, 'source_kind', '') or '') == 'current_request'
+    )
+    if len(request_members) > 1:
+        return {'status': 'ambiguous', 'reason': 'multiple_current_request_members'}
+    if not request_members:
+        return {'status': 'missing', 'reason': 'current_request_proof_missing'}
+    request_source_ref = str(request_members[0].source_ref or '').strip()
+    user_message_id = _message_id_from_source_ref(request_source_ref)
+    if user_message_id is None:
+        return {
+            'status': 'ambiguous' if request_source_ref else 'missing',
+            'reason': 'current_request_source_ambiguous' if request_source_ref
+                else 'current_request_source_missing',
+        }
+    if int(user_message_id) >= int(plan.user_message_id):
+        return {'status': 'ambiguous', 'reason': 'current_request_is_not_previous'}
+    try:
+        watermark = int(frozen['receipt'].installed_source_watermark)
+    except (AttributeError, TypeError, ValueError):
+        return {'status': 'missing', 'reason': 'receipt_watermark_invalid'}
+    if watermark <= 0:
+        return {'status': 'missing', 'reason': 'receipt_watermark_missing'}
+    if registry is None:
+        return {'status': 'missing', 'reason': 'session_registry_missing'}
+    if str(registry.get('scan_status') or '') != 'READY':
+        return {'status': 'missing', 'reason': 'session_registry_not_ready'}
+    if registry.get('last_mapped_message_id') is None:
+        return {'status': 'missing', 'reason': 'native_tail_mapping_missing'}
+    try:
+        last_mapped_message_id = int(registry['last_mapped_message_id'])
+    except (TypeError, ValueError):
+        return {'status': 'missing', 'reason': 'native_tail_mapping_watermark_invalid'}
+    if last_mapped_message_id != watermark:
+        return {'status': 'missing', 'reason': 'native_tail_mapping_watermark_mismatch'}
+
+    last_good = get_same_context_last_good(
+        int(plan.context_id), int(plan.context_epoch),
+    )
+    if not isinstance(last_good, dict):
+        return {'status': 'missing', 'reason': 'same_context_last_good_missing'}
+    try:
+        last_good_identity_matches = (
+            int(last_good.get('context_id') or 0) == int(plan.context_id)
+            and int(last_good.get('context_epoch') or 0) == int(plan.context_epoch)
+            and int(last_good.get('resident_generation') or 0)
+                == int(plan.resident_generation)
+            and str(last_good.get('claude_session_id') or '')
+                == str(registry.get('claude_session_id') or '')
+        )
+    except (TypeError, ValueError):
+        last_good_identity_matches = False
+    if not last_good_identity_matches:
+        return {'status': 'missing', 'reason': 'same_context_last_good_identity_mismatch'}
+    try:
+        last_good_end = int(last_good.get('transcript_end_offset'))
+        registry_offset = int(registry.get('scan_offset'))
+    except (TypeError, ValueError):
+        return {'status': 'missing', 'reason': 'native_tail_offset_missing'}
+    if last_good_end <= 0 or registry_offset != last_good_end:
+        return {'status': 'missing', 'reason': 'native_tail_offset_mismatch'}
+
+    try:
+        conn = open_continuity_read_only(_production_continuity_store_path(plan))
+        try:
+            rows = conn.execute(
+                'SELECT m.* FROM chat_messages m '
+                'JOIN daily_message_contexts dmc ON dmc.message_id=m.id '
+                'WHERE dmc.context_id=? AND dmc.context_epoch=? '
+                'AND dmc.resident_generation=? AND m.id<=? '
+                'ORDER BY m.id ASC',
+                (
+                    int(plan.context_id), int(plan.context_epoch),
+                    int(plan.resident_generation), watermark,
+                ),
+            ).fetchall()
+            mapping_rows = conn.execute(
+                "SELECT event_uuid, message_id, role, claude_session_id, "
+                "jsonl_byte_offset FROM chat_message_claude_events "
+                "WHERE context_id=? AND context_epoch=? "
+                "AND resident_generation=? AND message_id IN (?,?) "
+                "AND role IN ('user','assistant') "
+                "ORDER BY jsonl_byte_offset ASC",
+                (
+                    int(plan.context_id), int(plan.context_epoch),
+                    int(plan.resident_generation), user_message_id, watermark,
+                ),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, ValueError, sqlite3.Error):
+        return {'status': 'missing', 'reason': 'native_tail_rows_unavailable'}
+
+    try:
+        durable_rows = [dict(row) for row in rows]
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_rows_corrupt'}
+    try:
+        turns = tuple(derive_completed_turns(durable_rows))
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'canonical_tail_derivation_failed'}
+    matching = tuple(
+        turn for turn in turns
+        if str(turn.user_input_ref.source_ref) == 'message:%d' % user_message_id
+    )
+    if len(matching) > 1:
+        return {'status': 'ambiguous', 'reason': 'multiple_canonical_tail_turns'}
+    if not matching:
+        return {'status': 'missing', 'reason': 'canonical_tail_turn_missing'}
+    turn = matching[0]
+    if len(turn.assistant_committed_output_refs) != 1:
+        return {'status': 'ambiguous', 'reason': 'canonical_tail_assistant_count'}
+    assistant_message_id = _message_id_from_source_ref(
+        turn.assistant_committed_output_refs[0].source_ref,
+    )
+    if assistant_message_id is None or assistant_message_id != watermark:
+        return {'status': 'missing', 'reason': 'canonical_tail_watermark_mismatch'}
+
+    current_rows = tuple(
+        row for row in durable_rows if int(row.get('id') or 0) == user_message_id
+    )
+    if len(current_rows) != 1:
+        return {
+            'status': 'ambiguous' if len(current_rows) > 1 else 'missing',
+            'reason': 'current_request_row_ambiguous',
+        }
+    try:
+        current_evidence = evidence_ref(current_rows[0], prefix='message')
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'current_request_evidence_corrupt'}
+    request_member = request_members[0]
+    if (
+        str(request_member.source_ref) != str(current_evidence.source_ref)
+        or str(request_member.source_revision) != str(current_evidence.source_revision)
+        or str(request_member.content_hash) != str(current_evidence.content_hash)
+    ):
+        return {'status': 'missing', 'reason': 'current_request_proof_changed'}
+
+    try:
+        user_events = tuple(
+            row for row in mapping_rows
+            if int(row['message_id']) == user_message_id
+            and str(row['role']) == 'user'
+        )
+        assistant_events = tuple(
+            row for row in mapping_rows
+            if int(row['message_id']) == assistant_message_id
+            and str(row['role']) == 'assistant'
+        )
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_mapping_corrupt'}
+    if len(user_events) > 1 or len(assistant_events) > 1:
+        return {'status': 'ambiguous', 'reason': 'native_tail_mapping_ambiguous'}
+    if len(user_events) != 1 or len(assistant_events) != 1:
+        return {'status': 'missing', 'reason': 'native_tail_mapping_incomplete'}
+    user_event = user_events[0]
+    assistant_event = assistant_events[0]
+    expected_sid = str(registry.get('claude_session_id') or '')
+    try:
+        sessions_match = (
+            str(user_event['claude_session_id']) == expected_sid
+            and str(assistant_event['claude_session_id']) == expected_sid
+        )
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_mapping_corrupt'}
+    if not sessions_match:
+        return {'status': 'missing', 'reason': 'native_tail_session_mismatch'}
+    try:
+        user_offset = int(user_event['jsonl_byte_offset'])
+        assistant_offset = int(assistant_event['jsonl_byte_offset'])
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_mapping_offset_corrupt'}
+    if not (0 <= user_offset < assistant_offset < last_good_end):
+        return {'status': 'missing', 'reason': 'native_tail_mapping_offset_invalid'}
+
+    try:
+        tail_members = tuple(build_source_members((turn,), ()))
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'canonical_tail_member_corrupt'}
+    if len(tail_members) != 1:
+        return {'status': 'ambiguous', 'reason': 'canonical_tail_member_ambiguous'}
+    return {
+        'status': 'pass',
+        'reason': None,
+        'source_member': tail_members[0],
+        'user_message_id': user_message_id,
+        'assistant_message_id': assistant_message_id,
+        'transcript_end_offset': last_good_end,
+    }
+
+
+def _hot_live_identity_decision(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    frozen: dict[str, Any],
+) -> tuple[str, str, Optional[dict[str, Any]]]:
+    if not is_epoch_token_current(plan):
+        return 'BLOCKED', 'epoch_invalid', None
+    binding = get_local_binding()
+    if binding is None or not _binding_matches_plan(binding, plan):
+        return 'RESPAWN', 'live_binding_missing_or_mismatched', None
+    try:
+        if int(binding.context_id) != int(plan.context_id):
+            return 'RESPAWN', 'live_binding_context_mismatch', None
+        if int(binding.process_generation) <= 0:
+            return 'RESPAWN', 'live_binding_process_generation_missing', None
+    except (TypeError, ValueError):
+        return 'BLOCKED', 'live_binding_identity_invalid', None
+    if not _resident_is_alive(resident):
+        return 'RESPAWN', 'resident_not_alive', None
+    live_generation = int(getattr(resident, 'generation', 0) or 0)
+    live_sid = str(getattr(resident, 'session_id', None) or '').strip()
+    if live_generation <= 0 or not live_sid:
+        return 'RESPAWN', 'live_session_identity_missing', None
+    if int(binding.process_generation) != live_generation:
+        return 'RESPAWN', 'binding_process_generation_mismatch', None
+    if not str(binding.claude_session_id or '').strip():
+        return 'RESPAWN', 'binding_session_identity_missing', None
+    if str(binding.claude_session_id).strip() != live_sid:
+        return 'RESPAWN', 'binding_session_identity_mismatch', None
+    frozen_sid = str(frozen.get('session_id') or '').strip()
+    try:
+        frozen_process_generation = int(frozen.get('process_generation') or 0)
+    except (TypeError, ValueError):
+        return 'BLOCKED', 'frozen_process_generation_invalid', None
+    if frozen_sid and frozen_sid != live_sid:
+        return 'RESPAWN', 'frozen_session_identity_mismatch', None
+    if frozen_process_generation and frozen_process_generation != live_generation:
+        return 'RESPAWN', 'frozen_process_generation_mismatch', None
+    expected_model = str(frozen.get('model_identity') or '').strip()
+    live_model = str(
+        getattr(resident, 'model_identity', None)
+        or getattr(resident, '_model_identity', None)
+        or ''
+    ).strip()
+    if expected_model and expected_model != 'unknown':
+        if not live_model:
+            return 'RESPAWN', 'live_model_identity_missing', None
+        if live_model != expected_model:
+            return 'RESPAWN', 'live_model_identity_mismatch', None
+    expected_provider = str(frozen.get('provider') or '').strip()
+    live_provider = str(
+        getattr(resident, 'provider', None)
+        or getattr(resident, 'provider_identity', None)
+        or getattr(resident, '_provider', None)
+        or ''
+    ).strip()
+    if live_provider and expected_provider and live_provider != expected_provider:
+        return 'RESPAWN', 'live_provider_identity_mismatch', None
+    expected_system_hash = str(
+        plan.manifest.get('static_system_sha256') or ''
+    ).strip()
+    live_system = str(
+        getattr(resident, 'system_text', None)
+        or getattr(resident, '_system_text', None)
+        or ''
+    )
+    if expected_system_hash:
+        if not live_system:
+            return 'RESPAWN', 'live_system_identity_missing', None
+        if _sha256_text(live_system) != expected_system_hash:
+            return 'RESPAWN', 'live_system_identity_mismatch', None
+    live_persona_hash = str(
+        getattr(resident, 'persona_sha256', None)
+        or getattr(resident, '_persona_sha256', None)
+        or ''
+    ).strip()
+    expected_persona_hash = str(
+        plan.manifest.get('persona_sha256') or ''
+    ).strip()
+    if expected_persona_hash and live_persona_hash:
+        if live_persona_hash != expected_persona_hash:
+            return 'RESPAWN', 'live_persona_identity_mismatch', None
+
+    peek = getattr(resident, 'peek_respawn_reason', None)
+    if callable(peek):
+        try:
+            live_reason = peek(live_system, tool_profile=plan.tool_profile)
+        except Exception:
+            return 'BLOCKED', 'live_tool_surface_identity_unavailable', None
+        if live_reason:
+            return 'RESPAWN', 'live_provider_identity_mismatch', None
+    if plan.tool_profile == DAILY_TOOL_PROFILE:
+        tool_surface = str(
+            getattr(resident, 'bound_tool_surface_fingerprint', None)
+            or getattr(resident, '_bound_tool_surface_fingerprint', None)
+            or ''
+        ).strip()
+        if not tool_surface:
+            return 'RESPAWN', 'live_tool_surface_identity_missing', None
+
+    try:
+        registry = get_context_claude_session(
+            int(plan.context_id),
+            int(plan.resident_generation),
+            db_path=plan.db_path,
+        )
+    except (OSError, sqlite3.Error):
+        return 'BLOCKED', 'session_registry_unavailable', None
+    if registry is None:
+        return 'RESPAWN', 'session_registry_missing', None
+    try:
+        if (
+            int(registry.get('context_id')) != int(plan.context_id)
+            or int(registry.get('resident_generation'))
+                != int(plan.resident_generation)
+            or int(registry.get('context_epoch')) != int(plan.context_epoch)
+            or str(registry.get('chat_id') or '') != str(plan.chat_id)
+        ):
+            return 'BLOCKED', 'session_registry_identity_ambiguous', registry
+    except (TypeError, ValueError):
+        return 'BLOCKED', 'session_registry_identity_invalid', registry
+
+    if str(registry.get('claude_session_id') or '') != live_sid:
+        return 'RESPAWN', 'session_identity_mismatch', registry
+    if registry.get('process_generation') is None:
+        return 'RESPAWN', 'session_registry_process_generation_missing', registry
+    try:
+        registry_process_generation = int(registry['process_generation'])
+    except (TypeError, ValueError):
+        return 'BLOCKED', 'session_registry_process_generation_invalid', registry
+    if registry_process_generation != live_generation:
+        return 'RESPAWN', 'process_generation_mismatch', registry
+    if binding.claude_session_id and binding.claude_session_id != live_sid:
+        return 'RESPAWN', 'binding_session_identity_mismatch', registry
+
+    try:
+        owner = dc.get_resident_owner(
+            int(plan.context_id),
+            int(plan.resident_generation),
+            db_path=plan.db_path,
+        )
+    except (OSError, sqlite3.Error):
+        return 'BLOCKED', 'resident_owner_unavailable', registry
+    if owner is None:
+        return 'RESPAWN', 'resident_owner_missing', registry
+    try:
+        if (
+            int(owner.get('context_id')) != int(plan.context_id)
+            or int(owner.get('resident_generation'))
+                != int(plan.resident_generation)
+            or str(owner.get('worker_id') or '') != str(plan.worker_id)
+            or str(owner.get('resident_key') or '') != str(plan.resident_key)
+            or int(owner.get('process_generation') or 0) != live_generation
+        ):
+            return 'RESPAWN', 'resident_owner_identity_mismatch', registry
+    except (TypeError, ValueError):
+        return 'RESPAWN', 'resident_owner_identity_invalid', registry
+
+    receipt = frozen.get('receipt')
+    if receipt is not None:
+        try:
+            if (
+                int(receipt.context_id) != int(plan.context_id)
+                or int(receipt.context_epoch) != int(plan.context_epoch)
+                or int(receipt.resident_generation) != int(plan.resident_generation)
+            ):
+                return 'BLOCKED', 'receipt_window_identity_ambiguous', registry
+            receipt_process_generation = int(receipt.process_generation)
+            receipt_watermark = int(receipt.installed_source_watermark)
+        except (TypeError, ValueError):
+            return 'BLOCKED', 'receipt_window_identity_invalid', registry
+        if str(receipt.resident_key) != str(plan.resident_key):
+            return 'RESPAWN', 'receipt_resident_key_mismatch', registry
+        if str(receipt.provider) != str(frozen['provider']):
+            return 'RESPAWN', 'receipt_provider_mismatch', registry
+        if str(receipt.model_identity) != str(frozen['model_identity']):
+            return 'RESPAWN', 'receipt_model_mismatch', registry
+        if str(receipt.session_id) != live_sid:
+            return 'RESPAWN', 'receipt_session_identity_mismatch', registry
+        if receipt_process_generation != live_generation:
+            return 'RESPAWN', 'receipt_process_generation_mismatch', registry
+        try:
+            binding_cursor = binding.bound_cursor_message_id
+            owner_cursor = owner.get('bound_cursor_message_id')
+            db_cursor = dc.get_resident_history_cursor(
+                int(plan.context_id),
+                int(plan.resident_generation),
+                db_path=plan.db_path,
+            )
+            if (
+                binding_cursor is None
+                or owner_cursor is None
+                or db_cursor is None
+                or int(binding_cursor) != receipt_watermark
+                or int(owner_cursor) != receipt_watermark
+                or int(db_cursor) != receipt_watermark
+            ):
+                return 'RESPAWN', 'resident_cursor_watermark_mismatch', registry
+        except (TypeError, ValueError):
+            return 'RESPAWN', 'resident_cursor_identity_invalid', registry
+        except (OSError, sqlite3.Error):
+            return 'BLOCKED', 'resident_cursor_unavailable', registry
+    return 'PASS', '', registry
+
+
+def _hot_historical_compatibility(
+    *,
+    receipt_members: tuple[Any, ...],
+    desired_members: tuple[Any, ...],
+    native_tail_member: Any,
+) -> tuple[bool, str]:
+    installed = tuple(
+        member for member in receipt_members
+        if str(getattr(member, 'representation_kind', '') or '')
+            in _HOT_HISTORICAL_REPRESENTATION_KINDS
+    )
+    desired = tuple(
+        member for member in desired_members
+        if str(getattr(member, 'representation_kind', '') or '')
+            in _HOT_HISTORICAL_REPRESENTATION_KINDS
+    )
+    installed_keys = tuple(_receipt_member_source_identity(member) for member in installed)
+    desired_keys = tuple(_receipt_member_source_identity(member) for member in desired)
+    if len(set(installed_keys)) != len(installed_keys):
+        return False, 'installed_historical_members_ambiguous'
+    if len(set(desired_keys)) != len(desired_keys):
+        return False, 'desired_historical_members_ambiguous'
+    tail_key = _source_member_identity(native_tail_member)
+    if tail_key not in desired_keys:
+        return False, 'native_tail_not_in_desired_plan'
+    virtual_tail = tail_key not in installed_keys
+    if virtual_tail:
+        if desired_keys[-1] != tail_key:
+            return False, 'native_tail_order_mismatch'
+        if str(getattr(desired[-1], 'representation_kind', '') or '') != 'raw':
+            return False, 'native_tail_requires_raw_representation'
+        installed_keys = installed_keys + (tail_key,)
+    if installed_keys != desired_keys:
+        return False, 'historical_source_members_changed'
+
+    paired_installed: tuple[Any, ...] = installed
+    if virtual_tail:
+        paired_installed = installed + (None,)
+    if len(paired_installed) != len(desired):
+        return False, 'historical_source_members_changed'
+    for existing, desired_member in zip(paired_installed, desired):
+        if existing is None:
+            # The only member allowed to be newly proven is the native tail;
+            # it is raw native history, not a historical APPEND primitive.
+            continue
+        if str(getattr(existing, 'representation_kind', '') or '') != str(
+            getattr(desired_member, 'representation_kind', '') or ''
+        ):
+            return False, 'historical_representation_identity_changed'
+        if str(getattr(desired_member, 'representation_kind', '') or '') == 'chunk':
+            if str(getattr(existing, 'representation_id', '') or '') != str(
+                getattr(desired_member, 'representation_id', '') or ''
+            ):
+                return False, 'historical_representation_identity_changed'
+    return True, ''
+
+def _reconcile_hot_context_plan(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+) -> str:
+    desired = getattr(plan, 'hot_desired_plan', None)
+    frozen = getattr(plan, 'hot_receipt_frozen', None) or {}
+    decision = 'BLOCKED'
+    reason = 'hot_context_plan_missing'
+    if desired is None:
+        _set_hot_decision(plan, decision, reason)
+        return decision
+    if not bool(getattr(desired, 'valid', False)):
+        reason = 'desired_context_plan_invalid'
+        _set_hot_decision(plan, decision, reason)
+        return decision
+    try:
+        desired_budget_status = str(getattr(desired, 'budget_status', '') or '')
+        desired_gaps = tuple(getattr(desired, 'gaps', ()) or ())
+        desired_representations = tuple(
+            getattr(desired, 'representations', ()) or ()
+        )
+        current_request_sections = tuple(
+            section for section in tuple(
+                getattr(desired, 'ordered_sections', ()) or ()
+            )
+            if str(getattr(section, 'kind', '') or '') == 'current_request'
+        )
+        if desired_budget_status not in ('fit', 'unbounded') or desired_gaps:
+            reason = 'desired_context_plan_budget_or_coverage_invalid'
+            _set_hot_decision(plan, decision, reason)
+            return decision
+        if any(
+            str(getattr(representation, 'kind', '') or '')
+                not in _HOT_HISTORICAL_REPRESENTATION_KINDS
+            for representation in desired_representations
+        ):
+            reason = 'desired_context_plan_representation_invalid'
+            _set_hot_decision(plan, decision, reason)
+            return decision
+        if len(current_request_sections) != 1:
+            reason = 'desired_context_plan_current_request_ambiguous'
+            _set_hot_decision(plan, decision, reason)
+            return decision
+    except Exception:
+        reason = 'desired_context_plan_proof_unavailable'
+        _set_hot_decision(plan, decision, reason)
+        return decision
+
+    identity_decision, identity_reason, registry = _hot_live_identity_decision(
+        plan,
+        resident=resident,
+        frozen=frozen,
+    )
+    if identity_decision != 'PASS':
+        _set_hot_decision(plan, identity_decision, identity_reason)
+        return identity_decision
+    if frozen.get('receipt_read_error'):
+        _set_hot_decision(plan, 'BLOCKED', 'installed_receipt_unavailable')
+        return 'BLOCKED'
+    receipt = frozen.get('receipt')
+    if receipt is None:
+        _set_hot_decision(plan, 'RESPAWN', 'installed_receipt_missing')
+        return 'RESPAWN'
+    if not bool(frozen.get('receipt_members_complete')) or not bool(
+        frozen.get('membership_valid')
+    ):
+        _set_hot_decision(plan, 'RESPAWN', 'installed_receipt_proof_incomplete')
+        return 'RESPAWN'
+
+    desired_members = _context_receipt_members(plan)
+    installed_members = tuple(frozen.get('members') or ())
+    desired_fixed = tuple(
+        member for member in desired_members
+        if str(getattr(member, 'source_kind', '') or '')
+            in _HOT_FIXED_SECTION_KINDS
+    )
+    installed_fixed = tuple(
+        member for member in installed_members
+        if str(getattr(member, 'source_kind', '') or '')
+            in _HOT_FIXED_SECTION_KINDS
+    )
+    desired_fixed_kinds = tuple(
+        str(getattr(member, 'source_kind', '') or '') for member in desired_fixed
+    )
+    installed_fixed_kinds = tuple(
+        str(getattr(member, 'source_kind', '') or '') for member in installed_fixed
+    )
+    if set(desired_fixed_kinds) - set(installed_fixed_kinds):
+        _set_hot_decision(plan, 'RESPAWN', 'legacy_receipt_fixed_proof_incomplete')
+        return 'RESPAWN'
+    if (
+        desired_fixed_kinds != installed_fixed_kinds
+        or tuple(map(_receipt_member_identity, desired_fixed))
+            != tuple(map(_receipt_member_identity, installed_fixed))
+    ):
+        _set_hot_decision(plan, 'RESPAWN', 'fixed_context_plan_mismatch')
+        return 'RESPAWN'
+
+    desired_policy_version = str(
+        getattr(desired, 'budget_policy_version', '')
+        or 'continuity_context_budget_v1'
+    )
+    desired_measurement = str(getattr(desired, 'measurement_semantics', '') or '')
+    if str(receipt.budget_policy_version) != desired_policy_version:
+        _set_hot_decision(plan, 'RESPAWN', 'budget_policy_version_mismatch')
+        return 'RESPAWN'
+    if str(receipt.measurement_semantics) != desired_measurement:
+        _set_hot_decision(plan, 'RESPAWN', 'measurement_semantics_mismatch')
+        return 'RESPAWN'
+
+    tail = _hot_native_tail_proof(
+        plan,
+        frozen=frozen,
+        registry=registry,
+    )
+    if tail.get('status') == 'ambiguous':
+        _set_hot_decision(plan, 'BLOCKED', str(tail.get('reason') or 'native_tail_ambiguous'))
+        return 'BLOCKED'
+    if tail.get('status') != 'pass' or tail.get('source_member') is None:
+        _set_hot_decision(plan, 'RESPAWN', str(tail.get('reason') or 'native_tail_missing'))
+        return 'RESPAWN'
+
+    compatible, compatibility_reason = _hot_historical_compatibility(
+        receipt_members=installed_members,
+        desired_members=desired_members,
+        native_tail_member=tail['source_member'],
+    )
+    if not compatible:
+        _set_hot_decision(plan, 'RESPAWN', compatibility_reason)
+        return 'RESPAWN'
+
+    plan.manifest.update({
+        'context_plan_fixed_section_parity': 'PASS',
+        'context_plan_representation_parity': 'PASS',
+        'context_plan_current_request_count': 1,
+        'context_plan_native_tail_proof': 'PASS',
+        'context_plan_budget_status': str(getattr(desired, 'budget_status', '')),
+    })
+    _set_hot_decision(plan, 'NO_OP', '')
+    return 'NO_OP'
+
+
+def _set_hot_decision(plan: DailyTurnPlan, decision: str, reason: str) -> None:
+    plan.hot_decision = str(decision)
+    plan.hot_decision_reason = str(reason or '')
+    plan.manifest.update({
+        'context_plan_hot_decision': str(decision),
+        'context_plan_hot_decision_reason': str(reason or ''),
+    })
+
+
+def _prepare_hot_context_plan(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    static_system: str,
+) -> str:
+    try:
+        context_plan, chunk_bodies = _build_production_context_plan(
+            plan,
+            resident=resident,
+            static_system=static_system,
+        )
+    except DailyRuntimeError as exc:
+        _set_hot_decision(plan, 'BLOCKED', str(exc.error_code))
+        raise
+    except (TypeError, ValueError) as exc:
+        _set_hot_decision(plan, 'BLOCKED', str(exc))
+        raise DailyRuntimeError(
+            'normal hot ContextPlan build blocked: %s' % str(exc),
+            error_code='context_plan_hot_blocked',
+            retryable=False,
+        ) from exc
+    plan.hot_desired_plan = context_plan
+    plan.hot_desired_chunk_bodies = dict(chunk_bodies)
+    plan.manifest.update({
+        'context_plan_consumer': 'canonical_hot',
+        'context_plan_hot_pending': False,
+        'context_plan_id': str(context_plan.plan_id),
+        'context_plan_hash': str(context_plan.plan_hash),
+        'context_plan_valid': bool(context_plan.valid),
+        'context_plan_budget_status': str(context_plan.budget_status),
+        'context_plan_source_hash': str(context_plan.source_hash),
+    })
+    _freeze_hot_receipt(plan, resident=resident)
+    return _reconcile_hot_context_plan(plan, resident=resident)
 
 
 def _same_context_last_good_matches(plan: DailyTurnPlan) -> bool:
@@ -1535,8 +2371,17 @@ def _commit_production_context_receipt(
             'error_code': 'context_receipt_unavailable',
         })
         return False
-    context_plan = getattr(plan, 'continuity_plan', None)
+    context_plan = _context_plan_for_receipt(plan)
     if context_plan is None:
+        return False
+    hot_reconciliation = getattr(plan, 'hot_desired_plan', None) is not None
+    if hot_reconciliation and getattr(plan, 'hot_decision', None) != 'NO_OP':
+        plan.manifest.update({
+            'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_repair_required': True,
+            'context_receipt_error_code': 'context_plan_hot_not_no_op',
+            'error_code': 'context_plan_hot_not_no_op',
+        })
         return False
     cursor_after_raw = plan.manifest.get('cursor_after')
     try:
@@ -1615,21 +2460,36 @@ def _commit_production_context_receipt(
         conn = dc._connect(plan.db_path)
         try:
             receipt_store.ensure_context_receipt_schema(conn)
-            existing = receipt_store.get_receipt(
-                conn,
-                context_id=int(plan.context_id),
-                context_epoch=int(plan.context_epoch),
-                resident_generation=int(plan.resident_generation),
-            )
-            if existing is None:
-                committed = receipt_store.create_receipt(conn, receipt, members)
-            else:
+            if hot_reconciliation:
+                frozen = getattr(plan, 'hot_receipt_frozen', None) or {}
+                frozen_receipt = frozen.get('receipt')
+                expected_revision = frozen.get('expected_receipt_revision')
+                if frozen_receipt is None or expected_revision is None:
+                    raise receipt_store.ContextReceiptConflict(
+                        'hot receipt revision was not frozen before send'
+                    )
                 committed = receipt_store.hot_advance_receipt(
                     conn,
-                    expected_receipt_revision=int(existing.receipt_revision),
+                    expected_receipt_revision=int(expected_revision),
                     receipt=receipt,
                     members=members,
                 )
+            else:
+                existing = receipt_store.get_receipt(
+                    conn,
+                    context_id=int(plan.context_id),
+                    context_epoch=int(plan.context_epoch),
+                    resident_generation=int(plan.resident_generation),
+                )
+                if existing is None:
+                    committed = receipt_store.create_receipt(conn, receipt, members)
+                else:
+                    committed = receipt_store.hot_advance_receipt(
+                        conn,
+                        expected_receipt_revision=int(existing.receipt_revision),
+                        receipt=receipt,
+                        members=members,
+                    )
         finally:
             conn.close()
         plan.manifest.update({
@@ -1665,6 +2525,36 @@ def _provider_content_text(content: Any) -> str:
             if text
         )
     return ''
+
+
+def _validate_hot_no_op_payload(plan: DailyTurnPlan, content: Any) -> None:
+    """Keep NO_OP on the existing incremental payload contract."""
+    if getattr(plan, 'hot_decision', None) != 'NO_OP':
+        return
+    assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
+    if assembly.get('context_plan_representation_blocks'):
+        raise DailyRuntimeError(
+            'normal hot NO_OP contains ContextPlan history replay',
+            error_code='context_plan_hot_history_replay',
+        )
+    if assembly.get('carryover_messages') or str(
+        assembly.get('day_handoff') or ''
+    ).strip():
+        raise DailyRuntimeError(
+            'normal hot NO_OP contains legacy handoff/carryover replay',
+            error_code='context_plan_hot_legacy_replay',
+        )
+    text = _provider_content_text(content)
+    user_text = str(plan.user_content or '')
+    suffix = str(plan.provider_display_thinking_suffix or '')
+    if suffix and text.endswith(suffix):
+        text = text[:-len(suffix)]
+    if user_text.strip() and user_text.strip() != '[image]' and not text.endswith(user_text):
+        raise DailyRuntimeError(
+            'normal hot current request is not installed exactly once',
+            error_code='context_plan_hot_current_request_parity_failed',
+        )
+    plan.manifest['context_plan_current_request_count'] = 1
 
 
 def _section_install_identity(section: Any) -> tuple[str, str, str, int]:
@@ -1706,6 +2596,7 @@ def _validate_production_context_install(
         plan=plan,
         resident=resident,
         static_system=static_system,
+        require_full_state_snapshot=True,
     )
     actual_fixed = tuple(
         section for section in context_plan.ordered_sections
@@ -1956,7 +2847,9 @@ def _assemble_plan(
     )
     last_state: Optional[dict[str, str]] = None
     cold_like = bool(is_cold or is_respawn)
-    context_plan_consumer = bool(cold_like and _context_plan_consumer_enabled())
+    context_plan_gate = _context_plan_consumer_enabled()
+    context_plan_consumer = bool(cold_like and context_plan_gate)
+    hot_context_plan_pending = bool(turn_kind == 'hot' and context_plan_gate)
     if turn_kind == 'hot' and resident is not None:
         raw = getattr(resident, 'last_state_snapshot', None) or {}
         if isinstance(raw, dict):
@@ -2059,6 +2952,14 @@ def _assemble_plan(
             'context_plan_valid': bool(context_plan.valid),
             'context_plan_budget_status': str(context_plan.budget_status),
             'context_plan_source_hash': str(context_plan.source_hash),
+        })
+    elif hot_context_plan_pending:
+        # The normal-hot desired plan is deliberately deferred until after the
+        # read-only Capacity Swap door in ensure_resident_and_stream().  A
+        # capacity reason must not be turned into a hot store/budget failure.
+        daily_plan.manifest.update({
+            'context_plan_consumer': 'canonical_hot_pending',
+            'context_plan_hot_pending': True,
         })
     return daily_plan
 
@@ -3528,8 +4429,13 @@ def _build_continuity_shadow_fixed_sections(
     plan: DailyTurnPlan,
     resident: Any,
     static_system: str,
+    require_full_state_snapshot: bool = False,
 ) -> tuple[Any, ...]:
     from continuity.context_plan import ContextSection
+    from chat.persona_state_semantic import (
+        format_persona_semantic_snapshot,
+        translate_raw_state_to_persona_semantic,
+    )
     from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
     resident_system = getattr(resident, '_system_text', '')
@@ -3547,9 +4453,23 @@ def _build_continuity_shadow_fixed_sections(
     ))
 
     assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
-    state = assembly.get('state')
-    if state:
-        state_serialized = state if isinstance(state, str) else _continuity_shadow_canonical(state)
+    state_serialized = ''
+    state_snapshot = assembly.get('state_snapshot')
+    if isinstance(state_snapshot, dict) and state_snapshot:
+        state_serialized = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(state_snapshot),
+        )
+    if not state_serialized and not require_full_state_snapshot:
+        # Legacy shadow/test callers may only have the transport field.  The
+        # production ContextPlan path opts out so a hot delta cannot become a
+        # durable accepted-state identity.
+        state = assembly.get('state')
+        if state:
+            state_serialized = (
+                state if isinstance(state, str)
+                else _continuity_shadow_canonical(state)
+            )
+    if state_serialized:
         state_hash = _sha256_text(state_serialized)
         sections.append(ContextSection(
             kind='accepted_state',
@@ -4177,6 +5097,12 @@ def _observe_continuity_shadow(
             content=content,
         )
         return
+    if getattr(plan, 'hot_desired_plan', None) is not None:
+        # Gate-on normal hot already built and reconciled one canonical
+        # desired plan before this point.  The legacy shadow branch must not
+        # build a second plan or become an installed-proof authority.
+        plan.manifest['context_plan_hot_shadow'] = 'disabled'
+        return
     turn_kind = _continuity_shadow_turn_kind(plan)
     if hasattr(plan, '_continuity_shadow_pending_receipt'):
         delattr(plan, '_continuity_shadow_pending_receipt')
@@ -4550,6 +5476,61 @@ def ensure_resident_and_stream(
             )
             return
 
+        if bool(plan.manifest.get('context_plan_hot_pending')):
+            # Capacity has already had first refusal above.  Only now may a
+            # normal-hot store/budget read decide whether this turn is NO_OP,
+            # RESPAWN, or BLOCKED.
+            try:
+                hot_decision = _prepare_hot_context_plan(
+                    plan,
+                    resident=resident,
+                    static_system=effective_system,
+                )
+            except Exception:
+                heartbeat.stop()
+                _release_lease(plan)
+                raise
+            if hot_decision == 'BLOCKED':
+                heartbeat.stop()
+                _release_lease(plan)
+                raise DailyRuntimeError(
+                    'normal hot ContextPlan reconciliation blocked: %s'
+                    % str(plan.hot_decision_reason or 'unknown'),
+                    error_code='context_plan_hot_blocked',
+                    retryable=False,
+                )
+            if hot_decision == 'RESPAWN':
+                heartbeat.stop()
+                if _reprep_depth >= 1:
+                    _release_lease(plan)
+                    raise DailyRuntimeError(
+                        'normal hot ContextPlan respawn loop',
+                        error_code='context_plan_hot_respawn_loop',
+                        retryable=False,
+                    )
+                replacement = reprepare_after_registered_session_change(
+                    plan,
+                    resident=resident,
+                    static_system=effective_system,
+                    static_system_sha256=(
+                        plan.manifest.get('static_system_sha256')
+                        or _sha256_text(effective_system)
+                    ),
+                    persona_sha256=plan.manifest.get('persona_sha256') or '',
+                    provider=str(plan.manifest.get('provider') or 'claude_code'),
+                    model=str(plan.manifest.get('model') or ''),
+                )
+                _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
+                yield from ensure_resident_and_stream(
+                    plan,
+                    resident=resident,
+                    env=env,
+                    static_system=effective_system,
+                    _reprep_depth=_reprep_depth + 1,
+                    _registry_reprep_depth=_registry_reprep_depth,
+                )
+                return
+
         actual_cold = bool(
             resident.ensure_alive(effective_system, env, tool_profile=plan.tool_profile)
         )
@@ -4717,6 +5698,7 @@ def ensure_resident_and_stream(
                     error_code='uh_a0_turn_lease_unsupported',
                 )
 
+        _validate_hot_no_op_payload(plan, content)
         _observe_continuity_shadow(
             plan=plan,
             resident=resident,
@@ -5077,7 +6059,7 @@ def handle_provider_success(
         )
     # The receipt is committed only after persist + cursor CAS + MAPPED and
     # the existing last-good success boundary.  It is durable metadata proof.
-    if getattr(plan, 'continuity_plan', None) is not None:
+    if _context_plan_for_receipt(plan) is not None:
         _commit_production_context_receipt(
             plan,
             assistant_message_id=int(assistant_message_id),
