@@ -70,6 +70,21 @@ def _resident_alive(resident):
         return False
 
 
+_CLEANUP_REASON_ALLOWLIST = frozenset({
+    'delivery_failed',
+    'normal_wake_shared_unavailable',
+    'normal_wake_main_chat_failed',
+    'normal_wake_main_chat_jsonl_not_final',
+    'normal_wake_main_chat_delivery_failed',
+    'delivery_succeeded',
+})
+
+
+def _safe_cleanup_reason(reason):
+    value = str(reason or '').strip()
+    return value if value in _CLEANUP_REASON_ALLOWLIST else 'unknown'
+
+
 def _log_resident_cleanup(stage, *, resident_generation, resident_pid=None,
                            local_binding_present=None, reason=None,
                            resident_alive=None, close_return=None):
@@ -83,7 +98,7 @@ def _log_resident_cleanup(stage, *, resident_generation, resident_pid=None,
     if local_binding_present is not None:
         payload['local_binding_present'] = bool(local_binding_present)
     if reason is not None:
-        payload['reason'] = str(reason)[:160]
+        payload['reason'] = _safe_cleanup_reason(reason)
     if resident_alive is not None:
         payload['resident_alive'] = bool(resident_alive)
     if close_return is not None:
