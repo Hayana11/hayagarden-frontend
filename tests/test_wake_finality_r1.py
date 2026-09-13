@@ -178,7 +178,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
         self.assertIsNone(event['output_tokens'])
         self.assertFalse(event['round_already_complete'])
 
-    def test_close_reasons_include_tool_use_and_provider_result(self):
+    def test_close_reasons_use_provider_boundaries(self):
         _, logs, _ = self._run([
             _stream_event('message_start', _usage(3, 0)),
             _assistant(
@@ -380,6 +380,54 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
                 'cache_creation': 516,
             },
         ])
+
+    def test_tool_use_and_tool_result_are_yielded_in_order(self):
+        resident = cc_resident.ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+        resident._proc = _FakeProc([
+            _stream_event('message_start', _usage(1, 0)),
+            _assistant(
+                'req-r1',
+                _usage(1, 4),
+                content=[{
+                    'type': 'tool_use',
+                    'id': 'tool-r1',
+                    'name': 'read_only',
+                    'input': {},
+                }],
+            ),
+            {
+                'type': 'user',
+                'message': {
+                    'content': [{
+                        'type': 'tool_result',
+                        'tool_use_id': 'tool-r1',
+                        'content': [{'type': 'text', 'text': 'ok'}],
+                    }],
+                },
+            },
+            {'type': 'result'},
+        ])
+        with (
+            mock.patch.object(cc_resident, 'StreamWatchdog', _NoopWatchdog),
+            mock.patch.object(resident, '_commit_sent_context'),
+            mock.patch.object(
+                resident,
+                '_attach_jsonl_usage_with_retry',
+                side_effect=lambda usage, *args, **kwargs: usage,
+            ),
+        ):
+            stream = resident.send_turn(
+                'INTERNAL_PROMPT_SENTINEL',
+                diagnostic_wake_run_id='wake-r2-order-test',
+            )
+            first = next(stream)
+            self.assertEqual(first[0], 'tool_use')
+            self.assertEqual(first[1]['id'], 'tool-r1')
+            second = next(stream)
+            self.assertEqual(second[0], 'tool_result')
+            self.assertEqual(second[1]['tool_use_id'], 'tool-r1')
+            final = next(stream)
+            self.assertEqual(final[0], 'done')
 
     def test_multiple_tools_stay_in_one_round_without_merging_next_request(self):
         output, logs, _ = self._run([
