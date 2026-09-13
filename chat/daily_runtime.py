@@ -1734,6 +1734,35 @@ def _validate_production_context_install(
             'ContextPlan current-request proof is invalid',
             error_code='context_plan_current_request_parity_failed',
         )
+    try:
+        from continuity.sources import evidence_ref
+        current_row = _load_context_source_rows(
+            {int(plan.user_message_id)},
+            db_path=_production_continuity_store_path(plan),
+        ).get(int(plan.user_message_id))
+        if current_row is None:
+            raise ValueError('current request source row is unavailable')
+        current_evidence = evidence_ref(current_row, prefix='message')
+        current_identity = (
+            str(current_sections[0].source_ref or ''),
+            str(current_sections[0].content_hash or ''),
+            int(current_sections[0].estimated_tokens or 0),
+        )
+        expected_current_identity = (
+            str(current_evidence.source_ref),
+            str(current_evidence.content_hash),
+            int(current_evidence.logical_size),
+        )
+    except Exception as exc:
+        raise DailyRuntimeError(
+            'ContextPlan current-request source is unavailable',
+            error_code='context_plan_current_request_parity_failed',
+        ) from exc
+    if current_identity != expected_current_identity:
+        raise DailyRuntimeError(
+            'ContextPlan current-request identity does not match install',
+            error_code='context_plan_current_request_parity_failed',
+        )
 
     blocks = assembly.get('context_plan_representation_blocks') or []
     expected_blocks = tuple(context_plan.representations)
