@@ -1202,6 +1202,7 @@ def _build_production_context_plan(
     )
     result = build_daily_continuity_shadow_plan(
         source_db_path=store_path,
+        shadow_store_path=store_path,
         continuity_store_path=store_path,
         current_user_message_id=int(plan.user_message_id),
         budget_policy=policy,

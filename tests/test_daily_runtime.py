@@ -3997,6 +3997,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         representation = types.SimpleNamespace(
             representation_id='chunk:ready',
             kind='chunk',
+            chunk_id='chunk:ready',
             source_members=(types.SimpleNamespace(source_ref='turn:1:2'),),
         )
         context_plan = types.SimpleNamespace(
