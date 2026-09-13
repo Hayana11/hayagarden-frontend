@@ -1731,9 +1731,16 @@ def _hot_native_tail_proof(
         return {'status': 'ambiguous', 'reason': 'multiple_current_request_members'}
     if not request_members:
         return {'status': 'missing', 'reason': 'current_request_proof_missing'}
-    user_message_id = _message_id_from_source_ref(request_members[0].source_ref)
+    request_source_ref = str(request_members[0].source_ref or '').strip()
+    user_message_id = _message_id_from_source_ref(request_source_ref)
     if user_message_id is None:
-        return {'status': 'missing', 'reason': 'current_request_source_invalid'}
+        return {
+            'status': 'ambiguous' if request_source_ref else 'missing',
+            'reason': 'current_request_source_ambiguous' if request_source_ref
+                else 'current_request_source_missing',
+        }
+    if int(user_message_id) >= int(plan.user_message_id):
+        return {'status': 'ambiguous', 'reason': 'current_request_is_not_previous'}
     try:
         watermark = int(frozen['receipt'].installed_source_watermark)
     except (AttributeError, TypeError, ValueError):
@@ -1810,11 +1817,14 @@ def _hot_native_tail_proof(
     except (OSError, ValueError, sqlite3.Error):
         return {'status': 'missing', 'reason': 'native_tail_rows_unavailable'}
 
-    durable_rows = [dict(row) for row in rows]
+    try:
+        durable_rows = [dict(row) for row in rows]
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_rows_corrupt'}
     try:
         turns = tuple(derive_completed_turns(durable_rows))
-    except (TypeError, ValueError):
-        return {'status': 'missing', 'reason': 'canonical_tail_derivation_failed'}
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'canonical_tail_derivation_failed'}
     matching = tuple(
         turn for turn in turns
         if str(turn.user_input_ref.source_ref) == 'message:%d' % user_message_id
@@ -1842,8 +1852,8 @@ def _hot_native_tail_proof(
         }
     try:
         current_evidence = evidence_ref(current_rows[0], prefix='message')
-    except (TypeError, ValueError):
-        return {'status': 'missing', 'reason': 'current_request_evidence_unavailable'}
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'current_request_evidence_corrupt'}
     request_member = request_members[0]
     if (
         str(request_member.source_ref) != str(current_evidence.source_ref)
@@ -1852,14 +1862,19 @@ def _hot_native_tail_proof(
     ):
         return {'status': 'missing', 'reason': 'current_request_proof_changed'}
 
-    user_events = tuple(
-        row for row in mapping_rows
-        if int(row['message_id']) == user_message_id and str(row['role']) == 'user'
-    )
-    assistant_events = tuple(
-        row for row in mapping_rows
-        if int(row['message_id']) == assistant_message_id and str(row['role']) == 'assistant'
-    )
+    try:
+        user_events = tuple(
+            row for row in mapping_rows
+            if int(row['message_id']) == user_message_id
+            and str(row['role']) == 'user'
+        )
+        assistant_events = tuple(
+            row for row in mapping_rows
+            if int(row['message_id']) == assistant_message_id
+            and str(row['role']) == 'assistant'
+        )
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_mapping_corrupt'}
     if len(user_events) > 1 or len(assistant_events) > 1:
         return {'status': 'ambiguous', 'reason': 'native_tail_mapping_ambiguous'}
     if len(user_events) != 1 or len(assistant_events) != 1:
@@ -1867,20 +1882,27 @@ def _hot_native_tail_proof(
     user_event = user_events[0]
     assistant_event = assistant_events[0]
     expected_sid = str(registry.get('claude_session_id') or '')
-    if (
-        str(user_event['claude_session_id']) != expected_sid
-        or str(assistant_event['claude_session_id']) != expected_sid
-    ):
+    try:
+        sessions_match = (
+            str(user_event['claude_session_id']) == expected_sid
+            and str(assistant_event['claude_session_id']) == expected_sid
+        )
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_mapping_corrupt'}
+    if not sessions_match:
         return {'status': 'missing', 'reason': 'native_tail_session_mismatch'}
     try:
         user_offset = int(user_event['jsonl_byte_offset'])
         assistant_offset = int(assistant_event['jsonl_byte_offset'])
-    except (TypeError, ValueError):
-        return {'status': 'missing', 'reason': 'native_tail_mapping_offset_missing'}
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'native_tail_mapping_offset_corrupt'}
     if not (0 <= user_offset < assistant_offset < last_good_end):
         return {'status': 'missing', 'reason': 'native_tail_mapping_offset_invalid'}
 
-    tail_members = tuple(build_source_members((turn,), ()))
+    try:
+        tail_members = tuple(build_source_members((turn,), ()))
+    except Exception:
+        return {'status': 'ambiguous', 'reason': 'canonical_tail_member_corrupt'}
     if len(tail_members) != 1:
         return {'status': 'ambiguous', 'reason': 'canonical_tail_member_ambiguous'}
     return {
@@ -1904,12 +1926,34 @@ def _hot_live_identity_decision(
     binding = get_local_binding()
     if binding is None or not _binding_matches_plan(binding, plan):
         return 'RESPAWN', 'live_binding_missing_or_mismatched', None
+    try:
+        if int(binding.context_id) != int(plan.context_id):
+            return 'RESPAWN', 'live_binding_context_mismatch', None
+        if int(binding.process_generation) <= 0:
+            return 'RESPAWN', 'live_binding_process_generation_missing', None
+    except (TypeError, ValueError):
+        return 'BLOCKED', 'live_binding_identity_invalid', None
     if not _resident_is_alive(resident):
         return 'RESPAWN', 'resident_not_alive', None
     live_generation = int(getattr(resident, 'generation', 0) or 0)
     live_sid = str(getattr(resident, 'session_id', None) or '').strip()
     if live_generation <= 0 or not live_sid:
         return 'RESPAWN', 'live_session_identity_missing', None
+    if int(binding.process_generation) != live_generation:
+        return 'RESPAWN', 'binding_process_generation_mismatch', None
+    if not str(binding.claude_session_id or '').strip():
+        return 'RESPAWN', 'binding_session_identity_missing', None
+    if str(binding.claude_session_id).strip() != live_sid:
+        return 'RESPAWN', 'binding_session_identity_mismatch', None
+    frozen_sid = str(frozen.get('session_id') or '').strip()
+    try:
+        frozen_process_generation = int(frozen.get('process_generation') or 0)
+    except (TypeError, ValueError):
+        return 'BLOCKED', 'frozen_process_generation_invalid', None
+    if frozen_sid and frozen_sid != live_sid:
+        return 'RESPAWN', 'frozen_session_identity_mismatch', None
+    if frozen_process_generation and frozen_process_generation != live_generation:
+        return 'RESPAWN', 'frozen_process_generation_mismatch', None
     expected_model = str(frozen.get('model_identity') or '').strip()
     live_model = str(
         getattr(resident, 'model_identity', None)
@@ -1921,6 +1965,15 @@ def _hot_live_identity_decision(
             return 'RESPAWN', 'live_model_identity_missing', None
         if live_model != expected_model:
             return 'RESPAWN', 'live_model_identity_mismatch', None
+    expected_provider = str(frozen.get('provider') or '').strip()
+    live_provider = str(
+        getattr(resident, 'provider', None)
+        or getattr(resident, 'provider_identity', None)
+        or getattr(resident, '_provider', None)
+        or ''
+    ).strip()
+    if live_provider and expected_provider and live_provider != expected_provider:
+        return 'RESPAWN', 'live_provider_identity_mismatch', None
     expected_system_hash = str(
         plan.manifest.get('static_system_sha256') or ''
     ).strip()
@@ -1963,15 +2016,22 @@ def _hot_live_identity_decision(
         if not tool_surface:
             return 'RESPAWN', 'live_tool_surface_identity_missing', None
 
-    registry = get_context_claude_session(
-        int(plan.context_id), int(plan.resident_generation), db_path=plan.db_path,
-    )
+    try:
+        registry = get_context_claude_session(
+            int(plan.context_id),
+            int(plan.resident_generation),
+            db_path=plan.db_path,
+        )
+    except (OSError, sqlite3.Error):
+        return 'BLOCKED', 'session_registry_unavailable', None
     if registry is None:
         return 'RESPAWN', 'session_registry_missing', None
     try:
         if (
-            int(registry.get('context_epoch')) != int(plan.context_epoch)
-            or int(registry.get('resident_generation')) != int(plan.resident_generation)
+            int(registry.get('context_id')) != int(plan.context_id)
+            or int(registry.get('resident_generation'))
+                != int(plan.resident_generation)
+            or int(registry.get('context_epoch')) != int(plan.context_epoch)
             or str(registry.get('chat_id') or '') != str(plan.chat_id)
         ):
             return 'BLOCKED', 'session_registry_identity_ambiguous', registry
@@ -1982,19 +2042,31 @@ def _hot_live_identity_decision(
         return 'RESPAWN', 'session_identity_mismatch', registry
     if registry.get('process_generation') is None:
         return 'RESPAWN', 'session_registry_process_generation_missing', registry
-    if int(registry['process_generation']) != live_generation:
+    try:
+        registry_process_generation = int(registry['process_generation'])
+    except (TypeError, ValueError):
+        return 'BLOCKED', 'session_registry_process_generation_invalid', registry
+    if registry_process_generation != live_generation:
         return 'RESPAWN', 'process_generation_mismatch', registry
     if binding.claude_session_id and binding.claude_session_id != live_sid:
         return 'RESPAWN', 'binding_session_identity_mismatch', registry
 
-    owner = dc.get_resident_owner(
-        int(plan.context_id), int(plan.resident_generation), db_path=plan.db_path,
-    )
+    try:
+        owner = dc.get_resident_owner(
+            int(plan.context_id),
+            int(plan.resident_generation),
+            db_path=plan.db_path,
+        )
+    except (OSError, sqlite3.Error):
+        return 'BLOCKED', 'resident_owner_unavailable', registry
     if owner is None:
         return 'RESPAWN', 'resident_owner_missing', registry
     try:
         if (
-            str(owner.get('worker_id') or '') != str(plan.worker_id)
+            int(owner.get('context_id')) != int(plan.context_id)
+            or int(owner.get('resident_generation'))
+                != int(plan.resident_generation)
+            or str(owner.get('worker_id') or '') != str(plan.worker_id)
             or str(owner.get('resident_key') or '') != str(plan.resident_key)
             or int(owner.get('process_generation') or 0) != live_generation
         ):
@@ -2011,8 +2083,10 @@ def _hot_live_identity_decision(
                 or int(receipt.resident_generation) != int(plan.resident_generation)
             ):
                 return 'BLOCKED', 'receipt_window_identity_ambiguous', registry
+            receipt_process_generation = int(receipt.process_generation)
+            receipt_watermark = int(receipt.installed_source_watermark)
         except (TypeError, ValueError):
-            return 'RESPAWN', 'receipt_window_identity_invalid', registry
+            return 'BLOCKED', 'receipt_window_identity_invalid', registry
         if str(receipt.resident_key) != str(plan.resident_key):
             return 'RESPAWN', 'receipt_resident_key_mismatch', registry
         if str(receipt.provider) != str(frozen['provider']):
@@ -2021,8 +2095,29 @@ def _hot_live_identity_decision(
             return 'RESPAWN', 'receipt_model_mismatch', registry
         if str(receipt.session_id) != live_sid:
             return 'RESPAWN', 'receipt_session_identity_mismatch', registry
-        if int(receipt.process_generation) != live_generation:
+        if receipt_process_generation != live_generation:
             return 'RESPAWN', 'receipt_process_generation_mismatch', registry
+        try:
+            binding_cursor = binding.bound_cursor_message_id
+            owner_cursor = owner.get('bound_cursor_message_id')
+            db_cursor = dc.get_resident_history_cursor(
+                int(plan.context_id),
+                int(plan.resident_generation),
+                db_path=plan.db_path,
+            )
+            if (
+                binding_cursor is None
+                or owner_cursor is None
+                or db_cursor is None
+                or int(binding_cursor) != receipt_watermark
+                or int(owner_cursor) != receipt_watermark
+                or int(db_cursor) != receipt_watermark
+            ):
+                return 'RESPAWN', 'resident_cursor_watermark_mismatch', registry
+        except (TypeError, ValueError):
+            return 'RESPAWN', 'resident_cursor_identity_invalid', registry
+        except (OSError, sqlite3.Error):
+            return 'BLOCKED', 'resident_cursor_unavailable', registry
     return 'PASS', '', registry
 
 
@@ -2090,6 +2185,38 @@ def _reconcile_hot_context_plan(
         return decision
     if not bool(getattr(desired, 'valid', False)):
         reason = 'desired_context_plan_invalid'
+        _set_hot_decision(plan, decision, reason)
+        return decision
+    try:
+        desired_budget_status = str(getattr(desired, 'budget_status', '') or '')
+        desired_gaps = tuple(getattr(desired, 'gaps', ()) or ())
+        desired_representations = tuple(
+            getattr(desired, 'representations', ()) or ()
+        )
+        current_request_sections = tuple(
+            section for section in tuple(
+                getattr(desired, 'ordered_sections', ()) or ()
+            )
+            if str(getattr(section, 'kind', '') or '') == 'current_request'
+        )
+        if desired_budget_status not in ('fit', 'unbounded') or desired_gaps:
+            reason = 'desired_context_plan_budget_or_coverage_invalid'
+            _set_hot_decision(plan, decision, reason)
+            return decision
+        if any(
+            str(getattr(representation, 'kind', '') or '')
+                not in _HOT_HISTORICAL_REPRESENTATION_KINDS
+            for representation in desired_representations
+        ):
+            reason = 'desired_context_plan_representation_invalid'
+            _set_hot_decision(plan, decision, reason)
+            return decision
+        if len(current_request_sections) != 1:
+            reason = 'desired_context_plan_current_request_ambiguous'
+            _set_hot_decision(plan, decision, reason)
+            return decision
+    except Exception:
+        reason = 'desired_context_plan_proof_unavailable'
         _set_hot_decision(plan, decision, reason)
         return decision
 
