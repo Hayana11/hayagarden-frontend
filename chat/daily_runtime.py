@@ -4456,7 +4456,7 @@ def _build_continuity_shadow_fixed_sections(
     state_serialized = ''
     if 'state_snapshot' in assembly:
         state_snapshot = assembly.get('state_snapshot')
-        if isinstance(state_snapshot, dict):
+        if isinstance(state_snapshot, dict) and state_snapshot:
             state_serialized = format_persona_semantic_snapshot(
                 translate_raw_state_to_persona_semantic(state_snapshot),
             )

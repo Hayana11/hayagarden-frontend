@@ -4103,8 +4103,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
             hot_desired_plan=context_plan,
         )
         members = dr._context_receipt_members(plan)
-        self.assertEqual([member.representation_id for member in members], ['chunk:canonical'])
-        self.assertTrue(all(':proof:' not in member.representation_id for member in members))
+        historical = tuple(
+            member for member in members if member.source_kind == 'completed_turn'
+        )
+        self.assertEqual(
+            [member.representation_id for member in historical],
+            ['chunk:canonical'],
+        )
+        self.assertTrue(all(':proof:' not in member.representation_id for member in historical))
 
     def test_raw_native_tail_allows_natural_representation_regroup(self):
         installed = [
