@@ -5520,7 +5520,12 @@ def _observe_continuity_shadow(
     static_system: str,
     content: Any,
 ) -> None:
-    if _context_plan_for_receipt(plan) is not None:
+    # Normal hot keeps its incremental/no-replay contract.  Only a plan that
+    # is actually installed on this turn may enter production install proof.
+    if (
+        getattr(plan, 'continuity_plan', None) is not None
+        or getattr(plan, 'capacity_context_plan', None) is not None
+    ):
         _observe_production_context_plan(
             plan=plan,
             resident=resident,
