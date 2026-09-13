@@ -284,6 +284,16 @@ def attach_jsonl_usage(
         "cache_creation_1h": out["cache_creation_1h"],
         "stream_totals": stream_totals,
         "jsonl_totals": jsonl_totals,
+        "jsonl_requests": [
+            {
+                "request_id": record.get("request_id"),
+                "input_tokens": _as_int(record.get("input_tokens")),
+                "output_tokens": _as_int(record.get("output_tokens")),
+                "cache_read": _as_int(record.get("cache_read")),
+                "cache_creation": _as_int(record.get("cache_creation")),
+            }
+            for record in records
+        ],
         "stream_totals_match": stream_totals == jsonl_totals,
     }
     models = list(replay.get("models") or [])
