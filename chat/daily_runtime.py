@@ -487,31 +487,28 @@ def format_resident_turn_content(
     canonical_history = _format_context_plan_representation_blocks(
         context_plan_blocks,
     )
-    if capacity_bootstrap or context_plan_blocks:
-        fixed_carrier_kinds = tuple(
-            kind for kind, value in (
-                ('accepted_open_loops', open_loops),
-                ('accepted_state', state_text),
-            )
-            if value
+    fixed_carrier_kinds = tuple(
+        kind for kind, value in (
+            ('accepted_open_loops', open_loops),
+            ('accepted_state', state_text),
         )
-        assembly['_context_install_carriers'] = {
-            'representation_ids': tuple(
-                str(block.get('representation_id') or '')
-                for block in context_plan_blocks
-                if isinstance(block, dict)
-            ),
-            'representation_body_hashes': tuple(
-                _sha256_text(str(block.get('body') or '').strip())
-                for block in context_plan_blocks
-                if isinstance(block, dict)
-            ),
-            'fixed_section_kinds': fixed_carrier_kinds,
-            'current_request_slots': 1,
-            'current_request_carrier': 'tail',
-        }
-    else:
-        assembly.pop('_context_install_carriers', None)
+        if value
+    )
+    assembly['_context_install_carriers'] = {
+        'representation_ids': tuple(
+            str(block.get('representation_id') or '')
+            for block in context_plan_blocks
+            if isinstance(block, dict)
+        ),
+        'representation_body_hashes': tuple(
+            _sha256_text(str(block.get('body') or '').strip())
+            for block in context_plan_blocks
+            if isinstance(block, dict)
+        ),
+        'fixed_section_kinds': fixed_carrier_kinds,
+        'current_request_slots': 1,
+        'current_request_carrier': 'tail',
+    }
     prefix = NL.join(p for p in prefix_parts if p)
     if (cold_like or capacity_bootstrap) and canonical_history:
         body = (
