@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import json
 import os
 import sys
@@ -10,6 +11,16 @@ from pathlib import Path
 from unittest import mock
 
 from flask import Flask
+
+ROOT = str(Path(__file__).resolve().parents[1])
+if ROOT in sys.path:
+    sys.path.remove(ROOT)
+sys.path.insert(0, ROOT)
+loaded_gateway = sys.modules.get('gateway')
+if loaded_gateway is not None:
+    loaded_path = Path(getattr(loaded_gateway, '__file__', '')).resolve()
+    if loaded_path != Path(ROOT, 'gateway.py').resolve():
+        del sys.modules['gateway']
 
 from chat import behavior_authority_b3 as b3
 from chat import unified_heartbeat_a1 as uh
@@ -971,6 +982,353 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
 
         commit.assert_not_called()
         retire.assert_called_once()
+
+
+    def _import_worktree_gateway(self):
+        root = str(Path(__file__).resolve().parents[1])
+        if root in sys.path:
+            sys.path.remove(root)
+        sys.path.insert(0, root)
+        for module_name in ('gateway', 'cc_resident'):
+            loaded = sys.modules.get(module_name)
+            if loaded is None:
+                continue
+            loaded_path = Path(getattr(loaded, '__file__', '')).resolve()
+            if loaded_path != Path(root, f'{module_name}.py').resolve():
+                del sys.modules[module_name]
+        import gateway
+        return gateway
+
+    def _run_wake_live_trace_fixture(self, *, finality_match):
+        gateway = self._import_worktree_gateway()
+        from chat import cc_history_rewrite
+        from chat import display_thinking
+        from tools import lease_signer
+
+        resident = _FakeResident()
+        finality = {
+            'stream_totals': {
+                'input_tokens': 10,
+                'output_tokens': 20,
+                'cache_read': 30,
+                'cache_creation': 40,
+            },
+            'jsonl_totals': {
+                'input_tokens': 10,
+                'output_tokens': 20,
+                'cache_read': 30 if finality_match else 31,
+                'cache_creation': 40,
+            },
+            'stream_totals_match': finality_match,
+            'request_count': 2,
+            'duplicate_rows_ignored': 1,
+            'conflicting_duplicate_rows': 0,
+            'finality_state': 'FINAL' if finality_match else 'MISMATCH',
+        }
+
+        def main_stream(_messages, **kwargs):
+            self.assertTrue(callable(kwargs.get('on_stdin_begin')))
+            self.assertTrue(callable(kwargs.get('on_stdin_flushed')))
+            self.assertTrue(callable(kwargs.get('on_provider_done')))
+            kwargs['on_stdin_begin']()
+            kwargs['on_stdin_flushed']()
+            yield ('tool_use', {
+                'id': 'tool-1',
+                'name': 'get_location',
+                'args': {'private': 'PRIVATE-ARGS'},
+                'lease_decision': 'ALLOW',
+            })
+            yield ('tool_result', {
+                'tool_use_id': 'tool-1',
+                'result': 'PRIVATE-RESULT',
+                'is_error': False,
+            })
+            kwargs['on_provider_done']({
+                'num_rounds': 2,
+                'request_count': 2,
+                '_obs_result_seen': True,
+                '_obs_terminal_reason': 'result',
+            })
+            yield ('done', (
+                'wake text',
+                '',
+                {
+                    'num_rounds': 2,
+                    'request_count': 2,
+                    'jsonl_usage': finality,
+                },
+                {},
+            ))
+
+        commit_result = {
+            'context_id': 12,
+            'resident_generation': 2,
+            'start_offset': 100,
+            'end_offset': 250,
+            'skipped_provider_round': True,
+        }
+        patches = (
+            mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch.object(
+                gateway, '_gen_acquire_or_wait', return_value=('own', None),
+            ),
+            mock.patch.object(
+                gateway, '_gen_mark_pending_delivery',
+                side_effect=lambda token: None,
+            ),
+            mock.patch.object(gateway, '_gen_release'),
+            mock.patch.object(
+                gateway, '_cc_resident_stream_gen', side_effect=main_stream,
+            ),
+            mock.patch.object(
+                b3, '_hot_chat_resident_ready', return_value=(True, 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'prepare_shared_transcript_watermark',
+                return_value=(self.watermark(), 'ok'),
+            ),
+            mock.patch.object(
+                uh, 'commit_shared_transcript_watermark',
+                return_value=commit_result,
+            ),
+            mock.patch.object(
+                uh, 'retire_shared_resident_after_failed_delivery',
+                return_value=False,
+            ),
+            mock.patch.object(
+                cc_history_rewrite, 'guard_cc_generation',
+                side_effect=lambda events: events,
+            ),
+            mock.patch.object(
+                display_thinking, 'get_display_thinking_snapshot',
+                return_value=(False, ''),
+            ),
+            mock.patch.object(
+                lease_signer, 'issue_turn_lease',
+                return_value={'turn_id': 'wake-live'},
+            ),
+        )
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            with self.assertLogs(gateway.app.logger.name, level='INFO') as captured:
+                try:
+                    result = gateway._run_unified_normal_main_chat_turn(
+                        wake_run_id='wake-live-test',
+                        now=__import__('datetime').datetime.now(),
+                        t2_hours=1.0,
+                        t_hours=2.0,
+                    )
+                except Exception as exc:
+                    result = exc
+                else:
+                    result['_shared_delivery_fence'].finish(
+                        True,
+                        cache_info=result['cache_info'],
+                    )
+        return result, captured.output
+
+    def test_wake_live_trace_shared_unavailable_has_stage_and_reason(self):
+        gateway = self._import_worktree_gateway()
+        from chat import display_thinking
+
+        resident = _FakeResident()
+        with (
+            mock.patch.object(gateway, '_CC_RESIDENT', resident),
+            mock.patch.object(
+                b3, '_hot_chat_resident_ready',
+                return_value=(False, 'resident_stale:soft_context'),
+            ),
+            mock.patch.object(
+                display_thinking, 'get_display_thinking_snapshot',
+                return_value=(False, ''),
+            ),
+        ):
+            with self.assertLogs(gateway.app.logger.name, level='INFO') as captured:
+                with self.assertRaises(b3.UnifiedNormalWakeSharedUnavailable):
+                    gateway._run_unified_normal_main_chat_turn(
+                        wake_run_id='wake-live-unavailable',
+                        now=__import__('datetime').datetime.now(),
+                        t2_hours=1.0,
+                        t_hours=2.0,
+                    )
+
+        events = [
+            json.loads(line.split('[WAKE-LIVE] ', 1)[1])
+            for line in captured.output
+            if '[WAKE-LIVE] ' in line
+        ]
+        self.assertEqual(
+            [event['stage'] for event in events],
+            ['START', 'RESIDENT_CHECK_1', 'FAILED'],
+        )
+        self.assertEqual(events[1]['ready'], False)
+        self.assertEqual(events[1]['reason'], 'resident_stale:soft_context')
+        self.assertEqual(events[2]['error_code'], 'NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP')
+
+    def test_wake_live_trace_success_records_safe_tool_and_finality(self):
+        result, captured = self._run_wake_live_trace_fixture(
+            finality_match=True,
+        )
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result['text'], 'wake text')
+        self.assertEqual(result['tool_calls'][0]['result'], 'PRIVATE-RESULT')
+        self.assertNotIn('PRIVATE-RESULT', '\n'.join(captured))
+
+        events = [
+            json.loads(line.split('[WAKE-LIVE] ', 1)[1])
+            for line in captured
+            if '[WAKE-LIVE] ' in line
+        ]
+        stages = [event['stage'] for event in events]
+        self.assertEqual(
+            stages,
+            [
+                'START', 'RESIDENT_CHECK_1', 'GEN_LOCK_ACQUIRED',
+                'RESIDENT_CHECK_2', 'WATERMARK_PREPARED',
+                'DELIVERY_FENCE_STARTED', 'STDIN_BEGIN', 'STDIN_FLUSHED',
+                'TOOL_USE', 'TOOL_RESULT', 'PROVIDER_DONE',
+                'JSONL_FINALITY', 'WATERMARK_COMMIT',
+            ],
+        )
+        tool_use = next(event for event in events if event['stage'] == 'TOOL_USE')
+        tool_result = next(event for event in events if event['stage'] == 'TOOL_RESULT')
+        self.assertEqual(tool_use['tool_name'], 'get_location')
+        self.assertEqual(tool_use['tool_decision'], 'ALLOW')
+        self.assertEqual(tool_result['tool_name'], 'get_location')
+        self.assertTrue(tool_result['tool_success'])
+        self.assertEqual(
+            next(event for event in events if event['stage'] == 'JSONL_FINALITY')[
+                'stream_totals'
+            ],
+            {
+                'input_tokens': 10,
+                'output_tokens': 20,
+                'cache_read': 30,
+                'cache_creation': 40,
+            },
+        )
+
+    def test_wake_live_trace_jsonl_mismatch_records_both_totals(self):
+        result, captured = self._run_wake_live_trace_fixture(
+            finality_match=False,
+        )
+        self.assertIsInstance(result, RuntimeError)
+        self.assertIn('normal_wake_main_chat_jsonl_not_final', str(result))
+        events = [
+            json.loads(line.split('[WAKE-LIVE] ', 1)[1])
+            for line in captured
+            if '[WAKE-LIVE] ' in line
+        ]
+        finality = next(
+            event for event in events if event['stage'] == 'JSONL_FINALITY'
+        )
+        self.assertFalse(finality['stream_totals_match'])
+        self.assertEqual(finality['stream_totals']['cache_read'], 30)
+        self.assertEqual(finality['jsonl_totals']['cache_read'], 31)
+        self.assertEqual(finality['finality_state'], 'MISMATCH')
+        self.assertTrue(
+            any(event['stage'] == 'FAILED' for event in events)
+        )
+
+    def test_wake_live_route_success_emits_success(self):
+        gateway = self._import_worktree_gateway()
+        from chat import interaction_state
+        from wake import executor
+
+        class Fence:
+            def __init__(self):
+                self.finished = []
+
+            def finish(self, delivered, **kwargs):
+                self.finished.append(bool(delivered))
+
+        clock = types.SimpleNamespace(
+            reliable=True,
+            user_idle_hours=1.0,
+            effective_idle_hours=1.0,
+        )
+        main_turn = {
+            'text': 'wake text',
+            'thinking': '',
+            'tool_calls': [],
+            'model_identity': 'claude-code:test',
+            'cache_info': {
+                'provider': 'claude_code',
+                'source': 'wake',
+                'b3_authority': True,
+                'unified_chat_resident': True,
+                'unified_main_chat_proactive': True,
+            },
+            '_shared_delivery_fence': Fence(),
+        }
+        persisted_ids = {
+            'wake_log_id': 701,
+            'assistant_message_id': 9001,
+        }
+        runner = types.SimpleNamespace(
+            select_wake_provider=lambda _mode: 'claude_code',
+        )
+        data = {'mode': 'normal', 'wake_run_id': 'wake-route-success'}
+
+        with gateway.app.test_request_context(
+            '/wake', method='POST', json=data,
+        ):
+            with (
+                mock.patch.object(
+                    interaction_state, 'read_interaction_clock',
+                    return_value=clock,
+                ),
+                mock.patch.object(
+                    interaction_state, 'wake_guard_reason',
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    gateway, '_chat_is_generating', return_value=False,
+                ),
+                mock.patch.object(
+                    gateway, '_ensure_wake_runners', return_value=runner,
+                ),
+                mock.patch.object(
+                    gateway, '_wake_run_id_seen', return_value=False,
+                ),
+                mock.patch.object(
+                    gateway, '_run_unified_normal_main_chat_turn',
+                    return_value=main_turn,
+                ),
+                mock.patch.object(
+                    executor, 'execute', return_value={'delivered': True},
+                ),
+                mock.patch.object(
+                    gateway, '_wake_live_persisted_ids',
+                    return_value=persisted_ids,
+                ),
+                mock.patch.object(gateway, '_wake_run_id_mark'),
+                mock.patch('config_store.get_float', return_value=30),
+                mock.patch(
+                    'chat.window_identity.soft_window_enabled',
+                    return_value=False,
+                ),
+            ):
+                with self.assertLogs(gateway.app.logger.name, level='INFO') as captured:
+                    response = gateway._wake_decide_locked(
+                        data, 'normal', '', '',
+                    )
+
+        payload = response.get_json()
+        self.assertEqual(payload['action'], 'message')
+        events = [
+            json.loads(line.split('[WAKE-LIVE] ', 1)[1])
+            for line in captured.output
+            if '[WAKE-LIVE] ' in line
+        ]
+        self.assertEqual(
+            [event['stage'] for event in events],
+            ['DELIVERY_COMMIT', 'SUCCESS'],
+        )
+        self.assertEqual(events[0]['assistant_message_id'], 9001)
+        self.assertEqual(events[0]['wake_log_id'], 701)
+        self.assertTrue(events[1]['frontend_visible'])
 
 
 if __name__ == '__main__':

@@ -213,6 +213,11 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
         self.assertIn('now.strftime', trigger)
         self.assertIn('t2_hours', trigger)
         self.assertIn('t_hours', trigger)
+        self.assertIn('本轮最多只使用一个只读工具', trigger)
+        self.assertIn('不要再调用任何工具', trigger)
+        self.assertIn('不要继续尝试写日记、写记忆、改待办', trigger)
+        self.assertIn('也可以不调用工具，直接自然地开口', trigger)
+        self.assertNotIn('想看什么、做什么、记什么', trigger)
         self.assertNotIn('_NORMAL_WAKE_MAIN_CHAT_TRIGGER', gateway)
 
     def test_normal_wake_passes_existing_clock_values_without_new_clock_read(self):

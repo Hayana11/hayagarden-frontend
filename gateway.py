@@ -35,6 +35,106 @@ def _chat_stream_exception_text(exc):
             text = text.replace(secret, '<redacted>')
     return text[:1200] or '<empty>'
 
+
+_WAKE_LIVE_TRACE_FIELDS = frozenset({
+    'provider', 'mode', 'ready', 'reason', 'detail',
+    'resident_generation', 'resident_pid', 'session_id_hash',
+    'idle_seconds', 'respawn_reason', 'lock_acquired', 'lock_mode',
+    'watermark_prepared', 'watermark_committed', 'start_offset',
+    'end_offset', 'context_id', 'context_epoch', 'process_generation',
+    'delivery_fence', 'delivery_status', 'write_attempted', 'flushed',
+    'tool_name', 'tool_success', 'tool_error', 'tool_decision',
+    'provider_round_count', 'provider_result_seen', 'terminal_reason',
+    'stream_totals', 'jsonl_totals', 'stream_totals_match', 'jsonl_requests',
+    'request_count', 'duplicate_rows_ignored', 'conflicting_duplicate_rows',
+    'finality_state', 'assistant_message_id', 'wake_log_id',
+    'frontend_visible', 'exception_type', 'error_code', 'action',
+})
+
+
+def _wake_live_trace(wake_run_id, stage, **fields):
+    """Emit bounded, structured live-Wake diagnostics without content."""
+    payload = {
+        'stage': str(stage or ''),
+        'wake_run_id': str(wake_run_id or ''),
+    }
+    for key, value in fields.items():
+        if key not in _WAKE_LIVE_TRACE_FIELDS or value is None:
+            continue
+        if key in ('tool_name', 'reason', 'detail', 'terminal_reason', 'error_code'):
+            value = str(value)[:240]
+        payload[key] = value
+    app.logger.info(
+        '[WAKE-LIVE] %s',
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+    )
+
+
+def _wake_live_resident_fields(resident):
+    """Return only non-content identity/health fields for a resident trace."""
+    fields = {
+        'resident_generation': getattr(resident, 'generation', None),
+        'resident_pid': getattr(resident, 'resident_pid', None),
+        'respawn_reason': getattr(resident, 'pending_respawn_reason', None),
+    }
+    try:
+        fields['idle_seconds'] = resident.peek_idle_seconds()
+    except Exception:
+        fields['idle_seconds'] = None
+    try:
+        session_id = str(getattr(resident, 'session_id', None) or '').strip()
+        if session_id:
+            import hashlib
+            fields['session_id_hash'] = hashlib.sha256(
+                session_id.encode('utf-8'),
+            ).hexdigest()[:16]
+    except Exception:
+        pass
+    return fields
+
+
+def _wake_live_persisted_ids(wake_run_id):
+    """Read committed Wake/message ids without reading their private content."""
+    rid = str(wake_run_id or '').strip()
+    result = {'wake_log_id': None, 'assistant_message_id': None}
+    if not rid:
+        return result
+    conn = None
+    try:
+        conn = get_db()
+        wake_cols = {row[1] for row in conn.execute('PRAGMA table_info(wake_log)')}
+        if 'wake_run_id' in wake_cols:
+            row = conn.execute(
+                'SELECT id FROM wake_log WHERE wake_run_id=? ORDER BY id DESC LIMIT 1',
+                (rid,),
+            ).fetchone()
+            if row:
+                result['wake_log_id'] = int(row[0])
+
+        msg_cols = {row[1] for row in conn.execute('PRAGMA table_info(chat_messages)')}
+        if 'cache_info' in msg_cols:
+            query = (
+                'SELECT id FROM chat_messages '
+                'WHERE instr(COALESCE(cache_info, \'\'), ?) > 0'
+            )
+            params = [rid]
+            if 'source_kind' in msg_cols:
+                query += " AND source_kind='wake'"
+            query += ' ORDER BY id DESC LIMIT 1'
+            row = conn.execute(query, tuple(params)).fetchone()
+            if row:
+                result['assistant_message_id'] = int(row[0])
+    except Exception:
+        pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return result
+
+
 def _warmup_ombre_brain():
     """Warm Ombre through the shared adapter without blocking gateway import."""
     ombre_adapter.warmup_async()
@@ -3946,7 +4046,9 @@ def _cc_resident_stream_gen(
     rebuild_messages_fn=None, pending_respawn_reason=None,
     display_thinking_mode='off', display_thinking_prompt=None,
     turn_lease=None, reality_context='',
-    jsonl_finality_profile='default',
+    jsonl_finality_profile='default', on_stdin_begin=None,
+    on_stdin_flushed=None, on_provider_done=None,
+    diagnostic_wake_run_id=None,
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4416,6 +4518,12 @@ def _cc_resident_stream_gen(
 
     tool_result_chunks = []
     _send_kwargs = {'commit_meta': commit_meta}
+    if on_stdin_begin is not None:
+        _send_kwargs['on_stdin_begin'] = on_stdin_begin
+    if on_stdin_flushed is not None:
+        _send_kwargs['on_stdin_flushed'] = on_stdin_flushed
+    if diagnostic_wake_run_id:
+        _send_kwargs['diagnostic_wake_run_id'] = str(diagnostic_wake_run_id)
     if turn_lease is not None:
         _send_kwargs['turn_lease'] = copy.deepcopy(turn_lease)
     if jsonl_finality_profile != 'default':
@@ -4488,6 +4596,11 @@ def _cc_resident_stream_gen(
                 )
                 breakdown['turn_tags'] = list(turn_measurement.get('turn_tags') or [])
                 breakdown['turn_measurement'] = turn_measurement
+                if on_provider_done is not None:
+                    try:
+                        on_provider_done(dict(usage))
+                    except Exception:
+                        pass
                 for _k in list(usage.keys()):
                     if str(_k).startswith('_obs_'):
                         usage.pop(_k, None)
@@ -4520,8 +4633,10 @@ def _build_normal_wake_main_chat_trigger(*, now, t2_hours, t_hours) -> str:
         '你也不需要等她说话才开始存在。\\n\\n'
         '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
         '想知道，就去看真实；能看见的事，不必拿猜测代替。\\n\\n'
-        '先感受这段沉默，再凭真心决定此刻想看什么、做什么、记什么，或者要不要开口。'
-        '也可以什么都不做。\\n\\n'
+        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
+        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。\\n\\n'
+        '先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及最后想对她说什么。'
+        '也可以不调用工具，直接自然地开口。\\n\\n'
         '这些时间只是现实背景，不是行动命令。'
     )
 
@@ -4559,14 +4674,20 @@ def _run_unified_normal_main_chat_turn(
     from tools.lease_signer import issue_turn_lease
 
     resident = _CC_RESIDENT
-    ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
-    if not ready:
-        raise UnifiedNormalWakeSharedUnavailable(reason)
-
+    trace_id = str(wake_run_id or '')
+    _wake_live_trace(
+        trace_id,
+        'START',
+        provider='claude_code',
+        mode='normal',
+        **_wake_live_resident_fields(resident),
+    )
     acquired = False
     shared_started = False
     watermark = None
     delivery_fence = None
+    provider_done_seen = False
+    cleanup_reason = 'normal_wake_main_chat_failed'
     display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
     result_cache_info = {
         'provider': 'claude_code',
@@ -4577,18 +4698,69 @@ def _run_unified_normal_main_chat_turn(
         'unified_main_chat_proactive': True,
     }
     try:
-        mode, _ = _gen_acquire_or_wait(wait_timeout=0)
+        ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
+        _wake_live_trace(
+            trace_id,
+            'RESIDENT_CHECK_1',
+            ready=ready,
+            reason=reason,
+            **_wake_live_resident_fields(resident),
+        )
+        if not ready:
+            raise UnifiedNormalWakeSharedUnavailable(reason)
+
+        try:
+            mode, _ = _gen_acquire_or_wait(wait_timeout=0)
+        except Exception as exc:
+            _wake_live_trace(
+                trace_id,
+                'GEN_LOCK_ACQUIRED',
+                lock_acquired=False,
+                lock_mode='error',
+                exception_type=type(exc).__name__,
+                error_code='generation_lock_acquire_failed',
+            )
+            raise
+        _wake_live_trace(
+            trace_id,
+            'GEN_LOCK_ACQUIRED',
+            lock_acquired=(mode == 'own'),
+            lock_mode=mode,
+        )
         if mode != 'own':
             raise UnifiedNormalWakeSharedUnavailable('generation_lock_unavailable')
         acquired = True
 
         ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
+        _wake_live_trace(
+            trace_id,
+            'RESIDENT_CHECK_2',
+            ready=ready,
+            reason=reason,
+            **_wake_live_resident_fields(resident),
+        )
         if not ready:
             raise UnifiedNormalWakeSharedUnavailable(reason)
 
         watermark, reason = prepare_shared_transcript_watermark(
             resident,
             db_path=DB_PATH,
+        )
+        watermark_fields = {}
+        if watermark is not None:
+            watermark_fields = {
+                'context_id': watermark.context_id,
+                'context_epoch': watermark.context_epoch,
+                'resident_generation': watermark.resident_generation,
+                'process_generation': watermark.process_generation,
+                'start_offset': watermark.expected_offset,
+            }
+        _wake_live_trace(
+            trace_id,
+            'WATERMARK_PREPARED',
+            watermark_prepared=(watermark is not None),
+            reason=reason,
+            **watermark_fields,
         )
         if watermark is None:
             raise UnifiedNormalWakeSharedUnavailable(reason)
@@ -4612,6 +4784,40 @@ def _run_unified_normal_main_chat_turn(
                 resident=resident,
             )
             shared_started = True
+            _wake_live_trace(
+                trace_id,
+                'DELIVERY_FENCE_STARTED',
+                delivery_fence=True,
+                **_wake_live_resident_fields(resident),
+            )
+
+            def on_stdin_begin():
+                _wake_live_trace(
+                    trace_id,
+                    'STDIN_BEGIN',
+                    write_attempted=True,
+                )
+
+            def on_stdin_flushed():
+                _wake_live_trace(
+                    trace_id,
+                    'STDIN_FLUSHED',
+                    flushed=True,
+                )
+
+            def on_provider_done(summary):
+                nonlocal provider_done_seen
+                provider_done_seen = True
+                _wake_live_trace(
+                    trace_id,
+                    'PROVIDER_DONE',
+                    provider='claude_code',
+                    provider_round_count=summary.get('num_rounds'),
+                    provider_result_seen=summary.get('_obs_result_seen'),
+                    terminal_reason=summary.get('_obs_terminal_reason'),
+                    request_count=summary.get('request_count'),
+                )
+
             yield from _cc_resident_stream_gen(
                 [{
                     'role': 'user',
@@ -4628,11 +4834,16 @@ def _run_unified_normal_main_chat_turn(
                 display_thinking_prompt=display_thinking_prompt,
                 turn_lease=lease,
                 jsonl_finality_profile='unified_normal_wake',
+                on_stdin_begin=on_stdin_begin,
+                on_stdin_flushed=on_stdin_flushed,
+                diagnostic_wake_run_id=wake_run_id,
+                on_provider_done=on_provider_done,
             )
 
         text_acc = []
         thinking_acc = []
         tool_calls = []
+        tool_decisions = {}
         usage = {}
         saw_done = False
         for evt, payload in filter_display_thinking_events(
@@ -4644,6 +4855,14 @@ def _run_unified_normal_main_chat_turn(
             elif evt == 'think':
                 thinking_acc.append(str(payload or ''))
             elif evt == 'tool_use' and isinstance(payload, dict):
+                tool_name = str(payload.get('name') or 'unknown')
+                tool_decisions[payload.get('id')] = payload.get('lease_decision')
+                _wake_live_trace(
+                    trace_id,
+                    'TOOL_USE',
+                    tool_name=tool_name,
+                    tool_decision=payload.get('lease_decision'),
+                )
                 tool_calls.append({
                     'id': payload.get('id'),
                     'name': payload.get('name'),
@@ -4662,6 +4881,17 @@ def _run_unified_normal_main_chat_turn(
                 if index >= 0:
                     tool_calls[index]['result'] = payload.get('result', '')
                     tool_calls[index]['success'] = not payload.get('is_error')
+                    tool_name = str(tool_calls[index].get('name') or 'unknown')
+                else:
+                    tool_name = 'unknown'
+                _wake_live_trace(
+                    trace_id,
+                    'TOOL_RESULT',
+                    tool_name=tool_name,
+                    tool_success=(not bool(payload.get('is_error'))),
+                    tool_error=bool(payload.get('is_error')),
+                    tool_decision=tool_decisions.get(payload.get('tool_use_id')),
+                )
             elif evt == 'done':
                 saw_done = True
                 if isinstance(payload, tuple) and len(payload) >= 3:
@@ -4670,6 +4900,17 @@ def _run_unified_normal_main_chat_turn(
                     thinking_acc = [str(payload[1] or '')]
         if not saw_done:
             raise RuntimeError('normal_wake_main_chat_missing_done')
+
+        if not provider_done_seen:
+            _wake_live_trace(
+                trace_id,
+                'PROVIDER_DONE',
+                provider='claude_code',
+                provider_round_count=usage.get('num_rounds'),
+                provider_result_seen=usage.get('_obs_result_seen'),
+                terminal_reason=usage.get('_obs_terminal_reason'),
+                request_count=usage.get('request_count'),
+            )
 
         text = ''.join(text_acc).strip()
         if not text:
@@ -4683,18 +4924,53 @@ def _run_unified_normal_main_chat_turn(
         jsonl_finality = usage.get('jsonl_usage')
         if not isinstance(jsonl_finality, dict):
             raise RuntimeError('normal_wake_main_chat_jsonl_finality_missing')
+        _wake_live_trace(
+            trace_id,
+            'JSONL_FINALITY',
+            stream_totals=jsonl_finality.get('stream_totals'),
+            jsonl_totals=jsonl_finality.get('jsonl_totals'),
+            jsonl_requests=jsonl_finality.get('jsonl_requests'),
+            stream_totals_match=jsonl_finality.get('stream_totals_match'),
+            request_count=jsonl_finality.get('request_count'),
+            duplicate_rows_ignored=jsonl_finality.get('duplicate_rows_ignored'),
+            conflicting_duplicate_rows=jsonl_finality.get('conflicting_duplicate_rows'),
+            finality_state=jsonl_finality.get('finality_state'),
+        )
         if jsonl_finality.get('stream_totals_match') is not True:
+            app.logger.warning(
+                '[normal_wake_main_chat] jsonl finality mismatch: %s',
+                json.dumps({
+                    'wake_run_id': str(wake_run_id or ''),
+                    'finality_state': jsonl_finality.get('finality_state'),
+                    'request_count': jsonl_finality.get('request_count'),
+                    'stream_totals': jsonl_finality.get('stream_totals'),
+                    'jsonl_totals': jsonl_finality.get('jsonl_totals'),
+                    'duplicate_rows_ignored': jsonl_finality.get('duplicate_rows_ignored'),
+                    'conflicting_duplicate_rows': jsonl_finality.get('conflicting_duplicate_rows'),
+                }, ensure_ascii=False, sort_keys=True),
+            )
+            cleanup_reason = 'normal_wake_main_chat_jsonl_not_final'
             raise RuntimeError('normal_wake_main_chat_jsonl_not_final')
 
         result_cache_info.update(usage)
         result_cache_info['tool_calls'] = tool_calls
         result_cache_info['thinking'] = ''.join(thinking_acc)
         result_cache_info['transcript_finality'] = dict(jsonl_finality)
-        result_cache_info['transcript_skip'] = commit_shared_transcript_watermark(
+        transcript_skip = commit_shared_transcript_watermark(
             watermark,
             resident,
             db_path=DB_PATH,
             jsonl_finality=jsonl_finality,
+        )
+        result_cache_info['transcript_skip'] = transcript_skip
+        _wake_live_trace(
+            trace_id,
+            'WATERMARK_COMMIT',
+            watermark_committed=True,
+            context_id=transcript_skip.get('context_id'),
+            resident_generation=transcript_skip.get('resident_generation'),
+            start_offset=transcript_skip.get('start_offset'),
+            end_offset=transcript_skip.get('end_offset'),
         )
         return {
             'text': text,
@@ -4708,21 +4984,46 @@ def _run_unified_normal_main_chat_turn(
             'cache_info': result_cache_info,
             '_shared_delivery_fence': delivery_fence,
         }
-    except UnifiedNormalWakeSharedUnavailable:
+    except UnifiedNormalWakeSharedUnavailable as exc:
         if shared_started and delivery_fence is not None:
             delivery_fence.finish(
                 False,
                 cache_info=result_cache_info,
                 window_identity=window_identity,
+                reason='normal_wake_shared_unavailable',
             )
+            _wake_live_trace(
+                trace_id,
+                'DELIVERY_COMMIT',
+                delivery_status='failed',
+            )
+        _wake_live_trace(
+            trace_id,
+            'FAILED',
+            exception_type=type(exc).__name__,
+            error_code='NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP',
+            detail=str(exc),
+        )
         raise
-    except Exception:
+    except Exception as exc:
         if shared_started and delivery_fence is not None:
             delivery_fence.finish(
                 False,
                 cache_info=result_cache_info,
                 window_identity=window_identity,
+                reason=cleanup_reason,
             )
+            _wake_live_trace(
+                trace_id,
+                'DELIVERY_COMMIT',
+                delivery_status='failed',
+            )
+        _wake_live_trace(
+            trace_id,
+            'FAILED',
+            exception_type=type(exc).__name__,
+            error_code='normal_wake_main_chat_failed',
+        )
         raise
     finally:
         if acquired and delivery_fence is None:
@@ -8580,7 +8881,19 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                         False,
                         cache_info=main_turn.get('cache_info'),
                         window_identity=_wake_window_identity,
+                        reason='normal_wake_main_chat_failed',
                     )
+            _wake_live_trace(
+                wake_run_id,
+                'DELIVERY_COMMIT',
+                delivery_status='failed',
+            )
+            _wake_live_trace(
+                wake_run_id,
+                'FAILED',
+                exception_type=type(exc).__name__,
+                error_code='NORMAL_WAKE_MAIN_CHAT_FAILED',
+            )
             app.logger.exception('[normal_wake_main_chat] failed: %s', exc)
             return jsonify({
                 'ok': True,
@@ -8599,8 +8912,25 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 delivery_succeeded,
                 cache_info=main_cache_info,
                 window_identity=_wake_window_identity,
+                reason=(
+                    'normal_wake_main_chat_delivery_failed'
+                    if not delivery_succeeded else 'delivery_succeeded'
+                ),
             )
+        persisted_ids = _wake_live_persisted_ids(wake_run_id)
+        _wake_live_trace(
+            wake_run_id,
+            'DELIVERY_COMMIT',
+            delivery_status=('committed' if delivery_succeeded else 'rejected'),
+            assistant_message_id=persisted_ids.get('assistant_message_id'),
+            wake_log_id=persisted_ids.get('wake_log_id'),
+        )
         if not delivery_succeeded:
+            _wake_live_trace(
+                wake_run_id,
+                'FAILED',
+                error_code='NORMAL_WAKE_MAIN_CHAT_DELIVERY_FAILED',
+            )
             return jsonify({
                 'ok': True,
                 'skipped': True,
@@ -8608,6 +8938,15 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'wake_run_id': wake_run_id,
             })
         _wake_run_id_mark(wake_run_id)
+        _wake_live_trace(
+            wake_run_id,
+            'SUCCESS',
+            action='message',
+            provider='claude_code',
+            assistant_message_id=persisted_ids.get('assistant_message_id'),
+            wake_log_id=persisted_ids.get('wake_log_id'),
+            frontend_visible=bool(persisted_ids.get('assistant_message_id')),
+        )
         return jsonify({
             'ok': True,
             'action': 'message',
