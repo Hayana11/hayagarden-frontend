@@ -181,6 +181,7 @@ def build_daily_continuity_shadow_plan(
     budget_policy: ContextBudgetPolicy | None,
     accepted_fixed_sections: Sequence[ContextSection] = (),
     budget_policy_version: str = '',
+    continuity_store_path: str | Path | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -231,7 +232,12 @@ def build_daily_continuity_shadow_plan(
             return _blocked('invalid_current_request')
 
         try:
-            store_conn = _read_only_connection(shadow_store_path)
+            store_path = (
+                continuity_store_path
+                if continuity_store_path is not None
+                else shadow_store_path
+            )
+            store_conn = _read_only_connection(store_path)
         except (FileNotFoundError, OSError, sqlite3.Error):
             return _blocked('chunk_surface_unavailable')
         try:
