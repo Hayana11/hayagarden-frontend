@@ -2728,9 +2728,11 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         ))
         self.assertIsNone(plan.transcript_observation_error_code)
         aid = dr.persist_daily_assistant_for_plan(plan, content='blocked-map reply')
-        out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='blocked-map reply',
-        )
+        with mock.patch.object(dr, 'note_same_context_last_good') as note_last_good:
+            out = dr.handle_provider_success(
+                plan, assistant_message_id=aid, raw_text='blocked-map reply',
+            )
+        note_last_good.assert_not_called()
         self.assertEqual(out['transcript_mapping_status'], 'BLOCKED')
         self.assertIsNotNone(out['transcript_mapping_error_code'])
         self.assertEqual(int(out['transcript_mapping_event_count']), 0)

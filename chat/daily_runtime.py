@@ -5038,13 +5038,16 @@ def handle_provider_success(
     sid = str(plan.transcript_claude_session_id or '').strip()
     plan._same_context_last_good_proven = False
     plan.manifest['context_receipt_last_good_proven'] = False
+    mapping_proven = (
+        str(plan.manifest.get('transcript_mapping_status') or '') == 'MAPPED'
+    )
     jsonl_grew = (
         start_off is not None
         and end_off is not None
         and int(end_off) > int(start_off)
         and bool(sid)
     )
-    if jsonl_grew:
+    if jsonl_grew and mapping_proven:
         try:
             existing = get_context_claude_session(
                 int(plan.context_id),
@@ -5064,6 +5067,11 @@ def handle_provider_success(
         plan._same_context_last_good_proven = _same_context_last_good_matches(plan)
         plan.manifest['context_receipt_last_good_proven'] = bool(
             plan._same_context_last_good_proven
+        )
+    elif jsonl_grew:
+        logger.warning(
+            'same-context last-good withheld because transcript mapping is %s',
+            plan.manifest.get('transcript_mapping_status'),
         )
     # The receipt is committed only after persist + cursor CAS + MAPPED and
     # the existing last-good success boundary.  It is durable metadata proof.
