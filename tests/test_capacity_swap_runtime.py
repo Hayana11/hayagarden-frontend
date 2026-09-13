@@ -1526,7 +1526,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             'chat.capacity_swap_runtime.transform_transcript',
             wraps=real_transform_transcript,
         ) as transform:
-            result = dr.prepare_capacity_swap_for_context_plan(
+            result = prepare_capacity_swap_for_context_plan(
                 plan=plan,
                 context_plan=context_plan,
                 trigger_reason='soft_context',
