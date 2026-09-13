@@ -179,7 +179,7 @@ jobs:
       - name: Run CC vision bridge regressions
         run: python -m unittest tests.test_cc_vision_bridge -v
       - name: Run Wake B1 runner regressions
-        run: python -m unittest tests.test_wake_runners tests.test_wake_usage tests.test_provider_router tests.test_wake_finality_r1
+        run: python -m unittest tests.test_wake_runners tests.test_wake_usage tests.test_provider_router tests.test_wake_finality_r1 tests.test_wake_context_guard tests.test_cc_resident_lease_isolation tests.test_context_window_resident tests.test_uh_a1_step2_base_wake
       - name: Run Wake identity regressions
         run: |
           python3 -m unittest \
