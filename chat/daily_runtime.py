@@ -1643,6 +1643,7 @@ def _commit_production_context_receipt(
         logger.exception('production context receipt commit failed')
         plan.manifest.update({
             'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_repair_required': True,
             'context_receipt_error_code': 'context_receipt_unavailable',
             'error_code': 'context_receipt_unavailable',
         })

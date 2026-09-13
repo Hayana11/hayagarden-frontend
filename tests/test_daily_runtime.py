@@ -4544,6 +4544,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(plan.manifest['context_receipt_status'], 'REPAIR_REQUIRED')
+            self.assertTrue(plan.manifest['context_receipt_repair_required'])
             self.assertEqual(
                 plan.manifest['context_receipt_error_code'],
                 'context_receipt_unavailable',
