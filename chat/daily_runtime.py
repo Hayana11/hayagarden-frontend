@@ -1164,6 +1164,7 @@ def _build_production_context_plan(
     if (
         not str(result.plan.plan_id or '').startswith('plan:')
         or not re.fullmatch(r'[0-9a-f]{64}', str(result.plan.plan_hash or ''))
+        or str(result.plan.plan_id) != 'plan:' + str(result.plan.plan_hash)[:32]
         or not re.fullmatch(r'[0-9a-f]{64}', str(result.plan.source_hash or ''))
     ):
         raise DailyRuntimeError(
