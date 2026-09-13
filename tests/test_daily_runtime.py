@@ -5416,6 +5416,112 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
         )
         return db, plan, resident, target_system, content
 
+    def test_capacity_presend_observation_failure_rolls_back_before_send(self):
+        """The outer guard covers production install observation failures."""
+        dr.reset_bindings_for_tests()
+        plan = types.SimpleNamespace(
+            request_id='capacity-presend',
+            chat_id='default',
+            context_id=7,
+            context_epoch=3,
+            resident_generation=2,
+            resident_key='default:e3:g2',
+            user_message_id=1,
+            epoch_token={},
+            lease_owner='test-owner',
+            is_cold=False,
+            is_respawn=False,
+            cursor_before=0,
+            assembly={},
+            manifest={
+                'provider': 'claude_code',
+                'model': 'model-1',
+            },
+            user_content='好',
+            user_image_url='',
+            user_attachments=(),
+            provider_display_thinking_suffix='',
+            db_path='test.db',
+            worker_id='test-worker',
+            tool_profile='test-profile',
+            turn_lease={},
+            capacity_context_plan=object(),
+            continuity_plan=None,
+            hot_desired_plan=None,
+            _capacity_swap_install_state={'old_proc': object()},
+            _capacity_swap_deferred_old_proc=object(),
+            _current_user_stdin_flushed=False,
+        )
+        resident = mock.Mock()
+        resident.generation = 2
+        resident._system_text = 'TARGET SYSTEM'
+        resident.ensure_alive.return_value = False
+        heartbeat = mock.Mock()
+        heartbeat.failed = False
+        heartbeat.stop.return_value = False
+        parity_failure = dr.DailyRuntimeError(
+            'forced install parity failure',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        try:
+            with mock.patch.object(
+                dr,
+                'verify_epoch_token',
+            ), mock.patch.object(
+                dr,
+                'LeaseHeartbeat',
+                return_value=heartbeat,
+            ), mock.patch.object(
+                dr,
+                'peek_registered_respawn_decision',
+                return_value={'requires_respawn': False},
+            ), mock.patch.object(
+                dr,
+                'format_resident_turn_content',
+                return_value='TARGET CONTENT',
+            ), mock.patch.object(
+                dr.dc,
+                'get_resident_history_cursor',
+                return_value=0,
+            ), mock.patch.object(
+                dr.dc,
+                'upsert_resident_owner',
+            ), mock.patch.object(
+                dr,
+                '_capture_transcript_start',
+            ), mock.patch.object(
+                dr,
+                '_validate_hot_no_op_payload',
+            ), mock.patch.object(
+                dr,
+                '_observe_continuity_shadow',
+                side_effect=parity_failure,
+            ), mock.patch.object(
+                dr,
+                'rollback_capacity_swap_install',
+            ) as rollback, mock.patch.object(
+                dr,
+                'try_restore_same_context_last_good',
+            ) as fallback:
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    list(dr.ensure_resident_and_stream(
+                        plan,
+                        resident=resident,
+                        env={},
+                        static_system='TARGET SYSTEM',
+                    ))
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_current_request_parity_failed',
+            )
+            rollback.assert_called_once()
+            fallback.assert_not_called()
+            resident.send_turn.assert_not_called()
+            self.assertTrue(plan.manifest['capacity_swap_pre_flush_blocked'])
+            self.assertIsNone(plan._capacity_swap_install_state)
+        finally:
+            dr.reset_bindings_for_tests()
+
     def test_capacity_presend_rollback_1_restores_before_send(self):
         """CAPACITY-PRESEND-ROLLBACK-1: parity failure cannot send."""
         plan = types.SimpleNamespace(
