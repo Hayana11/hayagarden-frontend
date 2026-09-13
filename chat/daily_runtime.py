@@ -1243,7 +1243,13 @@ def _project_context_plan_history(
     for representation in context_plan.representations:
         if representation.kind == 'raw':
             for member in representation.source_members:
-                message_ids.update(_context_source_message_ids(member.source_ref))
+                ids = _context_source_message_ids(member.source_ref)
+                if not ids:
+                    raise DailyRuntimeError(
+                        'selected continuity source reference is invalid',
+                        error_code='context_plan_source_unavailable',
+                    )
+                message_ids.update(ids)
     rows = _load_context_source_rows(message_ids, db_path=store_path)
     history: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
@@ -1265,7 +1271,13 @@ def _project_context_plan_history(
             })
             continue
         for member in representation.source_members:
-            for message_id in _context_source_message_ids(member.source_ref):
+            ids = _context_source_message_ids(member.source_ref)
+            if not ids:
+                raise DailyRuntimeError(
+                    'selected continuity source reference is invalid',
+                    error_code='context_plan_source_unavailable',
+                )
+            for message_id in ids:
                 if message_id == int(plan.user_message_id) or message_id in seen_ids:
                     continue
                 row = rows.get(message_id)
