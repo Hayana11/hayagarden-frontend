@@ -1700,13 +1700,10 @@ class ResidentSession:
                             )
                         for b in (msg.get('content') or []):
                             if isinstance(b, dict) and b.get('type') == 'tool_use':
-                                if current_round is not None and not current_round.get('complete'):
-                                    _close_round(
-                                        current_round,
-                                        'assistant_tool_use',
-                                        complete=True,
-                                    )
-                                    current_round = None
+                                # Tool use is not a provider-request boundary.
+                                # Keep this round open: Claude may emit the final
+                                # message_delta usage for the same request after
+                                # the assistant tool_use event.
                                 tool_payload = {
                                     'id': b.get('id'),
                                     'name': b.get('name', ''),
