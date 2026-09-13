@@ -3794,6 +3794,342 @@ class ContextPlanConsumerTests(unittest.TestCase):
             exclusions=(),
         )
 
+    def _fake_hot_context_plan(self):
+        context_plan = self._fake_context_plan()
+        context_plan.ordered_sections = (
+            types.SimpleNamespace(
+                kind='invariant_system',
+                source_ref='system:static',
+                content_hash='hash-static',
+                estimated_tokens=2,
+            ),
+            types.SimpleNamespace(
+                kind='current_request',
+                source_ref='message:3',
+                content_hash='hash-current',
+                estimated_tokens=1,
+            ),
+        )
+        return context_plan
+
+    def _fake_hot_reconcile_plan(self, *, receipt_members=None):
+        from chat.context_receipt import ContextReceipt
+
+        context_plan = self._fake_hot_context_plan()
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            chat_id='default',
+            worker_id=dr.WORKER_ID,
+            manifest={'provider': 'claude_code', 'model': 'model-1'},
+            hot_desired_plan=context_plan,
+        )
+        desired_members = dr._context_receipt_members(plan)
+        members = tuple(receipt_members or desired_members)
+        receipt = ContextReceipt.build(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            provider='claude_code',
+            model_identity='model-1',
+            session_id='session-1',
+            process_generation=1,
+            plan_id='plan:previous',
+            plan_hash='previous-plan-hash',
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            installed_source_watermark=2,
+            members=members,
+        )
+        plan.hot_receipt_frozen = {
+            'receipt': receipt,
+            'members': members,
+            'receipt_missing': False,
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'expected_receipt_revision': 0,
+        }
+        return plan, context_plan, desired_members
+
+    def test_hot_receipt_members_include_fixed_sections_without_body(self):
+        from chat.context_receipt import ContextReceiptMember
+
+        context_plan = self._fake_hot_context_plan()
+        context_plan.ordered_sections = (
+            types.SimpleNamespace(
+                kind='invariant_system',
+                source_ref='system:static',
+                content_hash='hash-static',
+                estimated_tokens=2,
+            ),
+            types.SimpleNamespace(
+                kind='accepted_state',
+                source_ref='state:accepted',
+                content_hash='hash-state',
+                estimated_tokens=2,
+            ),
+            types.SimpleNamespace(
+                kind='accepted_open_loops',
+                source_ref='loops:accepted',
+                content_hash='hash-loops',
+                estimated_tokens=1,
+            ),
+            types.SimpleNamespace(
+                kind='current_request',
+                source_ref='message:3',
+                content_hash='hash-current',
+                estimated_tokens=1,
+            ),
+        )
+        plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=context_plan,
+        )
+
+        members = dr._context_receipt_members(plan)
+        fixed = tuple(
+            member for member in members
+            if member.source_kind in dr._HOT_FIXED_SECTION_KINDS
+        )
+        self.assertEqual(
+            [member.source_kind for member in fixed],
+            ['invariant_system', 'accepted_state', 'accepted_open_loops'],
+        )
+        self.assertTrue(all(isinstance(member, ContextReceiptMember) for member in fixed))
+        self.assertEqual(
+            [member.representation_id for member in fixed],
+            ['fixed:invariant_system', 'fixed:accepted_state', 'fixed:accepted_open_loops'],
+        )
+        self.assertEqual(
+            [member.source_revision for member in fixed],
+            ['hash-static', 'hash-state', 'hash-loops'],
+        )
+        self.assertEqual([member.span_start for member in fixed], [None, None, None])
+        self.assertEqual([member.span_end for member in fixed], [None, None, None])
+
+    def test_legacy_receipt_fixed_proof_reconciles_to_respawn(self):
+        plan, _context_plan, desired_members = self._fake_hot_reconcile_plan()
+        legacy_members = tuple(
+            member for member in desired_members
+            if member.source_kind not in dr._HOT_FIXED_SECTION_KINDS
+        )
+        plan.hot_receipt_frozen['members'] = legacy_members
+        plan.hot_receipt_frozen['receipt_members_complete'] = True
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(
+            plan.hot_decision_reason,
+            'legacy_receipt_fixed_proof_incomplete',
+        )
+
+    def test_compatible_hot_receipt_reconciles_to_no_op(self):
+        plan, context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={
+                'status': 'pass',
+                'source_member': context_plan.source_members[0],
+            },
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'NO_OP')
+        self.assertEqual(plan.hot_decision_reason, '')
+        self.assertEqual(plan.manifest['context_plan_native_tail_proof'], 'PASS')
+
+    def test_missing_native_tail_reconciles_to_respawn(self):
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'missing', 'reason': 'native_tail_mapping_missing'},
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'native_tail_mapping_missing')
+
+    def test_ambiguous_native_tail_blocks_without_fallback(self):
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'ambiguous', 'reason': 'multiple_canonical_tail_turns'},
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'BLOCKED')
+        self.assertEqual(plan.hot_decision_reason, 'multiple_canonical_tail_turns')
+
+    def test_hot_receipt_freezes_durable_revision_with_one_read(self):
+        from chat import context_receipt as receipt_store
+
+        db = self._context_plan_runtime_db()
+        try:
+            plan, _context_plan, desired_members = self._fake_hot_reconcile_plan()
+            plan.db_path = db
+            resident = types.SimpleNamespace(session_id='session-1', generation=1)
+            receipt = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='session-1',
+                process_generation=1,
+                plan_id='plan:previous',
+                plan_hash='previous-plan-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=desired_members,
+            )
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            receipt_store.create_receipt(conn, receipt, desired_members)
+            conn.close()
+            with mock.patch.object(
+                receipt_store,
+                'get_receipt',
+                wraps=receipt_store.get_receipt,
+            ) as get_receipt:
+                frozen = dr._freeze_hot_receipt(plan, resident=resident)
+            self.assertEqual(frozen['expected_receipt_revision'], 0)
+            self.assertEqual(get_receipt.call_count, 1)
+        finally:
+            os.unlink(db)
+
+    def test_hot_receipt_advance_uses_frozen_revision(self):
+        from chat import context_receipt as receipt_store
+
+        db = self._context_plan_runtime_db()
+        try:
+            plan, context_plan, desired_members = self._fake_hot_reconcile_plan()
+            plan.db_path = db
+            plan.transcript_claude_session_id = 'session-1'
+            plan.transcript_process_generation = 1
+            plan.transcript_start_offset = 1
+            plan.transcript_end_offset = 10
+            plan._same_context_last_good_proven = True
+            plan.manifest.update({
+                'transcript_mapping_status': 'MAPPED',
+                'assistant_message_id': 3,
+                'cursor_after': 3,
+                'cursor_cas_success': True,
+                'context_receipt_last_good_proven': True,
+            })
+            prior = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='session-1',
+                process_generation=1,
+                plan_id='plan:previous',
+                plan_hash='previous-plan-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=desired_members,
+            )
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            receipt_store.create_receipt(conn, prior, desired_members)
+            conn.close()
+            plan.hot_receipt_frozen = {
+                'receipt': prior,
+                'expected_receipt_revision': 0,
+            }
+            with mock.patch.object(
+                dr.dc,
+                'get_resident_history_cursor',
+                return_value=3,
+            ), mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': 10,
+                },
+            ), mock.patch.object(
+                receipt_store,
+                'hot_advance_receipt',
+                wraps=receipt_store.hot_advance_receipt,
+            ) as advance:
+                plan.hot_decision = 'NO_OP'
+                self.assertTrue(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=3,
+                    )
+                )
+            self.assertEqual(
+                advance.call_args.kwargs['expected_receipt_revision'],
+                0,
+            )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'COMMITTED')
+            self.assertEqual(plan.manifest['context_receipt_revision'], 1)
+            self.assertEqual(context_plan.plan_hash, 'plan-hash-one')
+        finally:
+            os.unlink(db)
+
+    def test_hot_no_op_keeps_incremental_payload_and_user_once(self):
+        plan = types.SimpleNamespace(
+            hot_decision='NO_OP',
+            assembly={'current_day_history': []},
+            user_content='hello',
+            provider_display_thinking_suffix='',
+            manifest={},
+        )
+        dr._validate_hot_no_op_payload(plan, 'existing incremental context\nhello')
+        self.assertEqual(plan.manifest['context_plan_current_request_count'], 1)
+        plan.assembly['context_plan_representation_blocks'] = [
+            {'kind': 'raw', 'content': 'forbidden replay'},
+        ]
+        with self.assertRaises(dr.DailyRuntimeError) as caught:
+            dr._validate_hot_no_op_payload(plan, 'hello')
+        self.assertEqual(caught.exception.error_code, 'context_plan_hot_history_replay')
+
+    def test_hot_shadow_does_not_build_second_planner(self):
+        plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=object(),
+            manifest={},
+        )
+        with mock.patch.object(dr, '_build_production_context_plan') as build_plan:
+            dr._observe_continuity_shadow(
+                plan=plan,
+                resident=object(),
+                static_system='',
+                content='hello',
+            )
+        build_plan.assert_not_called()
+        self.assertEqual(plan.manifest['context_plan_hot_shadow'], 'disabled')
+
     def test_gate_reads_existing_key_and_defaults_closed(self):
         with mock.patch.object(
             config_store,
@@ -4556,3 +4892,4 @@ class ContextPlanConsumerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
