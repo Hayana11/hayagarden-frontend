@@ -4454,13 +4454,12 @@ def _build_continuity_shadow_fixed_sections(
 
     assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
     state_serialized = ''
-    if 'state_snapshot' in assembly:
-        state_snapshot = assembly.get('state_snapshot')
-        if isinstance(state_snapshot, dict) and state_snapshot:
-            state_serialized = format_persona_semantic_snapshot(
-                translate_raw_state_to_persona_semantic(state_snapshot),
-            )
-    elif not require_full_state_snapshot:
+    state_snapshot = assembly.get('state_snapshot')
+    if isinstance(state_snapshot, dict) and state_snapshot:
+        state_serialized = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(state_snapshot),
+        )
+    if not state_serialized and not require_full_state_snapshot:
         # Legacy shadow/test callers may only have the transport field.  The
         # production ContextPlan path opts out so a hot delta cannot become a
         # durable accepted-state identity.

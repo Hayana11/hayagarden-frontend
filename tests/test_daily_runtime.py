@@ -3743,6 +3743,24 @@ class ContinuityShadowObservationTests(unittest.TestCase):
         )
         self.assertNotIn('accepted_state', [section.kind for section in sections])
 
+
+    def test_legacy_fixed_sections_fallback_when_state_snapshot_is_empty(self):
+        plan = types.SimpleNamespace(
+            assembly={
+                'state_snapshot': {},
+                'state': 'LEGACY STATE',
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='FALLBACK',
+            require_full_state_snapshot=False,
+        )
+        self.assertIn('accepted_state', [section.kind for section in sections])
+
     def test_hot_transport_keeps_delta_or_empty_without_replaying_snapshot(self):
         from chat.persona_state_semantic import (
             format_persona_semantic_snapshot,
