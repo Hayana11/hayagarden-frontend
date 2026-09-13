@@ -1082,7 +1082,10 @@ def _build_manifest_base(
 def _context_plan_consumer_enabled() -> bool:
     """Read the existing gate; any read/config error fails closed to OFF."""
     try:
-        import config_store
+        import sys
+        config_store = sys.modules.get('config_store')
+        if config_store is None:
+            return False
         return str(config_store.get(
             'CONTEXT_PLAN_CONSUMER_ENABLED',
             '0',
@@ -1344,6 +1347,7 @@ def _commit_production_context_receipt(
     ):
         plan.manifest.update({
             'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_repair_required': True,
             'context_receipt_error_code': 'context_receipt_unavailable',
             'error_code': 'context_receipt_unavailable',
         })
@@ -4581,7 +4585,7 @@ def handle_provider_success(
             transcript_end_offset=int(end_off) if end_off is not None else None,
         )
     # The receipt is committed only after persist + cursor CAS + MAPPED and
-    # the existing last-good success boundary.  It is process-local metadata.
+    # the existing last-good success boundary.  It is durable metadata proof.
     if getattr(plan, 'continuity_plan', None) is not None:
         _commit_production_context_receipt(
             plan,
