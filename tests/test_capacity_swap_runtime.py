@@ -40,6 +40,7 @@ from chat.capacity_swap_runtime import (
     effective_static_system_for_registry,
     forbid_resend_after_stdin_flush,
     is_capacity_swap_reason,
+    prepare_capacity_swap_for_context_plan,
     resolve_finalize_registry_source,
     try_restore_same_context_last_good,
     with_capacity_boundary_suffix,
@@ -1284,6 +1285,33 @@ class NeverUsedIdleReapContractTests(unittest.TestCase):
                 tool_profile=cc_resident.TOOL_PROFILE_TEXT_ONLY,
             )
         self.assertEqual(reason, 'idle')
+
+
+class ContextPlanCapacityCarrierTests(unittest.TestCase):
+    def test_zero_raw_blocks_before_legacy_selector(self):
+        plan = mock.Mock(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            user_message_id=9,
+            db_path=None,
+        )
+        context_plan = mock.Mock(representations=())
+        with mock.patch(
+            'chat.capacity_swap_runtime.prepare_capacity_swap_for_plan',
+        ) as legacy_prepare:
+            result = prepare_capacity_swap_for_context_plan(
+                plan=plan,
+                context_plan=context_plan,
+                trigger_reason='soft_context',
+                static_system='STATIC_PERSONA',
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_resume_seed_missing',
+        )
+        legacy_prepare.assert_not_called()
 
 
 if __name__ == '__main__':
