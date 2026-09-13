@@ -1571,10 +1571,12 @@ def _project_capacity_context_bootstrap(plan: DailyTurnPlan) -> dict[str, Any]:
 
 
 def _context_plan_for_receipt(plan: DailyTurnPlan) -> Any:
-    context_plan = getattr(plan, 'continuity_plan', None)
+    # A Capacity Swap plan is the consumed production authority for this
+    # transition; do not let an older cold/hot plan win receipt construction.
+    context_plan = getattr(plan, 'capacity_context_plan', None)
     if context_plan is not None:
         return context_plan
-    context_plan = getattr(plan, 'capacity_context_plan', None)
+    context_plan = getattr(plan, 'continuity_plan', None)
     if context_plan is not None:
         return context_plan
     return getattr(plan, 'hot_desired_plan', None)
@@ -4676,87 +4678,89 @@ def _attempt_capacity_swap_before_stdin(
             'target_generation': target_gen,
         }
 
-    # Production commit succeeded. Shadow metadata is best-effort and fail-open.
-    try:
-        # Candidate metadata is private and transient. Attach it only after
-        # staged install, registry publication, and target binding all succeed.
-        candidate = handoff.candidate
-        fixed_sections = tuple(
-            section for section in _build_continuity_shadow_fixed_sections(
-                plan=plan,
-                resident=resident,
-                static_system=effective,
+    # Gate OFF only: preserve the existing Capacity shadow metadata path.
+    if not gate_on:
+        # Production commit succeeded. Shadow metadata is best-effort and fail-open.
+        try:
+            # Candidate metadata is private and transient. Attach it only after
+            # staged install, registry publication, and target binding all succeed.
+            candidate = handoff.candidate
+            fixed_sections = tuple(
+                section for section in _build_continuity_shadow_fixed_sections(
+                    plan=plan,
+                    resident=resident,
+                    static_system=effective,
+                )
+                if str(getattr(section, 'kind', '') or '') in {
+                    'invariant_system',
+                    'accepted_state',
+                }
             )
-            if str(getattr(section, 'kind', '') or '') in {
-                'invariant_system',
-                'accepted_state',
+            anchor_status = getattr(
+                getattr(candidate, 'anchor_status', None),
+                'value',
+                getattr(candidate, 'anchor_status', ''),
+            )
+            candidate_sid = str(
+                handoff.candidate_session_id
+                or getattr(candidate, 'candidate_session_id', '')
+                or ''
+            ).strip()
+            pending_source_context_id = int(handoff.source_context_id or 0)
+            pending_source_context_epoch = int(handoff.source_context_epoch or 0)
+            pending_source_generation = int(handoff.source_resident_generation or 0)
+            pending_target_generation = int(target_gen)
+            baseline_sha = str(handoff.jsonl_sha256 or '').strip()
+            if (
+                not candidate_sid
+                or pending_source_context_id != source_ctx
+                or pending_source_context_epoch != source_epoch
+                or pending_source_generation <= 0
+                or pending_target_generation <= 0
+                or pending_target_generation != pending_source_generation + 1
+                or pending_target_generation != int(plan.resident_generation)
+            ):
+                raise DailyRuntimeError(
+                    'capacity shadow pending identity is incomplete',
+                    error_code='capacity_target_identity_mismatch',
+                )
+            if not baseline_sha:
+                raise DailyRuntimeError(
+                    'published capacity baseline sha256 is missing',
+                    error_code='capacity_baseline_sha_missing',
+                )
+            selected_ids = tuple(
+                int(value) for value in getattr(
+                    candidate, 'selected_message_ids', ()
+                ) if int(value) > 0
+            )
+            plan._continuity_shadow_capacity_pending = {
+                'source_context_id': pending_source_context_id,
+                'source_context_epoch': pending_source_context_epoch,
+                'source_resident_generation': pending_source_generation,
+                'target_resident_generation': pending_target_generation,
+                'candidate_session_id': candidate_sid,
+                'selected_message_ids': selected_ids,
+                'anchor_status': str(anchor_status or ''),
+                'anchor_message_id': int(
+                    getattr(candidate, 'anchor_message_id', 0) or 0
+                ),
+                'capacity_baseline_sha256': baseline_sha,
+                'trigger_reason': str(trigger_reason),
+                'fixed_section_fingerprints': _shadow_fixed_section_fingerprints(
+                    fixed_sections,
+                ),
             }
-        )
-        anchor_status = getattr(
-            getattr(candidate, 'anchor_status', None),
-            'value',
-            getattr(candidate, 'anchor_status', ''),
-        )
-        candidate_sid = str(
-            handoff.candidate_session_id
-            or getattr(candidate, 'candidate_session_id', '')
-            or ''
-        ).strip()
-        pending_source_context_id = int(handoff.source_context_id or 0)
-        pending_source_context_epoch = int(handoff.source_context_epoch or 0)
-        pending_source_generation = int(handoff.source_resident_generation or 0)
-        pending_target_generation = int(target_gen)
-        baseline_sha = str(handoff.jsonl_sha256 or '').strip()
-        if (
-            not candidate_sid
-            or pending_source_context_id != source_ctx
-            or pending_source_context_epoch != source_epoch
-            or pending_source_generation <= 0
-            or pending_target_generation <= 0
-            or pending_target_generation != pending_source_generation + 1
-            or pending_target_generation != int(plan.resident_generation)
-        ):
-            raise DailyRuntimeError(
-                'capacity shadow pending identity is incomplete',
-                error_code='capacity_target_identity_mismatch',
+        except Exception as exc:
+            err = str(getattr(exc, 'error_code', None) or '')
+            if not err:
+                err = 'capacity_shadow_pending_build_failed'
+            plan._continuity_shadow_capacity_pending_error = err
+            logger.exception(
+                'capacity shadow pending build failed code=%s',
+                err,
+                exc_info=True,
             )
-        if not baseline_sha:
-            raise DailyRuntimeError(
-                'published capacity baseline sha256 is missing',
-                error_code='capacity_baseline_sha_missing',
-            )
-        selected_ids = tuple(
-            int(value) for value in getattr(
-                candidate, 'selected_message_ids', ()
-            ) if int(value) > 0
-        )
-        plan._continuity_shadow_capacity_pending = {
-            'source_context_id': pending_source_context_id,
-            'source_context_epoch': pending_source_context_epoch,
-            'source_resident_generation': pending_source_generation,
-            'target_resident_generation': pending_target_generation,
-            'candidate_session_id': candidate_sid,
-            'selected_message_ids': selected_ids,
-            'anchor_status': str(anchor_status or ''),
-            'anchor_message_id': int(
-                getattr(candidate, 'anchor_message_id', 0) or 0
-            ),
-            'capacity_baseline_sha256': baseline_sha,
-            'trigger_reason': str(trigger_reason),
-            'fixed_section_fingerprints': _shadow_fixed_section_fingerprints(
-                fixed_sections,
-            ),
-        }
-    except Exception as exc:
-        err = str(getattr(exc, 'error_code', None) or '')
-        if not err:
-            err = 'capacity_shadow_pending_build_failed'
-        plan._continuity_shadow_capacity_pending_error = err
-        logger.exception(
-            'capacity shadow pending build failed code=%s',
-            err,
-            exc_info=True,
-        )
 
     # Success: retain full install_state until CURRENT user stdin flush.
     plan._capacity_swap_install_state = install_state  # type: ignore[attr-defined]
@@ -6165,6 +6169,23 @@ def ensure_resident_and_stream(
             rolled = _rollback_capacity_swap_if_unflushed(plan, resident=resident)
             if not rolled:
                 raise
+            if _is_capacity_context_plan(plan):
+                heartbeat.stop()
+                plan.manifest.update({
+                    'capacity_swap_pre_flush_blocked': True,
+                    'capacity_swap_pre_flush_error_code': str(
+                        getattr(exc, 'error_code', None)
+                        or type(exc).__name__
+                    ),
+                })
+                raise DailyRuntimeError(
+                    'gate-on Capacity ContextPlan carrier failed before stdin',
+                    error_code=str(
+                        getattr(exc, 'error_code', None)
+                        or 'context_plan_capacity_pre_send_failed'
+                    ),
+                    retryable=False,
+                ) from exc
             logger.info(
                 'capacity swap pre-flush send failed (%s); continuing last-good→cold fallback',
                 type(exc).__name__,
