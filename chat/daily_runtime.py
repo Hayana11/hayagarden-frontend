@@ -6010,4 +6010,3 @@ def reprepare_after_hot_cold_mismatch(
         model=model,
         _cold_reprepare=True,
     )
-
