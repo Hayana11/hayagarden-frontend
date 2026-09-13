@@ -267,6 +267,11 @@ def build_daily_window_context(
     context_id = int(ctx['id'])
     resident_generation = int(ctx.get('resident_generation') or 1)
     cold_like = bool(is_cold or is_respawn)
+    if history_override is not None:
+        # A caller-supplied projection is the sole history selector for this
+        # turn; legacy handoff/carryover replay must not run beside it.
+        inject_handoff = False
+        inject_carryover = False
 
     if not ctx.get('selection_finalized_at'):
         ensure_carryover_zero_if_user_messages_exist(context_id, db_path=db_path)

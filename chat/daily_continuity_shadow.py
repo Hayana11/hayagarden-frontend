@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
 from continuity.context_plan import (
     ContextBudgetPolicy,
@@ -158,9 +158,47 @@ def _current_request_section(row: dict[str, object]) -> ContextSection:
     )
 
 
-def _bindings(conn: sqlite3.Connection) -> tuple[ContextChunkBinding, ...]:
+def _bindings(
+    conn: sqlite3.Connection,
+    *,
+    validated_ready_artifacts: Sequence[Mapping[str, str]] | None = None,
+) -> tuple[ContextChunkBinding, ...]:
+    chunks = load_ready_chunks(conn)
+    if validated_ready_artifacts is not None:
+        expected: dict[str, tuple[str, str]] = {}
+        try:
+            for item in validated_ready_artifacts:
+                chunk_id = str(item.get('chunk_id') or '').strip()
+                artifact_revision = str(item.get('artifact_revision') or '').strip()
+                body_hash = str(item.get('body_hash') or '').strip()
+                if not chunk_id or not artifact_revision or not body_hash:
+                    raise ValueError('validated ready artifact identity is incomplete')
+                if chunk_id in expected:
+                    raise ValueError('validated ready artifact identity is duplicated')
+                expected[chunk_id] = (artifact_revision, body_hash)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise _ChunkSurfaceUnavailable(str(exc)) from exc
+        chunks_by_id = {str(chunk.chunk_id): chunk for chunk in chunks}
+        selected = []
+        for chunk_id in sorted(expected):
+            chunk = chunks_by_id.get(chunk_id)
+            if chunk is None:
+                raise _ChunkSurfaceUnavailable(
+                    'strict ready artifact disappeared during binding acquisition'
+                )
+            artifact_revision, body_hash = expected[chunk_id]
+            if (
+                str(chunk.artifact_revision) != artifact_revision
+                or str(chunk.body_hash) != body_hash
+            ):
+                raise _ChunkSurfaceUnavailable(
+                    'strict ready artifact identity changed during binding acquisition'
+                )
+            selected.append(chunk)
+        chunks = tuple(selected)
+
     bindings: list[ContextChunkBinding] = []
-    for chunk in load_ready_chunks(conn):
+    for chunk in chunks:
         candidate = load_candidate(conn, chunk.candidate_id)
         snapshot = load_snapshot(conn, chunk.snapshot_id)
         if candidate is None or snapshot is None:
@@ -182,6 +220,7 @@ def build_daily_continuity_shadow_plan(
     accepted_fixed_sections: Sequence[ContextSection] = (),
     budget_policy_version: str = '',
     continuity_store_path: str | Path | None = None,
+    validated_ready_artifacts: Sequence[Mapping[str, str]] | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -242,7 +281,10 @@ def build_daily_continuity_shadow_plan(
             return _blocked('chunk_surface_unavailable')
         try:
             _check_store_schema(store_conn)
-            bindings = _bindings(store_conn)
+            bindings = _bindings(
+                store_conn,
+                validated_ready_artifacts=validated_ready_artifacts,
+            )
         except (OSError, sqlite3.Error, TypeError, ValueError, ContinuityStoreError, _ChunkSurfaceUnavailable):
             return _blocked('chunk_surface_unavailable')
         finally:

@@ -48,6 +48,7 @@ from chat.capacity_swap_runtime import (
     CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1,
     CapacitySwapStagedHooks,
     effective_static_system_for_registry,
+    get_same_context_last_good,
     is_capacity_swap_reason,
     note_same_context_last_good,
     register_capacity_swap_generation,
@@ -329,6 +330,32 @@ def _format_history_messages(messages: list[dict[str, Any]]) -> str:
     return NL.join(lines)
 
 
+def _format_context_plan_representation_blocks(
+    blocks: list[dict[str, Any]],
+) -> str:
+    """Render canonical ContextPlan blocks without redefining raw turns."""
+    rendered = []
+    for block in blocks:
+        body = str(block.get('body') or '').strip()
+        if body:
+            rendered.append(body)
+    return NL.join(rendered)
+
+
+def _format_context_plan_open_loops(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        loops = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        text = str(value or '').strip()
+        loops = [text] if text else []
+    if not loops:
+        return ''
+    return NL.join([
+        '【已接受未完成事项】',
+        *('  - ' + item for item in loops),
+    ])
+
+
 def _format_carryover_messages(messages: list[dict[str, Any]]) -> str:
     if not messages:
         return ''
@@ -422,6 +449,11 @@ def format_resident_turn_content(
         carry_text = _format_carryover_messages(carryover)
         if carry_text:
             prefix_parts.append(carry_text)
+        open_loops = _format_context_plan_open_loops(
+            assembly.get('context_plan_accepted_open_loops'),
+        )
+        if open_loops:
+            prefix_parts.append(open_loops)
     state_text = str(assembly.get('state') or '').strip()
     if state_text:
         prefix_parts.append(state_text)
@@ -429,8 +461,24 @@ def format_resident_turn_content(
     if task_feedback:
         prefix_parts.append(task_feedback)
     history = assembly.get('current_day_history') or []
+    context_plan_blocks = assembly.get('context_plan_representation_blocks') or []
+    canonical_history = _format_context_plan_representation_blocks(
+        context_plan_blocks,
+    )
     prefix = NL.join(p for p in prefix_parts if p)
-    if cold_like and history:
+    if cold_like and canonical_history:
+        body = (
+            '以下是本聊天日内的正式对话记录：' + NL + NL
+            + canonical_history
+        )
+        if time_anchor:
+            body += NL + NL + time_anchor
+        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + turn_user_text
+        if prefix:
+            text = prefix + NL + NL + body
+        else:
+            text = body
+    elif cold_like and history:
         history_text = _format_history_messages(history)
         body = (
             '以下是本聊天日内的正式对话记录：' + NL + NL
@@ -1082,10 +1130,7 @@ def _build_manifest_base(
 def _context_plan_consumer_enabled() -> bool:
     """Read the existing gate; any read/config error fails closed to OFF."""
     try:
-        import sys
-        config_store = sys.modules.get('config_store')
-        if config_store is None:
-            return False
+        import config_store
         return str(config_store.get(
             'CONTEXT_PLAN_CONSUMER_ENABLED',
             '0',
@@ -1141,6 +1186,14 @@ def _build_production_context_plan(
             error_code='context_plan_store_corrupt',
             retryable=False,
         )
+    validated_ready_artifacts = tuple(
+        {
+            'chunk_id': str(chunk.chunk_id),
+            'artifact_revision': str(chunk.artifact_revision),
+            'body_hash': str(chunk.body_hash),
+        }
+        for chunk in surface.artifacts
+    )
     from chat.daily_continuity_shadow import build_daily_continuity_shadow_plan
     fixed_sections = _build_continuity_shadow_fixed_sections(
         plan=plan,
@@ -1154,6 +1207,7 @@ def _build_production_context_plan(
         budget_policy=policy,
         accepted_fixed_sections=fixed_sections,
         budget_policy_version=policy_version,
+        validated_ready_artifacts=validated_ready_artifacts,
     )
     if result.plan is None:
         raise DailyRuntimeError(
@@ -1178,6 +1232,30 @@ def _build_production_context_plan(
             error_code='context_plan_invalid',
             retryable=False,
         )
+    validated_by_id = {
+        str(chunk.chunk_id): (str(chunk.artifact_revision), str(chunk.body_hash))
+        for chunk in surface.artifacts
+    }
+    for representation in result.plan.representations:
+        if representation.kind != 'chunk':
+            continue
+        chunk_id = str(representation.chunk_id or '')
+        if chunk_id not in validated_by_id:
+            raise DailyRuntimeError(
+                'ContextPlan selected an artifact outside the strict READY surface',
+                error_code='context_plan_ready_artifact_outside_surface',
+                retryable=False,
+            )
+        provenance = dict(representation.provenance)
+        if (
+            provenance.get('artifact_revision') != validated_by_id[chunk_id][0]
+            or provenance.get('body_hash') != validated_by_id[chunk_id][1]
+        ):
+            raise DailyRuntimeError(
+                'ContextPlan selected a changed READY artifact',
+                error_code='context_plan_ready_artifact_identity_changed',
+                retryable=False,
+            )
     bodies = {
         str(chunk.chunk_id): str(chunk.body)
         for chunk in (surface.artifacts or ())
@@ -1216,7 +1294,10 @@ def _load_context_source_rows(
             for row in conn.execute('PRAGMA table_info(chat_messages)').fetchall()
         }
         selected = ['id', 'author', 'content', 'created_at']
-        for optional in ('attachments', 'image_url', 'file_url', 'file_name'):
+        for optional in (
+            'thinking', 'tool_calls', 'branches', 'branch_idx', 'cache_info',
+            'source_kind', 'attachments', 'image_url', 'file_url', 'file_name',
+        ):
             if optional in columns:
                 selected.append(optional)
         placeholders = ','.join('?' for _ in message_ids)
@@ -1238,6 +1319,7 @@ def _project_context_plan_history(
     chunk_bodies: dict[str, str],
 ) -> dict[str, Any]:
     """Project canonical representations into the existing formatter fields."""
+    from continuity.materialization import materialize_source_members
     from continuity.sources import is_formal_user_source_row
     store_path = _production_continuity_store_path(plan)
     message_ids: set[int] = set()
@@ -1253,6 +1335,7 @@ def _project_context_plan_history(
                 message_ids.update(ids)
     rows = _load_context_source_rows(message_ids, db_path=store_path)
     history: list[dict[str, Any]] = []
+    representation_blocks: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
     for representation in context_plan.representations:
         if representation.kind == 'chunk':
@@ -1270,7 +1353,39 @@ def _project_context_plan_history(
                     representation.representation_id
                 ),
             })
+            representation_blocks.append({
+                'kind': 'chunk',
+                'representation_id': str(representation.representation_id),
+                'body': body,
+            })
             continue
+        if representation.kind != 'raw':
+            raise DailyRuntimeError(
+                'selected continuity representation kind is invalid',
+                error_code='context_plan_representation_invalid',
+            )
+        try:
+            materialized = materialize_source_members(
+                representation.source_members,
+                rows.values(),
+            )
+        except Exception as exc:
+            raise DailyRuntimeError(
+                'selected continuity raw representation is unavailable',
+                error_code='context_plan_source_unavailable',
+            ) from exc
+        if not str(materialized.body or '').strip():
+            raise DailyRuntimeError(
+                'selected continuity raw representation is empty',
+                error_code='context_plan_source_unavailable',
+            )
+        representation_blocks.append({
+            'kind': 'raw',
+            'representation_id': str(representation.representation_id),
+            'body': str(materialized.body),
+            'source_fingerprint': str(materialized.source_fingerprint),
+            'source_refs': tuple(materialized.source_refs),
+        })
         for member in representation.source_members:
             ids = _context_source_message_ids(member.source_ref)
             if not ids:
@@ -1302,6 +1417,20 @@ def _project_context_plan_history(
                 })
     assembly = dict(plan.assembly)
     assembly['current_day_history'] = history
+    assembly['context_plan_representation_blocks'] = representation_blocks
+    if any(
+        str(section.kind or '') == 'accepted_open_loops'
+        for section in context_plan.ordered_sections
+    ):
+        handoff = assembly.get('day_handoff_content')
+        if isinstance(handoff, dict):
+            loops = handoff.get('open_loops')
+            if loops:
+                assembly['context_plan_accepted_open_loops'] = loops
+            else:
+                assembly.pop('context_plan_accepted_open_loops', None)
+        else:
+            assembly.pop('context_plan_accepted_open_loops', None)
     layers = [
         layer for layer in (assembly.get('layers') or ())
         if str(layer.get('kind') or '') != 'current_day_history'
@@ -1353,6 +1482,36 @@ def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
     return tuple(members)
 
 
+def _same_context_last_good_matches(plan: DailyTurnPlan) -> bool:
+    sid = str(plan.transcript_claude_session_id or '').strip()
+    if not sid or plan.transcript_start_offset is None or plan.transcript_end_offset is None:
+        return False
+    try:
+        transcript_start = int(plan.transcript_start_offset)
+        transcript_end = int(plan.transcript_end_offset)
+    except (TypeError, ValueError):
+        return False
+    if transcript_end <= transcript_start:
+        return False
+    last_good = get_same_context_last_good(
+        int(plan.context_id),
+        int(plan.context_epoch),
+    )
+    try:
+        return (
+            isinstance(last_good, dict)
+            and int(last_good.get('context_id') or 0) == int(plan.context_id)
+            and int(last_good.get('context_epoch') or 0) == int(plan.context_epoch)
+            and int(last_good.get('resident_generation') or 0)
+                == int(plan.resident_generation)
+            and str(last_good.get('claude_session_id') or '') == sid
+            and int(last_good.get('transcript_end_offset') or -1)
+                == transcript_end
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _commit_production_context_receipt(
     plan: DailyTurnPlan,
     *,
@@ -1378,12 +1537,60 @@ def _commit_production_context_receipt(
     context_plan = getattr(plan, 'continuity_plan', None)
     if context_plan is None:
         return False
+    cursor_after_raw = plan.manifest.get('cursor_after')
+    try:
+        assistant_manifest_id = int(
+            plan.manifest.get('assistant_message_id') or 0
+        )
+    except (TypeError, ValueError):
+        assistant_manifest_id = 0
+    if (
+        isinstance(cursor_after_raw, bool)
+        or plan.manifest.get('cursor_cas_success') is not True
+        or assistant_manifest_id != int(assistant_message_id)
+    ):
+        plan.manifest.update({
+            'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_repair_required': True,
+            'context_receipt_error_code': 'context_receipt_cursor_unavailable',
+            'error_code': 'context_receipt_cursor_unavailable',
+        })
+        return False
+    try:
+        cursor_after = int(cursor_after_raw)
+        persisted_cursor = dc.get_resident_history_cursor(
+            int(plan.context_id),
+            int(plan.resident_generation),
+            db_path=plan.db_path,
+        )
+    except (TypeError, ValueError, OSError, sqlite3.Error):
+        cursor_after = 0
+        persisted_cursor = None
+    if (
+        cursor_after <= 0
+        or cursor_after < int(assistant_message_id)
+        or persisted_cursor != cursor_after
+    ):
+        plan.manifest.update({
+            'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_repair_required': True,
+            'context_receipt_error_code': 'context_receipt_cursor_unavailable',
+            'error_code': 'context_receipt_cursor_unavailable',
+        })
+        return False
+    if (
+        plan.manifest.get('context_receipt_last_good_proven') is not True
+        or not getattr(plan, '_same_context_last_good_proven', False)
+        or not _same_context_last_good_matches(plan)
+    ):
+        plan.manifest.update({
+            'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_repair_required': True,
+            'context_receipt_error_code': 'context_receipt_last_good_unproven',
+            'error_code': 'context_receipt_last_good_unproven',
+        })
+        return False
     members = _context_receipt_members(plan)
-    watermark = max(
-        (int(member.seq) for representation in context_plan.representations
-         for member in representation.source_members),
-        default=0,
-    )
     try:
         receipt = receipt_store.ContextReceipt.build(
             context_id=int(plan.context_id),
@@ -1401,7 +1608,7 @@ def _commit_production_context_receipt(
                 or 'continuity_context_budget_v1'
             ),
             measurement_semantics=str(context_plan.measurement_semantics),
-            installed_source_watermark=watermark,
+            installed_source_watermark=cursor_after,
             members=members,
         )
         conn = dc._connect(plan.db_path)
@@ -1426,6 +1633,7 @@ def _commit_production_context_receipt(
             conn.close()
         plan.manifest.update({
             'context_receipt_status': 'COMMITTED',
+            'context_receipt_repair_required': False,
             'context_receipt_plan_hash': str(committed.plan_hash),
             'context_receipt_revision': int(committed.receipt_revision),
             'context_receipt_assistant_message_id': int(assistant_message_id),
@@ -1441,15 +1649,179 @@ def _commit_production_context_receipt(
         return False
 
 
+def _provider_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get('type') == 'text':
+            return str(content.get('text') or '')
+        return ''
+    if isinstance(content, (list, tuple)):
+        return NL.join(
+            text for item in content
+            for text in (_provider_content_text(item),)
+            if text
+        )
+    return ''
+
+
+def _section_install_identity(section: Any) -> tuple[str, str, str, int]:
+    return (
+        str(getattr(section, 'kind', '') or ''),
+        str(getattr(section, 'source_ref', '') or ''),
+        str(getattr(section, 'content_hash', '') or ''),
+        int(getattr(section, 'estimated_tokens', 0) or 0),
+    )
+
+
+def _validate_production_context_install(
+    *,
+    plan: DailyTurnPlan,
+    resident: Any,
+    static_system: str,
+    content: Any,
+) -> None:
+    """Fail closed unless the consumed plan is the provider-visible install."""
+    context_plan = getattr(plan, 'continuity_plan', None)
+    if context_plan is None:
+        raise DailyRuntimeError(
+            'production ContextPlan is missing',
+            error_code='context_plan_unavailable',
+        )
+    assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
+    if assembly.get('carryover_messages'):
+        raise DailyRuntimeError(
+            'legacy carryover is still present beside ContextPlan',
+            error_code='context_plan_legacy_carryover_forbidden',
+        )
+    if str(assembly.get('day_handoff') or '').strip():
+        raise DailyRuntimeError(
+            'legacy handoff replay is still present beside ContextPlan',
+            error_code='context_plan_legacy_handoff_forbidden',
+        )
+
+    expected_fixed = _build_continuity_shadow_fixed_sections(
+        plan=plan,
+        resident=resident,
+        static_system=static_system,
+    )
+    actual_fixed = tuple(
+        section for section in context_plan.ordered_sections
+        if str(getattr(section, 'kind', '') or '') in {
+            'invariant_system',
+            'accepted_state',
+            'accepted_open_loops',
+        }
+    )
+    if tuple(map(_section_install_identity, expected_fixed)) != tuple(
+        map(_section_install_identity, actual_fixed)
+    ):
+        raise DailyRuntimeError(
+            'ContextPlan fixed-section proof does not match install',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
+
+    current_sections = tuple(
+        section for section in context_plan.ordered_sections
+        if str(getattr(section, 'kind', '') or '') == 'current_request'
+    )
+    if (
+        len(current_sections) != 1
+        or str(current_sections[0].source_ref or '')
+            != 'message:%d' % int(plan.user_message_id)
+    ):
+        raise DailyRuntimeError(
+            'ContextPlan current-request proof is invalid',
+            error_code='context_plan_current_request_parity_failed',
+        )
+
+    blocks = assembly.get('context_plan_representation_blocks') or []
+    expected_blocks = tuple(context_plan.representations)
+    if len(blocks) != len(expected_blocks):
+        raise DailyRuntimeError(
+            'ContextPlan representation install is incomplete',
+            error_code='context_plan_representation_parity_failed',
+        )
+    provider_text = _provider_content_text(content)
+    for block, representation in zip(blocks, expected_blocks):
+        if (
+            not isinstance(block, dict)
+            or str(block.get('kind') or '') != str(representation.kind)
+            or str(block.get('representation_id') or '')
+                != str(representation.representation_id)
+        ):
+            raise DailyRuntimeError(
+                'ContextPlan representation identity does not match install',
+                error_code='context_plan_representation_parity_failed',
+            )
+        body = str(block.get('body') or '').strip()
+        if not body or provider_text.count(body) != 1:
+            raise DailyRuntimeError(
+                'ContextPlan representation body is not installed exactly once',
+                error_code='context_plan_representation_parity_failed',
+            )
+
+    state_text = str(assembly.get('state') or '').strip()
+    has_state_section = any(
+        str(getattr(section, 'kind', '') or '') == 'accepted_state'
+        for section in actual_fixed
+    )
+    if bool(state_text) != has_state_section:
+        raise DailyRuntimeError(
+            'accepted state install does not match ContextPlan proof',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
+
+    open_loops_text = _format_context_plan_open_loops(
+        assembly.get('context_plan_accepted_open_loops'),
+    )
+    has_open_loops_section = any(
+        str(getattr(section, 'kind', '') or '') == 'accepted_open_loops'
+        for section in actual_fixed
+    )
+    if bool(open_loops_text) != has_open_loops_section:
+        raise DailyRuntimeError(
+            'accepted open-loops install does not match ContextPlan proof',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
+    if open_loops_text and provider_text.count(open_loops_text) != 1:
+        raise DailyRuntimeError(
+            'accepted open-loops content is not installed exactly once',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
+
+    user_text = str(plan.user_content or '')
+    if user_text.strip() and user_text.strip() != '[image]':
+        if provider_text.count(user_text) != 1:
+            raise DailyRuntimeError(
+                'current request is not installed exactly once',
+                error_code='context_plan_current_request_parity_failed',
+            )
+
+    plan.manifest.update({
+        'context_plan_fixed_section_parity': 'PASS',
+        'context_plan_representation_parity': 'PASS',
+        'context_plan_current_request_count': 1,
+        'context_plan_provider_content_hash': _continuity_shadow_fingerprint(content)[0],
+    })
+
+
 def _observe_production_context_plan(
     *,
     plan: DailyTurnPlan,
     resident: Any,
+    static_system: str,
     content: Any,
 ) -> None:
     context_plan = getattr(plan, 'continuity_plan', None)
     if context_plan is None:
         return
+    _validate_production_context_install(
+        plan=plan,
+        resident=resident,
+        static_system=static_system,
+        content=content,
+    )
     content_hash, content_tokens, content_kind = _continuity_shadow_fingerprint(content)
     representations = tuple(context_plan.representations)
     observation = {
@@ -1501,6 +1873,8 @@ def _observe_production_context_plan(
         'resident_session_present': bool(
             str(getattr(resident, 'session_id', None) or '').strip()
         ),
+        'fixed_section_install_parity': 'PASS',
+        'representation_install_parity': 'PASS',
     }
     logger.info(
         'continuity_shadow_observation %s',
@@ -1570,8 +1944,8 @@ def _assemble_plan(
         is_cold=is_cold,
         is_respawn=is_respawn,
         last_state_snapshot=last_state,
-        inject_handoff=cold_like,
-        inject_carryover=cold_like,
+        inject_handoff=bool(cold_like and not context_plan_consumer),
+        inject_carryover=bool(cold_like and not context_plan_consumer),
         db_path=db_path,
         history_token_budget=history_token_budget,
         provider_claude_session_id=provider_sid,
@@ -1602,6 +1976,10 @@ def _assemble_plan(
     task_feedback = _format_task_feedback(feedback_lines)
     if task_feedback:
         assembly['task_feedback'] = task_feedback
+    if context_plan_consumer:
+        manifest['context_plan_runtime_overhead'] = (
+            ['task_feedback'] if task_feedback else []
+        )
     daily_plan = DailyTurnPlan(
         request_id=req_id,
         chat_id=chat_id,
@@ -2601,6 +2979,11 @@ def _rebuild_daily_assembly_with_history_budget(
     is_respawn: bool,
 ) -> dict[str, Any]:
     """Re-run cold assembly with a smaller history budget (Fence B rebuild)."""
+    if getattr(plan, 'continuity_plan', None) is not None:
+        raise DailyRuntimeError(
+            'ContextPlan consumer cannot rebuild through legacy history selector',
+            error_code='context_plan_legacy_selector_forbidden',
+        )
     refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path)
     if not refreshed:
         raise DailyRuntimeError(
@@ -2668,6 +3051,22 @@ def _apply_daily_cold_prompt_fence(
         (plan.assembly.get('manifest') or {}).get('cold_history_trimmed')
     )
     cold_prompt_estimate = estimate_whole_prompt(static_system, content)
+
+    if (
+        cold_prompt_estimate > cold_prompt_target_val
+        and getattr(plan, 'continuity_plan', None) is not None
+    ):
+        plan.manifest['cold_budget_overflow'] = True
+        plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
+        plan.manifest['cold_prompt_target'] = int(cold_prompt_target_val)
+        plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
+        plan.manifest['cold_budget_mode'] = 'token_budget'
+        raise ColdBootstrapOverflow(
+            estimate=cold_prompt_estimate,
+            target=cold_prompt_target_val,
+            history_budget=cold_history_budget_val,
+            cold_history_trimmed=cold_history_trimmed_flag,
+        )
 
     if cold_prompt_estimate > cold_prompt_target_val:
         history = plan.assembly.get('current_day_history') or []
@@ -3743,6 +4142,7 @@ def _observe_continuity_shadow(
         _observe_production_context_plan(
             plan=plan,
             resident=resident,
+            static_system=static_system,
             content=content,
         )
         return
@@ -4414,7 +4814,24 @@ def complete_daily_turn(
             expected_cursor=plan.cursor_before,
             db_path=plan.db_path,
         )
-        cas_success = bool(cursor_result.get('advanced', True))
+        cursor_after_raw = cursor_result.get('history_cursor_message_id')
+        cursor_result_valid = True
+        try:
+            cursor_after = int(cursor_after_raw)
+            cursor_result_valid = (
+                not isinstance(cursor_after_raw, bool)
+                and cursor_after >= aid
+                and int(cursor_result.get('context_id')) == int(plan.context_id)
+                and int(cursor_result.get('resident_generation'))
+                    == int(plan.resident_generation)
+                and isinstance(cursor_result.get('advanced'), bool)
+            )
+        except (AttributeError, TypeError, ValueError):
+            cursor_after = 0
+            cursor_result_valid = False
+        cas_success = bool(
+            cursor_result_valid and cursor_result.get('advanced') is True
+        )
     except ConflictError as exc:
         logger.warning('daily cursor CAS conflict: %s', exc)
         abort_daily_turn(plan, error_code='cursor_cas_conflict', respawn=is_epoch_token_current(plan))
@@ -4430,8 +4847,9 @@ def complete_daily_turn(
     _release_lease(plan)
     plan.manifest.update({
         'assistant_message_id': aid,
-        'cursor_after': int(cursor_result.get('history_cursor_message_id') or aid),
+        'cursor_after': int(cursor_after) if cursor_result_valid else None,
         'cursor_cas_success': cas_success,
+        'cursor_result_valid': cursor_result_valid,
         'unexpected_save_marker': bool(unexpected_save_marker),
         'stop_reason': stop_reason,
         'input_tokens': input_tokens,
@@ -4439,8 +4857,10 @@ def complete_daily_turn(
         'error_code': None,
     })
     binding = get_local_binding()
-    if binding and binding.resident_key == plan.resident_key:
-        binding.bound_cursor_message_id = aid
+    if cursor_result_valid and binding and binding.resident_key == plan.resident_key:
+        binding.bound_cursor_message_id = int(
+            plan.manifest['cursor_after']
+        )
         set_local_binding(binding)
     return dict(plan.manifest)
 
@@ -4587,6 +5007,8 @@ def handle_provider_success(
     end_off = plan.transcript_end_offset
     start_off = plan.transcript_start_offset
     sid = str(plan.transcript_claude_session_id or '').strip()
+    plan._same_context_last_good_proven = False
+    plan.manifest['context_receipt_last_good_proven'] = False
     jsonl_grew = (
         start_off is not None
         and end_off is not None
@@ -4594,18 +5016,25 @@ def handle_provider_success(
         and bool(sid)
     )
     if jsonl_grew:
-        existing = get_context_claude_session(
-            int(plan.context_id),
-            int(plan.resident_generation),
-            db_path=plan.db_path,
-        )
-        note_same_context_last_good(
-            context_id=int(plan.context_id),
-            context_epoch=int(plan.context_epoch),
-            resident_generation=int(plan.resident_generation),
-            claude_session_id=sid,
-            source=resolve_finalize_registry_source(existing, default='daily_runtime'),
-            transcript_end_offset=int(end_off) if end_off is not None else None,
+        try:
+            existing = get_context_claude_session(
+                int(plan.context_id),
+                int(plan.resident_generation),
+                db_path=plan.db_path,
+            )
+            note_same_context_last_good(
+                context_id=int(plan.context_id),
+                context_epoch=int(plan.context_epoch),
+                resident_generation=int(plan.resident_generation),
+                claude_session_id=sid,
+                source=resolve_finalize_registry_source(existing, default='daily_runtime'),
+                transcript_end_offset=int(end_off) if end_off is not None else None,
+            )
+        except Exception:
+            logger.warning('same-context last-good note failed', exc_info=True)
+        plan._same_context_last_good_proven = _same_context_last_good_matches(plan)
+        plan.manifest['context_receipt_last_good_proven'] = bool(
+            plan._same_context_last_good_proven
         )
     # The receipt is committed only after persist + cursor CAS + MAPPED and
     # the existing last-good success boundary.  It is durable metadata proof.

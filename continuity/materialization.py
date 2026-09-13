@@ -166,6 +166,66 @@ def _render_wake(source_ref: str, rows_by_id: Mapping[int, Any]) -> str:
     ))
 
 
+def materialize_source_members(
+    members: Iterable[SourceMember],
+    rows: Iterable[Any],
+) -> MaterializedSource:
+    """Materialize exact ContextPlan raw membership with canonical renderers."""
+    selected = tuple(members)
+    raw_rows = tuple(rows)
+    rows_by_id = _rows_by_id(raw_rows)
+    current_by_ref = _current_members(raw_rows)
+    rendered: list[str] = []
+    fingerprints: list[dict[str, Any]] = []
+    seen_refs: set[str] = set()
+
+    for member in selected:
+        source_ref = str(member.source_ref)
+        if source_ref in seen_refs:
+            raise SourceMaterializationError(
+                f'duplicate source member: {source_ref}'
+            )
+        seen_refs.add(source_ref)
+        current_member = current_by_ref.get(source_ref)
+        if current_member is None:
+            raise SourceMaterializationError(
+                f'source is no longer canonical: {source_ref}'
+            )
+        if (
+            current_member.source_revision != member.source_revision
+            or current_member.content_hash != member.content_hash
+            or current_member.branch_id != member.branch_id
+            or current_member.source_kind != member.source_kind
+        ):
+            raise SourceMaterializationError(
+                f'source revision/content drift: {source_ref}'
+            )
+        if member.source_kind == 'completed_turn':
+            rendered.append(_render_turn(source_ref, rows_by_id))
+        elif member.source_kind == 'autonomous_event':
+            rendered.append(_render_wake(source_ref, rows_by_id))
+        else:
+            raise UnsupportedSourceError(
+                f'unsupported source kind: {member.source_kind}'
+            )
+        fingerprints.append({
+            'seq': int(member.seq),
+            'source_ref': source_ref,
+            'source_revision': current_member.source_revision,
+            'content_hash': current_member.content_hash,
+            'branch_id': current_member.branch_id,
+            'finality_status': 'completed',
+        })
+
+    body = '\n\n'.join(rendered)
+    return MaterializedSource(
+        body=body,
+        source_token_estimate=int(estimate_tokens_heuristic_cjk1_ascii4_v1(body)),
+        source_fingerprint=_sha256(fingerprints),
+        source_refs=tuple(member.source_ref for member in selected),
+    )
+
+
 def materialize_candidate(
     snapshot: SourceSnapshot,
     candidate: CandidateBlock,
