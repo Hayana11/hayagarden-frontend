@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -27,6 +28,7 @@ import cc_resident
 import config_store
 from chat import context_window as cw
 from chat import daily_context as dc
+from chat import daily_history as dh
 from chat import daily_runtime as dr
 from chat.daily_context import ConflictError, DeferredError
 from chat.session_registry import (
@@ -36,6 +38,11 @@ from chat.session_registry import (
     register_context_claude_session,
 )
 from chat.system_builder import build_cc_daily_static_parts, build_cc_static_parts
+from continuity.sources import (
+    build_source_members,
+    derive_autonomous_events,
+    derive_completed_turns,
+)
 from tools.cc_jsonl_usage import session_jsonl_path
 from tools.execution_fence import evaluate_tool_call
 
@@ -2721,9 +2728,11 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         ))
         self.assertIsNone(plan.transcript_observation_error_code)
         aid = dr.persist_daily_assistant_for_plan(plan, content='blocked-map reply')
-        out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='blocked-map reply',
-        )
+        with mock.patch.object(dr, 'note_same_context_last_good') as note_last_good:
+            out = dr.handle_provider_success(
+                plan, assistant_message_id=aid, raw_text='blocked-map reply',
+            )
+        note_last_good.assert_not_called()
         self.assertEqual(out['transcript_mapping_status'], 'BLOCKED')
         self.assertIsNotNone(out['transcript_mapping_error_code'])
         self.assertEqual(int(out['transcript_mapping_event_count']), 0)
@@ -3708,6 +3717,838 @@ class ContinuityShadowObservationTests(unittest.TestCase):
             self.assertEqual(
                 self._observations(log)[-1]['error_code'],
                 'budget_policy_unmapped',
+            )
+        finally:
+            os.unlink(db)
+
+
+class ContextPlanConsumerTests(unittest.TestCase):
+    @staticmethod
+    def _context_plan_runtime_db():
+        db = _tmp_db()
+        _init_chat_messages(db)
+        conn = sqlite3.connect(db)
+        for column, definition in (
+            ('branches', 'TEXT DEFAULT ""'),
+            ('branch_idx', 'INTEGER DEFAULT 0'),
+            ('attachments', 'TEXT DEFAULT ""'),
+            ('file_url', 'TEXT DEFAULT ""'),
+            ('file_name', 'TEXT DEFAULT ""'),
+        ):
+            conn.execute(
+                'ALTER TABLE chat_messages ADD COLUMN %s %s' % (
+                    column, definition,
+                )
+            )
+        conn.commit()
+        conn.close()
+        from continuity.store import ensure_schema as ensure_continuity_schema
+        conn = sqlite3.connect(db)
+        ensure_continuity_schema(conn)
+        conn.close()
+        return db
+
+    def _fake_context_plan(self, member=None, *, representation_kind='raw'):
+        if member is None:
+            member = types.SimpleNamespace(
+                seq=0,
+                source_ref='turn:1:2',
+                source_revision='rev-turn',
+                source_kind='completed_turn',
+                content_hash='hash-turn',
+                span_start=None,
+                span_end=None,
+                branch_id='active-transcript',
+            )
+        representation = types.SimpleNamespace(
+            representation_id='raw:one',
+            kind=representation_kind,
+            source_members=(member,),
+            estimated_tokens=4,
+        )
+        current_request = types.SimpleNamespace(
+            kind='current_request',
+            source_ref='message:3',
+            content_hash='hash-current',
+            estimated_tokens=1,
+        )
+        return types.SimpleNamespace(
+            plan_id='plan:one',
+            plan_hash='plan-hash-one',
+            source_hash='source-hash-one',
+            source_members=(member,),
+            representations=(representation,),
+            ordered_sections=(current_request,),
+            budget_policy=types.SimpleNamespace(recent_raw_target=1),
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            budget_status='fit',
+            valid=True,
+            token_budget=100,
+            reserve_budget=2,
+            selected_token_estimate=4,
+            fixed_section_token_estimate=1,
+            total_token_estimate=7,
+            remaining_budget=93,
+            gaps=(),
+            exclusions=(),
+        )
+
+    def test_gate_reads_existing_key_and_defaults_closed(self):
+        with mock.patch.object(
+            config_store,
+            'get',
+            side_effect=lambda key, default='': (
+                '1' if key == 'CONTEXT_PLAN_CONSUMER_ENABLED' else default
+            ),
+        ):
+            self.assertTrue(dr._context_plan_consumer_enabled())
+        with mock.patch.object(
+            config_store,
+            'get',
+            return_value='0',
+        ):
+            self.assertFalse(dr._context_plan_consumer_enabled())
+
+    def test_gate_imports_config_store_when_not_preloaded(self):
+        saved = sys.modules.pop('config_store', None)
+        try:
+            fresh_config_store = importlib.import_module('config_store')
+            with mock.patch.object(
+                fresh_config_store,
+                'get',
+                return_value='1',
+            ):
+                self.assertTrue(dr._context_plan_consumer_enabled())
+        finally:
+            sys.modules.pop('config_store', None)
+            if saved is not None:
+                sys.modules['config_store'] = saved
+
+    def test_gate_on_cold_and_respawn_disables_legacy_replay(self):
+        for is_cold, is_respawn, turn_kind in (
+            (True, False, 'cold'),
+            (False, True, 'respawn'),
+        ):
+            assembly = {'manifest': {}, 'current_day_history': []}
+            fake_plan = self._fake_context_plan()
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=True,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ) as build_context, mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+                return_value=(fake_plan, {}),
+            ), mock.patch.object(
+                dr,
+                '_project_context_plan_history',
+                return_value=assembly,
+            ):
+                dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=is_cold,
+                    is_respawn=is_respawn,
+                    turn_kind=turn_kind,
+                    cursor_before=None,
+                    resident=None,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+            kwargs = build_context.call_args.kwargs
+            self.assertFalse(kwargs['inject_handoff'])
+            self.assertFalse(kwargs['inject_carryover'])
+            self.assertEqual(kwargs['history_override'], [])
+
+    def test_gate_off_cold_and_respawn_keep_legacy_assembly_contract(self):
+        for is_cold, is_respawn, turn_kind in (
+            (True, False, 'cold'),
+            (False, True, 'respawn'),
+        ):
+            assembly = {'manifest': {}, 'current_day_history': []}
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=False,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ) as build_context, mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+            ) as build_plan:
+                plan = dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=is_cold,
+                    is_respawn=is_respawn,
+                    turn_kind=turn_kind,
+                    cursor_before=None,
+                    resident=None,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+            kwargs = build_context.call_args.kwargs
+            self.assertTrue(kwargs['inject_handoff'])
+            self.assertTrue(kwargs['inject_carryover'])
+            self.assertNotIn('history_override', kwargs)
+            self.assertIsNone(plan.continuity_plan)
+            build_plan.assert_not_called()
+
+    def test_gate_on_hot_and_capacity_keep_original_authority(self):
+        for turn_kind in ('hot', 'capacity_swap'):
+            assembly = {'manifest': {}, 'current_day_history': []}
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=True,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ) as build_context, mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+            ) as build_plan:
+                plan = dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=False,
+                    is_respawn=False,
+                    turn_kind=turn_kind,
+                    cursor_before=2,
+                    resident=None,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+            kwargs = build_context.call_args.kwargs
+            self.assertFalse(kwargs['inject_handoff'])
+            self.assertFalse(kwargs['inject_carryover'])
+            self.assertNotIn('history_override', kwargs)
+            self.assertIsNone(plan.continuity_plan)
+            build_plan.assert_not_called()
+
+    def test_gate_on_ready_chunk_projection_has_no_raw_duplicate(self):
+        plan = types.SimpleNamespace(
+            db_path='production.db',
+            user_message_id=3,
+            assembly={
+                'layers': [],
+                'current_day_history': [],
+                'carryover_messages': [],
+                'day_handoff': '',
+                'day_handoff_content': {
+                    'open_loops': ['must not replay full handoff'],
+                },
+            },
+            user_content='current request',
+        )
+        representation = types.SimpleNamespace(
+            representation_id='chunk:ready',
+            kind='chunk',
+            chunk_id='chunk:ready',
+            source_members=(types.SimpleNamespace(source_ref='turn:1:2'),),
+        )
+        context_plan = types.SimpleNamespace(
+            representations=(representation,),
+            ordered_sections=(types.SimpleNamespace(
+                kind='older_continuity',
+                source_ref='chunk:ready',
+                content_hash='chunk-hash',
+                estimated_tokens=3,
+            ), types.SimpleNamespace(
+                kind='current_request',
+                source_ref='message:3',
+                content_hash='current-hash',
+                estimated_tokens=1,
+            )),
+        )
+        assembly = dr._project_context_plan_history(
+            plan,
+            context_plan=context_plan,
+            chunk_bodies={'chunk:ready': 'sealed chunk body'},
+        )
+        self.assertEqual(
+            [item['message_id'] for item in assembly['current_day_history']],
+            [0],
+        )
+        self.assertEqual(
+            [item['body'] for item in assembly['context_plan_representation_blocks']],
+            ['sealed chunk body'],
+        )
+        content = dr.format_resident_turn_content(
+            assembly=assembly,
+            user_content=plan.user_content,
+            is_cold=True,
+            is_respawn=False,
+        )
+        self.assertEqual(content.count('sealed chunk body'), 1)
+        self.assertNotIn('must not replay full handoff', content)
+        self.assertEqual(content.count('current request'), 1)
+
+    def test_gate_on_unavailable_corrupt_and_invalid_budget_block_before_send(self):
+        cases = (
+            ('context_plan_store_unavailable',
+             types.SimpleNamespace(status='unavailable', artifacts=())),
+            ('context_plan_store_corrupt',
+             types.SimpleNamespace(status='corrupt', artifacts=())),
+        )
+        for error_code, surface in cases:
+            resident = _FakeResident()
+            assembly = {'manifest': {}, 'current_day_history': []}
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=True,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ), mock.patch.object(
+                dr,
+                '_context_plan_policy',
+                return_value=(types.SimpleNamespace(), 'policy-v1'),
+            ), mock.patch(
+                'continuity.store.read_ready_surface',
+                return_value=surface,
+            ), mock.patch.object(
+                dr,
+                '_observe_continuity_shadow',
+            ) as observe_shadow:
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    dr._assemble_plan(
+                        req_id='request-1',
+                        owner='owner-1',
+                        chat_id='default',
+                        local_day='2026-07-27',
+                        refreshed={
+                            'id': 7,
+                            'context_epoch': 3,
+                            'resident_generation': 1,
+                        },
+                        user_message_id=3,
+                        user_content='current',
+                        is_cold=True,
+                        is_respawn=False,
+                        turn_kind='cold',
+                        cursor_before=None,
+                        resident=resident,
+                        static_system='STATIC',
+                        static_system_sha256='',
+                        persona_sha256='',
+                        provider='claude_code',
+                        model='model-1',
+                        db_path='production.db',
+                        lease_acquired=True,
+                        turn_lease={},
+                    )
+            self.assertEqual(raised.exception.error_code, error_code)
+            self.assertEqual(resident.sent, [])
+            observe_shadow.assert_not_called()
+
+        resident = _FakeResident()
+        with mock.patch.object(
+            dr,
+            '_context_plan_consumer_enabled',
+            return_value=True,
+        ), mock.patch.object(
+            dh,
+            'build_daily_window_context',
+            return_value={'manifest': {}, 'current_day_history': []},
+        ), mock.patch.object(
+            dr,
+            '_context_plan_policy',
+            side_effect=ValueError('invalid budget'),
+        ), mock.patch.object(dr, '_observe_continuity_shadow') as observe_shadow:
+            with self.assertRaises(ValueError):
+                dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=True,
+                    is_respawn=False,
+                    turn_kind='cold',
+                    cursor_before=None,
+                    resident=resident,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+        self.assertEqual(resident.sent, [])
+        observe_shadow.assert_not_called()
+
+    def test_production_plan_binds_only_strict_validated_ready_artifacts(self):
+        artifact = types.SimpleNamespace(
+            chunk_id='chunk:validated',
+            artifact_revision='artifact-revision',
+            body_hash='body-hash',
+            body='validated body',
+        )
+        representation = types.SimpleNamespace(
+            kind='chunk',
+            chunk_id='chunk:validated',
+            provenance=(
+                ('artifact_revision', 'artifact-revision'),
+                ('body_hash', 'body-hash'),
+            ),
+        )
+        context_plan = types.SimpleNamespace(
+            plan_id='plan:' + ('a' * 32),
+            plan_hash='a' * 64,
+            source_hash='b' * 64,
+            valid=True,
+            representations=(representation,),
+        )
+        result = types.SimpleNamespace(plan=context_plan)
+        plan = types.SimpleNamespace(
+            db_path='production.db',
+            user_message_id=3,
+            assembly={'state': '', 'day_handoff_content': None},
+        )
+        with mock.patch.object(
+            dr,
+            '_context_plan_policy',
+            return_value=(types.SimpleNamespace(), 'policy-v1'),
+        ), mock.patch(
+            'continuity.store.read_ready_surface',
+            return_value=types.SimpleNamespace(
+                status='ready',
+                artifacts=(artifact,),
+            ),
+        ), mock.patch.object(
+            dr,
+            '_build_continuity_shadow_fixed_sections',
+            return_value=(),
+        ), mock.patch(
+            'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+            return_value=result,
+        ) as adapter:
+            _plan, bodies = dr._build_production_context_plan(
+                plan,
+                resident=types.SimpleNamespace(),
+                static_system='STATIC',
+            )
+        self.assertEqual(bodies, {'chunk:validated': 'validated body'})
+        self.assertEqual(
+            adapter.call_args.kwargs['validated_ready_artifacts'],
+            ({
+                'chunk_id': 'chunk:validated',
+                'artifact_revision': 'artifact-revision',
+                'body_hash': 'body-hash',
+            },),
+        )
+
+    def test_gate_on_cold_and_respawn_empty_send_current_request_once(self):
+        original_get = config_store.get
+        for cold_reprepare in (False, True):
+            db = self._context_plan_runtime_db()
+            try:
+                _insert(db, 'hayana', 'previous user', '2026-07-27 09:00:00')
+                _insert(db, 'assistant', 'previous assistant', '2026-07-27 09:01:00')
+                uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+
+                def _get(key, default=None):
+                    if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                        return '1'
+                    if key == 'CONTEXT_PLAN_TOKEN_BUDGET':
+                        return '1000'
+                    if key == 'CONTEXT_PLAN_RESERVE_BUDGET':
+                        return '0'
+                    if key == 'CONTEXT_PLAN_RECENT_RAW_TARGET':
+                        return '100'
+                    return original_get(key, default)
+
+                resident = _FakeResident()
+                with mock.patch.object(config_store, 'get', side_effect=_get):
+                    plan = _prepare_turn(
+                        db,
+                        uid,
+                        resident=resident,
+                        static_system='STATIC',
+                        _cold_reprepare=cold_reprepare,
+                    )
+                    events = list(dr.stream_daily_resident_turn(
+                        plan,
+                        resident=resident,
+                        env={},
+                        static_system='STATIC',
+                    ))
+                self.assertTrue(any(evt == 'done' for evt, _payload in events))
+                self.assertEqual(len(resident.sent), 1)
+                self.assertEqual(resident.sent[0].count('current request'), 1)
+                self.assertEqual(plan.manifest['context_plan_consumer'], 'canonical')
+                self.assertEqual(plan.manifest['context_plan_fixed_section_parity'], 'PASS')
+            finally:
+                os.unlink(db)
+
+    def test_gate_off_cold_and_respawn_real_send_once(self):
+        original_get = config_store.get
+        for cold_reprepare in (False, True):
+            db = self._context_plan_runtime_db()
+            try:
+                _insert(db, 'hayana', 'previous user', '2026-07-27 09:00:00')
+                _insert(db, 'assistant', 'previous assistant', '2026-07-27 09:01:00')
+                uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+
+                def _get(key, default=None):
+                    if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                        return '0'
+                    return original_get(key, default)
+
+                resident = _FakeResident()
+                with mock.patch.object(config_store, 'get', side_effect=_get):
+                    plan = _prepare_turn(
+                        db,
+                        uid,
+                        resident=resident,
+                        static_system='STATIC',
+                        _cold_reprepare=cold_reprepare,
+                    )
+                    events = list(dr.stream_daily_resident_turn(
+                        plan,
+                        resident=resident,
+                        env={},
+                        static_system='STATIC',
+                    ))
+                self.assertTrue(any(evt == 'done' for evt, _payload in events))
+                self.assertEqual(len(resident.sent), 1)
+                self.assertIn('previous assistant', resident.sent[0])
+                self.assertEqual(resident.sent[0].count('current request'), 1)
+                self.assertIsNone(plan.continuity_plan)
+            finally:
+                os.unlink(db)
+
+    def test_projection_uses_selected_raw_and_excludes_current_request(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'old user', '2026-07-27 09:00:00')
+            _insert(db, 'assistant', 'old reply', '2026-07-27 09:01:00')
+            _insert(db, 'hayana', 'current', '2026-07-27 09:02:00')
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute('SELECT * FROM chat_messages ORDER BY id').fetchall()
+            conn.close()
+            members = build_source_members(
+                derive_completed_turns(rows[:2]),
+                derive_autonomous_events(rows[:2]),
+            )
+            plan = types.SimpleNamespace(
+                db_path=db,
+                user_message_id=3,
+                assembly={'layers': [], 'current_day_history': []},
+            )
+            assembly = dr._project_context_plan_history(
+                plan,
+                context_plan=self._fake_context_plan(members[0]),
+                chunk_bodies={},
+            )
+            self.assertEqual(
+                [item['message_id'] for item in assembly['current_day_history']],
+                [1, 2],
+            )
+            self.assertNotIn(3, {
+                int(item['message_id'])
+                for item in assembly['current_day_history']
+            })
+        finally:
+            os.unlink(db)
+
+    def test_durable_receipt_carries_plan_hash(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            plan = types.SimpleNamespace(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                db_path=db,
+                user_message_id=3,
+                transcript_claude_session_id='session-1',
+                transcript_process_generation=1,
+                manifest={
+                    'transcript_mapping_status': 'MAPPED',
+                    'provider': 'claude_code',
+                    'model': 'model-1',
+                    'assistant_message_id': 4,
+                    'cursor_after': 4,
+                    'cursor_cas_success': True,
+                    'context_receipt_last_good_proven': True,
+                },
+                continuity_plan=self._fake_context_plan(),
+            )
+            with mock.patch.object(
+                dc,
+                'get_resident_history_cursor',
+                return_value=4,
+            ), mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': 100,
+                },
+            ):
+                plan.transcript_start_offset = 10
+                plan.transcript_end_offset = 100
+                plan._same_context_last_good_proven = True
+                self.assertTrue(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=4,
+                    )
+                )
+            from chat.context_receipt import get_receipt
+            conn = sqlite3.connect(db)
+            receipt = get_receipt(
+                conn,
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+            )
+            conn.close()
+            self.assertIsNotNone(receipt)
+            self.assertEqual(receipt.plan_hash, 'plan-hash-one')
+            self.assertEqual(receipt.installed_source_watermark, 4)
+        finally:
+            os.unlink(db)
+
+    def test_gate_on_raw_projection_preserves_canonical_tool_outcomes(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'formal user', '2026-07-27 09:00:00')
+            assistant_id = _insert(
+                db, 'assistant', 'assistant body', '2026-07-27 09:01:00',
+            )
+            _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+            conn = sqlite3.connect(db)
+            conn.execute(
+                'UPDATE chat_messages SET tool_calls=? WHERE id=?',
+                (json.dumps([{
+                    'name': 'mcp__home__get_todos',
+                    'args': {'limit': 3},
+                    'result': {'ok': True, 'items': ['one']},
+                    'success': True,
+                    'artifact': None,
+                    'diff': None,
+                }], ensure_ascii=False), assistant_id),
+            )
+            conn.commit()
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute('SELECT * FROM chat_messages ORDER BY id').fetchall()
+            conn.close()
+            members = build_source_members(
+                derive_completed_turns(rows[:2]),
+                derive_autonomous_events(rows[:2]),
+            )
+            plan = types.SimpleNamespace(
+                db_path=db,
+                user_message_id=3,
+                user_content='current request',
+                assembly={'layers': [], 'current_day_history': []},
+            )
+            assembly = dr._project_context_plan_history(
+                plan,
+                context_plan=self._fake_context_plan(members[0]),
+                chunk_bodies={},
+            )
+            content = dr.format_resident_turn_content(
+                assembly=assembly,
+                user_content=plan.user_content,
+                is_cold=True,
+                is_respawn=False,
+            )
+            self.assertIn('USER:', content)
+            self.assertIn('formal user', content)
+            self.assertIn('ASSISTANT:', content)
+            self.assertIn('assistant body', content)
+            self.assertIn('TOOL OUTCOME:', content)
+            self.assertIn('mcp__home__get_todos', content)
+            self.assertIn('"ok":true', content)
+            self.assertEqual(content.count('current request'), 1)
+        finally:
+            os.unlink(db)
+
+    def _receipt_plan(self, db, *, proof=True):
+        _init_chat_messages(db)
+        manifest = {
+            'transcript_mapping_status': 'MAPPED',
+            'provider': 'claude_code',
+            'model': 'model-1',
+            'assistant_message_id': 4,
+            'cursor_after': 4,
+            'cursor_cas_success': True,
+            'context_receipt_last_good_proven': bool(proof),
+        }
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            db_path=db,
+            user_message_id=3,
+            transcript_claude_session_id='session-1',
+            transcript_process_generation=1,
+            transcript_start_offset=10,
+            transcript_end_offset=100,
+            manifest=manifest,
+            continuity_plan=self._fake_context_plan(),
+        )
+        plan._same_context_last_good_proven = bool(proof)
+        return plan
+
+    def test_receipt_requires_current_last_good_proof_without_resend(self):
+        db = _tmp_db()
+        try:
+            plan = self._receipt_plan(db, proof=False)
+            with mock.patch.object(dc, 'get_resident_history_cursor', return_value=4), \
+                 mock.patch.object(dr, 'get_same_context_last_good', return_value=None):
+                self.assertFalse(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=4,
+                    )
+                )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'REPAIR_REQUIRED')
+            self.assertEqual(
+                plan.manifest['context_receipt_error_code'],
+                'context_receipt_last_good_unproven',
+            )
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM context_receipts').fetchone()[0],
+                0,
+            )
+            conn.close()
+        finally:
+            os.unlink(db)
+
+    def test_receipt_rejects_missing_cursor_after_without_resend(self):
+        db = _tmp_db()
+        try:
+            plan = self._receipt_plan(db)
+            plan.manifest['cursor_after'] = None
+            plan.manifest['cursor_cas_success'] = False
+            self.assertFalse(
+                dr._commit_production_context_receipt(
+                    plan,
+                    assistant_message_id=4,
+                )
+            )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'REPAIR_REQUIRED')
+            self.assertEqual(
+                plan.manifest['context_receipt_error_code'],
+                'context_receipt_cursor_unavailable',
+            )
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM context_receipts').fetchone()[0],
+                0,
+            )
+            conn.close()
+        finally:
+            os.unlink(db)
+
+    def test_receipt_commit_failure_does_not_trigger_resend(self):
+        db = _tmp_db()
+        try:
+            plan = self._receipt_plan(db)
+            with mock.patch.object(dc, 'get_resident_history_cursor', return_value=4), \
+                 mock.patch.object(
+                     dr,
+                     'get_same_context_last_good',
+                     return_value={
+                         'context_id': 7,
+                         'context_epoch': 3,
+                         'resident_generation': 1,
+                         'claude_session_id': 'session-1',
+                         'transcript_end_offset': 100,
+                     },
+                 ), mock.patch.object(
+                     dc,
+                     '_connect',
+                     side_effect=sqlite3.OperationalError('commit unavailable'),
+                 ):
+                self.assertFalse(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=4,
+                    )
+                )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'REPAIR_REQUIRED')
+            self.assertTrue(plan.manifest['context_receipt_repair_required'])
+            self.assertEqual(
+                plan.manifest['context_receipt_error_code'],
+                'context_receipt_unavailable',
             )
         finally:
             os.unlink(db)
