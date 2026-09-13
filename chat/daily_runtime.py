@@ -6164,26 +6164,24 @@ def ensure_resident_and_stream(
             # Post-flush: CURRENT user already sent → fail closed, never resend.
             if bool(getattr(plan, '_current_user_stdin_flushed', False)):
                 raise
-            # Pre-flush CapSwap failure: restore old live, then continue frozen
-            # fallback (last-good → cold) so CURRENT user can still send once.
+            # Pre-flush CapSwap failure: restore old live. Gate-on split
+            # carrier stops here; gate-off retains the frozen fallback order.
             rolled = _rollback_capacity_swap_if_unflushed(plan, resident=resident)
             if not rolled:
                 raise
             if _is_capacity_context_plan(plan):
                 heartbeat.stop()
+                capacity_error = str(
+                    getattr(exc, 'error_code', None)
+                    or 'context_plan_capacity_pre_send_failed'
+                )
                 plan.manifest.update({
                     'capacity_swap_pre_flush_blocked': True,
-                    'capacity_swap_pre_flush_error_code': str(
-                        getattr(exc, 'error_code', None)
-                        or type(exc).__name__
-                    ),
+                    'capacity_swap_pre_flush_error_code': capacity_error,
                 })
                 raise DailyRuntimeError(
                     'gate-on Capacity ContextPlan carrier failed before stdin',
-                    error_code=str(
-                        getattr(exc, 'error_code', None)
-                        or 'context_plan_capacity_pre_send_failed'
-                    ),
+                    error_code=capacity_error,
                     retryable=False,
                 ) from exc
             logger.info(
