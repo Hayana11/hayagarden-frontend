@@ -461,6 +461,7 @@ def format_resident_turn_content(
 
     time_anchor = str(reality_time_anchor or '').strip()
     prefix_parts: list[str] = []
+    open_loops = ''
     if cold_like or capacity_bootstrap:
         if cold_like:
             handoff = str(assembly.get('day_handoff') or '').strip()
@@ -486,6 +487,31 @@ def format_resident_turn_content(
     canonical_history = _format_context_plan_representation_blocks(
         context_plan_blocks,
     )
+    if capacity_bootstrap or context_plan_blocks:
+        fixed_carrier_kinds = tuple(
+            kind for kind, value in (
+                ('accepted_open_loops', open_loops),
+                ('accepted_state', state_text),
+            )
+            if value
+        )
+        assembly['_context_install_carriers'] = {
+            'representation_ids': tuple(
+                str(block.get('representation_id') or '')
+                for block in context_plan_blocks
+                if isinstance(block, dict)
+            ),
+            'representation_body_hashes': tuple(
+                _sha256_text(str(block.get('body') or '').strip())
+                for block in context_plan_blocks
+                if isinstance(block, dict)
+            ),
+            'fixed_section_kinds': fixed_carrier_kinds,
+            'current_request_slots': 1,
+            'current_request_carrier': 'tail',
+        }
+    else:
+        assembly.pop('_context_install_carriers', None)
     prefix = NL.join(p for p in prefix_parts if p)
     if (cold_like or capacity_bootstrap) and canonical_history:
         body = (
@@ -2802,6 +2828,8 @@ def _validate_production_context_install(
     """Fail closed unless the consumed plan is the provider-visible install."""
     context_plan = _context_plan_for_receipt(plan)
     capacity_split = _is_capacity_context_plan(plan)
+    if capacity_split:
+        plan.manifest['capacity_context_install_parity'] = 'PENDING'
     if context_plan is None:
         raise DailyRuntimeError(
             'production ContextPlan is missing',
@@ -2963,7 +2991,43 @@ def _validate_production_context_install(
             'ContextPlan representation install is incomplete',
             error_code='context_plan_representation_parity_failed',
         )
-    provider_text = _provider_content_text(content)
+
+    carriers = assembly.get('_context_install_carriers')
+    if not isinstance(carriers, dict):
+        raise DailyRuntimeError(
+            'ContextPlan structural carrier proof is missing',
+            error_code='context_plan_current_request_parity_failed',
+        )
+    try:
+        current_request_slots = int(
+            carriers.get('current_request_slots', 0) or 0
+        )
+    except (TypeError, ValueError):
+        current_request_slots = 0
+    if (
+        current_request_slots != 1
+        or str(carriers.get('current_request_carrier') or '') != 'tail'
+    ):
+        raise DailyRuntimeError(
+            'current request structural carrier is not exactly once',
+            error_code='context_plan_current_request_parity_failed',
+        )
+
+    expected_representation_ids = tuple(
+        str(getattr(representation, 'representation_id', '') or '')
+        for representation in expected_blocks
+    )
+    installed_representation_ids = tuple(
+        str(value or '')
+        for value in (carriers.get('representation_ids') or ())
+    )
+    if installed_representation_ids != expected_representation_ids:
+        raise DailyRuntimeError(
+            'ContextPlan representation carrier identity does not match install',
+            error_code='context_plan_representation_parity_failed',
+        )
+
+    expected_body_hashes = []
     for block, representation in zip(blocks, expected_blocks):
         if (
             not isinstance(block, dict)
@@ -2976,10 +3040,49 @@ def _validate_production_context_install(
                 error_code='context_plan_representation_parity_failed',
             )
         body = str(block.get('body') or '').strip()
-        if not body or provider_text.count(body) != 1:
+        if not body:
             raise DailyRuntimeError(
-                'ContextPlan representation body is not installed exactly once',
+                'ContextPlan representation body is not installed',
                 error_code='context_plan_representation_parity_failed',
+            )
+        if capacity_split and str(
+            getattr(representation, 'kind', '') or ''
+        ) == 'chunk':
+            expected_body = _context_plan_chunk_bodies(plan).get(
+                str(getattr(representation, 'chunk_id', '') or '')
+            )
+            if expected_body is not None and body != str(expected_body).strip():
+                raise DailyRuntimeError(
+                    'ContextPlan chunk body does not match install',
+                    error_code='context_plan_representation_parity_failed',
+                )
+        expected_body_hashes.append(_sha256_text(body))
+
+    installed_body_hashes = tuple(
+        str(value or '')
+        for value in (carriers.get('representation_body_hashes') or ())
+    )
+    if tuple(expected_body_hashes) != installed_body_hashes:
+        raise DailyRuntimeError(
+            'ContextPlan representation carrier body proof does not match install',
+            error_code='context_plan_representation_parity_failed',
+        )
+
+    if capacity_split:
+        if assembly.get('current_day_history'):
+            raise DailyRuntimeError(
+                'Capacity current request has a second history carrier',
+                error_code='context_plan_current_request_parity_failed',
+            )
+        current_source_ref = 'message:%d' % int(plan.user_message_id)
+        if (
+            plan.manifest.get('capacity_context_current_user_in_candidate')
+            is not False
+            or current_source_ref in raw_refs
+        ):
+            raise DailyRuntimeError(
+                'current user is present in Capacity forged JSONL',
+                error_code='context_plan_capacity_current_user_in_candidate',
             )
 
     state_text = str(assembly.get('state') or '').strip()
@@ -3017,19 +3120,23 @@ def _validate_production_context_install(
             'accepted open-loops install does not match ContextPlan proof',
             error_code='context_plan_fixed_section_parity_failed',
         )
-    if open_loops_text and provider_text.count(open_loops_text) != 1:
+
+    expected_fixed_carrier_kinds = tuple(
+        kind for kind, value in (
+            ('accepted_open_loops', open_loops_text),
+            ('accepted_state', state_text),
+        )
+        if value
+    )
+    installed_fixed_carrier_kinds = tuple(
+        str(value or '')
+        for value in (carriers.get('fixed_section_kinds') or ())
+    )
+    if installed_fixed_carrier_kinds != expected_fixed_carrier_kinds:
         raise DailyRuntimeError(
-            'accepted open-loops content is not installed exactly once',
+            'ContextPlan fixed carrier identity does not match install',
             error_code='context_plan_fixed_section_parity_failed',
         )
-
-    user_text = str(plan.user_content or '')
-    if user_text.strip() and user_text.strip() != '[image]':
-        if provider_text.count(user_text) != 1:
-            raise DailyRuntimeError(
-                'current request is not installed exactly once',
-                error_code='context_plan_current_request_parity_failed',
-            )
 
     plan.manifest.update({
         'context_plan_fixed_section_parity': 'PASS',
@@ -3037,6 +3144,9 @@ def _validate_production_context_install(
         'context_plan_current_request_count': 1,
         'context_plan_provider_content_hash': _continuity_shadow_fingerprint(content)[0],
     })
+    if capacity_split:
+        plan.manifest['capacity_context_install_parity'] = 'PASS'
+
 
 
 def _observe_production_context_plan(
@@ -4805,6 +4915,72 @@ def _rollback_capacity_swap_if_unflushed(
     plan.manifest['capacity_swap_pre_flush_rollback'] = True
     return True
 
+def _raise_capacity_pre_send_failure(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    exc: Exception,
+) -> None:
+    """Rollback a staged Capacity target before surfacing a pre-send failure."""
+    if not _is_capacity_context_plan(plan):
+        raise exc
+    manifest = getattr(plan, 'manifest', None)
+    if not isinstance(manifest, dict):
+        manifest = {}
+        plan.manifest = manifest
+    if bool(getattr(plan, '_current_user_stdin_flushed', False)):
+        raise exc
+    if not getattr(plan, '_capacity_swap_install_state', None):
+        raise exc
+    if (
+        manifest.get('capacity_swap_pre_flush_blocked')
+        or manifest.get('capacity_swap_pre_flush_rollback_unproven')
+    ):
+        raise exc
+
+    error_code = str(
+        getattr(exc, 'error_code', None)
+        or 'context_plan_capacity_pre_send_failed'
+    )
+    try:
+        rolled = _rollback_capacity_swap_if_unflushed(
+            plan,
+            resident=resident,
+        )
+    except Exception as rollback_exc:
+        manifest.update({
+            'capacity_swap_pre_flush_rollback_unproven': True,
+            'capacity_swap_pre_flush_error_code': error_code,
+            'capacity_swap_pre_flush_rollback_error_code': (
+                type(rollback_exc).__name__
+            ),
+        })
+        raise DailyRuntimeError(
+            'gate-on Capacity ContextPlan rollback could not be proven',
+            error_code='context_plan_capacity_rollback_unproven',
+            retryable=False,
+        ) from rollback_exc
+    if not rolled:
+        manifest.update({
+            'capacity_swap_pre_flush_rollback_unproven': True,
+            'capacity_swap_pre_flush_error_code': error_code,
+        })
+        raise DailyRuntimeError(
+            'gate-on Capacity ContextPlan rollback could not be proven',
+            error_code='context_plan_capacity_rollback_unproven',
+            retryable=False,
+        ) from exc
+
+    manifest.update({
+        'capacity_swap_pre_flush_blocked': True,
+        'capacity_swap_pre_flush_error_code': error_code,
+    })
+    raise DailyRuntimeError(
+        'gate-on Capacity ContextPlan carrier failed before stdin',
+        error_code=error_code,
+        retryable=False,
+    ) from exc
+
 
 def _commit_capacity_swap_after_stdin_flush(plan: DailyTurnPlan) -> None:
     """After successful stdin flush: lock exactly-once and close deferred old proc."""
@@ -6171,24 +6347,15 @@ def ensure_resident_and_stream(
                 raise
             # Pre-flush CapSwap failure: restore old live. Gate-on split
             # carrier stops here; gate-off retains the frozen fallback order.
+            if _is_capacity_context_plan(plan):
+                _raise_capacity_pre_send_failure(
+                    plan,
+                    resident=resident,
+                    exc=exc,
+                )
             rolled = _rollback_capacity_swap_if_unflushed(plan, resident=resident)
             if not rolled:
                 raise
-            if _is_capacity_context_plan(plan):
-                heartbeat.stop()
-                capacity_error = str(
-                    getattr(exc, 'error_code', None)
-                    or 'context_plan_capacity_pre_send_failed'
-                )
-                plan.manifest.update({
-                    'capacity_swap_pre_flush_blocked': True,
-                    'capacity_swap_pre_flush_error_code': capacity_error,
-                })
-                raise DailyRuntimeError(
-                    'gate-on Capacity ContextPlan carrier failed before stdin',
-                    error_code=capacity_error,
-                    retryable=False,
-                ) from exc
             logger.info(
                 'capacity swap pre-flush send failed (%s); continuing last-good→cold fallback',
                 type(exc).__name__,
@@ -6250,6 +6417,14 @@ def ensure_resident_and_stream(
         if heartbeat.stop():
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)
             raise LeaseHeartbeatTerminalFailure('lease heartbeat failed after stream')
+    except Exception as exc:
+        if _is_capacity_context_plan(plan):
+            _raise_capacity_pre_send_failure(
+                plan,
+                resident=resident,
+                exc=exc,
+            )
+        raise
     finally:
         heartbeat.stop()
         if heartbeat.failed:
