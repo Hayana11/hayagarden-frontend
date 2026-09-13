@@ -3695,6 +3695,81 @@ class ContinuityShadowObservationTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+
+    def test_fixed_sections_use_full_semantic_state_snapshot_not_hot_delta(self):
+        from chat.persona_state_semantic import (
+            format_persona_semantic_snapshot,
+            translate_raw_state_to_persona_semantic,
+        )
+
+        plan = types.SimpleNamespace(
+            assembly={
+                'state': '【此刻有一点变化】\\n旧 transport delta',
+                'state_snapshot': {
+                    'emotion': 'mood=平静',
+                    'drive': 'fatigue=0.10 stress=0.10',
+                },
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='FALLBACK',
+        )
+        accepted = next(section for section in sections if section.kind == 'accepted_state')
+        expected = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(plan.assembly['state_snapshot']),
+        )
+        self.assertEqual(accepted.content_hash, hashlib.sha256(expected.encode()).hexdigest())
+        self.assertNotEqual(accepted.content_hash, hashlib.sha256(
+            plan.assembly['state'].encode(),
+        ).hexdigest())
+
+    def test_production_fixed_sections_do_not_fallback_to_hot_delta(self):
+        plan = types.SimpleNamespace(
+            assembly={
+                'state': 'HOT DELTA ONLY',
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='FALLBACK',
+            require_full_state_snapshot=True,
+        )
+        self.assertNotIn('accepted_state', [section.kind for section in sections])
+
+    def test_hot_transport_keeps_delta_or_empty_without_replaying_snapshot(self):
+        from chat.persona_state_semantic import (
+            format_persona_semantic_snapshot,
+            translate_raw_state_to_persona_semantic,
+        )
+
+        snapshot = {'emotion': 'mood=平静', 'drive': 'stress=0.10'}
+        full_snapshot = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(snapshot),
+        )
+        empty_payload = dr.format_resident_turn_content(
+            assembly={'state': '', 'state_snapshot': snapshot},
+            user_content='hello',
+            is_cold=False,
+            is_respawn=False,
+        )
+        delta_payload = dr.format_resident_turn_content(
+            assembly={'state': 'DELTA ONLY', 'state_snapshot': snapshot},
+            user_content='hello',
+            is_cold=False,
+            is_respawn=False,
+        )
+        self.assertEqual(empty_payload, 'hello')
+        self.assertNotIn(full_snapshot, empty_payload)
+        self.assertIn('DELTA ONLY', delta_payload)
+        self.assertNotIn(full_snapshot, delta_payload)
+
     def test_missing_cold_manifest_fails_closed(self):
         db = _tmp_db()
         try:
@@ -3853,6 +3928,299 @@ class ContextPlanConsumerTests(unittest.TestCase):
             'expected_receipt_revision': 0,
         }
         return plan, context_plan, desired_members
+
+
+    @staticmethod
+    def _historical_source(ref, revision=None):
+        revision = revision or ('revision-' + ref)
+        return types.SimpleNamespace(
+            source_ref=ref,
+            source_revision=revision,
+            source_kind='completed_turn',
+            content_hash='content-' + ref,
+            span_start=None,
+            span_end=None,
+            branch_id='active-transcript',
+        )
+
+    @classmethod
+    def _historical_receipt_member(
+        cls,
+        order,
+        ref,
+        *,
+        representation_kind='raw',
+        representation_id='raw:old',
+        revision=None,
+        content_hash=None,
+    ):
+        from chat.context_receipt import ContextReceiptMember
+
+        return ContextReceiptMember(
+            installed_order=order,
+            representation_id=representation_id,
+            representation_kind=representation_kind,
+            source_ref=ref,
+            source_revision=revision or ('revision-' + ref),
+            source_kind='completed_turn',
+            content_hash=content_hash or ('content-' + ref),
+            branch_id='active-transcript',
+        )
+
+    def _assert_hot_historical_respawn(self, installed, desired, tail):
+        compatible, reason = dr._hot_historical_compatibility(
+            receipt_members=tuple(installed),
+            desired_members=tuple(desired),
+            native_tail_member=tail,
+        )
+        self.assertFalse(compatible, reason)
+        self.assertEqual(reason, 'historical_representation_identity_changed'
+                         if any(
+                             left.representation_kind != right.representation_kind
+                             or (
+                                 left.representation_kind == 'chunk'
+                                 and left.representation_id != right.representation_id
+                             )
+                             for left, right in zip(installed, desired)
+                         ) else 'historical_source_members_changed')
+
+    def _state_context_plan(self, snapshot):
+        context_plan = self._fake_hot_context_plan()
+        state_plan = types.SimpleNamespace(
+            assembly={
+                'state': '',
+                'state_snapshot': dict(snapshot),
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        fixed_sections = dr._build_continuity_shadow_fixed_sections(
+            plan=state_plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='STATIC',
+        )
+        current_request = next(
+            section for section in context_plan.ordered_sections
+            if section.kind == 'current_request'
+        )
+        context_plan.ordered_sections = tuple(fixed_sections) + (current_request,)
+        return context_plan
+
+    def _state_hot_reconcile_plan(self, installed_snapshot, desired_snapshot):
+        from chat.context_receipt import ContextReceipt
+
+        desired_context_plan = self._state_context_plan(desired_snapshot)
+        installed_context_plan = self._state_context_plan(installed_snapshot)
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            chat_id='default',
+            worker_id=dr.WORKER_ID,
+            user_message_id=3,
+            manifest={'provider': 'claude_code', 'model': 'model-1'},
+            assembly={
+                'state': '',
+                'state_snapshot': dict(desired_snapshot),
+            },
+            hot_desired_plan=desired_context_plan,
+        )
+        desired_members = dr._context_receipt_members(plan)
+        installed_plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=installed_context_plan,
+        )
+        installed_members = dr._context_receipt_members(installed_plan)
+        receipt = ContextReceipt.build(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            provider='claude_code',
+            model_identity='model-1',
+            session_id='session-1',
+            process_generation=1,
+            plan_id='plan:previous',
+            plan_hash='previous-plan-hash',
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            installed_source_watermark=2,
+            members=installed_members,
+        )
+        plan.hot_receipt_frozen = {
+            'receipt': receipt,
+            'members': installed_members,
+            'receipt_missing': False,
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'expected_receipt_revision': 0,
+        }
+        return plan, desired_context_plan, desired_members
+
+    def test_hot_full_accepted_state_stays_no_op_when_transport_is_unchanged(self):
+        state_a = {'emotion': 'mood=平静', 'drive': 'stress=0.10'}
+        plan, context_plan, _desired_members = self._state_hot_reconcile_plan(
+            state_a,
+            state_a,
+        )
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={
+                'status': 'pass',
+                'source_member': context_plan.source_members[0],
+            },
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'NO_OP')
+
+    def test_hot_full_accepted_state_change_respawns(self):
+        state_a = {'emotion': 'mood=平静', 'drive': 'stress=0.10'}
+        state_b = {'emotion': 'mood=焦虑', 'drive': 'stress=0.80'}
+        plan, _context_plan, _desired_members = self._state_hot_reconcile_plan(
+            state_a,
+            state_b,
+        )
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'fixed_context_plan_mismatch')
+
+    def test_context_receipt_chunk_member_uses_canonical_representation_id(self):
+        context_plan = self._fake_context_plan(representation_kind='chunk')
+        context_plan.representations[0].representation_id = 'chunk:canonical'
+        plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=context_plan,
+        )
+        members = dr._context_receipt_members(plan)
+        self.assertEqual([member.representation_id for member in members], ['chunk:canonical'])
+        self.assertTrue(all(':proof:' not in member.representation_id for member in members))
+
+    def test_raw_native_tail_allows_natural_representation_regroup(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:old'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:old'),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        compatible, reason = dr._hot_historical_compatibility(
+            receipt_members=tuple(installed),
+            desired_members=tuple(desired),
+            native_tail_member=self._historical_source('turn:t'),
+        )
+        self.assertTrue(compatible, reason)
+
+    def test_raw_compatibility_rejects_unproven_extra_member(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
+            self._historical_receipt_member(2, 'turn:x', representation_id='raw:new'),
+            self._historical_receipt_member(3, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_raw_to_chunk_respawns(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+        ]
+        desired = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                2, 'turn:t', representation_id='raw:new',
+            ),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_chunk_to_raw_respawns(self):
+        installed = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_chunk_canonical_representation_change_respawns(self):
+        installed = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+        ]
+        desired = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:two',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:two',
+            ),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_historical_raw_source_change_respawns(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_id='raw:new', revision='revision-b-new',
+            ),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
 
     def test_hot_receipt_members_include_fixed_sections_without_body(self):
         from chat.context_receipt import ContextReceiptMember

@@ -1210,6 +1210,7 @@ def _build_production_context_plan(
         plan=plan,
         resident=resident,
         static_system=static_system,
+        require_full_state_snapshot=True,
     )
     result = build_daily_continuity_shadow_plan(
         source_db_path=store_path,
@@ -1463,54 +1464,6 @@ def _context_plan_for_receipt(plan: DailyTurnPlan) -> Any:
     return getattr(plan, 'hot_desired_plan', None)
 
 
-def _receipt_representation_id(representation: Any) -> str:
-    """Keep chunk artifact identity in the existing metadata-only member key."""
-    representation_id = str(getattr(representation, 'representation_id', '') or '')
-    if str(getattr(representation, 'kind', '') or '') != 'chunk':
-        return representation_id
-    provenance = {
-        str(key): str(value)
-        for key, value in (getattr(representation, 'provenance', ()) or ())
-    }
-    artifact_identity = {
-        'representation_id': representation_id,
-        'chunk_id': str(
-            getattr(representation, 'chunk_id', None)
-            or provenance.get('chunk_id')
-            or ''
-        ),
-        'candidate_id': str(
-            getattr(representation, 'candidate_id', None)
-            or provenance.get('candidate_id')
-            or ''
-        ),
-        'snapshot_id': str(
-            getattr(representation, 'snapshot_id', None)
-            or provenance.get('snapshot_id')
-            or ''
-        ),
-        'source_hash': str(
-            getattr(representation, 'source_hash', None)
-            or provenance.get('source_hash')
-            or ''
-        ),
-        'artifact_revision': str(provenance.get('artifact_revision') or ''),
-        'body_hash': str(provenance.get('body_hash') or ''),
-        'measurement_semantics': str(
-            provenance.get('measurement_semantics') or ''
-        ),
-    }
-    proof_hash = _sha256_text(
-        json.dumps(
-            artifact_identity,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(',', ':'),
-        )
-    )
-    return '%s:proof:%s' % (representation_id, proof_hash[:32])
-
-
 def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
     from chat.context_receipt import ContextReceiptMember
     context_plan = _context_plan_for_receipt(plan)
@@ -1522,7 +1475,7 @@ def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
         for source_member in representation.source_members:
             members.append(ContextReceiptMember(
                 installed_order=order,
-                representation_id=_receipt_representation_id(representation),
+                representation_id=str(representation.representation_id),
                 representation_kind=str(representation.kind),
                 source_ref=str(source_member.source_ref),
                 source_revision=str(source_member.source_revision),
@@ -2156,20 +2109,26 @@ def _hot_historical_compatibility(
     if installed_keys != desired_keys:
         return False, 'historical_source_members_changed'
 
-    installed_by_key = {
-        _receipt_member_source_identity(member): member for member in installed
-    }
-    for desired_member in desired:
-        key = _receipt_member_source_identity(desired_member)
-        existing = installed_by_key.get(key)
+    paired_installed: tuple[Any, ...] = installed
+    if virtual_tail:
+        paired_installed = installed + (None,)
+    if len(paired_installed) != len(desired):
+        return False, 'historical_source_members_changed'
+    for existing, desired_member in zip(paired_installed, desired):
         if existing is None:
             # The only member allowed to be newly proven is the native tail;
             # it is raw native history, not a historical APPEND primitive.
             continue
-        if _receipt_member_identity(existing) != _receipt_member_identity(desired_member):
+        if str(getattr(existing, 'representation_kind', '') or '') != str(
+            getattr(desired_member, 'representation_kind', '') or ''
+        ):
             return False, 'historical_representation_identity_changed'
+        if str(getattr(desired_member, 'representation_kind', '') or '') == 'chunk':
+            if str(getattr(existing, 'representation_id', '') or '') != str(
+                getattr(desired_member, 'representation_id', '') or ''
+            ):
+                return False, 'historical_representation_identity_changed'
     return True, ''
-
 
 def _reconcile_hot_context_plan(
     plan: DailyTurnPlan,
@@ -2637,6 +2596,7 @@ def _validate_production_context_install(
         plan=plan,
         resident=resident,
         static_system=static_system,
+        require_full_state_snapshot=True,
     )
     actual_fixed = tuple(
         section for section in context_plan.ordered_sections
@@ -4469,8 +4429,13 @@ def _build_continuity_shadow_fixed_sections(
     plan: DailyTurnPlan,
     resident: Any,
     static_system: str,
+    require_full_state_snapshot: bool = False,
 ) -> tuple[Any, ...]:
     from continuity.context_plan import ContextSection
+    from chat.persona_state_semantic import (
+        format_persona_semantic_snapshot,
+        translate_raw_state_to_persona_semantic,
+    )
     from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
     resident_system = getattr(resident, '_system_text', '')
@@ -4488,9 +4453,24 @@ def _build_continuity_shadow_fixed_sections(
     ))
 
     assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
-    state = assembly.get('state')
-    if state:
-        state_serialized = state if isinstance(state, str) else _continuity_shadow_canonical(state)
+    state_serialized = ''
+    if 'state_snapshot' in assembly:
+        state_snapshot = assembly.get('state_snapshot')
+        if isinstance(state_snapshot, dict):
+            state_serialized = format_persona_semantic_snapshot(
+                translate_raw_state_to_persona_semantic(state_snapshot),
+            )
+    elif not require_full_state_snapshot:
+        # Legacy shadow/test callers may only have the transport field.  The
+        # production ContextPlan path opts out so a hot delta cannot become a
+        # durable accepted-state identity.
+        state = assembly.get('state')
+        if state:
+            state_serialized = (
+                state if isinstance(state, str)
+                else _continuity_shadow_canonical(state)
+            )
+    if state_serialized:
         state_hash = _sha256_text(state_serialized)
         sections.append(ContextSection(
             kind='accepted_state',
