@@ -271,6 +271,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             snapshot_id TEXT PRIMARY KEY,
             identity_id TEXT NOT NULL,
             chat_id TEXT NOT NULL,
+            context_id INTEGER,
+            context_epoch INTEGER,
             branch_id TEXT NOT NULL,
             local_day TEXT NOT NULL,
             source_watermark INTEGER NOT NULL,
@@ -419,6 +421,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         END;
         """
     )
+    columns = {
+        str(row[1])
+        for row in conn.execute('PRAGMA table_info(continuity_source_snapshots)').fetchall()
+    }
+    for column, definition in (
+        ('context_id', 'INTEGER'),
+        ('context_epoch', 'INTEGER'),
+    ):
+        if column not in columns:
+            conn.execute(
+                f'ALTER TABLE continuity_source_snapshots ADD COLUMN {column} {definition}'
+            )
     conn.commit()
 
 
@@ -427,6 +441,8 @@ def _snapshot_row(snapshot: SourceSnapshot) -> tuple:
         snapshot.snapshot_id,
         snapshot.identity_id,
         snapshot.chat_id,
+        int(snapshot.context_id) if snapshot.context_id is not None else None,
+        int(snapshot.context_epoch) if snapshot.context_epoch is not None else None,
         snapshot.branch_id,
         snapshot.local_day,
         int(snapshot.source_watermark),
@@ -456,16 +472,17 @@ def _member_row(snapshot_id: str, member: SourceMember) -> tuple:
 
 def _assert_snapshot_identity(conn: sqlite3.Connection, snapshot: SourceSnapshot) -> None:
     row = conn.execute(
-        'SELECT identity_id, chat_id, branch_id, local_day, source_watermark, '
-        'source_policy_version, source_hash, status, created_at '
+        'SELECT identity_id, chat_id, context_id, context_epoch, branch_id, local_day, '
+        'source_watermark, source_policy_version, source_hash, status, created_at '
         'FROM continuity_source_snapshots WHERE snapshot_id=?',
         (snapshot.snapshot_id,),
     ).fetchone()
     if row is None:
         conn.execute(
             'INSERT INTO continuity_source_snapshots '
-            '(snapshot_id, identity_id, chat_id, branch_id, local_day, source_watermark, '
-            'source_policy_version, source_hash, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+            '(snapshot_id, identity_id, chat_id, context_id, context_epoch, branch_id, '
+            'local_day, source_watermark, source_policy_version, source_hash, status, created_at) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
             _snapshot_row(snapshot),
         )
         conn.executemany(
@@ -477,10 +494,12 @@ def _assert_snapshot_identity(conn: sqlite3.Connection, snapshot: SourceSnapshot
         )
         return
 
-    stored = tuple(row[:7])
+    stored = tuple(row[:9])
     requested = (
         snapshot.identity_id,
         snapshot.chat_id,
+        snapshot.context_id,
+        snapshot.context_epoch,
         snapshot.branch_id,
         snapshot.local_day,
         int(snapshot.source_watermark),
@@ -577,10 +596,58 @@ def enqueue_job(
         raise
 
 
+def _snapshot_select(conn: sqlite3.Connection) -> tuple[str, bool]:
+    """Return a compatibility-aware snapshot projection for old stores."""
+    columns = {
+        str(row[1])
+        for row in conn.execute('PRAGMA table_info(continuity_source_snapshots)').fetchall()
+    }
+    has_scope = {'context_id', 'context_epoch'}.issubset(columns)
+    fields = ['snapshot_id', 'identity_id', 'chat_id']
+    if has_scope:
+        fields.extend(('context_id', 'context_epoch'))
+    fields.extend((
+        'branch_id', 'local_day', 'source_watermark', 'source_policy_version',
+        'source_hash', 'status', 'created_at',
+    ))
+    return ', '.join(fields), has_scope
+
+
+def _snapshot_from_row(
+    row: sqlite3.Row | tuple,
+    members: Iterable[SourceMember],
+    *,
+    has_scope: bool,
+) -> SourceSnapshot:
+    values = tuple(row)
+    offset = 0
+    snapshot_id = str(values[offset]); offset += 1
+    identity_id = str(values[offset]); offset += 1
+    chat_id = str(values[offset]); offset += 1
+    context_id = values[offset] if has_scope else None
+    context_epoch = values[offset + 1] if has_scope else None
+    offset += 2 if has_scope else 0
+    return SourceSnapshot(
+        snapshot_id=snapshot_id,
+        identity_id=identity_id,
+        chat_id=chat_id,
+        branch_id=str(values[offset]),
+        local_day=str(values[offset + 1]),
+        source_watermark=int(values[offset + 2]),
+        policy_version=str(values[offset + 3]),
+        source_hash=str(values[offset + 4]),
+        status=str(values[offset + 5]),
+        created_at=str(values[offset + 6]),
+        members=tuple(members),
+        context_id=int(context_id) if context_id is not None else None,
+        context_epoch=int(context_epoch) if context_epoch is not None else None,
+    )
+
+
 def _load_snapshot_for_job(conn: sqlite3.Connection, job: ContinuityJob) -> SourceSnapshot:
+    projection, has_scope = _snapshot_select(conn)
     row = conn.execute(
-        'SELECT snapshot_id, identity_id, chat_id, branch_id, local_day, source_watermark, '
-        'source_policy_version, source_hash, status, created_at '
+        f'SELECT {projection} '
         'FROM continuity_source_snapshots WHERE snapshot_id=?',
         (job.snapshot_id,),
     ).fetchone()
@@ -592,24 +659,14 @@ def _load_snapshot_for_job(conn: sqlite3.Connection, job: ContinuityJob) -> Sour
         'FROM continuity_source_members WHERE snapshot_id=? ORDER BY seq',
         (job.snapshot_id,),
     ).fetchall()
-    return SourceSnapshot(
-        snapshot_id=str(row[0]),
-        identity_id=str(row[1]),
-        chat_id=str(row[2]),
-        branch_id=str(row[3]),
-        local_day=str(row[4]),
-        source_watermark=int(row[5]),
-        policy_version=str(row[6]),
-        source_hash=str(row[7]),
-        status=str(row[8]),
-        created_at=str(row[9]),
-        members=tuple(SourceMember(
+    return _snapshot_from_row(row, (
+        SourceMember(
             seq=int(item[0]), source_kind=item[1], source_ref=str(item[2]),
             source_revision=str(item[3]), role=str(item[4]), content_hash=str(item[5]),
             span_start=item[6], span_end=item[7], logical_size=int(item[8]),
             created_at=str(item[9]), branch_id=str(item[10]),
-        ) for item in members),
-    )
+        ) for item in members
+    ), has_scope=has_scope)
 
 
 def load_job(conn: sqlite3.Connection, job_id: str) -> ContinuityJob | None:
@@ -627,6 +684,8 @@ def materialize_job(
     policy: SealingPolicy,
     *,
     now: str | None = None,
+    include_end_of_snapshot: bool = True,
+    close_partial_before_day: str | None = None,
 ) -> tuple[CandidateBlock, ...]:
     """Materialize deterministic candidate metadata; repeat calls are idempotent."""
     job = load_job(conn, job_id)
@@ -641,7 +700,12 @@ def materialize_job(
         or expected_idempotency_key != job.idempotency_key
     ):
         raise ContinuityStoreConflict('continuity job identity does not match policy or snapshot')
-    candidates = seal_snapshot(snapshot, policy)
+    candidates = seal_snapshot(
+        snapshot,
+        policy,
+        include_end_of_snapshot=include_end_of_snapshot,
+        close_partial_before_day=close_partial_before_day,
+    )
     stamp = str(now or _stamp())
 
     conn.execute('BEGIN IMMEDIATE')
@@ -745,7 +809,6 @@ def materialize_job(
         conn.rollback()
         raise
 
-
 def load_candidates(conn: sqlite3.Connection, job_id: str) -> tuple[CandidateBlock, ...]:
     rows = conn.execute(
         'SELECT candidate_id, snapshot_id, policy_version, block_seq, local_day, branch_id, '
@@ -787,9 +850,9 @@ def load_candidate(conn: sqlite3.Connection, candidate_id: str) -> CandidateBloc
 
 
 def load_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> SourceSnapshot | None:
+    projection, has_scope = _snapshot_select(conn)
     row = conn.execute(
-        'SELECT snapshot_id, identity_id, chat_id, branch_id, local_day, source_watermark, '
-        'source_policy_version, source_hash, status, created_at '
+        f'SELECT {projection} '
         'FROM continuity_source_snapshots WHERE snapshot_id=?',
         (snapshot_id,),
     ).fetchone()
@@ -801,17 +864,14 @@ def load_snapshot(conn: sqlite3.Connection, snapshot_id: str) -> SourceSnapshot 
         'FROM continuity_source_members WHERE snapshot_id=? ORDER BY seq',
         (snapshot_id,),
     ).fetchall()
-    return SourceSnapshot(
-        snapshot_id=str(row[0]), identity_id=str(row[1]), chat_id=str(row[2]),
-        branch_id=str(row[3]), local_day=str(row[4]), source_watermark=int(row[5]),
-        policy_version=str(row[6]), source_hash=str(row[7]), status=str(row[8]),
-        created_at=str(row[9]), members=tuple(SourceMember(
+    return _snapshot_from_row(row, (
+        SourceMember(
             seq=int(item[0]), source_kind=item[1], source_ref=str(item[2]),
             source_revision=str(item[3]), role=str(item[4]), content_hash=str(item[5]),
             span_start=item[6], span_end=item[7], logical_size=int(item[8]),
             created_at=str(item[9]), branch_id=str(item[10]),
-        ) for item in members),
-    )
+        ) for item in members
+    ), has_scope=has_scope)
 
 
 def _generation_identity(
@@ -879,6 +939,53 @@ def load_generation_job(
         (generation_job_id,),
     ).fetchone()
     return _generation_job_from_row(row) if row is not None else None
+
+
+def load_generation_jobs(
+    conn: sqlite3.Connection,
+    *,
+    statuses: Iterable[str] | None = None,
+) -> tuple[ContinuityGenerationJob, ...]:
+    """Load generation jobs in deterministic order for explicit runners."""
+    normalized = None if statuses is None else tuple(str(status) for status in statuses)
+    if normalized == ():
+        return ()
+    query = f'SELECT {_GENERATION_JOB_COLUMNS} FROM continuity_generation_jobs'
+    params: tuple[object, ...] = ()
+    if normalized is not None:
+        invalid = set(normalized) - set(GENERATION_JOB_STATUSES)
+        if invalid:
+            raise ValueError('unknown generation job status: ' + ','.join(sorted(invalid)))
+        query += ' WHERE status IN (' + ','.join('?' for _ in normalized) + ')'
+        params = tuple(normalized)
+    query += ' ORDER BY created_at ASC, generation_job_id ASC'
+    return tuple(
+        _generation_job_from_row(row)
+        for row in conn.execute(query, params).fetchall()
+    )
+
+
+def load_claimed_source_revisions(
+    conn: sqlite3.Connection,
+    *,
+    source_refs: Iterable[str] | None = None,
+) -> frozenset[tuple[str, str]]:
+    """Return exact source identities already claimed by immutable snapshots."""
+    refs = None if source_refs is None else tuple(str(ref) for ref in source_refs)
+    if refs == ():
+        return frozenset()
+    query = (
+        'SELECT DISTINCT source_ref, source_revision '
+        'FROM continuity_source_members'
+    )
+    params: tuple[object, ...] = ()
+    if refs is not None:
+        query += ' WHERE source_ref IN (' + ','.join('?' for _ in refs) + ')'
+        params = tuple(refs)
+    return frozenset(
+        (str(row[0]), str(row[1]))
+        for row in conn.execute(query, params).fetchall()
+    )
 
 
 def enqueue_generation_job(

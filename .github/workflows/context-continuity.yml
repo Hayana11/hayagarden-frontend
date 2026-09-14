@@ -172,7 +172,7 @@ jobs:
             tests.test_artifact_cleaner \
             -v
       - name: Run continuity regressions
-        run: python -m unittest tests.test_continuity_source_contract tests.test_continuity_r2 tests.test_continuity_r3 tests.test_continuity_r4 tests.test_daily_continuity_shadow tests.test_context_continuity -v
+        run: python -m unittest tests.test_continuity_source_contract tests.test_continuity_r2 tests.test_continuity_r3 tests.test_continuity_r4 tests.test_daily_continuity_shadow tests.test_context_continuity tests.test_continuity_r45_c1 -v
       - name: Run clean window shadow regressions
         run: |
           python -m unittest \
