@@ -82,6 +82,18 @@ def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
     )
     conn.commit()
     mid = int(cur.lastrowid)
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='r45a_scope_fixture'"
+    ).fetchone()
+    if table_exists:
+        role = 'user' if author.lower() in {'hayana', 'haya', 'user'} else 'assistant'
+        conn.execute(
+            'INSERT INTO daily_message_contexts '
+            '(message_id, context_id, context_epoch, resident_generation, role, created_at) '
+            'VALUES (?,?,?,?,?,?)',
+            (mid, 1, 1, 1, role, created_at),
+        )
+        conn.commit()
     conn.close()
     return mid
 
@@ -3833,6 +3845,21 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     column, definition,
                 )
             )
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS daily_message_contexts ('
+            'message_id INTEGER PRIMARY KEY, context_id INTEGER, context_epoch INTEGER, '
+            'resident_generation INTEGER, role TEXT, created_at TEXT)'
+        )
+        conn.execute(
+            'CREATE TABLE r45a_scope_fixture (id INTEGER PRIMARY KEY)'
+        )
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS wake_log ('
+            'id INTEGER PRIMARY KEY AUTOINCREMENT, thoughts TEXT, action TEXT, '
+            'content TEXT, consumed INTEGER DEFAULT 0, woke_at TEXT, cache_info TEXT, '
+            'wake_run_id TEXT, chat_id TEXT, context_id INTEGER, context_epoch INTEGER, '
+            'resident_generation INTEGER)'
+        )
         conn.commit()
         conn.close()
         from continuity.store import ensure_schema as ensure_continuity_schema

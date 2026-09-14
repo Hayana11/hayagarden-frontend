@@ -61,7 +61,7 @@ def _row(
     }
 
 
-def _wake_cache() -> str:
+def _wake_cache(wake_run_id: str = 'wake-3') -> str:
     return json.dumps({
         'wake_mode': 'normal',
         'canonical_chat_history': True,
@@ -69,6 +69,7 @@ def _wake_cache() -> str:
         'b3_authority': True,
         'source': 'wake',
         'provider': 'claude_code',
+        'wake_run_id': wake_run_id,
     })
 
 
@@ -77,13 +78,27 @@ def _history_rows() -> list[dict[str, object]]:
         _row(1, 'hayana', 'first request', '2026-09-08 23:59:00'),
         _row(2, 'assistant', 'first answer', '2026-09-09 00:01:00'),
         _row(3, 'assistant', 'canonical wake', '2026-09-09 03:59:00',
-             source_kind='wake', cache_info=_wake_cache()),
+             source_kind='wake', cache_info=_wake_cache('wake-3')),
         _row(4, 'assistant', 'noncanonical wake', '2026-09-09 04:00:00',
-             source_kind='wake', cache_info='{"wake_mode":"morning"}'),
+             source_kind='wake', cache_info=json.dumps({
+                 'wake_mode': 'morning',
+                 'canonical_chat_history': True,
+                 'unified_chat_resident': True,
+                 'b3_authority': True,
+                 'source': 'wake',
+                 'provider': 'claude_code',
+                 'wake_run_id': 'wake-4',
+             })),
     ]
 
 
-def _write_source(path: Path, rows: list[dict[str, object]]) -> None:
+def _write_source(
+    path: Path,
+    rows: list[dict[str, object]],
+    *,
+    context_by_message: dict[int, tuple[int, int, int, str]] | None = None,
+    wake_provenance: list[tuple[str, str, int, int, int]] | None = None,
+) -> None:
     if path.exists():
         path.unlink()
     conn = sqlite3.connect(str(path))
@@ -94,6 +109,16 @@ def _write_source(path: Path, rows: list[dict[str, object]]) -> None:
         'cache_info TEXT, source_kind TEXT, attachments TEXT, image_url TEXT, '
         'file_url TEXT, file_name TEXT)'
     )
+    conn.execute(
+        'CREATE TABLE daily_message_contexts ('
+        'message_id INTEGER PRIMARY KEY, context_id INTEGER, context_epoch INTEGER, '
+        'resident_generation INTEGER, role TEXT, created_at TEXT)'
+    )
+    conn.execute(
+        'CREATE TABLE wake_log ('
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, wake_run_id TEXT, chat_id TEXT, '
+        'context_id INTEGER, context_epoch INTEGER, resident_generation INTEGER)'
+    )
     columns = (
         'id, author, content, thinking, created_at, tool_calls, branches, branch_idx, '
         'cache_info, source_kind, attachments, image_url, file_url, file_name'
@@ -102,6 +127,43 @@ def _write_source(path: Path, rows: list[dict[str, object]]) -> None:
     conn.executemany(
         f'INSERT INTO chat_messages ({columns}) VALUES ({placeholders})',
         [tuple(row[name] for name in columns.split(', ')) for row in rows],
+    )
+
+    contexts = context_by_message or {
+        int(row['id']): (
+            29,
+            27,
+            1,
+            'user' if str(row['author']).lower() == 'hayana' else 'assistant',
+        )
+        for row in rows
+        if row.get('source_kind') != 'wake'
+    }
+    conn.executemany(
+        'INSERT INTO daily_message_contexts '
+        '(message_id, context_id, context_epoch, resident_generation, role, created_at) '
+        'VALUES (?,?,?,?,?,?)',
+        [
+            (message_id, context_id, context_epoch, generation, role, '')
+            for message_id, (context_id, context_epoch, generation, role)
+            in contexts.items()
+        ],
+    )
+
+    if wake_provenance is None:
+        wake_provenance = []
+        for row in rows:
+            if row.get('source_kind') != 'wake':
+                continue
+            payload = json.loads(str(row.get('cache_info') or '{}'))
+            wake_run_id = str(payload.get('wake_run_id') or '').strip()
+            if wake_run_id:
+                wake_provenance.append((wake_run_id, 'default', 29, 27, 1))
+    conn.executemany(
+        'INSERT INTO wake_log '
+        '(wake_run_id, chat_id, context_id, context_epoch, resident_generation) '
+        'VALUES (?,?,?,?,?)',
+        wake_provenance,
     )
     conn.commit()
     conn.close()
@@ -170,6 +232,76 @@ class DailyContinuityShadowTests(unittest.TestCase):
             1,
         )
         self.assertEqual(result.plan.ordered_sections[-1].source_ref, 'message:5')
+
+    def test_old_context_is_excluded_even_when_message_id_is_before_current(self):
+        rows = _history_rows() + [self.current]
+        contexts = {
+            1: (28, 27, 1, 'user'),
+            2: (28, 27, 1, 'assistant'),
+            5: (29, 27, 1, 'user'),
+        }
+        _write_source(self.source_path, rows, context_by_message=contexts)
+        result = self._run()
+        self.assertNotIn('turn:1:2', [member.source_ref for member in result.plan.source_members])
+
+    def test_cross_day_same_epoch_is_included(self):
+        result = self._run()
+        self.assertIn('turn:1:2', [member.source_ref for member in result.plan.source_members])
+
+    def test_same_epoch_cross_generation_is_included(self):
+        rows = _history_rows() + [self.current]
+        contexts = {
+            1: (29, 27, 1, 'user'),
+            2: (29, 27, 1, 'assistant'),
+            5: (29, 27, 9, 'user'),
+        }
+        _write_source(self.source_path, rows, context_by_message=contexts)
+        result = self._run()
+        self.assertIn('turn:1:2', [member.source_ref for member in result.plan.source_members])
+
+    def test_foreign_context_wake_is_excluded(self):
+        rows = _history_rows() + [self.current]
+        contexts = {
+            1: (29, 27, 1, 'user'),
+            2: (29, 27, 1, 'assistant'),
+            5: (29, 27, 1, 'user'),
+        }
+        _write_source(
+            self.source_path,
+            rows,
+            context_by_message=contexts,
+            wake_provenance=[('wake-3', 'default', 28, 27, 1)],
+        )
+        result = self._run()
+        self.assertNotIn('wake:3', [member.source_ref for member in result.plan.source_members])
+
+    def test_foreign_epoch_wake_is_excluded(self):
+        rows = _history_rows() + [self.current]
+        contexts = {
+            1: (29, 27, 1, 'user'),
+            2: (29, 27, 1, 'assistant'),
+            5: (29, 27, 1, 'user'),
+        }
+        _write_source(
+            self.source_path,
+            rows,
+            context_by_message=contexts,
+            wake_provenance=[('wake-3', 'default', 29, 26, 1)],
+        )
+        result = self._run()
+        self.assertNotIn('wake:3', [member.source_ref for member in result.plan.source_members])
+
+    def test_missing_current_scope_mapping_fails_closed_without_all_history_fallback(self):
+        rows = _history_rows() + [self.current]
+        contexts = {
+            1: (29, 27, 1, 'user'),
+            2: (29, 27, 1, 'assistant'),
+        }
+        _write_source(self.source_path, rows, context_by_message=contexts)
+        result = self._run()
+        self.assertEqual(result.status, 'blocked')
+        self.assertEqual(result.error_code, 'source_scope_unavailable')
+        self.assertIsNone(result.plan)
 
     def test_current_incomplete_user_is_not_a_completed_turn(self):
         rows = _history_rows() + [
