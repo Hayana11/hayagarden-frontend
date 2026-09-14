@@ -101,6 +101,83 @@ def _read_only_connection(path: str | Path | None) -> sqlite3.Connection:
     return sqlite3.connect(f'file:{resolved.as_posix()}?mode=ro', uri=True)
 
 
+def read_canonical_scope_rows(
+    conn: sqlite3.Connection,
+    *,
+    context_id: int,
+    context_epoch: int,
+    before_message_id: int | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Read the frozen R4.5-A source universe for one canonical window.
+
+    Formal ownership comes from the durable message-context table. Wake rows are
+    admitted only through matching wake_log provenance; no date, message range,
+    or resident generation selects the universe. before_message_id exists only
+    for the current-request adapter's historical cutoff.
+    """
+    try:
+        context_id = int(context_id)
+        context_epoch = int(context_epoch)
+    except (TypeError, ValueError) as exc:
+        raise _SourceScopeUnavailable('source scope identity is malformed') from exc
+    if context_id <= 0 or context_epoch <= 0:
+        raise _SourceScopeUnavailable('source scope identity is invalid')
+
+    row_columns = tuple(item.strip() for item in _SOURCE_COLUMNS.split(','))
+    cutoff = ''
+    params: list[object] = [context_id, context_epoch]
+    if before_message_id is not None:
+        cutoff = ' AND m.id < ?'
+        params.append(int(before_message_id))
+    formal_cursor = conn.execute(
+        f'SELECT m.{", m.".join(row_columns)} FROM {_SOURCE_TABLE} m '
+        f'INNER JOIN {_MESSAGE_CONTEXT_TABLE} dmc ON dmc.message_id=m.id '
+        'WHERE dmc.context_id=? AND dmc.context_epoch=?' + cutoff +
+        ' ORDER BY m.id ASC',
+        tuple(params),
+    )
+    formal_rows = [dict(zip(row_columns, row)) for row in formal_cursor.fetchall()]
+
+    wake_run_rows = conn.execute(
+        f'SELECT wake_run_id FROM {_WAKE_TABLE} '
+        'WHERE context_id=? AND context_epoch=? '
+        'AND wake_run_id IS NOT NULL AND wake_run_id != ?',
+        (context_id, context_epoch, ''),
+    ).fetchall()
+    scoped_wake_run_ids = {
+        str(row[0]).strip() for row in wake_run_rows if str(row[0] or '').strip()
+    }
+    wake_rows: list[dict[str, object]] = []
+    if scoped_wake_run_ids:
+        wake_cutoff = ''
+        wake_params: list[object] = []
+        if before_message_id is not None:
+            wake_cutoff = ' AND id < ?'
+            wake_params.append(int(before_message_id))
+        wake_cursor = conn.execute(
+            f'SELECT {_SOURCE_COLUMNS} FROM {_SOURCE_TABLE} '
+            "WHERE source_kind='wake'" + wake_cutoff + ' ORDER BY id ASC',
+            tuple(wake_params),
+        )
+        for row in wake_cursor.fetchall():
+            candidate = dict(zip(row_columns, row))
+            try:
+                cache_info = json.loads(str(candidate.get('cache_info') or ''))
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(cache_info, dict)
+                and str(cache_info.get('wake_run_id') or '').strip()
+                in scoped_wake_run_ids
+            ):
+                wake_rows.append(candidate)
+
+    by_message_id = {
+        int(row['id']): row for row in (*formal_rows, *wake_rows)
+    }
+    return tuple(by_message_id[mid] for mid in sorted(by_message_id))
+
+
 def _source_rows(
     conn: sqlite3.Connection,
     current_user_message_id: int,
@@ -118,79 +195,25 @@ def _source_rows(
         context_id = int(mapping_rows[0][0])
         context_epoch = int(mapping_rows[0][1])
     except (TypeError, ValueError) as exc:
-        raise _SourceScopeUnavailable('current request scope mapping is invalid') from exc
+        raise _SourceScopeUnavailable('current request scope mapping is malformed') from exc
+    if context_id <= 0 or context_epoch <= 0:
+        raise _SourceScopeUnavailable('current request scope identity is invalid')
 
-    source_columns = ', '.join(
-        f'message.{column.strip()}'
-        for column in _SOURCE_COLUMNS.split(',')
+    history = read_canonical_scope_rows(
+        conn,
+        context_id=context_id,
+        context_epoch=context_epoch,
+        before_message_id=current_id,
     )
-    formal_cursor = conn.execute(
-        f'SELECT {source_columns} FROM {_SOURCE_TABLE} AS message '
-        f'INNER JOIN {_MESSAGE_CONTEXT_TABLE} AS mapping '
-        'ON mapping.message_id=message.id '
-        'WHERE mapping.context_id=? AND mapping.context_epoch=? '
-        'AND message.id < ? ORDER BY message.id ASC',
-        (context_id, context_epoch, current_id),
-    )
-    columns = tuple(item[0].split('.', 1)[-1] for item in formal_cursor.description)
-    formal_rows = [dict(zip(columns, row)) for row in formal_cursor.fetchall()]
-
-    wake_scope_rows = conn.execute(
-        f'SELECT wake_run_id FROM {_WAKE_TABLE} '
-        'WHERE context_id=? AND context_epoch=? '
-        'AND wake_run_id IS NOT NULL AND TRIM(wake_run_id) != ""',
-        (context_id, context_epoch),
-    ).fetchall()
-    wake_run_ids = frozenset(str(row[0]).strip() for row in wake_scope_rows)
-    wake_rows: list[dict[str, object]] = []
-    if wake_run_ids:
-        wake_cursor = conn.execute(
-            f'SELECT {source_columns} FROM {_SOURCE_TABLE} AS message '
-            "WHERE message.source_kind='wake' AND message.id < ? "
-            'AND EXISTS ('
-            f'SELECT 1 FROM {_WAKE_TABLE} AS wake '
-            'WHERE wake.context_id=? AND wake.context_epoch=? '
-            'AND wake.wake_run_id IS NOT NULL '
-            'AND TRIM(wake.wake_run_id) != "" '
-            'AND json_valid(message.cache_info) '
-            "AND json_extract(message.cache_info, '$.wake_run_id') = wake.wake_run_id"
-            ') ORDER BY message.id ASC',
-            (current_id, context_id, context_epoch),
-        )
-        wake_columns = tuple(item[0].split('.', 1)[-1] for item in wake_cursor.description)
-        wake_rows = [dict(zip(wake_columns, row)) for row in wake_cursor.fetchall()]
-        if any(
-            str(_json_wake_run_id(row.get('cache_info')) or '').strip() not in wake_run_ids
-            for row in wake_rows
-        ):
-            raise _SourceScopeUnavailable('wake provenance scope changed during read')
-
-    by_message_id = {
-        int(row['id']): row
-        for row in formal_rows + wake_rows
-    }
     current_cursor = conn.execute(
-        f'SELECT {_SOURCE_COLUMNS} FROM {_SOURCE_TABLE} WHERE id=?',
+        f'SELECT {_SOURCE_COLUMNS} FROM {_SOURCE_TABLE} WHERE id = ?',
         (current_id,),
     )
     current_columns = tuple(item[0] for item in current_cursor.description)
     current_rows = current_cursor.fetchall()
     if len(current_rows) != 1:
         raise LookupError('current request row is unavailable')
-    return tuple(by_message_id[key] for key in sorted(by_message_id)), dict(
-        zip(current_columns, current_rows[0])
-    )
-
-
-def _json_wake_run_id(raw_cache_info: object) -> str | None:
-    try:
-        payload = json.loads(raw_cache_info) if isinstance(raw_cache_info, str) else raw_cache_info
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    value = str(payload.get('wake_run_id') or '').strip()
-    return value or None
+    return history, dict(zip(current_columns, current_rows[0]))
 
 
 def _check_source_schema(conn: sqlite3.Connection) -> None:
@@ -421,5 +444,6 @@ def build_daily_continuity_shadow_plan(
 __all__ = [
     'DailyContinuityShadowResult',
     'build_daily_continuity_shadow_plan',
+    'read_canonical_scope_rows',
 ]
 

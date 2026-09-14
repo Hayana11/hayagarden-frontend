@@ -158,6 +158,9 @@ def _candidate(
 def seal_snapshot(
     snapshot: SourceSnapshot,
     policy: SealingPolicy = DEFAULT_SEALING_POLICY,
+    *,
+    include_end_of_snapshot: bool = True,
+    close_partial_before_day: str | None = None,
 ) -> tuple[CandidateBlock, ...]:
     """Seal one immutable snapshot into deterministic, flat candidate blocks."""
     _validate_snapshot_members(snapshot)
@@ -208,7 +211,11 @@ def seal_snapshot(
         elif current_size >= int(policy.target_logical_size):
             flush('target_logical_size')
 
-    flush('end_of_snapshot')
+    if include_end_of_snapshot:
+        flush('end_of_snapshot')
+    elif current and close_partial_before_day:
+        if _member_day(current[0]) < str(close_partial_before_day):
+            flush('day_boundary')
     return tuple(candidates)
 
 

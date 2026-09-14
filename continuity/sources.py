@@ -427,6 +427,8 @@ def build_source_snapshot(
     chat_id: str = CHAT_ID,
     branch_id: str = 'active-transcript',
     policy_version: str = POLICY_VERSION,
+    context_id: int | None = None,
+    context_epoch: int | None = None,
 ) -> SourceSnapshot:
     members = build_source_members(turns, events)
     digest = source_hash(members)
@@ -442,5 +444,7 @@ def build_source_snapshot(
         status='ready',
         created_at=created_at,
         members=members,
+        context_id=context_id,
+        context_epoch=context_epoch,
     )
 

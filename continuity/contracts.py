@@ -117,6 +117,8 @@ class SourceSnapshot:
     status: str
     created_at: str
     members: tuple[SourceMember, ...]
+    context_id: int | None = None
+    context_epoch: int | None = None
 
 
 @dataclass(frozen=True)
