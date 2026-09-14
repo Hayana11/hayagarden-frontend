@@ -9,6 +9,8 @@ on:
       - "tests/test_continuity_r2.py"
       - "tests/test_continuity_r3.py"
       - "tests/test_continuity_r4.py"
+      - "tests/test_continuity_r45_c1.py"
+      - "tests/test_continuity_r45_c2.py"
       - "chat/context_*.py"
       - "chat/daily_*.py"
       - "chat/history_*.py"
@@ -26,6 +28,7 @@ on:
       - "chat/choices_contract.py"
       - "chat/document_library.py"
       - "tools/context_*.py"
+      - "tools/continuity_producer.py"
       - "tools/rolling_summary.py"
       - "tools/cc_usage_observability.py"
       - "chat/cc_vision_bridge.py"
@@ -63,6 +66,8 @@ on:
       - "tests/test_continuity_r2.py"
       - "tests/test_continuity_r3.py"
       - "tests/test_continuity_r4.py"
+      - "tests/test_continuity_r45_c1.py"
+      - "tests/test_continuity_r45_c2.py"
       - "chat/context_*.py"
       - "chat/daily_*.py"
       - "chat/history_*.py"
@@ -80,6 +85,7 @@ on:
       - "chat/choices_contract.py"
       - "chat/document_library.py"
       - "tools/context_*.py"
+      - "tools/continuity_producer.py"
       - "tools/rolling_summary.py"
       - "tools/cc_usage_observability.py"
       - "chat/cc_vision_bridge.py"
@@ -172,7 +178,7 @@ jobs:
             tests.test_artifact_cleaner \
             -v
       - name: Run continuity regressions
-        run: python -m unittest tests.test_continuity_source_contract tests.test_continuity_r2 tests.test_continuity_r3 tests.test_continuity_r4 tests.test_daily_continuity_shadow tests.test_context_continuity tests.test_continuity_r45_c1 -v
+        run: python -m unittest tests.test_continuity_source_contract tests.test_continuity_r2 tests.test_continuity_r3 tests.test_continuity_r4 tests.test_daily_continuity_shadow tests.test_context_continuity tests.test_continuity_r45_c1 tests.test_continuity_r45_c2 -v
       - name: Run clean window shadow regressions
         run: |
           python -m unittest \
