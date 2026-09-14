@@ -1205,15 +1205,23 @@ def _context_plan_consumer_enabled() -> bool:
 
 
 def _context_plan_policy() -> tuple[Any, str]:
+    from chat.cold_bootstrap_budget import (
+        cold_prompt_target,
+        cold_safety_margin,
+    )
+    from chat.context_lean import cc_history_token_budget
     from continuity.context_plan import (
         CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION,
-        parse_context_budget_policy,
+        ContextBudgetPolicy,
     )
-    import config_store
-    policy = parse_context_budget_policy(
-        config_store.get('CONTEXT_PLAN_TOKEN_BUDGET', ''),
-        config_store.get('CONTEXT_PLAN_RESERVE_BUDGET', ''),
-        config_store.get('CONTEXT_PLAN_RECENT_RAW_TARGET', ''),
+
+    target = int(cold_prompt_target())
+    reserve = int(cold_safety_margin())
+    recent_raw_target = int(cc_history_token_budget())
+    policy = ContextBudgetPolicy(
+        token_budget=target + reserve,
+        reserve_budget=reserve,
+        recent_raw_target=recent_raw_target,
     )
     return policy, CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION
 
