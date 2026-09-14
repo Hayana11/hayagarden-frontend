@@ -166,13 +166,18 @@ def _identity_and_rows(
     chat_id: str,
     window_identity_reader: Callable[[sqlite3.Connection, str], Mapping[str, Any]],
 ) -> tuple[dict[str, Any], tuple[dict[str, object], ...]]:
+    from chat.window_identity import REASON_UNAVAILABLE, WindowIdentityUnavailable
+
     try:
         conn = _read_only_connection(source_db_path)
     except (OSError, sqlite3.Error) as exc:
         raise _ProducerBlocked('source_rows_unavailable') from exc
     try:
         try:
-            raw_identity = window_identity_reader(conn, chat_id)
+            try:
+                raw_identity = window_identity_reader(conn, chat_id)
+            except WindowIdentityUnavailable as exc:
+                raise _ProducerBlocked(REASON_UNAVAILABLE) from exc
             identity = _validate_window_identity(raw_identity, chat_id)
             from chat.daily_continuity_shadow import read_canonical_scope_rows
 

@@ -351,6 +351,43 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(result.error_code, 'orphan_generating_job')
         self.assertEqual(self.model_calls, 0)
 
+    def test_default_reader_unavailable_fails_closed_without_side_effects(self):
+        # The fixture has no canonical context-window schema, so the real default
+        # reader must raise WindowIdentityUnavailable before opening the store.
+        self._write_source([])
+        result = run_continuity_producer(
+            source_db_path=self.source_path,
+            continuity_store_path=self.store_path,
+            capture_authority=self._capture,
+            generate_fn=self._generate,
+            request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+            persona_text=PERSONA,
+            now='2026-09-14T00:00:00+00:00',
+        )
+        self.assertEqual(result.status, 'blocked')
+        self.assertEqual(result.error_code, 'window_identity_unavailable')
+        self.assertEqual(self.authority_calls, 0)
+        self.assertEqual(self.model_calls, 0)
+        self.assertFalse(self.store_path.exists())
+
+        if self.store_path.exists():
+            conn = sqlite3.connect(str(self.store_path))
+            for table in (
+                'continuity_source_snapshots',
+                'continuity_candidate_blocks',
+                'continuity_generation_jobs',
+                'continuity_chunks',
+            ):
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if exists:
+                    self.assertEqual(conn.execute(
+                        f'SELECT COUNT(*) FROM {table}'
+                    ).fetchone()[0], 0)
+            conn.close()
+
     def test_producer_has_no_chat_consumer_or_receipt_side_effect(self):
         self._write_source(self._turns(1))
         before = sqlite3.connect(str(self.source_path))
