@@ -54,6 +54,7 @@ from chat.capacity_swap_runtime import (
     register_capacity_swap_generation,
     resolve_finalize_registry_source,
     run_capacity_swap_handoff,
+    prepare_capacity_swap_for_context_plan,
     try_restore_same_context_last_good,
     with_capacity_boundary_suffix,
 )
@@ -196,6 +197,10 @@ class DailyTurnPlan:
     hot_receipt_frozen: Optional[dict[str, Any]] = field(default=None, repr=False)
     hot_decision: Optional[str] = field(default=None, repr=False)
     hot_decision_reason: Optional[str] = field(default=None, repr=False)
+    capacity_context_plan: Any = field(default=None, repr=False)
+    capacity_context_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
+    capacity_context_bootstrap: Optional[dict[str, Any]] = field(default=None, repr=False)
+    capacity_source_receipt_frozen: Optional[dict[str, Any]] = field(default=None, repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -435,6 +440,10 @@ def format_resident_turn_content(
     with image → multimodal list accepted by Claude Code stream-json
     """
     cold_like = bool(is_cold or is_respawn)
+    capacity_bootstrap = bool(
+        isinstance(assembly, dict)
+        and assembly.get('capacity_context_bootstrap')
+    )
     attachment_value = list(user_attachments or [])
     legacy_image_url = ''
     if not attachment_value and str(user_image_url or '').strip():
@@ -452,22 +461,27 @@ def format_resident_turn_content(
 
     time_anchor = str(reality_time_anchor or '').strip()
     prefix_parts: list[str] = []
-    if cold_like:
-        handoff = str(assembly.get('day_handoff') or '').strip()
-        if handoff:
-            prefix_parts.append(handoff)
-        carryover = assembly.get('carryover_messages') or []
-        carry_text = _format_carryover_messages(carryover)
-        if carry_text:
-            prefix_parts.append(carry_text)
+    fixed_carrier_values: list[tuple[str, str]] = []
+    open_loops = ''
+    if cold_like or capacity_bootstrap:
+        if cold_like:
+            handoff = str(assembly.get('day_handoff') or '').strip()
+            if handoff:
+                prefix_parts.append(handoff)
+            carryover = assembly.get('carryover_messages') or []
+            carry_text = _format_carryover_messages(carryover)
+            if carry_text:
+                prefix_parts.append(carry_text)
         open_loops = _format_context_plan_open_loops(
             assembly.get('context_plan_accepted_open_loops'),
         )
         if open_loops:
             prefix_parts.append(open_loops)
+            fixed_carrier_values.append(('accepted_open_loops', open_loops))
     state_text = str(assembly.get('state') or '').strip()
     if state_text:
         prefix_parts.append(state_text)
+        fixed_carrier_values.append(('accepted_state', state_text))
     task_feedback = str(assembly.get('task_feedback') or '').strip()
     if task_feedback:
         prefix_parts.append(task_feedback)
@@ -476,17 +490,55 @@ def format_resident_turn_content(
     canonical_history = _format_context_plan_representation_blocks(
         context_plan_blocks,
     )
+    render_receipt = {
+        'representation_ids': [],
+        'representation_body_hashes': [],
+        'fixed_section_kinds': [],
+        'fixed_section_body_hashes': [],
+        'current_request_slots': 0,
+        'current_request_carrier': '',
+    }
+
+    def _render_context_plan_history() -> str:
+        rendered = []
+        for block in context_plan_blocks:
+            body = str(block.get('body') or '').strip()
+            if not body:
+                continue
+            rendered.append(body)
+            render_receipt['representation_ids'].append(
+                str(block.get('representation_id') or '')
+            )
+            render_receipt['representation_body_hashes'].append(
+                _sha256_text(body)
+            )
+        return NL.join(rendered)
+
+    def _render_fixed_prefix() -> str:
+        for kind, value in fixed_carrier_values:
+            render_receipt['fixed_section_kinds'].append(str(kind))
+            render_receipt['fixed_section_body_hashes'].append(
+                _sha256_text(str(value))
+            )
+        return prefix
+
+    def _render_current_request() -> str:
+        render_receipt['current_request_slots'] += 1
+        render_receipt['current_request_carrier'] = 'tail'
+        return turn_user_text
+
     prefix = NL.join(p for p in prefix_parts if p)
-    if cold_like and canonical_history:
+    assembly['_context_install_render_receipt'] = render_receipt
+    if (cold_like or capacity_bootstrap) and canonical_history:
         body = (
             '以下是本聊天日内的正式对话记录：' + NL + NL
-            + canonical_history
+            + _render_context_plan_history()
         )
         if time_anchor:
             body += NL + NL + time_anchor
-        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + turn_user_text
+        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + _render_current_request()
         if prefix:
-            text = prefix + NL + NL + body
+            text = _render_fixed_prefix() + NL + NL + body
         else:
             text = body
     elif cold_like and history:
@@ -497,27 +549,27 @@ def format_resident_turn_content(
         )
         if time_anchor:
             body += NL + NL + time_anchor
-        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + turn_user_text
+        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + _render_current_request()
         if prefix:
-            text = prefix + NL + NL + body
+            text = _render_fixed_prefix() + NL + NL + body
         else:
             text = body
     elif history:
         history_text = _format_history_messages(history)
         replay = '【新增正式对话】' + NL + history_text + NL + NL
         if prefix:
-            text = prefix + NL + NL + replay + turn_user_text
+            text = _render_fixed_prefix() + NL + NL + replay + _render_current_request()
         else:
-            text = replay + turn_user_text
+            text = replay + _render_current_request()
     elif prefix:
         if cold_like and time_anchor:
-            text = prefix + NL + NL + time_anchor + NL + NL + turn_user_text
+            text = _render_fixed_prefix() + NL + NL + time_anchor + NL + NL + _render_current_request()
         else:
-            text = prefix + NL + NL + turn_user_text
+            text = _render_fixed_prefix() + NL + NL + _render_current_request()
     elif cold_like and time_anchor:
-        text = time_anchor + NL + NL + turn_user_text
+        text = time_anchor + NL + NL + _render_current_request()
     else:
-        text = turn_user_text
+        text = _render_current_request()
 
     if not attachment_parts:
         content = text
@@ -528,9 +580,11 @@ def format_resident_turn_content(
             attachment_parts=attachment_parts,
         )
     from chat.display_thinking import append_display_thinking_suffix
-    return append_display_thinking_suffix(
+    content = append_display_thinking_suffix(
         content, provider_display_thinking_suffix,
     )
+    _bind_context_install_render_receipt(assembly, content)
+    return content
 
 
 def _binding_matches_plan(binding: Optional[LocalResidentBinding], plan: DailyTurnPlan) -> bool:
@@ -1457,11 +1511,126 @@ def _project_context_plan_history(
     return assembly
 
 
+def _is_capacity_context_plan(plan: DailyTurnPlan) -> bool:
+    return getattr(plan, 'capacity_context_plan', None) is not None
+
+
+
+def _freeze_capacity_context_bootstrap(
+    plan: DailyTurnPlan,
+    *,
+    context_plan: Any,
+) -> dict[str, Any]:
+    """Freeze the first-target-stdin carrier beside the exact ContextPlan."""
+    assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
+    fixed_kinds = {
+        str(getattr(section, 'kind', '') or '')
+        for section in tuple(getattr(context_plan, 'ordered_sections', ()) or ())
+    }
+    handoff = assembly.get('day_handoff_content')
+    open_loops = (
+        copy.deepcopy(handoff.get('open_loops'))
+        if isinstance(handoff, dict)
+        else None
+    )
+    return {
+        'plan_id': str(getattr(context_plan, 'plan_id', '') or ''),
+        'plan_hash': str(getattr(context_plan, 'plan_hash', '') or ''),
+        'accepted_state_text': (
+            _accepted_state_text(assembly)
+            if 'accepted_state' in fixed_kinds else ''
+        ),
+        'accepted_open_loops': (
+            open_loops if 'accepted_open_loops' in fixed_kinds else None
+        ),
+        'handoff_content': copy.deepcopy(handoff) if isinstance(handoff, dict) else None,
+        'fixed_section_identities': tuple(
+            _section_install_identity(section)
+            for section in tuple(getattr(context_plan, 'ordered_sections', ()) or ())
+            if str(getattr(section, 'kind', '') or '') in _HOT_FIXED_SECTION_KINDS
+        ),
+    }
+
+
+def _project_capacity_context_bootstrap(plan: DailyTurnPlan) -> dict[str, Any]:
+    """Project only chunk blocks plus fixed first-stdin content."""
+    context_plan = getattr(plan, 'capacity_context_plan', None)
+    if context_plan is None:
+        raise DailyRuntimeError(
+            'capacity ContextPlan is missing',
+            error_code='context_plan_capacity_missing',
+        )
+    assembly = _project_context_plan_history(
+        plan,
+        context_plan=context_plan,
+        chunk_bodies=dict(getattr(plan, 'capacity_context_chunk_bodies', {}) or {}),
+    )
+    bootstrap = dict(getattr(plan, 'capacity_context_bootstrap', None) or {})
+    chunk_blocks = [
+        dict(block)
+        for block in (assembly.get('context_plan_representation_blocks') or [])
+        if isinstance(block, dict) and str(block.get('kind') or '') == 'chunk'
+    ]
+    assembly['capacity_context_bootstrap'] = True
+    assembly['context_plan_representation_blocks'] = chunk_blocks
+    assembly['current_day_history'] = []
+    assembly['day_handoff'] = ''
+    assembly['carryover_messages'] = []
+    assembly['day_handoff_content'] = copy.deepcopy(
+        bootstrap.get('handoff_content')
+    )
+    accepted_state = str(bootstrap.get('accepted_state_text') or '')
+    assembly['state'] = accepted_state
+    if bootstrap.get('accepted_open_loops') is not None:
+        assembly['context_plan_accepted_open_loops'] = copy.deepcopy(
+            bootstrap.get('accepted_open_loops')
+        )
+    else:
+        assembly.pop('context_plan_accepted_open_loops', None)
+    assembly['layers'] = [
+        layer for layer in (assembly.get('layers') or ())
+        if str(layer.get('kind') or '') not in {
+            'day_handoff',
+            'carryover',
+            'state',
+            'current_day_history',
+        }
+    ]
+    if accepted_state:
+        assembly['layers'].append({
+            'kind': 'state',
+            'text': accepted_state,
+            'mode': 'snapshot',
+        })
+    manifest = dict(assembly.get('manifest') or {})
+    manifest.update({
+        'context_plan_consumer': 'canonical_capacity',
+        'context_plan_id': str(getattr(context_plan, 'plan_id', '') or ''),
+        'context_plan_hash': str(getattr(context_plan, 'plan_hash', '') or ''),
+        'context_plan_capacity_chunk_count': len(chunk_blocks),
+        'context_plan_capacity_raw_in_first_stdin': False,
+    })
+    assembly['manifest'] = manifest
+    return assembly
+
+
 def _context_plan_for_receipt(plan: DailyTurnPlan) -> Any:
+    # A Capacity Swap plan is the consumed production authority for this
+    # transition; do not let an older cold/hot plan win receipt construction.
+    context_plan = getattr(plan, 'capacity_context_plan', None)
+    if context_plan is not None:
+        return context_plan
     context_plan = getattr(plan, 'continuity_plan', None)
     if context_plan is not None:
         return context_plan
     return getattr(plan, 'hot_desired_plan', None)
+
+
+def _context_plan_chunk_bodies(plan: DailyTurnPlan) -> dict[str, str]:
+    capacity_bodies = getattr(plan, 'capacity_context_chunk_bodies', None)
+    if isinstance(capacity_bodies, dict) and capacity_bodies:
+        return dict(capacity_bodies)
+    return dict(getattr(plan, 'continuity_chunk_bodies', None) or {})
 
 
 def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
@@ -2511,6 +2680,107 @@ def _commit_production_context_receipt(
         return False
 
 
+
+def _commit_capacity_source_receipt_supersession(
+    plan: DailyTurnPlan,
+    *,
+    target_receipt_committed: bool,
+) -> bool:
+    """CAS-supersede the frozen source receipt only after target proof."""
+    if not target_receipt_committed:
+        plan.manifest['capacity_source_receipt_supersession'] = (
+            'NOT_ATTEMPTED_TARGET_RECEIPT_FAILED'
+        )
+        return False
+    if plan.manifest.get('capacity_source_receipt_supersession_attempted'):
+        return plan.manifest.get(
+            'capacity_source_receipt_supersession'
+        ) == 'COMMITTED'
+    plan.manifest['capacity_source_receipt_supersession_attempted'] = True
+
+    frozen = getattr(plan, 'capacity_source_receipt_frozen', None)
+    if not isinstance(frozen, dict):
+        plan.manifest.update({
+            'capacity_source_receipt_supersession': 'REPAIR_REQUIRED',
+            'capacity_source_receipt_supersession_error': (
+                'capacity_source_receipt_not_frozen'
+            ),
+            'context_receipt_repair_required': True,
+            'error_code': 'context_receipt_supersession_not_frozen',
+        })
+        return False
+    source_receipt = frozen.get('receipt')
+    if source_receipt is None:
+        plan.manifest.update({
+            'capacity_source_receipt_supersession': 'SOURCE_RECEIPT_ABSENT',
+            'capacity_source_receipt_supersession_skipped': True,
+        })
+        return True
+
+    try:
+        source_context_id = int(frozen['context_id'])
+        source_context_epoch = int(frozen['context_epoch'])
+        source_generation = int(frozen['resident_generation'])
+        expected_revision = int(frozen['expected_receipt_revision'])
+        target_generation = int(plan.resident_generation)
+    except (KeyError, TypeError, ValueError) as exc:
+        plan.manifest.update({
+            'capacity_source_receipt_supersession': 'REPAIR_REQUIRED',
+            'capacity_source_receipt_supersession_error': (
+                'capacity_source_receipt_identity_invalid'
+            ),
+            'context_receipt_repair_required': True,
+            'error_code': 'context_receipt_supersession_identity_invalid',
+        })
+        logger.exception('capacity source receipt identity invalid')
+        return False
+
+    if (
+        source_context_id != int(plan.context_id)
+        or source_context_epoch != int(plan.context_epoch)
+        or target_generation != source_generation + 1
+    ):
+        plan.manifest.update({
+            'capacity_source_receipt_supersession': 'REPAIR_REQUIRED',
+            'capacity_source_receipt_supersession_error': (
+                'capacity_source_target_generation_mismatch'
+            ),
+            'context_receipt_repair_required': True,
+            'error_code': 'context_receipt_supersession_identity_invalid',
+        })
+        return False
+
+    from chat import context_receipt as receipt_store
+    conn = None
+    try:
+        conn = dc._connect(plan.db_path)
+        receipt_store.mark_superseded(
+            conn,
+            context_id=source_context_id,
+            context_epoch=source_context_epoch,
+            resident_generation=source_generation,
+            expected_receipt_revision=expected_revision,
+            target_generation=target_generation,
+        )
+    except Exception as exc:
+        logger.exception('capacity source receipt supersession failed')
+        plan.manifest.update({
+            'capacity_source_receipt_supersession': 'REPAIR_REQUIRED',
+            'capacity_source_receipt_supersession_error': type(exc).__name__,
+            'context_receipt_repair_required': True,
+            'error_code': 'context_receipt_supersession_conflict',
+        })
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+    plan.manifest.update({
+        'capacity_source_receipt_supersession': 'COMMITTED',
+        'capacity_source_receipt_superseded': True,
+    })
+    return True
+
+
 def _provider_content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -2574,7 +2844,10 @@ def _validate_production_context_install(
     content: Any,
 ) -> None:
     """Fail closed unless the consumed plan is the provider-visible install."""
-    context_plan = getattr(plan, 'continuity_plan', None)
+    context_plan = _context_plan_for_receipt(plan)
+    capacity_split = _is_capacity_context_plan(plan)
+    if capacity_split:
+        plan.manifest['capacity_context_install_parity'] = 'PENDING'
     if context_plan is None:
         raise DailyRuntimeError(
             'production ContextPlan is missing',
@@ -2594,7 +2867,7 @@ def _validate_production_context_install(
 
     expected_fixed = _build_continuity_shadow_fixed_sections(
         plan=plan,
-        resident=resident,
+        resident=None if capacity_split else resident,
         static_system=static_system,
         require_full_state_snapshot=True,
     )
@@ -2613,6 +2886,25 @@ def _validate_production_context_install(
             'ContextPlan fixed-section proof does not match install',
             error_code='context_plan_fixed_section_parity_failed',
         )
+
+    if capacity_split:
+        actual_system = str(
+            getattr(resident, '_system_text', '') or static_system or ''
+        )
+        invariant_sections = tuple(
+            section for section in actual_fixed
+            if str(getattr(section, 'kind', '') or '') == 'invariant_system'
+        )
+        if (
+            len(invariant_sections) != 1
+            or _sha256_text(actual_system)
+                != str(invariant_sections[0].content_hash or '')
+            or CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1 not in actual_system
+        ):
+            raise DailyRuntimeError(
+                'Capacity target system does not match ContextPlan fixed proof',
+                error_code='context_plan_capacity_fixed_parity_failed',
+            )
 
     current_sections = tuple(
         section for section in context_plan.ordered_sections
@@ -2657,14 +2949,116 @@ def _validate_production_context_install(
             error_code='context_plan_current_request_parity_failed',
         )
 
+    if capacity_split:
+        if not assembly.get('capacity_context_bootstrap'):
+            raise DailyRuntimeError(
+                'Capacity first-stdin bootstrap is missing',
+                error_code='context_plan_capacity_bootstrap_missing',
+            )
+        if assembly.get('context_plan_representation_blocks') and any(
+            str(block.get('kind') or '') == 'raw'
+            for block in assembly.get('context_plan_representation_blocks')
+            if isinstance(block, dict)
+        ):
+            raise DailyRuntimeError(
+                'raw ContextPlan history was replayed in target stdin',
+                error_code='context_plan_capacity_raw_replayed',
+            )
+        raw_refs = tuple(
+            str(member.source_ref)
+            for representation in tuple(context_plan.representations)
+            if str(getattr(representation, 'kind', '') or '') == 'raw'
+            for member in tuple(getattr(representation, 'source_members', ()) or ())
+        )
+        installed_raw_refs = tuple(
+            str(value)
+            for value in (plan.manifest.get('capacity_context_raw_source_refs') or ())
+        )
+        if (
+            plan.manifest.get('capacity_context_raw_carrier_parity') != 'PASS'
+            or installed_raw_refs != raw_refs
+        ):
+            raise DailyRuntimeError(
+                'Capacity raw carrier does not match ContextPlan',
+                error_code='context_plan_capacity_raw_parity_failed',
+            )
+        chunk_refs = tuple(
+            str(member.source_ref)
+            for representation in tuple(context_plan.representations)
+            if str(getattr(representation, 'kind', '') or '') == 'chunk'
+            for member in tuple(getattr(representation, 'source_members', ()) or ())
+        )
+        if len(chunk_refs) != len(set(chunk_refs)):
+            raise DailyRuntimeError(
+                'Capacity ContextPlan chunk membership overlaps',
+                error_code='context_plan_capacity_chunk_parity_failed',
+            )
+        if set(raw_refs) & set(chunk_refs):
+            raise DailyRuntimeError(
+                'raw and chunk ContextPlan membership overlaps',
+                error_code='context_plan_capacity_representation_overlap',
+            )
     blocks = assembly.get('context_plan_representation_blocks') or []
-    expected_blocks = tuple(context_plan.representations)
+    expected_blocks = tuple(
+        representation for representation in context_plan.representations
+        if not capacity_split
+        or str(getattr(representation, 'kind', '') or '') == 'chunk'
+    )
     if len(blocks) != len(expected_blocks):
         raise DailyRuntimeError(
             'ContextPlan representation install is incomplete',
             error_code='context_plan_representation_parity_failed',
         )
-    provider_text = _provider_content_text(content)
+
+    receipt = assembly.get('_context_install_render_receipt')
+    if not isinstance(receipt, dict):
+        raise DailyRuntimeError(
+            'ContextPlan structural render receipt is missing',
+            error_code='context_plan_render_receipt_missing',
+        )
+    payload_hash, payload_tokens, payload_kind = (
+        _continuity_shadow_fingerprint(content)
+    )
+    if (
+        str(receipt.get('final_payload_hash') or '') != str(payload_hash)
+        or int(receipt.get('final_payload_token_estimate', -1) or -1)
+            != int(payload_tokens)
+        or str(receipt.get('final_payload_kind') or '') != str(payload_kind)
+    ):
+        raise DailyRuntimeError(
+            'provider payload differs from structural render receipt',
+            error_code='context_plan_render_receipt_mismatch',
+        )
+    try:
+        current_request_slots = int(
+            receipt.get('current_request_slots', 0) or 0
+        )
+    except (TypeError, ValueError):
+        current_request_slots = 0
+    if (
+        current_request_slots != 1
+        or str(receipt.get('current_request_carrier') or '') != 'tail'
+    ):
+        raise DailyRuntimeError(
+            'current request structural carrier is not exactly once',
+            error_code='context_plan_current_request_parity_failed',
+        )
+
+    expected_representation_ids = tuple(
+        str(getattr(representation, 'representation_id', '') or '')
+        for representation in expected_blocks
+    )
+    installed_representation_ids = tuple(
+        str(value or '')
+        for value in (receipt.get('representation_ids') or ())
+    )
+    if installed_representation_ids != expected_representation_ids:
+        raise DailyRuntimeError(
+            'ContextPlan representation carrier identity does not match render',
+            error_code='context_plan_representation_parity_failed',
+        )
+
+    expected_body_hashes = []
     for block, representation in zip(blocks, expected_blocks):
         if (
             not isinstance(block, dict)
@@ -2677,10 +3071,51 @@ def _validate_production_context_install(
                 error_code='context_plan_representation_parity_failed',
             )
         body = str(block.get('body') or '').strip()
-        if not body or provider_text.count(body) != 1:
+        if not body:
             raise DailyRuntimeError(
-                'ContextPlan representation body is not installed exactly once',
+                'ContextPlan representation body is not installed',
                 error_code='context_plan_representation_parity_failed',
+            )
+        if capacity_split and str(
+            getattr(representation, 'kind', '') or ''
+        ) == 'chunk':
+            expected_body = _context_plan_chunk_bodies(plan).get(
+                str(getattr(representation, 'chunk_id', '') or '')
+            )
+            if expected_body is not None and body != str(expected_body).strip():
+                raise DailyRuntimeError(
+                    'ContextPlan chunk body does not match install',
+                    error_code='context_plan_representation_parity_failed',
+                )
+        expected_body_hashes.append(_sha256_text(body))
+
+    installed_body_hashes = tuple(
+        str(value or '')
+        for value in (receipt.get('representation_body_hashes') or ())
+    )
+    if tuple(expected_body_hashes) != installed_body_hashes:
+        raise DailyRuntimeError(
+            'ContextPlan representation body proof does not match render',
+            error_code='context_plan_representation_parity_failed',
+        )
+
+
+
+    if capacity_split:
+        if assembly.get('current_day_history'):
+            raise DailyRuntimeError(
+                'Capacity current request has a second history carrier',
+                error_code='context_plan_current_request_parity_failed',
+            )
+        current_source_ref = 'message:%d' % int(plan.user_message_id)
+        if (
+            plan.manifest.get('capacity_context_current_user_in_candidate')
+            is not False
+            or current_source_ref in raw_refs
+        ):
+            raise DailyRuntimeError(
+                'current user is present in Capacity forged JSONL',
+                error_code='context_plan_capacity_current_user_in_candidate',
             )
 
     state_text = str(assembly.get('state') or '').strip()
@@ -2691,6 +3126,18 @@ def _validate_production_context_install(
     if bool(state_text) != has_state_section:
         raise DailyRuntimeError(
             'accepted state install does not match ContextPlan proof',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
+    if state_text and (
+        not has_state_section
+        or _sha256_text(state_text)
+            != str(next(
+                section for section in actual_fixed
+                if str(getattr(section, 'kind', '') or '') == 'accepted_state'
+            ).content_hash or '')
+    ):
+        raise DailyRuntimeError(
+            'accepted state content does not match ContextPlan proof',
             error_code='context_plan_fixed_section_parity_failed',
         )
 
@@ -2706,26 +3153,47 @@ def _validate_production_context_install(
             'accepted open-loops install does not match ContextPlan proof',
             error_code='context_plan_fixed_section_parity_failed',
         )
-    if open_loops_text and provider_text.count(open_loops_text) != 1:
+
+    expected_fixed_carrier_kinds = tuple(
+        kind for kind, value in (
+            ('accepted_open_loops', open_loops_text),
+            ('accepted_state', state_text),
+        )
+        if value
+    )
+    installed_fixed_carrier_kinds = tuple(
+        str(value or '')
+        for value in (receipt.get('fixed_section_kinds') or ())
+    )
+    if installed_fixed_carrier_kinds != expected_fixed_carrier_kinds:
         raise DailyRuntimeError(
-            'accepted open-loops content is not installed exactly once',
+            'ContextPlan fixed carrier identity does not match render',
             error_code='context_plan_fixed_section_parity_failed',
         )
-
-    user_text = str(plan.user_content or '')
-    if user_text.strip() and user_text.strip() != '[image]':
-        if provider_text.count(user_text) != 1:
-            raise DailyRuntimeError(
-                'current request is not installed exactly once',
-                error_code='context_plan_current_request_parity_failed',
-            )
+    expected_fixed_body_hashes = tuple(
+        _sha256_text(str(value))
+        for value in (open_loops_text, state_text)
+        if value
+    )
+    installed_fixed_body_hashes = tuple(
+        str(value or '')
+        for value in (receipt.get('fixed_section_body_hashes') or ())
+    )
+    if installed_fixed_body_hashes != expected_fixed_body_hashes:
+        raise DailyRuntimeError(
+            'ContextPlan fixed carrier body proof does not match render',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
 
     plan.manifest.update({
         'context_plan_fixed_section_parity': 'PASS',
         'context_plan_representation_parity': 'PASS',
         'context_plan_current_request_count': 1,
-        'context_plan_provider_content_hash': _continuity_shadow_fingerprint(content)[0],
+        'context_plan_provider_content_hash': str(payload_hash),
     })
+    if capacity_split:
+        plan.manifest['capacity_context_install_parity'] = 'PASS'
+
 
 
 def _observe_production_context_plan(
@@ -2735,7 +3203,7 @@ def _observe_production_context_plan(
     static_system: str,
     content: Any,
 ) -> None:
-    context_plan = getattr(plan, 'continuity_plan', None)
+    context_plan = _context_plan_for_receipt(plan)
     if context_plan is None:
         return
     _validate_production_context_install(
@@ -2763,7 +3231,7 @@ def _observe_production_context_plan(
         'chunk_binding_count': sum(
             1 for item in representations if item.kind == 'chunk'
         ),
-        'chunk_surface': 'ready' if plan.continuity_chunk_bodies else 'empty',
+        'chunk_surface': 'ready' if _context_plan_chunk_bodies(plan) else 'empty',
         'plan_id': str(context_plan.plan_id),
         'plan_hash': str(context_plan.plan_hash),
         'plan_valid': bool(context_plan.valid),
@@ -3358,7 +3826,7 @@ def reprepare_after_capacity_swap(
             error_code='capacity_swap_cursor_seed_failed',
         ) from exc
 
-    return prepare_daily_turn(
+    replacement = prepare_daily_turn(
         user_message_id=plan.user_message_id,
         chat_id=plan.chat_id,
         request_id=plan.request_id,
@@ -3376,6 +3844,17 @@ def reprepare_after_capacity_swap(
         model=model,
         _capacity_swap_reprepare=True,
     )
+    replacement.capacity_context_plan = getattr(plan, 'capacity_context_plan', None)
+    replacement.capacity_context_chunk_bodies = dict(
+        getattr(plan, 'capacity_context_chunk_bodies', None) or {}
+    )
+    replacement.capacity_context_bootstrap = copy.deepcopy(
+        getattr(plan, 'capacity_context_bootstrap', None)
+    )
+    replacement.capacity_source_receipt_frozen = copy.deepcopy(
+        getattr(plan, 'capacity_source_receipt_frozen', None)
+    )
+    return replacement
 
 
 # Process/session identity transferred from staged (the new Claude process).
@@ -4113,6 +4592,55 @@ def _attempt_capacity_swap_before_stdin(
         return {'ok': False, 'error_code': 'trigger_not_capacity'}
 
     hooks = staged_hooks or _default_capacity_swap_staged_hooks(resident)
+    gate_on = _context_plan_consumer_enabled()
+    prepare_result = None
+    if gate_on:
+        target_system = with_capacity_boundary_suffix(static_system)
+        try:
+            frozen = _freeze_hot_receipt(plan, resident=resident)
+            plan.capacity_source_receipt_frozen = frozen
+            context_plan, chunk_bodies = _build_production_context_plan(
+                plan,
+                resident=None,
+                static_system=target_system,
+            )
+            plan.capacity_context_plan = context_plan
+            plan.capacity_context_chunk_bodies = dict(chunk_bodies)
+            plan.capacity_context_bootstrap = _freeze_capacity_context_bootstrap(
+                plan,
+                context_plan=context_plan,
+            )
+            plan.manifest.update({
+                'context_plan_consumer': 'canonical_capacity',
+                'context_plan_id': str(context_plan.plan_id),
+                'context_plan_hash': str(context_plan.plan_hash),
+                'context_plan_valid': bool(context_plan.valid),
+                'context_plan_budget_status': str(context_plan.budget_status),
+                'context_plan_source_hash': str(context_plan.source_hash),
+                'context_plan_capacity_source_receipt_revision': (
+                    frozen.get('expected_receipt_revision')
+                ),
+            })
+            prepare_result = prepare_capacity_swap_for_context_plan(
+                plan=plan,
+                context_plan=context_plan,
+                trigger_reason=trigger_reason,
+                static_system=target_system,
+                claude_home=claude_home,
+            )
+        except DailyRuntimeError as exc:
+            return {
+                'ok': False,
+                'error_code': str(exc.error_code),
+                'detail': str(exc),
+            }
+        except Exception as exc:
+            logger.exception('capacity ContextPlan preparation failed')
+            return {
+                'ok': False,
+                'error_code': 'context_plan_capacity_prepare_failed',
+                'detail': str(exc),
+            }
     handoff = run_capacity_swap_handoff(
         plan=plan,
         trigger_reason=trigger_reason,
@@ -4121,6 +4649,7 @@ def _attempt_capacity_swap_before_stdin(
         live_resident=resident,
         staged_hooks=hooks,
         claude_home=claude_home,
+        prepare_result=prepare_result,
     )
     if not handoff.ok or handoff.candidate is None:
         return {
@@ -4185,6 +4714,54 @@ def _attempt_capacity_swap_before_stdin(
             cursor_watermark=watermark,
         )
         _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
+        if gate_on:
+            context_plan = getattr(plan, 'capacity_context_plan', None)
+            if context_plan is None:
+                raise DailyRuntimeError(
+                    'capacity ContextPlan was lost during reprepare',
+                    error_code='context_plan_capacity_lost_after_reprepare',
+                )
+            plan.assembly = _project_capacity_context_bootstrap(plan)
+            raw_refs = tuple(
+                str(member.source_ref)
+                for representation in context_plan.representations
+                if str(getattr(representation, 'kind', '') or '') == 'raw'
+                for member in tuple(getattr(representation, 'source_members', ()) or ())
+            )
+            chunk_refs = tuple(
+                str(member.source_ref)
+                for representation in context_plan.representations
+                if str(getattr(representation, 'kind', '') or '') == 'chunk'
+                for member in tuple(getattr(representation, 'source_members', ()) or ())
+            )
+            selected_ids = tuple(
+                int(value)
+                for value in tuple(getattr(handoff.candidate, 'selected_message_ids', ()) or ())
+                if int(value) > 0
+            )
+            if int(plan.user_message_id) in selected_ids:
+                raise DailyRuntimeError(
+                    'current user entered Capacity forged JSONL',
+                    error_code='context_plan_capacity_current_user_in_candidate',
+                )
+            plan.manifest.update({
+                'context_plan_consumer': 'canonical_capacity',
+                'context_plan_id': str(context_plan.plan_id),
+                'context_plan_hash': str(context_plan.plan_hash),
+                'context_plan_valid': bool(context_plan.valid),
+                'context_plan_budget_status': str(context_plan.budget_status),
+                'context_plan_source_hash': str(context_plan.source_hash),
+                'capacity_context_raw_source_refs': raw_refs,
+                'capacity_context_chunk_source_refs': chunk_refs,
+                'capacity_context_raw_carrier_parity': 'PASS',
+                'capacity_context_raw_candidate_sha256': str(
+                    handoff.jsonl_sha256
+                    or getattr(handoff.candidate, 'output_sha256', '')
+                    or ''
+                ),
+                'capacity_context_current_user_in_candidate': False,
+                'capacity_context_install_parity': 'PENDING',
+            })
         plan.manifest['capacity_swap'] = True
         plan.manifest['capacity_swap_reason'] = trigger_reason
         plan.manifest['capacity_swap_source_generation'] = source_gen
@@ -4258,87 +4835,89 @@ def _attempt_capacity_swap_before_stdin(
             'target_generation': target_gen,
         }
 
-    # Production commit succeeded. Shadow metadata is best-effort and fail-open.
-    try:
-        # Candidate metadata is private and transient. Attach it only after
-        # staged install, registry publication, and target binding all succeed.
-        candidate = handoff.candidate
-        fixed_sections = tuple(
-            section for section in _build_continuity_shadow_fixed_sections(
-                plan=plan,
-                resident=resident,
-                static_system=effective,
+    # Gate OFF only: preserve the existing Capacity shadow metadata path.
+    if not gate_on:
+        # Production commit succeeded. Shadow metadata is best-effort and fail-open.
+        try:
+            # Candidate metadata is private and transient. Attach it only after
+            # staged install, registry publication, and target binding all succeed.
+            candidate = handoff.candidate
+            fixed_sections = tuple(
+                section for section in _build_continuity_shadow_fixed_sections(
+                    plan=plan,
+                    resident=resident,
+                    static_system=effective,
+                )
+                if str(getattr(section, 'kind', '') or '') in {
+                    'invariant_system',
+                    'accepted_state',
+                }
             )
-            if str(getattr(section, 'kind', '') or '') in {
-                'invariant_system',
-                'accepted_state',
+            anchor_status = getattr(
+                getattr(candidate, 'anchor_status', None),
+                'value',
+                getattr(candidate, 'anchor_status', ''),
+            )
+            candidate_sid = str(
+                handoff.candidate_session_id
+                or getattr(candidate, 'candidate_session_id', '')
+                or ''
+            ).strip()
+            pending_source_context_id = int(handoff.source_context_id or 0)
+            pending_source_context_epoch = int(handoff.source_context_epoch or 0)
+            pending_source_generation = int(handoff.source_resident_generation or 0)
+            pending_target_generation = int(target_gen)
+            baseline_sha = str(handoff.jsonl_sha256 or '').strip()
+            if (
+                not candidate_sid
+                or pending_source_context_id != source_ctx
+                or pending_source_context_epoch != source_epoch
+                or pending_source_generation <= 0
+                or pending_target_generation <= 0
+                or pending_target_generation != pending_source_generation + 1
+                or pending_target_generation != int(plan.resident_generation)
+            ):
+                raise DailyRuntimeError(
+                    'capacity shadow pending identity is incomplete',
+                    error_code='capacity_target_identity_mismatch',
+                )
+            if not baseline_sha:
+                raise DailyRuntimeError(
+                    'published capacity baseline sha256 is missing',
+                    error_code='capacity_baseline_sha_missing',
+                )
+            selected_ids = tuple(
+                int(value) for value in getattr(
+                    candidate, 'selected_message_ids', ()
+                ) if int(value) > 0
+            )
+            plan._continuity_shadow_capacity_pending = {
+                'source_context_id': pending_source_context_id,
+                'source_context_epoch': pending_source_context_epoch,
+                'source_resident_generation': pending_source_generation,
+                'target_resident_generation': pending_target_generation,
+                'candidate_session_id': candidate_sid,
+                'selected_message_ids': selected_ids,
+                'anchor_status': str(anchor_status or ''),
+                'anchor_message_id': int(
+                    getattr(candidate, 'anchor_message_id', 0) or 0
+                ),
+                'capacity_baseline_sha256': baseline_sha,
+                'trigger_reason': str(trigger_reason),
+                'fixed_section_fingerprints': _shadow_fixed_section_fingerprints(
+                    fixed_sections,
+                ),
             }
-        )
-        anchor_status = getattr(
-            getattr(candidate, 'anchor_status', None),
-            'value',
-            getattr(candidate, 'anchor_status', ''),
-        )
-        candidate_sid = str(
-            handoff.candidate_session_id
-            or getattr(candidate, 'candidate_session_id', '')
-            or ''
-        ).strip()
-        pending_source_context_id = int(handoff.source_context_id or 0)
-        pending_source_context_epoch = int(handoff.source_context_epoch or 0)
-        pending_source_generation = int(handoff.source_resident_generation or 0)
-        pending_target_generation = int(target_gen)
-        baseline_sha = str(handoff.jsonl_sha256 or '').strip()
-        if (
-            not candidate_sid
-            or pending_source_context_id != source_ctx
-            or pending_source_context_epoch != source_epoch
-            or pending_source_generation <= 0
-            or pending_target_generation <= 0
-            or pending_target_generation != pending_source_generation + 1
-            or pending_target_generation != int(plan.resident_generation)
-        ):
-            raise DailyRuntimeError(
-                'capacity shadow pending identity is incomplete',
-                error_code='capacity_target_identity_mismatch',
+        except Exception as exc:
+            err = str(getattr(exc, 'error_code', None) or '')
+            if not err:
+                err = 'capacity_shadow_pending_build_failed'
+            plan._continuity_shadow_capacity_pending_error = err
+            logger.exception(
+                'capacity shadow pending build failed code=%s',
+                err,
+                exc_info=True,
             )
-        if not baseline_sha:
-            raise DailyRuntimeError(
-                'published capacity baseline sha256 is missing',
-                error_code='capacity_baseline_sha_missing',
-            )
-        selected_ids = tuple(
-            int(value) for value in getattr(
-                candidate, 'selected_message_ids', ()
-            ) if int(value) > 0
-        )
-        plan._continuity_shadow_capacity_pending = {
-            'source_context_id': pending_source_context_id,
-            'source_context_epoch': pending_source_context_epoch,
-            'source_resident_generation': pending_source_generation,
-            'target_resident_generation': pending_target_generation,
-            'candidate_session_id': candidate_sid,
-            'selected_message_ids': selected_ids,
-            'anchor_status': str(anchor_status or ''),
-            'anchor_message_id': int(
-                getattr(candidate, 'anchor_message_id', 0) or 0
-            ),
-            'capacity_baseline_sha256': baseline_sha,
-            'trigger_reason': str(trigger_reason),
-            'fixed_section_fingerprints': _shadow_fixed_section_fingerprints(
-                fixed_sections,
-            ),
-        }
-    except Exception as exc:
-        err = str(getattr(exc, 'error_code', None) or '')
-        if not err:
-            err = 'capacity_shadow_pending_build_failed'
-        plan._continuity_shadow_capacity_pending_error = err
-        logger.exception(
-            'capacity shadow pending build failed code=%s',
-            err,
-            exc_info=True,
-        )
 
     # Success: retain full install_state until CURRENT user stdin flush.
     plan._capacity_swap_install_state = install_state  # type: ignore[attr-defined]
@@ -4383,6 +4962,72 @@ def _rollback_capacity_swap_if_unflushed(
     plan.manifest['capacity_swap_pre_flush_rollback'] = True
     return True
 
+def _raise_capacity_pre_send_failure(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    exc: Exception,
+) -> None:
+    """Rollback a staged Capacity target before surfacing a pre-send failure."""
+    if not _is_capacity_context_plan(plan):
+        raise exc
+    manifest = getattr(plan, 'manifest', None)
+    if not isinstance(manifest, dict):
+        manifest = {}
+        plan.manifest = manifest
+    if bool(getattr(plan, '_current_user_stdin_flushed', False)):
+        raise exc
+    if not getattr(plan, '_capacity_swap_install_state', None):
+        raise exc
+    if (
+        manifest.get('capacity_swap_pre_flush_blocked')
+        or manifest.get('capacity_swap_pre_flush_rollback_unproven')
+    ):
+        raise exc
+
+    error_code = str(
+        getattr(exc, 'error_code', None)
+        or 'context_plan_capacity_pre_send_failed'
+    )
+    try:
+        rolled = _rollback_capacity_swap_if_unflushed(
+            plan,
+            resident=resident,
+        )
+    except Exception as rollback_exc:
+        manifest.update({
+            'capacity_swap_pre_flush_rollback_unproven': True,
+            'capacity_swap_pre_flush_error_code': error_code,
+            'capacity_swap_pre_flush_rollback_error_code': (
+                type(rollback_exc).__name__
+            ),
+        })
+        raise DailyRuntimeError(
+            'gate-on Capacity ContextPlan rollback could not be proven',
+            error_code='context_plan_capacity_rollback_unproven',
+            retryable=False,
+        ) from rollback_exc
+    if not rolled:
+        manifest.update({
+            'capacity_swap_pre_flush_rollback_unproven': True,
+            'capacity_swap_pre_flush_error_code': error_code,
+        })
+        raise DailyRuntimeError(
+            'gate-on Capacity ContextPlan rollback could not be proven',
+            error_code='context_plan_capacity_rollback_unproven',
+            retryable=False,
+        ) from exc
+
+    manifest.update({
+        'capacity_swap_pre_flush_blocked': True,
+        'capacity_swap_pre_flush_error_code': error_code,
+    })
+    raise DailyRuntimeError(
+        'gate-on Capacity ContextPlan carrier failed before stdin',
+        error_code=error_code,
+        retryable=False,
+    ) from exc
+
 
 def _commit_capacity_swap_after_stdin_flush(plan: DailyTurnPlan) -> None:
     """After successful stdin flush: lock exactly-once and close deferred old proc."""
@@ -4424,6 +5069,38 @@ def _continuity_shadow_fingerprint(value: Any) -> tuple[str, int, str]:
     return digest, estimate, kind
 
 
+def _bind_context_install_render_receipt(
+    assembly: Any,
+    content: Any,
+) -> None:
+    """Bind the renderer's actual carrier operations to final provider content."""
+    if not isinstance(assembly, dict):
+        return
+    receipt = assembly.get('_context_install_render_receipt')
+    if not isinstance(receipt, dict):
+        return
+    digest, estimate, kind = _continuity_shadow_fingerprint(content)
+    receipt.update({
+        'final_payload_hash': str(digest),
+        'final_payload_token_estimate': int(estimate),
+        'final_payload_kind': str(kind),
+    })
+
+
+def _accepted_state_text(assembly: Any) -> str:
+    from chat.persona_state_semantic import (
+        format_persona_semantic_snapshot,
+        translate_raw_state_to_persona_semantic,
+    )
+    value = assembly if isinstance(assembly, dict) else {}
+    state_snapshot = value.get('state_snapshot')
+    if not isinstance(state_snapshot, dict) or not state_snapshot:
+        return ''
+    return format_persona_semantic_snapshot(
+        translate_raw_state_to_persona_semantic(state_snapshot),
+    )
+
+
 def _build_continuity_shadow_fixed_sections(
     *,
     plan: DailyTurnPlan,
@@ -4453,12 +5130,7 @@ def _build_continuity_shadow_fixed_sections(
     ))
 
     assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
-    state_serialized = ''
-    state_snapshot = assembly.get('state_snapshot')
-    if isinstance(state_snapshot, dict) and state_snapshot:
-        state_serialized = format_persona_semantic_snapshot(
-            translate_raw_state_to_persona_semantic(state_snapshot),
-        )
+    state_serialized = _accepted_state_text(assembly)
     if not state_serialized and not require_full_state_snapshot:
         # Legacy shadow/test callers may only have the transport field.  The
         # production ContextPlan path opts out so a hot delta cannot become a
@@ -5089,7 +5761,12 @@ def _observe_continuity_shadow(
     static_system: str,
     content: Any,
 ) -> None:
-    if getattr(plan, 'continuity_plan', None) is not None:
+    # Normal hot keeps its incremental/no-replay contract.  Only a plan that
+    # is actually installed on this turn may enter production install proof.
+    if (
+        getattr(plan, 'continuity_plan', None) is not None
+        or getattr(plan, 'capacity_context_plan', None) is not None
+    ):
         _observe_production_context_plan(
             plan=plan,
             resident=resident,
@@ -5417,6 +6094,18 @@ def ensure_resident_and_stream(
                         _registry_reprep_depth=_registry_reprep_depth + 1,
                     )
                     return
+                if _context_plan_consumer_enabled():
+                    heartbeat.stop()
+                    _release_lease(plan)
+                    raise DailyRuntimeError(
+                        'gate-on Capacity ContextPlan carrier blocked: %s'
+                        % str(swap.get('error_code') or 'capacity_swap_failed'),
+                        error_code=str(
+                            swap.get('error_code')
+                            or 'context_plan_capacity_blocked'
+                        ),
+                        retryable=False,
+                    )
                 # Pre-stdin failure → same-context last-good → existing cold (order frozen).
                 logger.info(
                     'capacity swap failed pre-stdin code=%s; trying same-context last-good',
@@ -5629,6 +6318,8 @@ def ensure_resident_and_stream(
             except Exception:
                 logger.warning('reality_context prefix injection failed; continuing without', exc_info=True)
 
+        _bind_context_install_render_receipt(plan.assembly, content)
+
         db_cursor = dc.get_resident_history_cursor(
             plan.context_id, plan.resident_generation, db_path=plan.db_path,
         )
@@ -5721,8 +6412,14 @@ def ensure_resident_and_stream(
             # Post-flush: CURRENT user already sent → fail closed, never resend.
             if bool(getattr(plan, '_current_user_stdin_flushed', False)):
                 raise
-            # Pre-flush CapSwap failure: restore old live, then continue frozen
-            # fallback (last-good → cold) so CURRENT user can still send once.
+            # Pre-flush CapSwap failure: restore old live. Gate-on split
+            # carrier stops here; gate-off retains the frozen fallback order.
+            if _is_capacity_context_plan(plan):
+                _raise_capacity_pre_send_failure(
+                    plan,
+                    resident=resident,
+                    exc=exc,
+                )
             rolled = _rollback_capacity_swap_if_unflushed(plan, resident=resident)
             if not rolled:
                 raise
@@ -5787,6 +6484,14 @@ def ensure_resident_and_stream(
         if heartbeat.stop():
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)
             raise LeaseHeartbeatTerminalFailure('lease heartbeat failed after stream')
+    except Exception as exc:
+        if _is_capacity_context_plan(plan):
+            _raise_capacity_pre_send_failure(
+                plan,
+                resident=resident,
+                exc=exc,
+            )
+        raise
     finally:
         heartbeat.stop()
         if heartbeat.failed:
@@ -6059,15 +6764,21 @@ def handle_provider_success(
         )
     # The receipt is committed only after persist + cursor CAS + MAPPED and
     # the existing last-good success boundary.  It is durable metadata proof.
+    target_receipt_committed = True
     if _context_plan_for_receipt(plan) is not None:
-        _commit_production_context_receipt(
+        target_receipt_committed = bool(_commit_production_context_receipt(
             plan,
             assistant_message_id=int(assistant_message_id),
-        )
+        ))
     else:
         _commit_continuity_shadow_receipt(
             plan,
             assistant_message_id=int(assistant_message_id),
+        )
+    if _is_capacity_context_plan(plan):
+        _commit_capacity_source_receipt_supersession(
+            plan,
+            target_receipt_committed=target_receipt_committed,
         )
     _consume_feedback_after_success(plan)
     return dict(plan.manifest)

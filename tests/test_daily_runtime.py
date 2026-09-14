@@ -5282,5 +5282,603 @@ class ContextPlanConsumerTests(unittest.TestCase):
             os.unlink(db)
 
 
+class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
+    def test_capacity_first_stdin_contains_chunks_and_fixed_content_only(self):
+        assembly = {
+            'capacity_context_bootstrap': True,
+            'context_plan_representation_blocks': [{
+                'kind': 'chunk',
+                'representation_id': 'chunk:ready-1',
+                'body': 'CHUNK_CANONICAL',
+            }],
+            'context_plan_accepted_open_loops': ['OPEN_LOOP'],
+            'state': 'ACCEPTED_STATE_SNAPSHOT',
+            'current_day_history': [{
+                'role': 'user',
+                'content': 'RAW_REPLAY_FORBIDDEN',
+            }],
+            'day_handoff': 'LEGACY_HANDOFF_FORBIDDEN',
+            'carryover_messages': [{
+                'role': 'assistant',
+                'content': 'LEGACY_CARRYOVER_FORBIDDEN',
+            }],
+        }
+        content = dr.format_resident_turn_content(
+            assembly=assembly,
+            user_content='CURRENT_REQUEST',
+            is_cold=False,
+            is_respawn=False,
+        )
+        self.assertEqual(content.count('CHUNK_CANONICAL'), 1)
+        self.assertEqual(content.count('OPEN_LOOP'), 1)
+        self.assertEqual(content.count('ACCEPTED_STATE_SNAPSHOT'), 1)
+        self.assertEqual(content.count('CURRENT_REQUEST'), 1)
+        self.assertNotIn('RAW_REPLAY_FORBIDDEN', content)
+        self.assertNotIn('LEGACY_HANDOFF_FORBIDDEN', content)
+        self.assertNotIn('LEGACY_CARRYOVER_FORBIDDEN', content)
+
+    def _capacity_install_fixture(self, current_text):
+        from continuity.sources import evidence_ref
+
+        db = _tmp_db()
+        _init_chat_messages(db)
+        current_id = _insert(
+            db,
+            'user',
+            current_text,
+            '2026-07-27 09:00:00',
+        )
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute(
+            'SELECT * FROM chat_messages WHERE id=?',
+            (current_id,),
+        ).fetchone())
+        conn.close()
+        current_evidence = evidence_ref(row, prefix='message')
+        target_system = (
+            'STATIC' + dr.CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1
+        )
+        chunk_body = (
+            'chunk carrier: %s / %s' % (current_text, current_text)
+        )
+        assembly = {
+            'capacity_context_bootstrap': True,
+            'context_plan_representation_blocks': [{
+                'kind': 'chunk',
+                'representation_id': 'chunk:one',
+                'body': chunk_body,
+            }],
+            'context_plan_accepted_open_loops': [
+                current_text,
+                current_text,
+            ],
+            'day_handoff_content': {
+                'open_loops': [current_text, current_text],
+            },
+            'state': '',
+            'current_day_history': [],
+            'day_handoff': '',
+            'carryover_messages': [],
+        }
+        scaffold = types.SimpleNamespace(
+            assembly=assembly,
+            manifest={},
+            db_path=db,
+        )
+        fixed_sections = dr._build_continuity_shadow_fixed_sections(
+            plan=scaffold,
+            resident=None,
+            static_system=target_system,
+            require_full_state_snapshot=True,
+        )
+        current_section = types.SimpleNamespace(
+            kind='current_request',
+            source_ref='message:%d' % current_id,
+            content_hash=str(current_evidence.content_hash),
+            estimated_tokens=int(current_evidence.logical_size),
+        )
+        chunk_representation = types.SimpleNamespace(
+            representation_id='chunk:one',
+            kind='chunk',
+            chunk_id='chunk:one',
+            source_members=(),
+            estimated_tokens=4,
+        )
+        context_plan = types.SimpleNamespace(
+            representations=(chunk_representation,),
+            ordered_sections=tuple(fixed_sections) + (current_section,),
+        )
+        plan = types.SimpleNamespace(
+            capacity_context_plan=context_plan,
+            continuity_plan=None,
+            hot_desired_plan=None,
+            user_message_id=current_id,
+            user_content=current_text,
+            db_path=db,
+            assembly=assembly,
+            manifest={
+                'capacity_context_current_user_in_candidate': False,
+                'capacity_context_raw_carrier_parity': 'PASS',
+                'capacity_context_raw_source_refs': (),
+                'capacity_context_install_parity': 'PENDING',
+            },
+            capacity_context_chunk_bodies={
+                'chunk:one': chunk_body,
+            },
+        )
+        resident = types.SimpleNamespace(_system_text=target_system)
+        content = dr.format_resident_turn_content(
+            assembly=assembly,
+            user_content=current_text,
+            is_cold=False,
+            is_respawn=False,
+        )
+        return db, plan, resident, target_system, content
+
+    def test_capacity_presend_observation_failure_rolls_back_before_send(self):
+        """The outer guard covers production install observation failures."""
+        dr.reset_bindings_for_tests()
+        plan = types.SimpleNamespace(
+            request_id='capacity-presend',
+            chat_id='default',
+            context_id=7,
+            context_epoch=3,
+            resident_generation=2,
+            resident_key='default:e3:g2',
+            user_message_id=1,
+            epoch_token={},
+            lease_owner='test-owner',
+            is_cold=False,
+            is_respawn=False,
+            cursor_before=0,
+            assembly={},
+            manifest={
+                'provider': 'claude_code',
+                'model': 'model-1',
+            },
+            user_content='好',
+            user_image_url='',
+            user_attachments=(),
+            provider_display_thinking_suffix='',
+            db_path='test.db',
+            worker_id='test-worker',
+            tool_profile='test-profile',
+            turn_lease={},
+            capacity_context_plan=object(),
+            continuity_plan=None,
+            hot_desired_plan=None,
+            _capacity_swap_install_state={'old_proc': object()},
+            _capacity_swap_deferred_old_proc=object(),
+            _current_user_stdin_flushed=False,
+        )
+        resident = mock.Mock()
+        resident.generation = 2
+        resident._system_text = 'TARGET SYSTEM'
+        resident.ensure_alive.return_value = False
+        heartbeat = mock.Mock()
+        heartbeat.failed = False
+        heartbeat.stop.return_value = False
+        parity_failure = dr.DailyRuntimeError(
+            'forced install parity failure',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        try:
+            with mock.patch.object(
+                dr,
+                'verify_epoch_token',
+            ), mock.patch.object(
+                dr,
+                'LeaseHeartbeat',
+                return_value=heartbeat,
+            ), mock.patch.object(
+                dr,
+                'peek_registered_respawn_decision',
+                return_value={'requires_respawn': False},
+            ), mock.patch.object(
+                dr,
+                'format_resident_turn_content',
+                return_value='TARGET CONTENT',
+            ), mock.patch.object(
+                dr.dc,
+                'get_resident_history_cursor',
+                return_value=0,
+            ), mock.patch.object(
+                dr.dc,
+                'upsert_resident_owner',
+            ), mock.patch.object(
+                dr,
+                '_capture_transcript_start',
+            ), mock.patch.object(
+                dr,
+                '_validate_hot_no_op_payload',
+            ), mock.patch.object(
+                dr,
+                '_observe_continuity_shadow',
+                side_effect=parity_failure,
+            ), mock.patch.object(
+                dr,
+                'rollback_capacity_swap_install',
+            ) as rollback, mock.patch.object(
+                dr,
+                'try_restore_same_context_last_good',
+            ) as fallback:
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    list(dr.ensure_resident_and_stream(
+                        plan,
+                        resident=resident,
+                        env={},
+                        static_system='TARGET SYSTEM',
+                    ))
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_current_request_parity_failed',
+            )
+            rollback.assert_called_once()
+            fallback.assert_not_called()
+            resident.send_turn.assert_not_called()
+            self.assertTrue(plan.manifest['capacity_swap_pre_flush_blocked'])
+            self.assertIsNone(plan._capacity_swap_install_state)
+        finally:
+            dr.reset_bindings_for_tests()
+
+    def test_capacity_presend_rollback_1_restores_before_send(self):
+        """CAPACITY-PRESEND-ROLLBACK-1: parity failure cannot send."""
+        plan = types.SimpleNamespace(
+            capacity_context_plan=object(),
+            manifest={},
+            _capacity_swap_install_state={'old_proc': object()},
+            _capacity_swap_deferred_old_proc=object(),
+            _current_user_stdin_flushed=False,
+        )
+        resident = mock.Mock()
+        failure = dr.DailyRuntimeError(
+            'parity failed',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        with mock.patch.object(
+            dr,
+            'rollback_capacity_swap_install',
+        ) as rollback, mock.patch.object(
+            dr,
+            'try_restore_same_context_last_good',
+        ) as fallback:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._raise_capacity_pre_send_failure(
+                    plan,
+                    resident=resident,
+                    exc=failure,
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_current_request_parity_failed',
+        )
+        self.assertTrue(plan.manifest['capacity_swap_pre_flush_blocked'])
+        self.assertIsNone(plan._capacity_swap_install_state)
+        rollback.assert_called_once()
+        fallback.assert_not_called()
+        resident.send_turn.assert_not_called()
+
+    def test_capacity_presend_rollback_2_rollback_failure_no_send(self):
+        """CAPACITY-PRESEND-ROLLBACK-2: failed restore is terminal."""
+        plan = types.SimpleNamespace(
+            capacity_context_plan=object(),
+            manifest={},
+            _capacity_swap_install_state={'old_proc': object()},
+            _capacity_swap_deferred_old_proc=object(),
+            _current_user_stdin_flushed=False,
+        )
+        resident = mock.Mock()
+        failure = dr.DailyRuntimeError(
+            'parity failed',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        with mock.patch.object(
+            dr,
+            'rollback_capacity_swap_install',
+            side_effect=RuntimeError('restore failed'),
+        ):
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._raise_capacity_pre_send_failure(
+                    plan,
+                    resident=resident,
+                    exc=failure,
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_capacity_rollback_unproven',
+        )
+        self.assertTrue(
+            plan.manifest['capacity_swap_pre_flush_rollback_unproven']
+        )
+        resident.send_turn.assert_not_called()
+
+    def test_capacity_actual_renderer_receipt_binds_each_carrier(self):
+        """ACTUAL-RENDER-RECEIPT: receipt records the provider payload render."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('好')
+        )
+        try:
+            receipt = plan.assembly['_context_install_render_receipt']
+            payload_hash, payload_tokens, payload_kind = (
+                dr._continuity_shadow_fingerprint(content)
+            )
+            self.assertEqual(
+                receipt['representation_ids'],
+                ['chunk:one'],
+            )
+            self.assertEqual(
+                receipt['representation_body_hashes'],
+                [dr._sha256_text(plan.capacity_context_chunk_bodies['chunk:one'])],
+            )
+            self.assertEqual(
+                receipt['fixed_section_kinds'],
+                ['accepted_open_loops'],
+            )
+            self.assertEqual(
+                receipt['fixed_section_body_hashes'],
+                [dr._sha256_text(
+                    dr._format_context_plan_open_loops(
+                        plan.assembly['context_plan_accepted_open_loops'],
+                    ),
+                )],
+            )
+            self.assertEqual(receipt['current_request_slots'], 1)
+            self.assertEqual(receipt['current_request_carrier'], 'tail')
+            self.assertEqual(receipt['final_payload_hash'], payload_hash)
+            self.assertEqual(
+                receipt['final_payload_token_estimate'],
+                payload_tokens,
+            )
+            self.assertEqual(receipt['final_payload_kind'], payload_kind)
+            dr._validate_production_context_install(
+                plan=plan,
+                resident=resident,
+                static_system=target_system,
+                content=content,
+            )
+            self.assertEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_1_chunk_omission_fails_closed(self):
+        """RENDER-PROOF-1: omitted chunk is rejected before provider send."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_CHUNK')
+        )
+        try:
+            chunk_body = plan.capacity_context_chunk_bodies['chunk:one']
+            self.assertEqual(content.count(chunk_body), 1)
+            omitted = content.replace(chunk_body, '', 1)
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=omitted,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_2_current_omission_or_duplication_fails_closed(self):
+        """RENDER-PROOF-2: CURRENT is absent or installed twice."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_SLOT')
+        )
+        try:
+            current_text = plan.user_content
+            self.assertTrue(content.endswith(current_text))
+            actual_payloads = (
+                content[:-len(current_text)],
+                content + current_text,
+            )
+            for actual in actual_payloads:
+                with self.subTest(payload=actual):
+                    plan.manifest['capacity_context_install_parity'] = 'PENDING'
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._validate_production_context_install(
+                            plan=plan,
+                            resident=resident,
+                            static_system=target_system,
+                            content=actual,
+                        )
+                    self.assertEqual(
+                        raised.exception.error_code,
+                        'context_plan_render_receipt_mismatch',
+                    )
+                    self.assertNotEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PASS',
+                    )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_3_post_receipt_payload_mutation_fails_closed(self):
+        """RENDER-PROOF-3: a frozen receipt rejects later payload mutation."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_REQUEST')
+        )
+        try:
+            mutated = content + '\nPOST_RENDER_MUTATION'
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=mutated,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_current_request_structural_proof_allows_literal_collisions(self):
+        """Short and repeated prose do not look like duplicate carriers."""
+        for current_text in ('好', '重复请求文本'):
+            with self.subTest(current_text=current_text):
+                db, plan, resident, target_system, content = (
+                    self._capacity_install_fixture(current_text)
+                )
+                try:
+                    self.assertGreaterEqual(content.count(current_text), 5)
+                    self.assertEqual(
+                        plan.assembly['_context_install_render_receipt'][
+                            'current_request_slots'
+                        ],
+                        1,
+                    )
+                    self.assertEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PENDING',
+                    )
+                    dr._validate_production_context_install(
+                        plan=plan,
+                        resident=resident,
+                        static_system=target_system,
+                        content=content,
+                    )
+                    self.assertEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PASS',
+                    )
+                finally:
+                    os.unlink(db)
+
+    def test_capacity_current_source_cannot_be_a_second_forged_carrier(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('重复请求文本')
+        )
+        try:
+            plan.manifest['capacity_context_current_user_in_candidate'] = True
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_capacity_current_user_in_candidate',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_install_parity_failure_never_reaches_pass(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('好')
+        )
+        try:
+            self.assertEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PENDING',
+            )
+            plan.assembly['_context_install_render_receipt'][
+                'current_request_slots'
+            ] = 2
+            with self.assertRaises(dr.DailyRuntimeError):
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_source_receipt_supersession_uses_frozen_revision_once(self):
+        from chat import context_receipt as receipt_store
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            source = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='source-session',
+                process_generation=1,
+                plan_id='plan:source',
+                plan_hash='source-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=(),
+            )
+            receipt_store.create_receipt(conn, source, ())
+            conn.close()
+
+            plan = types.SimpleNamespace(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=2,
+                db_path=db,
+                manifest={},
+                capacity_source_receipt_frozen={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'receipt': source,
+                    'expected_receipt_revision': 0,
+                },
+            )
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+            self.assertEqual(
+                plan.manifest['capacity_source_receipt_supersession'],
+                'COMMITTED',
+            )
+            conn = sqlite3.connect(db)
+            row = conn.execute(
+                'SELECT receipt_revision, result, superseded_by_generation '
+                'FROM context_receipts '
+                'WHERE context_id=7 AND context_epoch=3 AND resident_generation=1',
+            ).fetchone()
+            conn.close()
+            self.assertEqual(row, (1, 'superseded', 2))
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+        finally:
+            os.unlink(db)
+
+
 if __name__ == '__main__':
     unittest.main()
