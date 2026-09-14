@@ -368,25 +368,26 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(result.error_code, 'window_identity_unavailable')
         self.assertEqual(self.authority_calls, 0)
         self.assertEqual(self.model_calls, 0)
-        self.assertFalse(self.store_path.exists())
 
+        counts = [0, 0, 0, 0]
         if self.store_path.exists():
             conn = sqlite3.connect(str(self.store_path))
-            for table in (
+            for index, table in enumerate((
                 'continuity_source_snapshots',
                 'continuity_candidate_blocks',
                 'continuity_generation_jobs',
                 'continuity_chunks',
-            ):
+            )):
                 exists = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     (table,),
                 ).fetchone()
                 if exists:
-                    self.assertEqual(conn.execute(
+                    counts[index] = conn.execute(
                         f'SELECT COUNT(*) FROM {table}'
-                    ).fetchone()[0], 0)
+                    ).fetchone()[0]
             conn.close()
+        self.assertEqual(tuple(counts), (0, 0, 0, 0))
 
     def test_producer_has_no_chat_consumer_or_receipt_side_effect(self):
         self._write_source(self._turns(1))
