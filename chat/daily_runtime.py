@@ -461,6 +461,7 @@ def format_resident_turn_content(
 
     time_anchor = str(reality_time_anchor or '').strip()
     prefix_parts: list[str] = []
+    fixed_carrier_values: list[tuple[str, str]] = []
     open_loops = ''
     if cold_like or capacity_bootstrap:
         if cold_like:
@@ -476,9 +477,11 @@ def format_resident_turn_content(
         )
         if open_loops:
             prefix_parts.append(open_loops)
+            fixed_carrier_values.append(('accepted_open_loops', open_loops))
     state_text = str(assembly.get('state') or '').strip()
     if state_text:
         prefix_parts.append(state_text)
+        fixed_carrier_values.append(('accepted_state', state_text))
     task_feedback = str(assembly.get('task_feedback') or '').strip()
     if task_feedback:
         prefix_parts.append(task_feedback)
@@ -487,39 +490,55 @@ def format_resident_turn_content(
     canonical_history = _format_context_plan_representation_blocks(
         context_plan_blocks,
     )
-    fixed_carrier_kinds = tuple(
-        kind for kind, value in (
-            ('accepted_open_loops', open_loops),
-            ('accepted_state', state_text),
-        )
-        if value
-    )
-    assembly['_context_install_carriers'] = {
-        'representation_ids': tuple(
-            str(block.get('representation_id') or '')
-            for block in context_plan_blocks
-            if isinstance(block, dict)
-        ),
-        'representation_body_hashes': tuple(
-            _sha256_text(str(block.get('body') or '').strip())
-            for block in context_plan_blocks
-            if isinstance(block, dict)
-        ),
-        'fixed_section_kinds': fixed_carrier_kinds,
-        'current_request_slots': 1,
-        'current_request_carrier': 'tail',
+    render_receipt = {
+        'representation_ids': [],
+        'representation_body_hashes': [],
+        'fixed_section_kinds': [],
+        'fixed_section_body_hashes': [],
+        'current_request_slots': 0,
+        'current_request_carrier': '',
     }
+
+    def _render_context_plan_history() -> str:
+        rendered = []
+        for block in context_plan_blocks:
+            body = str(block.get('body') or '').strip()
+            if not body:
+                continue
+            rendered.append(body)
+            render_receipt['representation_ids'].append(
+                str(block.get('representation_id') or '')
+            )
+            render_receipt['representation_body_hashes'].append(
+                _sha256_text(body)
+            )
+        return NL.join(rendered)
+
+    def _render_fixed_prefix() -> str:
+        for kind, value in fixed_carrier_values:
+            render_receipt['fixed_section_kinds'].append(str(kind))
+            render_receipt['fixed_section_body_hashes'].append(
+                _sha256_text(str(value))
+            )
+        return prefix
+
+    def _render_current_request() -> str:
+        render_receipt['current_request_slots'] += 1
+        render_receipt['current_request_carrier'] = 'tail'
+        return turn_user_text
+
     prefix = NL.join(p for p in prefix_parts if p)
+    assembly['_context_install_render_receipt'] = render_receipt
     if (cold_like or capacity_bootstrap) and canonical_history:
         body = (
             '以下是本聊天日内的正式对话记录：' + NL + NL
-            + canonical_history
+            + _render_context_plan_history()
         )
         if time_anchor:
             body += NL + NL + time_anchor
-        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + turn_user_text
+        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + _render_current_request()
         if prefix:
-            text = prefix + NL + NL + body
+            text = _render_fixed_prefix() + NL + NL + body
         else:
             text = body
     elif cold_like and history:
@@ -530,27 +549,27 @@ def format_resident_turn_content(
         )
         if time_anchor:
             body += NL + NL + time_anchor
-        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + turn_user_text
+        body += NL + NL + '请回复最后一条用户消息。' + NL + NL + _render_current_request()
         if prefix:
-            text = prefix + NL + NL + body
+            text = _render_fixed_prefix() + NL + NL + body
         else:
             text = body
     elif history:
         history_text = _format_history_messages(history)
         replay = '【新增正式对话】' + NL + history_text + NL + NL
         if prefix:
-            text = prefix + NL + NL + replay + turn_user_text
+            text = _render_fixed_prefix() + NL + NL + replay + _render_current_request()
         else:
-            text = replay + turn_user_text
+            text = replay + _render_current_request()
     elif prefix:
         if cold_like and time_anchor:
-            text = prefix + NL + NL + time_anchor + NL + NL + turn_user_text
+            text = _render_fixed_prefix() + NL + NL + time_anchor + NL + NL + _render_current_request()
         else:
-            text = prefix + NL + NL + turn_user_text
+            text = _render_fixed_prefix() + NL + NL + _render_current_request()
     elif cold_like and time_anchor:
-        text = time_anchor + NL + NL + turn_user_text
+        text = time_anchor + NL + NL + _render_current_request()
     else:
-        text = turn_user_text
+        text = _render_current_request()
 
     if not attachment_parts:
         content = text
@@ -561,9 +580,11 @@ def format_resident_turn_content(
             attachment_parts=attachment_parts,
         )
     from chat.display_thinking import append_display_thinking_suffix
-    return append_display_thinking_suffix(
+    content = append_display_thinking_suffix(
         content, provider_display_thinking_suffix,
     )
+    _bind_context_install_render_receipt(assembly, content)
+    return content
 
 
 def _binding_matches_plan(binding: Optional[LocalResidentBinding], plan: DailyTurnPlan) -> bool:
@@ -2989,21 +3010,34 @@ def _validate_production_context_install(
             error_code='context_plan_representation_parity_failed',
         )
 
-    carriers = assembly.get('_context_install_carriers')
-    if not isinstance(carriers, dict):
+    receipt = assembly.get('_context_install_render_receipt')
+    if not isinstance(receipt, dict):
         raise DailyRuntimeError(
-            'ContextPlan structural carrier proof is missing',
-            error_code='context_plan_current_request_parity_failed',
+            'ContextPlan structural render receipt is missing',
+            error_code='context_plan_render_receipt_missing',
+        )
+    payload_hash, payload_tokens, payload_kind = (
+        _continuity_shadow_fingerprint(content)
+    )
+    if (
+        str(receipt.get('final_payload_hash') or '') != str(payload_hash)
+        or int(receipt.get('final_payload_token_estimate', -1) or -1)
+            != int(payload_tokens)
+        or str(receipt.get('final_payload_kind') or '') != str(payload_kind)
+    ):
+        raise DailyRuntimeError(
+            'provider payload differs from structural render receipt',
+            error_code='context_plan_render_receipt_mismatch',
         )
     try:
         current_request_slots = int(
-            carriers.get('current_request_slots', 0) or 0
+            receipt.get('current_request_slots', 0) or 0
         )
     except (TypeError, ValueError):
         current_request_slots = 0
     if (
         current_request_slots != 1
-        or str(carriers.get('current_request_carrier') or '') != 'tail'
+        or str(receipt.get('current_request_carrier') or '') != 'tail'
     ):
         raise DailyRuntimeError(
             'current request structural carrier is not exactly once',
@@ -3016,11 +3050,11 @@ def _validate_production_context_install(
     )
     installed_representation_ids = tuple(
         str(value or '')
-        for value in (carriers.get('representation_ids') or ())
+        for value in (receipt.get('representation_ids') or ())
     )
     if installed_representation_ids != expected_representation_ids:
         raise DailyRuntimeError(
-            'ContextPlan representation carrier identity does not match install',
+            'ContextPlan representation carrier identity does not match render',
             error_code='context_plan_representation_parity_failed',
         )
 
@@ -3057,13 +3091,15 @@ def _validate_production_context_install(
 
     installed_body_hashes = tuple(
         str(value or '')
-        for value in (carriers.get('representation_body_hashes') or ())
+        for value in (receipt.get('representation_body_hashes') or ())
     )
     if tuple(expected_body_hashes) != installed_body_hashes:
         raise DailyRuntimeError(
-            'ContextPlan representation carrier body proof does not match install',
+            'ContextPlan representation body proof does not match render',
             error_code='context_plan_representation_parity_failed',
         )
+
+
 
     if capacity_split:
         if assembly.get('current_day_history'):
@@ -3127,11 +3163,25 @@ def _validate_production_context_install(
     )
     installed_fixed_carrier_kinds = tuple(
         str(value or '')
-        for value in (carriers.get('fixed_section_kinds') or ())
+        for value in (receipt.get('fixed_section_kinds') or ())
     )
     if installed_fixed_carrier_kinds != expected_fixed_carrier_kinds:
         raise DailyRuntimeError(
-            'ContextPlan fixed carrier identity does not match install',
+            'ContextPlan fixed carrier identity does not match render',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
+    expected_fixed_body_hashes = tuple(
+        _sha256_text(str(value))
+        for value in (open_loops_text, state_text)
+        if value
+    )
+    installed_fixed_body_hashes = tuple(
+        str(value or '')
+        for value in (receipt.get('fixed_section_body_hashes') or ())
+    )
+    if installed_fixed_body_hashes != expected_fixed_body_hashes:
+        raise DailyRuntimeError(
+            'ContextPlan fixed carrier body proof does not match render',
             error_code='context_plan_fixed_section_parity_failed',
         )
 
@@ -3139,7 +3189,7 @@ def _validate_production_context_install(
         'context_plan_fixed_section_parity': 'PASS',
         'context_plan_representation_parity': 'PASS',
         'context_plan_current_request_count': 1,
-        'context_plan_provider_content_hash': _continuity_shadow_fingerprint(content)[0],
+        'context_plan_provider_content_hash': str(payload_hash),
     })
     if capacity_split:
         plan.manifest['capacity_context_install_parity'] = 'PASS'
@@ -5019,6 +5069,24 @@ def _continuity_shadow_fingerprint(value: Any) -> tuple[str, int, str]:
     return digest, estimate, kind
 
 
+def _bind_context_install_render_receipt(
+    assembly: Any,
+    content: Any,
+) -> None:
+    """Bind the renderer's actual carrier operations to final provider content."""
+    if not isinstance(assembly, dict):
+        return
+    receipt = assembly.get('_context_install_render_receipt')
+    if not isinstance(receipt, dict):
+        return
+    digest, estimate, kind = _continuity_shadow_fingerprint(content)
+    receipt.update({
+        'final_payload_hash': str(digest),
+        'final_payload_token_estimate': int(estimate),
+        'final_payload_kind': str(kind),
+    })
+
+
 def _accepted_state_text(assembly: Any) -> str:
     from chat.persona_state_semantic import (
         format_persona_semantic_snapshot,
@@ -6249,6 +6317,8 @@ def ensure_resident_and_stream(
                 content = prepend_reality_to_provider_content(content, prefix_reality)
             except Exception:
                 logger.warning('reality_context prefix injection failed; continuing without', exc_info=True)
+
+        _bind_context_install_render_receipt(plan.assembly, content)
 
         db_cursor = dc.get_resident_history_cursor(
             plan.context_id, plan.resident_generation, db_path=plan.db_path,
