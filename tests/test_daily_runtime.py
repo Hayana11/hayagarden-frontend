@@ -3827,6 +3827,112 @@ class ContinuityShadowObservationTests(unittest.TestCase):
             os.unlink(db)
 
 
+class ContextPlanBudgetAuthorityTests(unittest.TestCase):
+    def test_policy_maps_canonical_authority_without_semantic_version_change(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            return_value=90000,
+        ) as target, mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ) as reserve, mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ) as recent_raw:
+            policy, version = dr._context_plan_policy()
+
+        self.assertEqual(policy.token_budget, 98000)
+        self.assertEqual(policy.reserve_budget, 8000)
+        self.assertEqual(policy.usable_budget, 90000)
+        self.assertEqual(policy.recent_raw_target, 24000)
+        self.assertEqual(version, 'continuity_context_budget_v1')
+        target.assert_called_once_with()
+        reserve.assert_called_once_with()
+        recent_raw.assert_called_once_with()
+
+    def test_policy_tracks_dynamic_canonical_authority(self):
+        cases = (
+            (90000, 8000, 24000, 98000),
+            (70000, 6000, 18000, 76000),
+        )
+        for target_value, reserve_value, recent_value, token_budget in cases:
+            with self.subTest(
+                target=target_value,
+                reserve=reserve_value,
+                recent_raw=recent_value,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.cold_prompt_target',
+                return_value=target_value,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.cold_safety_margin',
+                return_value=reserve_value,
+            ), mock.patch(
+                'chat.context_lean.cc_history_token_budget',
+                return_value=recent_value,
+            ):
+                policy, _version = dr._context_plan_policy()
+
+            self.assertEqual(
+                (
+                    policy.token_budget,
+                    policy.reserve_budget,
+                    policy.usable_budget,
+                    policy.recent_raw_target,
+                ),
+                (token_budget, reserve_value, target_value, recent_value),
+            )
+
+    def test_legacy_context_plan_budget_keys_are_not_read_or_authoritative(self):
+        legacy_values = {
+            'CONTEXT_PLAN_TOKEN_BUDGET': '123',
+            'CONTEXT_PLAN_RESERVE_BUDGET': '45',
+            'CONTEXT_PLAN_RECENT_RAW_TARGET': '67',
+        }
+
+        def _legacy_get(key, default=''):
+            return legacy_values.get(key, default)
+
+        with mock.patch.object(
+            config_store,
+            'get',
+            side_effect=_legacy_get,
+        ) as legacy_get, mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            return_value=70000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=6000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=18000,
+        ):
+            policy, _version = dr._context_plan_policy()
+
+        self.assertEqual(
+            (
+                policy.token_budget,
+                policy.reserve_budget,
+                policy.usable_budget,
+                policy.recent_raw_target,
+            ),
+            (76000, 6000, 70000, 18000),
+        )
+        self.assertFalse(
+            any(
+                call.args and call.args[0] in legacy_values
+                for call in legacy_get.call_args_list
+            )
+        )
+
+    def test_canonical_authority_failure_is_fail_visible(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            side_effect=RuntimeError('canonical target unavailable'),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'canonical target unavailable'):
+                dr._context_plan_policy()
+
+
 class ContextPlanConsumerTests(unittest.TestCase):
     @staticmethod
     def _context_plan_runtime_db():
