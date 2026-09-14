@@ -5593,6 +5593,142 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
         )
         resident.send_turn.assert_not_called()
 
+    def test_capacity_actual_renderer_receipt_binds_each_carrier(self):
+        """ACTUAL-RENDER-RECEIPT: receipt records the provider payload render."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('好')
+        )
+        try:
+            receipt = plan.assembly['_context_install_render_receipt']
+            payload_hash, payload_tokens, payload_kind = (
+                dr._continuity_shadow_fingerprint(content)
+            )
+            self.assertEqual(
+                receipt['representation_ids'],
+                ['chunk:one'],
+            )
+            self.assertEqual(
+                receipt['representation_body_hashes'],
+                [dr._sha256_text(plan.capacity_context_chunk_bodies['chunk:one'])],
+            )
+            self.assertEqual(
+                receipt['fixed_section_kinds'],
+                ['accepted_open_loops'],
+            )
+            self.assertEqual(
+                receipt['fixed_section_body_hashes'],
+                [dr._sha256_text(
+                    dr._format_context_plan_open_loops(
+                        plan.assembly['context_plan_accepted_open_loops'],
+                    ),
+                )],
+            )
+            self.assertEqual(receipt['current_request_slots'], 1)
+            self.assertEqual(receipt['current_request_carrier'], 'tail')
+            self.assertEqual(receipt['final_payload_hash'], payload_hash)
+            self.assertEqual(
+                receipt['final_payload_token_estimate'],
+                payload_tokens,
+            )
+            self.assertEqual(receipt['final_payload_kind'], payload_kind)
+            dr._validate_production_context_install(
+                plan=plan,
+                resident=resident,
+                static_system=target_system,
+                content=content,
+            )
+            self.assertEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_1_chunk_omission_fails_closed(self):
+        """RENDER-PROOF-1: omitted chunk is rejected before provider send."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_CHUNK')
+        )
+        try:
+            chunk_body = plan.capacity_context_chunk_bodies['chunk:one']
+            self.assertEqual(content.count(chunk_body), 1)
+            omitted = content.replace(chunk_body, '', 1)
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=omitted,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_2_current_omission_or_duplication_fails_closed(self):
+        """RENDER-PROOF-2: CURRENT is absent or installed twice."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_SLOT')
+        )
+        try:
+            current_text = plan.user_content
+            self.assertTrue(content.endswith(current_text))
+            actual_payloads = (
+                content[:-len(current_text)],
+                content + current_text,
+            )
+            for actual in actual_payloads:
+                with self.subTest(payload=actual):
+                    plan.manifest['capacity_context_install_parity'] = 'PENDING'
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._validate_production_context_install(
+                            plan=plan,
+                            resident=resident,
+                            static_system=target_system,
+                            content=actual,
+                        )
+                    self.assertEqual(
+                        raised.exception.error_code,
+                        'context_plan_render_receipt_mismatch',
+                    )
+                    self.assertNotEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PASS',
+                    )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_3_post_receipt_payload_mutation_fails_closed(self):
+        """RENDER-PROOF-3: a frozen receipt rejects later payload mutation."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_REQUEST')
+        )
+        try:
+            mutated = content + '\nPOST_RENDER_MUTATION'
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=mutated,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
     def test_capacity_current_request_structural_proof_allows_literal_collisions(self):
         """Short and repeated prose do not look like duplicate carriers."""
         for current_text in ('好', '重复请求文本'):
@@ -5603,7 +5739,7 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
                 try:
                     self.assertGreaterEqual(content.count(current_text), 5)
                     self.assertEqual(
-                        plan.assembly['_context_install_carriers'][
+                        plan.assembly['_context_install_render_receipt'][
                             'current_request_slots'
                         ],
                         1,
@@ -5658,7 +5794,7 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
                 plan.manifest['capacity_context_install_parity'],
                 'PENDING',
             )
-            plan.assembly['_context_install_carriers'][
+            plan.assembly['_context_install_render_receipt'][
                 'current_request_slots'
             ] = 2
             with self.assertRaises(dr.DailyRuntimeError):
