@@ -7,6 +7,7 @@ source row, or assembles provider-facing text.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,8 @@ _SOURCE_COLUMNS = (
 )
 
 _SOURCE_TABLE = 'chat_messages'
+_MESSAGE_CONTEXT_TABLE = 'daily_message_contexts'
+_WAKE_TABLE = 'wake_log'
 _STORE_TABLES = frozenset({
     'continuity_source_snapshots',
     'continuity_source_members',
@@ -53,6 +56,10 @@ _STORE_TABLES = frozenset({
 
 
 class _ChunkSurfaceUnavailable(Exception):
+    pass
+
+
+class _SourceScopeUnavailable(Exception):
     pass
 
 
@@ -94,25 +101,96 @@ def _read_only_connection(path: str | Path | None) -> sqlite3.Connection:
     return sqlite3.connect(f'file:{resolved.as_posix()}?mode=ro', uri=True)
 
 
-def _source_rows(conn: sqlite3.Connection, current_user_message_id: int) -> tuple[dict[str, object], dict[str, object]]:
-    """Read history before the current request and the request row separately."""
-    history_cursor = conn.execute(
-        f'SELECT {_SOURCE_COLUMNS} FROM {_SOURCE_TABLE} '
-        'WHERE id < ? ORDER BY id ASC',
-        (int(current_user_message_id),),
-    )
-    history_columns = tuple(item[0] for item in history_cursor.description)
-    history = tuple(dict(zip(history_columns, row)) for row in history_cursor.fetchall())
+def _source_rows(
+    conn: sqlite3.Connection,
+    current_user_message_id: int,
+) -> tuple[tuple[dict[str, object], ...], dict[str, object]]:
+    """Read only the current request scope and its durable wake provenance."""
+    current_id = int(current_user_message_id)
+    mapping_rows = conn.execute(
+        f'SELECT context_id, context_epoch FROM {_MESSAGE_CONTEXT_TABLE} '
+        'WHERE message_id=?',
+        (current_id,),
+    ).fetchall()
+    if len(mapping_rows) != 1:
+        raise _SourceScopeUnavailable('current request scope mapping is unavailable')
+    try:
+        context_id = int(mapping_rows[0][0])
+        context_epoch = int(mapping_rows[0][1])
+    except (TypeError, ValueError) as exc:
+        raise _SourceScopeUnavailable('current request scope mapping is invalid') from exc
 
+    source_columns = ', '.join(
+        f'message.{column.strip()}'
+        for column in _SOURCE_COLUMNS.split(',')
+    )
+    formal_cursor = conn.execute(
+        f'SELECT {source_columns} FROM {_SOURCE_TABLE} AS message '
+        f'INNER JOIN {_MESSAGE_CONTEXT_TABLE} AS mapping '
+        'ON mapping.message_id=message.id '
+        'WHERE mapping.context_id=? AND mapping.context_epoch=? '
+        'AND message.id < ? ORDER BY message.id ASC',
+        (context_id, context_epoch, current_id),
+    )
+    columns = tuple(item[0].split('.', 1)[-1] for item in formal_cursor.description)
+    formal_rows = [dict(zip(columns, row)) for row in formal_cursor.fetchall()]
+
+    wake_scope_rows = conn.execute(
+        f'SELECT wake_run_id FROM {_WAKE_TABLE} '
+        'WHERE context_id=? AND context_epoch=? '
+        'AND wake_run_id IS NOT NULL AND TRIM(wake_run_id) != ""',
+        (context_id, context_epoch),
+    ).fetchall()
+    wake_run_ids = frozenset(str(row[0]).strip() for row in wake_scope_rows)
+    wake_rows: list[dict[str, object]] = []
+    if wake_run_ids:
+        wake_cursor = conn.execute(
+            f'SELECT {source_columns} FROM {_SOURCE_TABLE} AS message '
+            "WHERE message.source_kind='wake' AND message.id < ? "
+            'AND EXISTS ('
+            f'SELECT 1 FROM {_WAKE_TABLE} AS wake '
+            'WHERE wake.context_id=? AND wake.context_epoch=? '
+            'AND wake.wake_run_id IS NOT NULL '
+            'AND TRIM(wake.wake_run_id) != "" '
+            'AND json_valid(message.cache_info) '
+            "AND json_extract(message.cache_info, '$.wake_run_id') = wake.wake_run_id"
+            ') ORDER BY message.id ASC',
+            (current_id, context_id, context_epoch),
+        )
+        wake_columns = tuple(item[0].split('.', 1)[-1] for item in wake_cursor.description)
+        wake_rows = [dict(zip(wake_columns, row)) for row in wake_cursor.fetchall()]
+        if any(
+            str(_json_wake_run_id(row.get('cache_info')) or '').strip() not in wake_run_ids
+            for row in wake_rows
+        ):
+            raise _SourceScopeUnavailable('wake provenance scope changed during read')
+
+    by_message_id = {
+        int(row['id']): row
+        for row in formal_rows + wake_rows
+    }
     current_cursor = conn.execute(
-        f'SELECT {_SOURCE_COLUMNS} FROM {_SOURCE_TABLE} WHERE id = ?',
-        (int(current_user_message_id),),
+        f'SELECT {_SOURCE_COLUMNS} FROM {_SOURCE_TABLE} WHERE id=?',
+        (current_id,),
     )
     current_columns = tuple(item[0] for item in current_cursor.description)
     current_rows = current_cursor.fetchall()
     if len(current_rows) != 1:
         raise LookupError('current request row is unavailable')
-    return history, dict(zip(current_columns, current_rows[0]))
+    return tuple(by_message_id[key] for key in sorted(by_message_id)), dict(
+        zip(current_columns, current_rows[0])
+    )
+
+
+def _json_wake_run_id(raw_cache_info: object) -> str | None:
+    try:
+        payload = json.loads(raw_cache_info) if isinstance(raw_cache_info, str) else raw_cache_info
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = str(payload.get('wake_run_id') or '').strip()
+    return value or None
 
 
 def _check_source_schema(conn: sqlite3.Connection) -> None:
@@ -132,6 +210,31 @@ def _check_source_schema(conn: sqlite3.Connection) -> None:
         raise sqlite3.OperationalError(
             'chat_messages columns unavailable: ' + ','.join(sorted(missing))
         )
+
+    for table, required in (
+        (
+            _MESSAGE_CONTEXT_TABLE,
+            frozenset({'message_id', 'context_id', 'context_epoch', 'resident_generation', 'role'}),
+        ),
+        (
+            _WAKE_TABLE,
+            frozenset({'wake_run_id', 'context_id', 'context_epoch', 'chat_id'}),
+        ),
+    ):
+        table_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchall()
+        if not table_rows:
+            raise _SourceScopeUnavailable(f'{table} table is unavailable')
+        table_columns = {
+            str(row[1]) for row in conn.execute(f'PRAGMA table_info({table})').fetchall()
+        }
+        missing = required - table_columns
+        if missing:
+            raise _SourceScopeUnavailable(
+                f'{table} columns unavailable: ' + ','.join(sorted(missing))
+            )
 
 
 def _check_store_schema(conn: sqlite3.Connection) -> None:
@@ -252,6 +355,8 @@ def build_daily_continuity_shadow_plan(
             history_rows, current_row = _source_rows(source_conn, current_user_message_id)
         except LookupError:
             return _blocked('invalid_current_request')
+        except _SourceScopeUnavailable:
+            return _blocked('source_scope_unavailable')
         except (OSError, sqlite3.Error, TypeError, ValueError):
             return _blocked('source_rows_unavailable')
         finally:
