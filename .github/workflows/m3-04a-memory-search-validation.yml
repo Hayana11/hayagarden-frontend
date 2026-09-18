@@ -120,8 +120,8 @@ jobs:
 
       - name: Check diff whitespace and forbidden files
         env:
-          BASE_SHA: \${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
-          HEAD_SHA: \${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
+          BASE_SHA: ${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
         run: |
           set -Eeuo pipefail
           if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
@@ -135,8 +135,8 @@ jobs:
 
       - name: Verify scoped M3-04A changed-file fence
         env:
-          BASE_SHA: \${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
-          HEAD_SHA: \${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
+          BASE_SHA: ${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
         run: |
           set -Eeuo pipefail
           if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
