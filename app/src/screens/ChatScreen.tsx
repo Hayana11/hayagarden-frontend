@@ -34,7 +34,9 @@ import {
   chatFilePreviewUrl,
   chatPlaceholder,
   findLatestRoundContext,
+  fetchChatContextLimits,
   formatCapacityLabel,
+  fmtCapacityK,
   fmtArtifactSize,
   fmtCostUsd,
   fmtTokens,
@@ -43,6 +45,8 @@ import {
   guessChatErrorHint,
   isChoicesAnswered,
   streamChatReply,
+  DEFAULT_CHAT_CONTEXT_LIMITS,
+  type ChatContextLimits,
   type ChatMsg,
   type ChatToolCall,
 } from '../lib/chat';
@@ -385,11 +389,20 @@ const MAX_COMPOSER_ATTACHMENTS = 4;
 
 export function ChatScreen() {
   const [settings, setSettings] = useState<ChatPrefs>(loadChatPrefs);
+  const [contextLimits, setContextLimits] = useState<ChatContextLimits>(DEFAULT_CHAT_CONTEXT_LIMITS);
   const legacyCompat = useMemo(() => getLegacyNativeCompatDetails().legacyNativeCompat, []);
   const [warmSnapshot] = useState(() => readChatWarmReturn(legacyCompat));
   const [wide, setWide] = useState(() => window.innerWidth >= 900);
   const [compactToolbar, setCompactToolbar] = useState(() => window.innerWidth <= 360);
   const [genLockBusy, setGenLockBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void fetchChatContextLimits().then((limits) => {
+      if (active) setContextLimits(limits);
+    });
+    return () => { active = false; };
+  }, []);
 
   const timerFixtureEnabled = useMemo(() => isTaskTimerFixtureEnabled(), []);
   const {
@@ -534,10 +547,13 @@ export function ChatScreen() {
 
   const placeholder = useMemo(() => chatPlaceholder(new Date()), []);
   const capacityLabel = useMemo(
-    () => formatCapacityLabel(findLatestRoundContext(msgs)),
-    [msgs],
+    () => formatCapacityLabel(findLatestRoundContext(msgs), contextLimits.softLimit),
+    [contextLimits.softLimit, msgs],
   );
-  const capacityTitle = '上下文容量；90k 为 soft Swap 门槛，另有 30 轮触发';
+  const capacityTitle = useMemo(
+    () => `上下文容量；${fmtCapacityK(contextLimits.softLimit)} 为 soft Swap 门槛，另有 ${contextLimits.maxResidentTurns} 轮触发`,
+    [contextLimits.maxResidentTurns, contextLimits.softLimit],
+  );
   const dateLabel = useMemo(() => {
     const now = new Date();
     const dows = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];

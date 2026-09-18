@@ -43,7 +43,7 @@ from chat.claude_transcript_transform import (
 from chat.claude_transcript_validator import ValidatorOptions, validate_transcript_events
 from chat.claude_transcript_reader import read_transcript_range
 from chat.cold_bootstrap_budget import (
-    cold_prompt_target,
+    capacity_swap_prompt_target,
     cold_safety_margin,
     estimate_text_tokens,
 )
@@ -253,7 +253,7 @@ def compute_retained_transcript_token_budget(
     dynamic_state_text: str = '',
 ) -> int:
     """Dynamic retained-transcript budget using existing estimators (no new tokenizer)."""
-    target = int(cold_prompt_target())
+    target = int(capacity_swap_prompt_target())
     margin = int(cold_safety_margin())
     reserved = (
         estimate_text_tokens(static_system)

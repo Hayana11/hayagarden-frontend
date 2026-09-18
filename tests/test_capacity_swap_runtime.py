@@ -37,6 +37,7 @@ from chat.capacity_swap_runtime import (
     CAPACITY_SWAP_REGISTRY_SOURCE,
     CapacitySwapRuntimeError,
     CapacitySwapRuntimeResult,
+    compute_retained_transcript_token_budget,
     clear_same_context_last_good_for_tests,
     effective_static_system_for_registry,
     forbid_resend_after_stdin_flush,
@@ -51,6 +52,10 @@ from chat.session_registry import (
     register_context_claude_session,
 )
 from tools.cc_jsonl_usage import session_jsonl_path
+from chat.cold_bootstrap_budget import (
+    capacity_swap_prompt_target,
+    cold_rebuild_guard,
+)
 
 _FIXED_NOW = datetime.datetime(2026, 7, 27, 10, 0, 0)
 _REAL_PREPARE = dr.prepare_daily_turn
@@ -1228,6 +1233,39 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         self.assertEqual(live._pending_respawn_reason, 'capacity_swap')
         self.assertIsNotNone(state['old_attrs'].get('_committed_file_hashes'))
         self.assertIn('deadbeef', state['old_attrs']['_committed_file_hashes'])
+
+
+class CapacitySwapBudgetAuthorityTests(unittest.TestCase):
+    def test_budget_authorities_read_distinct_runtime_keys(self):
+        with mock.patch.object(
+            config_store,
+            'get_int',
+            side_effect=lambda key, default=0: {
+                'CC_CAPACITY_SWAP_PROMPT_TARGET': 90_000,
+                'CC_COLD_REBUILD_GUARD': 70_000,
+            }.get(key, default),
+        ):
+            self.assertEqual(capacity_swap_prompt_target(), 90_000)
+            self.assertEqual(cold_rebuild_guard(), 70_000)
+
+    def test_retained_budget_uses_independent_capacity_target(self):
+        with mock.patch(
+            'chat.capacity_swap_runtime.capacity_swap_prompt_target',
+            return_value=90_000,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.cold_safety_margin',
+            return_value=8_000,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.estimate_text_tokens',
+            return_value=0,
+        ):
+            retained = compute_retained_transcript_token_budget(
+                static_system='STATIC',
+                pending_user_text='CURRENT',
+                dynamic_state_text='STATE',
+            )
+        # 90k target - 8k safety - 2k anchor reserve; hot 150k is not consulted.
+        self.assertEqual(retained, 80_000)
 
 
 class NeverUsedIdleReapContractTests(unittest.TestCase):
