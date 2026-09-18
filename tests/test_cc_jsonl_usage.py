@@ -452,7 +452,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
         done = [payload for event, payload in events if event == "done"]
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0][0], terminal_text)
-        receipt = done[0][4]
+        receipt = done[0][2].terminal_receipt
         self.assertIsInstance(receipt, ProviderTerminalReceipt)
         self.assertEqual(receipt.terminal_kind, 'provider_result')
         self.assertEqual(receipt.source, 'resident_live_stdout')

@@ -248,6 +248,16 @@ class ProviderTerminalReceipt:
         )
 
 
+class ResidentTurnUsage(dict):
+    """Existing usage mapping with a typed, non-serialized terminal receipt."""
+
+    terminal_receipt: ProviderTerminalReceipt | None
+
+    def __init__(self, *args, terminal_receipt=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.terminal_receipt = terminal_receipt
+
+
 class ProviderTerminalTracker:
     """Tracks provider progress and the authoritative result boundary."""
 
@@ -1960,6 +1970,10 @@ class ResidentSession:
                 )
         except Exception:
             pass
+        usage = ResidentTurnUsage(
+            usage,
+            terminal_receipt=terminal_receipt,
+        )
 
         self._cold = False
         self._last_used = time.time()
@@ -1973,7 +1987,7 @@ class ResidentSession:
         # claims 只经 done 内部回传，不得写入公开 cache_info
         provider_text = ''.join(provider_text_acc).strip()
         final_text = provider_text or ''.join(text_acc).strip()
-        yield ('done', (final_text, ''.join(think_acc), usage, one_shot_claims, terminal_receipt))
+        yield ('done', (final_text, ''.join(think_acc), usage, one_shot_claims))
 
     def is_cold(self):
         return self._cold

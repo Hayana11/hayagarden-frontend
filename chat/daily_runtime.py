@@ -6491,8 +6491,12 @@ def ensure_resident_and_stream(
                     raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
                 if evt == 'done':
                     receipt = (
-                        payload[4]
-                        if isinstance(payload, tuple) and len(payload) >= 5
+                        getattr(payload[2], 'terminal_receipt', None)
+                        if (
+                            isinstance(payload, tuple)
+                            and len(payload) >= 3
+                            and isinstance(payload[2], dict)
+                        )
                         else None
                     )
                     if (
