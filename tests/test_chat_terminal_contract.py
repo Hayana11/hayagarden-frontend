@@ -76,22 +76,23 @@ class ChatTerminalContractTests(unittest.TestCase):
         receipt = cc_resident.ProviderTerminalReceipt.from_result_event(
             {'type': 'result', 'is_error': False, 'stop_reason': 'end_turn'},
             turn_identity='turn-1',
-            resident_generation=3,
+            process_generation=3,
             claude_session_id='session-1',
         )
         self.assertEqual(receipt.source, 'resident_live_stdout')
+        self.assertEqual(receipt.process_generation, 3)
         with self.assertRaises(ValueError):
             cc_resident.ProviderTerminalReceipt.from_result_event(
                 {'type': 'assistant', 'stop_reason': 'end_turn'},
                 turn_identity='turn-1',
-                resident_generation=3,
+                process_generation=3,
                 claude_session_id='session-1',
             )
         with self.assertRaises(ValueError):
             cc_resident.ProviderTerminalReceipt.from_result_event(
                 {'type': 'result', 'is_error': True},
                 turn_identity='turn-1',
-                resident_generation=3,
+                process_generation=3,
                 claude_session_id='session-1',
             )
 
@@ -105,7 +106,7 @@ class ChatTerminalContractTests(unittest.TestCase):
                             'stop_reason': stop_reason,
                         },
                         turn_identity='turn-1',
-                        resident_generation=3,
+                        process_generation=3,
                         claude_session_id='session-1',
                     )
 
@@ -113,6 +114,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         source = pathlib.Path(__file__).resolve().parents[1] / 'chat' / 'daily_runtime.py'
         text = source.read_text(encoding='utf-8')
         self.assertIn('terminal_receipt: Optional[cc_resident.ProviderTerminalReceipt]', text)
+        self.assertIn('transcript_process_generation=plan.transcript_process_generation', text)
         self.assertIn('terminal_receipt=plan.terminal_receipt', text)
 
     def test_t10_cleanup_and_next_turn_contract_is_wired(self):
