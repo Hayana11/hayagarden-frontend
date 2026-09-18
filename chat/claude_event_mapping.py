@@ -884,6 +884,7 @@ def _commit_mapping_work(
         mapped: list[str] = []
         inserted: list[str] = []
         confirmed_existing: list[str] = []
+        inserted_set: set[str] = set()
         final_offset = int(registry['scan_offset'])
         last_mapped_asst: Optional[int] = (
             int(registry['last_mapped_message_id'])
@@ -921,8 +922,10 @@ def _commit_mapping_work(
                     )
                 uid, was_inserted = _insert_mapping_row_with_receipt(conn, row)
                 mapped.append(uid)
-                if was_inserted:
-                    inserted.append(uid)
+                if was_inserted or uid in inserted_set:
+                    if uid not in inserted_set:
+                        inserted_set.add(uid)
+                        inserted.append(uid)
                 else:
                     confirmed_existing.append(uid)
                 if str(row['role']) == ROLE_ASSISTANT:
