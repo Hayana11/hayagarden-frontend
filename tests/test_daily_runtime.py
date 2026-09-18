@@ -3678,7 +3678,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                      side_effect=_build_rebuilt_assembly,
                  ), \
                  mock.patch(
-                     'chat.cold_bootstrap_budget.cold_rebuild_guard',
+                     'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
                      return_value=50,
                  ), \
                  mock.patch(
@@ -3759,7 +3759,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                          return_value={'current_day_history': [], 'manifest': {}},
                      ), \
                      mock.patch(
-                         'chat.cold_bootstrap_budget.cold_rebuild_guard',
+                         'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
                          return_value=50,
                      ), \
                      mock.patch(
@@ -4205,7 +4205,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
                      return_value=result,
                  ) as adapter, \
                  mock.patch.object(dr.logger, 'info') as log, \
-                 mock.patch('chat.cold_bootstrap_budget.cold_prompt_target', return_value=100), \
+                 mock.patch('chat.cold_bootstrap_budget.resident_rebuild_prompt_target', return_value=100), \
                  mock.patch('chat.cold_bootstrap_budget.cold_safety_margin', return_value=8):
                 resident, _events = self._stream(plan)
             adapter.assert_called_once()
@@ -4647,12 +4647,73 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             hot, _ = dr._context_plan_policy(mode='hot')
             capacity, _ = dr._context_plan_policy(mode='capacity')
 
-        self.assertEqual(cold.token_budget, 70000)
-        self.assertEqual(respawn.token_budget, 70000)
-        self.assertEqual(cold.usable_budget, 62000)
-        self.assertEqual(respawn.usable_budget, 62000)
+        self.assertEqual(cold.token_budget, 98000)
+        self.assertEqual(respawn.token_budget, 98000)
+        self.assertEqual(cold.usable_budget, 90000)
+        self.assertEqual(respawn.usable_budget, 90000)
         self.assertEqual(hot.usable_budget, 150000)
         self.assertEqual(capacity.usable_budget, 90000)
+
+
+    def test_cold_rebuild_guard_is_admission_only_not_packing_authority(self):
+        for guard_value in (60000, 70000, 80000):
+            with self.subTest(guard=guard_value), mock.patch(
+                'chat.cold_bootstrap_budget.cold_rebuild_guard',
+                return_value=guard_value,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+                return_value=90000,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.cold_safety_margin',
+                return_value=8000,
+            ), mock.patch(
+                'chat.context_lean.cc_history_token_budget',
+                return_value=24000,
+            ):
+                cold, _ = dr._context_plan_policy(mode='cold')
+                respawn, _ = dr._context_plan_policy(mode='respawn')
+
+            self.assertEqual(cold.usable_budget, 90000)
+            self.assertEqual(respawn.usable_budget, 90000)
+
+    def test_pre_462_rebuild_packing_budget_is_deterministically_equivalent(self):
+        fixed_sections = {
+            'static_system': 12000,
+            'dynamic_state': 4000,
+            'current_user': 3000,
+            'anchor_reserve': 5000,
+        }
+        fixed_total = sum(fixed_sections.values())
+        with mock.patch(
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ):
+            corrected, _ = dr._context_plan_policy(mode='cold')
+
+        # PRE_462 used cold_prompt_target() == 90k and token_budget=target+reserve.
+        pre_462_usable = 90000
+        corrected_retained = corrected.usable_budget - fixed_total
+        pre_462_retained = pre_462_usable - fixed_total
+        self.assertEqual(corrected_retained, pre_462_retained)
+        self.assertEqual(corrected_retained, 66000)
+        self.assertEqual(corrected_retained - pre_462_retained, 0)
+
+    def test_hot_threshold_defaults_remain_unchanged(self):
+        from chat.cold_bootstrap_budget import cold_hard_limit, cold_soft_limit
+
+        with mock.patch(
+            'config_store.get_int',
+            side_effect=lambda _key, default=0: default,
+        ):
+            self.assertEqual(cold_soft_limit(), 150000)
+            self.assertEqual(cold_hard_limit(), 180000)
+            self.assertEqual(cc_resident._cfg_int('CC_MAX_RESIDENT_TURNS', 45), 45)
 
     def test_cold_planner_selects_compact_chunk_for_source_over_guard(self):
         from continuity.context_plan import (
@@ -4736,8 +4797,8 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         )
         binding = ContextChunkBinding(chunk=chunk, candidate=candidate, snapshot=snapshot)
         with mock.patch(
-            'chat.cold_bootstrap_budget.cold_rebuild_guard',
-            return_value=70000,
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90000,
         ), mock.patch(
             'chat.cold_bootstrap_budget.cold_safety_margin',
             return_value=8000,
@@ -4772,8 +4833,8 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertTrue(plan.valid)
         self.assertEqual(plan.budget_status, 'fit')
         self.assertEqual([item.kind for item in plan.representations], ['chunk'])
-        self.assertLessEqual(plan.total_token_estimate, 70000)
-        self.assertLess(plan.total_token_estimate, 70000)
+        self.assertLessEqual(plan.total_token_estimate, 90000)
+        self.assertLess(plan.total_token_estimate, 90000)
 
         fixed_overflow = build_context_plan(
             members,
@@ -4785,7 +4846,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                     kind='invariant_system',
                     source_ref='system:oversized',
                     content_hash='system-oversized-hash',
-                    estimated_tokens=70001,
+                    estimated_tokens=90001,
                 ),
                 ContextSection(
                     kind='current_request',
@@ -5635,14 +5696,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     types.SimpleNamespace(kind='current_request', estimated_tokens=5000),
                 ),
                 budget_policy=types.SimpleNamespace(
-                    usable_budget=62000,
+                    usable_budget=90000,
                     reserve_budget=8000,
                 ),
                 budget_policy_version='continuity_context_budget_v1',
                 measurement_semantics='heuristic_cjk1_ascii4_v1',
                 budget_status='fit',
                 valid=True,
-                total_token_estimate=68000,
+                total_token_estimate=45000,
             )
             assembly = {
                 'manifest': {},
