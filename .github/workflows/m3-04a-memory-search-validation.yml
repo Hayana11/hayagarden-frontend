@@ -9,6 +9,10 @@ on:
       - ".github/workflows/m3-04a-memory-search-validation.yml"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

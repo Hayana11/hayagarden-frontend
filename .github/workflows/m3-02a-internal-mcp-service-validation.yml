@@ -10,6 +10,10 @@ on:
       - "tests/test-m3-02a-internal-mcp-readiness.mjs"
       - ".github/workflows/m3-02a-internal-mcp-service-validation.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

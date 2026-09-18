@@ -11,6 +11,10 @@ on:
       - ".github/workflows/memory-kernel-core-0.yml"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
