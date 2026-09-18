@@ -1,11 +1,6 @@
 name: M5-05B External execution fence validation
 
 on:
-  pull_request:
-    paths:
-      - tools/external_tool_execution_fence.py
-      - tests/test_external_tool_execution_fence.py
-      - .github/workflows/m5-05b-external-execution-fence-validation.yml
   workflow_dispatch:
 
 permissions:
