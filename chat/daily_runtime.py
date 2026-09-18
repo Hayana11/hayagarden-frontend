@@ -190,9 +190,6 @@ class DailyTurnPlan:
     transcript_claude_session_id: Optional[str] = None
     transcript_process_generation: Optional[int] = None
     transcript_observation_error_code: Optional[str] = None
-    terminal_receipt: Optional[cc_resident.ProviderTerminalReceipt] = field(
-        default=None, repr=False,
-    )
     continuity_plan: Any = field(default=None, repr=False)
     continuity_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
     hot_desired_plan: Any = field(default=None, repr=False)
@@ -4286,6 +4283,85 @@ def _set_transcript_mapping_manifest(
     plan.manifest['transcript_mapping_scan_offset'] = scan_offset
 
 
+def _log_transcript_mapping_diagnostic(
+    event_name: str,
+    plan: DailyTurnPlan,
+    *,
+    error_code: Optional[str] = None,
+    mapping_status: Optional[str] = None,
+    mapping_event_count: Optional[int] = None,
+    mapping_scan_offset: Optional[int] = None,
+) -> None:
+    """Emit metadata-only mapping diagnostics before rollback can erase state."""
+    manifest = plan.manifest or {}
+    code = error_code
+    if code is None:
+        code = manifest.get('transcript_mapping_error_code')
+    status = mapping_status
+    if status is None:
+        status = manifest.get('transcript_mapping_status')
+    event_count = mapping_event_count
+    if event_count is None:
+        event_count = manifest.get('transcript_mapping_event_count')
+    scan_offset = mapping_scan_offset
+    if scan_offset is None:
+        scan_offset = manifest.get('transcript_mapping_scan_offset')
+    logger.warning(
+        '%s error_code=%s mapping_status=%s mapping_event_count=%s '
+        'mapping_scan_offset=%s context_id=%s context_epoch=%s '
+        'resident_generation=%s process_generation=%s session_id=%s '
+        'start_offset=%s end_offset=%s observation_error=%s',
+        str(event_name),
+        str(code or 'transcript_mapping_blocked'),
+        str(status or 'UNKNOWN'),
+        event_count,
+        scan_offset,
+        plan.context_id,
+        plan.context_epoch,
+        plan.resident_generation,
+        plan.transcript_process_generation,
+        str(plan.transcript_claude_session_id or ''),
+        plan.transcript_start_offset,
+        plan.transcript_end_offset,
+        str(plan.transcript_observation_error_code or ''),
+    )
+
+
+def _freeze_transcript_mapping_failure(plan: DailyTurnPlan) -> dict[str, Any]:
+    """Freeze mapping metadata before rollback restores the registry snapshot."""
+    manifest = plan.manifest or {}
+    raw_scan_offset = manifest.get('transcript_mapping_scan_offset')
+    try:
+        scan_offset = int(raw_scan_offset) if raw_scan_offset is not None else None
+    except (TypeError, ValueError):
+        scan_offset = raw_scan_offset
+    return {
+        'mapping_status': str(
+            manifest.get('transcript_mapping_status') or 'UNKNOWN'
+        ),
+        'mapping_error_code': str(
+            manifest.get('transcript_mapping_error_code')
+            or 'transcript_mapping_blocked'
+        ),
+        'mapping_event_count': int(
+            manifest.get('transcript_mapping_event_count') or 0
+        ),
+        'mapping_scan_offset': scan_offset,
+        'context_id': plan.context_id,
+        'context_epoch': plan.context_epoch,
+        'resident_generation': plan.resident_generation,
+        'transcript_process_generation': plan.transcript_process_generation,
+        'transcript_claude_session_id': str(
+            plan.transcript_claude_session_id or ''
+        ),
+        'transcript_start_offset': plan.transcript_start_offset,
+        'transcript_end_offset': plan.transcript_end_offset,
+        'transcript_observation_error_code': str(
+            plan.transcript_observation_error_code or ''
+        ),
+    }
+
+
 def _capture_transcript_registry_snapshot(plan: DailyTurnPlan) -> Optional[dict[str, Any]]:
     """Capture the registry identity before this turn can mutate its watermark."""
     existing = get_context_claude_session(
@@ -4387,6 +4463,14 @@ def finalize_transcript_mapping_after_success(
                 return dict(plan.manifest)
 
         if plan.transcript_observation_error_code:
+            _log_transcript_mapping_diagnostic(
+                'TRANSCRIPT_MAPPING_OBSERVATION_BLOCKED',
+                plan,
+                error_code=str(plan.transcript_observation_error_code),
+                mapping_status='BLOCKED',
+                mapping_event_count=0,
+                mapping_scan_offset=None,
+            )
             _set_transcript_mapping_manifest(
                 plan,
                 status='BLOCKED',
@@ -4472,16 +4556,36 @@ def finalize_transcript_mapping_after_success(
                     else None
                 ),
             )
+            _log_transcript_mapping_diagnostic(
+                'TRANSCRIPT_MAPPING_PASS_BLOCKED',
+                plan,
+                error_code=str(result.error_code or 'mapping_blocked'),
+            )
     except SessionRegistryError as exc:
+        error_code = str(getattr(exc, 'error_code', None) or 'registry_error')
+        _log_transcript_mapping_diagnostic(
+            'TRANSCRIPT_MAPPING_SESSION_REGISTRY_BLOCKED',
+            plan,
+            error_code=error_code,
+            mapping_status='BLOCKED',
+            mapping_event_count=0,
+            mapping_scan_offset=None,
+        )
         logger.warning(
-            'transcript registry/mapping blocked: %s',
-            getattr(exc, 'error_code', exc),
+            'transcript registry/mapping blocked: error_code=%s '
+            'context_id=%s resident_generation=%s session_id=%s '
+            'process_generation=%s',
+            error_code,
+            plan.context_id,
+            plan.resident_generation,
+            str(plan.transcript_claude_session_id or ''),
+            plan.transcript_process_generation,
             exc_info=True,
         )
         _set_transcript_mapping_manifest(
             plan,
             status='BLOCKED',
-            error_code=str(getattr(exc, 'error_code', None) or 'registry_error'),
+            error_code=error_code,
             event_count=0,
             scan_offset=None,
         )
@@ -6537,24 +6641,6 @@ def ensure_resident_and_stream(
                     close_local_resident_if_bound(resident, expected_key=plan.resident_key)
                     raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
                 if evt == 'done':
-                    receipt = (
-                        getattr(payload[2], 'terminal_receipt', None)
-                        if (
-                            isinstance(payload, tuple)
-                            and len(payload) >= 3
-                            and isinstance(payload[2], dict)
-                        )
-                        else None
-                    )
-                    if (
-                        receipt is not None
-                        and not isinstance(receipt, cc_resident.ProviderTerminalReceipt)
-                    ):
-                        raise DailyRuntimeError(
-                            'resident terminal receipt has invalid type',
-                            error_code='provider_terminal_receipt_invalid',
-                        )
-                    plan.terminal_receipt = receipt
                     _capture_transcript_end(plan, resident)
                     # Safety net: stream completed without on_stdin_flushed hook.
                     if getattr(plan, '_capacity_swap_install_state', None) is not None:
@@ -6877,8 +6963,6 @@ def build_canonical_turn_for_plan(
         context_id=plan.context_id,
         context_epoch=plan.context_epoch,
         resident_generation=plan.resident_generation,
-        transcript_process_generation=plan.transcript_process_generation,
-        terminal_receipt=plan.terminal_receipt,
     )
     plan._canonical_turn = turn
     plan.manifest.update({
@@ -6946,6 +7030,15 @@ def handle_provider_success(
         plan, assistant_message_id=int(assistant_message_id),
     )
     if str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED':
+        mapping_failure = _freeze_transcript_mapping_failure(plan)
+        _log_transcript_mapping_diagnostic(
+            'TRANSCRIPT_MAPPING_TERMINAL_BLOCKED',
+            plan,
+            error_code=mapping_failure['mapping_error_code'],
+            mapping_status=mapping_failure['mapping_status'],
+            mapping_event_count=mapping_failure['mapping_event_count'],
+            mapping_scan_offset=mapping_failure['mapping_scan_offset'],
+        )
         try:
             _rollback_failed_terminalization(
                 plan,
@@ -6959,17 +7052,12 @@ def handle_provider_success(
             )
         abort_daily_turn(
             plan,
-            error_code=str(
-                plan.manifest.get('transcript_mapping_error_code')
-                or 'transcript_mapping_blocked'
-            ),
+            error_code=mapping_failure['mapping_error_code'],
         )
         raise DailyRuntimeError(
-            'transcript mapping did not reach FINAL',
-            error_code=str(
-                plan.manifest.get('transcript_mapping_error_code')
-                or 'transcript_mapping_blocked'
-            ),
+            'transcript mapping did not reach FINAL [%s]'
+            % mapping_failure['mapping_error_code'],
+            error_code=mapping_failure['mapping_error_code'],
         )
     try:
         complete_daily_turn(
@@ -7099,3 +7187,4 @@ def reprepare_after_hot_cold_mismatch(
         model=model,
         _cold_reprepare=True,
     )
+
