@@ -234,6 +234,8 @@ class ProviderTerminalReceipt:
             raise ValueError('provider terminal receipt requires type=result')
         if bool(event.get('is_error')):
             raise ValueError('provider terminal receipt cannot represent provider error')
+        if event.get('stop_reason') != 'end_turn':
+            raise ValueError('provider terminal receipt requires final end_turn')
         turn_id = str(turn_identity or '').strip()
         if not turn_id:
             raise ValueError('provider terminal receipt turn identity is missing')
@@ -1839,7 +1841,7 @@ class ResidentSession:
                             yield ('tool_use', deferred_payload)
                         if d.get('is_error'):
                             is_err = str(d.get('result', ''))[:300]
-                        else:
+                        elif d.get('stop_reason') == 'end_turn':
                             terminal_receipt = ProviderTerminalReceipt.from_result_event(
                                 d,
                                 turn_identity=terminal.turn_identity,
