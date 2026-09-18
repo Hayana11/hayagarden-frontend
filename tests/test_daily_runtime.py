@@ -4816,11 +4816,12 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             chunks=(binding,),
             budget_policy=policy,
             fixed_sections=(
+                # The compact fixture contributes 8,006 tokens; fixed sections total 66,994.
                 ContextSection(
                     kind='invariant_system',
                     source_ref='system:one',
                     content_hash='system-hash',
-                    estimated_tokens=25000,
+                    estimated_tokens=61994,
                 ),
                 ContextSection(
                     kind='current_request',
