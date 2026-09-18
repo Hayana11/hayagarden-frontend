@@ -1,9 +1,7 @@
 name: M5-06C-C2A egress lookup fix validation
 
 on:
-  push:
-    branches:
-      - codex/m5-06c-c2a-egress-lookup-fix-r1
+  workflow_dispatch:
 
 permissions:
   contents: read
