@@ -16,7 +16,7 @@ ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from cc_resident import ResidentSession
+from cc_resident import ProviderTerminalReceipt, ResidentSession
 from tools import cc_jsonl_usage as replay
 from tools import cc_usage_observability as obs
 from wake.usage import build_wake_cache_info
@@ -429,6 +429,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
             json.dumps({
                 "type": "result",
                 "is_error": False,
+                "stop_reason": "end_turn",
                 "result": terminal_text,
             }),
         ]
@@ -452,6 +453,10 @@ class ResidentJsonlHookTests(unittest.TestCase):
         done = [payload for event, payload in events if event == "done"]
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0][0], terminal_text)
+        receipt = done[0][2].terminal_receipt
+        self.assertIsInstance(receipt, ProviderTerminalReceipt)
+        self.assertEqual(receipt.terminal_kind, 'provider_result')
+        self.assertEqual(receipt.source, 'resident_live_stdout')
 
     def test_resident_done_text_does_not_duplicate_matching_terminal_content(self):
         text = "stream 与 terminal 相同"

@@ -13,6 +13,7 @@ if 'chat' not in sys.modules:
     sys.modules['chat'] = chat_package
 
 from chat.canonical_turn import CanonicalTurnError, build_canonical_turn, projection_hash
+from cc_resident import ProviderTerminalReceipt
 
 
 def _row(row_type, *, sid='session-1', **fields):
@@ -33,7 +34,14 @@ def _write(rows):
 
 
 class CanonicalTurnTests(unittest.TestCase):
-    def _build(self, rows, mode='auto'):
+    def _build(
+        self,
+        rows,
+        mode='auto',
+        *,
+        terminal_receipt=None,
+        resident_generation=None,
+    ):
         path = _write(rows)
         try:
             end = path.stat().st_size
@@ -43,6 +51,8 @@ class CanonicalTurnTests(unittest.TestCase):
                 end_offset=end,
                 session_id='session-1',
                 mode=mode,
+                resident_generation=resident_generation,
+                terminal_receipt=terminal_receipt,
             )
         finally:
             path.unlink(missing_ok=True)
@@ -129,6 +139,234 @@ class CanonicalTurnTests(unittest.TestCase):
                 _row('result', stop_reason='end_turn'),
             ])
         self.assertEqual(missing_assistant.exception.error_code, 'canonical_assistant_missing')
+
+    def _receipt(
+        self,
+        *,
+        generation=7,
+        session_id='session-1',
+        source='resident_live_stdout',
+        stop_reason='end_turn',
+        result_is_error=False,
+    ):
+        return ProviderTerminalReceipt(
+            terminal_kind='provider_result',
+            source=source,
+            turn_identity='turn-1',
+            resident_generation=generation,
+            claude_session_id=session_id,
+            result_is_error=result_is_error,
+            result_stop_reason=stop_reason,
+        )
+
+    def _receipt_rows(self, *, stop_reason='end_turn', with_tool=False):
+        content = []
+        if with_tool:
+            content.append({
+                'type': 'tool_use',
+                'id': 'tool-1',
+                'name': 'read',
+                'input': {},
+            })
+        content.append({'type': 'text', 'text': 'done'})
+        rows = [
+            _row('assistant', uuid='a1', message={
+                'role': 'assistant',
+                'stop_reason': stop_reason,
+                'content': content,
+            }),
+        ]
+        if with_tool:
+            rows.append(_row('user', message={'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 'tool-1', 'content': 'ok'},
+            ]}))
+        return rows
+
+    def test_live_receipt_replaces_only_missing_transcript_result(self):
+        turn = self._build(
+            self._receipt_rows(),
+            terminal_receipt=self._receipt(),
+            resident_generation=7,
+        )
+        self.assertEqual(turn.content, 'done')
+        self.assertEqual(turn.terminal_state, 'confirmed')
+
+    def test_live_receipt_closes_r2_tool_round(self):
+        turn = self._build(
+            self._receipt_rows(with_tool=True),
+            terminal_receipt=self._receipt(),
+            resident_generation=7,
+        )
+        self.assertEqual(turn.tool_calls[0]['result'], 'ok')
+
+    def test_receipt_absent_keeps_missing_result_failure(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(self._receipt_rows())
+        self.assertEqual(raised.exception.error_code, 'provider_result_missing')
+
+    def test_receipt_generation_mismatch_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                self._receipt_rows(),
+                terminal_receipt=self._receipt(generation=8),
+                resident_generation=7,
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_generation_mismatch',
+        )
+
+    def test_receipt_session_mismatch_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                self._receipt_rows(),
+                terminal_receipt=self._receipt(session_id='other'),
+                resident_generation=7,
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_session_mismatch',
+        )
+
+    def test_receipt_source_mismatch_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                self._receipt_rows(),
+                terminal_receipt=self._receipt(source='synthetic'),
+                resident_generation=7,
+            )
+        self.assertEqual(raised.exception.error_code, 'provider_terminal_receipt_invalid')
+
+    def test_receipt_stop_reason_mismatch_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                self._receipt_rows(),
+                terminal_receipt=self._receipt(stop_reason='tool_deferred'),
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_invalid',
+        )
+
+    def test_receipt_pending_tool_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                [
+                    _row('assistant', uuid='a1', message={
+                        'role': 'assistant',
+                        'stop_reason': 'end_turn',
+                        'content': [{
+                            'type': 'tool_use',
+                            'id': 'tool-1',
+                            'name': 'read',
+                            'input': {},
+                        }],
+                    }),
+                ],
+                terminal_receipt=self._receipt(),
+                resident_generation=7,
+            )
+        self.assertEqual(raised.exception.error_code, 'tool_result_missing')
+
+    def test_receipt_unmatched_tool_result_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                [
+                    _row('user', message={'role': 'user', 'content': [
+                        {'type': 'tool_result', 'tool_use_id': 'unknown', 'content': 'x'},
+                    ]}),
+                    _row('assistant', uuid='a1', message={
+                        'role': 'assistant',
+                        'stop_reason': 'end_turn',
+                        'content': [{'type': 'text', 'text': 'done'}],
+                    }),
+                ],
+                terminal_receipt=self._receipt(),
+                resident_generation=7,
+            )
+        self.assertEqual(raised.exception.error_code, 'tool_result_unmatched')
+
+    def test_receipt_duplicate_tool_result_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                [
+                    _row('assistant', uuid='a1', message={
+                        'role': 'assistant',
+                        'stop_reason': 'end_turn',
+                        'content': [{
+                            'type': 'tool_use',
+                            'id': 'tool-1',
+                            'name': 'read',
+                            'input': {},
+                        }],
+                    }),
+                    _row('user', message={'role': 'user', 'content': [
+                        {'type': 'tool_result', 'tool_use_id': 'tool-1', 'content': 'x'},
+                    ]}),
+                    _row('user', message={'role': 'user', 'content': [
+                        {'type': 'tool_result', 'tool_use_id': 'tool-1', 'content': 'x'},
+                    ]}),
+                ],
+                terminal_receipt=self._receipt(),
+                resident_generation=7,
+            )
+        self.assertEqual(raised.exception.error_code, 'tool_result_duplicate')
+
+    def test_receipt_requires_assistant_end_turn(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                [
+                    _row('assistant', uuid='a1', message={
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'done'}],
+                    }),
+                ],
+                terminal_receipt=self._receipt(),
+                resident_generation=7,
+            )
+        self.assertEqual(raised.exception.error_code, 'canonical_stop_reason_invalid')
+
+    def test_receipt_and_transcript_result_must_agree(self):
+        turn = self._build(
+            self._receipt_rows(),
+            terminal_receipt=self._receipt(),
+            resident_generation=7,
+        )
+        self.assertEqual(turn.stop_reason, 'end_turn')
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                [
+                    _row('assistant', uuid='a1', message={
+                        'role': 'assistant',
+                        'stop_reason': 'end_turn',
+                        'content': [{'type': 'text', 'text': 'done'}],
+                    }),
+                    _row('result', stop_reason='tool_deferred'),
+                ],
+                terminal_receipt=self._receipt(),
+                resident_generation=7,
+            )
+        self.assertEqual(raised.exception.error_code, 'provider_terminal_receipt_conflict')
+
+    def test_end_turn_without_live_result_or_transcript_result_still_fails(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build([
+                _row('assistant', uuid='a1', message={
+                    'stop_reason': 'end_turn',
+                    'content': [{'type': 'text', 'text': 'done'}],
+                }),
+            ])
+        self.assertEqual(raised.exception.error_code, 'provider_result_missing')
+
+    def test_transcript_result_remains_compatible_without_receipt(self):
+        turn = self._build([
+            _row('assistant', uuid='a1', message={
+                'stop_reason': 'end_turn',
+                'content': [{'type': 'text', 'text': 'done'}],
+            }),
+            _row('result', stop_reason='end_turn'),
+        ])
+        self.assertEqual(turn.content, 'done')
 
     def test_projection_hash_covers_complete_normalized_projection(self):
         tool = {

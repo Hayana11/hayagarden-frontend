@@ -9,6 +9,7 @@ Client disconnect (GeneratorExit) kills the resident to avoid stdout pollution.
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -207,6 +208,56 @@ def _claude_event_is_activity(d):
             return block.get('type') == 'tool_use'
         return False
     return False
+
+@dataclass(frozen=True)
+class ProviderTerminalReceipt:
+    """Typed authority emitted only after resident reads a successful result."""
+
+    terminal_kind: str
+    source: str
+    turn_identity: str
+    resident_generation: int
+    claude_session_id: str
+    result_is_error: bool
+    result_stop_reason: str
+
+    @classmethod
+    def from_result_event(
+        cls,
+        event,
+        *,
+        turn_identity,
+        resident_generation,
+        claude_session_id,
+    ):
+        if not isinstance(event, dict) or event.get('type') != 'result':
+            raise ValueError('provider terminal receipt requires type=result')
+        if bool(event.get('is_error')):
+            raise ValueError('provider terminal receipt cannot represent provider error')
+        if event.get('stop_reason') != 'end_turn':
+            raise ValueError('provider terminal receipt requires final end_turn')
+        turn_id = str(turn_identity or '').strip()
+        if not turn_id:
+            raise ValueError('provider terminal receipt turn identity is missing')
+        return cls(
+            terminal_kind='provider_result',
+            source='resident_live_stdout',
+            turn_identity=turn_id,
+            resident_generation=int(resident_generation),
+            claude_session_id=str(claude_session_id or '').strip(),
+            result_is_error=False,
+            result_stop_reason=str(event.get('stop_reason') or ''),
+        )
+
+
+class ResidentTurnUsage(dict):
+    """Existing usage mapping with a typed, non-serialized terminal receipt."""
+
+    terminal_receipt: ProviderTerminalReceipt | None
+
+    def __init__(self, *args, terminal_receipt=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.terminal_receipt = terminal_receipt
 
 
 class ProviderTerminalTracker:
@@ -1473,6 +1524,7 @@ class ResidentSession:
         current_round = None
         is_err = None
         saw_result = False
+        terminal_receipt = None
 
         def _record_round_usage(
             event_source,
@@ -1789,6 +1841,13 @@ class ResidentSession:
                             yield ('tool_use', deferred_payload)
                         if d.get('is_error'):
                             is_err = str(d.get('result', ''))[:300]
+                        elif d.get('stop_reason') == 'end_turn':
+                            terminal_receipt = ProviderTerminalReceipt.from_result_event(
+                                d,
+                                turn_identity=terminal.turn_identity,
+                                resident_generation=self._generation,
+                                claude_session_id=self._session_id,
+                            )
                         # result.usage is diagnostics only; it never updates
                         # or replaces the stream round totals.
                         if current_round is not None:
@@ -1913,6 +1972,10 @@ class ResidentSession:
                 )
         except Exception:
             pass
+        usage = ResidentTurnUsage(
+            usage,
+            terminal_receipt=terminal_receipt,
+        )
 
         self._cold = False
         self._last_used = time.time()
