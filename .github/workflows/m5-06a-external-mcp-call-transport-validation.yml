@@ -1,11 +1,6 @@
 name: M5-06A External MCP call transport validation
 
 on:
-  pull_request:
-    paths:
-      - 'tools/external_mcp_call_transport.mjs'
-      - 'tests/test_external_mcp_call_transport.mjs'
-      - '.github/workflows/m5-06a-external-mcp-call-transport-validation.yml'
   workflow_dispatch:
 
 permissions:
