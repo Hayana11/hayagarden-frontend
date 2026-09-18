@@ -61,6 +61,7 @@ HANDOFF_READY = 'READY'
 HANDOFF_FAILED_RETRYABLE = 'FAILED_RETRYABLE'
 
 SOURCE_KIND_CHAT = 'chat'
+SOURCE_KIND_DAILY_PENDING = 'daily_pending'
 SOURCE_KIND_WAKE = 'wake'
 SOURCE_KIND_WORKSPACE_JOB = 'workspace_job'
 SOURCE_KIND_SYSTEM = 'system'
@@ -2394,9 +2395,10 @@ def advance_resident_history_cursor(
     processed_through_message_id: int,
     *,
     expected_cursor: Union[int, None, object] = _CURSOR_CAS_OMITTED,
+    finalize_message_id: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Advance resident history cursor after assistant message is persisted."""
+    """Advance the resident cursor, optionally promoting one pending assistant."""
     new_id = int(processed_through_message_id)
     if new_id <= 0:
         raise ValueError('processed_through_message_id must be positive')
@@ -2423,6 +2425,47 @@ def advance_resident_history_cursor(
         if current is not None and new_id < current:
             conn.rollback()
             raise ConflictError('resident cursor cannot move backward')
+
+        if finalize_message_id is not None:
+            pending_id = int(finalize_message_id)
+            if pending_id != new_id:
+                conn.rollback()
+                raise ConflictError('finalize message does not match cursor target')
+            pending = conn.execute(
+                'SELECT m.author, m.source_kind, dmc.context_id, dmc.context_epoch, '
+                'dmc.resident_generation '
+                'FROM chat_messages m '
+                'INNER JOIN daily_message_contexts dmc ON dmc.message_id=m.id '
+                'WHERE m.id=?',
+                (pending_id,),
+            ).fetchone()
+            if pending is None:
+                conn.rollback()
+                raise ConflictError('pending assistant mapping missing')
+            pending_d = dict(pending)
+            if (
+                str(pending_d.get('author') or '').lower() != 'assistant'
+                or int(pending_d['context_id']) != int(context_id)
+                or int(pending_d['context_epoch']) != int(
+                    conn.execute(
+                        'SELECT context_epoch FROM daily_contexts WHERE id=?',
+                        (int(context_id),),
+                    ).fetchone()['context_epoch']
+                )
+                or int(pending_d['resident_generation']) != int(resident_generation)
+                or str(pending_d.get('source_kind') or '')
+                    not in (SOURCE_KIND_DAILY_PENDING, SOURCE_KIND_CHAT)
+            ):
+                conn.rollback()
+                raise ConflictError('pending assistant identity mismatch')
+
+            if str(pending_d.get('source_kind') or '') == SOURCE_KIND_DAILY_PENDING:
+                conn.execute(
+                    "UPDATE chat_messages SET source_kind=? WHERE id=? "
+                    "AND source_kind=?",
+                    (SOURCE_KIND_CHAT, pending_id, SOURCE_KIND_DAILY_PENDING),
+                )
+
         if current is not None and new_id == current:
             conn.commit()
             return {
@@ -2430,6 +2473,7 @@ def advance_resident_history_cursor(
                 'resident_generation': int(resident_generation),
                 'history_cursor_message_id': current,
                 'advanced': False,
+                'finalized': finalize_message_id is not None,
             }
         conn.execute(
             'INSERT INTO daily_resident_cursors '
@@ -2445,12 +2489,32 @@ def advance_resident_history_cursor(
             'resident_generation': int(resident_generation),
             'history_cursor_message_id': new_id,
             'advanced': True,
+            'finalized': finalize_message_id is not None,
         }
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def finalize_daily_assistant_and_advance_cursor(
+    context_id: int,
+    resident_generation: int,
+    assistant_message_id: int,
+    *,
+    expected_cursor: Union[int, None, object] = _CURSOR_CAS_OMITTED,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Atomically make a pending assistant formal and advance its cursor."""
+    return advance_resident_history_cursor(
+        context_id,
+        resident_generation,
+        int(assistant_message_id),
+        expected_cursor=expected_cursor,
+        finalize_message_id=int(assistant_message_id),
+        db_path=db_path,
+    )
 
 
 def make_epoch_token(
@@ -3176,6 +3240,7 @@ def persist_daily_assistant_if_current(
     cache_info: str = '',
     choices: str = '',
     display_segments: str = '',
+    source_kind: str = SOURCE_KIND_CHAT,
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
 ) -> int:
@@ -3225,10 +3290,14 @@ def persist_daily_assistant_if_current(
             conn.rollback()
             raise ConflictError('lease expired at persist')
         display_segments = finalize_display_segments_json(display_segments, content)
+        persisted_source_kind = str(source_kind or SOURCE_KIND_CHAT).strip() or SOURCE_KIND_CHAT
         cur = conn.execute(
-            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices, display_segments) "
-            "VALUES ('assistant', ?, ?, ?, ?, ?, ?)",
-            (content, thinking, tool_calls, cache_info, choices, display_segments),
+            "INSERT INTO chat_messages (author, content, thinking, tool_calls, cache_info, choices, display_segments, source_kind) "
+            "VALUES ('assistant', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                content, thinking, tool_calls, cache_info, choices,
+                display_segments, persisted_source_kind,
+            ),
         )
         assistant_id = int(cur.lastrowid)
         now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -3243,6 +3312,143 @@ def persist_daily_assistant_if_current(
         )
         conn.commit()
         return assistant_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def rollback_daily_assistant_terminalization(
+    *,
+    assistant_message_id: int,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    registry_snapshot: Optional[dict[str, Any]],
+    expected_claude_session_id: str = '',
+    expected_transcript_path: str = '',
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Rollback one failed pending terminalization with identity checks.
+
+    The delete is intentionally coupled to the context mapping and registry
+    restore in one transaction. A changed identity fails closed instead of
+    deleting a newer turn or registry binding.
+    """
+    ensure_schema(db_path)
+    aid = int(assistant_message_id)
+    cid = int(context_id)
+    epoch = int(context_epoch)
+    generation = int(resident_generation)
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        message = conn.execute(
+            'SELECT author, source_kind FROM chat_messages WHERE id=?',
+            (aid,),
+        ).fetchone()
+        mapping = conn.execute(
+            'SELECT message_id, context_id, context_epoch, resident_generation, role '
+            'FROM daily_message_contexts WHERE message_id=?',
+            (aid,),
+        ).fetchone()
+        if message is None or mapping is None:
+            conn.rollback()
+            raise ConflictError('pending assistant terminalization identity missing')
+        message_d = dict(message)
+        mapping_d = dict(mapping)
+        if (
+            str(message_d.get('author') or '').lower() != 'assistant'
+            or str(message_d.get('source_kind') or '') != SOURCE_KIND_DAILY_PENDING
+            or int(mapping_d['context_id']) != cid
+            or int(mapping_d['context_epoch']) != epoch
+            or int(mapping_d['resident_generation']) != generation
+            or str(mapping_d.get('role') or '') != 'assistant'
+        ):
+            conn.rollback()
+            raise ConflictError('pending assistant terminalization identity mismatch')
+
+        current_registry_row = conn.execute(
+            'SELECT * FROM context_claude_sessions '
+            'WHERE context_id=? AND resident_generation=?',
+            (cid, generation),
+        ).fetchone()
+        current_registry = dict(current_registry_row) if current_registry_row is not None else None
+        if registry_snapshot is None:
+            if current_registry is not None:
+                if expected_claude_session_id and str(current_registry.get('claude_session_id') or '') != str(expected_claude_session_id):
+                    conn.rollback()
+                    raise ConflictError('registry identity changed during rollback')
+                if expected_transcript_path and str(current_registry.get('transcript_path') or '') != str(expected_transcript_path):
+                    conn.rollback()
+                    raise ConflictError('registry transcript changed during rollback')
+        else:
+            snapshot = dict(registry_snapshot)
+            if current_registry is None:
+                conn.rollback()
+                raise ConflictError('registry disappeared during rollback')
+            for key in (
+                'context_id', 'context_epoch', 'resident_generation',
+                'chat_id', 'claude_session_id', 'transcript_path', 'source',
+                'process_generation',
+            ):
+                if str(current_registry.get(key)) != str(snapshot.get(key)):
+                    conn.rollback()
+                    raise ConflictError('registry identity changed during rollback')
+
+        event_cur = conn.execute(
+            'DELETE FROM chat_message_claude_events WHERE message_id=?',
+            (aid,),
+        )
+        conn.execute('DELETE FROM daily_message_contexts WHERE message_id=?', (aid,))
+        deleted = conn.execute(
+            'DELETE FROM chat_messages WHERE id=? AND author=? AND source_kind=?',
+            (aid, 'assistant', SOURCE_KIND_DAILY_PENDING),
+        )
+        if int(deleted.rowcount or 0) != 1:
+            conn.rollback()
+            raise ConflictError('pending assistant delete CAS failed')
+
+        if registry_snapshot is None:
+            if current_registry is not None:
+                removed = conn.execute(
+                    'DELETE FROM context_claude_sessions '
+                    'WHERE context_id=? AND resident_generation=?',
+                    (cid, generation),
+                )
+                if int(removed.rowcount or 0) != 1:
+                    conn.rollback()
+                    raise ConflictError('registry delete CAS failed')
+        else:
+            snapshot = dict(registry_snapshot)
+            updated = conn.execute(
+                '''UPDATE context_claude_sessions SET
+                   context_epoch=?, chat_id=?, claude_session_id=?,
+                   transcript_path=?, source=?, process_generation=?,
+                   scan_offset=?, scan_status=?, scan_error_code=?,
+                   last_mapped_message_id=?, created_at=?, updated_at=?
+                   WHERE context_id=? AND resident_generation=?''',
+                (
+                    snapshot.get('context_epoch'), snapshot.get('chat_id'),
+                    snapshot.get('claude_session_id'), snapshot.get('transcript_path'),
+                    snapshot.get('source'), snapshot.get('process_generation'),
+                    snapshot.get('scan_offset'), snapshot.get('scan_status'),
+                    snapshot.get('scan_error_code'), snapshot.get('last_mapped_message_id'),
+                    snapshot.get('created_at'), snapshot.get('updated_at'),
+                    cid, generation,
+                ),
+            )
+            if int(updated.rowcount or 0) != 1:
+                conn.rollback()
+                raise ConflictError('registry restore CAS failed')
+
+        conn.commit()
+        return {
+            'assistant_message_id': aid,
+            'deleted_event_count': int(event_cur.rowcount or 0),
+            'registry_restored': registry_snapshot is not None,
+        }
     except Exception:
         conn.rollback()
         raise
@@ -3399,3 +3605,4 @@ def current_summary(
         'resident_generation': int(ctx['resident_generation'] or 1),
         'context_id': context_id,
     }
+

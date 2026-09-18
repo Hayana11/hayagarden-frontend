@@ -2412,7 +2412,7 @@ class DailyRuntimeCursorCASTests(unittest.TestCase):
                 plan = _prepare_turn(db, uid, wall_now=_FIXED_NOW, static_system='S')
                 aid = dr.persist_daily_assistant_for_plan(plan, content='saved once')
                 with mock.patch(
-                    'chat.daily_context.advance_resident_history_cursor',
+                    'chat.daily_context.finalize_daily_assistant_and_advance_cursor',
                     side_effect=dc.ConflictError('cursor stale'),
                 ):
                     with self.assertRaises(dr.CursorCASConflictAfterPersist) as ctx:
@@ -2424,6 +2424,56 @@ class DailyRuntimeCursorCASTests(unittest.TestCase):
             ).fetchone()[0]
             conn.close()
             self.assertEqual(int(count), 1)
+            conn = sqlite3.connect(db)
+            source_kind = conn.execute(
+                'SELECT source_kind FROM chat_messages WHERE author=?',
+                ('assistant',),
+            ).fetchone()[0]
+            conn.close()
+            self.assertEqual(source_kind, dc.SOURCE_KIND_DAILY_PENDING)
+        finally:
+            os.unlink(db)
+
+    def test_handle_cursor_conflict_rolls_back_pending_terminalization(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'cas through handler', '2026-07-27 10:00:00')
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                plan = _prepare_turn(db, uid, wall_now=_FIXED_NOW, static_system='S')
+                _attach_successful_canonical(plan, content='saved then rolled back')
+                aid = dr.persist_daily_assistant_for_plan(
+                    plan, content='saved then rolled back',
+                )
+                with mock.patch.object(
+                    dr,
+                    'finalize_transcript_mapping_after_success',
+                    side_effect=_mark_transcript_mapped,
+                ), mock.patch.object(
+                    dc,
+                    'finalize_daily_assistant_and_advance_cursor',
+                    side_effect=dc.ConflictError('cursor stale'),
+                ):
+                    with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                        dr.handle_provider_success(
+                            plan,
+                            assistant_message_id=aid,
+                            raw_text='saved then rolled back',
+                        )
+
+            conn = sqlite3.connect(db)
+            self.assertIsNone(conn.execute(
+                'SELECT id FROM chat_messages WHERE id=?', (aid,),
+            ).fetchone())
+            self.assertEqual(conn.execute(
+                'SELECT COUNT(*) FROM daily_message_contexts WHERE message_id=?',
+                (aid,),
+            ).fetchone()[0], 0)
+            conn.close()
+            self.assertIsNone(dc.get_resident_history_cursor(
+                plan.context_id, plan.resident_generation, db_path=db,
+            ))
         finally:
             os.unlink(db)
 
@@ -2904,7 +2954,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(plan.manifest['transcript_mapping_status'], 'BLOCKED')
         self.assertIsNotNone(plan.manifest['transcript_mapping_error_code'])
         self.assertEqual(int(plan.manifest['transcript_mapping_event_count']), 0)
-        self.assertIsNone(plan.manifest.get('cursor_cas_success'))
+        self.assertNotIn('cursor_cas_success', plan.manifest)
         self.assertTrue(plan.lease_released)
         self.assertFalse(dc.is_resident_turn_active(
             plan.context_id, plan.resident_generation, db_path=self.db, now=_FIXED_NOW,
@@ -2914,20 +2964,32 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         asst = conn.execute(
             "SELECT id, content FROM chat_messages WHERE author='assistant'"
         ).fetchone()
+        formal_asst_count = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' AND source_kind='chat'"
+        ).fetchone()[0]
+        context_mapping_count = conn.execute(
+            'SELECT COUNT(*) FROM daily_message_contexts WHERE role=?',
+            ('assistant',),
+        ).fetchone()[0]
         map_count = conn.execute(
             'SELECT COUNT(*) FROM chat_message_claude_events'
         ).fetchone()[0]
         conn.close()
-        self.assertEqual(int(asst[0]), aid)
-        self.assertEqual(asst[1], 'orphan')
+        self.assertIsNone(asst)
+        self.assertEqual(int(formal_asst_count), 0)
+        self.assertEqual(int(context_mapping_count), 0)
         self.assertEqual(int(map_count), 0)
+
+        self.assertIsNone(dc.get_resident_history_cursor(
+            plan.context_id,
+            plan.resident_generation,
+            db_path=self.db,
+        ))
 
         reg = get_context_claude_session(
             plan.context_id, plan.resident_generation, db_path=self.db,
         )
-        self.assertIsNotNone(reg)
-        self.assertEqual(reg['scan_status'], SCAN_STATUS_BLOCKED)
-        self.assertEqual(int(reg['scan_offset']), 0)
+        self.assertIsNone(reg)
 
 
 class ResidentPeekRespawnReasonTests(unittest.TestCase):
@@ -3287,10 +3349,6 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                         dr,
                         'complete_daily_turn',
                         side_effect=RuntimeError('commit failed'),
-                    ), mock.patch.object(
-                        dr,
-                        'finalize_transcript_mapping_after_success',
-                        side_effect=_mark_transcript_mapped,
                     ):
                         with self.assertRaises(RuntimeError):
                             dr.handle_provider_success(
@@ -6197,3 +6255,4 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

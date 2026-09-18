@@ -130,6 +130,92 @@ class CanonicalTurnTests(unittest.TestCase):
             ])
         self.assertEqual(missing_assistant.exception.error_code, 'canonical_assistant_missing')
 
+    def test_projection_hash_covers_complete_normalized_projection(self):
+        tool = {
+            'id': 'tool-1',
+            'name': 'read',
+            'args': {'path': 'a', 'options': {'z': 1, 'a': True}},
+            'result': 'result A',
+            'success': True,
+        }
+        exact_left = projection_hash(
+            'same text',
+            '[{"type":"text","text":"same text"}]',
+            thinking='same thinking',
+            tool_calls=[tool],
+            choices=['A', 'B'],
+        )
+        exact_right = projection_hash(
+            'same text',
+            '[{"text":"same text","type":"text"}]',
+            thinking='same thinking',
+            tool_calls=[dict(tool)],
+            choices=['A', 'B'],
+        )
+        self.assertEqual(exact_left, exact_right)
+        self.assertNotEqual(
+            exact_left,
+            projection_hash(
+                'same text',
+                '[{"type":"text","text":"same text"}]',
+                thinking='same thinking',
+                tool_calls=[dict(tool, result='result B')],
+                choices=['A', 'B'],
+            ),
+        )
+        self.assertNotEqual(
+            exact_left,
+            projection_hash(
+                'same text',
+                '[{"type":"text","text":"same text"}]',
+                thinking='same thinking',
+                tool_calls=[tool],
+                choices=['A', 'C'],
+            ),
+        )
+
+    def test_tool_result_pairing_is_exact_and_fail_closed(self):
+        with self.assertRaises(CanonicalTurnError) as missing:
+            self._build([
+                _row('assistant', uuid='a1', message={'role': 'assistant', 'content': [
+                    {'type': 'tool_use', 'id': 'tool-1', 'name': 'read', 'input': {}},
+                    {'type': 'text', 'text': 'done'},
+                ]}),
+                _row('result', stop_reason='end_turn'),
+            ])
+        self.assertEqual(missing.exception.error_code, 'tool_result_missing')
+
+        with self.assertRaises(CanonicalTurnError) as unmatched:
+            self._build([
+                _row('user', message={'role': 'user', 'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'unknown', 'content': 'x'},
+                ]}),
+                _row('assistant', uuid='a1', message={'role': 'assistant', 'content': [
+                    {'type': 'text', 'text': 'done'},
+                ]}),
+                _row('result', stop_reason='end_turn'),
+            ])
+        self.assertEqual(unmatched.exception.error_code, 'tool_result_unmatched')
+
+        with self.assertRaises(CanonicalTurnError) as duplicate:
+            self._build([
+                _row('assistant', uuid='a1', message={'role': 'assistant', 'content': [
+                    {'type': 'tool_use', 'id': 'tool-1', 'name': 'read', 'input': {}},
+                ]}),
+                _row('user', message={'role': 'user', 'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'tool-1', 'content': 'x'},
+                ]}),
+                _row('user', message={'role': 'user', 'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'tool-1', 'content': 'x'},
+                ]}),
+                _row('assistant', uuid='a2', message={'role': 'assistant', 'content': [
+                    {'type': 'text', 'text': 'done'},
+                ]}),
+                _row('result', stop_reason='end_turn'),
+            ])
+        self.assertEqual(duplicate.exception.error_code, 'tool_result_duplicate')
+
 
 if __name__ == '__main__':
     unittest.main()
+

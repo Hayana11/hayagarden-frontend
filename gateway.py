@@ -6895,9 +6895,14 @@ def _stream_cc_daily_soft_window(
 
         turn_terminal = True
         live_content, _live_choices = _extract_choices(''.join(text_acc).strip())
+        if _live_choices and not live_content:
+            live_content = '[选项: ' + ' / '.join(_live_choices) + ']'
         live_projection = projection_hash(
             live_content,
             display_segments.as_list(),
+            thinking=''.join(think_acc),
+            tool_calls=cc_tool_calls,
+            choices=_live_choices,
         )
         if live_projection != canonical.projection_hash:
             logging.getLogger(__name__).warning(
@@ -6922,6 +6927,7 @@ def _stream_cc_daily_soft_window(
                     'thinking': canonical.thinking,
                     'display_segments': json.loads(canonical.display_segments),
                     'tool_calls': [dict(tc) for tc in canonical.tool_calls],
+                    'choices': list(canonical.choices),
                     'canonical_sha256': canonical.projection_hash,
                     'assistant_message_id': assistant_id,
                 },

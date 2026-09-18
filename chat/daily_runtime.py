@@ -4247,6 +4247,59 @@ def _set_transcript_mapping_manifest(
     plan.manifest['transcript_mapping_scan_offset'] = scan_offset
 
 
+def _capture_transcript_registry_snapshot(plan: DailyTurnPlan) -> Optional[dict[str, Any]]:
+    """Capture the registry identity before this turn can mutate its watermark."""
+    existing = get_context_claude_session(
+        int(plan.context_id),
+        int(plan.resident_generation),
+        db_path=plan.db_path,
+    )
+    snapshot = dict(existing) if existing is not None else None
+    plan._transcript_registry_before_mapping = snapshot
+    return snapshot
+
+
+def _rollback_failed_terminalization(
+    plan: DailyTurnPlan,
+    *,
+    assistant_message_id: int,
+) -> dict[str, Any]:
+    """Remove a pending assistant only after proving its full turn identity."""
+    snapshot = getattr(plan, '_transcript_registry_before_mapping', None)
+    result = dc.rollback_daily_assistant_terminalization(
+        assistant_message_id=int(assistant_message_id),
+        context_id=int(plan.context_id),
+        context_epoch=int(plan.context_epoch),
+        resident_generation=int(plan.resident_generation),
+        registry_snapshot=snapshot,
+        expected_claude_session_id=str(plan.transcript_claude_session_id or ''),
+        expected_transcript_path=str(plan.transcript_path or ''),
+        db_path=plan.db_path,
+    )
+    plan.manifest['terminal_rollback_status'] = 'ROLLED_BACK'
+    plan.manifest['terminal_rollback'] = dict(result)
+    return result
+
+
+def _raise_terminal_rollback_unproven(
+    plan: DailyTurnPlan,
+    *,
+    assistant_message_id: int,
+    cause: Exception,
+) -> None:
+    plan.manifest['terminal_rollback_status'] = 'UNPROVEN'
+    plan.manifest['terminal_rollback_error_code'] = type(cause).__name__
+    abort_daily_turn(
+        plan,
+        error_code='terminal_rollback_unproven',
+        respawn=False,
+    )
+    raise DailyRuntimeError(
+        'failed terminalization rollback could not be proven',
+        error_code='terminal_rollback_unproven',
+    ) from cause
+
+
 def finalize_transcript_mapping_after_success(
     plan: DailyTurnPlan,
     *,
@@ -4263,6 +4316,9 @@ def finalize_transcript_mapping_after_success(
             int(plan.context_id),
             int(plan.resident_generation),
             db_path=plan.db_path,
+        )
+        plan._transcript_registry_before_mapping = (
+            dict(existing) if existing is not None else None
         )
         # BLOCKED at/after current turn start stays fail-closed. BLOCKED with a
         # true backlog (scan_offset behind this turn start) must still attempt
@@ -6534,7 +6590,7 @@ def complete_daily_turn(
         raise DailyRuntimeError('assistant_message_id required', error_code='assistant_missing')
 
     try:
-        cursor_result = dc.advance_resident_history_cursor(
+        cursor_result = dc.finalize_daily_assistant_and_advance_cursor(
             plan.context_id,
             plan.resident_generation,
             aid,
@@ -6654,6 +6710,7 @@ def persist_partial_daily_stream_rescue(
         tool_calls=tool_calls or '',
         cache_info=cache_info,
         choices='',
+        source_kind=dc.SOURCE_KIND_CHAT,
     )
     plan.manifest['partial_rescue'] = True
     plan.manifest['partial_rescue_assistant_id'] = int(aid)
@@ -6669,6 +6726,7 @@ def persist_daily_assistant_for_plan(
     cache_info: str = '',
     choices: str = '',
     display_segments: str = '',
+    source_kind: str = dc.SOURCE_KIND_DAILY_PENDING,
 ) -> int:
     return dc.persist_daily_assistant_if_current(
         chat_id=plan.chat_id,
@@ -6682,6 +6740,7 @@ def persist_daily_assistant_for_plan(
         cache_info=cache_info,
         choices=choices,
         display_segments=display_segments,
+        source_kind=source_kind,
         db_path=plan.db_path,
     )
 
@@ -6781,12 +6840,32 @@ def handle_provider_success(
             'canonical transcript projection missing',
             error_code='canonical_turn_missing',
         )
+    if not hasattr(plan, '_transcript_registry_before_mapping'):
+        try:
+            _capture_transcript_registry_snapshot(plan)
+        except Exception as exc:
+            abort_daily_turn(plan, error_code='registry_snapshot_failed')
+            raise DailyRuntimeError(
+                'transcript registry snapshot failed',
+                error_code='registry_snapshot_failed',
+            ) from exc
     # The row is already the canonical projection at this point, but it is not
     # a successful turn until the same transcript range maps successfully.
     finalize_transcript_mapping_after_success(
         plan, assistant_message_id=int(assistant_message_id),
     )
     if str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED':
+        try:
+            _rollback_failed_terminalization(
+                plan,
+                assistant_message_id=int(assistant_message_id),
+            )
+        except Exception as exc:
+            _raise_terminal_rollback_unproven(
+                plan,
+                assistant_message_id=int(assistant_message_id),
+                cause=exc,
+            )
         abort_daily_turn(
             plan,
             error_code=str(
@@ -6801,14 +6880,28 @@ def handle_provider_success(
                 or 'transcript_mapping_blocked'
             ),
         )
-    complete_daily_turn(
-        plan,
-        assistant_message_id=int(assistant_message_id),
-        stop_reason=str(getattr(canonical, 'stop_reason', None) or usage.get('stop_reason') or 'end_turn'),
-        input_tokens=usage.get('input_tokens'),
-        output_tokens=usage.get('output_tokens'),
-        unexpected_save_marker=unexpected_save_marker,
-    )
+    try:
+        complete_daily_turn(
+            plan,
+            assistant_message_id=int(assistant_message_id),
+            stop_reason=str(getattr(canonical, 'stop_reason', None) or usage.get('stop_reason') or 'end_turn'),
+            input_tokens=usage.get('input_tokens'),
+            output_tokens=usage.get('output_tokens'),
+            unexpected_save_marker=unexpected_save_marker,
+        )
+    except CursorCASConflictAfterPersist as exc:
+        try:
+            _rollback_failed_terminalization(
+                plan,
+                assistant_message_id=int(assistant_message_id),
+            )
+        except Exception as rollback_exc:
+            _raise_terminal_rollback_unproven(
+                plan,
+                assistant_message_id=int(assistant_message_id),
+                cause=rollback_exc,
+            )
+        raise exc
     # Same-context last-good: only after full success (result + persist + JSONL + cursor).
     end_off = plan.transcript_end_offset
     start_off = plan.transcript_start_offset
@@ -6915,3 +7008,4 @@ def reprepare_after_hot_cold_mismatch(
         model=model,
         _cold_reprepare=True,
     )
+

@@ -132,9 +132,54 @@ def _read_closed_range(path: str, start_offset: int, end_offset: int) -> list[di
         raise CanonicalTurnError('transcript read failed', error_code='transcript_read_error') from exc
 
 
-def _hash_projection(content: str, segments: list[dict[str, Any]]) -> str:
+def _normalize_projection_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_projection_value(value[key])
+            for key in sorted(value.keys(), key=lambda item: str(item))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_projection_value(item) for item in value]
+    return value
+
+
+def _coerce_display_segments(display_segments: str | Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    if isinstance(display_segments, str):
+        try:
+            parsed = json.loads(display_segments) if display_segments else []
+        except (TypeError, ValueError):
+            parsed = []
+    else:
+        parsed = list(display_segments)
+    return parsed if isinstance(parsed, list) else []
+
+
+def _hash_projection(
+    content: str,
+    thinking: str,
+    segments: list[dict[str, Any]],
+    tool_calls: Iterable[Mapping[str, Any]],
+    choices: Iterable[Any],
+) -> str:
+    normalized_tool_calls = []
+    for call in tool_calls:
+        if not isinstance(call, Mapping):
+            continue
+        normalized_tool_calls.append({
+            'id': str(call.get('id') or ''),
+            'name': str(call.get('name') or ''),
+            'args': _normalize_projection_value(call.get('args') or {}),
+            'result': _normalize_projection_value(call.get('result') if call.get('result') is not None else ''),
+            'success': bool(call.get('success')),
+        })
     body = json.dumps(
-        {'content': content, 'display_segments': segments},
+        {
+            'content': str(content or '').strip(),
+            'thinking': str(thinking or ''),
+            'display_segments': _normalize_projection_value(segments),
+            'tool_calls': normalized_tool_calls,
+            'choices': [str(choice) for choice in choices],
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(',', ':'),
@@ -183,6 +228,7 @@ def build_canonical_turn(
     segments = DisplaySegmentAccumulator()
     tool_calls: list[dict[str, Any]] = []
     tool_index_by_id: dict[str, int] = {}
+    tool_result_seen: set[str] = set()
     provider_rounds: list[dict[str, Any]] = []
     terminal_result = False
     terminal_assistant = False
@@ -232,6 +278,11 @@ def build_canonical_turn(
                             'tool_use identity is missing',
                             error_code='tool_use_identity_missing',
                         )
+                    if tool_id in tool_index_by_id:
+                        raise CanonicalTurnError(
+                            'tool_use identity is duplicated',
+                            error_code='tool_use_duplicate',
+                        )
                     index = len(tool_calls)
                     tool_index_by_id[tool_id] = index
                     tool_calls.append({
@@ -259,6 +310,12 @@ def build_canonical_turn(
                         'tool_result has no preceding tool_use',
                         error_code='tool_result_unmatched',
                     )
+                if tool_id in tool_result_seen:
+                    raise CanonicalTurnError(
+                        'tool_result is duplicated',
+                        error_code='tool_result_duplicate',
+                    )
+                tool_result_seen.add(tool_id)
                 idx = tool_index_by_id[tool_id]
                 tool_calls[idx]['result'] = _tool_result_text(block.get('content'))
                 tool_calls[idx]['success'] = not bool(block.get('is_error'))
@@ -275,6 +332,11 @@ def build_canonical_turn(
             raise CanonicalTurnError(
                 'tool identity is incomplete',
                 error_code='tool_identity_incomplete',
+            )
+        if str(call.get('id') or '') not in tool_result_seen:
+            raise CanonicalTurnError(
+                'tool_result is missing',
+                error_code='tool_result_missing',
             )
 
     for kind, value in parser.finish():
@@ -322,18 +384,29 @@ def build_canonical_turn(
         stop_reason=terminal_stop_reason,
         terminal_state='confirmed',
         transcript_identity=identity,
-        projection_hash=_hash_projection(content, canonical_segments),
+        projection_hash=_hash_projection(
+            content,
+            parser.thinking,
+            canonical_segments,
+            tool_calls,
+            choices,
+        ),
     )
 
 
-def projection_hash(content: str, display_segments: str | Iterable[dict[str, Any]]) -> str:
-    if isinstance(display_segments, str):
-        try:
-            parsed = json.loads(display_segments) if display_segments else []
-        except (TypeError, ValueError):
-            parsed = []
-    else:
-        parsed = list(display_segments)
-    if not isinstance(parsed, list):
-        parsed = []
-    return _hash_projection(str(content or '').strip(), parsed)
+def projection_hash(
+    content: str,
+    display_segments: str | Iterable[dict[str, Any]],
+    *,
+    thinking: str = '',
+    tool_calls: Iterable[Mapping[str, Any]] = (),
+    choices: Iterable[Any] = (),
+) -> str:
+    return _hash_projection(
+        str(content or '').strip(),
+        str(thinking or ''),
+        _coerce_display_segments(display_segments),
+        tool_calls,
+        choices,
+    )
+
