@@ -37,7 +37,7 @@ for (const label of ['默认开启', '已开启', '已关闭', '不可用']) {
 }
 assert.match(profile, /状态未知/);
 assert.match(profile, /当前不可确认/);
-assert.match(profile, /const dirty = personaDirty \|\| toolDirty \|\| hasResetIntent;/);
+assert.match(profile, /const dirty = personaDirty \|\| displayThinkingDirty \|\| toolDirty \|\| hasResetIntent;/);
 assert.match(profile, /profile-tool-card-toggle/);
 assert.match(profile, /setOpenTools/);
 assert.doesNotMatch(profile, /patchCapabilityState|\/api\/capabilities\/[^']+\/state|http\.patch/);
