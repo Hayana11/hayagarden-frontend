@@ -1,23 +1,7 @@
 name: M5-06C-B1 external auth runtime primitives validation
 
 on:
-  push:
-    branches:
-      - codex/m5-06c-b1-auth-runtime-primitives-r1
-    paths:
-      - .github/workflows/m5-06c-b1-external-auth-runtime-primitives-validation.yml
-      - tools/external_secret_store.py
-      - tools/external_mcp_secret_materializer.py
-      - tools/external_mcp_call_bridge.mjs
-      - tools/external_mcp_call_transport.mjs
-      - tools/external_mcp_discovery_bridge.mjs
-      - tools/external_mcp_discovery_transport.mjs
-      - tests/test_external_secret_store.py
-      - tests/test_external_mcp_secret_materializer.py
-      - tests/test_external_mcp_call_bridge.mjs
-      - tests/test_external_mcp_call_transport.mjs
-      - tests/test_external_mcp_discovery_bridge.mjs
-      - tests/test_external_mcp_discovery_transport.mjs
+  workflow_dispatch:
 
 permissions:
   contents: read
