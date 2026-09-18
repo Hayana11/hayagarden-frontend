@@ -162,6 +162,11 @@ def _validate_terminal_receipt(
             'provider terminal receipt source is invalid',
             error_code='provider_terminal_receipt_invalid',
         )
+    if receipt.result_stop_reason != 'end_turn':
+        raise CanonicalTurnError(
+            'provider terminal receipt stop_reason is not final',
+            error_code='provider_terminal_receipt_invalid',
+        )
     if not str(receipt.turn_identity or '').strip():
         raise CanonicalTurnError(
             'provider terminal receipt identity is missing',
