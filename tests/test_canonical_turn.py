@@ -192,7 +192,7 @@ class CanonicalTurnTests(unittest.TestCase):
             resident_generation=64,
             transcript_process_generation=1,
         )
-        self.assertEqual(turn.terminal_state, "confirmed")
+        self.assertEqual(turn.terminal_state, 'confirmed')
 
     def test_process_generation_mismatch_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "provider_terminal_receipt_generation_mismatch"):
@@ -225,6 +225,7 @@ class CanonicalTurnTests(unittest.TestCase):
             self._receipt_rows(),
             terminal_receipt=self._receipt(),
             resident_generation=7,
+            transcript_process_generation=7,
         )
         self.assertEqual(turn.content, 'done')
         self.assertEqual(turn.terminal_state, 'confirmed')
@@ -234,6 +235,7 @@ class CanonicalTurnTests(unittest.TestCase):
             self._receipt_rows(with_tool=True),
             terminal_receipt=self._receipt(),
             resident_generation=7,
+            transcript_process_generation=7,
         )
         self.assertEqual(turn.tool_calls[0]['result'], 'ok')
 
@@ -376,6 +378,7 @@ class CanonicalTurnTests(unittest.TestCase):
             self._receipt_rows(),
             terminal_receipt=self._receipt(),
             resident_generation=7,
+            transcript_process_generation=7,
         )
         self.assertEqual(turn.stop_reason, 'end_turn')
         with self.assertRaises(CanonicalTurnError) as raised:
