@@ -37,6 +37,59 @@ jobs:
           fi
           touch /opt/frontend/.env
 
+      - name: Resolve pull_request validation range
+        id: pull-request-range
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" || "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "pull_request validation range unavailable: base=$BASE_SHA head=$HEAD_SHA" >&2
+            exit 1
+          fi
+          git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null || {
+            echo "pull_request validation base is not a commit: $BASE_SHA" >&2
+            exit 1
+          }
+          git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null || {
+            echo "pull_request validation head is not a commit: $HEAD_SHA" >&2
+            exit 1
+          }
+          {
+            echo "base_sha=$BASE_SHA"
+            echo "head_sha=$HEAD_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve workflow_dispatch validation range
+        id: workflow-dispatch-range
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$HEAD_SHA" || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "workflow_dispatch validation range unavailable: head=$HEAD_SHA" >&2
+            exit 1
+          fi
+          git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null || {
+            echo "workflow_dispatch validation head is not a commit: $HEAD_SHA" >&2
+            exit 1
+          }
+          BASE_SHA="$(git rev-parse --verify "$HEAD_SHA^")" || {
+            echo "workflow_dispatch validation base unavailable: head=$HEAD_SHA has no parent" >&2
+            exit 1
+          }
+          git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null || {
+            echo "workflow_dispatch validation base is not a commit: $BASE_SHA" >&2
+            exit 1
+          }
+          {
+            echo "base_sha=$BASE_SHA"
+            echo "head_sha=$HEAD_SHA"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run M3-04A handler and HTTP parity tests
         run: |
           python -m unittest             tests.test_m3_04a_memory_search             tests.test_product_handlers             -v
@@ -53,24 +106,56 @@ jobs:
           from wake.cc_tools import WAKE_TO_CC_MCP
 
           assert manifest.get_capability("memory.search")["provider_bindings"] == {
-              "claude_code": "mcp__home__search_memories"
+              "claude_code": "mcp__capability__memory_search",
+              "internal_mcp": "mcp__internal__search_memories",
+              "home_mcp": "mcp__home__search_memories",
           }
           assert manifest.get_capability("memory.search")["loading_policy"] == "always_load"
           assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
           assert physical_surface_fingerprint() == (
-              "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
+              "0309ce7e2df0e8274cbf1a8dbfd671a1ad3f111f3b4def7933e2a77750b30687"
           )
           print("memory provider/loading/Wake/fingerprint PASS")
           PY
 
       - name: Check diff whitespace and forbidden files
+        env:
+          BASE_SHA: ${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
         run: |
-          git diff --check
-          test -z "$(git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD | grep -E '^(mcp-http-server.js|internal-mcp-server.js|tools/memory_tool.py|tools/memory_library.py|tools/ombre_adapter.py|tools/capability_manifest.py|tools/cc_capability_adapter.py|tools/execution_fence.py|cc_resident.py|chat/|wake/|static/|deploy/|systemd/|scripts/)' || true)"
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "validation diff range outputs are empty" >&2
+            exit 1
+          fi
+          changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          forbidden_files="$(printf '%s\n' "$changed_files" | grep -E '^(mcp-http-server.js|internal-mcp-server.js|tools/memory_tool.py|tools/memory_library.py|tools/ombre_adapter.py|tools/capability_manifest.py|tools/cc_capability_adapter.py|tools/execution_fence.py|cc_resident.py|chat/|wake/|static/|deploy/|systemd/|scripts/)' || true)"
+          test -z "$forbidden_files"
 
-      - name: Verify exact M3-04A changed-file fence
+      - name: Verify scoped M3-04A changed-file fence
+        env:
+          BASE_SHA: ${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
         run: |
-          actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD | sort)"
-          expected="$(printf '%s\n'             '.github/workflows/m3-04a-memory-search-validation.yml'             'app.py'             'tests/test_m3_04a_memory_search.py'             'tools/product_handlers.py' | sort)"
-          test "$actual" = "$expected"
-          printf '%s\n' "$actual"
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "validation diff range outputs are empty" >&2
+            exit 1
+          fi
+          changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          m3_scope_pattern="^(\.github/workflows/m3-04a-memory-search-validation\.yml|app\.py|tests/test_m3_04a_memory_search\.py|tools/product_handlers\.py)$"
+          m3_related_pattern="^(\.github/workflows/m3-04a-memory-search-validation\.yml|app\.py|tests/test_m3_04a_memory_search\.py|tests/test_product_handlers\.py|tools/product_handlers\.py)$"
+          m3_scope_files="$(printf '%s\n' "$changed_files" | grep -E "$m3_scope_pattern" || true)"
+          m3_related_files="$(printf '%s\n' "$changed_files" | grep -E "$m3_related_pattern" || true)"
+          if [[ -z "$m3_scope_files" ]]; then
+            echo "M3-04A scoped changed-file fence: no owned file changed" >&2
+            exit 1
+          fi
+          undeclared_m3_files="$(printf '%s\n' "$m3_related_files" | grep -Ev "$m3_scope_pattern" || true)"
+          if [[ -n "$undeclared_m3_files" ]]; then
+            echo "M3-04A scoped changed-file fence: undeclared related file(s):" >&2
+            printf '%s\n' "$undeclared_m3_files" >&2
+            exit 1
+          fi
+          printf '%s\n' "$m3_scope_files"
