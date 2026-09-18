@@ -13,6 +13,10 @@ on:
       - "tests/test_cc_capability_adapter.py"
       - ".github/workflows/m2-02b-surface-generation-validation.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
