@@ -132,6 +132,72 @@ def _read_closed_range(path: str, start_offset: int, end_offset: int) -> list[di
         raise CanonicalTurnError('transcript read failed', error_code='transcript_read_error') from exc
 
 
+def _validate_terminal_receipt(
+    receipt: Any,
+    *,
+    expected_session_id: str,
+    expected_generation: int | None,
+) -> bool:
+    if receipt is None:
+        return False
+    try:
+        from cc_resident import ProviderTerminalReceipt
+    except Exception as exc:
+        raise CanonicalTurnError(
+            'provider terminal receipt type is unavailable',
+            error_code='provider_terminal_receipt_invalid',
+        ) from exc
+    if not isinstance(receipt, ProviderTerminalReceipt):
+        raise CanonicalTurnError(
+            'provider terminal receipt type is invalid',
+            error_code='provider_terminal_receipt_invalid',
+        )
+    if receipt.terminal_kind != 'provider_result':
+        raise CanonicalTurnError(
+            'provider terminal receipt kind is invalid',
+            error_code='provider_terminal_receipt_invalid',
+        )
+    if receipt.source != 'resident_live_stdout':
+        raise CanonicalTurnError(
+            'provider terminal receipt source is invalid',
+            error_code='provider_terminal_receipt_invalid',
+        )
+    if not str(receipt.turn_identity or '').strip():
+        raise CanonicalTurnError(
+            'provider terminal receipt identity is missing',
+            error_code='provider_terminal_receipt_invalid',
+        )
+    if expected_generation is None:
+        raise CanonicalTurnError(
+            'provider terminal receipt generation is unavailable',
+            error_code='provider_terminal_receipt_generation_mismatch',
+        )
+    try:
+        receipt_generation = int(receipt.resident_generation)
+        current_generation = int(expected_generation)
+    except (TypeError, ValueError) as exc:
+        raise CanonicalTurnError(
+            'provider terminal receipt generation is invalid',
+            error_code='provider_terminal_receipt_generation_mismatch',
+        ) from exc
+    if receipt_generation != current_generation:
+        raise CanonicalTurnError(
+            'provider terminal receipt generation mismatch',
+            error_code='provider_terminal_receipt_generation_mismatch',
+        )
+    if str(receipt.claude_session_id or '').strip() != expected_session_id:
+        raise CanonicalTurnError(
+            'provider terminal receipt session mismatch',
+            error_code='provider_terminal_receipt_session_mismatch',
+        )
+    if bool(receipt.result_is_error):
+        raise CanonicalTurnError(
+            'provider terminal receipt represents an error',
+            error_code='provider_result_error',
+        )
+    return True
+
+
 def _normalize_projection_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -214,6 +280,7 @@ def build_canonical_turn(
     context_id: int | None = None,
     context_epoch: int | None = None,
     resident_generation: int | None = None,
+    terminal_receipt: Any = None,
 ) -> CanonicalTurn:
     """Build one final projection from a closed provider transcript range."""
     rows = _read_closed_range(transcript_path, start_offset, end_offset)
@@ -233,6 +300,11 @@ def build_canonical_turn(
     terminal_result = False
     terminal_assistant = False
     terminal_assistant_reason = ''
+    receipt_terminal = _validate_terminal_receipt(
+        terminal_receipt,
+        expected_session_id=expected_sid,
+        expected_generation=resident_generation,
+    )
 
     for row in rows:
         row_sid = str(row.get('sessionId') or '').strip()
@@ -248,6 +320,20 @@ def build_canonical_turn(
                     'provider result is not successful',
                     error_code='provider_result_error',
                 )
+            if receipt_terminal:
+                row_stop_reason = str(row.get('stop_reason') or '')
+                receipt_stop_reason = str(
+                    terminal_receipt.result_stop_reason or ''
+                )
+                if (
+                    row_stop_reason
+                    and receipt_stop_reason
+                    and row_stop_reason != receipt_stop_reason
+                ):
+                    raise CanonicalTurnError(
+                        'provider terminal receipt conflicts with transcript result',
+                        error_code='provider_terminal_receipt_conflict',
+                    )
             terminal_result = True
             if row.get('stop_reason'):
                 terminal_assistant_reason = str(row.get('stop_reason') or '')
@@ -320,12 +406,17 @@ def build_canonical_turn(
                 tool_calls[idx]['result'] = _tool_result_text(block.get('content'))
                 tool_calls[idx]['success'] = not bool(block.get('is_error'))
 
-    if not terminal_result:
+    if not terminal_result and not receipt_terminal:
         raise CanonicalTurnError('provider result is not final', error_code='provider_result_missing')
     if not terminal_assistant:
         raise CanonicalTurnError(
             'terminal assistant projection is missing',
             error_code='canonical_assistant_missing',
+        )
+    if terminal_assistant_reason != 'end_turn':
+        raise CanonicalTurnError(
+            'terminal assistant stop_reason is not end_turn',
+            error_code='canonical_stop_reason_invalid',
         )
     for call in tool_calls:
         if not call.get('id'):
