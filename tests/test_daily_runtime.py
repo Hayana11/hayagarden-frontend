@@ -3333,7 +3333,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(plan.manifest['transcript_mapping_status'], 'BLOCKED')
         self.assertIsNotNone(plan.manifest['transcript_mapping_error_code'])
         self.assertEqual(int(plan.manifest['transcript_mapping_event_count']), 0)
-        self.assertNotIn('cursor_cas_success', plan.manifest)
+        self.assertIsNone(plan.manifest.get('cursor_cas_success'))
         self.assertTrue(plan.lease_released)
         self.assertFalse(dc.is_resident_turn_active(
             plan.context_id, plan.resident_generation, db_path=self.db, now=_FIXED_NOW,
@@ -3728,7 +3728,12 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                         dr,
                         'complete_daily_turn',
                         side_effect=RuntimeError('commit failed'),
-                    ):
+                    ), \
+                     mock.patch.object(
+                         dr,
+                         'finalize_transcript_mapping_after_success',
+                         side_effect=_mark_transcript_mapped,
+                     ):
                         with self.assertRaises(RuntimeError):
                             dr.handle_provider_success(
                                 failed_plan,
@@ -3808,11 +3813,17 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                      dr,
                      'finalize_transcript_mapping_after_success',
                      side_effect=_mark_transcript_mapped,
-                 ):
+                 ), \
+                 mock.patch.object(
+                     dr,
+                     '_rollback_failed_terminalization',
+                     return_value={},
+                 ) as rollback:
                 with self.assertRaises(dr.CursorCASConflictAfterPersist):
                     dr.handle_provider_success(
                         plan, assistant_message_id=101, raw_text='回复',
                     )
+            rollback.assert_called_once_with(plan, assistant_message_id=101)
             self.assertFalse(store.consume_feedback.called)
         finally:
             os.unlink(db)
