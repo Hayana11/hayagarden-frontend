@@ -3464,11 +3464,6 @@ def prepare_daily_turn(
     if not dc.enabled():
         raise DailyRuntimeError('DAILY_SOFT_WINDOW_ENABLED=0', error_code='daily_disabled')
 
-    # A process may die after mapping/registry commit A and before terminal
-    # promotion/cursor commit B. Resolve that durable receipt before claiming
-    # another Daily turn; Python exception cleanup cannot cover a crash.
-    dc.recover_pending_terminalizations(db_path=db_path)
-
     feedback_snapshot = (
         _feedback_snapshot
         if _feedback_snapshot is not None
@@ -3505,6 +3500,12 @@ def prepare_daily_turn(
                 prior = dc.get_latest_active_context(chat_id, db_path=db_path)
                 if prior and str(prior.get('local_day') or '') != origin_day:
                     raise DeferredError('provider request in flight; rollover deferred')
+
+        # A process may die after mapping/registry commit A and before terminal
+        # promotion/cursor commit B. Recovery itself re-checks each receipt's
+        # context/generation lease while holding the write lock, so a live
+        # terminalization is skipped rather than mistaken for crash residue.
+        dc.recover_pending_terminalizations(db_path=db_path)
 
         if manual_mode:
             if cw.has_active_switch_intent(chat_id, db_path=db_path):

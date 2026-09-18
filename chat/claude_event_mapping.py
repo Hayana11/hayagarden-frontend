@@ -884,6 +884,7 @@ def _commit_mapping_work(
         mapped: list[str] = []
         inserted: list[str] = []
         confirmed_existing: list[str] = []
+        inserted_rows: list[dict[str, Any]] = []
         inserted_set: set[str] = set()
         final_offset = int(registry['scan_offset'])
         last_mapped_asst: Optional[int] = (
@@ -926,6 +927,15 @@ def _commit_mapping_work(
                     if uid not in inserted_set:
                         inserted_set.add(uid)
                         inserted.append(uid)
+                        inserted_rows.append({
+                            key: row.get(key)
+                            for key in (
+                                'event_uuid', 'message_id', 'role',
+                                'claude_session_id', 'context_id',
+                                'context_epoch', 'resident_generation',
+                                'jsonl_byte_offset',
+                            )
+                        })
                 else:
                     confirmed_existing.append(uid)
                 if str(row['role']) == ROLE_ASSISTANT:
@@ -968,6 +978,7 @@ def _commit_mapping_work(
                 inserted_event_uuids=inserted,
                 confirmed_existing_event_uuids=confirmed_existing,
                 mapped_event_uuids=mapped,
+                inserted_event_rows=inserted_rows,
             )
         conn.commit()
         final_reg = get_context_claude_session(
