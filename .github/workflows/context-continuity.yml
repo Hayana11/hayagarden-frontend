@@ -146,8 +146,71 @@ jobs:
           for name in ("memories.db", "commands.db"):
               sqlite3.connect(f"/opt/frontend/{name}").close()
           PY
-      - name: Check patch whitespace
-        run: git diff --check "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+      - name: Check patch whitespace (pull_request)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" || "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "pull_request diff range unavailable: base=$BASE_SHA head=$HEAD_SHA" >&2
+            exit 1
+          fi
+          git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null || {
+            echo "pull_request diff base is not a commit: $BASE_SHA" >&2
+            exit 1
+          }
+          git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null || {
+            echo "pull_request diff head is not a commit: $HEAD_SHA" >&2
+            exit 1
+          }
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Check patch whitespace (push)
+        if: github.event_name == 'push'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" || "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "push diff range unavailable: before=$BASE_SHA head=$HEAD_SHA" >&2
+            exit 1
+          fi
+          git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null || {
+            echo "push diff base is not a commit: $BASE_SHA" >&2
+            exit 1
+          }
+          git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null || {
+            echo "push diff head is not a commit: $HEAD_SHA" >&2
+            exit 1
+          }
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Check patch whitespace (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$HEAD_SHA" || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "workflow_dispatch diff range unavailable: head=$HEAD_SHA" >&2
+            exit 1
+          fi
+          git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null || {
+            echo "workflow_dispatch diff head is not a commit: $HEAD_SHA" >&2
+            exit 1
+          }
+          BASE_SHA="$(git rev-parse --verify "$HEAD_SHA^")" || {
+            echo "workflow_dispatch diff base unavailable: head=$HEAD_SHA has no parent" >&2
+            exit 1
+          }
+          git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null || {
+            echo "workflow_dispatch diff base is not a commit: $BASE_SHA" >&2
+            exit 1
+          }
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
       - name: Compile context paths
         run: python -m py_compile app.py gateway.py cc_resident.py chat/system_builder.py chat/context_continuity.py chat/context_budget.py chat/context_lean.py chat/context_lean_state.py continuity/contracts.py continuity/coverage.py continuity/sources.py continuity/sealing.py continuity/store.py continuity/materialization.py continuity/chunk_generation.py continuity/context_plan.py scripts/replay_continuity_sources.py scripts/generate_continuity_chunk_shadow.py chat/clean_window_shadow.py chat/day_handoff.py chat/daily_context.py chat/context_window.py chat/daily_history.py chat/daily_runtime.py chat/cc_vision_bridge.py chat/history_assembly.py chat/history_boundary.py chat/history_legacy.py chat/rolling_summary_store.py tools/rolling_summary.py scripts/measure_production_context.py scripts/generate_day_handoff.py scripts/daily_candidate_shadow_chat.py context_usage_routes.py context_usage_store.py daily_context_routes.py daily_context_bff.py context_window_routes.py context_window_bff.py tools/context_usage_collector.py tools/cc_usage_observability.py tools/cc_jsonl_usage.py tools/cc_tool_surface.py tools/capability_manifest.py tools/lease_signer.py tools/cc_capability_adapter.py tools/execution_fence.py scripts/report_cc_usage.py scripts/replay_cc_jsonl_usage.py wake/usage.py wake/concern_resolution.py
       - name: Compile FILE+CHOICES contract
