@@ -429,6 +429,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
             json.dumps({
                 "type": "result",
                 "is_error": False,
+                "stop_reason": "end_turn",
                 "result": terminal_text,
             }),
         ]
