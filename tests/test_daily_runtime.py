@@ -31,6 +31,7 @@ from chat import daily_context as dc
 from chat import daily_history as dh
 from chat import daily_runtime as dr
 from chat.daily_context import ConflictError, DeferredError
+from chat.canonical_turn import CanonicalTurn, projection_hash
 from chat.session_registry import (
     SCAN_STATUS_BLOCKED,
     SCAN_STATUS_READY,
@@ -114,6 +115,97 @@ def _prepare_turn(db, uid, *, now=None, wall_now=None, **kwargs):
             static_system=kwargs.pop('static_system', 'S'),
             **kwargs,
         )
+
+
+def _test_canonical_turn(content: str = '成功回复', *, tool_calls=()) -> CanonicalTurn:
+    """Small deterministic canonical prerequisite for non-parser unit tests."""
+    calls = tuple(dict(call) for call in tool_calls)
+    segments = [
+        {'type': 'tool', 'tool_index': index}
+        for index, _call in enumerate(calls)
+    ]
+    segments.append({'type': 'text', 'text': content})
+    display_segments = json.dumps(segments, ensure_ascii=False, separators=(',', ':'))
+    return CanonicalTurn(
+        content=content,
+        thinking='',
+        display_segments=display_segments,
+        tool_calls=calls,
+        choices=(),
+        provider_rounds=(
+            {
+                'index': 1,
+                'event_uuid': 'test-canonical-assistant',
+                'text_block_count': 1,
+                'tool_use_count': len(calls),
+                'stop_reason': 'end_turn',
+            },
+        ),
+        stop_reason='end_turn',
+        terminal_state='confirmed',
+        transcript_identity={
+            'path': '/tmp/test-canonical.jsonl',
+            'start_offset': 0,
+            'end_offset': 1,
+            'session_id': 'test-canonical-session',
+            'mapping_status': 'MAPPED',
+            'message_id': None,
+            'context_id': None,
+            'context_epoch': None,
+            'resident_generation': None,
+        },
+        projection_hash=projection_hash(content, display_segments),
+    )
+
+
+def _attach_successful_canonical(plan, *, content: str = '成功回复', tool_calls=()):
+    canonical = _test_canonical_turn(content, tool_calls=tool_calls)
+    plan._canonical_turn = canonical
+    plan.manifest.update({
+        'transcript_mapping_status': 'MAPPED',
+        'transcript_mapping_error_code': None,
+        'transcript_mapping_event_count': 1,
+    })
+    return canonical
+
+
+def _mark_transcript_mapped(plan, **_kwargs):
+    plan.manifest.update({
+        'transcript_mapping_status': 'MAPPED',
+        'transcript_mapping_error_code': None,
+        'transcript_mapping_event_count': 1,
+    })
+    return dict(plan.manifest)
+
+
+def _persist_canonical_for_plan(plan):
+    canonical = dr.build_canonical_turn_for_plan(plan)
+    aid = dr.persist_daily_assistant_for_plan(
+        plan,
+        content=canonical.content,
+        thinking=canonical.thinking,
+        tool_calls=json.dumps(list(canonical.tool_calls), ensure_ascii=False)
+        if canonical.tool_calls else '',
+        choices=json.dumps(list(canonical.choices), ensure_ascii=False)
+        if canonical.choices else '',
+        display_segments=canonical.display_segments,
+    )
+    return canonical, aid
+
+
+def _gateway_canonical_builder(*, content: str = 'daily reply', tool_calls=()):
+    canonical = _test_canonical_turn(content, tool_calls=tool_calls)
+
+    def _build(plan, **_kwargs):
+        plan._canonical_turn = canonical
+        plan.manifest.update({
+            'transcript_mapping_status': 'MAPPED',
+            'transcript_mapping_error_code': None,
+            'transcript_mapping_event_count': 1,
+        })
+        return canonical
+
+    return _build
 
 
 class _FakeResident:
@@ -392,10 +484,16 @@ class DailyRuntimeTurnTests(unittest.TestCase):
                 self.assertIs(plan, original_plan)
                 self.assertEqual(id(plan), original_id)
                 self.assertGreater(int(plan.resident_generation), old_gen)
+                _attach_successful_canonical(plan, content='daily reply')
                 aid = dr.persist_daily_assistant_for_plan(plan, content='daily reply')
-                out = dr.handle_provider_success(
-                    plan, assistant_message_id=aid, raw_text='daily reply',
-                )
+                with mock.patch.object(
+                    dr,
+                    'finalize_transcript_mapping_after_success',
+                    side_effect=_mark_transcript_mapped,
+                ):
+                    out = dr.handle_provider_success(
+                        plan, assistant_message_id=aid, raw_text='daily reply',
+                    )
             self.assertTrue(any(e[0] == 'done' for e in events))
             self.assertEqual(len(resident.sent), 1)
             self.assertNotIn('新增正式对话', resident.sent[0])
@@ -1551,6 +1649,11 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                 'persona': 'P', 'full_system': 'STATIC',
             }),
             mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
+            mock.patch.object(
+                dr,
+                'build_canonical_turn_for_plan',
+                side_effect=_gateway_canonical_builder(),
+            ),
             mock.patch.object(gateway, '_write_session_memo', memo_mock),
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
@@ -1834,6 +1937,16 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
                 'persona': 'P', 'full_system': 'STATIC',
             }),
             mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
+            mock.patch.object(
+                dr,
+                'build_canonical_turn_for_plan',
+                side_effect=_gateway_canonical_builder(),
+            ),
+            mock.patch.object(
+                dr,
+                'finalize_transcript_mapping_after_success',
+                side_effect=_mark_transcript_mapped,
+            ),
             mock.patch.object(gateway, '_write_session_memo', memo_mock),
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
@@ -2053,6 +2166,22 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
                 mock.patch.object(
                     dr,
+                    'build_canonical_turn_for_plan',
+                    side_effect=_gateway_canonical_builder(
+                        content='工具读取完成',
+                        tool_calls=(
+                            {
+                                'id': 't-visible-1',
+                                'name': 'mcp__home__get_todos',
+                                'args': {},
+                                'result': '{"ok":true}',
+                                'success': True,
+                            },
+                        ),
+                    ),
+                ),
+                mock.patch.object(
+                    dr,
                     'stream_daily_resident_turn',
                     side_effect=_fake_stream,
                 ),
@@ -2135,6 +2264,11 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                     'persona': 'P', 'full_system': 'STATIC',
                 }),
                 mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
+                mock.patch.object(
+                    dr,
+                    'build_canonical_turn_for_plan',
+                    side_effect=_gateway_canonical_builder(),
+                ),
                 mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=_fake_stream),
                 mock.patch.object(dr, 'persist_daily_assistant_for_plan', return_value=999),
                 mock.patch.object(dr, 'handle_provider_success', side_effect=cas_exc),
@@ -2224,6 +2358,11 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
                     'persona': 'P', 'full_system': 'STATIC',
                 }),
                 mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
+                mock.patch.object(
+                    dr,
+                    'build_canonical_turn_for_plan',
+                    side_effect=_gateway_canonical_builder(),
+                ),
                 mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=_fake_stream),
                 mock.patch.object(dr, 'persist_daily_assistant_for_plan', return_value=999),
                 mock.patch.object(dr, 'handle_provider_success', side_effect=cas_exc),
@@ -2320,6 +2459,17 @@ def _jsonl_line(
     return json.dumps(obj, ensure_ascii=False)
 
 
+def _jsonl_result_line(uuid: str, *, session: str, stop_reason: str = 'end_turn') -> str:
+    return json.dumps({
+        'type': 'result',
+        'uuid': uuid,
+        'cwd': '/tmp/synth',
+        'sessionId': session,
+        'is_error': False,
+        'stop_reason': stop_reason,
+    }, ensure_ascii=False)
+
+
 def _append_jsonl(path: Path, lines: list[str]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = ''.join(
@@ -2370,6 +2520,7 @@ class _TranscriptHotResident(_FakeResident):
                 'a-hot-1', 'assistant', session=self.session_id, parent='u-hot-1',
                 content=[{'type': 'text', 'text': 'hot-asst'}],
             ),
+            _jsonl_result_line('r-hot-1', session=self.session_id),
         ])
         yield ('text', 'hot reply')
         yield ('done', ('hot reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
@@ -2399,6 +2550,7 @@ class _TranscriptColdResident(_FakeResident):
                 'a-cold-1', 'assistant', session=self.session_id, parent='u-cold-1',
                 content=[{'type': 'text', 'text': 'cold-asst'}],
             ),
+            _jsonl_result_line('r-cold-1', session=self.session_id),
         ])
         yield ('done', ('cold reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
 
@@ -2445,12 +2597,13 @@ class _RegisteredRespawnResident(_FakeResident):
                 'a-rs-1', 'assistant', session=self.session_id, parent='u-rs-1',
                 content=[{'type': 'text', 'text': 'rs-asst'}],
             ),
+            _jsonl_result_line('r-rs-1', session=self.session_id),
         ])
         yield ('done', ('after-respawn', '', {'input_tokens': 1, 'output_tokens': 2}, {}))
 
 
 class _MappingBlockedResident(_TranscriptColdResident):
-    """Writes JSONL with no candidate_user → Mapping BLOCKED after chat success."""
+    """Writes a terminal turn without a user event → mapping must fail closed."""
 
     def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
@@ -2462,6 +2615,7 @@ class _MappingBlockedResident(_TranscriptColdResident):
                 'a-only-1', 'assistant', session=self.session_id, parent=None,
                 content=[{'type': 'text', 'text': 'orphan'}],
             ),
+            _jsonl_result_line('r-only-1', session=self.session_id),
         ])
         yield ('done', ('blocked-map reply', '', {'input_tokens': 1, 'output_tokens': 1}, {}))
 
@@ -2548,9 +2702,9 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(plan.transcript_claude_session_id, _MAP_SESSION_HOT)
         self.assertIsNone(plan.transcript_observation_error_code)
 
-        aid = dr.persist_daily_assistant_for_plan(plan, content='hot reply')
+        canonical, aid = _persist_canonical_for_plan(plan)
         out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='hot reply',
+            plan, assistant_message_id=aid, raw_text=canonical.content,
             usage={'input_tokens': 3, 'output_tokens': 5},
         )
         self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
@@ -2599,9 +2753,9 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertGreater(int(plan.transcript_end_offset or 0), 0)
         self.assertIsNone(plan.transcript_observation_error_code)
 
-        aid = dr.persist_daily_assistant_for_plan(plan, content='cold reply')
+        canonical, aid = _persist_canonical_for_plan(plan)
         out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='cold reply',
+            plan, assistant_message_id=aid, raw_text=canonical.content,
         )
         self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
         reg = get_context_claude_session(
@@ -2668,9 +2822,9 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(old_reg['claude_session_id'], _MAP_SESSION_HOT)
 
         # Gateway contract: persist + Mapping on the same caller-held plan object.
-        aid = dr.persist_daily_assistant_for_plan(plan, content='after-respawn')
+        canonical, aid = _persist_canonical_for_plan(plan)
         out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='after-respawn',
+            plan, assistant_message_id=aid, raw_text=canonical.content,
         )
         self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
         self.assertTrue(plan.lease_released)
@@ -2727,8 +2881,8 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             db_path=self.db, now=_FIXED_NOW,
         ))
 
-    def test_mapping_blocked_does_not_fail_chat(self):
-        """4) Mapping BLOCKED after persist+cursor; chat still succeeds."""
+    def test_mapping_blocked_rejects_successful_terminalization(self):
+        """4) A canonical turn with blocked mapping cannot become successful."""
         jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
         uid = _insert(self.db, 'hayana', 'block-map', '2026-07-27 10:00:00')
         resident = _MappingBlockedResident(
@@ -2739,17 +2893,18 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             plan, resident=resident, env={}, static_system='STATIC',
         ))
         self.assertIsNone(plan.transcript_observation_error_code)
-        aid = dr.persist_daily_assistant_for_plan(plan, content='blocked-map reply')
+        canonical, aid = _persist_canonical_for_plan(plan)
         with mock.patch.object(dr, 'note_same_context_last_good') as note_last_good:
-            out = dr.handle_provider_success(
-                plan, assistant_message_id=aid, raw_text='blocked-map reply',
-            )
+            with self.assertRaises(dr.DailyRuntimeError) as ctx:
+                dr.handle_provider_success(
+                    plan, assistant_message_id=aid, raw_text=canonical.content,
+                )
         note_last_good.assert_not_called()
-        self.assertEqual(out['transcript_mapping_status'], 'BLOCKED')
-        self.assertIsNotNone(out['transcript_mapping_error_code'])
-        self.assertEqual(int(out['transcript_mapping_event_count']), 0)
-        self.assertTrue(out.get('cursor_cas_success'))
-        self.assertEqual(out.get('assistant_message_id'), aid)
+        self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
+        self.assertEqual(plan.manifest['transcript_mapping_status'], 'BLOCKED')
+        self.assertIsNotNone(plan.manifest['transcript_mapping_error_code'])
+        self.assertEqual(int(plan.manifest['transcript_mapping_event_count']), 0)
+        self.assertIsNone(plan.manifest.get('cursor_cas_success'))
         self.assertTrue(plan.lease_released)
         self.assertFalse(dc.is_resident_turn_active(
             plan.context_id, plan.resident_generation, db_path=self.db, now=_FIXED_NOW,
@@ -2764,7 +2919,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         ).fetchone()[0]
         conn.close()
         self.assertEqual(int(asst[0]), aid)
-        self.assertEqual(asst[1], 'blocked-map reply')
+        self.assertEqual(asst[1], 'orphan')
         self.assertEqual(int(map_count), 0)
 
         reg = get_context_claude_session(
@@ -2918,6 +3073,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
         )
         with mock.patch.dict(sys.modules, {'command_store': fake_store}):
             plan = _prepare_turn(db, uid, static_system='STATIC')
+        _attach_successful_canonical(plan)
         return plan, fake_store
 
     def test_peek_only_and_daily_injection_for_hot_cold_respawn(self):
@@ -3001,6 +3157,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                     wall_now=_FIXED_NOW,
                     static_system='STATIC',
                 )
+            _attach_successful_canonical(plan)
             frozen_ids = plan.feedback_ids
             self.assertEqual(fake_store.peek_feedback.call_count, 1)
 
@@ -3059,7 +3216,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                 fake_store.peek_feedback.assert_called_once_with()
 
                 with mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
-                     mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                     mock.patch.object(
+                         dr,
+                         'finalize_transcript_mapping_after_success',
+                         side_effect=_mark_transcript_mapped,
+                     ):
                     out = dr.handle_provider_success(
                         plan, assistant_message_id=191, raw_text='成功回复',
                     )
@@ -3086,6 +3247,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                         wall_now=_FIXED_NOW,
                         static_system='STATIC',
                     )
+                _attach_successful_canonical(failed_plan)
                 with mock.patch.dict(sys.modules, {'command_store': failing_store}), \
                      mock.patch.object(
                          dr.dh,
@@ -3125,6 +3287,10 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                         dr,
                         'complete_daily_turn',
                         side_effect=RuntimeError('commit failed'),
+                    ), mock.patch.object(
+                        dr,
+                        'finalize_transcript_mapping_after_success',
+                        side_effect=_mark_transcript_mapped,
                     ):
                         with self.assertRaises(RuntimeError):
                             dr.handle_provider_success(
@@ -3147,7 +3313,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             )
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', return_value={}) as complete, \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ):
                 out = dr.handle_provider_success(
                     plan, assistant_message_id=99, raw_text='成功回复',
                 )
@@ -3167,7 +3337,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             )
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ):
                 dr.handle_provider_success(
                     plan, assistant_message_id=100, raw_text='成功回复',
                 )
@@ -3193,7 +3367,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             )
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', side_effect=exc), \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ):
                 with self.assertRaises(dr.CursorCASConflictAfterPersist):
                     dr.handle_provider_success(
                         plan, assistant_message_id=101, raw_text='回复',
@@ -3237,7 +3415,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             store.consume_feedback.side_effect = RuntimeError('bookkeeping failed')
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ):
                 out = dr.handle_provider_success(
                     plan, assistant_message_id=102, raw_text='成功回复',
                 )

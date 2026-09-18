@@ -8,10 +8,23 @@ export type LiveSegment =
 
 export type LiveEvent = 'connecting' | 'thinking' | 'text' | 'tool';
 
+export interface CanonicalLiveProjection {
+  content: string;
+  thinking?: string;
+  display_segments: Array<{
+    type: 'thinking' | 'text' | 'tool';
+    text?: string;
+    tool_index?: number;
+  }>;
+  tool_calls?: ChatToolCall[];
+  canonical_sha256: string;
+}
+
 export interface LiveState {
   segments: LiveSegment[];
   nextSegmentId: number;
   lastEvent: LiveEvent;
+  canonicalSha256?: string;
 }
 
 export function createLiveState(): LiveState {
@@ -79,4 +92,49 @@ export function applyToolResult(state: LiveState, idx: number, result: ChatToolC
     tool: normalizeToolCall({ ...existing.tool, ...result, running: false }),
   };
   return { ...state, segments, lastEvent: 'tool' };
+}
+
+/** Replace the live preview with the single transcript-backed terminal projection. */
+export function replaceWithCanonicalProjection(
+  state: LiveState,
+  projection: CanonicalLiveProjection,
+): LiveState {
+  const toolCalls = projection.tool_calls || [];
+  const segments: LiveSegment[] = [];
+  let nextSegmentId = 0;
+  let lastEvent: LiveEvent = 'connecting';
+  for (const item of projection.display_segments || []) {
+    if (item.type === 'thinking' || item.type === 'text') {
+      const text = typeof item.text === 'string' ? item.text : '';
+      if (!text) continue;
+      segments.push({ id: nextSegmentId, type: item.type, text });
+      nextSegmentId += 1;
+      lastEvent = item.type;
+      continue;
+    }
+    const idx = Number(item.tool_index);
+    if (!Number.isInteger(idx) || idx < 0) continue;
+    const fallback = state.segments.find(
+      (segment): segment is Extract<LiveSegment, { type: 'tool' }> => (
+        segment.type === 'tool' && segment.idx === idx
+      ),
+    );
+    const tool = toolCalls[idx] || fallback?.tool;
+    if (!tool) continue;
+    segments.push({
+      id: nextSegmentId,
+      type: 'tool',
+      idx,
+      tool: normalizeToolCall({ ...tool, running: false }),
+    });
+    nextSegmentId += 1;
+    lastEvent = 'tool';
+  }
+  return {
+    ...state,
+    segments,
+    nextSegmentId,
+    lastEvent,
+    canonicalSha256: projection.canonical_sha256,
+  };
 }

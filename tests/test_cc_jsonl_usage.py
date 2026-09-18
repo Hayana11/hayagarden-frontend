@@ -410,6 +410,92 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(usage["cache_creation_5m"], 0)
         self.assertNotIn("finality_state", usage["jsonl_usage"])
 
+    def test_resident_done_text_prefers_terminal_assistant_content(self):
+        terminal_text = "完整的 terminal 正文"
+        lines = [
+            json.dumps({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "短前缀"},
+                },
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": terminal_text}],
+                },
+            }),
+            json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": terminal_text,
+            }),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                return_value=replay.replay_jsonl_lines([]),
+            ),
+        ):
+            events = list(resident.send_turn("hello"))
+
+        self.assertEqual(
+            [payload for event, payload in events if event == "text"],
+            ["短前缀"],
+        )
+        done = [payload for event, payload in events if event == "done"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0][0], terminal_text)
+
+    def test_resident_done_text_does_not_duplicate_matching_terminal_content(self):
+        text = "stream 与 terminal 相同"
+        lines = [
+            json.dumps({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": text},
+                },
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": text}],
+                },
+            }),
+            json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": text,
+            }),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                return_value=replay.replay_jsonl_lines([]),
+            ),
+        ):
+            events = list(resident.send_turn("hello"))
+
+        self.assertEqual(
+            [payload for event, payload in events if event == "text"],
+            [text],
+        )
+        done = [payload for event, payload in events if event == "done"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0][0], text)
+
 
     def test_resident_captures_session_id_from_camelcase_jsonl_events(self):
         session = "65305691-efff-4fd6-9df5-2fc4ea4aa43f"

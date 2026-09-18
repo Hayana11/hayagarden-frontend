@@ -1465,6 +1465,10 @@ class ResidentSession:
         watchdog.start()
 
         think_acc, text_acc = [], []
+        # Claude's terminal assistant rows can contain the complete text even
+        # when one or more stream deltas were lost. Keep this separate from
+        # the live accumulator; Daily canonicalization still reads transcript.
+        provider_text_acc = []
         rounds = []
         current_round = None
         is_err = None
@@ -1699,7 +1703,11 @@ class ResidentSession:
                                 provider_request_id=_diagnostic_request_id(d),
                             )
                         for b in (msg.get('content') or []):
-                            if isinstance(b, dict) and b.get('type') == 'tool_use':
+                            if isinstance(b, dict) and b.get('type') == 'text':
+                                block_text = str(b.get('text') or '')
+                                if block_text:
+                                    provider_text_acc.append(block_text)
+                            elif isinstance(b, dict) and b.get('type') == 'tool_use':
                                 # Tool use is not a provider-request boundary.
                                 # Keep this round open: Claude may emit the final
                                 # message_delta usage for the same request after
@@ -1916,7 +1924,9 @@ class ResidentSession:
         usage['resident_turn_count'] = self._resident_turn_count
         usage['max_round_context'] = self._max_round_context
         # claims 只经 done 内部回传，不得写入公开 cache_info
-        yield ('done', (''.join(text_acc).strip(), ''.join(think_acc), usage, one_shot_claims))
+        provider_text = ''.join(provider_text_acc).strip()
+        final_text = provider_text or ''.join(text_acc).strip()
+        yield ('done', (final_text, ''.join(think_acc), usage, one_shot_claims))
 
     def is_cold(self):
         return self._cold

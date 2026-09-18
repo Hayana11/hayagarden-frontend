@@ -4252,10 +4252,11 @@ def finalize_transcript_mapping_after_success(
     *,
     assistant_message_id: int,
 ) -> dict[str, Any]:
-    """Register session + map events after assistant persist and cursor CAS.
+    """Register session + map events after the canonical assistant persist.
 
     Failures only update mapping manifest fields (BLOCKED). Never raises to
-    Gateway, never aborts the turn, never respawns or rolls back chat state.
+    this helper; the caller decides whether BLOCKED is terminal before cursor
+    advancement.
     """
     try:
         existing = get_context_claude_session(
@@ -6685,6 +6686,62 @@ def persist_daily_assistant_for_plan(
     )
 
 
+def build_canonical_turn_for_plan(
+    plan: DailyTurnPlan,
+    *,
+    mode: str = 'auto',
+    stop_reason: str = 'end_turn',
+) -> Any:
+    """Build the durable projection before the assistant row is inserted.
+
+    The provider stream has already reached ``result`` when this is called,
+    but its text is only a preview. A missing or unstable transcript is a hard
+    terminal failure; callers must never persist that preview as success.
+    """
+    from chat.canonical_turn import CanonicalTurnError, build_canonical_turn
+
+    if plan.transcript_observation_error_code:
+        raise CanonicalTurnError(
+            str(plan.transcript_observation_error_code),
+            error_code=str(plan.transcript_observation_error_code),
+        )
+    required = (
+        plan.transcript_path,
+        plan.transcript_claude_session_id,
+        plan.transcript_start_offset,
+        plan.transcript_end_offset,
+        plan.transcript_process_generation,
+    )
+    if any(value is None or value == '' for value in required):
+        raise CanonicalTurnError(
+            'transcript finality identity is incomplete',
+            error_code='transcript_finality_incomplete',
+        )
+    turn = build_canonical_turn(
+        str(plan.transcript_path),
+        start_offset=int(plan.transcript_start_offset),
+        end_offset=int(plan.transcript_end_offset),
+        session_id=str(plan.transcript_claude_session_id),
+        mode=mode,
+        stop_reason=stop_reason,
+        mapping_status=str(plan.manifest.get('transcript_mapping_status') or 'UNVERIFIED'),
+        message_id=None,
+        context_id=plan.context_id,
+        context_epoch=plan.context_epoch,
+        resident_generation=plan.resident_generation,
+    )
+    plan._canonical_turn = turn
+    plan.manifest.update({
+        'canonical_projection_hash': turn.projection_hash,
+        'canonical_content_length': len(turn.content),
+        'canonical_display_segments': turn.display_segments,
+        'canonical_provider_round_count': len(turn.provider_rounds),
+        'transcript_finality_status': turn.terminal_state,
+        'transcript_finality_identity': dict(turn.transcript_identity),
+    })
+    return turn
+
+
 def _consume_feedback_after_success(plan: DailyTurnPlan) -> None:
     ids = list(plan.feedback_ids)
     if not ids:
@@ -6717,17 +6774,40 @@ def handle_provider_success(
         abort_daily_turn(plan, error_code='empty_provider_response')
         raise DailyRuntimeError('empty provider response', error_code='empty_provider_response')
     usage = usage or {}
+    canonical = getattr(plan, '_canonical_turn', None)
+    if canonical is None:
+        abort_daily_turn(plan, error_code='canonical_turn_missing')
+        raise DailyRuntimeError(
+            'canonical transcript projection missing',
+            error_code='canonical_turn_missing',
+        )
+    # The row is already the canonical projection at this point, but it is not
+    # a successful turn until the same transcript range maps successfully.
+    finalize_transcript_mapping_after_success(
+        plan, assistant_message_id=int(assistant_message_id),
+    )
+    if str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED':
+        abort_daily_turn(
+            plan,
+            error_code=str(
+                plan.manifest.get('transcript_mapping_error_code')
+                or 'transcript_mapping_blocked'
+            ),
+        )
+        raise DailyRuntimeError(
+            'transcript mapping did not reach FINAL',
+            error_code=str(
+                plan.manifest.get('transcript_mapping_error_code')
+                or 'transcript_mapping_blocked'
+            ),
+        )
     complete_daily_turn(
         plan,
         assistant_message_id=int(assistant_message_id),
-        stop_reason=str(usage.get('stop_reason') or 'end_turn'),
+        stop_reason=str(getattr(canonical, 'stop_reason', None) or usage.get('stop_reason') or 'end_turn'),
         input_tokens=usage.get('input_tokens'),
         output_tokens=usage.get('output_tokens'),
         unexpected_save_marker=unexpected_save_marker,
-    )
-    # Mapping only after assistant persist (Gateway) + cursor CAS success above.
-    finalize_transcript_mapping_after_success(
-        plan, assistant_message_id=int(assistant_message_id),
     )
     # Same-context last-good: only after full success (result + persist + JSONL + cursor).
     end_off = plan.transcript_end_offset
