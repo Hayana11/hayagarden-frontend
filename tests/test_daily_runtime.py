@@ -3330,6 +3330,7 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
                 )
         note_last_good.assert_not_called()
         self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
+        self.assertIn('candidate_user_missing', str(ctx.exception))
         self.assertEqual(plan.manifest['transcript_mapping_status'], 'BLOCKED')
         self.assertIsNotNone(plan.manifest['transcript_mapping_error_code'])
         self.assertEqual(int(plan.manifest['transcript_mapping_event_count']), 0)
@@ -3369,6 +3370,68 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             plan.context_id, plan.resident_generation, db_path=self.db,
         )
         self.assertIsNone(reg)
+
+    def test_mapping_terminal_diagnostic_precedes_rollback(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'diagnostic-order', '2026-07-27 10:00:00')
+        resident = _MappingBlockedResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical, aid = _persist_canonical_for_plan(plan)
+        events = []
+        real_rollback = dr._rollback_failed_terminalization
+
+        def record_log(*args, **kwargs):
+            rendered = ' '.join(str(value) for value in args)
+            if 'TRANSCRIPT_MAPPING_TERMINAL_BLOCKED' in rendered:
+                events.append(('log', rendered))
+
+        def record_rollback(*args, **kwargs):
+            events.append(('rollback', ''))
+            return real_rollback(*args, **kwargs)
+
+        with mock.patch.object(dr.logger, 'warning', side_effect=record_log), \
+             mock.patch.object(
+                 dr, '_rollback_failed_terminalization', side_effect=record_rollback,
+             ):
+            with self.assertRaises(dr.DailyRuntimeError) as ctx:
+                dr.handle_provider_success(
+                    plan, assistant_message_id=aid, raw_text=canonical.content,
+                )
+
+        self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
+        self.assertEqual(events[0][0], 'log')
+        self.assertIn('candidate_user_missing', events[0][1])
+        self.assertEqual(events[1][0], 'rollback')
+
+    def test_observation_mapping_diagnostic_preserves_exact_code(self):
+        uid = _insert(self.db, 'hayana', 'observation-diagnostic', '2026-07-27 10:00:00')
+        plan = self._prepare(uid)
+        plan.transcript_observation_error_code = 'transcript_process_generation_changed'
+
+        with mock.patch.object(dr.logger, 'warning') as warning:
+            out = dr.finalize_transcript_mapping_after_success(
+                plan, assistant_message_id=999,
+            )
+
+        self.assertEqual(out['transcript_mapping_status'], 'BLOCKED')
+        self.assertEqual(
+            out['transcript_mapping_error_code'],
+            'transcript_process_generation_changed',
+        )
+        rendered_calls = [
+            ' '.join(str(value) for value in call.args)
+            for call in warning.call_args_list
+        ]
+        self.assertTrue(any(
+            'TRANSCRIPT_MAPPING_OBSERVATION_BLOCKED' in rendered
+            and 'transcript_process_generation_changed' in rendered
+            for rendered in rendered_calls
+        ))
 
 
 class ResidentPeekRespawnReasonTests(unittest.TestCase):
@@ -4562,7 +4625,6 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'canonical target unavailable'):
                 dr._context_plan_policy()
 
-
     def test_mode_aware_policy_keeps_cold_hot_and_capacity_authorities_separate(self):
         with mock.patch(
             'chat.cold_bootstrap_budget.cold_rebuild_guard',
@@ -4736,6 +4798,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         )
         self.assertFalse(fixed_overflow.valid)
         self.assertEqual(fixed_overflow.budget_status, 'blocked')
+
 
 class ContextPlanConsumerTests(unittest.TestCase):
     @staticmethod
