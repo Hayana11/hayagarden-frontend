@@ -106,7 +106,9 @@ jobs:
           from wake.cc_tools import WAKE_TO_CC_MCP
 
           assert manifest.get_capability("memory.search")["provider_bindings"] == {
-              "claude_code": "mcp__home__search_memories"
+              "claude_code": "mcp__capability__memory_search",
+              "internal_mcp": "mcp__internal__search_memories",
+              "home_mcp": "mcp__home__search_memories",
           }
           assert manifest.get_capability("memory.search")["loading_policy"] == "always_load"
           assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
