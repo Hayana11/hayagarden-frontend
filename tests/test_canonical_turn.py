@@ -195,13 +195,17 @@ class CanonicalTurnTests(unittest.TestCase):
         self.assertEqual(turn.terminal_state, 'confirmed')
 
     def test_process_generation_mismatch_fails_closed(self):
-        with self.assertRaisesRegex(ValueError, "provider_terminal_receipt_generation_mismatch"):
+        with self.assertRaises(CanonicalTurnError) as raised:
             self._build(
                 self._receipt_rows(with_tool=True),
                 terminal_receipt=self._receipt(generation=1),
                 resident_generation=64,
                 transcript_process_generation=2,
             )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_generation_mismatch',
+        )
 
     def test_logical_generation_does_not_authorize_receipt(self):
         turn = self._build(
@@ -213,12 +217,16 @@ class CanonicalTurnTests(unittest.TestCase):
         self.assertEqual(turn.terminal_state, "confirmed")
 
     def test_receipt_requires_expected_process_generation(self):
-        with self.assertRaisesRegex(ValueError, "provider_terminal_receipt_generation_mismatch"):
+        with self.assertRaises(CanonicalTurnError) as raised:
             self._build(
                 self._receipt_rows(with_tool=True),
                 terminal_receipt=self._receipt(generation=1),
                 resident_generation=64,
             )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_generation_mismatch',
+        )
 
     def test_live_receipt_replaces_only_missing_transcript_result(self):
         turn = self._build(
