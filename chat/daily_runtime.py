@@ -190,6 +190,9 @@ class DailyTurnPlan:
     transcript_claude_session_id: Optional[str] = None
     transcript_process_generation: Optional[int] = None
     transcript_observation_error_code: Optional[str] = None
+    terminal_receipt: Optional[cc_resident.ProviderTerminalReceipt] = field(
+        default=None, repr=False,
+    )
     continuity_plan: Any = field(default=None, repr=False)
     continuity_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
     hot_desired_plan: Any = field(default=None, repr=False)
@@ -6641,6 +6644,24 @@ def ensure_resident_and_stream(
                     close_local_resident_if_bound(resident, expected_key=plan.resident_key)
                     raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
                 if evt == 'done':
+                    receipt = (
+                        getattr(payload[2], 'terminal_receipt', None)
+                        if (
+                            isinstance(payload, tuple)
+                            and len(payload) >= 3
+                            and isinstance(payload[2], dict)
+                        )
+                        else None
+                    )
+                    if (
+                        receipt is not None
+                        and not isinstance(receipt, cc_resident.ProviderTerminalReceipt)
+                    ):
+                        raise DailyRuntimeError(
+                            'resident terminal receipt has invalid type',
+                            error_code='provider_terminal_receipt_invalid',
+                        )
+                    plan.terminal_receipt = receipt
                     _capture_transcript_end(plan, resident)
                     # Safety net: stream completed without on_stdin_flushed hook.
                     if getattr(plan, '_capacity_swap_install_state', None) is not None:
@@ -6963,6 +6984,8 @@ def build_canonical_turn_for_plan(
         context_id=plan.context_id,
         context_epoch=plan.context_epoch,
         resident_generation=plan.resident_generation,
+        transcript_process_generation=plan.transcript_process_generation,
+        terminal_receipt=plan.terminal_receipt,
     )
     plan._canonical_turn = turn
     plan.manifest.update({
