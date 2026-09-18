@@ -5,6 +5,7 @@ on:
     paths:
       - "continuity/**"
       - "scripts/replay_continuity_sources.py"
+      - ".github/workflows/context-continuity.yml"
       - "tests/test_continuity_source_contract.py"
       - "tests/test_continuity_r2.py"
       - "tests/test_continuity_r3.py"
@@ -62,6 +63,7 @@ on:
     paths:
       - "continuity/**"
       - "scripts/replay_continuity_sources.py"
+      - ".github/workflows/context-continuity.yml"
       - "tests/test_continuity_source_contract.py"
       - "tests/test_continuity_r2.py"
       - "tests/test_continuity_r3.py"
