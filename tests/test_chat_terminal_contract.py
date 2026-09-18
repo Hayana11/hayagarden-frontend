@@ -95,6 +95,20 @@ class ChatTerminalContractTests(unittest.TestCase):
                 claude_session_id='session-1',
             )
 
+        for stop_reason in ('tool_deferred', '', 'future_reason'):
+            with self.subTest(stop_reason=stop_reason):
+                with self.assertRaises(ValueError):
+                    cc_resident.ProviderTerminalReceipt.from_result_event(
+                        {
+                            'type': 'result',
+                            'is_error': False,
+                            'stop_reason': stop_reason,
+                        },
+                        turn_identity='turn-1',
+                        resident_generation=3,
+                        claude_session_id='session-1',
+                    )
+
     def test_t12_daily_runtime_forwards_receipt_without_rederiving_terminal(self):
         source = pathlib.Path(__file__).resolve().parents[1] / 'chat' / 'daily_runtime.py'
         text = source.read_text(encoding='utf-8')
