@@ -41,6 +41,7 @@ class CanonicalTurnTests(unittest.TestCase):
         *,
         terminal_receipt=None,
         resident_generation=None,
+        transcript_process_generation=None,
     ):
         path = _write(rows)
         try:
@@ -52,6 +53,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 session_id='session-1',
                 mode=mode,
                 resident_generation=resident_generation,
+                transcript_process_generation=transcript_process_generation,
                 terminal_receipt=terminal_receipt,
             )
         finally:
@@ -153,7 +155,7 @@ class CanonicalTurnTests(unittest.TestCase):
             terminal_kind='provider_result',
             source=source,
             turn_identity='turn-1',
-            resident_generation=generation,
+            process_generation=generation,
             claude_session_id=session_id,
             result_is_error=result_is_error,
             result_stop_reason=stop_reason,
@@ -182,11 +184,56 @@ class CanonicalTurnTests(unittest.TestCase):
             ]}))
         return rows
 
+
+    def test_process_generation_authority_accepts_distinct_logical_generation(self):
+        turn = self._build(
+            self._receipt_rows(with_tool=True),
+            terminal_receipt=self._receipt(generation=1),
+            resident_generation=64,
+            transcript_process_generation=1,
+        )
+        self.assertEqual(turn.terminal_state, 'confirmed')
+
+    def test_process_generation_mismatch_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                self._receipt_rows(with_tool=True),
+                terminal_receipt=self._receipt(generation=1),
+                resident_generation=64,
+                transcript_process_generation=2,
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_generation_mismatch',
+        )
+
+    def test_logical_generation_does_not_authorize_receipt(self):
+        turn = self._build(
+            self._receipt_rows(with_tool=True),
+            terminal_receipt=self._receipt(generation=1),
+            resident_generation=999,
+            transcript_process_generation=1,
+        )
+        self.assertEqual(turn.terminal_state, "confirmed")
+
+    def test_receipt_requires_expected_process_generation(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                self._receipt_rows(with_tool=True),
+                terminal_receipt=self._receipt(generation=1),
+                resident_generation=64,
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_generation_mismatch',
+        )
+
     def test_live_receipt_replaces_only_missing_transcript_result(self):
         turn = self._build(
             self._receipt_rows(),
             terminal_receipt=self._receipt(),
             resident_generation=7,
+            transcript_process_generation=7,
         )
         self.assertEqual(turn.content, 'done')
         self.assertEqual(turn.terminal_state, 'confirmed')
@@ -196,6 +243,7 @@ class CanonicalTurnTests(unittest.TestCase):
             self._receipt_rows(with_tool=True),
             terminal_receipt=self._receipt(),
             resident_generation=7,
+            transcript_process_generation=7,
         )
         self.assertEqual(turn.tool_calls[0]['result'], 'ok')
 
@@ -210,6 +258,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 self._receipt_rows(),
                 terminal_receipt=self._receipt(generation=8),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(
             raised.exception.error_code,
@@ -222,6 +271,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 self._receipt_rows(),
                 terminal_receipt=self._receipt(session_id='other'),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(
             raised.exception.error_code,
@@ -234,6 +284,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 self._receipt_rows(),
                 terminal_receipt=self._receipt(source='synthetic'),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(raised.exception.error_code, 'provider_terminal_receipt_invalid')
 
@@ -265,6 +316,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 ],
                 terminal_receipt=self._receipt(),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(raised.exception.error_code, 'tool_result_missing')
 
@@ -283,6 +335,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 ],
                 terminal_receipt=self._receipt(),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(raised.exception.error_code, 'tool_result_unmatched')
 
@@ -309,6 +362,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 ],
                 terminal_receipt=self._receipt(),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(raised.exception.error_code, 'tool_result_duplicate')
 
@@ -323,6 +377,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 ],
                 terminal_receipt=self._receipt(),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(raised.exception.error_code, 'canonical_stop_reason_invalid')
 
@@ -331,6 +386,7 @@ class CanonicalTurnTests(unittest.TestCase):
             self._receipt_rows(),
             terminal_receipt=self._receipt(),
             resident_generation=7,
+            transcript_process_generation=7,
         )
         self.assertEqual(turn.stop_reason, 'end_turn')
         with self.assertRaises(CanonicalTurnError) as raised:
@@ -345,6 +401,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 ],
                 terminal_receipt=self._receipt(),
                 resident_generation=7,
+                transcript_process_generation=7,
             )
         self.assertEqual(raised.exception.error_code, 'provider_terminal_receipt_conflict')
 

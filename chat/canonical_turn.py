@@ -136,7 +136,7 @@ def _validate_terminal_receipt(
     receipt: Any,
     *,
     expected_session_id: str,
-    expected_generation: int | None,
+    expected_process_generation: int | None,
 ) -> bool:
     if receipt is None:
         return False
@@ -172,20 +172,20 @@ def _validate_terminal_receipt(
             'provider terminal receipt identity is missing',
             error_code='provider_terminal_receipt_invalid',
         )
-    if expected_generation is None:
+    if expected_process_generation is None:
         raise CanonicalTurnError(
             'provider terminal receipt generation is unavailable',
             error_code='provider_terminal_receipt_generation_mismatch',
         )
     try:
-        receipt_generation = int(receipt.resident_generation)
-        current_generation = int(expected_generation)
+        receipt_process_generation = int(receipt.process_generation)
+        expected_process_generation_value = int(expected_process_generation)
     except (TypeError, ValueError) as exc:
         raise CanonicalTurnError(
             'provider terminal receipt generation is invalid',
             error_code='provider_terminal_receipt_generation_mismatch',
         ) from exc
-    if receipt_generation != current_generation:
+    if receipt_process_generation != expected_process_generation_value:
         raise CanonicalTurnError(
             'provider terminal receipt generation mismatch',
             error_code='provider_terminal_receipt_generation_mismatch',
@@ -285,6 +285,7 @@ def build_canonical_turn(
     context_id: int | None = None,
     context_epoch: int | None = None,
     resident_generation: int | None = None,
+    transcript_process_generation: int | None = None,
     terminal_receipt: Any = None,
 ) -> CanonicalTurn:
     """Build one final projection from a closed provider transcript range."""
@@ -308,7 +309,7 @@ def build_canonical_turn(
     receipt_terminal = _validate_terminal_receipt(
         terminal_receipt,
         expected_session_id=expected_sid,
-        expected_generation=resident_generation,
+        expected_process_generation=transcript_process_generation,
     )
 
     for row in rows:

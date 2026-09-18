@@ -6830,6 +6830,7 @@ def build_canonical_turn_for_plan(
         context_id=plan.context_id,
         context_epoch=plan.context_epoch,
         resident_generation=plan.resident_generation,
+        transcript_process_generation=plan.transcript_process_generation,
         terminal_receipt=plan.terminal_receipt,
     )
     plan._canonical_turn = turn

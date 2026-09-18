@@ -216,7 +216,7 @@ class ProviderTerminalReceipt:
     terminal_kind: str
     source: str
     turn_identity: str
-    resident_generation: int
+    process_generation: int
     claude_session_id: str
     result_is_error: bool
     result_stop_reason: str
@@ -227,7 +227,7 @@ class ProviderTerminalReceipt:
         event,
         *,
         turn_identity,
-        resident_generation,
+        process_generation,
         claude_session_id,
     ):
         if not isinstance(event, dict) or event.get('type') != 'result':
@@ -243,7 +243,7 @@ class ProviderTerminalReceipt:
             terminal_kind='provider_result',
             source='resident_live_stdout',
             turn_identity=turn_id,
-            resident_generation=int(resident_generation),
+            process_generation=int(process_generation),
             claude_session_id=str(claude_session_id or '').strip(),
             result_is_error=False,
             result_stop_reason=str(event.get('stop_reason') or ''),
@@ -1845,7 +1845,7 @@ class ResidentSession:
                             terminal_receipt = ProviderTerminalReceipt.from_result_event(
                                 d,
                                 turn_identity=terminal.turn_identity,
-                                resident_generation=self._generation,
+                                process_generation=self._generation,
                                 claude_session_id=self._session_id,
                             )
                         # result.usage is diagnostics only; it never updates
