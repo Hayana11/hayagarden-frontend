@@ -2477,6 +2477,47 @@ class DailyRuntimeCursorCASTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_generation_race_is_rejected_inside_finalize_transaction(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'generation race', '2026-07-27 10:00:00')
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                plan = _prepare_turn(db, uid, wall_now=_FIXED_NOW, static_system='S')
+                aid = dr.persist_daily_assistant_for_plan(plan, content='pending')
+                conn = sqlite3.connect(db)
+                conn.execute(
+                    'UPDATE daily_contexts SET resident_generation=resident_generation+1 '
+                    'WHERE id=?', (int(plan.context_id),),
+                )
+                conn.commit()
+                conn.close()
+                with self.assertRaises(dc.ConflictError):
+                    dc.finalize_daily_assistant_and_advance_cursor(
+                        plan.context_id,
+                        plan.resident_generation,
+                        aid,
+                        expected_cursor=plan.cursor_before,
+                        expected_context_epoch=plan.context_epoch,
+                        db_path=db,
+                    )
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute(
+                    'SELECT source_kind FROM chat_messages WHERE id=?', (aid,),
+                ).fetchone()[0],
+                dc.SOURCE_KIND_DAILY_PENDING,
+            )
+            self.assertIsNone(conn.execute(
+                'SELECT history_cursor_message_id FROM daily_resident_cursors '
+                'WHERE context_id=? AND resident_generation=?',
+                (plan.context_id, plan.resident_generation),
+            ).fetchone())
+            conn.close()
+        finally:
+            os.unlink(db)
+
 
 # ---------------------------------------------------------------------------
 # Runtime → Session Registry / Mapping R1 focused cases
@@ -2603,6 +2644,48 @@ class _TranscriptColdResident(_FakeResident):
             _jsonl_result_line('r-cold-1', session=self.session_id),
         ])
         yield ('done', ('cold reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
+
+
+class _TranscriptBacklogResident(_FakeResident):
+    """One session that appends two rounds so rollback can cover catch-up."""
+
+    def __init__(self, *, cwd: str, session_id: str, jsonl_path: Path):
+        super().__init__()
+        self.cwd = cwd
+        self.session_id = None
+        self.generation = 1
+        self._session_id = session_id
+        self._jsonl_path = jsonl_path
+        self._turn_count = 0
+
+    def peek_respawn_reason(self, system_text, *, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
+        return None
+
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
+        self.sent.append(str(content))
+        self.session_id = self._session_id
+        if self._turn_count == 0:
+            lines = [
+                _jsonl_line('u-back-1', 'user', session=self.session_id, parent=None, content='back-user-1'),
+                _jsonl_line(
+                    'a-back-1', 'assistant', session=self.session_id, parent='u-back-1',
+                    content=[{'type': 'text', 'text': 'back-asst-1'}],
+                ),
+                _jsonl_result_line('r-back-1', session=self.session_id),
+            ]
+            _write_jsonl(self._jsonl_path, lines)
+        else:
+            _append_jsonl(self._jsonl_path, [
+                _jsonl_line('u-back-2', 'user', session=self.session_id, parent=None, content='back-user-2'),
+                _jsonl_line(
+                    'a-back-2', 'assistant', session=self.session_id, parent='u-back-2',
+                    content=[{'type': 'text', 'text': 'back-asst-2'}],
+                ),
+                _jsonl_result_line('r-back-2', session=self.session_id),
+            ])
+        self._turn_count += 1
+        yield ('text', 'back reply')
+        yield ('done', ('back reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
 
 
 class _RegisteredRespawnResident(_FakeResident):
@@ -2824,6 +2907,165 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         roles = {r[0]: r[1] for r in rows}
         self.assertEqual(roles.get('user'), uid)
         self.assertEqual(roles.get('assistant'), aid)
+
+    def test_current_turn_mapping_rows_rollback_after_cursor_conflict(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'rollback-current', '2026-07-27 10:00:00')
+        resident = _TranscriptColdResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical, aid = _persist_canonical_for_plan(plan)
+        with mock.patch.object(
+            dc,
+            'finalize_daily_assistant_and_advance_cursor',
+            side_effect=dc.ConflictError('cursor stale'),
+        ):
+            with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                dr.handle_provider_success(
+                    plan, assistant_message_id=aid, raw_text=canonical.content,
+                )
+
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM chat_message_claude_events').fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                'SELECT COUNT(*) FROM daily_message_contexts WHERE message_id=?', (aid,),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE id=? AND source_kind=?",
+                (aid, dc.SOURCE_KIND_DAILY_PENDING),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                'SELECT COUNT(*) FROM daily_terminal_mapping_receipts',
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+        self.assertIsNone(get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        ))
+        self.assertIsNone(dc.get_resident_history_cursor(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        ))
+
+    def test_backlog_mapping_rollback_preserves_preexisting_rows(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        resident = _TranscriptBacklogResident(
+            cwd=self.cwd, session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        uid1 = _insert(self.db, 'hayana', 'backlog-1', '2026-07-27 10:00:00')
+        plan1 = self._prepare(uid1, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan1, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical1, aid1 = _persist_canonical_for_plan(plan1)
+        dr.handle_provider_success(
+            plan1, assistant_message_id=aid1, raw_text=canonical1.content,
+        )
+
+        uid2 = _insert(self.db, 'hayana', 'backlog-2', '2026-07-27 10:01:00')
+        plan2 = self._prepare(uid2, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan2, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical2, aid2 = _persist_canonical_for_plan(plan2)
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            'UPDATE context_claude_sessions SET scan_offset=0, '
+            'last_mapped_message_id=NULL, scan_status=? '
+            'WHERE context_id=? AND resident_generation=?',
+            ('READY', plan2.context_id, plan2.resident_generation),
+        )
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(
+            dc,
+            'finalize_daily_assistant_and_advance_cursor',
+            side_effect=dc.ConflictError('cursor stale'),
+        ):
+            with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                dr.handle_provider_success(
+                    plan2, assistant_message_id=aid2, raw_text=canonical2.content,
+                )
+
+        conn = sqlite3.connect(self.db)
+        mapped = {
+            row[0] for row in conn.execute(
+                'SELECT event_uuid FROM chat_message_claude_events ORDER BY event_uuid',
+            ).fetchall()
+        }
+        self.assertEqual(mapped, {'u-back-1', 'a-back-1'})
+        self.assertEqual(
+            conn.execute(
+                'SELECT scan_offset FROM context_claude_sessions '
+                'WHERE context_id=? AND resident_generation=?',
+                (plan2.context_id, plan2.resident_generation),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertIsNone(conn.execute(
+            'SELECT id FROM chat_messages WHERE id=?', (aid2,),
+        ).fetchone())
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM daily_terminal_mapping_receipts').fetchone()[0],
+            0,
+        )
+        conn.close()
+        self.assertEqual(
+            dc.get_resident_history_cursor(
+                plan2.context_id, plan2.resident_generation, db_path=self.db,
+            ),
+            aid1,
+        )
+
+    def test_pending_terminal_receipt_recovers_after_crash_before_finalize(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'crash recovery', '2026-07-27 10:00:00')
+        resident = _TranscriptColdResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        _canonical, aid = _persist_canonical_for_plan(plan)
+        out = dr.finalize_transcript_mapping_after_success(
+            plan, assistant_message_id=aid,
+        )
+        self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
+        self.assertIsNotNone(getattr(plan, '_terminal_mapping_receipt_id', None))
+
+        self.assertEqual(dc.recover_pending_terminalizations(db_path=self.db), 1)
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM chat_message_claude_events').fetchone()[0],
+            0,
+        )
+        self.assertIsNone(conn.execute(
+            'SELECT id FROM chat_messages WHERE id=?', (aid,),
+        ).fetchone())
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM daily_terminal_mapping_receipts').fetchone()[0],
+            0,
+        )
+        conn.close()
+        self.assertIsNone(get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        ))
 
     def test_registered_generation_respawn_before_stdin(self):
         """3) Registered gen + peek process_dead → bump gen; caller plan adopted in place."""

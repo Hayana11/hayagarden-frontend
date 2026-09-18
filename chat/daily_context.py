@@ -498,6 +498,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
             _ensure_manual_window_indexes(conn)
             _ensure_context_switch_forge_schema(conn)
             _ensure_session_registry_mapping_schema(conn)
+            _ensure_terminal_mapping_receipt_schema(conn)
             ensure_context_receipt_schema(conn)
             ensure_chat_messages_display_segments(conn)
             conn.commit()
@@ -628,6 +629,7 @@ def ensure_schema(db_path: Optional[str] = None) -> None:
         _ensure_manual_window_indexes(conn)
         _ensure_context_switch_forge_schema(conn)
         _ensure_session_registry_mapping_schema(conn)
+        _ensure_terminal_mapping_receipt_schema(conn)
         ensure_context_receipt_schema(conn)
         if _table_columns(conn, 'chat_messages'):
             ensure_chat_messages_source_kind(conn, record_cutover=True)
@@ -689,6 +691,95 @@ def _ensure_session_registry_mapping_schema(conn: sqlite3.Connection) -> None:
         'CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_message_claude_events_user_msg '
         'ON chat_message_claude_events(message_id) WHERE role = \'user\''
     )
+
+
+def _ensure_terminal_mapping_receipt_schema(conn: sqlite3.Connection) -> None:
+    """Durable A/B receipt for pending terminalization recovery."""
+    conn.execute(
+        '''CREATE TABLE IF NOT EXISTS daily_terminal_mapping_receipts (
+            receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assistant_message_id INTEGER NOT NULL UNIQUE,
+            user_message_id INTEGER NOT NULL,
+            context_id INTEGER NOT NULL,
+            context_epoch INTEGER NOT NULL,
+            resident_generation INTEGER NOT NULL,
+            expected_cursor_message_id INTEGER NULL,
+            transcript_path TEXT NOT NULL,
+            claude_session_id TEXT NOT NULL,
+            transcript_start_offset INTEGER NULL,
+            transcript_end_offset INTEGER NULL,
+            pre_registry_json TEXT NOT NULL,
+            post_registry_json TEXT NOT NULL,
+            inserted_event_uuids_json TEXT NOT NULL,
+            confirmed_existing_event_uuids_json TEXT NOT NULL,
+            mapped_event_uuids_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'MAPPED_PENDING',
+            created_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours')),
+            updated_at DATETIME NOT NULL DEFAULT (datetime('now', '+8 hours'))
+        )'''
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_daily_terminal_mapping_receipts_status '
+        'ON daily_terminal_mapping_receipts(status)'
+    )
+
+
+def insert_terminal_mapping_receipt(
+    *,
+    conn: sqlite3.Connection,
+    assistant_message_id: int,
+    user_message_id: int,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    expected_cursor: Optional[int],
+    transcript_path: str,
+    claude_session_id: str,
+    transcript_start_offset: Optional[int],
+    transcript_end_offset: Optional[int],
+    pre_registry_snapshot: Optional[dict[str, Any]],
+    post_registry_snapshot: dict[str, Any],
+    inserted_event_uuids: list[str],
+    confirmed_existing_event_uuids: list[str],
+    mapped_event_uuids: list[str],
+) -> int:
+    """Insert the receipt inside the mapping transaction that owns it."""
+    cur = conn.execute(
+        '''INSERT INTO daily_terminal_mapping_receipts (
+            assistant_message_id, user_message_id, context_id, context_epoch,
+            resident_generation, expected_cursor_message_id, transcript_path,
+            claude_session_id, transcript_start_offset, transcript_end_offset,
+            pre_registry_json, post_registry_json, inserted_event_uuids_json,
+            confirmed_existing_event_uuids_json, mapped_event_uuids_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        (
+            int(assistant_message_id), int(user_message_id), int(context_id),
+            int(context_epoch), int(resident_generation),
+            None if expected_cursor is None else int(expected_cursor),
+            str(transcript_path), str(claude_session_id),
+            None if transcript_start_offset is None else int(transcript_start_offset),
+            None if transcript_end_offset is None else int(transcript_end_offset),
+            json.dumps(pre_registry_snapshot, ensure_ascii=False, sort_keys=True),
+            json.dumps(post_registry_snapshot, ensure_ascii=False, sort_keys=True),
+            json.dumps(list(inserted_event_uuids), ensure_ascii=False),
+            json.dumps(list(confirmed_existing_event_uuids), ensure_ascii=False),
+            json.dumps(list(mapped_event_uuids), ensure_ascii=False),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _decode_terminal_receipt(row: sqlite3.Row) -> dict[str, Any]:
+    result = dict(row)
+    for key in (
+        'pre_registry_json', 'post_registry_json', 'inserted_event_uuids_json',
+        'confirmed_existing_event_uuids_json', 'mapped_event_uuids_json',
+    ):
+        try:
+            result[key[:-5]] = json.loads(str(result[key]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ConflictError('terminal mapping receipt is corrupt') from exc
+    return result
 
 
 def _ensure_context_switch_forge_schema(conn: sqlite3.Connection) -> None:
@@ -2396,6 +2487,8 @@ def advance_resident_history_cursor(
     *,
     expected_cursor: Union[int, None, object] = _CURSOR_CAS_OMITTED,
     finalize_message_id: Optional[int] = None,
+    expected_context_epoch: Optional[int] = None,
+    terminal_receipt_id: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """Advance the resident cursor, optionally promoting one pending assistant."""
@@ -2427,6 +2520,46 @@ def advance_resident_history_cursor(
             raise ConflictError('resident cursor cannot move backward')
 
         if finalize_message_id is not None:
+            if expected_context_epoch is None:
+                inferred_epoch = conn.execute(
+                    'SELECT context_epoch FROM daily_message_contexts '
+                    'WHERE message_id=?', (int(finalize_message_id),),
+                ).fetchone()
+                if inferred_epoch is None:
+                    conn.rollback()
+                    raise ConflictError('finalize context epoch required')
+                expected_context_epoch = int(inferred_epoch['context_epoch'])
+            context = conn.execute(
+                'SELECT id, chat_id, context_epoch, resident_generation, '
+                'is_backfill, closed_at FROM daily_contexts WHERE id=?',
+                (int(context_id),),
+            ).fetchone()
+            if context is None:
+                conn.rollback()
+                raise ConflictError('finalize context missing')
+            context_d = dict(context)
+            if (
+                int(context_d.get('is_backfill') or 0)
+                or context_d.get('closed_at') is not None
+                or int(context_d['context_epoch']) != int(expected_context_epoch)
+                or int(context_d['resident_generation']) != int(resident_generation)
+            ):
+                conn.rollback()
+                raise ConflictError('finalize context generation is stale')
+            active = conn.execute(
+                'SELECT id, context_epoch, resident_generation FROM daily_contexts '
+                f'WHERE chat_id=? AND {_FORMAL_CONTEXT_PRED} AND closed_at IS NULL '
+                'ORDER BY context_epoch DESC LIMIT 1',
+                (str(context_d['chat_id']),),
+            ).fetchone()
+            if (
+                active is None
+                or int(active['id']) != int(context_id)
+                or int(active['context_epoch']) != int(expected_context_epoch)
+                or int(active['resident_generation']) != int(resident_generation)
+            ):
+                conn.rollback()
+                raise ConflictError('finalize context is no longer active')
             pending_id = int(finalize_message_id)
             if pending_id != new_id:
                 conn.rollback()
@@ -2466,6 +2599,17 @@ def advance_resident_history_cursor(
                     (SOURCE_KIND_CHAT, pending_id, SOURCE_KIND_DAILY_PENDING),
                 )
 
+            if terminal_receipt_id is not None:
+                consumed = conn.execute(
+                    'DELETE FROM daily_terminal_mapping_receipts '
+                    'WHERE receipt_id=? AND assistant_message_id=? '
+                    "AND status='MAPPED_PENDING'",
+                    (int(terminal_receipt_id), pending_id),
+                )
+                if int(consumed.rowcount or 0) != 1:
+                    conn.rollback()
+                    raise ConflictError('terminal mapping receipt consume CAS failed')
+
         if current is not None and new_id == current:
             conn.commit()
             return {
@@ -2504,6 +2648,8 @@ def finalize_daily_assistant_and_advance_cursor(
     assistant_message_id: int,
     *,
     expected_cursor: Union[int, None, object] = _CURSOR_CAS_OMITTED,
+    expected_context_epoch: Optional[int] = None,
+    terminal_receipt_id: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """Atomically make a pending assistant formal and advance its cursor."""
@@ -2513,6 +2659,8 @@ def finalize_daily_assistant_and_advance_cursor(
         int(assistant_message_id),
         expected_cursor=expected_cursor,
         finalize_message_id=int(assistant_message_id),
+        expected_context_epoch=expected_context_epoch,
+        terminal_receipt_id=terminal_receipt_id,
         db_path=db_path,
     )
 
@@ -3326,6 +3474,7 @@ def rollback_daily_assistant_terminalization(
     context_epoch: int,
     resident_generation: int,
     registry_snapshot: Optional[dict[str, Any]],
+    mapping_receipt_id: Optional[int] = None,
     expected_claude_session_id: str = '',
     expected_transcript_path: str = '',
     db_path: Optional[str] = None,
@@ -3369,13 +3518,58 @@ def rollback_daily_assistant_terminalization(
             conn.rollback()
             raise ConflictError('pending assistant terminalization identity mismatch')
 
+        receipt_row = conn.execute(
+            'SELECT * FROM daily_terminal_mapping_receipts '
+            + ('WHERE receipt_id=?' if mapping_receipt_id is not None
+               else 'WHERE assistant_message_id=?'),
+            (int(mapping_receipt_id) if mapping_receipt_id is not None else aid,),
+        ).fetchone()
+        receipt = _decode_terminal_receipt(receipt_row) if receipt_row is not None else None
+        if mapping_receipt_id is not None and receipt is None:
+            conn.rollback()
+            raise ConflictError('terminal mapping receipt missing')
+        if receipt is not None:
+            if (
+                str(receipt.get('status') or '') != 'MAPPED_PENDING'
+                or int(receipt['assistant_message_id']) != aid
+                or int(receipt['context_id']) != cid
+                or int(receipt['context_epoch']) != epoch
+                or int(receipt['resident_generation']) != generation
+            ):
+                conn.rollback()
+                raise ConflictError('terminal mapping receipt identity mismatch')
+            receipt_snapshot = receipt.get('pre_registry')
+            if receipt_snapshot != registry_snapshot:
+                conn.rollback()
+                raise ConflictError('terminal mapping receipt snapshot mismatch')
+            inserted_event_uuids = [
+                str(uid) for uid in receipt.get('inserted_event_uuids', [])
+            ]
+            post_registry_snapshot = receipt.get('post_registry')
+        else:
+            inserted_event_uuids = []
+            post_registry_snapshot = None
+
         current_registry_row = conn.execute(
             'SELECT * FROM context_claude_sessions '
             'WHERE context_id=? AND resident_generation=?',
             (cid, generation),
         ).fetchone()
         current_registry = dict(current_registry_row) if current_registry_row is not None else None
-        if registry_snapshot is None:
+        if post_registry_snapshot is not None:
+            if current_registry is None:
+                conn.rollback()
+                raise ConflictError('registry disappeared during rollback')
+            for key in (
+                'context_id', 'context_epoch', 'resident_generation',
+                'chat_id', 'claude_session_id', 'transcript_path', 'source',
+                'process_generation', 'scan_offset', 'scan_status',
+                'scan_error_code', 'last_mapped_message_id',
+            ):
+                if str(current_registry.get(key)) != str(post_registry_snapshot.get(key)):
+                    conn.rollback()
+                    raise ConflictError('registry watermark changed during rollback')
+        elif registry_snapshot is None:
             if current_registry is not None:
                 if expected_claude_session_id and str(current_registry.get('claude_session_id') or '') != str(expected_claude_session_id):
                     conn.rollback()
@@ -3397,10 +3591,38 @@ def rollback_daily_assistant_terminalization(
                     conn.rollback()
                     raise ConflictError('registry identity changed during rollback')
 
-        event_cur = conn.execute(
-            'DELETE FROM chat_message_claude_events WHERE message_id=?',
-            (aid,),
-        )
+        deleted_event_count = 0
+        for event_uuid in inserted_event_uuids:
+            event = conn.execute(
+                'SELECT event_uuid, message_id, context_id, context_epoch, '
+                'resident_generation FROM chat_message_claude_events '
+                'WHERE event_uuid=?',
+                (event_uuid,),
+            ).fetchone()
+            if event is None:
+                conn.rollback()
+                raise ConflictError('owned mapping row missing during rollback')
+            event_d = dict(event)
+            if (
+                int(event_d['context_id']) != cid
+                or int(event_d['context_epoch']) != epoch
+                or int(event_d['resident_generation']) != generation
+                or int(event_d['message_id']) not in {
+                    int(receipt['user_message_id']), aid,
+                }
+            ):
+                conn.rollback()
+                raise ConflictError('owned mapping row identity mismatch')
+            deleted = conn.execute(
+                'DELETE FROM chat_message_claude_events '
+                'WHERE event_uuid=? AND context_id=? AND context_epoch=? '
+                'AND resident_generation=?',
+                (event_uuid, cid, epoch, generation),
+            )
+            if int(deleted.rowcount or 0) != 1:
+                conn.rollback()
+                raise ConflictError('owned mapping delete CAS failed')
+            deleted_event_count += 1
         conn.execute('DELETE FROM daily_message_contexts WHERE message_id=?', (aid,))
         deleted = conn.execute(
             'DELETE FROM chat_messages WHERE id=? AND author=? AND source_kind=?',
@@ -3443,10 +3665,28 @@ def rollback_daily_assistant_terminalization(
                 conn.rollback()
                 raise ConflictError('registry restore CAS failed')
 
+        if receipt is not None:
+            consumed = conn.execute(
+                'DELETE FROM daily_terminal_mapping_receipts '
+                'WHERE receipt_id=? AND assistant_message_id=? '
+                "AND status='MAPPED_PENDING'",
+                (int(receipt['receipt_id']), aid),
+            )
+            if int(consumed.rowcount or 0) != 1:
+                conn.rollback()
+                raise ConflictError('terminal mapping receipt delete CAS failed')
+
         conn.commit()
         return {
             'assistant_message_id': aid,
-            'deleted_event_count': int(event_cur.rowcount or 0),
+            'deleted_event_count': int(deleted_event_count),
+            'confirmed_event_count': int(
+                len(receipt.get('confirmed_existing_event_uuids', []))
+                if receipt is not None else 0
+            ),
+            'mapping_receipt_id': (
+                int(receipt['receipt_id']) if receipt is not None else None
+            ),
             'registry_restored': registry_snapshot is not None,
         }
     except Exception:
@@ -3454,6 +3694,41 @@ def rollback_daily_assistant_terminalization(
         raise
     finally:
         conn.close()
+
+
+def recover_pending_terminalizations(*, db_path: Optional[str] = None) -> int:
+    """Resolve durable A-without-B receipts before the next Daily turn.
+
+    Recovery deliberately rolls back the staged terminalization. Completing a
+    provider turn without its original in-memory success path would be an
+    unproved promotion; the receipt gives rollback exact event ownership.
+    """
+    ensure_schema(db_path)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM daily_terminal_mapping_receipts "
+            "WHERE status='MAPPED_PENDING' ORDER BY receipt_id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    recovered = 0
+    for row in rows:
+        receipt = _decode_terminal_receipt(row)
+        rollback_daily_assistant_terminalization(
+            assistant_message_id=int(receipt['assistant_message_id']),
+            context_id=int(receipt['context_id']),
+            context_epoch=int(receipt['context_epoch']),
+            resident_generation=int(receipt['resident_generation']),
+            registry_snapshot=receipt.get('pre_registry'),
+            mapping_receipt_id=int(receipt['receipt_id']),
+            expected_claude_session_id=str(receipt.get('claude_session_id') or ''),
+            expected_transcript_path=str(receipt.get('transcript_path') or ''),
+            db_path=db_path,
+        )
+        recovered += 1
+    return recovered
 
 
 def get_resident_owner(

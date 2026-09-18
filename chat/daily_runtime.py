@@ -3464,6 +3464,11 @@ def prepare_daily_turn(
     if not dc.enabled():
         raise DailyRuntimeError('DAILY_SOFT_WINDOW_ENABLED=0', error_code='daily_disabled')
 
+    # A process may die after mapping/registry commit A and before terminal
+    # promotion/cursor commit B. Resolve that durable receipt before claiming
+    # another Daily turn; Python exception cleanup cannot cover a crash.
+    dc.recover_pending_terminalizations(db_path=db_path)
+
     feedback_snapshot = (
         _feedback_snapshot
         if _feedback_snapshot is not None
@@ -4272,6 +4277,7 @@ def _rollback_failed_terminalization(
         context_epoch=int(plan.context_epoch),
         resident_generation=int(plan.resident_generation),
         registry_snapshot=snapshot,
+        mapping_receipt_id=getattr(plan, '_terminal_mapping_receipt_id', None),
         expected_claude_session_id=str(plan.transcript_claude_session_id or ''),
         expected_transcript_path=str(plan.transcript_path or ''),
         db_path=plan.db_path,
@@ -4397,10 +4403,22 @@ def finalize_transcript_mapping_after_success(
                 assistant_message_id=int(assistant_message_id),
                 expected_start_offset=int(plan.transcript_start_offset),
                 observed_end_offset=int(plan.transcript_end_offset),
+                terminal_receipt={
+                    'expected_cursor': plan.cursor_before,
+                    'transcript_path': plan.transcript_path,
+                    'claude_session_id': sid,
+                    'transcript_start_offset': plan.transcript_start_offset,
+                    'transcript_end_offset': plan.transcript_end_offset,
+                    'pre_registry_snapshot': getattr(
+                        plan, '_transcript_registry_before_mapping', None,
+                    ),
+                },
             ),
             db_path=plan.db_path,
         )
         if result.ok:
+            if result.terminal_receipt_id is not None:
+                plan._terminal_mapping_receipt_id = int(result.terminal_receipt_id)
             _set_transcript_mapping_manifest(
                 plan,
                 status='MAPPED',
@@ -6595,6 +6613,8 @@ def complete_daily_turn(
             plan.resident_generation,
             aid,
             expected_cursor=plan.cursor_before,
+            expected_context_epoch=plan.context_epoch,
+            terminal_receipt_id=getattr(plan, '_terminal_mapping_receipt_id', None),
             db_path=plan.db_path,
         )
         cursor_after_raw = cursor_result.get('history_cursor_message_id')
