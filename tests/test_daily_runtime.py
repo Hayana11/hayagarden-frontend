@@ -4655,7 +4655,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(capacity.usable_budget, 90000)
 
 
-    def test_cold_rebuild_guard_is_admission_only_not_packing_authority(self):
+    def test_cold_rebuild_guard_does_not_change_rebuild_packing_policy(self):
         for guard_value in (60000, 70000, 80000):
             with self.subTest(guard=guard_value), mock.patch(
                 'chat.cold_bootstrap_budget.cold_rebuild_guard',
@@ -4715,7 +4715,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             self.assertEqual(cold_hard_limit(), 180000)
             self.assertEqual(cc_resident._cfg_int('CC_MAX_RESIDENT_TURNS', 45), 45)
 
-    def test_cold_planner_selects_compact_chunk_for_source_over_guard(self):
+    def test_cold_planner_accepts_75k_plan_despite_legacy_guard(self):
         from continuity.context_plan import (
             ContextChunkBinding,
             ContextSection,
@@ -4797,6 +4797,9 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         )
         binding = ContextChunkBinding(chunk=chunk, candidate=candidate, snapshot=snapshot)
         with mock.patch(
+            'chat.cold_bootstrap_budget.cold_rebuild_guard',
+            return_value=70000,
+        ), mock.patch(
             'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
             return_value=90000,
         ), mock.patch(
@@ -4817,7 +4820,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                     kind='invariant_system',
                     source_ref='system:one',
                     content_hash='system-hash',
-                    estimated_tokens=10000,
+                    estimated_tokens=25000,
                 ),
                 ContextSection(
                     kind='current_request',
@@ -4832,6 +4835,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(sum(member.logical_size for member in members), 80000)
         self.assertTrue(plan.valid)
         self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(plan.total_token_estimate, 75000)
         self.assertEqual([item.kind for item in plan.representations], ['chunk'])
         self.assertLessEqual(plan.total_token_estimate, 90000)
         self.assertLess(plan.total_token_estimate, 90000)
@@ -5689,7 +5693,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     chunk_id='chunk:one',
                     representation_id='chunk:one',
                     source_members=source_members,
-                    estimated_tokens=45000,
+                    estimated_tokens=75000,
                 ),),
                 ordered_sections=(
                     types.SimpleNamespace(kind='invariant_system', estimated_tokens=10000),
@@ -5703,7 +5707,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 measurement_semantics='heuristic_cjk1_ascii4_v1',
                 budget_status='fit',
                 valid=True,
-                total_token_estimate=45000,
+                total_token_estimate=75000,
             )
             assembly = {
                 'manifest': {},
@@ -5755,7 +5759,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 plan.manifest.get('error_code'),
                 'context_plan_legacy_selector_forbidden',
             )
-            self.assertFalse(plan.manifest.get('cold_rebuild_guard_overflow', False))
+            self.assertFalse(plan.manifest.get('cold_budget_overflow', False))
         finally:
             os.unlink(db)
 

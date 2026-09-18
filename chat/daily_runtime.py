@@ -1258,7 +1258,6 @@ def _build_production_context_plan(
     mode: str = 'hot',
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
-    from chat.cold_bootstrap_budget import cold_rebuild_guard
     from continuity.store import read_ready_surface
     policy, policy_version = _context_plan_policy(mode=mode)
     store_path = _production_continuity_store_path(plan)
@@ -1323,22 +1322,6 @@ def _build_production_context_plan(
             error_code='context_plan_invalid',
             retryable=False,
         )
-    if str(mode or '').strip().lower() in ('cold', 'respawn'):
-        try:
-            plan_total_estimate = int(result.plan.total_token_estimate)
-            whole_prompt_guard = int(cold_rebuild_guard())
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise DailyRuntimeError(
-                'canonical cold ContextPlan estimate is unavailable',
-                error_code='context_plan_cold_guard_unmeasurable',
-                retryable=False,
-            ) from exc
-        if plan_total_estimate > whole_prompt_guard:
-            raise DailyRuntimeError(
-                'canonical cold ContextPlan exceeds rebuild guard',
-                error_code='context_plan_cold_guard_overflow',
-                retryable=False,
-            )
     validated_by_id = {
         str(chunk.chunk_id): (str(chunk.artifact_revision), str(chunk.body_hash))
         for chunk in surface.artifacts
@@ -4670,7 +4653,6 @@ def _apply_daily_cold_prompt_fence(
     from chat.cold_bootstrap_budget import (
         ColdBootstrapOverflow,
         NoBenefitRespawnError,
-        cold_rebuild_guard,
         effective_history_budget,
         resident_rebuild_prompt_target,
         estimate_text_tokens,
@@ -4679,7 +4661,6 @@ def _apply_daily_cold_prompt_fence(
     )
     from chat.context_lean import cc_history_token_budget
 
-    cold_rebuild_guard_val = cold_rebuild_guard()
     resident_rebuild_target_val = resident_rebuild_prompt_target()
     cold_history_budget_val = int(
         (plan.assembly.get('manifest') or {}).get('cold_history_budget')
@@ -4689,14 +4670,6 @@ def _apply_daily_cold_prompt_fence(
         (plan.assembly.get('manifest') or {}).get('cold_history_trimmed')
     )
     cold_prompt_estimate = estimate_whole_prompt(static_system, content)
-    guard_triggered = cold_prompt_estimate > cold_rebuild_guard_val
-    if guard_triggered:
-        plan.manifest.update({
-            'cold_rebuild_guard_triggered': True,
-            'cold_rebuild_guard_before_estimate': int(cold_prompt_estimate),
-            'cold_rebuild_guard': int(cold_rebuild_guard_val),
-        })
-
     if cold_prompt_estimate > resident_rebuild_target_val:
         history = plan.assembly.get('current_day_history') or []
         history_tokens_est = estimate_text_tokens(_format_history_messages(history))
@@ -4728,16 +4701,14 @@ def _apply_daily_cold_prompt_fence(
             reality_time_anchor=reality_time_anchor,
         )
         cold_prompt_estimate = estimate_whole_prompt(static_system, content)
-        plan.manifest['cold_rebuild_guard_after_estimate'] = int(cold_prompt_estimate)
         cold_history_budget_val = new_budget
         cold_history_trimmed_flag = bool(
             (plan.assembly.get('manifest') or {}).get('cold_history_trimmed')
         )
         plan.manifest.update(dict(plan.assembly.get('manifest') or {}))
 
-    if cold_prompt_estimate > cold_rebuild_guard_val:
+    if cold_prompt_estimate > resident_rebuild_target_val:
         plan.manifest['cold_budget_overflow'] = True
-        plan.manifest['cold_rebuild_guard_overflow'] = True
         plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
         plan.manifest['cold_prompt_target'] = int(resident_rebuild_target_val)
         plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
@@ -4747,8 +4718,6 @@ def _apply_daily_cold_prompt_fence(
             target=resident_rebuild_target_val,
             history_budget=cold_history_budget_val,
             cold_history_trimmed=cold_history_trimmed_flag,
-            error_code='cold_rebuild_guard_overflow',
-            guard_target=cold_rebuild_guard_val,
         )
 
     pending_respawn_reason = getattr(resident, 'pending_respawn_reason', None)
@@ -4779,8 +4748,6 @@ def _apply_daily_cold_prompt_fence(
 
     plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
     plan.manifest['cold_prompt_target'] = int(resident_rebuild_target_val)
-    plan.manifest['cold_rebuild_guard'] = int(cold_rebuild_guard_val)
-    plan.manifest['cold_rebuild_guard_overflow'] = False
     plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
     plan.manifest['cold_history_trimmed'] = bool(cold_history_trimmed_flag)
     plan.manifest['cold_budget_mode'] = 'token_budget'

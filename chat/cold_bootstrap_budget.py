@@ -64,7 +64,12 @@ def resident_rebuild_prompt_target() -> int:
 
 
 def cold_rebuild_guard() -> int:
-    """Maximum cold whole-prompt estimate allowed at provider stdin."""
+    """Reserved threshold for the future stale-cache pre-send policy.
+
+    This legacy configuration must not affect resident rebuild packing,
+    cold/respawn ContextPlan validity, cold whole-prompt admission, history
+    trimming, or desired rebuild size.
+    """
     return max(1, _cfg_int('CC_COLD_REBUILD_GUARD', 70_000))
 
 
