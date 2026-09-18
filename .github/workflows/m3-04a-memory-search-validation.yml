@@ -111,7 +111,7 @@ jobs:
           assert manifest.get_capability("memory.search")["loading_policy"] == "always_load"
           assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
           assert physical_surface_fingerprint() == (
-              "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
+              "0309ce7e2df0e8274cbf1a8dbfd671a1ad3f111f3b4def7933e2a77750b30687"
           )
           print("memory provider/loading/Wake/fingerprint PASS")
           PY
@@ -130,6 +130,38 @@ jobs:
           git diff --check "$BASE_SHA" "$HEAD_SHA"
           forbidden_files="$(printf '%s\n' "$changed_files" | grep -E '^(mcp-http-server.js|internal-mcp-server.js|tools/memory_tool.py|tools/memory_library.py|tools/ombre_adapter.py|tools/capability_manifest.py|tools/cc_capability_adapter.py|tools/execution_fence.py|cc_resident.py|chat/|wake/|static/|deploy/|systemd/|scripts/)' || true)"
           test -z "$forbidden_files"
+
+          m3_scope_pattern='^(\.github/workflows/m3-04a-memory-search-validation\.yml|app\.py|tests/test_m3_04a_memory_search\.py|tools/product_handlers\.py)
+      - name: Verify exact M3-04A changed-file fence
+        env:
+          BASE_SHA: ${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "validation diff range outputs are empty" >&2
+            exit 1
+          fi
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
+          expected="$(printf '%s\n'             '.github/workflows/m3-04a-memory-search-validation.yml'             'app.py'             'tests/test_m3_04a_memory_search.py'             'tools/product_handlers.py' | sort)"
+          test "$actual" = "$expected"
+          printf '%s\n' "$actual"
+
+          m3_scope_files="$(printf '%s\n' "$changed_files" | grep -E "$m3_scope_pattern" || true)"
+          if [[ -z "$m3_scope_files" ]]; then
+            echo "M3-04A scoped changed-file fence: no owned file changed" >&2
+            exit 1
+          fi
+          while IFS= read -r file; do
+            case "$file" in
+              .github/workflows/m3-04a-memory-search-validation.yml|app.py|tests/test_m3_04a_memory_search.py|tools/product_handlers.py)
+                ;;
+              *)
+                echo "M3-04A scoped changed-file fence: undeclared owned file: $file" >&2
+                exit 1
+                ;;
+            esac
+          done <<< "$m3_scope_files"
 
       - name: Verify exact M3-04A changed-file fence
         env:
