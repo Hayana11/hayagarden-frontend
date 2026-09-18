@@ -37,6 +37,59 @@ jobs:
           fi
           touch /opt/frontend/.env
 
+      - name: Resolve pull_request validation range
+        id: pull-request-range
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" || "$BASE_SHA" =~ ^0+$ || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "pull_request validation range unavailable: base=$BASE_SHA head=$HEAD_SHA" >&2
+            exit 1
+          fi
+          git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null || {
+            echo "pull_request validation base is not a commit: $BASE_SHA" >&2
+            exit 1
+          }
+          git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null || {
+            echo "pull_request validation head is not a commit: $HEAD_SHA" >&2
+            exit 1
+          }
+          {
+            echo "base_sha=$BASE_SHA"
+            echo "head_sha=$HEAD_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve workflow_dispatch validation range
+        id: workflow-dispatch-range
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$HEAD_SHA" || "$HEAD_SHA" =~ ^0+$ ]]; then
+            echo "workflow_dispatch validation range unavailable: head=$HEAD_SHA" >&2
+            exit 1
+          fi
+          git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null || {
+            echo "workflow_dispatch validation head is not a commit: $HEAD_SHA" >&2
+            exit 1
+          }
+          BASE_SHA="$(git rev-parse --verify "$HEAD_SHA^")" || {
+            echo "workflow_dispatch validation base unavailable: head=$HEAD_SHA has no parent" >&2
+            exit 1
+          }
+          git rev-parse --verify "$BASE_SHA^{commit}" >/dev/null || {
+            echo "workflow_dispatch validation base is not a commit: $BASE_SHA" >&2
+            exit 1
+          }
+          {
+            echo "base_sha=$BASE_SHA"
+            echo "head_sha=$HEAD_SHA"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run M3-04A handler and HTTP parity tests
         run: |
           python -m unittest             tests.test_m3_04a_memory_search             tests.test_product_handlers             -v
@@ -64,13 +117,31 @@ jobs:
           PY
 
       - name: Check diff whitespace and forbidden files
+        env:
+          BASE_SHA: ${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
         run: |
-          git diff --check
-          test -z "$(git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD | grep -E '^(mcp-http-server.js|internal-mcp-server.js|tools/memory_tool.py|tools/memory_library.py|tools/ombre_adapter.py|tools/capability_manifest.py|tools/cc_capability_adapter.py|tools/execution_fence.py|cc_resident.py|chat/|wake/|static/|deploy/|systemd/|scripts/)' || true)"
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "validation diff range outputs are empty" >&2
+            exit 1
+          fi
+          changed_files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+          forbidden_files="$(printf '%s\n' "$changed_files" | grep -E '^(mcp-http-server.js|internal-mcp-server.js|tools/memory_tool.py|tools/memory_library.py|tools/ombre_adapter.py|tools/capability_manifest.py|tools/cc_capability_adapter.py|tools/execution_fence.py|cc_resident.py|chat/|wake/|static/|deploy/|systemd/|scripts/)' || true)"
+          test -z "$forbidden_files"
 
       - name: Verify exact M3-04A changed-file fence
+        env:
+          BASE_SHA: ${{ steps.pull-request-range.outputs.base_sha || steps.workflow-dispatch-range.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pull-request-range.outputs.head_sha || steps.workflow-dispatch-range.outputs.head_sha }}
         run: |
-          actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD | sort)"
+          set -Eeuo pipefail
+          if [[ -z "$BASE_SHA" || -z "$HEAD_SHA" ]]; then
+            echo "validation diff range outputs are empty" >&2
+            exit 1
+          fi
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
           expected="$(printf '%s\n'             '.github/workflows/m3-04a-memory-search-validation.yml'             'app.py'             'tests/test_m3_04a_memory_search.py'             'tools/product_handlers.py' | sort)"
           test "$actual" = "$expected"
           printf '%s\n' "$actual"
