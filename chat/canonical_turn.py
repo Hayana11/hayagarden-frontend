@@ -409,4 +409,3 @@ def projection_hash(
         tool_calls,
         choices,
     )
-

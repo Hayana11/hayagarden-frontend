@@ -123,4 +123,3 @@ jobs:
           HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-effort-config.db
           HAYAGARDEN_ENV_PATH: ${{ runner.temp }}/chat-effort.env
         run: python -m unittest tests.test_cc_effort -v
-

@@ -3967,4 +3967,3 @@ def current_summary(
         'resident_generation': int(ctx['resident_generation'] or 1),
         'context_id': context_id,
     }
-

@@ -1368,4 +1368,3 @@ def get_user_canonical_by_event_uuid(
         return {str(r['event_uuid']): str(r['content'] or '') for r in rows}
     finally:
         conn.close()
-
