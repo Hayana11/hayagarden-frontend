@@ -54,6 +54,16 @@ jobs:
       - name: Install M2-02B test dependencies
         run: python -m pip install Flask Pillow Markdown
 
+      - name: Prepare isolated runtime paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt
+          if [ ! -e /opt/frontend ]; then
+            sudo ln -sfn "$GITHUB_WORKSPACE" /opt/frontend
+          fi
+          touch /opt/frontend/.env
+
       - name: Run exact M2-02B matrix on both base and head
         run: >-
           python -m unittest
