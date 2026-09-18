@@ -1,15 +1,7 @@
 name: M5-06C-B2 external runtime composition validation
 
 on:
-  push:
-    branches:
-      - codex/m5-06c-b2-runtime-composition-r1
-    paths:
-      - .github/workflows/m5-06c-b2-external-runtime-composition-validation.yml
-      - tools/external_mcp_runtime.py
-      - tests/test_external_mcp_runtime.py
-      - tools/external_mcp_call_bridge.mjs
-      - tests/test_external_mcp_call_bridge.mjs
+  workflow_dispatch:
 
 permissions:
   contents: read
