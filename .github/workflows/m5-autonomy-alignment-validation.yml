@@ -1,16 +1,6 @@
 name: M5 autonomy alignment validation
 
 on:
-  push:
-    branches:
-      - codex/m5-autonomy-alignment-r1
-    paths:
-      - .github/workflows/m5-autonomy-alignment-validation.yml
-      - tools/external_tool_side_effect_policy.py
-      - tools/external_tool_execution_fence.py
-      - tests/test_external_tool_side_effect_policy.py
-      - tests/test_external_tool_execution_fence.py
-      - tests/test_external_mcp_invocation.py
   workflow_dispatch:
 
 permissions:

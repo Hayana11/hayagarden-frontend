@@ -1,9 +1,7 @@
 name: M5-06C-C1W production composition root validation
 
 on:
-  push:
-    branches:
-      - codex/m5-06c-c1w-production-composition-root-r1
+  workflow_dispatch:
 
 permissions:
   contents: read
