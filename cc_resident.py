@@ -209,6 +209,7 @@ def _claude_event_is_activity(d):
         return False
     return False
 
+
 @dataclass(frozen=True)
 class ProviderTerminalReceipt:
     """Typed authority emitted only after resident reads a successful result."""
@@ -825,9 +826,9 @@ class ResidentSession:
         if system_text != self._system_text:
             return 'system_changed'
 
-        hard = _cfg_int('CC_CONTEXT_HARD_LIMIT', 120_000)
-        soft = _cfg_int('CC_CONTEXT_SOFT_LIMIT', 90_000)
-        max_turns = _cfg_int('CC_MAX_RESIDENT_TURNS', 30)
+        hard = _cfg_int('CC_CONTEXT_HARD_LIMIT', 180_000)
+        soft = _cfg_int('CC_CONTEXT_SOFT_LIMIT', 150_000)
+        max_turns = _cfg_int('CC_MAX_RESIDENT_TURNS', 45)
         min_between = _cfg_int('CC_MIN_TURNS_BETWEEN_RESPAWNS', 5)
 
         if self._last_round_context >= hard:

@@ -3615,7 +3615,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                      side_effect=_build_rebuilt_assembly,
                  ), \
                  mock.patch(
-                     'chat.cold_bootstrap_budget.cold_prompt_target',
+                     'chat.cold_bootstrap_budget.cold_rebuild_guard',
                      return_value=50,
                  ), \
                  mock.patch(
@@ -3696,7 +3696,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                          return_value={'current_day_history': [], 'manifest': {}},
                      ), \
                      mock.patch(
-                         'chat.cold_bootstrap_budget.cold_prompt_target',
+                         'chat.cold_bootstrap_budget.cold_rebuild_guard',
                          return_value=50,
                      ), \
                      mock.patch(
@@ -4563,6 +4563,180 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                 dr._context_plan_policy()
 
 
+    def test_mode_aware_policy_keeps_cold_hot_and_capacity_authorities_separate(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_rebuild_guard',
+            return_value=70000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            return_value=150000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.capacity_swap_prompt_target',
+            return_value=90000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ):
+            cold, _ = dr._context_plan_policy(mode='cold')
+            respawn, _ = dr._context_plan_policy(mode='respawn')
+            hot, _ = dr._context_plan_policy(mode='hot')
+            capacity, _ = dr._context_plan_policy(mode='capacity')
+
+        self.assertEqual(cold.token_budget, 70000)
+        self.assertEqual(respawn.token_budget, 70000)
+        self.assertEqual(cold.usable_budget, 62000)
+        self.assertEqual(respawn.usable_budget, 62000)
+        self.assertEqual(hot.usable_budget, 150000)
+        self.assertEqual(capacity.usable_budget, 90000)
+
+    def test_cold_planner_selects_compact_chunk_for_source_over_guard(self):
+        from continuity.context_plan import (
+            ContextChunkBinding,
+            ContextSection,
+            build_context_plan,
+        )
+        from continuity.contracts import (
+            ContinuityChunk,
+            SourceMember,
+            SourceSnapshot,
+            candidate_source_revision,
+        )
+        from continuity.coverage import source_hash
+        from continuity.sealing import CandidateBlock
+
+        members = tuple(
+            SourceMember(
+                seq=seq,
+                source_kind='completed_turn',
+                source_ref='turn:%s' % seq,
+                source_revision='rev:%s' % seq,
+                role='user',
+                content_hash='hash:%s' % seq,
+                logical_size=40000,
+                created_at='2026-07-27 09:0%s:00' % seq,
+            )
+            for seq in (1, 2)
+        )
+        snapshot_hash = source_hash(members)
+        snapshot = SourceSnapshot(
+            snapshot_id='snapshot:one',
+            identity_id='default',
+            chat_id='default',
+            branch_id='active-transcript',
+            local_day='2026-07-27',
+            source_watermark=2,
+            policy_version='r1',
+            source_hash=snapshot_hash,
+            status='ready',
+            created_at='2026-07-27 10:00:00',
+            members=members,
+        )
+        candidate = CandidateBlock(
+            candidate_id='candidate:one',
+            snapshot_id=snapshot.snapshot_id,
+            policy_version='r1',
+            block_seq=0,
+            local_day='2026-07-27',
+            branch_id='active-transcript',
+            source_start_seq=1,
+            source_end_seq=2,
+            source_seqs=(1, 2),
+            source_refs=('turn:1', 'turn:2'),
+            source_revisions=('rev:1', 'rev:2'),
+            logical_size=80000,
+            completed_turn_count=2,
+            oversize=False,
+            close_reason='boundary',
+            source_revision=candidate_source_revision(members),
+        )
+        body = 'compact canonical chunk'
+        chunk = ContinuityChunk(
+            chunk_id='chunk:one',
+            generation_job_id='job:one',
+            candidate_id=candidate.candidate_id,
+            snapshot_id=snapshot.snapshot_id,
+            artifact_revision='artifact:one',
+            body=body,
+            body_hash=hashlib.sha256(body.encode('utf-8')).hexdigest(),
+            source_token_estimate=80000,
+            output_token_estimate=45000,
+            generator_policy_version='r1',
+            prompt_policy_version='r1',
+            provider='test',
+            model_identity='test',
+            actual_executor='test',
+            generation_id='generation:one',
+            status='ready',
+            created_at='2026-07-27 10:01:00',
+        )
+        binding = ContextChunkBinding(chunk=chunk, candidate=candidate, snapshot=snapshot)
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_rebuild_guard',
+            return_value=70000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=0,
+        ):
+            policy, _version = dr._context_plan_policy(mode='cold')
+        plan = build_context_plan(
+            members,
+            raw_members=members,
+            chunks=(binding,),
+            budget_policy=policy,
+            fixed_sections=(
+                ContextSection(
+                    kind='invariant_system',
+                    source_ref='system:one',
+                    content_hash='system-hash',
+                    estimated_tokens=10000,
+                ),
+                ContextSection(
+                    kind='current_request',
+                    source_ref='message:current',
+                    content_hash='current-hash',
+                    estimated_tokens=5000,
+                ),
+            ),
+            budget_policy_version='continuity_context_budget_v1',
+        )
+
+        self.assertEqual(sum(member.logical_size for member in members), 80000)
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual([item.kind for item in plan.representations], ['chunk'])
+        self.assertLessEqual(plan.total_token_estimate, 70000)
+        self.assertLess(plan.total_token_estimate, 70000)
+
+        fixed_overflow = build_context_plan(
+            members,
+            raw_members=members,
+            chunks=(binding,),
+            budget_policy=policy,
+            fixed_sections=(
+                ContextSection(
+                    kind='invariant_system',
+                    source_ref='system:oversized',
+                    content_hash='system-oversized-hash',
+                    estimated_tokens=70001,
+                ),
+                ContextSection(
+                    kind='current_request',
+                    source_ref='message:current',
+                    content_hash='current-hash',
+                    estimated_tokens=1,
+                ),
+            ),
+            budget_policy_version='continuity_context_budget_v1',
+        )
+        self.assertFalse(fixed_overflow.valid)
+        self.assertEqual(fixed_overflow.budget_status, 'blocked')
+
 class ContextPlanConsumerTests(unittest.TestCase):
     @staticmethod
     def _context_plan_runtime_db():
@@ -5370,6 +5544,141 @@ class ContextPlanConsumerTests(unittest.TestCase):
             self.assertFalse(kwargs['inject_handoff'])
             self.assertFalse(kwargs['inject_carryover'])
             self.assertEqual(kwargs['history_override'], [])
+
+    def test_gate_on_cold_oversized_source_uses_canonical_plan_and_sends_once(self):
+        db = self._context_plan_runtime_db()
+        try:
+            _insert(db, 'hayana', 'previous user', '2026-07-27 09:00:00')
+            _insert(db, 'assistant', 'previous assistant', '2026-07-27 09:01:00')
+            uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+            source_members = (
+                types.SimpleNamespace(logical_size=40000, source_ref='turn:1'),
+                types.SimpleNamespace(logical_size=40000, source_ref='turn:2'),
+            )
+            context_plan = types.SimpleNamespace(
+                plan_id='plan:oversized-source',
+                plan_hash='plan-hash-oversized-source',
+                source_hash='source-hash-oversized-source',
+                source_members=source_members,
+                representations=(types.SimpleNamespace(
+                    kind='chunk',
+                    chunk_id='chunk:one',
+                    representation_id='chunk:one',
+                    source_members=source_members,
+                    estimated_tokens=45000,
+                ),),
+                ordered_sections=(
+                    types.SimpleNamespace(kind='invariant_system', estimated_tokens=10000),
+                    types.SimpleNamespace(kind='current_request', estimated_tokens=5000),
+                ),
+                budget_policy=types.SimpleNamespace(
+                    usable_budget=62000,
+                    reserve_budget=8000,
+                ),
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                budget_status='fit',
+                valid=True,
+                total_token_estimate=68000,
+            )
+            assembly = {
+                'manifest': {},
+                'state': '',
+                'day_handoff_content': None,
+                'current_day_history': [],
+                'context_plan_representation_blocks': [{
+                    'kind': 'chunk',
+                    'representation_id': 'chunk:one',
+                    'body': 'compact canonical history',
+                }],
+                'layers': [],
+            }
+            original_get = config_store.get
+            captured = {}
+
+            def _get(key, default=None):
+                if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                    return '1'
+                return original_get(key, default)
+
+            def _build(plan, *, resident, static_system, mode='hot'):
+                captured['mode'] = mode
+                return context_plan, {'chunk:one': 'compact canonical history'}
+
+            resident = _FakeResident()
+            with mock.patch.object(config_store, 'get', side_effect=_get), \
+                 mock.patch.object(dr, '_build_production_context_plan', side_effect=_build), \
+                 mock.patch.object(dr, '_project_context_plan_history', return_value=assembly), \
+                 mock.patch.object(dr, '_observe_continuity_shadow'):
+                plan = _prepare_turn(
+                    db,
+                    uid,
+                    resident=resident,
+                    static_system='STATIC',
+                )
+                events = list(dr.stream_daily_resident_turn(
+                    plan,
+                    resident=resident,
+                    env={},
+                    static_system='STATIC',
+                ))
+
+            self.assertEqual(captured['mode'], 'cold')
+            self.assertTrue(any(evt == 'done' for evt, _payload in events))
+            self.assertEqual(len(resident.sent), 1)
+            self.assertEqual(resident.sent[0].count('current request'), 1)
+            self.assertNotEqual(
+                plan.manifest.get('error_code'),
+                'context_plan_legacy_selector_forbidden',
+            )
+            self.assertFalse(plan.manifest.get('cold_rebuild_guard_overflow', False))
+        finally:
+            os.unlink(db)
+
+    def test_gate_on_cold_fixed_sections_over_guard_fail_closed_before_send(self):
+        db = self._context_plan_runtime_db()
+        try:
+            uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+            resident = _FakeResident()
+            assembly = {'manifest': {}, 'current_day_history': []}
+            oversized = dr.DailyRuntimeError(
+                'canonical ContextPlan is invalid',
+                error_code='context_plan_invalid',
+            )
+            original_get = config_store.get
+
+            def _get(key, default=None):
+                if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                    return '1'
+                return original_get(key, default)
+
+            def _reject_fixed_overflow(plan, *, resident, static_system, mode='hot'):
+                self.assertEqual(mode, 'cold')
+                self.assertGreater(len(static_system), 70000)
+                raise oversized
+
+            with mock.patch.object(config_store, 'get', side_effect=_get), \
+                 mock.patch.object(
+                     dh,
+                     'build_daily_window_context',
+                     return_value=assembly,
+                 ), mock.patch.object(
+                     dr,
+                     '_build_production_context_plan',
+                     side_effect=_reject_fixed_overflow,
+                 ):
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    _prepare_turn(
+                        db,
+                        uid,
+                        resident=resident,
+                        static_system='S' * 70001,
+                    )
+
+            self.assertEqual(raised.exception.error_code, 'context_plan_invalid')
+            self.assertEqual(resident.sent, [])
+        finally:
+            os.unlink(db)
 
     def test_gate_off_cold_and_respawn_keep_legacy_assembly_contract(self):
         for is_cold, is_respawn, turn_kind in (

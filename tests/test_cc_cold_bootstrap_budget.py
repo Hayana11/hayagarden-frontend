@@ -669,7 +669,11 @@ class ColdPreflightFenceTests(unittest.TestCase):
             'oldest_retained_message_id': config_store.get_int('HISTORY_OLDEST_RETAINED_ID', 0),
         }
         self.assertEqual(after, before)
+        self.assertEqual(ctx.exception.error_code, 'cold_bootstrap_overflow')
         self.assertTrue(ctx.exception.usage.get('cold_budget_overflow'))
+        self.assertNotIn('cold_rebuild_guard_triggered', ctx.exception.usage)
+        self.assertNotIn('cold_rebuild_guard_overflow', ctx.exception.usage)
+        self.assertNotIn('cold_rebuild_guard', ctx.exception.usage)
         self.assertEqual(resident.send_turn_calls, [])
 
     def test_effective_history_budget_zero_remaining_is_minimum_safe(self):

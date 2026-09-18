@@ -81,6 +81,9 @@ _DEFAULTS = {
     'CONTEXT_PLAN_TOKEN_BUDGET': '',
     'CONTEXT_PLAN_RESERVE_BUDGET': '',
     'CONTEXT_PLAN_RECENT_RAW_TARGET': '',
+    # CONTEXT-LIMIT-R1: independent hot/capacity/cold budget authorities.
+    'CC_CAPACITY_SWAP_PROMPT_TARGET': '90000',
+    'CC_COLD_REBUILD_GUARD': '70000',
 }
 
 

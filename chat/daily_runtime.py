@@ -1207,8 +1207,10 @@ def _context_plan_consumer_enabled() -> bool:
         return False
 
 
-def _context_plan_policy() -> tuple[Any, str]:
+def _context_plan_policy(mode: str = 'hot') -> tuple[Any, str]:
     from chat.cold_bootstrap_budget import (
+        capacity_swap_prompt_target,
+        cold_rebuild_guard,
         cold_prompt_target,
         cold_safety_margin,
     )
@@ -1218,11 +1220,20 @@ def _context_plan_policy() -> tuple[Any, str]:
         ContextBudgetPolicy,
     )
 
-    target = int(cold_prompt_target())
+    policy_mode = str(mode or 'hot').strip().lower()
+    if policy_mode in ('cold', 'respawn'):
+        target = int(cold_rebuild_guard())
+    elif policy_mode == 'capacity':
+        target = int(capacity_swap_prompt_target())
+    elif policy_mode == 'hot':
+        target = int(cold_prompt_target())
+    else:
+        raise ValueError('unknown_context_plan_mode:%s' % policy_mode)
     reserve = int(cold_safety_margin())
+    token_budget = target if policy_mode in ('cold', 'respawn') else target + reserve
     recent_raw_target = int(cc_history_token_budget())
     policy = ContextBudgetPolicy(
-        token_budget=target + reserve,
+        token_budget=token_budget,
         reserve_budget=reserve,
         recent_raw_target=recent_raw_target,
     )
@@ -1244,10 +1255,11 @@ def _build_production_context_plan(
     *,
     resident: Any,
     static_system: str,
+    mode: str = 'hot',
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
     from continuity.store import read_ready_surface
-    policy, policy_version = _context_plan_policy()
+    policy, policy_version = _context_plan_policy(mode=mode)
     store_path = _production_continuity_store_path(plan)
     surface = read_ready_surface(store_path)
     if surface.status == 'unavailable':
@@ -1310,6 +1322,22 @@ def _build_production_context_plan(
             error_code='context_plan_invalid',
             retryable=False,
         )
+    if str(mode or '').strip().lower() in ('cold', 'respawn'):
+        try:
+            plan_total_estimate = int(result.plan.total_token_estimate)
+            whole_prompt_guard = int(policy.token_budget)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise DailyRuntimeError(
+                'canonical cold ContextPlan estimate is unavailable',
+                error_code='context_plan_cold_guard_unmeasurable',
+                retryable=False,
+            ) from exc
+        if plan_total_estimate > whole_prompt_guard:
+            raise DailyRuntimeError(
+                'canonical cold ContextPlan exceeds rebuild guard',
+                error_code='context_plan_cold_guard_overflow',
+                retryable=False,
+            )
     validated_by_id = {
         str(chunk.chunk_id): (str(chunk.artifact_revision), str(chunk.body_hash))
         for chunk in surface.artifacts
@@ -2473,6 +2501,7 @@ def _prepare_hot_context_plan(
             plan,
             resident=resident,
             static_system=static_system,
+            mode='hot',
         )
     except DailyRuntimeError as exc:
         _set_hot_decision(plan, 'BLOCKED', str(exc.error_code))
@@ -3416,6 +3445,7 @@ def _assemble_plan(
             daily_plan,
             resident=resident,
             static_system=static_system,
+            mode='cold',
         )
         daily_plan.continuity_plan = context_plan
         daily_plan.continuity_chunk_bodies = dict(chunk_bodies)
@@ -4532,7 +4562,7 @@ def _apply_daily_cold_prompt_fence(
     from chat.cold_bootstrap_budget import (
         ColdBootstrapOverflow,
         NoBenefitRespawnError,
-        cold_prompt_target,
+        cold_rebuild_guard,
         effective_history_budget,
         estimate_text_tokens,
         estimate_whole_prompt,
@@ -4540,7 +4570,7 @@ def _apply_daily_cold_prompt_fence(
     )
     from chat.context_lean import cc_history_token_budget
 
-    cold_prompt_target_val = cold_prompt_target()
+    cold_rebuild_guard_val = cold_rebuild_guard()
     cold_history_budget_val = int(
         (plan.assembly.get('manifest') or {}).get('cold_history_budget')
         or cc_history_token_budget()
@@ -4549,31 +4579,41 @@ def _apply_daily_cold_prompt_fence(
         (plan.assembly.get('manifest') or {}).get('cold_history_trimmed')
     )
     cold_prompt_estimate = estimate_whole_prompt(static_system, content)
+    guard_triggered = cold_prompt_estimate > cold_rebuild_guard_val
+    if guard_triggered:
+        plan.manifest.update({
+            'cold_rebuild_guard_triggered': True,
+            'cold_rebuild_guard_before_estimate': int(cold_prompt_estimate),
+            'cold_rebuild_guard': int(cold_rebuild_guard_val),
+        })
 
     if (
-        cold_prompt_estimate > cold_prompt_target_val
+        cold_prompt_estimate > cold_rebuild_guard_val
         and getattr(plan, 'continuity_plan', None) is not None
     ):
         plan.manifest['cold_budget_overflow'] = True
+        plan.manifest['cold_rebuild_guard_overflow'] = True
         plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
-        plan.manifest['cold_prompt_target'] = int(cold_prompt_target_val)
+        plan.manifest['cold_prompt_target'] = int(cold_rebuild_guard_val)
         plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
         plan.manifest['cold_budget_mode'] = 'token_budget'
         raise ColdBootstrapOverflow(
             estimate=cold_prompt_estimate,
-            target=cold_prompt_target_val,
+            target=cold_rebuild_guard_val,
             history_budget=cold_history_budget_val,
             cold_history_trimmed=cold_history_trimmed_flag,
+            error_code='cold_rebuild_guard_overflow',
+            guard_target=cold_rebuild_guard_val,
         )
 
-    if cold_prompt_estimate > cold_prompt_target_val:
+    if cold_prompt_estimate > cold_rebuild_guard_val:
         history = plan.assembly.get('current_day_history') or []
         history_tokens_est = estimate_text_tokens(_format_history_messages(history))
         non_history_est = max(0, cold_prompt_estimate - history_tokens_est)
         new_budget = effective_history_budget(
             default_history_budget=cold_history_budget_val,
             non_history_estimate=non_history_est,
-            cold_target=cold_prompt_target_val,
+            cold_target=cold_rebuild_guard_val,
         )
         rebuilt = _rebuild_daily_assembly_with_history_budget(
             plan,
@@ -4597,23 +4637,27 @@ def _apply_daily_cold_prompt_fence(
             reality_time_anchor=reality_time_anchor,
         )
         cold_prompt_estimate = estimate_whole_prompt(static_system, content)
+        plan.manifest['cold_rebuild_guard_after_estimate'] = int(cold_prompt_estimate)
         cold_history_budget_val = new_budget
         cold_history_trimmed_flag = bool(
             (plan.assembly.get('manifest') or {}).get('cold_history_trimmed')
         )
         plan.manifest.update(dict(plan.assembly.get('manifest') or {}))
 
-    if cold_prompt_estimate > cold_prompt_target_val:
+    if cold_prompt_estimate > cold_rebuild_guard_val:
         plan.manifest['cold_budget_overflow'] = True
+        plan.manifest['cold_rebuild_guard_overflow'] = True
         plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
-        plan.manifest['cold_prompt_target'] = int(cold_prompt_target_val)
+        plan.manifest['cold_prompt_target'] = int(cold_rebuild_guard_val)
         plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
         plan.manifest['cold_budget_mode'] = 'token_budget'
         raise ColdBootstrapOverflow(
             estimate=cold_prompt_estimate,
-            target=cold_prompt_target_val,
+            target=cold_rebuild_guard_val,
             history_budget=cold_history_budget_val,
             cold_history_trimmed=cold_history_trimmed_flag,
+            error_code='cold_rebuild_guard_overflow',
+            guard_target=cold_rebuild_guard_val,
         )
 
     pending_respawn_reason = getattr(resident, 'pending_respawn_reason', None)
@@ -4643,7 +4687,9 @@ def _apply_daily_cold_prompt_fence(
         note_cold_estimate(cold_prompt_estimate)
 
     plan.manifest['cold_prompt_estimate'] = int(cold_prompt_estimate)
-    plan.manifest['cold_prompt_target'] = int(cold_prompt_target_val)
+    plan.manifest['cold_prompt_target'] = int(cold_rebuild_guard_val)
+    plan.manifest['cold_rebuild_guard'] = int(cold_rebuild_guard_val)
+    plan.manifest['cold_rebuild_guard_overflow'] = False
     plan.manifest['cold_history_budget'] = int(cold_history_budget_val)
     plan.manifest['cold_history_trimmed'] = bool(cold_history_trimmed_flag)
     plan.manifest['cold_budget_mode'] = 'token_budget'
@@ -4690,6 +4736,7 @@ def _attempt_capacity_swap_before_stdin(
                 plan,
                 resident=None,
                 static_system=target_system,
+                mode='capacity',
             )
             plan.capacity_context_plan = context_plan
             plan.capacity_context_chunk_bodies = dict(chunk_bodies)

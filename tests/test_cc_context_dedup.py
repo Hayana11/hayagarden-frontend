@@ -990,6 +990,24 @@ class ResidentRespawnTests(unittest.TestCase):
                 spawn.assert_called()
                 self.assertEqual(spawn.call_args.kwargs.get('reason'), 'turn_limit')
 
+    def test_r1_hot_thresholds_and_turn_limit_defaults(self):
+        def decide(*, context, turns):
+            sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
+            sess._proc = FakeProc([])
+            sess._cold = False
+            sess._system_text = 'STATIC'
+            sess._last_used = 10**12
+            sess._last_round_context = context
+            sess._resident_turn_count = turns
+            sess._turns_since_respawn = 5
+            with mock.patch('cc_resident._cfg_int', side_effect=lambda key, default: default):
+                return sess._decide_respawn_reason('STATIC')
+
+        self.assertIsNone(decide(context=149_999, turns=1))
+        self.assertEqual(decide(context=150_000, turns=1), 'soft_context')
+        self.assertEqual(decide(context=180_000, turns=1), 'hard_context')
+        self.assertEqual(decide(context=10_000, turns=45), 'turn_limit')
+
     def test_spawn_resets_snapshots(self):
         sess = ResidentSession('/tmp', '', '/tmp/cc-tools.json')
         sess._last_state_snapshot = {'lights': '开'}

@@ -42,15 +42,25 @@ def _cfg_int(key: str, default: int) -> int:
 
 
 def cold_hard_limit() -> int:
-    return _cfg_int('CC_CONTEXT_HARD_LIMIT', 120_000)
+    return _cfg_int('CC_CONTEXT_HARD_LIMIT', 180_000)
 
 
 def cold_soft_limit() -> int:
-    return _cfg_int('CC_CONTEXT_SOFT_LIMIT', 90_000)
+    return _cfg_int('CC_CONTEXT_SOFT_LIMIT', 150_000)
 
 
 def cold_safety_margin() -> int:
     return _cfg_int('CC_COLD_BOOTSTRAP_SAFETY_MARGIN', DEFAULT_SAFETY_MARGIN)
+
+
+def capacity_swap_prompt_target() -> int:
+    """Independent whole-prompt budget authority for Capacity Swap."""
+    return max(1, _cfg_int('CC_CAPACITY_SWAP_PROMPT_TARGET', 90_000))
+
+
+def cold_rebuild_guard() -> int:
+    """Maximum cold whole-prompt estimate allowed at provider stdin."""
+    return max(1, _cfg_int('CC_COLD_REBUILD_GUARD', 70_000))
 
 
 def cold_prompt_target() -> int:
@@ -157,6 +167,8 @@ class ColdBootstrapOverflow(RuntimeError):
         history_budget: int,
         usage=None,
         cold_history_trimmed=None,
+        error_code='cold_bootstrap_overflow',
+        guard_target=None,
     ):
         super().__init__(
             'cold_bootstrap_overflow: estimate=%d target=%d history_budget=%d'
@@ -165,6 +177,7 @@ class ColdBootstrapOverflow(RuntimeError):
         self.estimate = int(estimate)
         self.target = int(target)
         self.history_budget = int(history_budget)
+        self.error_code = str(error_code or 'cold_bootstrap_overflow')
         from cc_resident import empty_usage
 
         if usage is None:
@@ -175,6 +188,10 @@ class ColdBootstrapOverflow(RuntimeError):
         usage['cold_prompt_target'] = int(target)
         usage['cold_history_budget'] = int(history_budget)
         usage['cold_budget_mode'] = 'token_budget'
+        if guard_target is not None:
+            usage['cold_rebuild_guard_triggered'] = True
+            usage['cold_rebuild_guard_overflow'] = True
+            usage['cold_rebuild_guard'] = int(guard_target)
         if cold_history_trimmed is not None:
             usage['cold_history_trimmed'] = bool(cold_history_trimmed)
         self.usage = usage
