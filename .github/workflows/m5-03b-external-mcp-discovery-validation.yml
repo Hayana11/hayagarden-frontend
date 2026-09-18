@@ -1,13 +1,6 @@
 name: M5-03B registry to discovery validation
 
 on:
-  pull_request:
-    paths:
-      - 'tools/external_mcp_discovery.py'
-      - 'tools/external_mcp_discovery_bridge.mjs'
-      - 'tests/test_external_mcp_discovery.py'
-      - 'tests/test_external_mcp_discovery_bridge.mjs'
-      - '.github/workflows/m5-03b-external-mcp-discovery-validation.yml'
   workflow_dispatch:
 
 permissions:
