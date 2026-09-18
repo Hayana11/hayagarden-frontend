@@ -54,6 +54,7 @@ import {
   applyToolResult,
   createLiveState,
   isTextCaretActive,
+  replaceWithCanonicalProjection,
   upsertToolUse,
   type LiveSegment,
   type LiveState,
@@ -1142,6 +1143,10 @@ export function ChatScreen() {
           onToolResult: (idx, tc) => {
             updateLive((l) => applyToolResult(l, idx, tc));
             scrollBottom({ source: 'stream-follow' });
+          },
+          onTurnReconcile: (projection) => {
+            updateLive((l) => replaceWithCanonicalProjection(l, projection));
+            scrollBottom(true);
           },
           onNotice: (s) => showToast(s),
         },

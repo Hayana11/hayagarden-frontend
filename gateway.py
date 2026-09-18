@@ -6524,6 +6524,7 @@ def _stream_cc_daily_soft_window(
     import hashlib
     import logging
     from moments_turn import DEFAULT_CONVERSATION_ID
+    from chat.canonical_turn import CanonicalTurnError, projection_hash
     from chat import daily_context as _daily_ctx
     from chat import daily_runtime as _daily_rt
     from chat import context_window as _cw
@@ -6788,6 +6789,21 @@ def _stream_cc_daily_soft_window(
 
         if deferred_payload is not None:
             return
+
+        canonical = _daily_rt.build_canonical_turn_for_plan(
+            _daily_plan,
+            mode=_display_thinking_mode,
+            stop_reason=str((cc_usage or {}).get('stop_reason') or 'end_turn'),
+        )
+        text = canonical.content
+        thinking = canonical.thinking
+        cc_usage = dict(cc_usage or {})
+        cc_usage['canonical_sha256'] = canonical.projection_hash
+        cc_usage['canonical_content_length'] = len(canonical.content)
+        cc_usage['canonical_provider_round_count'] = len(canonical.provider_rounds)
+        cc_usage['canonical_provider_rounds'] = [dict(row) for row in canonical.provider_rounds]
+        cc_usage['transcript_identity'] = canonical.transcript_identity
+
         if not str(text or '').strip():
             _daily_rt.handle_provider_failure(
                 _daily_plan,
@@ -6809,21 +6825,21 @@ def _stream_cc_daily_soft_window(
                 'cache_creation': cc_cache_create,
             }, ensure_ascii=False) if (cc_cache_read or cc_cache_create) else ''
         )
-        _cc_text, _cc_choices = _extract_choices(text)
+        _cc_text, _cc_choices = canonical.content, list(canonical.choices)
         if _cc_choices and not _cc_text:
             _cc_text = '[选项: ' + ' / '.join(_cc_choices) + ']'
         try:
             assistant_id = _daily_rt.persist_daily_assistant_for_plan(
                 _daily_plan,
                 content=_cc_text,
-                thinking=thinking or '',
+                thinking=canonical.thinking or '',
                 tool_calls=json.dumps(
-                    [{k: v for k, v in tc.items() if k != 'id'} for tc in cc_tool_calls],
+                    [dict(tc) for tc in canonical.tool_calls],
                     ensure_ascii=False,
-                ) if cc_tool_calls else '',
+                ) if canonical.tool_calls else '',
                 cache_info=_cache_info_json,
                 choices=json.dumps(_cc_choices, ensure_ascii=False) if _cc_choices else '',
-                display_segments=display_segments.to_json(),
+                display_segments=canonical.display_segments,
             )
             assistant_persisted = True
         except _daily_ctx.ConflictError as exc:
@@ -6878,7 +6894,60 @@ def _stream_cc_daily_soft_window(
             return
 
         turn_terminal = True
-        yield ('persisted', text, thinking)
+        live_content, _live_choices = _extract_choices(''.join(text_acc).strip())
+        if _live_choices and not live_content:
+            live_content = '[选项: ' + ' / '.join(_live_choices) + ']'
+        live_projection = projection_hash(
+            live_content,
+            display_segments.as_list(),
+            thinking=''.join(think_acc),
+            tool_calls=cc_tool_calls,
+            choices=_live_choices,
+        )
+        if live_projection != canonical.projection_hash:
+            logging.getLogger(__name__).warning(
+                'turn_projection_mismatch live_length=%s canonical_length=%s '
+                'live_sha256=%s canonical_sha256=%s provider_round_count=%s '
+                'mapping_status=%s finality_status=%s message_id=%s request_id=%s '
+                'reconcile_applied=true',
+                len(live_content),
+                len(canonical.content),
+                live_projection,
+                canonical.projection_hash,
+                len(canonical.provider_rounds),
+                manifest.get('transcript_mapping_status'),
+                manifest.get('transcript_finality_status'),
+                assistant_id,
+                _daily_plan.request_id,
+            )
+            yield 'data: ' + json.dumps({
+                't': 'turn_reconcile',
+                'd': {
+                    'content': canonical.content,
+                    'thinking': canonical.thinking,
+                    'display_segments': json.loads(canonical.display_segments),
+                    'tool_calls': [dict(tc) for tc in canonical.tool_calls],
+                    'choices': list(canonical.choices),
+                    'canonical_sha256': canonical.projection_hash,
+                    'assistant_message_id': assistant_id,
+                },
+            }, ensure_ascii=False) + SSE_END
+        else:
+            logging.getLogger(__name__).info(
+                'turn_projection_confirmed canonical_sha256=%s message_id=%s request_id=%s',
+                canonical.projection_hash,
+                assistant_id,
+                _daily_plan.request_id,
+            )
+            yield 'data: ' + json.dumps({
+                't': 'turn_final',
+                'd': {
+                    'status': 'confirmed',
+                    'canonical_sha256': canonical.projection_hash,
+                    'assistant_message_id': assistant_id,
+                },
+            }, ensure_ascii=False) + SSE_END
+        yield ('persisted', canonical.content, canonical.thinking)
 
         _write_session_memo(_uc, _cc_text)
         try:
@@ -6915,8 +6984,27 @@ def _stream_cc_daily_soft_window(
                         _usage_evt[_k] = cc_usage[_k]
             yield 'data: ' + json.dumps(_usage_evt) + SSE_END
         yield 'data: ' + json.dumps({
-            't': 'done', 'ok': True, 'assistant_message_id': assistant_id,
+            't': 'done',
+            'ok': True,
+            'assistant_message_id': assistant_id,
+            'canonical_sha256': canonical.projection_hash,
         }) + SSE_END
+        return None
+    except CanonicalTurnError as exc:
+        if _daily_plan:
+            _daily_rt.handle_provider_failure(
+                _daily_plan,
+                error_code=str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
+                resident=_CC_RESIDENT,
+            )
+        turn_terminal = True
+        yield 'data: ' + json.dumps({
+            't': 'err',
+            'd': str(exc),
+            'retryable': False,
+            'code': str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
+        }, ensure_ascii=False) + SSE_END
+        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True

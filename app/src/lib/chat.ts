@@ -6,6 +6,7 @@
 //     trace_summary/usage/notice/done/err (家里 t/d 信封，chatnest 语义)
 import { chatDayKeyFromLocalTs } from './dailySoftWindow';
 import { sseUrl } from './http';
+import type { CanonicalLiveProjection } from './chatLiveTimeline';
 
 export function isFyAuthor(a: string | null | undefined): boolean {
   return ['fyodor', 'assistant', 'claude'].includes((a || '').toLowerCase());
@@ -364,6 +365,8 @@ export interface StreamHandlers {
   onTraceSummary?: (s: string) => void;
   onUsage?: (u: ChatUsage) => void;
   onNotice?: (s: string) => void;
+  onTurnFinal?: (canonicalSha256: string) => void;
+  onTurnReconcile?: (projection: CanonicalLiveProjection) => void;
 }
 
 export interface StreamResult {
@@ -371,6 +374,7 @@ export interface StreamResult {
   error?: string;
   deferredTool?: ChatToolCall;
   assistantMessageId?: number;
+  canonicalSha256?: string;
 }
 
 interface SseEvent {
@@ -391,6 +395,7 @@ interface SseEvent {
   resident_turn_count?: number;
   respawn_reason?: string;
   assistant_message_id?: number;
+  canonical_sha256?: string;
 }
 
 /**
@@ -508,13 +513,29 @@ export async function streamChatReply(
           case 'notice':
             handlers.onNotice?.(String(ev.d ?? ''));
             break;
+          case 'turn_final': {
+            const detail = ev.d && typeof ev.d === 'object'
+              ? ev.d as { canonical_sha256?: unknown }
+              : {};
+            const hash = String(detail.canonical_sha256 || ev.canonical_sha256 || '');
+            handlers.onTurnFinal?.(hash);
+            break;
+          }
+          case 'turn_reconcile':
+            if (ev.d && typeof ev.d === 'object') {
+              handlers.onTurnReconcile?.(ev.d as CanonicalLiveProjection);
+            }
+            break;
           case 'done': {
             const assistantMessageId = ev.ok === false && ev.assistant_message_id === undefined
               ? undefined
               : Number.isSafeInteger(ev.assistant_message_id)
                 ? Number(ev.assistant_message_id)
                 : undefined;
-            result = { ok: ev.ok !== false, deferredTool, assistantMessageId };
+            const canonicalSha256 = typeof ev.canonical_sha256 === 'string'
+              ? ev.canonical_sha256
+              : undefined;
+            result = { ok: ev.ok !== false, deferredTool, assistantMessageId, canonicalSha256 };
             break;
           }
           case 'err':
