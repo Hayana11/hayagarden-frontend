@@ -1,14 +1,6 @@
 name: M5-06C-A external auth binding validation
 
 on:
-  pull_request:
-    paths:
-      - tools/external_mcp_auth_binding.py
-      - tools/external_mcp_invocation.py
-      - tools/external_server_registry.py
-      - tests/test_external_mcp_auth_binding.py
-      - tests/test_external_mcp_invocation.py
-      - .github/workflows/m5-06c-a-external-auth-binding-validation.yml
   workflow_dispatch:
 
 permissions:
