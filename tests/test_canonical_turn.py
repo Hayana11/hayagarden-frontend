@@ -237,6 +237,17 @@ class CanonicalTurnTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.error_code, 'provider_terminal_receipt_invalid')
 
+    def test_receipt_stop_reason_mismatch_fails_closed(self):
+        with self.assertRaises(CanonicalTurnError) as raised:
+            self._build(
+                self._receipt_rows(),
+                terminal_receipt=self._receipt(stop_reason='tool_deferred'),
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'provider_terminal_receipt_invalid',
+        )
+
     def test_receipt_pending_tool_fails_closed(self):
         with self.assertRaises(CanonicalTurnError) as raised:
             self._build(
