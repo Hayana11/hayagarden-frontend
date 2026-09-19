@@ -204,7 +204,8 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
         self.assertEqual(plan.gate_reason, 'ok')
         provenance = plan.planner_provenance or {}
         self.assertEqual(provenance.get('suggested_action'), 'message')
-        self.assertEqual(provenance.get('primary_drive'), 'attachment')
+        # Basic authoritative Planner deliberately omits drive inference.
+        self.assertIsNone(provenance.get('primary_drive'))
 
         # B2=1 B3=0 → message legacy
         with mock.patch(
