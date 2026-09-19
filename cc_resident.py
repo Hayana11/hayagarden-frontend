@@ -12,6 +12,7 @@ import copy
 from dataclasses import dataclass
 import json
 import logging
+import math
 import os
 import select
 import subprocess
@@ -252,13 +253,24 @@ class ProviderTerminalReceipt:
 
 
 class ResidentTurnUsage(dict):
-    """Existing usage mapping with a typed, non-serialized terminal receipt."""
+    """Existing usage mapping with typed, non-serialized turn metadata."""
 
     terminal_receipt: ProviderTerminalReceipt | None
+    _candidate_cache_refresh_at: float | None
+    _candidate_cache_refresh_monotonic: float | None
 
-    def __init__(self, *args, terminal_receipt=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        terminal_receipt=None,
+        candidate_cache_refresh_at=None,
+        candidate_cache_refresh_monotonic=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.terminal_receipt = terminal_receipt
+        self._candidate_cache_refresh_at = candidate_cache_refresh_at
+        self._candidate_cache_refresh_monotonic = candidate_cache_refresh_monotonic
 
 
 class ProviderTerminalTracker:
@@ -630,6 +642,10 @@ class ResidentSession:
         self._turns_since_rel_sent = 0
         self._last_rel_mood = None
         self._keepwarm_lease_expires_at = None
+        # Provider cache freshness is generation-scoped and is committed only
+        # by route-specific success boundaries, never by send_turn itself.
+        self._last_cache_refresh_at = None
+        self._last_cache_refresh_monotonic = None
         self._tool_surface_snapshot = {}
 
     def _build_spawn_tool_flags(self, *, env=None):
@@ -1308,6 +1324,38 @@ class ResidentSession:
             return None
         return max(0.0, time.time() - float(self._last_used))
 
+    def commit_cache_freshness(self, *, wall_at, monotonic_at):
+        """Atomically commit one proven provider-request start timestamp.
+
+        The caller must invoke this only after its route-specific terminal and
+        transcript/finality proof. Candidate capture in send_turn is not a
+        commit and never mutates these fields.
+        """
+        try:
+            wall_value = float(wall_at)
+            monotonic_value = float(monotonic_at)
+        except (TypeError, ValueError):
+            return False
+        if (
+            not math.isfinite(wall_value)
+            or not math.isfinite(monotonic_value)
+            or wall_value <= 0.0
+            or monotonic_value < 0.0
+        ):
+            return False
+        with self._lock:
+            self._last_cache_refresh_at = wall_value
+            self._last_cache_refresh_monotonic = monotonic_value
+        return True
+
+    @property
+    def last_cache_refresh_at(self):
+        return self._last_cache_refresh_at
+
+    @property
+    def last_cache_refresh_monotonic(self):
+        return self._last_cache_refresh_monotonic
+
     def _maybe_set_session_id(self, data):
         if not isinstance(data, dict):
             return
@@ -1468,6 +1516,10 @@ class ResidentSession:
             except Exception:
                 # Diagnostics must never change the provider send contract.
                 pass
+        # This is a local candidate only. It is deliberately captured before
+        # stdin.write and committed only by the route-specific success proof.
+        candidate_cache_refresh_at = time.time()
+        candidate_cache_refresh_monotonic = time.monotonic()
         try:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
@@ -1976,6 +2028,8 @@ class ResidentSession:
         usage = ResidentTurnUsage(
             usage,
             terminal_receipt=terminal_receipt,
+            candidate_cache_refresh_at=candidate_cache_refresh_at,
+            candidate_cache_refresh_monotonic=candidate_cache_refresh_monotonic,
         )
 
         self._cold = False
