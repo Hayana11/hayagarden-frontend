@@ -170,6 +170,7 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
                 skill_view=self.skill,
                 wake_run_id='b21-run-1',
                 decision_attempt_id='da-b21-legacy',
+                mode='nightwatch',
                 get_db_fn=self._get_db,
                 now=T_OBS,
                 invoke_fn=self._message_invoke_for('b21-run-1'),
