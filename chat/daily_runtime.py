@@ -3892,6 +3892,7 @@ def reprepare_after_capacity_swap(
 _CAPACITY_SWAP_PROCESS_IDENTITY = (
     '_proc', '_system_text', '_session_id', '_cold', '_generation',
     '_tool_profile', '_model_identity', '_history_rewrite_epoch', '_last_used',
+    '_last_cache_refresh_at', '_last_cache_refresh_monotonic',
 )
 _CAPACITY_SWAP_PUBLIC_MIRRORS = (
     'session_id', 'generation', 'tool_profile', 'cwd', '_peek_reason',

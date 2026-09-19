@@ -387,6 +387,8 @@ def invoke_renderer_cc_hot(
 
     text = ''
     usage: dict[str, Any] = {}
+    candidate_cache_refresh_at = None
+    candidate_cache_refresh_monotonic = None
     saw_done = False
     saw_tool = False
     payload = build_shared_renderer_user_payload(renderer_input)
@@ -417,7 +419,14 @@ def invoke_renderer_cc_hot(
         if isinstance(raw, tuple) and len(raw) >= 3:
             text = str(raw[0] or '')
             if isinstance(raw[2], dict):
-                usage = dict(raw[2])
+                usage_obj = raw[2]
+                candidate_cache_refresh_at = getattr(
+                    usage_obj, '_candidate_cache_refresh_at', None,
+                )
+                candidate_cache_refresh_monotonic = getattr(
+                    usage_obj, '_candidate_cache_refresh_monotonic', None,
+                )
+                usage = dict(usage_obj)
         else:
             text = str(raw or '')
     if not saw_done:
@@ -434,7 +443,7 @@ def invoke_renderer_cc_hot(
         raise RuntimeError('uh_a1_shared_renderer_jsonl_finality_missing')
     if jsonl_finality.get('stream_totals_match') is not True:
         raise RuntimeError('uh_a1_shared_renderer_jsonl_not_final')
-    return {
+    result = {
         'text': text,
         'provider': 'claude_code',
         'model_identity': str(
@@ -445,6 +454,15 @@ def invoke_renderer_cc_hot(
         'transcript_finality': dict(jsonl_finality),
         'shared_resident': True,
     }
+    if (
+        candidate_cache_refresh_at is not None
+        and candidate_cache_refresh_monotonic is not None
+    ):
+        result['_cache_refresh_candidate_at'] = candidate_cache_refresh_at
+        result['_cache_refresh_candidate_monotonic'] = (
+            candidate_cache_refresh_monotonic
+        )
+    return result
 
 
 def _try_invoke_shared_renderer(
@@ -569,6 +587,15 @@ def _try_invoke_shared_renderer(
             raise RuntimeError(
                 'uh_a1_transcript_watermark_commit_failed'
             ) from exc
+        candidate_wall = result.pop('_cache_refresh_candidate_at', None)
+        candidate_monotonic = result.pop(
+            '_cache_refresh_candidate_monotonic', None,
+        )
+        if candidate_wall is not None and candidate_monotonic is not None:
+            resident.commit_cache_freshness(
+                wall_at=candidate_wall,
+                monotonic_at=candidate_monotonic,
+            )
         result['_shared_delivery_fence'] = delivery_fence
         return result
     except _SharedPreTurnUnavailable as exc:

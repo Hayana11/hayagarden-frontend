@@ -4533,6 +4533,13 @@ def _cc_resident_stream_gen(
             tool_result_chunks.append(str(payload.get('result') or ''))
         if evt == 'done' and isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
             raw_text, thinking, usage = payload[0], payload[1], payload[2]
+            candidate_cache_refresh_at = getattr(
+                usage, '_candidate_cache_refresh_at', None,
+            )
+            candidate_cache_refresh_monotonic = getattr(
+                usage, '_candidate_cache_refresh_monotonic', None,
+            )
+            terminal_receipt = getattr(usage, 'terminal_receipt', None)
             claims = payload[3] if len(payload) >= 4 else {}
             try:
                 if tool_result_chunks:
@@ -4617,6 +4624,14 @@ def _cc_resident_stream_gen(
                 usage['rel_context'] = rel_context_usage
                 if rel_sources is not None:
                     usage['rel_sources'] = rel_sources
+            # Observation assembly may copy the dict. Re-wrap it so the
+            # candidate remains internal metadata and never enters cache_info.
+            usage = cc_resident.ResidentTurnUsage(
+                usage,
+                terminal_receipt=terminal_receipt,
+                candidate_cache_refresh_at=candidate_cache_refresh_at,
+                candidate_cache_refresh_monotonic=candidate_cache_refresh_monotonic,
+            )
             yield evt, (raw_text, thinking, usage, claims)
             continue
         yield evt, payload
@@ -4845,6 +4860,7 @@ def _run_unified_normal_main_chat_turn(
         tool_calls = []
         tool_decisions = {}
         usage = {}
+        wake_cache_refresh_candidate = None
         saw_done = False
         for evt, payload in filter_display_thinking_events(
             guard_cc_generation(guarded_events()),
@@ -4895,7 +4911,12 @@ def _run_unified_normal_main_chat_turn(
             elif evt == 'done':
                 saw_done = True
                 if isinstance(payload, tuple) and len(payload) >= 3:
-                    usage = dict(payload[2]) if isinstance(payload[2], dict) else {}
+                    usage_obj = payload[2] if isinstance(payload[2], dict) else {}
+                    wake_cache_refresh_candidate = (
+                        getattr(usage_obj, '_candidate_cache_refresh_at', None),
+                        getattr(usage_obj, '_candidate_cache_refresh_monotonic', None),
+                    )
+                    usage = dict(usage_obj)
                     text_acc = [str(payload[0] or '')]
                     thinking_acc = [str(payload[1] or '')]
         if not saw_done:
@@ -4963,6 +4984,15 @@ def _run_unified_normal_main_chat_turn(
             jsonl_finality=jsonl_finality,
         )
         result_cache_info['transcript_skip'] = transcript_skip
+        if (
+            wake_cache_refresh_candidate is not None
+            and wake_cache_refresh_candidate[0] is not None
+            and wake_cache_refresh_candidate[1] is not None
+        ):
+            resident.commit_cache_freshness(
+                wall_at=wake_cache_refresh_candidate[0],
+                monotonic_at=wake_cache_refresh_candidate[1],
+            )
         _wake_live_trace(
             trace_id,
             'WATERMARK_COMMIT',
@@ -6702,6 +6732,7 @@ def _stream_cc_daily_soft_window(
         cc_tool_calls = []
         display_segments = DisplaySegmentAccumulator()
         deferred_payload = None
+        cache_refresh_candidate = None
         _daily_resident = (
             _RequestRealityResident(_CC_RESIDENT, request_reality_context)
             if request_reality_context else _CC_RESIDENT
@@ -6779,6 +6810,10 @@ def _stream_cc_daily_soft_window(
             elif evt == 'done':
                 if isinstance(payload, tuple) and len(payload) >= 3 and isinstance(payload[2], dict):
                     raw_text, thinking, cc_usage = payload[0], payload[1], payload[2]
+                    cache_refresh_candidate = (
+                        getattr(cc_usage, '_candidate_cache_refresh_at', None),
+                        getattr(cc_usage, '_candidate_cache_refresh_monotonic', None),
+                    )
                 else:
                     raw_text, thinking, cc_cache_read, cc_cache_create = payload
                     cc_usage = {
@@ -6892,6 +6927,16 @@ def _stream_cc_daily_soft_window(
             }) + SSE_END
             yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
+
+        if (
+            cache_refresh_candidate is not None
+            and cache_refresh_candidate[0] is not None
+            and cache_refresh_candidate[1] is not None
+        ):
+            _CC_RESIDENT.commit_cache_freshness(
+                wall_at=cache_refresh_candidate[0],
+                monotonic_at=cache_refresh_candidate[1],
+            )
 
         turn_terminal = True
         live_content, _live_choices = _extract_choices(''.join(text_acc).strip())
