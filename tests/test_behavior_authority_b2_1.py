@@ -403,26 +403,41 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
         self.assertNotIn('b2_gate_blocked', legacy_tail)
 
 
-    def test_baseline_r1_reports_planner_view_timestamp_boundary(self):
+    def test_planner_view_timestamp_boundary_accepts_canonical_view(self):
         from chat.authoritative_planner import run_authoritative_cc_planner
+
+        status, decision = run_authoritative_cc_planner(
+            planner_input=self.view,
+            wake_run_id='b21-timestamp-boundary',
+            decision_attempt_id='b21-timestamp-boundary-attempt',
+            invoke_fn=self._none_invoke_for('b21-timestamp-boundary'),
+        )
+        self.assertEqual(status, 'valid')
+        self.assertEqual(decision.get('action_candidate'), 'none')
+
+    def test_invalid_planner_timestamp_fails_closed(self):
+        from chat.authoritative_planner import run_authoritative_cc_planner
+
+        invalid_view = type(
+            'InvalidPlannerView',
+            (),
+            {'observed_at': 'not-a-timestamp'},
+        )()
 
         def _must_not_invoke(**kwargs):
             raise AssertionError('provider invocation must not occur')
 
         status, decision = run_authoritative_cc_planner(
-            planner_input=self.view,
-            wake_run_id='b21-baseline-probe',
-            decision_attempt_id='b21-baseline-probe-attempt',
+            planner_input=invalid_view,
+            wake_run_id='b21-invalid-timestamp',
+            decision_attempt_id='b21-invalid-timestamp-attempt',
             invoke_fn=_must_not_invoke,
         )
-        print(
-            'BASELINE_R1_PROBE:',
-            status,
-            decision.get('error'),
-            decision.get('detail'),
-        )
         self.assertEqual(status, 'error')
-        self.assertEqual(decision.get('error'), "'str' object has no attribute 'isoformat'")
+        self.assertEqual(
+            decision.get('error'),
+            'planner_observed_at_invalid',
+        )
 
 
 if __name__ == '__main__':
