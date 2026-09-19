@@ -557,21 +557,51 @@ class StaleCacheDailyRuntimeTests(unittest.TestCase):
 
     def test_stronger_reason_is_runtime_authority_over_stale(self):
         resident = _RuntimeDailyResident(existing_reason="turn_limit")
-        session = _minimal_resident()
-        session._decide_respawn_reason = mock.Mock(return_value="turn_limit")
-        session._spawn = mock.Mock()
-
-        self.assertEqual(
-            resident.peek_respawn_reason(
-                "STATIC",
-                allow_stale_cache_guard=True,
-            ),
-            "turn_limit",
+        plan = _runtime_plan()
+        replacement = _runtime_replacement_plan()
+        self._bind_initial_plan(plan)
+        stack, replacement_calls, reprepare_spy = _daily_runtime_stack(
+            resident, replacement,
         )
-        self.assertFalse(session.ensure_stale_cache_guard("STATIC", {}))
-        session._spawn.assert_not_called()
+        decisions = []
+        original_decision = dr.peek_registered_respawn_decision
+
+        def _record_decision(*args, **kwargs):
+            result = original_decision(*args, **kwargs)
+            decisions.append(dict(result))
+            return result
+
+        with stack:
+            with mock.patch.object(
+                dr,
+                "peek_registered_respawn_decision",
+                side_effect=_record_decision,
+            ):
+                events = list(dr.ensure_resident_and_stream(
+                    plan,
+                    resident=resident,
+                    env={},
+                    static_system="STATIC",
+                ))
+
+        done = [payload for kind, payload in events if kind == "done"][0]
+        usage = done[2]
+        self.assertEqual(decisions[0]["reason"], "turn_limit")
+        self.assertEqual(decisions[0]["capacity_swap"], False)
+        self.assertEqual(
+            sum(1 for decision in decisions if decision["requires_respawn"]),
+            1,
+        )
+        self.assertEqual(len(replacement_calls), 1)
+        self.assertEqual(reprepare_spy.call_count, 1)
         self.assertEqual(resident.stale_specific_path_calls, 0)
-        self.assertEqual(resident.send_count, 0)
+        self.assertEqual(resident.old_resident_send_count, 0)
+        self.assertEqual(resident.new_resident_send_count, 1)
+        self.assertEqual(resident.send_count, 1)
+        self.assertNotEqual(
+            usage["respawn_reason"],
+            "stale_cache_guard",
+        )
 
 
 
