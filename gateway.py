@@ -4041,6 +4041,28 @@ class _RequestRealityResident:
         setattr(self._resident, name, value)
 
 
+def _cc_stale_guard_before_resident_reuse(system_text, env):
+    """Run the opt-in stale gate before the resident can receive this turn."""
+    peek = getattr(_CC_RESIDENT, 'peek_respawn_reason', None)
+    if not callable(peek):
+        return False
+    try:
+        reason = peek(
+            system_text,
+            allow_stale_cache_guard=True,
+        )
+    except TypeError as exc:
+        if 'allow_stale_cache_guard' not in str(exc):
+            raise
+        return False
+    if reason != 'stale_cache_guard':
+        return False
+    ensure = getattr(_CC_RESIDENT, 'ensure_stale_cache_guard', None)
+    if not callable(ensure):
+        return False
+    return bool(ensure(system_text, env))
+
+
 def _cc_resident_stream_gen(
     messages, *, user_turn=True, history_stats=None, is_cold=None,
     rebuild_messages_fn=None, pending_respawn_reason=None,
@@ -4130,10 +4152,10 @@ def _cc_resident_stream_gen(
         _CC_RESIDENT, 'peek_idle_seconds', lambda: None
     )()
     if is_cold is None:
-        is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
-        _stale_guard = getattr(_CC_RESIDENT, 'ensure_stale_cache_guard', None)
-        if callable(_stale_guard) and _stale_guard(full_system, env):
+        if _cc_stale_guard_before_resident_reuse(full_system, env):
             is_cold = True
+        else:
+            is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
 
     relationship_text = ''
     rel_context_usage = None
@@ -7337,23 +7359,21 @@ def chat_stream():
                     ):
                         _cc_is_cold = False
                     else:
-                        _cc_is_cold = _CC_RESIDENT.ensure_alive(
-                            _static_parts['full_system'], _cc_env,
-                        )
-                        if _cc_is_cold:
-                            _cc_pending_respawn_reason = getattr(
-                                _CC_RESIDENT, 'pending_respawn_reason', None,
-                            )
-                        _stale_guard = getattr(
-                            _CC_RESIDENT, 'ensure_stale_cache_guard', None,
-                        )
-                        if callable(_stale_guard) and _stale_guard(
+                        if _cc_stale_guard_before_resident_reuse(
                             _static_parts['full_system'], _cc_env,
                         ):
                             _cc_is_cold = True
                             _cc_pending_respawn_reason = getattr(
                                 _CC_RESIDENT, 'pending_respawn_reason', None,
                             )
+                        else:
+                            _cc_is_cold = _CC_RESIDENT.ensure_alive(
+                                _static_parts['full_system'], _cc_env,
+                            )
+                            if _cc_is_cold:
+                                _cc_pending_respawn_reason = getattr(
+                                    _CC_RESIDENT, 'pending_respawn_reason', None,
+                                )
                     _resident_files = (
                         set()
                         if _cc_is_cold else
