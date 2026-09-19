@@ -556,7 +556,7 @@ class StaleCacheDailyRuntimeTests(unittest.TestCase):
         self.assertEqual(resident.stale_specific_path_calls, 0)
 
     def test_stronger_reason_is_runtime_authority_over_stale(self):
-        resident = _RuntimeDailyResident(existing_reason="turn_limit")
+        resident = _RuntimeDailyResident(existing_reason="history_rewrite")
         plan = _runtime_plan()
         replacement = _runtime_replacement_plan()
         self._bind_initial_plan(plan)
@@ -586,7 +586,7 @@ class StaleCacheDailyRuntimeTests(unittest.TestCase):
 
         done = [payload for kind, payload in events if kind == "done"][0]
         usage = done[2]
-        self.assertEqual(decisions[0]["reason"], "turn_limit")
+        self.assertEqual(decisions[0]["reason"], "history_rewrite")
         self.assertEqual(decisions[0]["capacity_swap"], False)
         self.assertEqual(
             sum(1 for decision in decisions if decision["requires_respawn"]),
