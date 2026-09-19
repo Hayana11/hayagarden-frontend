@@ -170,7 +170,7 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
             self.assertTrue(effective_b3_enabled())
 
     def test_case1_message_happy_path_and_routing(self):
-        """Case 1: message ALLOW → Renderer → executor → Planner provenance Settlement."""
+        """Case 1: message ALLOW → Renderer → state-free basic Action."""
         view1 = freeze_planner_state_view(
             db_path=self.db_path,
             observed_at=T_OBS,
@@ -310,9 +310,10 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
             'normal',
             self._get_db,
             wake_run_id='b31-run-1',
-            settle_fired_drive=provenance.get('primary_drive'),
-            settle_provenance_present=True,
+            settle_fired_drive=None,
+            settle_provenance_present=False,
             settle_user_idle_hours=3.0,
+            settlement_required=False,
             cache_info={
                 'provider': 'claude_code',
                 'source': 'wake',
@@ -323,8 +324,8 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
             },
         )
         self.assertTrue(out['delivered'])
-        self.assertTrue(out['settled'])
-        self.assertEqual(out['settle_status'], 'applied')
+        self.assertFalse(out['settled'])
+        self.assertIsNone(out['settle_status'])
 
         conn = sqlite3.connect(self.db_path)
         self.assertEqual(
@@ -350,7 +351,7 @@ class BehaviorAuthorityB31Tests(unittest.TestCase):
                 "SELECT COUNT(*) FROM internal_state_events "
                 "WHERE event_key='wake_outcome:b31-run-1'",
             ).fetchone()[0],
-            1,
+            0,
         )
         conn.close()
 
