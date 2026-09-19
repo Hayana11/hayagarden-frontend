@@ -403,5 +403,27 @@ class BehaviorAuthorityB21Tests(unittest.TestCase):
         self.assertNotIn('b2_gate_blocked', legacy_tail)
 
 
+    def test_baseline_r1_reports_planner_view_timestamp_boundary(self):
+        from chat.authoritative_planner import run_authoritative_cc_planner
+
+        def _must_not_invoke(**kwargs):
+            raise AssertionError('provider invocation must not occur')
+
+        status, decision = run_authoritative_cc_planner(
+            planner_input=self.view,
+            wake_run_id='b21-baseline-probe',
+            decision_attempt_id='b21-baseline-probe-attempt',
+            invoke_fn=_must_not_invoke,
+        )
+        print(
+            'BASELINE_R1_PROBE:',
+            status,
+            decision.get('error'),
+            decision.get('detail'),
+        )
+        self.assertEqual(status, 'error')
+        self.assertEqual(decision.get('error'), "'str' object has no attribute 'isoformat'")
+
+
 if __name__ == '__main__':
     unittest.main()
