@@ -3756,11 +3756,16 @@ def peek_registered_respawn_decision(
     peek = getattr(resident, 'peek_respawn_reason', None)
     reason = None
     if callable(peek):
-        reason = peek(
-            effective,
-            tool_profile=plan.tool_profile,
-            allow_stale_cache_guard=True,
-        )
+        try:
+            reason = peek(
+                effective,
+                tool_profile=plan.tool_profile,
+                allow_stale_cache_guard=True,
+            )
+        except TypeError as exc:
+            if 'allow_stale_cache_guard' not in str(exc):
+                raise
+            reason = peek(effective, tool_profile=plan.tool_profile)
 
     if reason:
         return {
