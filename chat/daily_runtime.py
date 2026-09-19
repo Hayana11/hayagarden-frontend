@@ -3756,7 +3756,11 @@ def peek_registered_respawn_decision(
     peek = getattr(resident, 'peek_respawn_reason', None)
     reason = None
     if callable(peek):
-        reason = peek(effective, tool_profile=plan.tool_profile)
+        reason = peek(
+            effective,
+            tool_profile=plan.tool_profile,
+            allow_stale_cache_guard=True,
+        )
 
     if reason:
         return {
