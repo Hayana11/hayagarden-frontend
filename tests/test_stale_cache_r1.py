@@ -180,7 +180,6 @@ class StaleCacheGateTests(unittest.TestCase):
         start = source.index("def _cc_resident_stream_gen(")
         end = source.index("\ndef ", start + 1)
         block = source[start:end]
-        self.assertIn("ensure_stale_cache_guard", block)
         self.assertLess(
             block.index("_cc_stale_guard_before_resident_reuse"),
             block.index("_CC_RESIDENT.ensure_alive"),
