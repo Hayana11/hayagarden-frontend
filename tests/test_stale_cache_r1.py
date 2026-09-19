@@ -182,9 +182,29 @@ class StaleCacheGateTests(unittest.TestCase):
         block = source[start:end]
         self.assertIn("ensure_stale_cache_guard", block)
         self.assertLess(
-            block.index("ensure_stale_cache_guard"),
+            block.index("_cc_stale_guard_before_resident_reuse"),
+            block.index("_CC_RESIDENT.ensure_alive"),
+        )
+        self.assertLess(
+            block.index("_cc_stale_guard_before_resident_reuse"),
             block.index("_CC_RESIDENT.send_turn"),
         )
+
+    def test_gateway_stale_probe_replaces_before_reuse(self):
+        source = (ROOT / "gateway.py").read_text(encoding="utf-8")
+        helper_start = source.index(
+            "def _cc_stale_guard_before_resident_reuse(",
+        )
+        helper_end = source.index(
+            "\ndef _cc_resident_stream_gen(",
+            helper_start,
+        )
+        helper = source[helper_start:helper_end]
+        self.assertLess(
+            helper.index("peek_respawn_reason"),
+            helper.index("ensure_stale_cache_guard"),
+        )
+        self.assertNotIn("_CC_RESIDENT.send_turn", helper)
 
     def test_daily_chat_uses_registered_reprepare_path(self):
         source = (ROOT / "chat" / "daily_runtime.py").read_text(
@@ -224,6 +244,7 @@ class StaleCacheGateTests(unittest.TestCase):
         self.assertEqual(cold_rebuild_guard(), 70_000)
         self.assertEqual(cold_soft_limit(), 150_000)
         self.assertEqual(cold_hard_limit(), 180_000)
+        self.assertEqual(cc_resident.IDLE_REAP_SECONDS, 3 * 60 * 60)
 
 
 if __name__ == "__main__":
