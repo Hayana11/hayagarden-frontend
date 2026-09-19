@@ -4143,8 +4143,15 @@ def reprepare_after_registered_session_change(
     persona_sha256: str = '',
     provider: str = 'claude_code',
     model: str = '',
+    respawn_reason: Optional[str] = None,
 ) -> DailyTurnPlan:
     """Bump resident_generation before a new Claude session under a registered gen."""
+    if respawn_reason and resident is not None:
+        # Preserve the existing ResidentSession reason plumbing across the
+        # registered-generation close/reprepare recursion.  The next
+        # ensure_alive() will hand this to _spawn(), which resets the new
+        # generation with the same public respawn_reason.
+        setattr(resident, '_next_spawn_reason', str(respawn_reason))
     _release_lease(plan)
     if resident is not None:
         close_local_resident_if_bound(resident, expected_key=plan.resident_key)
@@ -6355,6 +6362,12 @@ def ensure_resident_and_stream(
                 persona_sha256=plan.manifest.get('persona_sha256') or '',
                 provider=str(plan.manifest.get('provider') or 'claude_code'),
                 model=str(plan.manifest.get('model') or ''),
+                respawn_reason=(
+                    str(door.get('reason') or '').strip()
+                    if str(door.get('reason') or '').strip()
+                    == 'stale_cache_guard'
+                    else None
+                ),
             )
             _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
             yield from ensure_resident_and_stream(
