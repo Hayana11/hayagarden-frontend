@@ -89,6 +89,19 @@ def make_basic_wake_planner_input(
     )
 
 
+def _coerce_observed_at(value: Any) -> datetime.datetime:
+    if isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw:
+            try:
+                return datetime.datetime.fromisoformat(raw)
+            except ValueError as exc:
+                raise ValueError('planner_observed_at_invalid') from exc
+    raise TypeError('planner_observed_at_invalid_type')
+
+
 def _input_from_view(
     planner_input: Any,
     *,
@@ -98,6 +111,7 @@ def _input_from_view(
     captured_at = observed_at or getattr(
         planner_input, 'observed_at', datetime.datetime.now()
     )
+    captured_at = _coerce_observed_at(captured_at)
     return make_basic_wake_planner_input(
         wake_run_id=wake_run_id,
         observed_at=captured_at,
