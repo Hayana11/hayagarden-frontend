@@ -255,6 +255,8 @@ jobs:
         run: python -m unittest tests.test_daily_soft_window tests.test_daily_context_bff -v
       - name: Daily runtime R1 tests
         run: python -m unittest tests.test_daily_runtime tests.test_daily_continuity_shadow_receipt tests.test_daily_sse_heartbeat tests.test_daily_bounded_cold tests.test_step10_continuity_fix tests.test_mapping_backlog_catchup tests.test_reality_context_h1a tests.test_cold_forge_carryover_dedup tests.test_cold_handoff_scene_ownership -v
+      - name: Cache freshness clock focused regressions
+        run: python -m unittest tests.test_cache_freshness_clock_r1 -v
       - name: Run context usage regressions
         run: python -m unittest tests.test_context_usage
       - name: Run CC context dedup regressions
