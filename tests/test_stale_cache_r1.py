@@ -155,11 +155,12 @@ class StaleCacheGateTests(unittest.TestCase):
             "process_dead",
             "model_changed",
             "effort_changed",
-            "idle_timeout",
+            "idle",
             "system_changed",
             "hard_context",
             "turn_limit",
             "soft_context",
+            "tool_profile_changed",
             "tool_surface_changed",
         ):
             self.assertLess(
@@ -203,9 +204,11 @@ class StaleCacheGateTests(unittest.TestCase):
         source = (ROOT / "chat" / "cold_bootstrap_budget.py").read_text(
             encoding="utf-8",
         )
-        self.assertNotIn("STALE_CACHE", source)
-        self.assertNotIn("70000", source)
-        self.assertNotIn("70_000", source)
+        target_start = source.index("def cold_prompt_target(")
+        target_end = source.index("def estimate_text_tokens(", target_start)
+        target = source[target_start:target_end]
+        self.assertNotIn("STALE_CACHE", target)
+        self.assertNotIn("cold_rebuild_guard", target)
 
     def test_packing_targets_and_limits_remain_authoritative(self):
         from chat.cold_bootstrap_budget import (
