@@ -410,6 +410,7 @@ def _runtime_plan(*, generation=1, is_cold=False, is_respawn=False):
         db_path="/tmp/stale-cache-r1-runtime-test.db",
         worker_id="runtime-test-worker",
         tool_profile=dr.DAILY_TOOL_PROFILE,
+        turn_lease={"lease_id": "runtime-test-lease"},
     )
 
 
