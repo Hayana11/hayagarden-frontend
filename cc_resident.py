@@ -28,6 +28,8 @@ CC_STREAM_TIMEOUT = 360  # stall / inactivity seconds (runtime-tunable)
 CC_STREAM_HARD_TIMEOUT = 1800  # absolute per-turn ceiling (runtime-tunable)
 CC_STREAM_RESULT_GRACE = 30  # wait for result after provider end_turn (runtime-tunable)
 IDLE_REAP_SECONDS = 3 * 60 * 60
+STALE_CACHE_CONTEXT_THRESHOLD = 70_000
+STALE_CACHE_MAX_AGE_SECONDS = 3_300
 TOOL_PROFILE_LEGACY = 'legacy'
 TOOL_PROFILE_TEXT_ONLY = 'text_only'
 TOOL_PROFILE_UH_A0 = 'uh_a0'
@@ -799,7 +801,13 @@ class ResidentSession:
     def _alive(self):
         return self._proc is not None and self._proc.poll() is None
 
-    def _decide_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
+    def _decide_respawn_reason(
+        self,
+        system_text,
+        *,
+        tool_profile=TOOL_PROFILE_LEGACY,
+        allow_stale_cache_guard=False,
+    ):
         from chat.cc_model import cc_model_identity
         from chat.cc_effort import cc_effort_identity
         # Durable rewrite epoch: any resident spawned before the latest
@@ -877,6 +885,8 @@ class ResidentSession:
                 if current_surface != bound_surface:
                     return 'tool_surface_changed'
 
+        if allow_stale_cache_guard and self._stale_cache_guard_due():
+            return 'stale_cache_guard'
         return None
 
     def ensure_alive(self, system_text, env, *, tool_profile=TOOL_PROFILE_LEGACY):
@@ -894,13 +904,47 @@ class ResidentSession:
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             return self._cold
 
-    def peek_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
+    def ensure_stale_cache_guard(
+        self,
+        system_text,
+        env,
+        *,
+        tool_profile=TOOL_PROFILE_LEGACY,
+    ):
+        """Replace only when no stronger pre-send respawn reason exists."""
+        with self._lock:
+            reason = self._decide_respawn_reason(
+                system_text,
+                tool_profile=tool_profile,
+                allow_stale_cache_guard=True,
+            )
+            if reason != 'stale_cache_guard':
+                return False
+            self._spawn(
+                system_text,
+                env,
+                reason='stale_cache_guard',
+                tool_profile=tool_profile,
+            )
+            return True
+
+    def peek_respawn_reason(
+        self,
+        system_text,
+        *,
+        tool_profile=TOOL_PROFILE_LEGACY,
+        allow_stale_cache_guard=False,
+    ):
         """Read-only: same reason as ``_decide_respawn_reason``, or None.
 
         Does not spawn, kill, change generation, or write stdin.
         """
         with self._lock:
-            return self._decide_respawn_reason(system_text, tool_profile=tool_profile)
+            return self._decide_respawn_reason(
+                system_text,
+                tool_profile=tool_profile,
+                allow_stale_cache_guard=allow_stale_cache_guard,
+            )
 
     def spawn_resumable(
         self,
@@ -1323,6 +1367,18 @@ class ResidentSession:
         if not self._last_used:
             return None
         return max(0.0, time.time() - float(self._last_used))
+
+    def _stale_cache_guard_due(self):
+        if self._last_round_context <= STALE_CACHE_CONTEXT_THRESHOLD:
+            return False
+        refreshed_at = self._last_cache_refresh_monotonic
+        if refreshed_at is None:
+            return False
+        try:
+            age = time.monotonic() - float(refreshed_at)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(age) and age >= STALE_CACHE_MAX_AGE_SECONDS
 
     def commit_cache_freshness(self, *, wall_at, monotonic_at):
         """Atomically commit one proven provider-request start timestamp.
