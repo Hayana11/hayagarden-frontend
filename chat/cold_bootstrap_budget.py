@@ -14,7 +14,7 @@ rebuilt identically forever:
   Fence B (whole-prompt preflight) — this module estimates the token count
   of what is actually about to be written to Claude stdin (full system text
   + assembled cold content) and refuses to send when it exceeds
-  ``cold_prompt_target()``. At most one deterministic rebuild (smaller
+  the resident rebuild packing target. At most one deterministic rebuild (smaller
   history budget, reusing the same token-budget history assembly) is
   attempted before failing closed with :class:`ColdBootstrapOverflow`. This
   fence never retries a model call and never truncates the final prompt
@@ -58,8 +58,18 @@ def capacity_swap_prompt_target() -> int:
     return max(1, _cfg_int('CC_CAPACITY_SWAP_PROMPT_TARGET', 90_000))
 
 
+def resident_rebuild_prompt_target() -> int:
+    """90k-based packing authority shared by cold, respawn, and capacity."""
+    return capacity_swap_prompt_target()
+
+
 def cold_rebuild_guard() -> int:
-    """Maximum cold whole-prompt estimate allowed at provider stdin."""
+    """Reserved threshold for the future stale-cache pre-send policy.
+
+    This legacy configuration must not affect resident rebuild packing,
+    cold/respawn ContextPlan validity, cold whole-prompt admission, history
+    trimming, or desired rebuild size.
+    """
     return max(1, _cfg_int('CC_COLD_REBUILD_GUARD', 70_000))
 
 
