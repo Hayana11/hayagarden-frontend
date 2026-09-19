@@ -4131,7 +4131,8 @@ def _cc_resident_stream_gen(
     )()
     if is_cold is None:
         is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
-        if _CC_RESIDENT.ensure_stale_cache_guard(full_system, env):
+        _stale_guard = getattr(_CC_RESIDENT, 'ensure_stale_cache_guard', None)
+        if callable(_stale_guard) and _stale_guard(full_system, env):
             is_cold = True
 
     relationship_text = ''
@@ -7343,7 +7344,10 @@ def chat_stream():
                             _cc_pending_respawn_reason = getattr(
                                 _CC_RESIDENT, 'pending_respawn_reason', None,
                             )
-                        if _CC_RESIDENT.ensure_stale_cache_guard(
+                        _stale_guard = getattr(
+                            _CC_RESIDENT, 'ensure_stale_cache_guard', None,
+                        )
+                        if callable(_stale_guard) and _stale_guard(
                             _static_parts['full_system'], _cc_env,
                         ):
                             _cc_is_cold = True
