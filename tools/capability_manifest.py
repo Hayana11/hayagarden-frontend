@@ -246,7 +246,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "没有需要读取的具体在线来源时。",
         "failure_behavior": "说明网页读取失败，不得声称看过未取得的页面。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "WebFetch"},
+        "provider_bindings": {"claude_code": "WebFetch", "browser_mcp": "mcp__browser__taobao_read"},
     },
     {
         "capability_id": "github.read",
@@ -347,4 +347,3 @@ def p1_enabled_capabilities() -> tuple[dict[str, Any], ...]:
         item for item in CAPABILITY_MANIFEST
         if item["capability_id"] in P1_ENABLED_CAPABILITY_IDS
     )
-

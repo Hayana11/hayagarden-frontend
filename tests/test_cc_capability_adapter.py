@@ -38,6 +38,7 @@ from tools.cc_capability_adapter import (
     loading_plan_from_manifest,
     physical_surface_fingerprint,
     physical_surface_names,
+    uh_a0_browser_mcp_tools,
     uh_a0_home_mcp_tools,
     uh_a0_internal_mcp_tools,
     uh_a0_capability_proxy_tools,
@@ -119,6 +120,11 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(native["files.find"], "Glob")
         self.assertEqual(native["code.search"], "Grep")
         self.assertEqual(uh_a0_external_read_tools(), ("WebSearch", "WebFetch"))
+        self.assertEqual(uh_a0_browser_mcp_tools(), ("mcp__browser__taobao_read",))
+        self.assertEqual(
+            get_capability("web.read")["provider_bindings"]["browser_mcp"],
+            "mcp__browser__taobao_read",
+        )
         # No second product dictionary: every surface MCP name resolves via manifest.
         for name in home:
             matches = [
@@ -166,11 +172,15 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for name in NON_P3_HOME_MCP_TOOLS:
             self.assertNotIn(name, home)
         cfg = build_uh_a0_mcp_config(env={})
-        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "external"})
+        self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "browser", "external"})
         capability_cfg = cfg["mcpServers"]["capability"]
         self.assertEqual(capability_cfg["type"], "stdio")
         self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"])
         self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"].endswith("memories.db"))
+        browser_cfg = cfg["mcpServers"]["browser"]
+        self.assertEqual(browser_cfg["type"], "stdio")
+        self.assertTrue(browser_cfg["args"][0].endswith("browser-mcp-server.js"))
+        self.assertEqual(browser_cfg["env"]["SHOP_DAEMON_URL"], "http://127.0.0.1:8787")
         self.assertEqual(
             cfg["mcpServers"]["home"]["headers"],
             {"X-UH-A0-Profile": "uh_a0"},
@@ -224,6 +234,8 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertIn("mcp__home__write_diary", plan["disallowed_tools"])
         self.assertIn("mcp__capability__diary_write", plan["surface_allowlist"])
         self.assertIn("mcp__capability__task_timer_start", plan["surface_allowlist"])
+        self.assertIn("mcp__browser__taobao_read", plan["surface_allowlist"])
+        self.assertEqual(plan["browser_mcp_tools"], ("mcp__browser__taobao_read",))
 
     def test_c_diary_surface_schema_is_content_only(self):
         old_schema = _HOME_TOOL_SCHEMAS["mcp__home__write_diary"]
@@ -244,7 +256,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                     self.assertNotIn(item, surface)
         for bad in ("Bash", "Edit", "Write", "Agent"):
             self.assertNotIn(bad, surface)
-        for good in ("WebSearch", "WebFetch"):
+        for good in ("WebSearch", "WebFetch", "mcp__browser__taobao_read"):
             self.assertIn(good, surface)
 
     def test_e_exact_inherit_fingerprint_is_stable(self):
@@ -284,6 +296,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(plan_chat["built_in_tools"], plan_task["built_in_tools"])
         self.assertEqual(plan_chat["home_mcp_tools"], plan_task["home_mcp_tools"])
+        self.assertEqual(plan_chat["browser_mcp_tools"], plan_task["browser_mcp_tools"])
         self.assertEqual(
             plan_chat["physical_surface_fingerprint"],
             physical_surface_fingerprint(),
@@ -409,6 +422,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertIn("mcp__internal__get_todos", disallowed)
             self.assertIn("mcp__capability__todo_read", allowed)
             self.assertIn("mcp__capability__todo_write", allowed)
+            self.assertIn("mcp__browser__taobao_read", allowed)
             self.assertNotIn("mcp__brain__", allowed)
             self.assertNotIn("mcp__home__get_todos", allowed)
             self.assertNotIn("mcp__home__add_todo", allowed)
@@ -416,7 +430,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             mcp_path = Path(flags["mcp_path"])
             self.assertTrue(mcp_path.is_file())
             cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
-            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "external"})
+            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "browser", "external"})
 
             # tool_profile mismatch is detected by the existing decision helper
             # once a live generation exists (process_dead otherwise wins).
@@ -440,6 +454,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
     def test_l_runtime_off_hides_native_external_and_home_surface(self):
         set_capability_state("files.read", enabled=False)
         set_capability_state("web.search", enabled=False)
+        set_capability_state("web.read", enabled=False)
         set_capability_state("todo.read", enabled=False)
         set_capability_state("memory.search", enabled=False)
         set_capability_state("memory.write", enabled=False)
@@ -452,6 +467,9 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertNotIn("WebSearch", plan["built_in_tools"])
         self.assertNotIn("WebSearch", plan["built_in_tools_csv"])
         self.assertNotIn("WebSearch", plan["claude_visible_built_ins"])
+        self.assertNotIn("WebFetch", plan["built_in_tools"])
+        self.assertNotIn("mcp__browser__taobao_read", plan["browser_mcp_tools"])
+        self.assertIn("mcp__browser__taobao_read", plan["disallowed_tools"])
 
         self.assertNotIn("mcp__home__get_todos", plan["home_mcp_tools"])
         self.assertNotIn(
@@ -497,6 +515,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for field in (
             "built_in_tools",
             "home_mcp_tools",
+            "browser_mcp_tools",
             "surface_allowlist",
             "disallowed_tools",
             "claude_visible_built_ins",
@@ -520,9 +539,11 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(plan["runtime_state_status"], "FAIL_CLOSED")
         self.assertEqual(plan["built_in_tools"], ())
         self.assertEqual(plan["home_mcp_tools"], ())
+        self.assertEqual(plan["browser_mcp_tools"], ())
         self.assertEqual(plan["surface_allowlist"], ())
         for tool in uh_a0_home_mcp_tools():
             self.assertIn(tool, plan["disallowed_tools"])
+        self.assertIn("mcp__browser__taobao_read", plan["disallowed_tools"])
 
     def test_m5_storage_unavailable_fails_closed(self):
         with mock.patch.object(
@@ -534,9 +555,9 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(plan["runtime_state_status"], "FAIL_CLOSED")
         self.assertEqual(plan["built_in_tools"], ())
         self.assertEqual(plan["home_mcp_tools"], ())
+        self.assertEqual(plan["browser_mcp_tools"], ())
         self.assertEqual(plan["surface_allowlist"], ())
 
 
 if __name__ == "__main__":
     unittest.main()
-
