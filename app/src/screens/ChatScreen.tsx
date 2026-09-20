@@ -2748,13 +2748,6 @@ export function ChatScreen() {
             </div>
             <div style={{ height: 1, background: 'var(--line)', margin: '0 22px' }} />
             <div className="vstack vstack-10" style={{ padding: '18px 16px' }}>
-              <Link to="/contacts" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
-                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
-                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>通讯录</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>Codex · 群聊 · 游戏室</span>
-                </div>
-                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
-              </Link>
               <Link to="/moments" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(245,222,179,.5),rgba(232,220,245,.55))' }}>
                 <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>Fyodor 的朋友圈</span>
@@ -2777,26 +2770,7 @@ export function ChatScreen() {
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
-              <a data-testid="chat-preview-entry" href="https://love-style.xyz/preview/" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(226,218,238,.72),rgba(249,228,232,.76))' }}>
-                <div style={{ width: 34, height: 34, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, background: 'rgba(126,103,153,.12)', color: '#7E6799', fontSize: 18 }}>◫</div>
-                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
-                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>Preview</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>Chat 测试页 · 实时预览</span>
-                </div>
-                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
-              </a>
-              <Link to="/group-chat" onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(220,232,217,.72),rgba(220,232,245,.76))' }}>
-                <div className="hstack hstack-6" style={{ flexShrink: 0 }}>
-                  <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#91AD93' }} />
-                  <i style={{ width: 13, height: 13, borderRadius: '50%', background: '#8EACCF', marginLeft: -3, opacity: .88 }} />
-                </div>
-                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
-                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>群聊房间</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>同一个人 · 暖色与蓝色两条线路</span>
-                </div>
-                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
-              </Link>
-              <Link to="/settings" className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'var(--card2)' }}>
+              <Link to="/settings" className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(226,218,238,.72),rgba(249,228,232,.76))' }}>
                 <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>系统配置</span>
                   <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>用量统计 · API 端点管理</span>

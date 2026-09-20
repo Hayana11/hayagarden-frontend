@@ -125,9 +125,9 @@ const chatSource = readFileSync(
   'utf8',
 );
 const userStart = chatSource.indexOf('function renderUserMsg');
-const assistantStart = chatSource.indexOf('function renderAssistantMsg');
-assert.ok(userStart >= 0 && assistantStart > userStart);
-const userRenderer = chatSource.slice(userStart, assistantStart);
+const userEnd = chatSource.indexOf('\n  function render', userStart + 1);
+assert.ok(userStart >= 0 && userEnd > userStart);
+const userRenderer = chatSource.slice(userStart, userEnd);
 assert.match(userRenderer, /whiteSpace: ['"]pre-wrap['"]/);
 assert.doesNotMatch(userRenderer, /renderMarkdown\(/);
 assert.match(chatSource, /installObjectHasOwnCompat\(\)/);
@@ -138,6 +138,28 @@ const compatSource = readFileSync(
 );
 assert.doesNotMatch(compatSource, /Object\.hasOwn\s*=/);
 assert.doesNotMatch(compatSource, /\?\?=|\|\|=|&&=|replaceAll|\.at\(|Promise\.any|structuredClone|crypto\.randomUUID/);
+
+const markdownCss = readFileSync(
+  fileURLToPath(new URL('../src/screens/ChatMarkdown.css', import.meta.url)),
+  'utf8',
+);
+assert.match(markdownCss, /\.chat-markdown p\s*\{\s*margin:\s*1\.25em 0;/);
+assert.doesNotMatch(markdownCss, /\.chat-markdown p,\s*\.chat-markdown ul/);
+
+const themeControl = readFileSync(
+  fileURLToPath(new URL('../src/components/ChatThemeControl.tsx', import.meta.url)),
+  'utf8',
+);
+assert.doesNotMatch(themeControl, /蓝色/);
+assert.match(themeControl, /\(\['light', 'dark', 'auto'\] as const\)/);
+
+const themeLib = readFileSync(
+  fileURLToPath(new URL('../src/lib/chatTheme.ts', import.meta.url)),
+  'utf8',
+);
+assert.match(themeLib, /export type ThemeMode = 'light' \| 'dark' \| 'auto'/);
+assert.match(themeLib, /export type EffectiveTheme = 'light' \| 'dark'/);
+assert.doesNotMatch(themeLib, /effective === 'dark' \? 'blue'/);
 
 console.log('chat markdown focused checks: PASS');
 
