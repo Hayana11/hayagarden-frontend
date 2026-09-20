@@ -125,9 +125,9 @@ const chatSource = readFileSync(
   'utf8',
 );
 const userStart = chatSource.indexOf('function renderUserMsg');
-const assistantStart = chatSource.indexOf('function renderAssistantMsg');
-assert.ok(userStart >= 0 && assistantStart > userStart);
-const userRenderer = chatSource.slice(userStart, assistantStart);
+const userEnd = chatSource.indexOf('\n  function render', userStart + 1);
+assert.ok(userStart >= 0 && userEnd > userStart);
+const userRenderer = chatSource.slice(userStart, userEnd);
 assert.match(userRenderer, /whiteSpace: ['"]pre-wrap['"]/);
 assert.doesNotMatch(userRenderer, /renderMarkdown\(/);
 assert.match(chatSource, /installObjectHasOwnCompat\(\)/);
