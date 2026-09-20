@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { HttpError, http } from '../lib/http';
 import { fetchToolCompanionHints, type ToolCompanionHints } from '../lib/toolCompanionHints';
@@ -60,6 +60,44 @@ function estimatePersonaTokens(text: string): number {
   return cjk + (other ? Math.ceil(other / 4) : 0);
 }
 
+function highlightPersonaMarkdown(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  while (i < text.length) {
+    const atLineStart = i === 0 || text.charCodeAt(i - 1) === 10;
+    if (atLineStart && text.charAt(i) === '#') {
+      let hashes = 0;
+      while (i + hashes < text.length && text.charAt(i + hashes) === '#' && hashes < 6) hashes += 1;
+      let end = text.indexOf('\n', i);
+      if (end < 0) end = text.length;
+      nodes.push(<span className="profile-md-heading" key={key}>{text.slice(i, end)}</span>);
+      key += 1;
+      i = end;
+      continue;
+    }
+    if (text.charAt(i) === '*' && text.charAt(i + 1) === '*') {
+      const close = text.indexOf('**', i + 2);
+      if (close > i + 1) {
+        nodes.push(<span className="profile-md-strong" key={key}>{text.slice(i, close + 2)}</span>);
+        key += 1;
+        i = close + 2;
+        continue;
+      }
+    }
+    let j = i + 1;
+    while (j < text.length) {
+      const nextLineStart = text.charCodeAt(j - 1) === 10;
+      if (nextLineStart && text.charAt(j) === '#') break;
+      if (text.charAt(j) === '*' && text.charAt(j + 1) === '*') break;
+      j += 1;
+    }
+    nodes.push(text.slice(i, j));
+    i = j;
+  }
+  return nodes;
+}
+
 export function ProfileScreen() {
   const navigate = useNavigate();
   const [theme] = useState(() => {
@@ -95,6 +133,14 @@ export function ProfileScreen() {
   const characterCount = useMemo(() => Array.from(draftPersona).length, [draftPersona]);
   const lineCount = useMemo(() => draftPersona ? draftPersona.split(/\r?\n/).length : 0, [draftPersona]);
   const personaTokenCount = useMemo(() => estimatePersonaTokens(draftPersona), [draftPersona]);
+  const personaEditorRef = useRef<HTMLTextAreaElement | null>(null);
+  const [personaEditing, setPersonaEditing] = useState(false);
+  const personaMarkdown = useMemo(() => highlightPersonaMarkdown(draftPersona), [draftPersona]);
+  useEffect(() => {
+    if (!personaEditing) return;
+    const editor = personaEditorRef.current;
+    if (editor) editor.focus();
+  }, [personaEditing]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -267,14 +313,14 @@ export function ProfileScreen() {
           <section className="profile-meta-grid" aria-label="人设信息">
             <div className="profile-meta-card"><strong>{characterCount.toLocaleString()}</strong><span>字符</span></div>
             <div className="profile-meta-card"><strong>{lineCount.toLocaleString()}</strong><span>行</span></div>
-            <div className="profile-meta-card"><strong>{personaTokenCount.toLocaleString()}</strong><span>完整人设所用的token</span></div>
+            <div className="profile-meta-card"><strong className="profile-meta-token">{personaTokenCount.toLocaleString()}</strong><span>token</span></div>
           </section>
 
           <section className="profile-section">
             <div className="profile-persona-heading">
               <div>
                 <div className="profile-section-title">PROFILE</div>
-                <div className="profile-help-text">这里直接读取实际生效的 persona.md。保存会写入 persona.md，并沿用现有行为重启聊天网关。</div>
+                <div className="profile-help-text profile-section-hint">直接读取写入 persona.md</div>
               </div>
               <button type="button" className="profile-reload-button" disabled={saving} onClick={reload}>重新读取</button>
             </div>
@@ -282,7 +328,28 @@ export function ProfileScreen() {
               {personaLoadError ? (
                 <div className="profile-help-text">读取 persona.md 失败：{personaLoadError}。当前不展示伪造的人设内容，请稍后重新读取。</div>
               ) : (
-                <textarea className="profile-persona-editor" value={draftPersona} spellCheck={false} aria-label="费佳的完整人设正文" onChange={(event) => setDraftPersona(event.target.value)} />
+                <div className={'profile-persona-editor-shell' + (personaEditing ? ' is-editing' : '')}>
+                  <pre
+                    className="profile-persona-highlight"
+                    tabIndex={0}
+                    onClick={() => setPersonaEditing(true)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setPersonaEditing(true);
+                      }
+                    }}
+                  >{personaMarkdown}{'\n'}</pre>
+                  <textarea
+                    ref={personaEditorRef}
+                    className="profile-persona-editor"
+                    value={draftPersona}
+                    spellCheck={false}
+                    aria-label="费佳的完整人设正文"
+                    onBlur={() => setPersonaEditing(false)}
+                    onChange={(event) => setDraftPersona(event.target.value)}
+                  />
+                </div>
               )}
             </div>
           </section>
@@ -291,7 +358,7 @@ export function ProfileScreen() {
             <div className="profile-persona-heading">
               <div>
                 <div className="profile-section-title">think</div>
-                <div className="profile-help-text">控制回复前 &lt;思绪&gt;...&lt;/思绪&gt; 的写法。只影响界面展示的角色内心独白，不修改完整人设。</div>
+                <div className="profile-help-text profile-section-hint">手写思维链</div>
               </div>
               <button
                 type="button"
@@ -328,7 +395,7 @@ export function ProfileScreen() {
             <div className="profile-tool-heading">
               <div>
                 <div className="profile-section-title">TOOL</div>
-                <div className="profile-help-text">只展示当前注入预览；真实能力边界由系统固定。工具名称与说明请到工具房修改。</div>
+                <div className="profile-help-text profile-section-hint">工具注入预览</div>
               </div>
             </div>
             {toolHintsLoadError ? (

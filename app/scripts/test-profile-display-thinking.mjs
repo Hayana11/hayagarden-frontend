@@ -16,10 +16,13 @@ const tools = profile.indexOf('profile-section-title">TOOL');
 assert.ok(persona >= 0 && thinking > persona && tools > thinking, 'profile order must be PROFILE -> think -> TOOL');
 assert.match(profile, /aria-label="可见思绪 prompt"/);
 assert.match(profile, /恢复默认/);
-assert.match(profile, /完整人设所用的token/);
 assert.match(profile, /estimatePersonaTokens/);
 assert.match(profile, /aria-label="保存费佳档案"/);
 assert.match(profile, /\{saving \? '…' : '✓'\}/);
+assert.match(profile, /highlightPersonaMarkdown/);
+assert.match(profile, /profile-md-heading/);
+assert.match(profile, /profile-md-strong/);
+assert.match(profile, /<span>token<\/span>/);
 assert.doesNotMatch(profile, /身份 · 关系 · 工具直觉/);
 assert.doesNotMatch(profile, /工具试用/);
 assert.doesNotMatch(profile, /profile-tool-card-toggle/);
@@ -35,5 +38,8 @@ assert.equal(app.slice(routeStart, routeEnd).includes('persona.md'), false, 'dis
 
 assert.match(css, /font-family:\s*'JetBrains Mono',\s*monospace/);
 assert.match(css, /color:\s*#B76E79/);
+assert.match(css, /color:\s*#C45C78/);
+assert.match(css, /color:\s*#E2A8B6/);
+assert.doesNotMatch(css, /\.profile-tool-prompt-preview__title\s*\{[^}]*gap:/);
 assert.match(indexHtml, /family=JetBrains\+Mono/);
 console.log('profile display-thinking contract: PASS');

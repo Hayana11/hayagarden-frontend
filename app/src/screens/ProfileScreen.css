@@ -168,6 +168,13 @@
   line-height: 1.55;
 }
 
+.profile-section-hint {
+  color: var(--mut);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 0.4px;
+}
+
 .profile-preferences-textarea {
   width: 100%;
   border: 0;
@@ -281,11 +288,11 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
   color: var(--rose);
   font: italic 11px/1.4 var(--font-serif-display);
   letter-spacing: 1px;
 }
+.profile-tool-prompt-preview__title > * + * { margin-left: 10px; }
 
 .profile-tool-prompt-preview__title small {
   color: var(--faint);
@@ -392,6 +399,10 @@
   font: 600 15px/1.2 var(--display);
 }
 
+.profile-meta-card .profile-meta-token {
+  color: var(--ok);
+}
+
 .profile-meta-card span {
   text-align: center;
   line-height: 1.35;
@@ -422,26 +433,67 @@
 
 .profile-persona-card {
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(183, 110, 121, 0.12);
   border-radius: 24px;
   background: var(--card2);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
+.profile-persona-editor-shell {
+  position: relative;
+  min-height: 58vh;
+  min-height: 58dvh;
+}
+
+.profile-persona-highlight,
 .profile-persona-editor {
   display: block;
   width: 100%;
   min-height: 58vh;
   min-height: 58dvh;
-  resize: vertical;
+  margin: 0;
   border: 0;
   outline: 0;
   padding: 20px;
+  box-sizing: border-box;
   background: transparent;
-  color: var(--ink);
   font: 400 14px/1.8 var(--serif);
   letter-spacing: 0.1px;
   tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.profile-persona-highlight {
+  overflow: auto;
+  color: var(--ink);
+  cursor: text;
+}
+
+.profile-persona-editor {
+  resize: vertical;
+  color: var(--ink);
+}
+
+.profile-persona-editor-shell:not(.is-editing) .profile-persona-editor {
+  display: none;
+}
+
+.profile-persona-editor-shell.is-editing .profile-persona-highlight {
+  display: none;
+}
+
+.profile-md-heading {
+  color: #C45C78;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.8;
+}
+
+.profile-md-strong {
+  color: #E2A8B6;
+  font-weight: 700;
 }
 
 .profile-persona-note {
