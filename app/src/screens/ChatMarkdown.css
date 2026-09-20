@@ -20,7 +20,10 @@
   margin-bottom: 0;
 }
 
-.chat-markdown p,
+.chat-markdown p {
+  margin: 1.25em 0;
+}
+
 .chat-markdown ul,
 .chat-markdown ol,
 .chat-markdown blockquote,

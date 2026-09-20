@@ -4,8 +4,8 @@ import { beginThemePerfProbe, flushThemePerfProbe } from './themePerfProbe';
 
 export const CHAT_SETTINGS_KEY = 'fyodor-chat-settings';
 
-export type ThemeMode = 'light' | 'dark' | 'blue' | 'auto';
-export type EffectiveTheme = 'light' | 'dark' | 'blue';
+export type ThemeMode = 'light' | 'dark' | 'auto';
+export type EffectiveTheme = 'light' | 'dark';
 
 export interface FyodorChatSettings {
   theme: ThemeMode;
@@ -24,6 +24,12 @@ const DEFAULTS: FyodorChatSettings = {
   thinkMode: 'auto',
 };
 
+function normalizeTheme(theme: unknown): ThemeMode {
+  if (theme === 'blue') return 'dark';
+  if (theme === 'light' || theme === 'dark' || theme === 'auto') return theme;
+  return DEFAULTS.theme;
+}
+
 type ChatThemeListener = (state: ChatThemeState) => void;
 const listeners = new Set<ChatThemeListener>();
 
@@ -31,7 +37,7 @@ export function loadChatSettings(): FyodorChatSettings {
   try {
     const s = JSON.parse(localStorage.getItem(CHAT_SETTINGS_KEY) || '{}');
     return {
-      theme: (['light', 'dark', 'blue', 'auto'] as const).includes(s.theme) ? s.theme : DEFAULTS.theme,
+      theme: normalizeTheme(s.theme),
       fontStep:
         typeof s.fontStep === 'number' && s.fontStep >= 0 && s.fontStep <= 4 ? s.fontStep : DEFAULTS.fontStep,
       thinkMode: (['auto', 'drawer', 'inline'] as const).includes(s.thinkMode) ? s.thinkMode : DEFAULTS.thinkMode,
@@ -131,6 +137,6 @@ export function setChatTheme(root: HTMLElement | null, theme: ThemeMode): Effect
 
 export function toggleChatThemeQuick(root: HTMLElement | null): EffectiveTheme {
   const effective = resolveEffectiveTheme();
-  const next: EffectiveTheme = effective === 'light' ? 'dark' : effective === 'dark' ? 'blue' : 'light';
+  const next: EffectiveTheme = effective === 'light' ? 'dark' : 'light';
   return setChatTheme(root, next);
 }
