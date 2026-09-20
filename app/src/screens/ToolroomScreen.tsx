@@ -800,7 +800,7 @@ export function ToolroomScreen() {
         setCompanionHints(nextHints);
       }
       setPromptOverrides((current) => ({ ...current, [tool.tool_name]: promptDraft }));
-      setPromptNotice(linked ? '已更新费佳档案工具区中的 Prompt。' : '未找到对应档案工具，仅保留当前页面预览。');
+      setPromptNotice(linked ? '已更新工具直觉 Prompt。' : '未找到对应档案工具，仅保留当前页面预览。');
     } catch (error) {
       setPromptNotice(error instanceof Error ? error.message : 'Prompt 保存失败，请稍后重试。');
     } finally {
