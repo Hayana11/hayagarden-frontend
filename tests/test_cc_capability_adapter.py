@@ -92,7 +92,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
+            ("memory.search", "memory.write", "diary.write", "task.timer.start", "self_trigger.schedule", "self_trigger.cancel", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
@@ -535,6 +535,115 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(plan["built_in_tools"], ())
         self.assertEqual(plan["home_mcp_tools"], ())
         self.assertEqual(plan["surface_allowlist"], ())
+
+
+
+    def test_self_trigger_surface_is_main_chat_only_and_contract_is_strict(self):
+        from tools.execution_fence import evaluate_tool_call
+        from tools.self_trigger_capability_adapter import cancel_self_trigger, schedule_self_trigger
+        from wake.cc_tools import CC_WAKE_CAPABILITY_TEXT, cc_wake_allowed_tools
+
+        schedule = get_capability("self_trigger.schedule")
+        cancel = get_capability("self_trigger.cancel")
+        self.assertEqual(schedule["provider_bindings"]["claude_code"], "mcp__capability__self_trigger_schedule")
+        self.assertEqual(cancel["provider_bindings"]["claude_code"], "mcp__capability__self_trigger_cancel")
+        self.assertIn("mcp__capability__self_trigger_schedule", uh_a0_capability_proxy_tools())
+        self.assertIn("mcp__capability__self_trigger_cancel", uh_a0_capability_proxy_tools())
+
+        plan = self._plan()
+        self.assertIn("mcp__capability__self_trigger_schedule", plan["surface_allowlist"])
+        self.assertIn("mcp__capability__self_trigger_cancel", plan["surface_allowlist"])
+        self.assertNotIn("mcp__capability__self_trigger_schedule", cc_wake_allowed_tools(None))
+        self.assertNotIn("mcp__capability__self_trigger_cancel", cc_wake_allowed_tools(None))
+        self.assertIn("self_trigger", CC_WAKE_CAPABILITY_TEXT)
+
+        schedule_schema = _CAPABILITY_PROXY_TOOL_SCHEMAS["mcp__capability__self_trigger_schedule"]
+        cancel_schema = _CAPABILITY_PROXY_TOOL_SCHEMAS["mcp__capability__self_trigger_cancel"]
+        self.assertEqual(schedule_schema["required"], ["minutes"])
+        self.assertEqual(schedule_schema["properties"]["minutes"]["minimum"], 1)
+        self.assertEqual(schedule_schema["properties"]["minutes"]["maximum"], 1440)
+        self.assertEqual(cancel_schema["required"], ["id"])
+        self.assertEqual(cancel_schema["properties"]["id"]["minimum"], 1)
+
+        lease = issue_turn_lease(
+            turn_id="self-trigger-turn",
+            turn_mode="chat",
+            issued_from="default_policy",
+            requested_capabilities=(),
+            approval_ids=(),
+            issued_at="2026-08-27T00:00:00Z",
+        )
+        for tool_name, capability_id in (
+            ("mcp__capability__self_trigger_schedule", "self_trigger.schedule"),
+            ("mcp__capability__self_trigger_cancel", "self_trigger.cancel"),
+        ):
+            result = evaluate_tool_call(tool_name, {}, lease)
+            self.assertEqual(result["capability_id"], capability_id)
+            self.assertEqual(result["lease_decision"], "CAPABILITY_ASK_REQUIRED")
+            self.assertEqual(result["turn_mode"], "chat")
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = json.dumps(payload).encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return self.payload
+
+        with mock.patch(
+            "tools.self_trigger_capability_adapter.urllib.request.urlopen",
+            return_value=Response({"ok": True, "id": 23, "trigger_at": "2026-08-27 12:01:00"}),
+        ) as opener:
+            self.assertEqual(
+                schedule_self_trigger(minutes=1, note="回来看看", api_base_url="http://test"),
+                {"status": "SCHEDULED", "id": 23, "trigger_at": "2026-08-27 12:01:00"},
+            )
+            request = opener.call_args.args[0]
+            self.assertEqual(request.full_url, "http://test/api/self_triggers")
+            self.assertEqual(json.loads(request.data), {"minutes": 1, "note": "回来看看"})
+
+        with mock.patch(
+            "tools.self_trigger_capability_adapter.urllib.request.urlopen",
+            return_value=Response({"ok": True, "id": 24, "trigger_at": "2026-08-28 12:00:00"}),
+        ):
+            self.assertEqual(schedule_self_trigger(minutes=1440, api_base_url="http://test")["id"], 24)
+
+        for bad_minutes in (0, 1441):
+            with mock.patch("tools.self_trigger_capability_adapter.urllib.request.urlopen") as opener:
+                with self.assertRaises(ValueError):
+                    schedule_self_trigger(minutes=bad_minutes, api_base_url="http://test")
+                opener.assert_not_called()
+
+        with mock.patch("tools.self_trigger_capability_adapter.urllib.request.urlopen") as opener:
+            with self.assertRaises(ValueError):
+                cancel_self_trigger(trigger_id=None, api_base_url="http://test")
+            with self.assertRaises(ValueError):
+                cancel_self_trigger(trigger_id=0, api_base_url="http://test")
+            opener.assert_not_called()
+
+        with mock.patch(
+            "tools.self_trigger_capability_adapter.urllib.request.urlopen",
+            return_value=Response({"ok": True}),
+        ) as opener:
+            self.assertEqual(
+                cancel_self_trigger(trigger_id=23, api_base_url="http://test"),
+                {"status": "CANCELLED", "id": 23},
+            )
+            request = opener.call_args.args[0]
+            self.assertEqual(request.full_url, "http://test/api/self_triggers/cancel")
+            self.assertEqual(json.loads(request.data), {"id": 23})
+
+        proxy_source = (Path(__file__).resolve().parents[1] / "capability-proxy-mcp-server.js").read_text(encoding="utf-8")
+        self.assertIn("'self_trigger_schedule'", proxy_source)
+        self.assertIn("'self_trigger_cancel'", proxy_source)
+        self.assertIn("z.number().int().min(1).max(1440)", proxy_source)
+        self.assertIn("z.number().int().positive()", proxy_source)
+        self.assertNotIn("cancel all", proxy_source.lower())
+        gateway_source = Path(__file__).resolve().parents[1].joinpath("gateway.py").read_text(encoding="utf-8")
+        self.assertIn("set_self_trigger", gateway_source)
+        self.assertIn("cancel_self_trigger", gateway_source)
 
 
 if __name__ == "__main__":

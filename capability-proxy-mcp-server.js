@@ -12,6 +12,8 @@ const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'memory_write',
   'diary_write',
   'task_timer_start',
+  'self_trigger_schedule',
+  'self_trigger_cancel',
   'home_light_status',
   'todo_read',
   'todo_write',
@@ -25,6 +27,8 @@ const ADAPTER_MODULES = Object.freeze({
   memory_write: 'tools.memory_write_adapter',
   diary_write: 'tools.diary_capability_adapter',
   task_timer_start: 'tools.task_timer_capability_adapter',
+  self_trigger_schedule: 'tools.self_trigger_capability_adapter',
+  self_trigger_cancel: 'tools.self_trigger_capability_adapter',
   todo_read: 'tools.todo_internal_adapter',
   todo_write: 'tools.todo_internal_adapter',
   ledger_read: 'tools.ledger_internal_adapter',
@@ -66,9 +70,11 @@ function callAdapter(toolName, input) {
   }
   const dbEnvName = toolName === 'task_timer_start'
     ? 'TASK_TIMER_COMMANDS_DB_PATH'
-    : 'TODO_INTERNAL_DB_PATH';
-  const dbPath = String(process.env[dbEnvName] || '').trim();
-  if (!dbPath) {
+    : ['self_trigger_schedule', 'self_trigger_cancel'].includes(toolName)
+      ? null
+      : 'TODO_INTERNAL_DB_PATH';
+  const dbPath = dbEnvName ? String(process.env[dbEnvName] || '').trim() : '';
+  if (dbEnvName && !dbPath) {
     throw new Error(dbEnvName + ' is required');
   }
   const command = adapterCommand();
@@ -81,7 +87,11 @@ function callAdapter(toolName, input) {
           ? 'write_diary'
           : toolName === 'task_timer_start'
             ? 'start_task_timer'
-            : toolName === 'todo_read'
+            : toolName === 'self_trigger_schedule'
+              ? 'schedule_self_trigger'
+              : toolName === 'self_trigger_cancel'
+                ? 'cancel_self_trigger'
+                : toolName === 'todo_read'
             ? 'get_todos'
             : toolName === 'todo_write'
               ? 'add_todo'
@@ -91,11 +101,13 @@ function callAdapter(toolName, input) {
                   ? 'get_ledger_budget'
                   : 'add_ledger',
     ...input,
-    db_path: dbPath,
+    ...(dbPath ? { db_path: dbPath } : {}),
   };
   const output = execFileSync(command.python, ['-m', moduleName], {
     cwd: command.cwd,
-    env: { ...process.env, TODO_INTERNAL_DB_PATH: dbPath },
+    env: dbEnvName
+      ? { ...process.env, [dbEnvName]: dbPath }
+      : process.env,
     input: JSON.stringify(payload),
     encoding: 'utf8',
     timeout: 5000,
@@ -126,6 +138,9 @@ function resultText(toolName, result) {
     return result.status === 'CREATED'
       ? 'TASK_TIMER_CREATED'
       : String(result.status || 'TASK_TIMER_FAILED');
+  }
+  if (toolName === 'self_trigger_schedule' || toolName === 'self_trigger_cancel') {
+    return JSON.stringify(result);
   }
   if (toolName === 'diary_write') {
     return result.status === 'CREATED'
@@ -208,6 +223,25 @@ function buildServer() {
       title,
       countdown_seconds: countdown_seconds ?? null,
     }),
+  );
+
+  server.tool(
+    'self_trigger_schedule',
+    {
+      minutes: z.number().int().min(1).max(1440).describe('多少分钟后主动联系，范围 1-1440'),
+      note: z.string().optional().describe('主动联系时要记住的备注'),
+    },
+    async ({ minutes, note }) => runProxy('self_trigger_schedule', {
+      minutes,
+      note: note ?? null,
+    }),
+  );
+  server.tool(
+    'self_trigger_cancel',
+    {
+      id: z.number().int().positive().describe('要取消的稍后联系整数 id'),
+    },
+    async ({ id }) => runProxy('self_trigger_cancel', { id }),
   );
   server.tool(
     'home_light_status',
