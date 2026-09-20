@@ -11,21 +11,39 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from chat.capacity_swap import (
     CAPACITY_SWAP_REASONS,
+    AnchorStatus,
     CapacitySwapCandidate,
     CapacitySwapPrepareResult,
     CapacitySwapStatus,
     prepare_capacity_swap_candidate,
 )
-from chat.claude_transcript_model import ThinkingPolicy
+from chat.claude_transcript_model import (
+    EventRole,
+    SidechainPolicy,
+    SummaryPolicy,
+    ThinkingPolicy,
+    UnknownEventPolicy,
+)
+from chat.claude_transcript_transform import (
+    SelectionPolicy,
+    TransformError,
+    TransformRequest,
+    estimate_serialized_token_count,
+    serialize_events,
+    sha256_text,
+    transform_transcript,
+)
+from chat.claude_transcript_validator import ValidatorOptions, validate_transcript_events
 from chat.claude_transcript_reader import read_transcript_range
 from chat.cold_bootstrap_budget import (
-    cold_prompt_target,
+    capacity_swap_prompt_target,
     cold_safety_margin,
     estimate_text_tokens,
 )
@@ -235,7 +253,7 @@ def compute_retained_transcript_token_budget(
     dynamic_state_text: str = '',
 ) -> int:
     """Dynamic retained-transcript budget using existing estimators (no new tokenizer)."""
-    target = int(cold_prompt_target())
+    target = int(capacity_swap_prompt_target())
     margin = int(cold_safety_margin())
     reserved = (
         estimate_text_tokens(static_system)
@@ -423,6 +441,501 @@ def _load_mapping_for_messages(
             )
     return canonical, mid_to_event, event_to_mid
 
+
+
+def _context_plan_raw_members(context_plan: Any) -> list[tuple[Any, int, int]]:
+    """Return exact completed-turn members selected by one ContextPlan."""
+    raw_members: list[tuple[Any, int, int]] = []
+    for representation in tuple(getattr(context_plan, 'representations', ()) or ()):
+        if str(getattr(representation, 'kind', '') or '') != 'raw':
+            continue
+        for member in tuple(getattr(representation, 'source_members', ()) or ()):
+            source_kind = str(getattr(member, 'source_kind', '') or '')
+            source_ref = str(getattr(member, 'source_ref', '') or '')
+            parts = source_ref.split(':')
+            if source_kind != 'completed_turn' or len(parts) != 3 or parts[0] != 'turn':
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw source is not a completed turn',
+                    error_code='context_plan_capacity_raw_source_invalid',
+                )
+            try:
+                user_id = int(parts[1])
+                assistant_id = int(parts[2])
+            except (TypeError, ValueError) as exc:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw source reference is invalid',
+                    error_code='context_plan_capacity_raw_source_invalid',
+                ) from exc
+            if user_id <= 0 or assistant_id <= 0:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw source reference is invalid',
+                    error_code='context_plan_capacity_raw_source_invalid',
+                )
+            raw_members.append((
+                member,
+                user_id,
+                assistant_id,
+            ))
+    raw_members.sort(key=lambda item: int(getattr(item[0], 'seq', 0) or 0))
+    if not raw_members:
+        raise CapacitySwapRuntimeError(
+            'Capacity ContextPlan has no raw resume seed',
+            error_code='context_plan_capacity_resume_seed_missing',
+        )
+    refs = [str(getattr(item[0], 'source_ref', '') or '') for item in raw_members]
+    if len(refs) != len(set(refs)):
+        raise CapacitySwapRuntimeError(
+            'Capacity ContextPlan raw source is duplicated',
+            error_code='context_plan_capacity_raw_source_duplicated',
+        )
+    return raw_members
+
+
+def _capacity_context_candidate_session_id(
+    *,
+    plan_hash: str,
+    source_context_id: int,
+    source_context_epoch: int,
+    source_resident_generation: int,
+    source_scan_offset: int,
+    trigger_reason: str,
+) -> str:
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        (
+            'hayagarden-capacity-context-plan:'
+            f'{str(plan_hash)}:'
+            f'{int(source_context_id)}:'
+            f'{int(source_context_epoch)}:'
+            f'{int(source_resident_generation)}:'
+            f'{int(source_scan_offset)}:'
+            f'{str(trigger_reason)}'
+        ),
+    ))
+
+
+def _capacity_context_source_member_from_db(
+    *,
+    conn: Any,
+    context_id: int,
+    context_epoch: int,
+    user_id: int,
+    assistant_id: int,
+) -> Any:
+    from continuity.sources import build_source_members, derive_completed_turns
+
+    rows = conn.execute(
+        'SELECT DISTINCT m.* FROM chat_messages m '
+        'JOIN daily_message_contexts dmc ON dmc.message_id=m.id '
+        'WHERE dmc.context_id=? AND dmc.context_epoch=? '
+        'AND m.id IN (?,?) ORDER BY m.id ASC',
+        (int(context_id), int(context_epoch), int(user_id), int(assistant_id)),
+    ).fetchall()
+    turns = tuple(derive_completed_turns(rows))
+    expected_ref = 'turn:%d:%d' % (int(user_id), int(assistant_id))
+    matched = tuple(turn for turn in turns if turn.turn_id == expected_ref)
+    if len(matched) != 1:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw source cannot be revalidated',
+            error_code='context_plan_capacity_raw_identity_mismatch',
+        )
+    members = tuple(build_source_members(matched, ()))
+    if len(members) != 1:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw source identity is ambiguous',
+            error_code='context_plan_capacity_raw_identity_mismatch',
+        )
+    return members[0]
+
+
+def _capacity_context_source_identity(member: Any) -> tuple[Any, ...]:
+    return (
+        str(getattr(member, 'source_ref', '') or ''),
+        str(getattr(member, 'source_revision', '') or ''),
+        str(getattr(member, 'source_kind', '') or ''),
+        str(getattr(member, 'content_hash', '') or ''),
+        getattr(member, 'span_start', None),
+        getattr(member, 'span_end', None),
+        str(getattr(member, 'branch_id', '') or ''),
+    )
+
+
+def _capacity_context_emitted_event_uuids(
+    graph: Any,
+    rounds: Sequence[Any],
+) -> list[str]:
+    excluded_roles = {
+        EventRole.SYSTEM,
+        EventRole.SUMMARY,
+        EventRole.META,
+        EventRole.UNKNOWN,
+        EventRole.SIDECHAIN,
+        EventRole.USER_CONTINUATION,
+    }
+    out: list[str] = []
+    seen: set[str] = set()
+    for round_item in rounds:
+        for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ()):
+            event_uuid = str(event_uuid)
+            if event_uuid in seen:
+                continue
+            event = graph.by_uuid.get(event_uuid)
+            if event is None:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw round event is missing',
+                    error_code='context_plan_capacity_raw_event_missing',
+                )
+            if (
+                event.event_role in excluded_roles
+                or bool(getattr(event, 'is_sidechain', False))
+            ):
+                continue
+            out.append(event_uuid)
+            seen.add(event_uuid)
+    return out
+
+
+def prepare_capacity_swap_for_context_plan(
+    *,
+    plan: Any,
+    context_plan: Any,
+    trigger_reason: str,
+    static_system: str,
+    claude_home: Optional[str] = None,
+) -> CapacitySwapRuntimeResult:
+    """Build an exact raw-only candidate from the consumed ContextPlan.
+
+    This is the gate-on WHAT adapter. It deliberately does not call the
+    legacy anchor/tail selector. The transport/publish/staged-resume path stays
+    in run_capacity_swap_handoff().
+    """
+    reason = str(trigger_reason or '').strip()
+    source_gen = int(plan.resident_generation)
+    source_ctx = int(plan.context_id)
+    source_epoch = int(plan.context_epoch)
+
+    def _failure(code: str, warnings: Sequence[str] = ()) -> CapacitySwapRuntimeResult:
+        return CapacitySwapRuntimeResult(
+            ok=False,
+            error_code=str(code),
+            source_context_id=source_ctx,
+            source_context_epoch=source_epoch,
+            source_resident_generation=source_gen,
+            warnings=list(warnings),
+        )
+
+    if not is_capacity_swap_reason(reason):
+        return _failure('trigger_not_capacity', [f'rejected_reason:{reason}'])
+
+    try:
+        raw_members = _context_plan_raw_members(context_plan)
+    except CapacitySwapRuntimeError as exc:
+        return _failure(exc.error_code, [str(exc)])
+
+    registry = get_context_claude_session(
+        source_ctx, source_gen, db_path=plan.db_path,
+    )
+    if registry is None:
+        return _failure('registry_missing')
+
+    from chat import daily_context as dc
+
+    watermark = latest_complete_assistant_watermark(
+        context_id=source_ctx,
+        context_epoch=source_epoch,
+        resident_generation=source_gen,
+        before_message_id=int(plan.user_message_id),
+        db_path=plan.db_path,
+    )
+    if registry_mapping_lags_watermark(registry, watermark):
+        catchup = attempt_mapping_catchup_through(
+            context_id=source_ctx,
+            context_epoch=source_epoch,
+            resident_generation=source_gen,
+            chat_id=str(getattr(plan, 'chat_id', '') or 'default'),
+            through_assistant_id=int(watermark),
+            db_path=plan.db_path,
+        )
+        registry = get_context_claude_session(
+            source_ctx, source_gen, db_path=plan.db_path,
+        ) or registry
+        if (
+            not catchup.ok
+            or registry_mapping_lags_watermark(registry, watermark)
+        ):
+            return _failure(
+                ERROR_MAPPING_LAG,
+                [
+                    str(catchup.error_code or ERROR_MAPPING_LAG),
+                    'watermark=%s' % watermark,
+                    'last_mapped=%s' % registry.get('last_mapped_message_id'),
+                ],
+            )
+
+    if str(registry.get('scan_status') or '') == SCAN_STATUS_BLOCKED:
+        return _failure('registry_blocked')
+
+    path = str(registry.get('transcript_path') or '').strip()
+    sid = str(registry.get('claude_session_id') or '').strip()
+    try:
+        scan_offset = int(registry.get('scan_offset') or 0)
+    except (TypeError, ValueError):
+        scan_offset = 0
+    if not path or not sid or scan_offset <= 0:
+        return _failure('source_prefix_unreliable')
+
+    try:
+        source_sha = _snapshot_prefix_sha256(path, scan_offset)
+        graph = read_transcript_range(path, 0, scan_offset)
+    except Exception as exc:
+        logger.info('capacity ContextPlan source read failed: %s', type(exc).__name__)
+        return _failure('source_transcript_unreadable', [type(exc).__name__])
+
+    conn = dc._connect(plan.db_path)
+    try:
+        formal = _load_formal_messages_excluding_current(
+            conn,
+            context_id=source_ctx,
+            context_epoch=source_epoch,
+            current_user_message_id=int(plan.user_message_id),
+            cursor_before=plan.cursor_before,
+        )
+        mids = [int(m['id']) for m in formal]
+        canonical, mid_to_event, event_to_mid = _load_mapping_for_messages(conn, mids)
+
+        round_by_user: dict[str, Any] = {}
+        for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ()):
+            candidate_uuid = str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
+            if not candidate_uuid or candidate_uuid in round_by_user:
+                raise CapacitySwapRuntimeError(
+                    'Capacity source candidate round identity is ambiguous',
+                    error_code='context_plan_capacity_raw_identity_mismatch',
+                )
+            round_by_user[candidate_uuid] = round_item
+
+        selected_rounds: list[Any] = []
+        selected_round_users: set[str] = set()
+        for member, user_id, assistant_id in raw_members:
+            if int(user_id) == int(plan.user_message_id):
+                raise CapacitySwapRuntimeError(
+                    'current user is present in the raw ContextPlan carrier',
+                    error_code='context_plan_capacity_current_user_in_candidate',
+                )
+            user_event_uuid = str(mid_to_event.get(int(user_id)) or '').strip()
+            if not user_event_uuid:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw user mapping is missing',
+                    error_code='context_plan_capacity_raw_mapping_missing',
+                )
+            user_event = graph.by_uuid.get(user_event_uuid)
+            if user_event is None or user_event.event_role != EventRole.CANDIDATE_USER:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw user mapping is not a candidate event',
+                    error_code='context_plan_capacity_raw_mapping_invalid',
+                )
+            round_item = round_by_user.get(user_event_uuid)
+            if round_item is None:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw completed turn is absent from source graph',
+                    error_code='context_plan_capacity_raw_round_missing',
+                )
+            if bool(getattr(round_item, 'has_sidechain_impact', False)):
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw completed turn has sidechain impact',
+                    error_code='context_plan_capacity_raw_sidechain_invalid',
+                )
+            if user_event_uuid in selected_round_users:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw round is duplicated',
+                    error_code='context_plan_capacity_raw_source_duplicated',
+                )
+            assistant_events = [
+                str(event_uuid)
+                for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ())
+                if (
+                    graph.by_uuid.get(str(event_uuid)) is not None
+                    and graph.by_uuid[str(event_uuid)].event_role == EventRole.ASSISTANT
+                    and int(event_to_mid.get(str(event_uuid), 0) or 0) == int(assistant_id)
+                )
+            ]
+            if len(assistant_events) != 1:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw assistant mapping is not exact',
+                    error_code='context_plan_capacity_raw_mapping_invalid',
+                )
+            source_member = _capacity_context_source_member_from_db(
+                conn=conn,
+                context_id=source_ctx,
+                context_epoch=source_epoch,
+                user_id=user_id,
+                assistant_id=assistant_id,
+            )
+            if (
+                _capacity_context_source_identity(source_member)
+                != _capacity_context_source_identity(member)
+            ):
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw source identity changed',
+                    error_code='context_plan_capacity_raw_identity_mismatch',
+                )
+            selected_rounds.append(round_item)
+            selected_round_users.add(user_event_uuid)
+
+        selected_uuids = {
+            str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
+            for round_item in selected_rounds
+        }
+        all_round_uuids = [
+            str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
+            for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ())
+        ]
+        excluded_rounds = frozenset(
+            uuid_value for uuid_value in all_round_uuids
+            if uuid_value not in selected_uuids
+        )
+    except CapacitySwapRuntimeError as exc:
+        return _failure(exc.error_code, [str(exc)])
+    finally:
+        conn.close()
+
+    cid = _capacity_context_candidate_session_id(
+        plan_hash=str(getattr(context_plan, 'plan_hash', '') or ''),
+        source_context_id=source_ctx,
+        source_context_epoch=source_epoch,
+        source_resident_generation=source_gen,
+        source_scan_offset=scan_offset,
+        trigger_reason=reason,
+    )
+    cwd_guess = str(getattr(plan, 'transcript_cwd', '') or '')
+    if not cwd_guess:
+        cwd_guess = os.getcwd()
+    request = TransformRequest(
+        new_session_id=cid,
+        cwd=cwd_guess,
+        keep_rounds=len(selected_rounds),
+        user_canonical_by_event_uuid=canonical,
+        thinking_policy=ThinkingPolicy.DROP,
+        sidechain_policy=SidechainPolicy.EXCLUDE,
+        summary_policy=SummaryPolicy.DROP,
+        unknown_event_policy=UnknownEventPolicy.DROP,
+        selection_policy=SelectionPolicy.FIXED_ROUND_COUNT,
+        exclude_round_candidate_uuids=excluded_rounds,
+    )
+    try:
+        transformed = transform_transcript(graph, request)
+    except TransformError as exc:
+        return _failure(
+            'context_plan_capacity_raw_transform_failed',
+            [str(exc)],
+        )
+
+    if transformed.selected_round_count != len(selected_rounds):
+        return _failure(
+            'context_plan_capacity_raw_selection_changed',
+            ['selected=%s expected=%s' % (
+                transformed.selected_round_count, len(selected_rounds),
+            )],
+        )
+    selected_user_uuids = {
+        str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
+        for round_item in selected_rounds
+    }
+    if (
+        selected_user_uuids
+        & set(str(value) for value in transformed.dropped_sidechain_round_user_uuids)
+    ) or (
+        selected_user_uuids
+        & set(str(value) for value in transformed.dropped_unconfirmed_user_uuids)
+    ):
+        return _failure(
+            'context_plan_capacity_raw_selection_changed',
+            ['selected round was dropped by transform'],
+        )
+
+    expected_events = _capacity_context_emitted_event_uuids(
+        graph, selected_rounds,
+    )
+    actual_events = [str(value) for value in transformed.uuid_map.keys()]
+    if actual_events != expected_events:
+        return _failure(
+            'context_plan_capacity_raw_identity_mismatch',
+            ['native event set differs from exact ContextPlan rounds'],
+        )
+
+    serialized = serialize_events(transformed.events)
+    validation = validate_transcript_events(
+        transformed.events,
+        ValidatorOptions(
+            session_id=cid,
+            thinking_policy=ThinkingPolicy.DROP,
+            forbid_sidechain=True,
+            forbid_summary=True,
+            expected_round_count=len(selected_rounds),
+            max_round_count=len(selected_rounds),
+            old_uuids=set(graph.by_uuid.keys()),
+            unknown_event_mode='reject',
+        ),
+    )
+    if not validation.ok:
+        return _failure(
+            'context_plan_capacity_raw_validator_rejected',
+            list(validation.errors),
+        )
+
+    selected_message_ids: list[int] = []
+    for event_uuid in expected_events:
+        event = graph.by_uuid.get(event_uuid)
+        message_id = int(event_to_mid.get(event_uuid, 0) or 0)
+        if message_id <= 0 and (
+            event is None or event.event_role != EventRole.TOOL_RESULT_USER
+        ):
+            return _failure(
+                'context_plan_capacity_raw_mapping_missing',
+                ['native event mapping missing:%s' % event_uuid],
+            )
+        if message_id == int(plan.user_message_id):
+            return _failure(
+                'context_plan_capacity_current_user_in_candidate',
+            )
+        if message_id > 0 and message_id not in selected_message_ids:
+            selected_message_ids.append(message_id)
+
+    serialized_bytes = len(serialized.encode('utf-8'))
+    candidate = CapacitySwapCandidate(
+        source_context_id=source_ctx,
+        source_context_epoch=source_epoch,
+        source_resident_generation=source_gen,
+        source_claude_session_id=sid,
+        source_transcript_path=path,
+        source_scan_offset=scan_offset,
+        source_sha256=source_sha,
+        target_resident_generation=source_gen + 1,
+        candidate_session_id=cid,
+        trigger_reason=reason,
+        anchor_status=AnchorStatus.ANCHOR_UNAVAILABLE,
+        anchor_message_id=0,
+        anchor_event_uuid=None,
+        selected_round_count=len(selected_rounds),
+        selected_message_ids=tuple(selected_message_ids),
+        estimated_tokens=estimate_serialized_token_count(transformed.events),
+        serialized_bytes=serialized_bytes,
+        event_count=len(transformed.events),
+        output_sha256=sha256_text(serialized),
+        serialized_jsonl=serialized,
+        boundary_required=True,
+        warnings=('context_plan_exact_raw',),
+    )
+    return CapacitySwapRuntimeResult(
+        ok=True,
+        candidate=candidate,
+        source_context_id=source_ctx,
+        source_context_epoch=source_epoch,
+        source_resident_generation=source_gen,
+        target_resident_generation=source_gen + 1,
+        candidate_session_id=cid,
+        effective_system=with_capacity_boundary_suffix(static_system),
+        warnings=['context_plan_exact_raw'],
+    )
 
 def prepare_capacity_swap_for_plan(
     *,

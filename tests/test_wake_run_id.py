@@ -69,6 +69,32 @@ class DreamWakePayloadTests(unittest.TestCase):
             'wake_run_id': 'normal-2026-07-23-14:00',
         })
 
+    def test_normal_wake_logs_skip_detail_when_present(self):
+        import tools.dream_wake as dream_wake
+
+        now = datetime.datetime(2026, 7, 23, 14, 22)
+        with (
+            mock.patch.object(dream_wake, '_now', return_value=now),
+            mock.patch.object(dream_wake, 'run_self_triggers', return_value=False),
+            mock.patch.object(dream_wake, '_in_active_hours', return_value=True),
+            mock.patch.object(dream_wake, '_calc_t_hours', return_value=2.0),
+            mock.patch.object(dream_wake._wcfg, 'get_float', side_effect=lambda k, d=None: 30 if k == 'WAKE_MIN_IDLE_MINUTES' else d),
+            mock.patch.object(dream_wake, 'random') as rnd,
+            mock.patch.object(dream_wake, '_call_wake', return_value={
+                'skipped': True,
+                'reason': 'NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP',
+                'detail': 'resident_stale:soft_context',
+            }),
+            mock.patch.object(dream_wake, '_log') as log,
+        ):
+            rnd.random.return_value = 0.0
+            dream_wake.run()
+
+        log.assert_any_call(
+            'wake skipped: NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP | '
+            'detail=resident_stale:soft_context'
+        )
+
     def test_nightwatch_passes_stable_run_id(self):
         import tools.dream_wake as dream_wake
 

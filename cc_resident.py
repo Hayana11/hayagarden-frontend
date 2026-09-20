@@ -9,7 +9,10 @@ Client disconnect (GeneratorExit) kills the resident to avoid stdout pollution.
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 import json
+import logging
+import math
 import os
 import select
 import subprocess
@@ -25,6 +28,8 @@ CC_STREAM_TIMEOUT = 360  # stall / inactivity seconds (runtime-tunable)
 CC_STREAM_HARD_TIMEOUT = 1800  # absolute per-turn ceiling (runtime-tunable)
 CC_STREAM_RESULT_GRACE = 30  # wait for result after provider end_turn (runtime-tunable)
 IDLE_REAP_SECONDS = 3 * 60 * 60
+STALE_CACHE_CONTEXT_THRESHOLD = 70_000
+STALE_CACHE_MAX_AGE_SECONDS = 3_300
 TOOL_PROFILE_LEGACY = 'legacy'
 TOOL_PROFILE_TEXT_ONLY = 'text_only'
 TOOL_PROFILE_UH_A0 = 'uh_a0'
@@ -50,6 +55,124 @@ _CLAUDE_ACTIVITY_DELTA_TYPES = frozenset({
     'thinking_delta',
     'text_delta',
 })
+
+_USAGE_PROVENANCE_FIELDS = (
+    'input_tokens',
+    'output_tokens',
+    'cache_read_input_tokens',
+    'cache_creation_input_tokens',
+)
+
+
+def _diagnostic_int(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _diagnostic_usage_snapshot(usage):
+    usage = usage if isinstance(usage, dict) else {}
+    return {
+        key: _diagnostic_int(usage.get(key))
+        for key in _USAGE_PROVENANCE_FIELDS
+    }
+
+
+def _diagnostic_round_snapshot(round_row):
+    if not isinstance(round_row, dict):
+        return None
+    return {
+        'round_index': _diagnostic_int(round_row.get('index')),
+        'complete': bool(round_row.get('complete')),
+        'input_tokens': _diagnostic_int(round_row.get('input_tokens')),
+        'output_tokens': _diagnostic_int(round_row.get('output_tokens')),
+        'cache_read': _diagnostic_int(round_row.get('cache_read')),
+        'cache_creation': _diagnostic_int(round_row.get('cache_creation')),
+        'context_tokens': _diagnostic_int(round_row.get('context_tokens')),
+    }
+
+
+def _diagnostic_request_id(*events):
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        for key in ('request_id', 'requestId'):
+            value = str(event.get(key) or '').strip()
+            if value:
+                return value[:200]
+    return None
+
+
+def _log_wake_round_usage(
+    *,
+    diagnostic_wake_run_id,
+    turn_identity,
+    round_index,
+    event_source,
+    usage,
+    current_round_before,
+    current_round_after,
+    round_already_complete,
+    provider_request_id=None,
+):
+    if not diagnostic_wake_run_id:
+        return
+    payload = {
+        'stage': 'ROUND_USAGE',
+        'wake_run_id': str(diagnostic_wake_run_id),
+        'turn_identity': str(turn_identity or ''),
+        'round_index': _diagnostic_int(round_index),
+        'event_source': str(event_source),
+        'usage_present': isinstance(usage, dict) and bool(usage),
+        'current_round_before': current_round_before,
+        'current_round_after': current_round_after,
+        'round_already_complete': bool(round_already_complete),
+    }
+    payload.update(_diagnostic_usage_snapshot(usage))
+    if provider_request_id:
+        payload['provider_request_id'] = str(provider_request_id)[:200]
+    logging.getLogger(__name__).info(
+        '[WAKE-LIVE] %s',
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _log_wake_round_close(
+    *,
+    diagnostic_wake_run_id,
+    turn_identity,
+    round_row,
+    close_reason,
+):
+    if not diagnostic_wake_run_id:
+        return
+    snapshot = _diagnostic_round_snapshot(round_row) or {}
+    payload = {
+        'stage': 'ROUND_CLOSE',
+        'wake_run_id': str(diagnostic_wake_run_id),
+        'turn_identity': str(turn_identity or ''),
+        'round_index': snapshot.get('round_index'),
+        'close_reason': str(close_reason),
+        'final_usage': {
+            key: snapshot.get(key)
+            for key in (
+                'input_tokens',
+                'output_tokens',
+                'cache_read',
+                'cache_creation',
+                'context_tokens',
+            )
+        },
+    }
+    logging.getLogger(__name__).info(
+        '[WAKE-LIVE] %s',
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+
+
 
 
 def _cfg_int(key, default):
@@ -88,6 +211,68 @@ def _claude_event_is_activity(d):
             return block.get('type') == 'tool_use'
         return False
     return False
+
+
+@dataclass(frozen=True)
+class ProviderTerminalReceipt:
+    """Typed authority emitted only after resident reads a successful result."""
+
+    terminal_kind: str
+    source: str
+    turn_identity: str
+    process_generation: int
+    claude_session_id: str
+    result_is_error: bool
+    result_stop_reason: str
+
+    @classmethod
+    def from_result_event(
+        cls,
+        event,
+        *,
+        turn_identity,
+        process_generation,
+        claude_session_id,
+    ):
+        if not isinstance(event, dict) or event.get('type') != 'result':
+            raise ValueError('provider terminal receipt requires type=result')
+        if bool(event.get('is_error')):
+            raise ValueError('provider terminal receipt cannot represent provider error')
+        if event.get('stop_reason') != 'end_turn':
+            raise ValueError('provider terminal receipt requires final end_turn')
+        turn_id = str(turn_identity or '').strip()
+        if not turn_id:
+            raise ValueError('provider terminal receipt turn identity is missing')
+        return cls(
+            terminal_kind='provider_result',
+            source='resident_live_stdout',
+            turn_identity=turn_id,
+            process_generation=int(process_generation),
+            claude_session_id=str(claude_session_id or '').strip(),
+            result_is_error=False,
+            result_stop_reason=str(event.get('stop_reason') or ''),
+        )
+
+
+class ResidentTurnUsage(dict):
+    """Existing usage mapping with typed, non-serialized turn metadata."""
+
+    terminal_receipt: ProviderTerminalReceipt | None
+    _candidate_cache_refresh_at: float | None
+    _candidate_cache_refresh_monotonic: float | None
+
+    def __init__(
+        self,
+        *args,
+        terminal_receipt=None,
+        candidate_cache_refresh_at=None,
+        candidate_cache_refresh_monotonic=None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.terminal_receipt = terminal_receipt
+        self._candidate_cache_refresh_at = candidate_cache_refresh_at
+        self._candidate_cache_refresh_monotonic = candidate_cache_refresh_monotonic
 
 
 class ProviderTerminalTracker:
@@ -459,6 +644,10 @@ class ResidentSession:
         self._turns_since_rel_sent = 0
         self._last_rel_mood = None
         self._keepwarm_lease_expires_at = None
+        # Provider cache freshness is generation-scoped and is committed only
+        # by route-specific success boundaries, never by send_turn itself.
+        self._last_cache_refresh_at = None
+        self._last_cache_refresh_monotonic = None
         self._tool_surface_snapshot = {}
 
     def _build_spawn_tool_flags(self, *, env=None):
@@ -612,7 +801,13 @@ class ResidentSession:
     def _alive(self):
         return self._proc is not None and self._proc.poll() is None
 
-    def _decide_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
+    def _decide_respawn_reason(
+        self,
+        system_text,
+        *,
+        tool_profile=TOOL_PROFILE_LEGACY,
+        allow_stale_cache_guard=False,
+    ):
         from chat.cc_model import cc_model_identity
         from chat.cc_effort import cc_effort_identity
         # Durable rewrite epoch: any resident spawned before the latest
@@ -655,9 +850,9 @@ class ResidentSession:
         if system_text != self._system_text:
             return 'system_changed'
 
-        hard = _cfg_int('CC_CONTEXT_HARD_LIMIT', 120_000)
-        soft = _cfg_int('CC_CONTEXT_SOFT_LIMIT', 90_000)
-        max_turns = _cfg_int('CC_MAX_RESIDENT_TURNS', 30)
+        hard = _cfg_int('CC_CONTEXT_HARD_LIMIT', 180_000)
+        soft = _cfg_int('CC_CONTEXT_SOFT_LIMIT', 150_000)
+        max_turns = _cfg_int('CC_MAX_RESIDENT_TURNS', 45)
         min_between = _cfg_int('CC_MIN_TURNS_BETWEEN_RESPAWNS', 5)
 
         if self._last_round_context >= hard:
@@ -690,6 +885,8 @@ class ResidentSession:
                 if current_surface != bound_surface:
                     return 'tool_surface_changed'
 
+        if allow_stale_cache_guard and self._stale_cache_guard_due():
+            return 'stale_cache_guard'
         return None
 
     def ensure_alive(self, system_text, env, *, tool_profile=TOOL_PROFILE_LEGACY):
@@ -707,13 +904,47 @@ class ResidentSession:
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             return self._cold
 
-    def peek_respawn_reason(self, system_text, *, tool_profile=TOOL_PROFILE_LEGACY):
+    def ensure_stale_cache_guard(
+        self,
+        system_text,
+        env,
+        *,
+        tool_profile=TOOL_PROFILE_LEGACY,
+    ):
+        """Replace only when no stronger pre-send respawn reason exists."""
+        with self._lock:
+            reason = self._decide_respawn_reason(
+                system_text,
+                tool_profile=tool_profile,
+                allow_stale_cache_guard=True,
+            )
+            if reason != 'stale_cache_guard':
+                return False
+            self._spawn(
+                system_text,
+                env,
+                reason='stale_cache_guard',
+                tool_profile=tool_profile,
+            )
+            return True
+
+    def peek_respawn_reason(
+        self,
+        system_text,
+        *,
+        tool_profile=TOOL_PROFILE_LEGACY,
+        allow_stale_cache_guard=False,
+    ):
         """Read-only: same reason as ``_decide_respawn_reason``, or None.
 
         Does not spawn, kill, change generation, or write stdin.
         """
         with self._lock:
-            return self._decide_respawn_reason(system_text, tool_profile=tool_profile)
+            return self._decide_respawn_reason(
+                system_text,
+                tool_profile=tool_profile,
+                allow_stale_cache_guard=allow_stale_cache_guard,
+            )
 
     def spawn_resumable(
         self,
@@ -1137,6 +1368,50 @@ class ResidentSession:
             return None
         return max(0.0, time.time() - float(self._last_used))
 
+    def _stale_cache_guard_due(self):
+        if self._last_round_context <= STALE_CACHE_CONTEXT_THRESHOLD:
+            return False
+        refreshed_at = self._last_cache_refresh_monotonic
+        if refreshed_at is None:
+            return False
+        try:
+            age = time.monotonic() - float(refreshed_at)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(age) and age >= STALE_CACHE_MAX_AGE_SECONDS
+
+    def commit_cache_freshness(self, *, wall_at, monotonic_at):
+        """Atomically commit one proven provider-request start timestamp.
+
+        The caller must invoke this only after its route-specific terminal and
+        transcript/finality proof. Candidate capture in send_turn is not a
+        commit and never mutates these fields.
+        """
+        try:
+            wall_value = float(wall_at)
+            monotonic_value = float(monotonic_at)
+        except (TypeError, ValueError):
+            return False
+        if (
+            not math.isfinite(wall_value)
+            or not math.isfinite(monotonic_value)
+            or wall_value <= 0.0
+            or monotonic_value < 0.0
+        ):
+            return False
+        with self._lock:
+            self._last_cache_refresh_at = wall_value
+            self._last_cache_refresh_monotonic = monotonic_value
+        return True
+
+    @property
+    def last_cache_refresh_at(self):
+        return self._last_cache_refresh_at
+
+    @property
+    def last_cache_refresh_monotonic(self):
+        return self._last_cache_refresh_monotonic
+
     def _maybe_set_session_id(self, data):
         if not isinstance(data, dict):
             return
@@ -1228,6 +1503,8 @@ class ResidentSession:
         turn_lease=None,
         turn_runtime=None,
         jsonl_finality_profile=JSONL_FINALITY_PROFILE_DEFAULT,
+        on_stdin_begin=None,
+        diagnostic_wake_run_id=None,
     ):
         """Yield ('text'/'think'/'tool_use'/'tool_result'/'done', payload).
 
@@ -1289,6 +1566,16 @@ class ResidentSession:
             {'type': 'user', 'message': {'role': 'user', 'content': content}},
             ensure_ascii=False,
         )
+        if on_stdin_begin is not None:
+            try:
+                on_stdin_begin()
+            except Exception:
+                # Diagnostics must never change the provider send contract.
+                pass
+        # This is a local candidate only. It is deliberately captured before
+        # stdin.write and committed only by the route-specific success proof.
+        candidate_cache_refresh_at = time.time()
+        candidate_cache_refresh_monotonic = time.monotonic()
         try:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
@@ -1338,10 +1625,63 @@ class ResidentSession:
         watchdog.start()
 
         think_acc, text_acc = [], []
+        # Claude's terminal assistant rows can contain the complete text even
+        # when one or more stream deltas were lost. Keep this separate from
+        # the live accumulator; Daily canonicalization still reads transcript.
+        provider_text_acc = []
         rounds = []
         current_round = None
         is_err = None
         saw_result = False
+        terminal_receipt = None
+
+        def _record_round_usage(
+            event_source,
+            event_usage,
+            *,
+            before,
+            after,
+            round_already_complete,
+            provider_request_id=None,
+        ):
+            if event_source != 'result' and not event_usage:
+                return
+            if after is not None:
+                round_index = after.get('round_index')
+            elif before is not None:
+                round_index = before.get('round_index')
+            elif rounds:
+                round_index = rounds[-1].get('index')
+            else:
+                round_index = None
+            _log_wake_round_usage(
+                diagnostic_wake_run_id=diagnostic_wake_run_id,
+                turn_identity=terminal.turn_identity,
+                round_index=round_index,
+                event_source=event_source,
+                usage=event_usage,
+                current_round_before=before,
+                current_round_after=after,
+                round_already_complete=round_already_complete,
+                provider_request_id=provider_request_id,
+            )
+
+        def _close_round(round_row, close_reason, *, complete):
+            if round_row is None:
+                return
+            round_row['context_tokens'] = (
+                int(round_row.get('input_tokens') or 0)
+                + int(round_row.get('cache_read') or 0)
+                + int(round_row.get('cache_creation') or 0)
+            )
+            round_row['complete'] = bool(complete)
+            rounds.append(round_row)
+            _log_wake_round_close(
+                diagnostic_wake_run_id=diagnostic_wake_run_id,
+                turn_identity=terminal.turn_identity,
+                round_row=round_row,
+                close_reason=close_reason,
+            )
         use_idle_heartbeat = (
             idle_heartbeat_sec is not None and float(idle_heartbeat_sec) > 0
         )
@@ -1405,14 +1745,13 @@ class ResidentSession:
                         ev = d.get('event') or {}
                         ev_type = ev.get('type')
                         if ev_type == 'message_start':
+                            before_round = _diagnostic_round_snapshot(current_round)
                             if current_round is not None:
-                                current_round['context_tokens'] = (
-                                    int(current_round.get('input_tokens') or 0)
-                                    + int(current_round.get('cache_read') or 0)
-                                    + int(current_round.get('cache_creation') or 0)
+                                _close_round(
+                                    current_round,
+                                    'next_message_start',
+                                    complete=True,
                                 )
-                                current_round['complete'] = True
-                                rounds.append(current_round)
                             current_round = {
                                 'index': len(rounds) + 1,
                                 'complete': False,
@@ -1436,7 +1775,16 @@ class ResidentSession:
                                 current_round['cache_creation'] = max(
                                     current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
                                 )
+                                _record_round_usage(
+                                    'message_start',
+                                    u,
+                                    before=before_round,
+                                    after=_diagnostic_round_snapshot(current_round),
+                                    round_already_complete=False,
+                                    provider_request_id=_diagnostic_request_id(d, ev),
+                                )
                         elif ev_type == 'message_delta':
+                            before_round = _diagnostic_round_snapshot(current_round)
                             u = ev.get('usage') or {}
                             if current_round is not None and u:
                                 current_round['input_tokens'] = max(
@@ -1451,6 +1799,18 @@ class ResidentSession:
                                 current_round['cache_creation'] = max(
                                     current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
                                 )
+                            if u:
+                                _record_round_usage(
+                                    'message_delta',
+                                    u,
+                                    before=before_round,
+                                    after=_diagnostic_round_snapshot(current_round),
+                                    round_already_complete=(
+                                        bool(before_round and before_round.get('complete'))
+                                        or (before_round is None and bool(rounds))
+                                    ),
+                                    provider_request_id=_diagnostic_request_id(d, ev),
+                                )
                         elif ev_type == 'content_block_delta':
                             delta = ev.get('delta') or {}
                             if delta.get('type') == 'text_delta':
@@ -1464,6 +1824,8 @@ class ResidentSession:
                                     think_acc.append(chunk)
                                     yield ('think', chunk)
                     elif t == 'assistant':
+                        before_round = _diagnostic_round_snapshot(current_round)
+                        created_round = current_round is None
                         msg = d.get('message') or {}
                         u = msg.get('usage') or {}
                         if current_round is None:
@@ -1489,17 +1851,28 @@ class ResidentSession:
                             current_round['cache_creation'] = max(
                                 current_round['cache_creation'], int(u.get('cache_creation_input_tokens') or 0)
                             )
+                            _record_round_usage(
+                                'assistant',
+                                u,
+                                before=before_round,
+                                after=_diagnostic_round_snapshot(current_round),
+                                round_already_complete=(
+                                    False
+                                    if created_round
+                                    else bool(before_round and before_round.get('complete'))
+                                ),
+                                provider_request_id=_diagnostic_request_id(d),
+                            )
                         for b in (msg.get('content') or []):
-                            if isinstance(b, dict) and b.get('type') == 'tool_use':
-                                if current_round is not None and not current_round.get('complete'):
-                                    current_round['context_tokens'] = (
-                                        int(current_round.get('input_tokens') or 0)
-                                        + int(current_round.get('cache_read') or 0)
-                                        + int(current_round.get('cache_creation') or 0)
-                                    )
-                                    current_round['complete'] = True
-                                    rounds.append(current_round)
-                                    current_round = None
+                            if isinstance(b, dict) and b.get('type') == 'text':
+                                block_text = str(b.get('text') or '')
+                                if block_text:
+                                    provider_text_acc.append(block_text)
+                            elif isinstance(b, dict) and b.get('type') == 'tool_use':
+                                # Tool use is not a provider-request boundary.
+                                # Keep this round open: Claude may emit the final
+                                # message_delta usage for the same request after
+                                # the assistant tool_use event.
                                 tool_payload = {
                                     'id': b.get('id'),
                                     'name': b.get('name', ''),
@@ -1529,6 +1902,21 @@ class ResidentSession:
                                 })
                     elif t == 'result':
                         saw_result = True
+                        result_usage = d.get('usage')
+                        if not isinstance(result_usage, dict):
+                            result_usage = {}
+                        before_round = _diagnostic_round_snapshot(current_round)
+                        _record_round_usage(
+                            'result',
+                            result_usage,
+                            before=before_round,
+                            after=_diagnostic_round_snapshot(current_round),
+                            round_already_complete=(
+                                bool(before_round and before_round.get('complete'))
+                                or (before_round is None and bool(rounds))
+                            ),
+                            provider_request_id=_diagnostic_request_id(d),
+                        )
                         if (
                             uh_a0_runtime is not None
                             and d.get('stop_reason') == 'tool_deferred'
@@ -1562,15 +1950,21 @@ class ResidentSession:
                             yield ('tool_use', deferred_payload)
                         if d.get('is_error'):
                             is_err = str(d.get('result', ''))[:300]
-                        # result.usage 只做校验/fallback，不覆盖已解析的 rounds
-                        if current_round is not None:
-                            current_round['context_tokens'] = (
-                                int(current_round.get('input_tokens') or 0)
-                                + int(current_round.get('cache_read') or 0)
-                                + int(current_round.get('cache_creation') or 0)
+                        elif d.get('stop_reason') == 'end_turn':
+                            terminal_receipt = ProviderTerminalReceipt.from_result_event(
+                                d,
+                                turn_identity=terminal.turn_identity,
+                                process_generation=self._generation,
+                                claude_session_id=self._session_id,
                             )
-                            current_round['complete'] = not bool(d.get('is_error'))
-                            rounds.append(current_round)
+                        # result.usage is diagnostics only; it never updates
+                        # or replaces the stream round totals.
+                        if current_round is not None:
+                            _close_round(
+                                current_round,
+                                'provider_result',
+                                complete=not bool(d.get('is_error')),
+                            )
                             current_round = None
                         break
             except GeneratorExit:
@@ -1591,13 +1985,8 @@ class ResidentSession:
                 uh_a0_runtime.end_turn(turn_id=uh_a0_turn_id)
 
         if current_round is not None:
-            current_round['context_tokens'] = (
-                int(current_round.get('input_tokens') or 0)
-                + int(current_round.get('cache_read') or 0)
-                + int(current_round.get('cache_creation') or 0)
-            )
-            current_round['complete'] = False
-            rounds.append(current_round)
+            _close_round(current_round, 'loop_finalizer', complete=False)
+            current_round = None
 
         usage = summarize_rounds(
             rounds,
@@ -1692,6 +2081,12 @@ class ResidentSession:
                 )
         except Exception:
             pass
+        usage = ResidentTurnUsage(
+            usage,
+            terminal_receipt=terminal_receipt,
+            candidate_cache_refresh_at=candidate_cache_refresh_at,
+            candidate_cache_refresh_monotonic=candidate_cache_refresh_monotonic,
+        )
 
         self._cold = False
         self._last_used = time.time()
@@ -1703,7 +2098,9 @@ class ResidentSession:
         usage['resident_turn_count'] = self._resident_turn_count
         usage['max_round_context'] = self._max_round_context
         # claims 只经 done 内部回传，不得写入公开 cache_info
-        yield ('done', (''.join(text_acc).strip(), ''.join(think_acc), usage, one_shot_claims))
+        provider_text = ''.join(provider_text_acc).strip()
+        final_text = provider_text or ''.join(text_acc).strip()
+        yield ('done', (final_text, ''.join(think_acc), usage, one_shot_claims))
 
     def is_cold(self):
         return self._cold

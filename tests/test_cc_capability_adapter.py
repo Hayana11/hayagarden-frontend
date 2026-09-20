@@ -190,6 +190,30 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertTrue(external_cfg["args"][0].endswith("external-mcp-surface-server.js"))
         self.assertNotIn("workspace", cfg["mcpServers"])
 
+    def test_c_capability_proxy_servers_share_resident_lease_path(self):
+        lease_path = str(Path(self._tmp.name) / ".uh-a0-current-turn-lease.json")
+        cfg = build_uh_a0_mcp_config(env={"UH_A0_TURN_LEASE_PATH": lease_path})
+
+        capability_env = cfg["mcpServers"]["capability"]["env"]
+        self.assertEqual(
+            capability_env["UH_A0_TURN_LEASE_PATH"],
+            lease_path,
+        )
+        self.assertEqual(
+            cfg["mcpServers"]["external"]["env"]["UH_A0_TURN_LEASE_PATH"],
+            lease_path,
+        )
+
+        proxy_tools = set(uh_a0_capability_proxy_tools())
+        self.assertTrue(
+            {
+                "mcp__capability__memory_write",
+                "mcp__capability__home_light_status",
+                "mcp__capability__todo_read",
+                "mcp__capability__ledger_read",
+            }.issubset(proxy_tools)
+        )
+
     def test_c_home_compatibility_diary_is_hidden_but_registered(self):
         self.assertEqual(
             uh_a0_home_compatibility_tools(),

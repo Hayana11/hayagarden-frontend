@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -27,8 +28,10 @@ import cc_resident
 import config_store
 from chat import context_window as cw
 from chat import daily_context as dc
+from chat import daily_history as dh
 from chat import daily_runtime as dr
 from chat.daily_context import ConflictError, DeferredError
+from chat.canonical_turn import CanonicalTurn, projection_hash
 from chat.session_registry import (
     SCAN_STATUS_BLOCKED,
     SCAN_STATUS_READY,
@@ -36,6 +39,11 @@ from chat.session_registry import (
     register_context_claude_session,
 )
 from chat.system_builder import build_cc_daily_static_parts, build_cc_static_parts
+from continuity.sources import (
+    build_source_members,
+    derive_autonomous_events,
+    derive_completed_turns,
+)
 from tools.cc_jsonl_usage import session_jsonl_path
 from tools.execution_fence import evaluate_tool_call
 
@@ -75,6 +83,18 @@ def _insert(db_path: str, author: str, content: str, created_at: str) -> int:
     )
     conn.commit()
     mid = int(cur.lastrowid)
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='r45a_scope_fixture'"
+    ).fetchone()
+    if table_exists:
+        role = 'user' if author.lower() in {'hayana', 'haya', 'user'} else 'assistant'
+        conn.execute(
+            'INSERT INTO daily_message_contexts '
+            '(message_id, context_id, context_epoch, resident_generation, role, created_at) '
+            'VALUES (?,?,?,?,?,?)',
+            (mid, 1, 1, 1, role, created_at),
+        )
+        conn.commit()
     conn.close()
     return mid
 
@@ -95,6 +115,97 @@ def _prepare_turn(db, uid, *, now=None, wall_now=None, **kwargs):
             static_system=kwargs.pop('static_system', 'S'),
             **kwargs,
         )
+
+
+def _test_canonical_turn(content: str = '成功回复', *, tool_calls=()) -> CanonicalTurn:
+    """Small deterministic canonical prerequisite for non-parser unit tests."""
+    calls = tuple(dict(call) for call in tool_calls)
+    segments = [
+        {'type': 'tool', 'tool_index': index}
+        for index, _call in enumerate(calls)
+    ]
+    segments.append({'type': 'text', 'text': content})
+    display_segments = json.dumps(segments, ensure_ascii=False, separators=(',', ':'))
+    return CanonicalTurn(
+        content=content,
+        thinking='',
+        display_segments=display_segments,
+        tool_calls=calls,
+        choices=(),
+        provider_rounds=(
+            {
+                'index': 1,
+                'event_uuid': 'test-canonical-assistant',
+                'text_block_count': 1,
+                'tool_use_count': len(calls),
+                'stop_reason': 'end_turn',
+            },
+        ),
+        stop_reason='end_turn',
+        terminal_state='confirmed',
+        transcript_identity={
+            'path': '/tmp/test-canonical.jsonl',
+            'start_offset': 0,
+            'end_offset': 1,
+            'session_id': 'test-canonical-session',
+            'mapping_status': 'MAPPED',
+            'message_id': None,
+            'context_id': None,
+            'context_epoch': None,
+            'resident_generation': None,
+        },
+        projection_hash=projection_hash(content, display_segments),
+    )
+
+
+def _attach_successful_canonical(plan, *, content: str = '成功回复', tool_calls=()):
+    canonical = _test_canonical_turn(content, tool_calls=tool_calls)
+    plan._canonical_turn = canonical
+    plan.manifest.update({
+        'transcript_mapping_status': 'MAPPED',
+        'transcript_mapping_error_code': None,
+        'transcript_mapping_event_count': 1,
+    })
+    return canonical
+
+
+def _mark_transcript_mapped(plan, **_kwargs):
+    plan.manifest.update({
+        'transcript_mapping_status': 'MAPPED',
+        'transcript_mapping_error_code': None,
+        'transcript_mapping_event_count': 1,
+    })
+    return dict(plan.manifest)
+
+
+def _persist_canonical_for_plan(plan):
+    canonical = dr.build_canonical_turn_for_plan(plan)
+    aid = dr.persist_daily_assistant_for_plan(
+        plan,
+        content=canonical.content,
+        thinking=canonical.thinking,
+        tool_calls=json.dumps(list(canonical.tool_calls), ensure_ascii=False)
+        if canonical.tool_calls else '',
+        choices=json.dumps(list(canonical.choices), ensure_ascii=False)
+        if canonical.choices else '',
+        display_segments=canonical.display_segments,
+    )
+    return canonical, aid
+
+
+def _gateway_canonical_builder(*, content: str = 'daily reply', tool_calls=()):
+    canonical = _test_canonical_turn(content, tool_calls=tool_calls)
+
+    def _build(plan, **_kwargs):
+        plan._canonical_turn = canonical
+        plan.manifest.update({
+            'transcript_mapping_status': 'MAPPED',
+            'transcript_mapping_error_code': None,
+            'transcript_mapping_event_count': 1,
+        })
+        return canonical
+
+    return _build
 
 
 class _FakeResident:
@@ -373,10 +484,16 @@ class DailyRuntimeTurnTests(unittest.TestCase):
                 self.assertIs(plan, original_plan)
                 self.assertEqual(id(plan), original_id)
                 self.assertGreater(int(plan.resident_generation), old_gen)
+                _attach_successful_canonical(plan, content='daily reply')
                 aid = dr.persist_daily_assistant_for_plan(plan, content='daily reply')
-                out = dr.handle_provider_success(
-                    plan, assistant_message_id=aid, raw_text='daily reply',
-                )
+                with mock.patch.object(
+                    dr,
+                    'finalize_transcript_mapping_after_success',
+                    side_effect=_mark_transcript_mapped,
+                ):
+                    out = dr.handle_provider_success(
+                        plan, assistant_message_id=aid, raw_text='daily reply',
+                    )
             self.assertTrue(any(e[0] == 'done' for e in events))
             self.assertEqual(len(resident.sent), 1)
             self.assertNotIn('新增正式对话', resident.sent[0])
@@ -1532,6 +1649,11 @@ class GatewayClientDisconnectTests(unittest.TestCase):
                 'persona': 'P', 'full_system': 'STATIC',
             }),
             mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
+            mock.patch.object(
+                dr,
+                'build_canonical_turn_for_plan',
+                side_effect=_gateway_canonical_builder(),
+            ),
             mock.patch.object(gateway, '_write_session_memo', memo_mock),
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
@@ -1815,6 +1937,16 @@ class GatewaySuccessHandoffTests(unittest.TestCase):
                 'persona': 'P', 'full_system': 'STATIC',
             }),
             mock.patch.object(dr, 'prepare_daily_turn', side_effect=_prepare_real),
+            mock.patch.object(
+                dr,
+                'build_canonical_turn_for_plan',
+                side_effect=_gateway_canonical_builder(),
+            ),
+            mock.patch.object(
+                dr,
+                'finalize_transcript_mapping_after_success',
+                side_effect=_mark_transcript_mapped,
+            ),
             mock.patch.object(gateway, '_write_session_memo', memo_mock),
             mock.patch('moments_persistence.after_assistant_persisted', moments_mock),
             mock.patch('chat.scoring_identity.trigger_turn_scoring', scoring_mock),
@@ -2034,6 +2166,22 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                 mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
                 mock.patch.object(
                     dr,
+                    'build_canonical_turn_for_plan',
+                    side_effect=_gateway_canonical_builder(
+                        content='工具读取完成',
+                        tool_calls=(
+                            {
+                                'id': 't-visible-1',
+                                'name': 'mcp__home__get_todos',
+                                'args': {},
+                                'result': '{"ok":true}',
+                                'success': True,
+                            },
+                        ),
+                    ),
+                ),
+                mock.patch.object(
+                    dr,
                     'stream_daily_resident_turn',
                     side_effect=_fake_stream,
                 ),
@@ -2116,6 +2264,11 @@ class GatewayDailyCasSseTests(unittest.TestCase):
                     'persona': 'P', 'full_system': 'STATIC',
                 }),
                 mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
+                mock.patch.object(
+                    dr,
+                    'build_canonical_turn_for_plan',
+                    side_effect=_gateway_canonical_builder(),
+                ),
                 mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=_fake_stream),
                 mock.patch.object(dr, 'persist_daily_assistant_for_plan', return_value=999),
                 mock.patch.object(dr, 'handle_provider_success', side_effect=cas_exc),
@@ -2205,6 +2358,11 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
                     'persona': 'P', 'full_system': 'STATIC',
                 }),
                 mock.patch.object(dr, 'prepare_daily_turn', return_value=plan),
+                mock.patch.object(
+                    dr,
+                    'build_canonical_turn_for_plan',
+                    side_effect=_gateway_canonical_builder(),
+                ),
                 mock.patch.object(dr, 'stream_daily_resident_turn', side_effect=_fake_stream),
                 mock.patch.object(dr, 'persist_daily_assistant_for_plan', return_value=999),
                 mock.patch.object(dr, 'handle_provider_success', side_effect=cas_exc),
@@ -2254,7 +2412,7 @@ class DailyRuntimeCursorCASTests(unittest.TestCase):
                 plan = _prepare_turn(db, uid, wall_now=_FIXED_NOW, static_system='S')
                 aid = dr.persist_daily_assistant_for_plan(plan, content='saved once')
                 with mock.patch(
-                    'chat.daily_context.advance_resident_history_cursor',
+                    'chat.daily_context.finalize_daily_assistant_and_advance_cursor',
                     side_effect=dc.ConflictError('cursor stale'),
                 ):
                     with self.assertRaises(dr.CursorCASConflictAfterPersist) as ctx:
@@ -2266,6 +2424,97 @@ class DailyRuntimeCursorCASTests(unittest.TestCase):
             ).fetchone()[0]
             conn.close()
             self.assertEqual(int(count), 1)
+            conn = sqlite3.connect(db)
+            source_kind = conn.execute(
+                'SELECT source_kind FROM chat_messages WHERE author=?',
+                ('assistant',),
+            ).fetchone()[0]
+            conn.close()
+            self.assertEqual(source_kind, dc.SOURCE_KIND_DAILY_PENDING)
+        finally:
+            os.unlink(db)
+
+    def test_handle_cursor_conflict_rolls_back_pending_terminalization(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'cas through handler', '2026-07-27 10:00:00')
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                plan = _prepare_turn(db, uid, wall_now=_FIXED_NOW, static_system='S')
+                _attach_successful_canonical(plan, content='saved then rolled back')
+                aid = dr.persist_daily_assistant_for_plan(
+                    plan, content='saved then rolled back',
+                )
+                with mock.patch.object(
+                    dr,
+                    'finalize_transcript_mapping_after_success',
+                    side_effect=_mark_transcript_mapped,
+                ), mock.patch.object(
+                    dc,
+                    'finalize_daily_assistant_and_advance_cursor',
+                    side_effect=dc.ConflictError('cursor stale'),
+                ):
+                    with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                        dr.handle_provider_success(
+                            plan,
+                            assistant_message_id=aid,
+                            raw_text='saved then rolled back',
+                        )
+
+            conn = sqlite3.connect(db)
+            self.assertIsNone(conn.execute(
+                'SELECT id FROM chat_messages WHERE id=?', (aid,),
+            ).fetchone())
+            self.assertEqual(conn.execute(
+                'SELECT COUNT(*) FROM daily_message_contexts WHERE message_id=?',
+                (aid,),
+            ).fetchone()[0], 0)
+            conn.close()
+            self.assertIsNone(dc.get_resident_history_cursor(
+                plan.context_id, plan.resident_generation, db_path=db,
+            ))
+        finally:
+            os.unlink(db)
+
+    def test_generation_race_is_rejected_inside_finalize_transaction(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'generation race', '2026-07-27 10:00:00')
+            with mock.patch.object(config_store, 'get_bool', return_value=True), \
+                 mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})):
+                plan = _prepare_turn(db, uid, wall_now=_FIXED_NOW, static_system='S')
+                aid = dr.persist_daily_assistant_for_plan(plan, content='pending')
+                conn = sqlite3.connect(db)
+                conn.execute(
+                    'UPDATE daily_contexts SET resident_generation=resident_generation+1 '
+                    'WHERE id=?', (int(plan.context_id),),
+                )
+                conn.commit()
+                conn.close()
+                with self.assertRaises(dc.ConflictError):
+                    dc.finalize_daily_assistant_and_advance_cursor(
+                        plan.context_id,
+                        plan.resident_generation,
+                        aid,
+                        expected_cursor=plan.cursor_before,
+                        expected_context_epoch=plan.context_epoch,
+                        db_path=db,
+                    )
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute(
+                    'SELECT source_kind FROM chat_messages WHERE id=?', (aid,),
+                ).fetchone()[0],
+                dc.SOURCE_KIND_DAILY_PENDING,
+            )
+            self.assertIsNone(conn.execute(
+                'SELECT history_cursor_message_id FROM daily_resident_cursors '
+                'WHERE context_id=? AND resident_generation=?',
+                (plan.context_id, plan.resident_generation),
+            ).fetchone())
+            conn.close()
         finally:
             os.unlink(db)
 
@@ -2299,6 +2548,17 @@ def _jsonl_line(
         },
     }
     return json.dumps(obj, ensure_ascii=False)
+
+
+def _jsonl_result_line(uuid: str, *, session: str, stop_reason: str = 'end_turn') -> str:
+    return json.dumps({
+        'type': 'result',
+        'uuid': uuid,
+        'cwd': '/tmp/synth',
+        'sessionId': session,
+        'is_error': False,
+        'stop_reason': stop_reason,
+    }, ensure_ascii=False)
 
 
 def _append_jsonl(path: Path, lines: list[str]) -> int:
@@ -2351,6 +2611,7 @@ class _TranscriptHotResident(_FakeResident):
                 'a-hot-1', 'assistant', session=self.session_id, parent='u-hot-1',
                 content=[{'type': 'text', 'text': 'hot-asst'}],
             ),
+            _jsonl_result_line('r-hot-1', session=self.session_id),
         ])
         yield ('text', 'hot reply')
         yield ('done', ('hot reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
@@ -2380,8 +2641,65 @@ class _TranscriptColdResident(_FakeResident):
                 'a-cold-1', 'assistant', session=self.session_id, parent='u-cold-1',
                 content=[{'type': 'text', 'text': 'cold-asst'}],
             ),
+            _jsonl_result_line('r-cold-1', session=self.session_id),
         ])
         yield ('done', ('cold reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
+
+
+class _TranscriptBacklogResident(_FakeResident):
+    """One session that appends tool rounds so catch-up spans old and current turns."""
+
+    def __init__(self, *, cwd: str, session_id: str, jsonl_path: Path):
+        super().__init__()
+        self.cwd = cwd
+        self.session_id = None
+        self.generation = 1
+        self._session_id = session_id
+        self._jsonl_path = jsonl_path
+        self._turn_count = 0
+
+    def peek_respawn_reason(self, system_text, *, tool_profile=cc_resident.TOOL_PROFILE_LEGACY):
+        return None
+
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
+        self.sent.append(str(content))
+        self.session_id = self._session_id
+        index = self._turn_count
+        lines = [
+            _jsonl_line(
+                f'u-back-{index}', 'user', session=self.session_id,
+                parent=None, content=f'back-user-{index}',
+            ),
+            _jsonl_line(
+                f'a-back-{index}-tool', 'assistant', session=self.session_id,
+                parent=f'u-back-{index}',
+                content=[{
+                    'type': 'tool_use', 'id': f'tool-back-{index}',
+                    'name': 'Read', 'input': {'path': 'fixture.txt'},
+                }],
+            ),
+            _jsonl_line(
+                f't-back-{index}', 'user', session=self.session_id,
+                parent=f'a-back-{index}-tool',
+                content=[{
+                    'type': 'tool_result', 'tool_use_id': f'tool-back-{index}',
+                    'content': f'tool-result-{index}',
+                }],
+            ),
+            _jsonl_line(
+                f'a-back-{index}-final', 'assistant', session=self.session_id,
+                parent=f't-back-{index}',
+                content=[{'type': 'text', 'text': f'back-asst-{index}'}],
+            ),
+            _jsonl_result_line(f'r-back-{index}', session=self.session_id),
+        ]
+        if self._turn_count == 0:
+            _write_jsonl(self._jsonl_path, lines)
+        else:
+            _append_jsonl(self._jsonl_path, lines)
+        self._turn_count += 1
+        yield ('text', 'back reply')
+        yield ('done', ('back reply', '', {'input_tokens': 2, 'output_tokens': 4}, {}))
 
 
 class _RegisteredRespawnResident(_FakeResident):
@@ -2426,12 +2744,13 @@ class _RegisteredRespawnResident(_FakeResident):
                 'a-rs-1', 'assistant', session=self.session_id, parent='u-rs-1',
                 content=[{'type': 'text', 'text': 'rs-asst'}],
             ),
+            _jsonl_result_line('r-rs-1', session=self.session_id),
         ])
         yield ('done', ('after-respawn', '', {'input_tokens': 1, 'output_tokens': 2}, {}))
 
 
 class _MappingBlockedResident(_TranscriptColdResident):
-    """Writes JSONL with no candidate_user → Mapping BLOCKED after chat success."""
+    """Writes a terminal turn without a user event → mapping must fail closed."""
 
     def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
@@ -2443,6 +2762,7 @@ class _MappingBlockedResident(_TranscriptColdResident):
                 'a-only-1', 'assistant', session=self.session_id, parent=None,
                 content=[{'type': 'text', 'text': 'orphan'}],
             ),
+            _jsonl_result_line('r-only-1', session=self.session_id),
         ])
         yield ('done', ('blocked-map reply', '', {'input_tokens': 1, 'output_tokens': 1}, {}))
 
@@ -2529,9 +2849,9 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(plan.transcript_claude_session_id, _MAP_SESSION_HOT)
         self.assertIsNone(plan.transcript_observation_error_code)
 
-        aid = dr.persist_daily_assistant_for_plan(plan, content='hot reply')
+        canonical, aid = _persist_canonical_for_plan(plan)
         out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='hot reply',
+            plan, assistant_message_id=aid, raw_text=canonical.content,
             usage={'input_tokens': 3, 'output_tokens': 5},
         )
         self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
@@ -2580,9 +2900,9 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertGreater(int(plan.transcript_end_offset or 0), 0)
         self.assertIsNone(plan.transcript_observation_error_code)
 
-        aid = dr.persist_daily_assistant_for_plan(plan, content='cold reply')
+        canonical, aid = _persist_canonical_for_plan(plan)
         out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='cold reply',
+            plan, assistant_message_id=aid, raw_text=canonical.content,
         )
         self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
         reg = get_context_claude_session(
@@ -2601,6 +2921,288 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         roles = {r[0]: r[1] for r in rows}
         self.assertEqual(roles.get('user'), uid)
         self.assertEqual(roles.get('assistant'), aid)
+
+    def test_current_turn_mapping_rows_rollback_after_cursor_conflict(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'rollback-current', '2026-07-27 10:00:00')
+        resident = _TranscriptColdResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical, aid = _persist_canonical_for_plan(plan)
+        with mock.patch.object(
+            dc,
+            'finalize_daily_assistant_and_advance_cursor',
+            side_effect=dc.ConflictError('cursor stale'),
+        ):
+            with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                dr.handle_provider_success(
+                    plan, assistant_message_id=aid, raw_text=canonical.content,
+                )
+
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM chat_message_claude_events').fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                'SELECT COUNT(*) FROM daily_message_contexts WHERE message_id=?', (aid,),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE id=? AND source_kind=?",
+                (aid, dc.SOURCE_KIND_DAILY_PENDING),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            conn.execute(
+                'SELECT COUNT(*) FROM daily_terminal_mapping_receipts',
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+        self.assertIsNone(get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        ))
+        self.assertIsNone(dc.get_resident_history_cursor(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        ))
+
+    def test_backlog_mapping_rollback_preserves_preexisting_rows(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        resident = _TranscriptBacklogResident(
+            cwd=self.cwd, session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        uid0 = _insert(self.db, 'hayana', 'backlog-0', '2026-07-27 10:00:00')
+        plan0 = self._prepare(uid0, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan0, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical0, aid0 = _persist_canonical_for_plan(plan0)
+        dr.handle_provider_success(
+            plan0, assistant_message_id=aid0, raw_text=canonical0.content,
+        )
+
+        # This formal historical round is deliberately made unmapped after
+        # its own success, leaving a real backlog behind the registry.
+        uid1 = _insert(self.db, 'hayana', 'backlog-1', '2026-07-27 10:01:00')
+        plan1 = self._prepare(uid1, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan1, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical1, aid1 = _persist_canonical_for_plan(plan1)
+        dr.handle_provider_success(
+            plan1, assistant_message_id=aid1, raw_text=canonical1.content,
+        )
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            'DELETE FROM chat_message_claude_events '
+            'WHERE event_uuid IN (?,?,?,?,?)',
+            (
+                'u-back-1', 'a-back-1-tool', 't-back-1', 'a-back-1-final',
+                'r-back-1',
+            ),
+        )
+        conn.execute(
+            'UPDATE context_claude_sessions SET scan_offset=?, '
+            'last_mapped_message_id=?, scan_status=? '
+            'WHERE context_id=? AND resident_generation=?',
+            (
+                int(plan0.transcript_end_offset), aid0, 'READY',
+                plan1.context_id, plan1.resident_generation,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        uid2 = _insert(self.db, 'hayana', 'backlog-2', '2026-07-27 10:02:00')
+        plan2 = self._prepare(uid2, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan2, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical2, aid2 = _persist_canonical_for_plan(plan2)
+        pre_mapping_registry = dict(get_context_claude_session(
+            plan2.context_id, plan2.resident_generation, db_path=self.db,
+        ) or {})
+        self.assertEqual(
+            int(pre_mapping_registry['scan_offset']), int(plan0.transcript_end_offset),
+        )
+
+        with mock.patch.object(
+            dc,
+            'finalize_daily_assistant_and_advance_cursor',
+            side_effect=dc.ConflictError('cursor stale'),
+        ):
+            with self.assertRaises(dr.CursorCASConflictAfterPersist):
+                dr.handle_provider_success(
+                    plan2, assistant_message_id=aid2, raw_text=canonical2.content,
+                )
+
+        conn = sqlite3.connect(self.db)
+        mapped = {
+            row[0] for row in conn.execute(
+                'SELECT event_uuid FROM chat_message_claude_events ORDER BY event_uuid',
+            ).fetchall()
+        }
+        self.assertEqual(mapped, {
+            'u-back-0', 'a-back-0-tool', 't-back-0', 'a-back-0-final',
+        })
+        self.assertNotIn('u-back-1', mapped)
+        self.assertNotIn('a-back-1-tool', mapped)
+        self.assertNotIn('t-back-1', mapped)
+        self.assertNotIn('a-back-1-final', mapped)
+        self.assertNotIn('u-back-2', mapped)
+        self.assertNotIn('a-back-2-tool', mapped)
+        self.assertNotIn('t-back-2', mapped)
+        self.assertNotIn('a-back-2-final', mapped)
+        self.assertEqual(
+            plan2.manifest['terminal_rollback']['deleted_event_count'], 8,
+        )
+        self.assertEqual(
+            conn.execute(
+                'SELECT scan_offset FROM context_claude_sessions '
+                'WHERE context_id=? AND resident_generation=?',
+                (plan2.context_id, plan2.resident_generation),
+            ).fetchone()[0],
+            int(plan0.transcript_end_offset),
+        )
+        self.assertIsNone(conn.execute(
+            'SELECT id FROM chat_messages WHERE id=?', (aid2,),
+        ).fetchone())
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM daily_terminal_mapping_receipts').fetchone()[0],
+            0,
+        )
+        conn.close()
+        self.assertEqual(
+            dict(get_context_claude_session(
+                plan2.context_id, plan2.resident_generation, db_path=self.db,
+            ) or {}),
+            pre_mapping_registry,
+        )
+        self.assertEqual(
+            dc.get_resident_history_cursor(
+                plan2.context_id, plan2.resident_generation, db_path=self.db,
+            ),
+            aid1,
+        )
+
+    def test_pending_terminal_receipt_recovers_after_crash_before_finalize(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'crash recovery', '2026-07-27 10:00:00')
+        resident = _TranscriptColdResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        _canonical, aid = _persist_canonical_for_plan(plan)
+        out = dr.finalize_transcript_mapping_after_success(
+            plan, assistant_message_id=aid,
+        )
+        self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
+        self.assertIsNotNone(getattr(plan, '_terminal_mapping_receipt_id', None))
+
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "UPDATE daily_resident_turn_leases SET expires_at='2000-01-01 00:00:00' "
+            'WHERE context_id=? AND resident_generation=?',
+            (plan.context_id, plan.resident_generation),
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(dc.recover_pending_terminalizations(db_path=self.db), 1)
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM chat_message_claude_events').fetchone()[0],
+            0,
+        )
+        self.assertIsNone(conn.execute(
+            'SELECT id FROM chat_messages WHERE id=?', (aid,),
+        ).fetchone())
+        self.assertEqual(
+            conn.execute('SELECT COUNT(*) FROM daily_terminal_mapping_receipts').fetchone()[0],
+            0,
+        )
+        conn.close()
+        self.assertIsNone(get_context_claude_session(
+            plan.context_id, plan.resident_generation, db_path=self.db,
+        ))
+
+    def test_live_terminal_receipt_is_fenced_by_active_lease(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'live receipt', '2026-07-27 10:00:00')
+        resident = _TranscriptColdResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        _canonical, aid = _persist_canonical_for_plan(plan)
+        out = dr.finalize_transcript_mapping_after_success(
+            plan, assistant_message_id=aid,
+        )
+        self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
+        self.assertEqual(dc.recover_pending_terminalizations(db_path=self.db), 0)
+
+        conn = sqlite3.connect(self.db)
+        self.assertIsNotNone(conn.execute(
+            'SELECT receipt_id FROM daily_terminal_mapping_receipts '
+            'WHERE assistant_message_id=?', (aid,),
+        ).fetchone())
+        self.assertIsNotNone(conn.execute(
+            "SELECT id FROM chat_messages WHERE id=? AND source_kind='daily_pending'",
+            (aid,),
+        ).fetchone())
+        self.assertGreater(
+            conn.execute('SELECT COUNT(*) FROM chat_message_claude_events').fetchone()[0],
+            0,
+        )
+        conn.close()
+
+        result = dc.finalize_daily_assistant_and_advance_cursor(
+            plan.context_id,
+            plan.resident_generation,
+            aid,
+            expected_cursor=plan.cursor_before,
+            expected_context_epoch=plan.context_epoch,
+            terminal_receipt_id=getattr(plan, '_terminal_mapping_receipt_id'),
+            db_path=self.db,
+        )
+        self.assertTrue(result['advanced'])
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(
+            conn.execute(
+                "SELECT source_kind FROM chat_messages WHERE id=?", (aid,),
+            ).fetchone()[0],
+            dc.SOURCE_KIND_CHAT,
+        )
+        self.assertIsNone(conn.execute(
+            'SELECT receipt_id FROM daily_terminal_mapping_receipts '
+            'WHERE assistant_message_id=?', (aid,),
+        ).fetchone())
+        self.assertEqual(
+            conn.execute(
+                'SELECT history_cursor_message_id FROM daily_resident_cursors '
+                'WHERE context_id=? AND resident_generation=?',
+                (plan.context_id, plan.resident_generation),
+            ).fetchone()[0],
+            aid,
+        )
+        self.assertGreater(
+            conn.execute('SELECT COUNT(*) FROM chat_message_claude_events').fetchone()[0],
+            0,
+        )
+        conn.close()
 
     def test_registered_generation_respawn_before_stdin(self):
         """3) Registered gen + peek process_dead → bump gen; caller plan adopted in place."""
@@ -2649,9 +3251,9 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         self.assertEqual(old_reg['claude_session_id'], _MAP_SESSION_HOT)
 
         # Gateway contract: persist + Mapping on the same caller-held plan object.
-        aid = dr.persist_daily_assistant_for_plan(plan, content='after-respawn')
+        canonical, aid = _persist_canonical_for_plan(plan)
         out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='after-respawn',
+            plan, assistant_message_id=aid, raw_text=canonical.content,
         )
         self.assertEqual(out['transcript_mapping_status'], 'MAPPED')
         self.assertTrue(plan.lease_released)
@@ -2708,8 +3310,8 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             db_path=self.db, now=_FIXED_NOW,
         ))
 
-    def test_mapping_blocked_does_not_fail_chat(self):
-        """4) Mapping BLOCKED after persist+cursor; chat still succeeds."""
+    def test_mapping_blocked_rejects_successful_terminalization(self):
+        """4) A canonical turn with blocked mapping cannot become successful."""
         jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
         uid = _insert(self.db, 'hayana', 'block-map', '2026-07-27 10:00:00')
         resident = _MappingBlockedResident(
@@ -2720,15 +3322,19 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
             plan, resident=resident, env={}, static_system='STATIC',
         ))
         self.assertIsNone(plan.transcript_observation_error_code)
-        aid = dr.persist_daily_assistant_for_plan(plan, content='blocked-map reply')
-        out = dr.handle_provider_success(
-            plan, assistant_message_id=aid, raw_text='blocked-map reply',
-        )
-        self.assertEqual(out['transcript_mapping_status'], 'BLOCKED')
-        self.assertIsNotNone(out['transcript_mapping_error_code'])
-        self.assertEqual(int(out['transcript_mapping_event_count']), 0)
-        self.assertTrue(out.get('cursor_cas_success'))
-        self.assertEqual(out.get('assistant_message_id'), aid)
+        canonical, aid = _persist_canonical_for_plan(plan)
+        with mock.patch.object(dr, 'note_same_context_last_good') as note_last_good:
+            with self.assertRaises(dr.DailyRuntimeError) as ctx:
+                dr.handle_provider_success(
+                    plan, assistant_message_id=aid, raw_text=canonical.content,
+                )
+        note_last_good.assert_not_called()
+        self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
+        self.assertIn('candidate_user_missing', str(ctx.exception))
+        self.assertEqual(plan.manifest['transcript_mapping_status'], 'BLOCKED')
+        self.assertIsNotNone(plan.manifest['transcript_mapping_error_code'])
+        self.assertEqual(int(plan.manifest['transcript_mapping_event_count']), 0)
+        self.assertIsNone(plan.manifest.get('cursor_cas_success'))
         self.assertTrue(plan.lease_released)
         self.assertFalse(dc.is_resident_turn_active(
             plan.context_id, plan.resident_generation, db_path=self.db, now=_FIXED_NOW,
@@ -2738,20 +3344,94 @@ class DailyRuntimeTranscriptMappingTests(unittest.TestCase):
         asst = conn.execute(
             "SELECT id, content FROM chat_messages WHERE author='assistant'"
         ).fetchone()
+        formal_asst_count = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE author='assistant' AND source_kind='chat'"
+        ).fetchone()[0]
+        context_mapping_count = conn.execute(
+            'SELECT COUNT(*) FROM daily_message_contexts WHERE role=?',
+            ('assistant',),
+        ).fetchone()[0]
         map_count = conn.execute(
             'SELECT COUNT(*) FROM chat_message_claude_events'
         ).fetchone()[0]
         conn.close()
-        self.assertEqual(int(asst[0]), aid)
-        self.assertEqual(asst[1], 'blocked-map reply')
+        self.assertIsNone(asst)
+        self.assertEqual(int(formal_asst_count), 0)
+        self.assertEqual(int(context_mapping_count), 0)
         self.assertEqual(int(map_count), 0)
+
+        self.assertIsNone(dc.get_resident_history_cursor(
+            plan.context_id,
+            plan.resident_generation,
+            db_path=self.db,
+        ))
 
         reg = get_context_claude_session(
             plan.context_id, plan.resident_generation, db_path=self.db,
         )
-        self.assertIsNotNone(reg)
-        self.assertEqual(reg['scan_status'], SCAN_STATUS_BLOCKED)
-        self.assertEqual(int(reg['scan_offset']), 0)
+        self.assertIsNone(reg)
+
+    def test_mapping_terminal_diagnostic_precedes_rollback(self):
+        jsonl_path = self._jsonl_for(_MAP_SESSION_COLD)
+        uid = _insert(self.db, 'hayana', 'diagnostic-order', '2026-07-27 10:00:00')
+        resident = _MappingBlockedResident(
+            cwd=self.cwd, new_session_id=_MAP_SESSION_COLD, jsonl_path=jsonl_path,
+        )
+        plan = self._prepare(uid, resident=resident)
+        list(dr.stream_daily_resident_turn(
+            plan, resident=resident, env={}, static_system='STATIC',
+        ))
+        canonical, aid = _persist_canonical_for_plan(plan)
+        events = []
+        real_rollback = dr._rollback_failed_terminalization
+
+        def record_log(*args, **kwargs):
+            rendered = ' '.join(str(value) for value in args)
+            if 'TRANSCRIPT_MAPPING_TERMINAL_BLOCKED' in rendered:
+                events.append(('log', rendered))
+
+        def record_rollback(*args, **kwargs):
+            events.append(('rollback', ''))
+            return real_rollback(*args, **kwargs)
+
+        with mock.patch.object(dr.logger, 'warning', side_effect=record_log), \
+             mock.patch.object(
+                 dr, '_rollback_failed_terminalization', side_effect=record_rollback,
+             ):
+            with self.assertRaises(dr.DailyRuntimeError) as ctx:
+                dr.handle_provider_success(
+                    plan, assistant_message_id=aid, raw_text=canonical.content,
+                )
+
+        self.assertEqual(ctx.exception.error_code, 'candidate_user_missing')
+        self.assertEqual(events[0][0], 'log')
+        self.assertIn('candidate_user_missing', events[0][1])
+        self.assertEqual(events[1][0], 'rollback')
+
+    def test_observation_mapping_diagnostic_preserves_exact_code(self):
+        uid = _insert(self.db, 'hayana', 'observation-diagnostic', '2026-07-27 10:00:00')
+        plan = self._prepare(uid)
+        plan.transcript_observation_error_code = 'transcript_process_generation_changed'
+
+        with mock.patch.object(dr.logger, 'warning') as warning:
+            out = dr.finalize_transcript_mapping_after_success(
+                plan, assistant_message_id=999,
+            )
+
+        self.assertEqual(out['transcript_mapping_status'], 'BLOCKED')
+        self.assertEqual(
+            out['transcript_mapping_error_code'],
+            'transcript_process_generation_changed',
+        )
+        rendered_calls = [
+            ' '.join(str(value) for value in call.args)
+            for call in warning.call_args_list
+        ]
+        self.assertTrue(any(
+            'TRANSCRIPT_MAPPING_OBSERVATION_BLOCKED' in rendered
+            and 'transcript_process_generation_changed' in rendered
+            for rendered in rendered_calls
+        ))
 
 
 class ResidentPeekRespawnReasonTests(unittest.TestCase):
@@ -2897,6 +3577,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
         )
         with mock.patch.dict(sys.modules, {'command_store': fake_store}):
             plan = _prepare_turn(db, uid, static_system='STATIC')
+        _attach_successful_canonical(plan)
         return plan, fake_store
 
     def test_peek_only_and_daily_injection_for_hot_cold_respawn(self):
@@ -2980,6 +3661,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                     wall_now=_FIXED_NOW,
                     static_system='STATIC',
                 )
+            _attach_successful_canonical(plan)
             frozen_ids = plan.feedback_ids
             self.assertEqual(fake_store.peek_feedback.call_count, 1)
 
@@ -2996,7 +3678,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                      side_effect=_build_rebuilt_assembly,
                  ), \
                  mock.patch(
-                     'chat.cold_bootstrap_budget.cold_prompt_target',
+                     'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
                      return_value=50,
                  ), \
                  mock.patch(
@@ -3038,7 +3720,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                 fake_store.peek_feedback.assert_called_once_with()
 
                 with mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
-                     mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                     mock.patch.object(
+                         dr,
+                         'finalize_transcript_mapping_after_success',
+                         side_effect=_mark_transcript_mapped,
+                     ):
                     out = dr.handle_provider_success(
                         plan, assistant_message_id=191, raw_text='成功回复',
                     )
@@ -3065,6 +3751,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                         wall_now=_FIXED_NOW,
                         static_system='STATIC',
                     )
+                _attach_successful_canonical(failed_plan)
                 with mock.patch.dict(sys.modules, {'command_store': failing_store}), \
                      mock.patch.object(
                          dr.dh,
@@ -3072,7 +3759,7 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                          return_value={'current_day_history': [], 'manifest': {}},
                      ), \
                      mock.patch(
-                         'chat.cold_bootstrap_budget.cold_prompt_target',
+                         'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
                          return_value=50,
                      ), \
                      mock.patch(
@@ -3104,7 +3791,12 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
                         dr,
                         'complete_daily_turn',
                         side_effect=RuntimeError('commit failed'),
-                    ):
+                    ), \
+                     mock.patch.object(
+                         dr,
+                         'finalize_transcript_mapping_after_success',
+                         side_effect=_mark_transcript_mapped,
+                     ):
                         with self.assertRaises(RuntimeError):
                             dr.handle_provider_success(
                                 failed_plan,
@@ -3126,7 +3818,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             )
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', return_value={}) as complete, \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ):
                 out = dr.handle_provider_success(
                     plan, assistant_message_id=99, raw_text='成功回复',
                 )
@@ -3146,7 +3842,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             )
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ):
                 dr.handle_provider_success(
                     plan, assistant_message_id=100, raw_text='成功回复',
                 )
@@ -3172,11 +3872,21 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             )
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', side_effect=exc), \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ), \
+                 mock.patch.object(
+                     dr,
+                     '_rollback_failed_terminalization',
+                     return_value={},
+                 ) as rollback:
                 with self.assertRaises(dr.CursorCASConflictAfterPersist):
                     dr.handle_provider_success(
                         plan, assistant_message_id=101, raw_text='回复',
                     )
+            rollback.assert_called_once_with(plan, assistant_message_id=101)
             self.assertFalse(store.consume_feedback.called)
         finally:
             os.unlink(db)
@@ -3216,7 +3926,11 @@ class DailyRuntimeTaskFeedbackTests(unittest.TestCase):
             store.consume_feedback.side_effect = RuntimeError('bookkeeping failed')
             with mock.patch.dict(sys.modules, {'command_store': store}), \
                  mock.patch.object(dr, 'complete_daily_turn', return_value={}), \
-                 mock.patch.object(dr, 'finalize_transcript_mapping_after_success', return_value={}):
+                 mock.patch.object(
+                     dr,
+                     'finalize_transcript_mapping_after_success',
+                     side_effect=_mark_transcript_mapped,
+                 ):
                 out = dr.handle_provider_success(
                     plan, assistant_message_id=102, raw_text='成功回复',
                 )
@@ -3386,6 +4100,2985 @@ class DailyAttachmentReplayTests(unittest.TestCase):
         self.assertIn('carry.txt', content)
         self.assertIn('显式降级为元数据标记', content)
         self.assertNotIn('carry body', content)
+
+
+
+class ContinuityShadowObservationTests(unittest.TestCase):
+    def setUp(self):
+        dr.reset_bindings_for_tests()
+
+    class _Resident(_FakeResident):
+        def __init__(self):
+            super().__init__()
+            self.sent_objects = []
+            self.sent_kwargs = []
+
+        def send_turn(self, content, commit_meta=None, turn_lease=None):
+            self.sent_objects.append(content)
+            self.sent_kwargs.append({
+                'commit_meta': commit_meta,
+                'turn_lease': turn_lease,
+            })
+            yield ('text', 'daily reply')
+            yield ('done', ('daily reply', '', {}, {}))
+
+    @staticmethod
+    def _result(*, surface='empty', status='ready', error_code=None, representations=()):
+        policy = types.SimpleNamespace(recent_raw_target=24)
+        plan = types.SimpleNamespace(
+            plan_id='shadow-plan',
+            plan_hash='shadow-hash',
+            valid=(status == 'ready'),
+            budget_status='fit' if status == 'ready' else 'blocked',
+            token_budget=100,
+            reserve_budget=8,
+            recent_raw_target=24,
+            budget_policy=policy,
+            selected_token_estimate=12,
+            fixed_section_token_estimate=5,
+            total_token_estimate=25,
+            remaining_budget=75,
+            representations=tuple(representations),
+            gaps=(),
+            exclusions=(),
+        )
+        return types.SimpleNamespace(
+            status=status,
+            error_code=error_code,
+            plan=plan if status == 'ready' else None,
+            chunk_surface=surface,
+            source_member_count=1,
+            chunk_binding_count=1 if surface == 'ready' else 0,
+        )
+
+    @staticmethod
+    def _observations(log):
+        out = []
+        for call in log.call_args_list:
+            if call.args and call.args[0] == 'continuity_shadow_observation %s':
+                out.append(json.loads(call.args[1]))
+        return out
+
+    def _plan(self, db, *, content='hello'):
+        _init_chat_messages(db)
+        uid = _insert(db, 'hayana', content, '2026-07-27 10:00:00')
+        plan = _prepare_turn(db, uid, static_system='STATIC')
+        plan.assembly.setdefault('manifest', {})['cold_history_budget'] = 24
+        return plan
+
+    def _stream(self, plan, *, env=None):
+        resident = self._Resident()
+        events = list(dr.stream_daily_resident_turn(
+            plan,
+            resident=resident,
+            env=env or {},
+            static_system='STATIC',
+        ))
+        return resident, events
+
+    def test_unconfigured_cold_shadow_is_blocked_and_send_once(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(dr.logger, 'info') as log, \
+                 mock.patch('chat.daily_continuity_shadow.build_daily_continuity_shadow_plan') as adapter:
+                resident, events = self._stream(plan)
+            adapter.assert_not_called()
+            self.assertEqual(len(resident.sent_objects), 1)
+            self.assertTrue(any(evt == 'done' for evt, _payload in events))
+            self.assertEqual(self._observations(log)[-1]['error_code'], 'shadow_store_unconfigured')
+        finally:
+            os.unlink(db)
+
+    def test_cold_ready_uses_explicit_path_policy_and_fixed_sections(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db, content='中文 production body')
+            result = self._result()
+            shadow_path = os.path.join(tempfile.gettempdir(), 'continuity-shadow-r4c.db')
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': shadow_path,
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=result,
+                 ) as adapter, \
+                 mock.patch.object(dr.logger, 'info') as log, \
+                 mock.patch('chat.cold_bootstrap_budget.resident_rebuild_prompt_target', return_value=100), \
+                 mock.patch('chat.cold_bootstrap_budget.cold_safety_margin', return_value=8):
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            kwargs = adapter.call_args.kwargs
+            self.assertEqual(kwargs['source_db_path'], db)
+            self.assertEqual(kwargs['shadow_store_path'], shadow_path)
+            self.assertEqual(kwargs['budget_policy'].token_budget, 108)
+            self.assertEqual(kwargs['budget_policy'].reserve_budget, 8)
+            self.assertEqual(kwargs['budget_policy'].recent_raw_target, 24)
+            self.assertEqual(
+                [section.kind for section in kwargs['accepted_fixed_sections']],
+                ['invariant_system'],
+            )
+            self.assertEqual(len(resident.sent_objects), 1)
+            observation = self._observations(log)[-1]
+            self.assertTrue(observation['shadow_plan_available'])
+            self.assertFalse(observation['installed_context_proven'])
+        finally:
+            os.unlink(db)
+
+    def test_respawn_ready_chunk_and_final_send_once(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            plan.is_respawn = True
+            plan.is_cold = False
+            plan.manifest['turn_kind'] = 'respawn'
+            result = self._result(
+                surface='ready',
+                representations=(types.SimpleNamespace(kind='chunk'),),
+            )
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=result,
+                 ) as adapter:
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            self.assertEqual(len(resident.sent_objects), 1)
+        finally:
+            os.unlink(db)
+
+    def test_hot_and_capacity_swap_block_without_adapter(self):
+        for turn_kind in ('hot', 'capacity_swap'):
+            db = _tmp_db()
+            try:
+                plan = self._plan(db)
+                plan.is_cold = False
+                plan.is_respawn = False
+                plan.manifest['turn_kind'] = turn_kind
+                with mock.patch.dict(os.environ, {
+                    'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+                }, clear=False), \
+                     mock.patch(
+                         'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     ) as adapter, \
+                     mock.patch.object(dr.logger, 'info') as log:
+                    dr._observe_continuity_shadow(
+                        plan=plan,
+                        resident=self._Resident(),
+                        static_system='STATIC',
+                        content='hot body',
+                    )
+                adapter.assert_not_called()
+                expected_error = (
+                    'hot_budget_policy_unmapped'
+                    if turn_kind == 'hot'
+                    else 'installed_context_policy_unmapped'
+                )
+                self.assertEqual(
+                    self._observations(log)[-1]['error_code'],
+                    expected_error,
+                )
+            finally:
+                os.unlink(db)
+
+    def test_unavailable_and_exception_are_fail_open(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            unavailable = self._result(
+                status='blocked',
+                error_code='chunk_surface_unavailable',
+                surface='unavailable',
+            )
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=unavailable,
+                 ) as adapter, \
+                 mock.patch.object(dr.logger, 'info') as log:
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            self.assertFalse(
+                self._observations(log)[-1]['installed_context_proven'],
+            )
+            self.assertEqual(len(resident.sent_objects), 1)
+        finally:
+            os.unlink(db)
+
+        db = _tmp_db()
+        try:
+            plan = self._plan(db, content='second')
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     side_effect=RuntimeError('observer fault'),
+                 ) as adapter, \
+                 mock.patch.object(dr.logger, 'exception') as log_exception, \
+                 mock.patch.object(dr.logger, 'info') as log_info:
+                resident, _events = self._stream(plan)
+            adapter.assert_called_once()
+            log_exception.assert_called_once()
+            self.assertFalse(
+                self._observations(log_info)[-1]['installed_context_proven'],
+            )
+            self.assertEqual(len(resident.sent_objects), 1)
+        finally:
+            os.unlink(db)
+
+    def test_fingerprint_and_projection_are_deterministic_without_body_logging(self):
+        self.assertEqual(
+            dr._continuity_shadow_fingerprint('中文abc'),
+            dr._continuity_shadow_fingerprint('中文abc'),
+        )
+        first = dr._continuity_shadow_fingerprint(
+            [{'type': 'text', 'text': '中文'}, {'type': 'image', 'name': 'a'}],
+        )
+        second = dr._continuity_shadow_fingerprint(
+            [{'text': '中文', 'type': 'text'}, {'name': 'a', 'type': 'image'}],
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first[2], 'multimodal')
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            plan.assembly.update({
+                'state': 'STATE BODY',
+                'day_handoff_content': {
+                    'source_day': '2026-09-09',
+                    'source_sha256': 'handoff-hash',
+                    'source_last_message_id': 7,
+                    'open_loops': ['loop one'],
+                    'topics': ['must not affect projection'],
+                    'last_topic': 'also ignored',
+                },
+            })
+            resident = self._Resident()
+            resident._system_text = 'EFFECTIVE SYSTEM'
+            before = dict(plan.manifest)
+            sections = dr._build_continuity_shadow_fixed_sections(
+                plan=plan,
+                resident=resident,
+                static_system='FALLBACK SYSTEM',
+            )
+            self.assertEqual(
+                [section.kind for section in sections],
+                ['invariant_system', 'accepted_state', 'accepted_open_loops'],
+            )
+            self.assertEqual(
+                sections[0].content_hash,
+                hashlib.sha256(b'EFFECTIVE SYSTEM').hexdigest(),
+            )
+            self.assertEqual(plan.manifest, before)
+            log = mock.Mock()
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                     return_value=self._result(),
+                 ):
+                with mock.patch.object(dr.logger, 'info') as info:
+                    dr._observe_continuity_shadow(
+                        plan=plan,
+                        resident=resident,
+                        static_system='FALLBACK SYSTEM',
+                        content='PRIVATE BODY MUST NOT APPEAR',
+                    )
+            serialized = ' '.join(
+                str(arg)
+                for call in info.call_args_list
+                for arg in call.args
+            )
+            self.assertNotIn('PRIVATE BODY MUST NOT APPEAR', serialized)
+        finally:
+            os.unlink(db)
+
+
+    def test_fixed_sections_use_full_semantic_state_snapshot_not_hot_delta(self):
+        from chat.persona_state_semantic import (
+            format_persona_semantic_snapshot,
+            translate_raw_state_to_persona_semantic,
+        )
+
+        plan = types.SimpleNamespace(
+            assembly={
+                'state': '【此刻有一点变化】\\n旧 transport delta',
+                'state_snapshot': {
+                    'emotion': 'mood=平静',
+                    'drive': 'fatigue=0.10 stress=0.10',
+                },
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='FALLBACK',
+        )
+        accepted = next(section for section in sections if section.kind == 'accepted_state')
+        expected = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(plan.assembly['state_snapshot']),
+        )
+        self.assertEqual(accepted.content_hash, hashlib.sha256(expected.encode()).hexdigest())
+        self.assertNotEqual(accepted.content_hash, hashlib.sha256(
+            plan.assembly['state'].encode(),
+        ).hexdigest())
+
+    def test_production_fixed_sections_do_not_fallback_to_hot_delta(self):
+        plan = types.SimpleNamespace(
+            assembly={
+                'state': 'HOT DELTA ONLY',
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='FALLBACK',
+            require_full_state_snapshot=True,
+        )
+        self.assertNotIn('accepted_state', [section.kind for section in sections])
+
+
+    def test_legacy_fixed_sections_fallback_when_state_snapshot_is_empty(self):
+        plan = types.SimpleNamespace(
+            assembly={
+                'state_snapshot': {},
+                'state': 'LEGACY STATE',
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='FALLBACK',
+            require_full_state_snapshot=False,
+        )
+        self.assertIn('accepted_state', [section.kind for section in sections])
+
+    def test_hot_transport_keeps_delta_or_empty_without_replaying_snapshot(self):
+        from chat.persona_state_semantic import (
+            format_persona_semantic_snapshot,
+            translate_raw_state_to_persona_semantic,
+        )
+
+        snapshot = {'emotion': 'mood=平静', 'drive': 'stress=0.10'}
+        full_snapshot = format_persona_semantic_snapshot(
+            translate_raw_state_to_persona_semantic(snapshot),
+        )
+        empty_payload = dr.format_resident_turn_content(
+            assembly={'state': '', 'state_snapshot': snapshot},
+            user_content='hello',
+            is_cold=False,
+            is_respawn=False,
+        )
+        delta_payload = dr.format_resident_turn_content(
+            assembly={'state': 'DELTA ONLY', 'state_snapshot': snapshot},
+            user_content='hello',
+            is_cold=False,
+            is_respawn=False,
+        )
+        self.assertEqual(empty_payload, 'hello')
+        self.assertNotIn(full_snapshot, empty_payload)
+        self.assertIn('DELTA ONLY', delta_payload)
+        self.assertNotIn(full_snapshot, delta_payload)
+
+    def test_missing_cold_manifest_fails_closed(self):
+        db = _tmp_db()
+        try:
+            plan = self._plan(db)
+            plan.assembly['manifest'].pop('cold_history_budget', None)
+            with mock.patch.dict(os.environ, {
+                'HAYA_CONTINUITY_SHADOW_STORE_PATH': 'shadow.db',
+            }, clear=False), \
+                 mock.patch(
+                     'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+                 ) as adapter, \
+                 mock.patch.object(dr.logger, 'info') as log:
+                dr._observe_continuity_shadow(
+                    plan=plan,
+                    resident=self._Resident(),
+                    static_system='STATIC',
+                    content='body',
+                )
+            adapter.assert_not_called()
+            self.assertEqual(
+                self._observations(log)[-1]['error_code'],
+                'budget_policy_unmapped',
+            )
+        finally:
+            os.unlink(db)
+
+
+class ContextPlanBudgetAuthorityTests(unittest.TestCase):
+    def test_policy_maps_canonical_authority_without_semantic_version_change(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            return_value=90000,
+        ) as target, mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ) as reserve, mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ) as recent_raw:
+            policy, version = dr._context_plan_policy()
+
+        self.assertEqual(policy.token_budget, 98000)
+        self.assertEqual(policy.reserve_budget, 8000)
+        self.assertEqual(policy.usable_budget, 90000)
+        self.assertEqual(policy.recent_raw_target, 24000)
+        self.assertEqual(version, 'continuity_context_budget_v1')
+        target.assert_called_once_with()
+        reserve.assert_called_once_with()
+        recent_raw.assert_called_once_with()
+
+    def test_policy_tracks_dynamic_canonical_authority(self):
+        cases = (
+            (90000, 8000, 24000, 98000),
+            (70000, 6000, 18000, 76000),
+        )
+        for target_value, reserve_value, recent_value, token_budget in cases:
+            with self.subTest(
+                target=target_value,
+                reserve=reserve_value,
+                recent_raw=recent_value,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.cold_prompt_target',
+                return_value=target_value,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.cold_safety_margin',
+                return_value=reserve_value,
+            ), mock.patch(
+                'chat.context_lean.cc_history_token_budget',
+                return_value=recent_value,
+            ):
+                policy, _version = dr._context_plan_policy()
+
+            self.assertEqual(
+                (
+                    policy.token_budget,
+                    policy.reserve_budget,
+                    policy.usable_budget,
+                    policy.recent_raw_target,
+                ),
+                (token_budget, reserve_value, target_value, recent_value),
+            )
+
+    def test_legacy_context_plan_budget_keys_are_not_read_or_authoritative(self):
+        legacy_values = {
+            'CONTEXT_PLAN_TOKEN_BUDGET': '123',
+            'CONTEXT_PLAN_RESERVE_BUDGET': '45',
+            'CONTEXT_PLAN_RECENT_RAW_TARGET': '67',
+        }
+
+        def _legacy_get(key, default=''):
+            return legacy_values.get(key, default)
+
+        with mock.patch.object(
+            config_store,
+            'get',
+            side_effect=_legacy_get,
+        ) as legacy_get, mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            return_value=70000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=6000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=18000,
+        ):
+            policy, _version = dr._context_plan_policy()
+
+        self.assertEqual(
+            (
+                policy.token_budget,
+                policy.reserve_budget,
+                policy.usable_budget,
+                policy.recent_raw_target,
+            ),
+            (76000, 6000, 70000, 18000),
+        )
+        self.assertFalse(
+            any(
+                call.args and call.args[0] in legacy_values
+                for call in legacy_get.call_args_list
+            )
+        )
+
+    def test_canonical_authority_failure_is_fail_visible(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            side_effect=RuntimeError('canonical target unavailable'),
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'canonical target unavailable'):
+                dr._context_plan_policy()
+
+    def test_mode_aware_policy_keeps_cold_hot_and_capacity_authorities_separate(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_rebuild_guard',
+            return_value=70000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_prompt_target',
+            return_value=150000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.capacity_swap_prompt_target',
+            return_value=90000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ):
+            cold, _ = dr._context_plan_policy(mode='cold')
+            respawn, _ = dr._context_plan_policy(mode='respawn')
+            hot, _ = dr._context_plan_policy(mode='hot')
+            capacity, _ = dr._context_plan_policy(mode='capacity')
+
+        self.assertEqual(cold.token_budget, 98000)
+        self.assertEqual(respawn.token_budget, 98000)
+        self.assertEqual(cold.usable_budget, 90000)
+        self.assertEqual(respawn.usable_budget, 90000)
+        self.assertEqual(hot.usable_budget, 150000)
+        self.assertEqual(capacity.usable_budget, 90000)
+
+
+    def test_cold_rebuild_guard_does_not_change_rebuild_packing_policy(self):
+        for guard_value in (60000, 70000, 80000):
+            with self.subTest(guard=guard_value), mock.patch(
+                'chat.cold_bootstrap_budget.cold_rebuild_guard',
+                return_value=guard_value,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+                return_value=90000,
+            ), mock.patch(
+                'chat.cold_bootstrap_budget.cold_safety_margin',
+                return_value=8000,
+            ), mock.patch(
+                'chat.context_lean.cc_history_token_budget',
+                return_value=24000,
+            ):
+                cold, _ = dr._context_plan_policy(mode='cold')
+                respawn, _ = dr._context_plan_policy(mode='respawn')
+
+            self.assertEqual(cold.usable_budget, 90000)
+            self.assertEqual(respawn.usable_budget, 90000)
+
+    def test_pre_462_rebuild_packing_budget_is_deterministically_equivalent(self):
+        fixed_sections = {
+            'static_system': 12000,
+            'dynamic_state': 4000,
+            'current_user': 3000,
+            'anchor_reserve': 5000,
+        }
+        fixed_total = sum(fixed_sections.values())
+        with mock.patch(
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ):
+            corrected, _ = dr._context_plan_policy(mode='cold')
+
+        # PRE_462 used cold_prompt_target() == 90k and token_budget=target+reserve.
+        pre_462_usable = 90000
+        corrected_retained = corrected.usable_budget - fixed_total
+        pre_462_retained = pre_462_usable - fixed_total
+        self.assertEqual(corrected_retained, pre_462_retained)
+        self.assertEqual(corrected_retained, 66000)
+        self.assertEqual(corrected_retained - pre_462_retained, 0)
+
+    def test_hot_threshold_defaults_remain_unchanged(self):
+        from chat.cold_bootstrap_budget import cold_hard_limit, cold_soft_limit
+
+        with mock.patch(
+            'config_store.get_int',
+            side_effect=lambda _key, default=0: default,
+        ):
+            self.assertEqual(cold_soft_limit(), 150000)
+            self.assertEqual(cold_hard_limit(), 180000)
+            self.assertEqual(cc_resident._cfg_int('CC_MAX_RESIDENT_TURNS', 45), 45)
+
+    def test_cold_planner_accepts_75k_plan_despite_legacy_guard(self):
+        from continuity.context_plan import (
+            ContextChunkBinding,
+            ContextSection,
+            build_context_plan,
+        )
+        from continuity.contracts import (
+            ContinuityChunk,
+            SourceMember,
+            SourceSnapshot,
+            candidate_source_revision,
+        )
+        from continuity.coverage import source_hash
+        from continuity.sealing import CandidateBlock
+
+        members = tuple(
+            SourceMember(
+                seq=seq,
+                source_kind='completed_turn',
+                source_ref='turn:%s' % seq,
+                source_revision='rev:%s' % seq,
+                role='user',
+                content_hash='hash:%s' % seq,
+                logical_size=40000,
+                created_at='2026-07-27 09:0%s:00' % seq,
+            )
+            for seq in (1, 2)
+        )
+        snapshot_hash = source_hash(members)
+        snapshot = SourceSnapshot(
+            snapshot_id='snapshot:one',
+            identity_id='default',
+            chat_id='default',
+            branch_id='active-transcript',
+            local_day='2026-07-27',
+            source_watermark=2,
+            policy_version='r1',
+            source_hash=snapshot_hash,
+            status='ready',
+            created_at='2026-07-27 10:00:00',
+            members=members,
+        )
+        candidate = CandidateBlock(
+            candidate_id='candidate:one',
+            snapshot_id=snapshot.snapshot_id,
+            policy_version='r1',
+            block_seq=0,
+            local_day='2026-07-27',
+            branch_id='active-transcript',
+            source_start_seq=1,
+            source_end_seq=2,
+            source_seqs=(1, 2),
+            source_refs=('turn:1', 'turn:2'),
+            source_revisions=('rev:1', 'rev:2'),
+            logical_size=80000,
+            completed_turn_count=2,
+            oversize=False,
+            close_reason='boundary',
+            source_revision=candidate_source_revision(members),
+        )
+        body = 'compact canonical chunk'
+        chunk = ContinuityChunk(
+            chunk_id='chunk:one',
+            generation_job_id='job:one',
+            candidate_id=candidate.candidate_id,
+            snapshot_id=snapshot.snapshot_id,
+            artifact_revision='artifact:one',
+            body=body,
+            body_hash=hashlib.sha256(body.encode('utf-8')).hexdigest(),
+            source_token_estimate=80000,
+            output_token_estimate=45000,
+            generator_policy_version='r1',
+            prompt_policy_version='r1',
+            provider='test',
+            model_identity='test',
+            actual_executor='test',
+            generation_id='generation:one',
+            status='ready',
+            created_at='2026-07-27 10:01:00',
+        )
+        binding = ContextChunkBinding(chunk=chunk, candidate=candidate, snapshot=snapshot)
+        with mock.patch(
+            'chat.cold_bootstrap_budget.cold_rebuild_guard',
+            return_value=70000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=0,
+        ):
+            policy, _version = dr._context_plan_policy(mode='cold')
+        plan = build_context_plan(
+            members,
+            raw_members=members,
+            chunks=(binding,),
+            budget_policy=policy,
+            fixed_sections=(
+                # The compact fixture contributes 8,006 tokens; fixed sections total 66,994.
+                ContextSection(
+                    kind='invariant_system',
+                    source_ref='system:one',
+                    content_hash='system-hash',
+                    estimated_tokens=61994,
+                ),
+                ContextSection(
+                    kind='current_request',
+                    source_ref='message:current',
+                    content_hash='current-hash',
+                    estimated_tokens=5000,
+                ),
+            ),
+            budget_policy_version='continuity_context_budget_v1',
+        )
+
+        self.assertEqual(sum(member.logical_size for member in members), 80000)
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(plan.total_token_estimate, 75000)
+        self.assertEqual([item.kind for item in plan.representations], ['chunk'])
+        self.assertLessEqual(plan.total_token_estimate, 90000)
+        self.assertLess(plan.total_token_estimate, 90000)
+
+        fixed_overflow = build_context_plan(
+            members,
+            raw_members=members,
+            chunks=(binding,),
+            budget_policy=policy,
+            fixed_sections=(
+                ContextSection(
+                    kind='invariant_system',
+                    source_ref='system:oversized',
+                    content_hash='system-oversized-hash',
+                    estimated_tokens=90001,
+                ),
+                ContextSection(
+                    kind='current_request',
+                    source_ref='message:current',
+                    content_hash='current-hash',
+                    estimated_tokens=1,
+                ),
+            ),
+            budget_policy_version='continuity_context_budget_v1',
+        )
+        self.assertFalse(fixed_overflow.valid)
+        self.assertEqual(fixed_overflow.budget_status, 'blocked')
+
+
+class ContextPlanConsumerTests(unittest.TestCase):
+    @staticmethod
+    def _context_plan_runtime_db():
+        db = _tmp_db()
+        _init_chat_messages(db)
+        conn = sqlite3.connect(db)
+        for column, definition in (
+            ('branches', 'TEXT DEFAULT ""'),
+            ('branch_idx', 'INTEGER DEFAULT 0'),
+            ('attachments', 'TEXT DEFAULT ""'),
+            ('file_url', 'TEXT DEFAULT ""'),
+            ('file_name', 'TEXT DEFAULT ""'),
+        ):
+            conn.execute(
+                'ALTER TABLE chat_messages ADD COLUMN %s %s' % (
+                    column, definition,
+                )
+            )
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS daily_message_contexts ('
+            'message_id INTEGER PRIMARY KEY, context_id INTEGER, context_epoch INTEGER, '
+            'resident_generation INTEGER, role TEXT, created_at TEXT)'
+        )
+        conn.execute(
+            'CREATE TABLE r45a_scope_fixture (id INTEGER PRIMARY KEY)'
+        )
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS wake_log ('
+            'id INTEGER PRIMARY KEY AUTOINCREMENT, thoughts TEXT, action TEXT, '
+            'content TEXT, consumed INTEGER DEFAULT 0, woke_at TEXT, cache_info TEXT, '
+            'wake_run_id TEXT, chat_id TEXT, context_id INTEGER, context_epoch INTEGER, '
+            'resident_generation INTEGER)'
+        )
+        conn.commit()
+        conn.close()
+        from continuity.store import ensure_schema as ensure_continuity_schema
+        conn = sqlite3.connect(db)
+        ensure_continuity_schema(conn)
+        conn.close()
+        return db
+
+    def _fake_context_plan(self, member=None, *, representation_kind='raw'):
+        if member is None:
+            member = types.SimpleNamespace(
+                seq=0,
+                source_ref='turn:1:2',
+                source_revision='rev-turn',
+                source_kind='completed_turn',
+                content_hash='hash-turn',
+                span_start=None,
+                span_end=None,
+                branch_id='active-transcript',
+            )
+        representation = types.SimpleNamespace(
+            representation_id='raw:one',
+            kind=representation_kind,
+            source_members=(member,),
+            estimated_tokens=4,
+        )
+        current_request = types.SimpleNamespace(
+            kind='current_request',
+            source_ref='message:3',
+            content_hash='hash-current',
+            estimated_tokens=1,
+        )
+        return types.SimpleNamespace(
+            plan_id='plan:one',
+            plan_hash='plan-hash-one',
+            source_hash='source-hash-one',
+            source_members=(member,),
+            representations=(representation,),
+            ordered_sections=(current_request,),
+            budget_policy=types.SimpleNamespace(recent_raw_target=1),
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            budget_status='fit',
+            valid=True,
+            token_budget=100,
+            reserve_budget=2,
+            selected_token_estimate=4,
+            fixed_section_token_estimate=1,
+            total_token_estimate=7,
+            remaining_budget=93,
+            gaps=(),
+            exclusions=(),
+        )
+
+    def _fake_hot_context_plan(self):
+        context_plan = self._fake_context_plan()
+        context_plan.ordered_sections = (
+            types.SimpleNamespace(
+                kind='invariant_system',
+                source_ref='system:static',
+                content_hash='hash-static',
+                estimated_tokens=2,
+            ),
+            types.SimpleNamespace(
+                kind='current_request',
+                source_ref='message:3',
+                content_hash='hash-current',
+                estimated_tokens=1,
+            ),
+        )
+        return context_plan
+
+    def _fake_hot_reconcile_plan(self, *, receipt_members=None):
+        from chat.context_receipt import ContextReceipt
+
+        context_plan = self._fake_hot_context_plan()
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            chat_id='default',
+            worker_id=dr.WORKER_ID,
+            manifest={'provider': 'claude_code', 'model': 'model-1'},
+            hot_desired_plan=context_plan,
+        )
+        desired_members = dr._context_receipt_members(plan)
+        members = tuple(receipt_members or desired_members)
+        receipt = ContextReceipt.build(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            provider='claude_code',
+            model_identity='model-1',
+            session_id='session-1',
+            process_generation=1,
+            plan_id='plan:previous',
+            plan_hash='previous-plan-hash',
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            installed_source_watermark=2,
+            members=members,
+        )
+        plan.hot_receipt_frozen = {
+            'receipt': receipt,
+            'members': members,
+            'receipt_missing': False,
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'expected_receipt_revision': 0,
+        }
+        return plan, context_plan, desired_members
+
+
+    @staticmethod
+    def _historical_source(ref, revision=None):
+        revision = revision or ('revision-' + ref)
+        return types.SimpleNamespace(
+            source_ref=ref,
+            source_revision=revision,
+            source_kind='completed_turn',
+            content_hash='content-' + ref,
+            span_start=None,
+            span_end=None,
+            branch_id='active-transcript',
+        )
+
+    @classmethod
+    def _historical_receipt_member(
+        cls,
+        order,
+        ref,
+        *,
+        representation_kind='raw',
+        representation_id='raw:old',
+        revision=None,
+        content_hash=None,
+    ):
+        from chat.context_receipt import ContextReceiptMember
+
+        return ContextReceiptMember(
+            installed_order=order,
+            representation_id=representation_id,
+            representation_kind=representation_kind,
+            source_ref=ref,
+            source_revision=revision or ('revision-' + ref),
+            source_kind='completed_turn',
+            content_hash=content_hash or ('content-' + ref),
+            branch_id='active-transcript',
+        )
+
+    def _assert_hot_historical_respawn(self, installed, desired, tail):
+        compatible, reason = dr._hot_historical_compatibility(
+            receipt_members=tuple(installed),
+            desired_members=tuple(desired),
+            native_tail_member=tail,
+        )
+        self.assertFalse(compatible, reason)
+        self.assertEqual(reason, 'historical_representation_identity_changed'
+                         if any(
+                             left.representation_kind != right.representation_kind
+                             or (
+                                 left.representation_kind == 'chunk'
+                                 and left.representation_id != right.representation_id
+                             )
+                             for left, right in zip(installed, desired)
+                         ) else 'historical_source_members_changed')
+
+    def _state_context_plan(self, snapshot):
+        context_plan = self._fake_hot_context_plan()
+        state_plan = types.SimpleNamespace(
+            assembly={
+                'state': '',
+                'state_snapshot': dict(snapshot),
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        fixed_sections = dr._build_continuity_shadow_fixed_sections(
+            plan=state_plan,
+            resident=types.SimpleNamespace(_system_text='STATIC'),
+            static_system='STATIC',
+        )
+        current_request = next(
+            section for section in context_plan.ordered_sections
+            if section.kind == 'current_request'
+        )
+        context_plan.ordered_sections = tuple(fixed_sections) + (current_request,)
+        return context_plan
+
+    def _state_hot_reconcile_plan(self, installed_snapshot, desired_snapshot):
+        from chat.context_receipt import ContextReceipt
+
+        desired_context_plan = self._state_context_plan(desired_snapshot)
+        installed_context_plan = self._state_context_plan(installed_snapshot)
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            chat_id='default',
+            worker_id=dr.WORKER_ID,
+            user_message_id=3,
+            manifest={'provider': 'claude_code', 'model': 'model-1'},
+            assembly={
+                'state': '',
+                'state_snapshot': dict(desired_snapshot),
+            },
+            hot_desired_plan=desired_context_plan,
+        )
+        desired_members = dr._context_receipt_members(plan)
+        installed_plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=installed_context_plan,
+        )
+        installed_members = dr._context_receipt_members(installed_plan)
+        receipt = ContextReceipt.build(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            provider='claude_code',
+            model_identity='model-1',
+            session_id='session-1',
+            process_generation=1,
+            plan_id='plan:previous',
+            plan_hash='previous-plan-hash',
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            installed_source_watermark=2,
+            members=installed_members,
+        )
+        plan.hot_receipt_frozen = {
+            'receipt': receipt,
+            'members': installed_members,
+            'receipt_missing': False,
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'expected_receipt_revision': 0,
+        }
+        return plan, desired_context_plan, desired_members
+
+    def test_hot_full_accepted_state_stays_no_op_when_transport_is_unchanged(self):
+        state_a = {'emotion': 'mood=平静', 'drive': 'stress=0.10'}
+        plan, context_plan, _desired_members = self._state_hot_reconcile_plan(
+            state_a,
+            state_a,
+        )
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={
+                'status': 'pass',
+                'source_member': context_plan.source_members[0],
+            },
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'NO_OP')
+
+    def test_hot_full_accepted_state_change_respawns(self):
+        state_a = {'emotion': 'mood=平静', 'drive': 'stress=0.10'}
+        state_b = {'emotion': 'mood=焦虑', 'drive': 'stress=0.80'}
+        plan, _context_plan, _desired_members = self._state_hot_reconcile_plan(
+            state_a,
+            state_b,
+        )
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'fixed_context_plan_mismatch')
+
+    def test_context_receipt_chunk_member_uses_canonical_representation_id(self):
+        context_plan = self._fake_context_plan(representation_kind='chunk')
+        context_plan.representations[0].representation_id = 'chunk:canonical'
+        plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=context_plan,
+        )
+        members = dr._context_receipt_members(plan)
+        historical = tuple(
+            member for member in members if member.source_kind == 'completed_turn'
+        )
+        self.assertEqual(
+            [member.representation_id for member in historical],
+            ['chunk:canonical'],
+        )
+        self.assertTrue(all(':proof:' not in member.representation_id for member in historical))
+
+    def test_raw_native_tail_allows_natural_representation_regroup(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:old'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:old'),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        compatible, reason = dr._hot_historical_compatibility(
+            receipt_members=tuple(installed),
+            desired_members=tuple(desired),
+            native_tail_member=self._historical_source('turn:t'),
+        )
+        self.assertTrue(compatible, reason)
+
+    def test_raw_compatibility_rejects_unproven_extra_member(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
+            self._historical_receipt_member(2, 'turn:x', representation_id='raw:new'),
+            self._historical_receipt_member(3, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_raw_to_chunk_respawns(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+        ]
+        desired = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                2, 'turn:t', representation_id='raw:new',
+            ),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_chunk_to_raw_respawns(self):
+        installed = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_chunk_canonical_representation_change_respawns(self):
+        installed = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:one',
+            ),
+        ]
+        desired = [
+            self._historical_receipt_member(
+                0, 'turn:a', representation_kind='chunk',
+                representation_id='chunk:two',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_kind='chunk',
+                representation_id='chunk:two',
+            ),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_historical_raw_source_change_respawns(self):
+        installed = [
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+        ]
+        desired = [
+            self._historical_receipt_member(0, 'turn:a', representation_id='raw:new'),
+            self._historical_receipt_member(
+                1, 'turn:b', representation_id='raw:new', revision='revision-b-new',
+            ),
+            self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
+        ]
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
+        )
+
+    def test_hot_receipt_members_include_fixed_sections_without_body(self):
+        from chat.context_receipt import ContextReceiptMember
+
+        context_plan = self._fake_hot_context_plan()
+        context_plan.ordered_sections = (
+            types.SimpleNamespace(
+                kind='invariant_system',
+                source_ref='system:static',
+                content_hash='hash-static',
+                estimated_tokens=2,
+            ),
+            types.SimpleNamespace(
+                kind='accepted_state',
+                source_ref='state:accepted',
+                content_hash='hash-state',
+                estimated_tokens=2,
+            ),
+            types.SimpleNamespace(
+                kind='accepted_open_loops',
+                source_ref='loops:accepted',
+                content_hash='hash-loops',
+                estimated_tokens=1,
+            ),
+            types.SimpleNamespace(
+                kind='current_request',
+                source_ref='message:3',
+                content_hash='hash-current',
+                estimated_tokens=1,
+            ),
+        )
+        plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=context_plan,
+        )
+
+        members = dr._context_receipt_members(plan)
+        fixed = tuple(
+            member for member in members
+            if member.source_kind in dr._HOT_FIXED_SECTION_KINDS
+        )
+        self.assertEqual(
+            [member.source_kind for member in fixed],
+            ['invariant_system', 'accepted_state', 'accepted_open_loops'],
+        )
+        self.assertTrue(all(isinstance(member, ContextReceiptMember) for member in fixed))
+        self.assertEqual(
+            [member.representation_id for member in fixed],
+            ['fixed:invariant_system', 'fixed:accepted_state', 'fixed:accepted_open_loops'],
+        )
+        self.assertEqual(
+            [member.source_revision for member in fixed],
+            ['hash-static', 'hash-state', 'hash-loops'],
+        )
+        self.assertEqual([member.span_start for member in fixed], [None, None, None])
+        self.assertEqual([member.span_end for member in fixed], [None, None, None])
+
+    def test_legacy_receipt_fixed_proof_reconciles_to_respawn(self):
+        plan, _context_plan, desired_members = self._fake_hot_reconcile_plan()
+        legacy_members = tuple(
+            member for member in desired_members
+            if member.source_kind not in dr._HOT_FIXED_SECTION_KINDS
+        )
+        plan.hot_receipt_frozen['members'] = legacy_members
+        plan.hot_receipt_frozen['receipt_members_complete'] = True
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(
+            plan.hot_decision_reason,
+            'legacy_receipt_fixed_proof_incomplete',
+        )
+
+    def test_compatible_hot_receipt_reconciles_to_no_op(self):
+        plan, context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={
+                'status': 'pass',
+                'source_member': context_plan.source_members[0],
+            },
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'NO_OP')
+        self.assertEqual(plan.hot_decision_reason, '')
+        self.assertEqual(plan.manifest['context_plan_native_tail_proof'], 'PASS')
+
+    def test_missing_native_tail_reconciles_to_respawn(self):
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'missing', 'reason': 'native_tail_mapping_missing'},
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'native_tail_mapping_missing')
+
+    def test_ambiguous_native_tail_blocks_without_fallback(self):
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'ambiguous', 'reason': 'multiple_canonical_tail_turns'},
+        ):
+            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+        self.assertEqual(decision, 'BLOCKED')
+        self.assertEqual(plan.hot_decision_reason, 'multiple_canonical_tail_turns')
+
+    def test_hot_receipt_freezes_durable_revision_with_one_read(self):
+        from chat import context_receipt as receipt_store
+
+        db = self._context_plan_runtime_db()
+        try:
+            plan, _context_plan, desired_members = self._fake_hot_reconcile_plan()
+            plan.db_path = db
+            resident = types.SimpleNamespace(session_id='session-1', generation=1)
+            receipt = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='session-1',
+                process_generation=1,
+                plan_id='plan:previous',
+                plan_hash='previous-plan-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=desired_members,
+            )
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            receipt_store.create_receipt(conn, receipt, desired_members)
+            conn.close()
+            with mock.patch.object(
+                receipt_store,
+                'get_receipt',
+                wraps=receipt_store.get_receipt,
+            ) as get_receipt:
+                frozen = dr._freeze_hot_receipt(plan, resident=resident)
+            self.assertEqual(frozen['expected_receipt_revision'], 0)
+            self.assertEqual(get_receipt.call_count, 1)
+        finally:
+            os.unlink(db)
+
+    def test_hot_receipt_advance_uses_frozen_revision(self):
+        from chat import context_receipt as receipt_store
+
+        db = self._context_plan_runtime_db()
+        try:
+            plan, context_plan, desired_members = self._fake_hot_reconcile_plan()
+            plan.db_path = db
+            plan.transcript_claude_session_id = 'session-1'
+            plan.transcript_process_generation = 1
+            plan.transcript_start_offset = 1
+            plan.transcript_end_offset = 10
+            plan._same_context_last_good_proven = True
+            plan.manifest.update({
+                'transcript_mapping_status': 'MAPPED',
+                'assistant_message_id': 3,
+                'cursor_after': 3,
+                'cursor_cas_success': True,
+                'context_receipt_last_good_proven': True,
+            })
+            prior = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='session-1',
+                process_generation=1,
+                plan_id='plan:previous',
+                plan_hash='previous-plan-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=desired_members,
+            )
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            receipt_store.create_receipt(conn, prior, desired_members)
+            conn.close()
+            plan.hot_receipt_frozen = {
+                'receipt': prior,
+                'expected_receipt_revision': 0,
+            }
+            with mock.patch.object(
+                dr.dc,
+                'get_resident_history_cursor',
+                return_value=3,
+            ), mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': 10,
+                },
+            ), mock.patch.object(
+                receipt_store,
+                'hot_advance_receipt',
+                wraps=receipt_store.hot_advance_receipt,
+            ) as advance:
+                plan.hot_decision = 'NO_OP'
+                self.assertTrue(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=3,
+                    )
+                )
+            self.assertEqual(
+                advance.call_args.kwargs['expected_receipt_revision'],
+                0,
+            )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'COMMITTED')
+            self.assertEqual(plan.manifest['context_receipt_revision'], 1)
+            self.assertEqual(context_plan.plan_hash, 'plan-hash-one')
+        finally:
+            os.unlink(db)
+
+    def test_hot_no_op_keeps_incremental_payload_and_user_once(self):
+        plan = types.SimpleNamespace(
+            hot_decision='NO_OP',
+            assembly={'current_day_history': []},
+            user_content='hello',
+            provider_display_thinking_suffix='',
+            manifest={},
+        )
+        dr._validate_hot_no_op_payload(plan, 'existing incremental context\nhello')
+        self.assertEqual(plan.manifest['context_plan_current_request_count'], 1)
+        plan.assembly['context_plan_representation_blocks'] = [
+            {'kind': 'raw', 'content': 'forbidden replay'},
+        ]
+        with self.assertRaises(dr.DailyRuntimeError) as caught:
+            dr._validate_hot_no_op_payload(plan, 'hello')
+        self.assertEqual(caught.exception.error_code, 'context_plan_hot_history_replay')
+
+    def test_hot_shadow_does_not_build_second_planner(self):
+        plan = types.SimpleNamespace(
+            continuity_plan=None,
+            hot_desired_plan=object(),
+            manifest={},
+        )
+        with mock.patch.object(dr, '_build_production_context_plan') as build_plan:
+            dr._observe_continuity_shadow(
+                plan=plan,
+                resident=object(),
+                static_system='',
+                content='hello',
+            )
+        build_plan.assert_not_called()
+        self.assertEqual(plan.manifest['context_plan_hot_shadow'], 'disabled')
+
+    def test_gate_reads_existing_key_and_defaults_closed(self):
+        with mock.patch.object(
+            config_store,
+            'get',
+            side_effect=lambda key, default='': (
+                '1' if key == 'CONTEXT_PLAN_CONSUMER_ENABLED' else default
+            ),
+        ):
+            self.assertTrue(dr._context_plan_consumer_enabled())
+        with mock.patch.object(
+            config_store,
+            'get',
+            return_value='0',
+        ):
+            self.assertFalse(dr._context_plan_consumer_enabled())
+
+    def test_gate_imports_config_store_when_not_preloaded(self):
+        saved = sys.modules.pop('config_store', None)
+        try:
+            fresh_config_store = importlib.import_module('config_store')
+            with mock.patch.object(
+                fresh_config_store,
+                'get',
+                return_value='1',
+            ):
+                self.assertTrue(dr._context_plan_consumer_enabled())
+        finally:
+            sys.modules.pop('config_store', None)
+            if saved is not None:
+                sys.modules['config_store'] = saved
+
+    def test_gate_on_cold_and_respawn_disables_legacy_replay(self):
+        for is_cold, is_respawn, turn_kind in (
+            (True, False, 'cold'),
+            (False, True, 'respawn'),
+        ):
+            assembly = {'manifest': {}, 'current_day_history': []}
+            fake_plan = self._fake_context_plan()
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=True,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ) as build_context, mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+                return_value=(fake_plan, {}),
+            ), mock.patch.object(
+                dr,
+                '_project_context_plan_history',
+                return_value=assembly,
+            ):
+                dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=is_cold,
+                    is_respawn=is_respawn,
+                    turn_kind=turn_kind,
+                    cursor_before=None,
+                    resident=None,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+            kwargs = build_context.call_args.kwargs
+            self.assertFalse(kwargs['inject_handoff'])
+            self.assertFalse(kwargs['inject_carryover'])
+            self.assertEqual(kwargs['history_override'], [])
+
+    def test_gate_on_cold_oversized_source_uses_canonical_plan_and_sends_once(self):
+        db = self._context_plan_runtime_db()
+        try:
+            _insert(db, 'hayana', 'previous user', '2026-07-27 09:00:00')
+            _insert(db, 'assistant', 'previous assistant', '2026-07-27 09:01:00')
+            uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+            source_members = (
+                types.SimpleNamespace(logical_size=40000, source_ref='turn:1'),
+                types.SimpleNamespace(logical_size=40000, source_ref='turn:2'),
+            )
+            context_plan = types.SimpleNamespace(
+                plan_id='plan:oversized-source',
+                plan_hash='plan-hash-oversized-source',
+                source_hash='source-hash-oversized-source',
+                source_members=source_members,
+                representations=(types.SimpleNamespace(
+                    kind='chunk',
+                    chunk_id='chunk:one',
+                    representation_id='chunk:one',
+                    source_members=source_members,
+                    estimated_tokens=75000,
+                ),),
+                ordered_sections=(
+                    types.SimpleNamespace(kind='invariant_system', estimated_tokens=10000),
+                    types.SimpleNamespace(kind='current_request', estimated_tokens=5000),
+                ),
+                budget_policy=types.SimpleNamespace(
+                    usable_budget=90000,
+                    reserve_budget=8000,
+                ),
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                budget_status='fit',
+                valid=True,
+                total_token_estimate=75000,
+            )
+            assembly = {
+                'manifest': {},
+                'state': '',
+                'day_handoff_content': None,
+                'current_day_history': [],
+                'context_plan_representation_blocks': [{
+                    'kind': 'chunk',
+                    'representation_id': 'chunk:one',
+                    'body': 'compact canonical history',
+                }],
+                'layers': [],
+            }
+            original_get = config_store.get
+            captured = {}
+
+            def _get(key, default=None):
+                if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                    return '1'
+                return original_get(key, default)
+
+            def _build(plan, *, resident, static_system, mode='hot'):
+                captured['mode'] = mode
+                return context_plan, {'chunk:one': 'compact canonical history'}
+
+            resident = _FakeResident()
+            with mock.patch.object(config_store, 'get', side_effect=_get), \
+                 mock.patch.object(dr, '_build_production_context_plan', side_effect=_build), \
+                 mock.patch.object(dr, '_project_context_plan_history', return_value=assembly), \
+                 mock.patch.object(dr, '_observe_continuity_shadow'):
+                plan = _prepare_turn(
+                    db,
+                    uid,
+                    resident=resident,
+                    static_system='STATIC',
+                )
+                events = list(dr.stream_daily_resident_turn(
+                    plan,
+                    resident=resident,
+                    env={},
+                    static_system='STATIC',
+                ))
+
+            self.assertEqual(captured['mode'], 'cold')
+            self.assertTrue(any(evt == 'done' for evt, _payload in events))
+            self.assertEqual(len(resident.sent), 1)
+            self.assertEqual(resident.sent[0].count('current request'), 1)
+            self.assertNotEqual(
+                plan.manifest.get('error_code'),
+                'context_plan_legacy_selector_forbidden',
+            )
+            self.assertFalse(plan.manifest.get('cold_budget_overflow', False))
+        finally:
+            os.unlink(db)
+
+    def test_gate_on_cold_fixed_sections_over_guard_fail_closed_before_send(self):
+        db = self._context_plan_runtime_db()
+        try:
+            uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+            resident = _FakeResident()
+            assembly = {'manifest': {}, 'current_day_history': []}
+            oversized = dr.DailyRuntimeError(
+                'canonical ContextPlan is invalid',
+                error_code='context_plan_invalid',
+            )
+            original_get = config_store.get
+
+            def _get(key, default=None):
+                if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                    return '1'
+                return original_get(key, default)
+
+            def _reject_fixed_overflow(plan, *, resident, static_system, mode='hot'):
+                self.assertEqual(mode, 'cold')
+                self.assertGreater(len(static_system), 70000)
+                raise oversized
+
+            with mock.patch.object(config_store, 'get', side_effect=_get), \
+                 mock.patch.object(
+                     dh,
+                     'build_daily_window_context',
+                     return_value=assembly,
+                 ), mock.patch.object(
+                     dr,
+                     '_build_production_context_plan',
+                     side_effect=_reject_fixed_overflow,
+                 ):
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    _prepare_turn(
+                        db,
+                        uid,
+                        resident=resident,
+                        static_system='S' * 70001,
+                    )
+
+            self.assertEqual(raised.exception.error_code, 'context_plan_invalid')
+            self.assertEqual(resident.sent, [])
+        finally:
+            os.unlink(db)
+
+    def test_gate_off_cold_and_respawn_keep_legacy_assembly_contract(self):
+        for is_cold, is_respawn, turn_kind in (
+            (True, False, 'cold'),
+            (False, True, 'respawn'),
+        ):
+            assembly = {'manifest': {}, 'current_day_history': []}
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=False,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ) as build_context, mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+            ) as build_plan:
+                plan = dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=is_cold,
+                    is_respawn=is_respawn,
+                    turn_kind=turn_kind,
+                    cursor_before=None,
+                    resident=None,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+            kwargs = build_context.call_args.kwargs
+            self.assertTrue(kwargs['inject_handoff'])
+            self.assertTrue(kwargs['inject_carryover'])
+            self.assertNotIn('history_override', kwargs)
+            self.assertIsNone(plan.continuity_plan)
+            build_plan.assert_not_called()
+
+    def test_gate_on_hot_and_capacity_keep_original_authority(self):
+        for turn_kind in ('hot', 'capacity_swap'):
+            assembly = {'manifest': {}, 'current_day_history': []}
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=True,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ) as build_context, mock.patch.object(
+                dr,
+                '_build_production_context_plan',
+            ) as build_plan:
+                plan = dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=False,
+                    is_respawn=False,
+                    turn_kind=turn_kind,
+                    cursor_before=2,
+                    resident=None,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+            kwargs = build_context.call_args.kwargs
+            self.assertFalse(kwargs['inject_handoff'])
+            self.assertFalse(kwargs['inject_carryover'])
+            self.assertNotIn('history_override', kwargs)
+            self.assertIsNone(plan.continuity_plan)
+            build_plan.assert_not_called()
+
+    def test_gate_on_ready_chunk_projection_has_no_raw_duplicate(self):
+        plan = types.SimpleNamespace(
+            db_path='production.db',
+            user_message_id=3,
+            assembly={
+                'layers': [],
+                'current_day_history': [],
+                'carryover_messages': [],
+                'day_handoff': '',
+                'day_handoff_content': {
+                    'open_loops': ['must not replay full handoff'],
+                },
+            },
+            user_content='current request',
+        )
+        representation = types.SimpleNamespace(
+            representation_id='chunk:ready',
+            kind='chunk',
+            chunk_id='chunk:ready',
+            source_members=(types.SimpleNamespace(source_ref='turn:1:2'),),
+        )
+        context_plan = types.SimpleNamespace(
+            representations=(representation,),
+            ordered_sections=(types.SimpleNamespace(
+                kind='older_continuity',
+                source_ref='chunk:ready',
+                content_hash='chunk-hash',
+                estimated_tokens=3,
+            ), types.SimpleNamespace(
+                kind='current_request',
+                source_ref='message:3',
+                content_hash='current-hash',
+                estimated_tokens=1,
+            )),
+        )
+        assembly = dr._project_context_plan_history(
+            plan,
+            context_plan=context_plan,
+            chunk_bodies={'chunk:ready': 'sealed chunk body'},
+        )
+        self.assertEqual(
+            [item['message_id'] for item in assembly['current_day_history']],
+            [0],
+        )
+        self.assertEqual(
+            [item['body'] for item in assembly['context_plan_representation_blocks']],
+            ['sealed chunk body'],
+        )
+        content = dr.format_resident_turn_content(
+            assembly=assembly,
+            user_content=plan.user_content,
+            is_cold=True,
+            is_respawn=False,
+        )
+        self.assertEqual(content.count('sealed chunk body'), 1)
+        self.assertNotIn('must not replay full handoff', content)
+        self.assertEqual(content.count('current request'), 1)
+
+    def test_gate_on_unavailable_corrupt_and_invalid_budget_block_before_send(self):
+        cases = (
+            ('context_plan_store_unavailable',
+             types.SimpleNamespace(status='unavailable', artifacts=())),
+            ('context_plan_store_corrupt',
+             types.SimpleNamespace(status='corrupt', artifacts=())),
+        )
+        for error_code, surface in cases:
+            resident = _FakeResident()
+            assembly = {'manifest': {}, 'current_day_history': []}
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=True,
+            ), mock.patch.object(
+                dh,
+                'build_daily_window_context',
+                return_value=assembly,
+            ), mock.patch.object(
+                dr,
+                '_context_plan_policy',
+                return_value=(types.SimpleNamespace(), 'policy-v1'),
+            ), mock.patch(
+                'continuity.store.read_ready_surface',
+                return_value=surface,
+            ), mock.patch.object(
+                dr,
+                '_observe_continuity_shadow',
+            ) as observe_shadow:
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    dr._assemble_plan(
+                        req_id='request-1',
+                        owner='owner-1',
+                        chat_id='default',
+                        local_day='2026-07-27',
+                        refreshed={
+                            'id': 7,
+                            'context_epoch': 3,
+                            'resident_generation': 1,
+                        },
+                        user_message_id=3,
+                        user_content='current',
+                        is_cold=True,
+                        is_respawn=False,
+                        turn_kind='cold',
+                        cursor_before=None,
+                        resident=resident,
+                        static_system='STATIC',
+                        static_system_sha256='',
+                        persona_sha256='',
+                        provider='claude_code',
+                        model='model-1',
+                        db_path='production.db',
+                        lease_acquired=True,
+                        turn_lease={},
+                    )
+            self.assertEqual(raised.exception.error_code, error_code)
+            self.assertEqual(resident.sent, [])
+            observe_shadow.assert_not_called()
+
+        resident = _FakeResident()
+        with mock.patch.object(
+            dr,
+            '_context_plan_consumer_enabled',
+            return_value=True,
+        ), mock.patch.object(
+            dh,
+            'build_daily_window_context',
+            return_value={'manifest': {}, 'current_day_history': []},
+        ), mock.patch.object(
+            dr,
+            '_context_plan_policy',
+            side_effect=ValueError('invalid budget'),
+        ), mock.patch.object(dr, '_observe_continuity_shadow') as observe_shadow:
+            with self.assertRaises(ValueError):
+                dr._assemble_plan(
+                    req_id='request-1',
+                    owner='owner-1',
+                    chat_id='default',
+                    local_day='2026-07-27',
+                    refreshed={
+                        'id': 7,
+                        'context_epoch': 3,
+                        'resident_generation': 1,
+                    },
+                    user_message_id=3,
+                    user_content='current',
+                    is_cold=True,
+                    is_respawn=False,
+                    turn_kind='cold',
+                    cursor_before=None,
+                    resident=resident,
+                    static_system='STATIC',
+                    static_system_sha256='',
+                    persona_sha256='',
+                    provider='claude_code',
+                    model='model-1',
+                    db_path='production.db',
+                    lease_acquired=True,
+                    turn_lease={},
+                )
+        self.assertEqual(resident.sent, [])
+        observe_shadow.assert_not_called()
+
+    def test_production_plan_binds_only_strict_validated_ready_artifacts(self):
+        artifact = types.SimpleNamespace(
+            chunk_id='chunk:validated',
+            artifact_revision='artifact-revision',
+            body_hash='body-hash',
+            body='validated body',
+        )
+        representation = types.SimpleNamespace(
+            kind='chunk',
+            chunk_id='chunk:validated',
+            provenance=(
+                ('artifact_revision', 'artifact-revision'),
+                ('body_hash', 'body-hash'),
+            ),
+        )
+        context_plan = types.SimpleNamespace(
+            plan_id='plan:' + ('a' * 32),
+            plan_hash='a' * 64,
+            source_hash='b' * 64,
+            valid=True,
+            representations=(representation,),
+        )
+        result = types.SimpleNamespace(plan=context_plan)
+        plan = types.SimpleNamespace(
+            db_path='production.db',
+            user_message_id=3,
+            assembly={'state': '', 'day_handoff_content': None},
+        )
+        with mock.patch.object(
+            dr,
+            '_context_plan_policy',
+            return_value=(types.SimpleNamespace(), 'policy-v1'),
+        ), mock.patch(
+            'continuity.store.read_ready_surface',
+            return_value=types.SimpleNamespace(
+                status='ready',
+                artifacts=(artifact,),
+            ),
+        ), mock.patch.object(
+            dr,
+            '_build_continuity_shadow_fixed_sections',
+            return_value=(),
+        ), mock.patch(
+            'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+            return_value=result,
+        ) as adapter:
+            _plan, bodies = dr._build_production_context_plan(
+                plan,
+                resident=types.SimpleNamespace(),
+                static_system='STATIC',
+            )
+        self.assertEqual(bodies, {'chunk:validated': 'validated body'})
+        self.assertEqual(
+            adapter.call_args.kwargs['validated_ready_artifacts'],
+            ({
+                'chunk_id': 'chunk:validated',
+                'artifact_revision': 'artifact-revision',
+                'body_hash': 'body-hash',
+            },),
+        )
+
+    def test_gate_on_cold_and_respawn_empty_send_current_request_once(self):
+        original_get = config_store.get
+        for cold_reprepare in (False, True):
+            db = self._context_plan_runtime_db()
+            try:
+                _insert(db, 'hayana', 'previous user', '2026-07-27 09:00:00')
+                _insert(db, 'assistant', 'previous assistant', '2026-07-27 09:01:00')
+                uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+
+                def _get(key, default=None):
+                    if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                        return '1'
+                    if key == 'CONTEXT_PLAN_TOKEN_BUDGET':
+                        return '1000'
+                    if key == 'CONTEXT_PLAN_RESERVE_BUDGET':
+                        return '0'
+                    if key == 'CONTEXT_PLAN_RECENT_RAW_TARGET':
+                        return '100'
+                    return original_get(key, default)
+
+                resident = _FakeResident()
+                with mock.patch.object(config_store, 'get', side_effect=_get):
+                    plan = _prepare_turn(
+                        db,
+                        uid,
+                        resident=resident,
+                        static_system='STATIC',
+                        _cold_reprepare=cold_reprepare,
+                    )
+                    events = list(dr.stream_daily_resident_turn(
+                        plan,
+                        resident=resident,
+                        env={},
+                        static_system='STATIC',
+                    ))
+                self.assertTrue(any(evt == 'done' for evt, _payload in events))
+                self.assertEqual(len(resident.sent), 1)
+                self.assertEqual(resident.sent[0].count('current request'), 1)
+                self.assertEqual(plan.manifest['context_plan_consumer'], 'canonical')
+                self.assertEqual(plan.manifest['context_plan_fixed_section_parity'], 'PASS')
+            finally:
+                os.unlink(db)
+
+    def test_gate_off_cold_and_respawn_real_send_once(self):
+        original_get = config_store.get
+        for cold_reprepare in (False, True):
+            db = self._context_plan_runtime_db()
+            try:
+                _insert(db, 'hayana', 'previous user', '2026-07-27 09:00:00')
+                _insert(db, 'assistant', 'previous assistant', '2026-07-27 09:01:00')
+                uid = _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+
+                def _get(key, default=None):
+                    if key == 'CONTEXT_PLAN_CONSUMER_ENABLED':
+                        return '0'
+                    return original_get(key, default)
+
+                resident = _FakeResident()
+                with mock.patch.object(config_store, 'get', side_effect=_get):
+                    plan = _prepare_turn(
+                        db,
+                        uid,
+                        resident=resident,
+                        static_system='STATIC',
+                        _cold_reprepare=cold_reprepare,
+                    )
+                    events = list(dr.stream_daily_resident_turn(
+                        plan,
+                        resident=resident,
+                        env={},
+                        static_system='STATIC',
+                    ))
+                self.assertTrue(any(evt == 'done' for evt, _payload in events))
+                self.assertEqual(len(resident.sent), 1)
+                self.assertIn('previous assistant', resident.sent[0])
+                self.assertEqual(resident.sent[0].count('current request'), 1)
+                self.assertIsNone(plan.continuity_plan)
+            finally:
+                os.unlink(db)
+
+    def test_projection_uses_selected_raw_and_excludes_current_request(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'old user', '2026-07-27 09:00:00')
+            _insert(db, 'assistant', 'old reply', '2026-07-27 09:01:00')
+            _insert(db, 'hayana', 'current', '2026-07-27 09:02:00')
+            conn = sqlite3.connect(db)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute('SELECT * FROM chat_messages ORDER BY id').fetchall()
+            conn.close()
+            members = build_source_members(
+                derive_completed_turns(rows[:2]),
+                derive_autonomous_events(rows[:2]),
+            )
+            plan = types.SimpleNamespace(
+                db_path=db,
+                user_message_id=3,
+                assembly={'layers': [], 'current_day_history': []},
+            )
+            assembly = dr._project_context_plan_history(
+                plan,
+                context_plan=self._fake_context_plan(members[0]),
+                chunk_bodies={},
+            )
+            self.assertEqual(
+                [item['message_id'] for item in assembly['current_day_history']],
+                [1, 2],
+            )
+            self.assertNotIn(3, {
+                int(item['message_id'])
+                for item in assembly['current_day_history']
+            })
+        finally:
+            os.unlink(db)
+
+    def test_durable_receipt_carries_plan_hash(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            plan = types.SimpleNamespace(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                db_path=db,
+                user_message_id=3,
+                transcript_claude_session_id='session-1',
+                transcript_process_generation=1,
+                manifest={
+                    'transcript_mapping_status': 'MAPPED',
+                    'provider': 'claude_code',
+                    'model': 'model-1',
+                    'assistant_message_id': 4,
+                    'cursor_after': 4,
+                    'cursor_cas_success': True,
+                    'context_receipt_last_good_proven': True,
+                },
+                continuity_plan=self._fake_context_plan(),
+            )
+            with mock.patch.object(
+                dc,
+                'get_resident_history_cursor',
+                return_value=4,
+            ), mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': 100,
+                },
+            ):
+                plan.transcript_start_offset = 10
+                plan.transcript_end_offset = 100
+                plan._same_context_last_good_proven = True
+                self.assertTrue(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=4,
+                    )
+                )
+            from chat.context_receipt import get_receipt
+            conn = sqlite3.connect(db)
+            receipt = get_receipt(
+                conn,
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+            )
+            conn.close()
+            self.assertIsNotNone(receipt)
+            self.assertEqual(receipt.plan_hash, 'plan-hash-one')
+            self.assertEqual(receipt.installed_source_watermark, 4)
+        finally:
+            os.unlink(db)
+
+    def test_gate_on_raw_projection_preserves_canonical_tool_outcomes(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            _insert(db, 'hayana', 'formal user', '2026-07-27 09:00:00')
+            assistant_id = _insert(
+                db, 'assistant', 'assistant body', '2026-07-27 09:01:00',
+            )
+            _insert(db, 'hayana', 'current request', '2026-07-27 09:02:00')
+            conn = sqlite3.connect(db)
+            conn.execute(
+                'UPDATE chat_messages SET tool_calls=? WHERE id=?',
+                (json.dumps([{
+                    'name': 'mcp__home__get_todos',
+                    'args': {'limit': 3},
+                    'result': {'ok': True, 'items': ['one']},
+                    'success': True,
+                    'artifact': None,
+                    'diff': None,
+                }], ensure_ascii=False), assistant_id),
+            )
+            conn.commit()
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute('SELECT * FROM chat_messages ORDER BY id').fetchall()
+            conn.close()
+            members = build_source_members(
+                derive_completed_turns(rows[:2]),
+                derive_autonomous_events(rows[:2]),
+            )
+            plan = types.SimpleNamespace(
+                db_path=db,
+                user_message_id=3,
+                user_content='current request',
+                assembly={'layers': [], 'current_day_history': []},
+            )
+            assembly = dr._project_context_plan_history(
+                plan,
+                context_plan=self._fake_context_plan(members[0]),
+                chunk_bodies={},
+            )
+            content = dr.format_resident_turn_content(
+                assembly=assembly,
+                user_content=plan.user_content,
+                is_cold=True,
+                is_respawn=False,
+            )
+            self.assertIn('USER:', content)
+            self.assertIn('formal user', content)
+            self.assertIn('ASSISTANT:', content)
+            self.assertIn('assistant body', content)
+            self.assertIn('TOOL OUTCOME:', content)
+            self.assertIn('mcp__home__get_todos', content)
+            self.assertIn('"ok":true', content)
+            self.assertEqual(content.count('current request'), 1)
+        finally:
+            os.unlink(db)
+
+    def _receipt_plan(self, db, *, proof=True):
+        _init_chat_messages(db)
+        manifest = {
+            'transcript_mapping_status': 'MAPPED',
+            'provider': 'claude_code',
+            'model': 'model-1',
+            'assistant_message_id': 4,
+            'cursor_after': 4,
+            'cursor_cas_success': True,
+            'context_receipt_last_good_proven': bool(proof),
+        }
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            resident_key='default:e3:g1',
+            db_path=db,
+            user_message_id=3,
+            transcript_claude_session_id='session-1',
+            transcript_process_generation=1,
+            transcript_start_offset=10,
+            transcript_end_offset=100,
+            manifest=manifest,
+            continuity_plan=self._fake_context_plan(),
+        )
+        plan._same_context_last_good_proven = bool(proof)
+        return plan
+
+    def test_receipt_requires_current_last_good_proof_without_resend(self):
+        db = _tmp_db()
+        try:
+            plan = self._receipt_plan(db, proof=False)
+            with mock.patch.object(dc, 'get_resident_history_cursor', return_value=4), \
+                 mock.patch.object(dr, 'get_same_context_last_good', return_value=None):
+                self.assertFalse(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=4,
+                    )
+                )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'REPAIR_REQUIRED')
+            self.assertEqual(
+                plan.manifest['context_receipt_error_code'],
+                'context_receipt_last_good_unproven',
+            )
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM context_receipts').fetchone()[0],
+                0,
+            )
+            conn.close()
+        finally:
+            os.unlink(db)
+
+    def test_receipt_rejects_missing_cursor_after_without_resend(self):
+        db = _tmp_db()
+        try:
+            plan = self._receipt_plan(db)
+            plan.manifest['cursor_after'] = None
+            plan.manifest['cursor_cas_success'] = False
+            self.assertFalse(
+                dr._commit_production_context_receipt(
+                    plan,
+                    assistant_message_id=4,
+                )
+            )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'REPAIR_REQUIRED')
+            self.assertEqual(
+                plan.manifest['context_receipt_error_code'],
+                'context_receipt_cursor_unavailable',
+            )
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM context_receipts').fetchone()[0],
+                0,
+            )
+            conn.close()
+        finally:
+            os.unlink(db)
+
+    def test_receipt_commit_failure_does_not_trigger_resend(self):
+        db = _tmp_db()
+        try:
+            plan = self._receipt_plan(db)
+            with mock.patch.object(dc, 'get_resident_history_cursor', return_value=4), \
+                 mock.patch.object(
+                     dr,
+                     'get_same_context_last_good',
+                     return_value={
+                         'context_id': 7,
+                         'context_epoch': 3,
+                         'resident_generation': 1,
+                         'claude_session_id': 'session-1',
+                         'transcript_end_offset': 100,
+                     },
+                 ), mock.patch.object(
+                     dc,
+                     '_connect',
+                     side_effect=sqlite3.OperationalError('commit unavailable'),
+                 ):
+                self.assertFalse(
+                    dr._commit_production_context_receipt(
+                        plan,
+                        assistant_message_id=4,
+                    )
+                )
+            self.assertEqual(plan.manifest['context_receipt_status'], 'REPAIR_REQUIRED')
+            self.assertTrue(plan.manifest['context_receipt_repair_required'])
+            self.assertEqual(
+                plan.manifest['context_receipt_error_code'],
+                'context_receipt_unavailable',
+            )
+        finally:
+            os.unlink(db)
+
+
+class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
+    def test_capacity_first_stdin_contains_chunks_and_fixed_content_only(self):
+        assembly = {
+            'capacity_context_bootstrap': True,
+            'context_plan_representation_blocks': [{
+                'kind': 'chunk',
+                'representation_id': 'chunk:ready-1',
+                'body': 'CHUNK_CANONICAL',
+            }],
+            'context_plan_accepted_open_loops': ['OPEN_LOOP'],
+            'state': 'ACCEPTED_STATE_SNAPSHOT',
+            'current_day_history': [{
+                'role': 'user',
+                'content': 'RAW_REPLAY_FORBIDDEN',
+            }],
+            'day_handoff': 'LEGACY_HANDOFF_FORBIDDEN',
+            'carryover_messages': [{
+                'role': 'assistant',
+                'content': 'LEGACY_CARRYOVER_FORBIDDEN',
+            }],
+        }
+        content = dr.format_resident_turn_content(
+            assembly=assembly,
+            user_content='CURRENT_REQUEST',
+            is_cold=False,
+            is_respawn=False,
+        )
+        self.assertEqual(content.count('CHUNK_CANONICAL'), 1)
+        self.assertEqual(content.count('OPEN_LOOP'), 1)
+        self.assertEqual(content.count('ACCEPTED_STATE_SNAPSHOT'), 1)
+        self.assertEqual(content.count('CURRENT_REQUEST'), 1)
+        self.assertNotIn('RAW_REPLAY_FORBIDDEN', content)
+        self.assertNotIn('LEGACY_HANDOFF_FORBIDDEN', content)
+        self.assertNotIn('LEGACY_CARRYOVER_FORBIDDEN', content)
+
+    def _capacity_install_fixture(self, current_text):
+        from continuity.sources import evidence_ref
+
+        db = _tmp_db()
+        _init_chat_messages(db)
+        current_id = _insert(
+            db,
+            'user',
+            current_text,
+            '2026-07-27 09:00:00',
+        )
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute(
+            'SELECT * FROM chat_messages WHERE id=?',
+            (current_id,),
+        ).fetchone())
+        conn.close()
+        current_evidence = evidence_ref(row, prefix='message')
+        target_system = (
+            'STATIC' + dr.CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1
+        )
+        chunk_body = (
+            'chunk carrier: %s / %s' % (current_text, current_text)
+        )
+        assembly = {
+            'capacity_context_bootstrap': True,
+            'context_plan_representation_blocks': [{
+                'kind': 'chunk',
+                'representation_id': 'chunk:one',
+                'body': chunk_body,
+            }],
+            'context_plan_accepted_open_loops': [
+                current_text,
+                current_text,
+            ],
+            'day_handoff_content': {
+                'open_loops': [current_text, current_text],
+            },
+            'state': '',
+            'current_day_history': [],
+            'day_handoff': '',
+            'carryover_messages': [],
+        }
+        scaffold = types.SimpleNamespace(
+            assembly=assembly,
+            manifest={},
+            db_path=db,
+        )
+        fixed_sections = dr._build_continuity_shadow_fixed_sections(
+            plan=scaffold,
+            resident=None,
+            static_system=target_system,
+            require_full_state_snapshot=True,
+        )
+        current_section = types.SimpleNamespace(
+            kind='current_request',
+            source_ref='message:%d' % current_id,
+            content_hash=str(current_evidence.content_hash),
+            estimated_tokens=int(current_evidence.logical_size),
+        )
+        chunk_representation = types.SimpleNamespace(
+            representation_id='chunk:one',
+            kind='chunk',
+            chunk_id='chunk:one',
+            source_members=(),
+            estimated_tokens=4,
+        )
+        context_plan = types.SimpleNamespace(
+            representations=(chunk_representation,),
+            ordered_sections=tuple(fixed_sections) + (current_section,),
+        )
+        plan = types.SimpleNamespace(
+            capacity_context_plan=context_plan,
+            continuity_plan=None,
+            hot_desired_plan=None,
+            user_message_id=current_id,
+            user_content=current_text,
+            db_path=db,
+            assembly=assembly,
+            manifest={
+                'capacity_context_current_user_in_candidate': False,
+                'capacity_context_raw_carrier_parity': 'PASS',
+                'capacity_context_raw_source_refs': (),
+                'capacity_context_install_parity': 'PENDING',
+            },
+            capacity_context_chunk_bodies={
+                'chunk:one': chunk_body,
+            },
+        )
+        resident = types.SimpleNamespace(_system_text=target_system)
+        content = dr.format_resident_turn_content(
+            assembly=assembly,
+            user_content=current_text,
+            is_cold=False,
+            is_respawn=False,
+        )
+        return db, plan, resident, target_system, content
+
+    def test_capacity_presend_observation_failure_rolls_back_before_send(self):
+        """The outer guard covers production install observation failures."""
+        dr.reset_bindings_for_tests()
+        plan = types.SimpleNamespace(
+            request_id='capacity-presend',
+            chat_id='default',
+            context_id=7,
+            context_epoch=3,
+            resident_generation=2,
+            resident_key='default:e3:g2',
+            user_message_id=1,
+            epoch_token={},
+            lease_owner='test-owner',
+            is_cold=False,
+            is_respawn=False,
+            cursor_before=0,
+            assembly={},
+            manifest={
+                'provider': 'claude_code',
+                'model': 'model-1',
+            },
+            user_content='好',
+            user_image_url='',
+            user_attachments=(),
+            provider_display_thinking_suffix='',
+            db_path='test.db',
+            worker_id='test-worker',
+            tool_profile='test-profile',
+            turn_lease={},
+            capacity_context_plan=object(),
+            continuity_plan=None,
+            hot_desired_plan=None,
+            _capacity_swap_install_state={'old_proc': object()},
+            _capacity_swap_deferred_old_proc=object(),
+            _current_user_stdin_flushed=False,
+        )
+        resident = mock.Mock()
+        resident.generation = 2
+        resident._system_text = 'TARGET SYSTEM'
+        resident.ensure_alive.return_value = False
+        heartbeat = mock.Mock()
+        heartbeat.failed = False
+        heartbeat.stop.return_value = False
+        parity_failure = dr.DailyRuntimeError(
+            'forced install parity failure',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        try:
+            with mock.patch.object(
+                dr,
+                'verify_epoch_token',
+            ), mock.patch.object(
+                dr,
+                'LeaseHeartbeat',
+                return_value=heartbeat,
+            ), mock.patch.object(
+                dr,
+                'peek_registered_respawn_decision',
+                return_value={'requires_respawn': False},
+            ), mock.patch.object(
+                dr,
+                'format_resident_turn_content',
+                return_value='TARGET CONTENT',
+            ), mock.patch.object(
+                dr.dc,
+                'get_resident_history_cursor',
+                return_value=0,
+            ), mock.patch.object(
+                dr.dc,
+                'upsert_resident_owner',
+            ), mock.patch.object(
+                dr,
+                '_capture_transcript_start',
+            ), mock.patch.object(
+                dr,
+                '_validate_hot_no_op_payload',
+            ), mock.patch.object(
+                dr,
+                '_observe_continuity_shadow',
+                side_effect=parity_failure,
+            ), mock.patch.object(
+                dr,
+                'rollback_capacity_swap_install',
+            ) as rollback, mock.patch.object(
+                dr,
+                'try_restore_same_context_last_good',
+            ) as fallback:
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    list(dr.ensure_resident_and_stream(
+                        plan,
+                        resident=resident,
+                        env={},
+                        static_system='TARGET SYSTEM',
+                    ))
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_current_request_parity_failed',
+            )
+            rollback.assert_called_once()
+            fallback.assert_not_called()
+            resident.send_turn.assert_not_called()
+            self.assertTrue(plan.manifest['capacity_swap_pre_flush_blocked'])
+            self.assertIsNone(plan._capacity_swap_install_state)
+        finally:
+            dr.reset_bindings_for_tests()
+
+    def test_capacity_presend_rollback_1_restores_before_send(self):
+        """CAPACITY-PRESEND-ROLLBACK-1: parity failure cannot send."""
+        plan = types.SimpleNamespace(
+            capacity_context_plan=object(),
+            manifest={},
+            _capacity_swap_install_state={'old_proc': object()},
+            _capacity_swap_deferred_old_proc=object(),
+            _current_user_stdin_flushed=False,
+        )
+        resident = mock.Mock()
+        failure = dr.DailyRuntimeError(
+            'parity failed',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        with mock.patch.object(
+            dr,
+            'rollback_capacity_swap_install',
+        ) as rollback, mock.patch.object(
+            dr,
+            'try_restore_same_context_last_good',
+        ) as fallback:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._raise_capacity_pre_send_failure(
+                    plan,
+                    resident=resident,
+                    exc=failure,
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_current_request_parity_failed',
+        )
+        self.assertTrue(plan.manifest['capacity_swap_pre_flush_blocked'])
+        self.assertIsNone(plan._capacity_swap_install_state)
+        rollback.assert_called_once()
+        fallback.assert_not_called()
+        resident.send_turn.assert_not_called()
+
+    def test_capacity_presend_rollback_2_rollback_failure_no_send(self):
+        """CAPACITY-PRESEND-ROLLBACK-2: failed restore is terminal."""
+        plan = types.SimpleNamespace(
+            capacity_context_plan=object(),
+            manifest={},
+            _capacity_swap_install_state={'old_proc': object()},
+            _capacity_swap_deferred_old_proc=object(),
+            _current_user_stdin_flushed=False,
+        )
+        resident = mock.Mock()
+        failure = dr.DailyRuntimeError(
+            'parity failed',
+            error_code='context_plan_current_request_parity_failed',
+        )
+        with mock.patch.object(
+            dr,
+            'rollback_capacity_swap_install',
+            side_effect=RuntimeError('restore failed'),
+        ):
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._raise_capacity_pre_send_failure(
+                    plan,
+                    resident=resident,
+                    exc=failure,
+                )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_capacity_rollback_unproven',
+        )
+        self.assertTrue(
+            plan.manifest['capacity_swap_pre_flush_rollback_unproven']
+        )
+        resident.send_turn.assert_not_called()
+
+    def test_capacity_actual_renderer_receipt_binds_each_carrier(self):
+        """ACTUAL-RENDER-RECEIPT: receipt records the provider payload render."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('好')
+        )
+        try:
+            receipt = plan.assembly['_context_install_render_receipt']
+            payload_hash, payload_tokens, payload_kind = (
+                dr._continuity_shadow_fingerprint(content)
+            )
+            self.assertEqual(
+                receipt['representation_ids'],
+                ['chunk:one'],
+            )
+            self.assertEqual(
+                receipt['representation_body_hashes'],
+                [dr._sha256_text(plan.capacity_context_chunk_bodies['chunk:one'])],
+            )
+            self.assertEqual(
+                receipt['fixed_section_kinds'],
+                ['accepted_open_loops'],
+            )
+            self.assertEqual(
+                receipt['fixed_section_body_hashes'],
+                [dr._sha256_text(
+                    dr._format_context_plan_open_loops(
+                        plan.assembly['context_plan_accepted_open_loops'],
+                    ),
+                )],
+            )
+            self.assertEqual(receipt['current_request_slots'], 1)
+            self.assertEqual(receipt['current_request_carrier'], 'tail')
+            self.assertEqual(receipt['final_payload_hash'], payload_hash)
+            self.assertEqual(
+                receipt['final_payload_token_estimate'],
+                payload_tokens,
+            )
+            self.assertEqual(receipt['final_payload_kind'], payload_kind)
+            dr._validate_production_context_install(
+                plan=plan,
+                resident=resident,
+                static_system=target_system,
+                content=content,
+            )
+            self.assertEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_1_chunk_omission_fails_closed(self):
+        """RENDER-PROOF-1: omitted chunk is rejected before provider send."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_CHUNK')
+        )
+        try:
+            chunk_body = plan.capacity_context_chunk_bodies['chunk:one']
+            self.assertEqual(content.count(chunk_body), 1)
+            omitted = content.replace(chunk_body, '', 1)
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=omitted,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_2_current_omission_or_duplication_fails_closed(self):
+        """RENDER-PROOF-2: CURRENT is absent or installed twice."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_SLOT')
+        )
+        try:
+            current_text = plan.user_content
+            self.assertTrue(content.endswith(current_text))
+            actual_payloads = (
+                content[:-len(current_text)],
+                content + current_text,
+            )
+            for actual in actual_payloads:
+                with self.subTest(payload=actual):
+                    plan.manifest['capacity_context_install_parity'] = 'PENDING'
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._validate_production_context_install(
+                            plan=plan,
+                            resident=resident,
+                            static_system=target_system,
+                            content=actual,
+                        )
+                    self.assertEqual(
+                        raised.exception.error_code,
+                        'context_plan_render_receipt_mismatch',
+                    )
+                    self.assertNotEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PASS',
+                    )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_3_post_receipt_payload_mutation_fails_closed(self):
+        """RENDER-PROOF-3: a frozen receipt rejects later payload mutation."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_REQUEST')
+        )
+        try:
+            mutated = content + '\nPOST_RENDER_MUTATION'
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=mutated,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_current_request_structural_proof_allows_literal_collisions(self):
+        """Short and repeated prose do not look like duplicate carriers."""
+        for current_text in ('好', '重复请求文本'):
+            with self.subTest(current_text=current_text):
+                db, plan, resident, target_system, content = (
+                    self._capacity_install_fixture(current_text)
+                )
+                try:
+                    self.assertGreaterEqual(content.count(current_text), 5)
+                    self.assertEqual(
+                        plan.assembly['_context_install_render_receipt'][
+                            'current_request_slots'
+                        ],
+                        1,
+                    )
+                    self.assertEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PENDING',
+                    )
+                    dr._validate_production_context_install(
+                        plan=plan,
+                        resident=resident,
+                        static_system=target_system,
+                        content=content,
+                    )
+                    self.assertEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PASS',
+                    )
+                finally:
+                    os.unlink(db)
+
+    def test_capacity_current_source_cannot_be_a_second_forged_carrier(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('重复请求文本')
+        )
+        try:
+            plan.manifest['capacity_context_current_user_in_candidate'] = True
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_capacity_current_user_in_candidate',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_install_parity_failure_never_reaches_pass(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('好')
+        )
+        try:
+            self.assertEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PENDING',
+            )
+            plan.assembly['_context_install_render_receipt'][
+                'current_request_slots'
+            ] = 2
+            with self.assertRaises(dr.DailyRuntimeError):
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_source_receipt_supersession_uses_frozen_revision_once(self):
+        from chat import context_receipt as receipt_store
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            source = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='source-session',
+                process_generation=1,
+                plan_id='plan:source',
+                plan_hash='source-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=(),
+            )
+            receipt_store.create_receipt(conn, source, ())
+            conn.close()
+
+            plan = types.SimpleNamespace(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=2,
+                db_path=db,
+                manifest={},
+                capacity_source_receipt_frozen={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'receipt': source,
+                    'expected_receipt_revision': 0,
+                },
+            )
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+            self.assertEqual(
+                plan.manifest['capacity_source_receipt_supersession'],
+                'COMMITTED',
+            )
+            conn = sqlite3.connect(db)
+            row = conn.execute(
+                'SELECT receipt_revision, result, superseded_by_generation '
+                'FROM context_receipts '
+                'WHERE context_id=7 AND context_epoch=3 AND resident_generation=1',
+            ).fetchone()
+            conn.close()
+            self.assertEqual(row, (1, 'superseded', 2))
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+        finally:
+            os.unlink(db)
 
 
 if __name__ == '__main__':

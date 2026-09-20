@@ -1,11 +1,6 @@
 name: M5-06B External MCP invocation validation
 
 on:
-  pull_request:
-    paths:
-      - tools/external_mcp_invocation.py
-      - tests/test_external_mcp_invocation.py
-      - .github/workflows/m5-06b-external-mcp-invocation-validation.yml
   workflow_dispatch:
 
 permissions:

@@ -13,6 +13,10 @@ on:
       - "app/src/screens/ToolroomScreen.tsx"
       - ".github/workflows/toolroom-external-surface.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

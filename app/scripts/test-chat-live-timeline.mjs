@@ -5,6 +5,7 @@ import {
   applyToolResult,
   createLiveState,
   isTextCaretActive,
+  replaceWithCanonicalProjection,
   upsertToolUse,
 } from '../src/lib/chatLiveTimeline.ts';
 
@@ -65,6 +66,28 @@ assert.equal(isTextCaretActive(caretState), true);
 caretState = applyToolResult(caretState, 0, tool('tool-a', { result: 'late result' }));
 assert.equal(isTextCaretActive(caretState), false);
 assert.equal(isTextCaretActive(createLiveState()), false);
+
+let preview = appendTextDelta(createLiveState(), 'short prefix');
+preview = upsertToolUse(preview, 0, tool('read', { result: 'done' }));
+const reconciled = replaceWithCanonicalProjection(preview, {
+  content: '完整正文',
+  thinking: 'thought',
+  display_segments: [
+    { type: 'thinking', text: 'thought' },
+    { type: 'text', text: '第一段' },
+    { type: 'tool', tool_index: 0 },
+    { type: 'text', text: '第二段' },
+  ],
+  tool_calls: [tool('read', { result: 'done', success: true })],
+  canonical_sha256: 'hash',
+});
+assert.deepEqual(shape(reconciled), [
+  { type: 'thinking', text: 'thought' },
+  { type: 'text', text: '第一段' },
+  { type: 'tool', idx: 0, name: 'read', running: false, result: 'done' },
+  { type: 'text', text: '第二段' },
+]);
+assert.equal(reconciled.canonicalSha256, 'hash');
 
 console.log('chat live timeline focused checks: PASS');
 

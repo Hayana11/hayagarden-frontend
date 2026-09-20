@@ -270,6 +270,7 @@ def build_uh_a0_mcp_config(
                     "UH_A0_REPO_ROOT": str(root),
                     "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
                     "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
+                    "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
                 },
             },
             "external": {

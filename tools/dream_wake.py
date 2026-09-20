@@ -343,7 +343,12 @@ def run():
     try:
         result = _call_wake({'mode': 'normal', 'wake_run_id': wake_run_id})
         if result.get('skipped'):
-            _log(f"wake skipped: {result.get('reason')}")
+            reason = result.get('reason')
+            detail = str(result.get('detail') or '').strip()
+            if detail:
+                _log(f"wake skipped: {reason} | detail={detail}")
+            else:
+                _log(f"wake skipped: {reason}")
             return
         _act = result.get('action', '?')
         _th = (result.get('thoughts') or '').strip()

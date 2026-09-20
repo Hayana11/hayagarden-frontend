@@ -17,6 +17,8 @@ creates a second cursor, or invents message mappings.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -42,6 +44,71 @@ class SharedTranscriptWatermark:
     process_generation: int
 
 
+
+
+def _resident_pid(resident):
+    pid = getattr(resident, 'resident_pid', None)
+    if pid is not None:
+        return pid
+    proc = getattr(resident, '_proc', None)
+    return getattr(proc, 'pid', None) if proc is not None else None
+
+
+def _resident_alive(resident):
+    try:
+        alive = getattr(resident, '_alive', None)
+        if callable(alive):
+            return bool(alive())
+    except Exception:
+        pass
+    proc = getattr(resident, '_proc', None)
+    if proc is None:
+        return False
+    try:
+        return proc.poll() is None
+    except Exception:
+        return False
+
+
+_CLEANUP_REASON_ALLOWLIST = frozenset({
+    'delivery_failed',
+    'normal_wake_shared_unavailable',
+    'normal_wake_main_chat_failed',
+    'normal_wake_main_chat_jsonl_not_final',
+    'normal_wake_main_chat_delivery_failed',
+    'delivery_succeeded',
+})
+
+
+def _safe_cleanup_reason(reason):
+    value = str(reason or '').strip()
+    return value if value in _CLEANUP_REASON_ALLOWLIST else 'unknown'
+
+
+def _log_resident_cleanup(stage, *, resident_generation, resident_pid=None,
+                           local_binding_present=None, reason=None,
+                           resident_alive=None, close_return=None):
+    payload = {
+        'stage': str(stage),
+    }
+    if resident_generation is not None:
+        payload['resident_generation'] = resident_generation
+    if resident_pid is not None:
+        payload['resident_pid'] = resident_pid
+    if local_binding_present is not None:
+        payload['local_binding_present'] = bool(local_binding_present)
+    if reason is not None:
+        payload['reason'] = _safe_cleanup_reason(reason)
+    if resident_alive is not None:
+        payload['resident_alive'] = bool(resident_alive)
+    if close_return is not None:
+        payload['close_return'] = bool(close_return)
+    logging.getLogger(__name__).info(
+        '[WAKE-LIVE] %s',
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+
+
 class SharedWakeDeliveryFence:
     """Keep the Chat generation owner until Wake delivery is final."""
 
@@ -57,6 +124,7 @@ class SharedWakeDeliveryFence:
         *,
         cache_info: Any = None,
         window_identity: Any = None,
+        reason: str = 'delivery_failed',
     ) -> None:
         if self._finished:
             return
@@ -66,6 +134,7 @@ class SharedWakeDeliveryFence:
                     cache_info=cache_info,
                     window_identity=window_identity,
                     delivery_token=self.token,
+                    reason=reason,
                 )
         finally:
             self.gateway._gen_release(
@@ -261,6 +330,7 @@ def retire_shared_resident_after_failed_delivery(
     cache_info: Any,
     window_identity: Any,
     delivery_token: Any = None,
+    reason: str = 'delivery_failed',
 ) -> bool:
     """Retire only an idle, still-bound resident after undelivered B3 output."""
     if not _is_shared_b3_cache_info(cache_info):
@@ -309,9 +379,24 @@ def retire_shared_resident_after_failed_delivery(
             current = dr.get_local_binding()
             if current is None or str(current.resident_key) != str(binding.resident_key):
                 return False
-            return bool(dr.close_local_resident_if_bound(
+            _log_resident_cleanup(
+                'RESIDENT_CLEANUP_BEGIN',
+                resident_generation=getattr(resident, 'generation', None),
+                resident_pid=_resident_pid(resident),
+                local_binding_present=True,
+                reason=reason,
+            )
+            close_return = dr.close_local_resident_if_bound(
                 resident,
                 expected_key=str(binding.resident_key),
-            ))
+            )
+            _log_resident_cleanup(
+                'RESIDENT_CLEANUP_END',
+                resident_generation=getattr(resident, 'generation', None),
+                resident_alive=_resident_alive(resident),
+                local_binding_present=(dr.get_local_binding() is not None),
+                close_return=close_return,
+            )
+            return bool(close_return)
     except Exception:
         return False

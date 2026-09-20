@@ -6,6 +6,7 @@
 //     trace_summary/usage/notice/done/err (家里 t/d 信封，chatnest 语义)
 import { chatDayKeyFromLocalTs } from './dailySoftWindow';
 import { sseUrl } from './http';
+import type { CanonicalLiveProjection } from './chatLiveTimeline';
 
 export function isFyAuthor(a: string | null | undefined): boolean {
   return ['fyodor', 'assistant', 'claude'].includes((a || '').toLowerCase());
@@ -288,8 +289,51 @@ export function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 }
 
-/** Capacity Swap soft limit display denominator (CC_CONTEXT_SOFT_LIMIT). */
-export const CAPACITY_SOFT_LIMIT = 90000;
+/** Fallbacks used until the read-only runtime authority is available. */
+export const CAPACITY_SOFT_LIMIT = 150000;
+export const MAX_RESIDENT_TURNS = 45;
+
+export interface ChatContextLimits {
+  softLimit: number;
+  maxResidentTurns: number;
+  authoritative: boolean;
+}
+
+export const DEFAULT_CHAT_CONTEXT_LIMITS: ChatContextLimits = {
+  softLimit: CAPACITY_SOFT_LIMIT,
+  maxResidentTurns: MAX_RESIDENT_TURNS,
+  authoritative: false,
+};
+
+function positiveInteger(value: unknown, fallback: number): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function normalizeChatContextLimits(raw: unknown): ChatContextLimits {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_CHAT_CONTEXT_LIMITS };
+  const data = raw as Record<string, unknown>;
+  const softRaw = data.context_soft_limit ?? data.contextSoftLimit;
+  const turnsRaw = data.max_resident_turns ?? data.maxResidentTurns;
+  const softLimit = positiveInteger(softRaw, CAPACITY_SOFT_LIMIT);
+  const maxResidentTurns = positiveInteger(turnsRaw, MAX_RESIDENT_TURNS);
+  return {
+    softLimit,
+    maxResidentTurns,
+    authoritative: Number.isInteger(Number(softRaw)) && Number(softRaw) > 0
+      && Number.isInteger(Number(turnsRaw)) && Number(turnsRaw) > 0,
+  };
+}
+
+export async function fetchChatContextLimits(): Promise<ChatContextLimits> {
+  try {
+    const resp = await fetch('/api/config/context-limits', { credentials: 'include' });
+    if (!resp.ok) return { ...DEFAULT_CHAT_CONTEXT_LIMITS };
+    return normalizeChatContextLimits(await resp.json());
+  } catch {
+    return { ...DEFAULT_CHAT_CONTEXT_LIMITS };
+  }
+}
 
 /** Format resident context size for Fyodor header (lowercase k). */
 export function fmtCapacityK(n: number): string {
@@ -299,8 +343,11 @@ export function fmtCapacityK(n: number): string {
   return `${(n / 1000).toFixed(1)}k`;
 }
 
-export function formatCapacityLabel(lastRoundContext: number | null | undefined): string {
-  const denom = fmtCapacityK(CAPACITY_SOFT_LIMIT);
+export function formatCapacityLabel(
+  lastRoundContext: number | null | undefined,
+  softLimit = CAPACITY_SOFT_LIMIT,
+): string {
+  const denom = fmtCapacityK(positiveInteger(softLimit, CAPACITY_SOFT_LIMIT));
   if (lastRoundContext == null || lastRoundContext <= 0) return `— / ${denom}`;
   return `${fmtCapacityK(lastRoundContext)} / ${denom}`;
 }
@@ -364,6 +411,8 @@ export interface StreamHandlers {
   onTraceSummary?: (s: string) => void;
   onUsage?: (u: ChatUsage) => void;
   onNotice?: (s: string) => void;
+  onTurnFinal?: (canonicalSha256: string) => void;
+  onTurnReconcile?: (projection: CanonicalLiveProjection) => void;
 }
 
 export interface StreamResult {
@@ -371,6 +420,7 @@ export interface StreamResult {
   error?: string;
   deferredTool?: ChatToolCall;
   assistantMessageId?: number;
+  canonicalSha256?: string;
 }
 
 interface SseEvent {
@@ -391,6 +441,7 @@ interface SseEvent {
   resident_turn_count?: number;
   respawn_reason?: string;
   assistant_message_id?: number;
+  canonical_sha256?: string;
 }
 
 /**
@@ -508,13 +559,29 @@ export async function streamChatReply(
           case 'notice':
             handlers.onNotice?.(String(ev.d ?? ''));
             break;
+          case 'turn_final': {
+            const detail = ev.d && typeof ev.d === 'object'
+              ? ev.d as { canonical_sha256?: unknown }
+              : {};
+            const hash = String(detail.canonical_sha256 || ev.canonical_sha256 || '');
+            handlers.onTurnFinal?.(hash);
+            break;
+          }
+          case 'turn_reconcile':
+            if (ev.d && typeof ev.d === 'object') {
+              handlers.onTurnReconcile?.(ev.d as CanonicalLiveProjection);
+            }
+            break;
           case 'done': {
             const assistantMessageId = ev.ok === false && ev.assistant_message_id === undefined
               ? undefined
               : Number.isSafeInteger(ev.assistant_message_id)
                 ? Number(ev.assistant_message_id)
                 : undefined;
-            result = { ok: ev.ok !== false, deferredTool, assistantMessageId };
+            const canonicalSha256 = typeof ev.canonical_sha256 === 'string'
+              ? ev.canonical_sha256
+              : undefined;
+            result = { ok: ev.ok !== false, deferredTool, assistantMessageId, canonicalSha256 };
             break;
           }
           case 'err':

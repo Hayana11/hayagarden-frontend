@@ -16,7 +16,7 @@ ROOT = str(Path(__file__).resolve().parents[1])
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from cc_resident import ResidentSession
+from cc_resident import ProviderTerminalReceipt, ResidentSession
 from tools import cc_jsonl_usage as replay
 from tools import cc_usage_observability as obs
 from wake.usage import build_wake_cache_info
@@ -194,6 +194,14 @@ class JsonlReplayTests(unittest.TestCase):
         self.assertEqual(enriched["request_ids"], ["req-1"])
         self.assertEqual(enriched["rounds"][0]["request_id"], "req-1")
         self.assertTrue(enriched["jsonl_usage"]["stream_totals_match"])
+        self.assertEqual(enriched["jsonl_usage"]["stream_totals"], {
+            "input_tokens": 1, "output_tokens": 2,
+            "cache_read": 0, "cache_creation": 100,
+        })
+        self.assertEqual(enriched["jsonl_usage"]["jsonl_totals"], {
+            "input_tokens": 1, "output_tokens": 2,
+            "cache_read": 0, "cache_creation": 100,
+        })
         self.assertEqual(enriched["_obs_model"], "claude-sonnet-4-6")
 
 
@@ -401,6 +409,97 @@ class ResidentJsonlHookTests(unittest.TestCase):
         self.assertEqual(usage["cache_creation_1h"], 100)
         self.assertEqual(usage["cache_creation_5m"], 0)
         self.assertNotIn("finality_state", usage["jsonl_usage"])
+
+    def test_resident_done_text_prefers_terminal_assistant_content(self):
+        terminal_text = "完整的 terminal 正文"
+        lines = [
+            json.dumps({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "短前缀"},
+                },
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": terminal_text}],
+                },
+            }),
+            json.dumps({
+                "type": "result",
+                "is_error": False,
+                "stop_reason": "end_turn",
+                "result": terminal_text,
+            }),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                return_value=replay.replay_jsonl_lines([]),
+            ),
+        ):
+            events = list(resident.send_turn("hello"))
+
+        self.assertEqual(
+            [payload for event, payload in events if event == "text"],
+            ["短前缀"],
+        )
+        done = [payload for event, payload in events if event == "done"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0][0], terminal_text)
+        receipt = done[0][2].terminal_receipt
+        self.assertIsInstance(receipt, ProviderTerminalReceipt)
+        self.assertEqual(receipt.terminal_kind, 'provider_result')
+        self.assertEqual(receipt.source, 'resident_live_stdout')
+
+    def test_resident_done_text_does_not_duplicate_matching_terminal_content(self):
+        text = "stream 与 terminal 相同"
+        lines = [
+            json.dumps({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": text},
+                },
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": text}],
+                },
+            }),
+            json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": text,
+            }),
+        ]
+        resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
+        resident._proc = FakeProc(lines)
+
+        with (
+            mock.patch.object(replay, "snapshot_session_jsonl", return_value=None),
+            mock.patch.object(
+                replay,
+                "replay_session_jsonl",
+                return_value=replay.replay_jsonl_lines([]),
+            ),
+        ):
+            events = list(resident.send_turn("hello"))
+
+        self.assertEqual(
+            [payload for event, payload in events if event == "text"],
+            [text],
+        )
+        done = [payload for event, payload in events if event == "done"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0][0], text)
 
 
     def test_resident_captures_session_id_from_camelcase_jsonl_events(self):

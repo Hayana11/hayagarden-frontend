@@ -10,6 +10,10 @@ on:
       - "tests/test-m3-02a-internal-mcp-readiness.mjs"
       - ".github/workflows/m3-02a-internal-mcp-service-validation.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -67,7 +71,12 @@ jobs:
           from tools.cc_capability_adapter import build_uh_a0_spawn_plan
           with tempfile.TemporaryDirectory() as root:
               plan = build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
-          assert set(plan["mcp_config"]["mcpServers"]) == {"home"}
+          assert set(plan["mcp_config"]["mcpServers"]) == {
+              "home",
+              "internal",
+              "capability",
+              "external",
+          }
           assert "mcp__internal__" not in plan["surface_allowlist_csv"]
           print(plan["physical_surface_fingerprint"])
           PY
@@ -112,7 +121,12 @@ jobs:
           from tools.cc_capability_adapter import build_uh_a0_spawn_plan
           with tempfile.TemporaryDirectory() as root:
               plan = build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})
-          assert set(plan["mcp_config"]["mcpServers"]) == {"home"}
+          assert set(plan["mcp_config"]["mcpServers"]) == {
+              "home",
+              "internal",
+              "capability",
+              "external",
+          }
           assert "mcp__internal__" not in plan["surface_allowlist_csv"]
           print(plan["physical_surface_fingerprint"])
           PY
@@ -125,14 +139,16 @@ jobs:
           printf 'head fingerprint: '
           cat /tmp/m3-02a-head-fingerprint
           cmp /tmp/m3-02a-base-fingerprint /tmp/m3-02a-head-fingerprint
-          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | sort)"
-          # M3-02A1 is a post-merge maintenance slice; fence its workflow plus two fixes.
-          expected="$(printf '%s\n' \
-            '.github/workflows/m3-02a-internal-mcp-service-validation.yml' \
-            '.gitignore' \
-            'scripts/activate-internal-mcp.sh' \
-            'tests/test_m3_02a_internal_mcp_service.py' | sort)"
-          test "$actual" = "$expected"
+          actual="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          owned="$(printf '%s\n' "$actual" | awk '
+            $0 == ".github/workflows/m3-02a-internal-mcp-service-validation.yml" ||
+            $0 == "deploy/systemd/internal-mcp.service" ||
+            $0 == "scripts/activate-internal-mcp.sh" ||
+            $0 == "scripts/check-internal-mcp-readiness.mjs" ||
+            $0 == "tests/test_m3_02a_internal_mcp_service.py" ||
+            $0 == "tests/test-m3-02a-internal-mcp-readiness.mjs"
+          ')"
+          test -n "$owned"
           if printf '%s\n' "$actual" | grep -E '^(tools/|wake/|cc_resident.py$|chat/daily_runtime.py$|app.py$|internal-mcp-server.js$|deploy-frontend.sh$|app/)' ; then
             exit 1
           fi

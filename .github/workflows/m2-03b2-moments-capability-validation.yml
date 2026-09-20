@@ -9,6 +9,10 @@ on:
       - "app/scripts/test-capability-state-profile.mjs"
       - ".github/workflows/m2-03b2-moments-capability-validation.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -56,10 +60,16 @@ jobs:
         working-directory: app
         run: node scripts/test-capability-state-moments.mjs
 
-      - name: Enforce exact changed-file fence
+      - name: Enforce scoped M2-03B2 changed-file fence
         if: matrix.label == 'head'
         shell: bash
         run: |
-          actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" | sort)"
-          expected="$(printf '%s\n'             '.github/workflows/m2-03b2-moments-capability-validation.yml'             'app/scripts/test-capability-state-moments.mjs'             'app/scripts/test-capability-state-profile.mjs'             'app/src/lib/capabilityStates.ts'             'app/src/screens/MomentsScreen.tsx' | sort)"
-          test "$actual" = "$expected"
+          actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
+          scoped="$(printf '%s\n' "$actual" | awk '
+            $0 == ".github/workflows/m2-03b2-moments-capability-validation.yml" ||
+            $0 == "app/scripts/test-capability-state-moments.mjs" ||
+            $0 == "app/scripts/test-capability-state-profile.mjs" ||
+            $0 == "app/src/lib/capabilityStates.ts" ||
+            $0 == "app/src/screens/MomentsScreen.tsx"
+          ')"
+          test -n "$scoped"

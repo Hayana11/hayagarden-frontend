@@ -76,6 +76,14 @@ _DEFAULTS = {
     'CC_REWRITE_NATIVE_FORK_ENABLED': '0',
     # Fyodor solo chat authored/display thinking compatibility.
     'DISPLAY_THINKING_MODE': 'auto',
+    # R5-R1A: production ContextPlan gate and explicit budget contract (default OFF/unmapped).
+    'CONTEXT_PLAN_CONSUMER_ENABLED': '0',
+    'CONTEXT_PLAN_TOKEN_BUDGET': '',
+    'CONTEXT_PLAN_RESERVE_BUDGET': '',
+    'CONTEXT_PLAN_RECENT_RAW_TARGET': '',
+    # CONTEXT-LIMIT-R1: independent hot/capacity/cold budget authorities.
+    'CC_CAPACITY_SWAP_PROMPT_TARGET': '90000',
+    'CC_COLD_REBUILD_GUARD': '70000',
 }
 
 

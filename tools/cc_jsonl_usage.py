@@ -282,6 +282,18 @@ def attach_jsonl_usage(
         "invalid_json_rows": _as_int(replay.get("invalid_json_rows")),
         "cache_creation_5m": out["cache_creation_5m"],
         "cache_creation_1h": out["cache_creation_1h"],
+        "stream_totals": stream_totals,
+        "jsonl_totals": jsonl_totals,
+        "jsonl_requests": [
+            {
+                "request_id": record.get("request_id"),
+                "input_tokens": _as_int(record.get("input_tokens")),
+                "output_tokens": _as_int(record.get("output_tokens")),
+                "cache_read": _as_int(record.get("cache_read")),
+                "cache_creation": _as_int(record.get("cache_creation")),
+            }
+            for record in records
+        ],
         "stream_totals_match": stream_totals == jsonl_totals,
     }
     models = list(replay.get("models") or [])

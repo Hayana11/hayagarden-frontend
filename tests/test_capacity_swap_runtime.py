@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -36,10 +37,12 @@ from chat.capacity_swap_runtime import (
     CAPACITY_SWAP_REGISTRY_SOURCE,
     CapacitySwapRuntimeError,
     CapacitySwapRuntimeResult,
+    compute_retained_transcript_token_budget,
     clear_same_context_last_good_for_tests,
     effective_static_system_for_registry,
     forbid_resend_after_stdin_flush,
     is_capacity_swap_reason,
+    prepare_capacity_swap_for_context_plan,
     resolve_finalize_registry_source,
     try_restore_same_context_last_good,
     with_capacity_boundary_suffix,
@@ -49,6 +52,10 @@ from chat.session_registry import (
     register_context_claude_session,
 )
 from tools.cc_jsonl_usage import session_jsonl_path
+from chat.cold_bootstrap_budget import (
+    capacity_swap_prompt_target,
+    cold_rebuild_guard,
+)
 
 _FIXED_NOW = datetime.datetime(2026, 7, 27, 10, 0, 0)
 _REAL_PREPARE = dr.prepare_daily_turn
@@ -1228,6 +1235,39 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         self.assertIn('deadbeef', state['old_attrs']['_committed_file_hashes'])
 
 
+class CapacitySwapBudgetAuthorityTests(unittest.TestCase):
+    def test_budget_authorities_read_distinct_runtime_keys(self):
+        with mock.patch.object(
+            config_store,
+            'get_int',
+            side_effect=lambda key, default=0: {
+                'CC_CAPACITY_SWAP_PROMPT_TARGET': 90_000,
+                'CC_COLD_REBUILD_GUARD': 70_000,
+            }.get(key, default),
+        ):
+            self.assertEqual(capacity_swap_prompt_target(), 90_000)
+            self.assertEqual(cold_rebuild_guard(), 70_000)
+
+    def test_retained_budget_uses_independent_capacity_target(self):
+        with mock.patch(
+            'chat.capacity_swap_runtime.capacity_swap_prompt_target',
+            return_value=90_000,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.cold_safety_margin',
+            return_value=8_000,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.estimate_text_tokens',
+            return_value=0,
+        ):
+            retained = compute_retained_transcript_token_budget(
+                static_system='STATIC',
+                pending_user_text='CURRENT',
+                dynamic_state_text='STATE',
+            )
+        # 90k target - 8k safety - 2k anchor reserve; hot 150k is not consulted.
+        self.assertEqual(retained, 80_000)
+
+
 class NeverUsedIdleReapContractTests(unittest.TestCase):
     """LIVE_FAIL #2: never-used (_last_used=0) must not trip idle reap."""
 
@@ -1284,6 +1324,285 @@ class NeverUsedIdleReapContractTests(unittest.TestCase):
                 tool_profile=cc_resident.TOOL_PROFILE_TEXT_ONLY,
             )
         self.assertEqual(reason, 'idle')
+
+
+class ContextPlanCapacityCarrierTests(unittest.TestCase):
+    def test_zero_raw_blocks_before_legacy_selector(self):
+        plan = mock.Mock(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            user_message_id=9,
+            db_path=None,
+        )
+        context_plan = mock.Mock(representations=())
+        with mock.patch(
+            'chat.capacity_swap_runtime.prepare_capacity_swap_for_plan',
+        ) as legacy_prepare:
+            result = prepare_capacity_swap_for_context_plan(
+                plan=plan,
+                context_plan=context_plan,
+                trigger_reason='soft_context',
+                static_system='STATIC_PERSONA',
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_resume_seed_missing',
+        )
+        legacy_prepare.assert_not_called()
+
+
+    def test_context_plan_raw_selection_preserves_tool_events(self):
+        from chat.claude_transcript_model import (
+            CandidateConversationRound,
+            EventRole,
+            EventType,
+            TranscriptEvent,
+            TranscriptGraph,
+        )
+        from chat.claude_transcript_transform import (
+            SelectionPolicy,
+            SidechainPolicy,
+            SummaryPolicy,
+            ThinkingPolicy,
+            transform_transcript as real_transform_transcript,
+        )
+
+        def event(uid, role, event_type, raw, line):
+            return TranscriptEvent(
+                event_uuid=uid,
+                parent_uuid=None,
+                session_id='source-session',
+                event_role=role,
+                event_type=event_type,
+                raw=raw,
+                line_number=line,
+            )
+
+        source_events = [
+            event(
+                'u1', EventRole.CANDIDATE_USER, EventType.USER,
+                {'type': 'user', 'message': {
+                    'role': 'user', 'content': 'old-one',
+                }},
+                1,
+            ),
+            event(
+                'a1', EventRole.ASSISTANT, EventType.ASSISTANT,
+                {'type': 'assistant', 'message': {
+                    'role': 'assistant', 'content': [{
+                        'type': 'text', 'text': 'answer-one',
+                    }],
+                }},
+                2,
+            ),
+            event(
+                'u2', EventRole.CANDIDATE_USER, EventType.USER,
+                {'type': 'user', 'message': {
+                    'role': 'user', 'content': 'old-two',
+                }},
+                3,
+            ),
+            event(
+                'a2', EventRole.ASSISTANT, EventType.ASSISTANT,
+                {'type': 'assistant', 'message': {
+                    'role': 'assistant', 'content': [{
+                        'type': 'text', 'text': 'answer-two',
+                    }],
+                }},
+                4,
+            ),
+            event(
+                'u3', EventRole.CANDIDATE_USER, EventType.USER,
+                {'type': 'user', 'message': {
+                    'role': 'user', 'content': 'old-tool-user',
+                }},
+                5,
+            ),
+            event(
+                'a3', EventRole.ASSISTANT, EventType.ASSISTANT,
+                {'type': 'assistant', 'message': {
+                    'role': 'assistant', 'content': [{
+                        'type': 'tool_use',
+                        'id': 'tool-3',
+                        'name': 'lookup',
+                        'input': {'q': 'x'},
+                    }],
+                }},
+                6,
+            ),
+            event(
+                't3', EventRole.TOOL_RESULT_USER, EventType.USER,
+                {'type': 'user', 'message': {
+                    'role': 'user', 'content': [{
+                        'type': 'tool_result',
+                        'tool_use_id': 'tool-3',
+                        'content': 'TOOL_OUTCOME',
+                    }],
+                }, 'sourceToolUseID': 'tool-3'},
+                7,
+            ),
+        ]
+        graph = TranscriptGraph(
+            session_id='source-session',
+            events=source_events,
+            by_uuid={item.event_uuid: item for item in source_events},
+            candidate_rounds=[
+                CandidateConversationRound(
+                    candidate_user_event_uuid='u1',
+                    event_uuids=('u1', 'a1'),
+                    has_assistant=True,
+                ),
+                CandidateConversationRound(
+                    candidate_user_event_uuid='u2',
+                    event_uuids=('u2', 'a2'),
+                    has_assistant=True,
+                ),
+                CandidateConversationRound(
+                    candidate_user_event_uuid='u3',
+                    event_uuids=('u3', 'a3', 't3'),
+                    tool_use_ids=('tool-3',),
+                    has_assistant=True,
+                ),
+            ],
+        )
+        member_one = types.SimpleNamespace(
+            seq=1,
+            source_ref='turn:1:2',
+            source_revision='rev-one',
+            source_kind='completed_turn',
+            content_hash='hash-one',
+            span_start=None,
+            span_end=None,
+            branch_id='active',
+        )
+        member_tool = types.SimpleNamespace(
+            seq=3,
+            source_ref='turn:5:6',
+            source_revision='rev-tool',
+            source_kind='completed_turn',
+            content_hash='hash-tool',
+            span_start=None,
+            span_end=None,
+            branch_id='active',
+        )
+        context_plan = types.SimpleNamespace(
+            plan_hash='plan-hash',
+            representations=(types.SimpleNamespace(
+                kind='raw',
+                representation_id='raw:exact',
+                source_members=(member_one, member_tool),
+            ),),
+        )
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            user_message_id=99,
+            cursor_before=10,
+            db_path='db',
+            chat_id='default',
+            transcript_cwd='/tmp',
+            plan_hash='ignored-plan-field',
+        )
+        registry = {
+            'scan_status': 'ready',
+            'transcript_path': '/tmp/source.jsonl',
+            'claude_session_id': 'source-session',
+            'scan_offset': 123,
+            'last_mapped_message_id': 10,
+        }
+        fake_conn = mock.Mock()
+        formal = [{'id': value} for value in (1, 2, 3, 4, 5, 6, 7)]
+        canonical = {
+            'u1': 'CANONICAL_ONE',
+            'u2': 'CANONICAL_TWO',
+            'u3': 'CANONICAL_TOOL_USER',
+        }
+        mid_to_event = {1: 'u1', 3: 'u2', 5: 'u3'}
+        event_to_mid = {
+            'u1': 1, 'a1': 2, 'u2': 3, 'a2': 4,
+            'u3': 5, 'a3': 6, 't3': 7,
+        }
+        source_members = {
+            'turn:1:2': member_one,
+            'turn:5:6': member_tool,
+        }
+
+        with mock.patch(
+            'chat.capacity_swap_runtime.get_context_claude_session',
+            return_value=registry,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.latest_complete_assistant_watermark',
+            return_value=10,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.registry_mapping_lags_watermark',
+            return_value=False,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._snapshot_prefix_sha256',
+            return_value='a' * 64,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.read_transcript_range',
+            return_value=graph,
+        ), mock.patch.object(
+            dc, '_connect', return_value=fake_conn,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._load_formal_messages_excluding_current',
+            return_value=formal,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._load_mapping_for_messages',
+            return_value=(canonical, mid_to_event, event_to_mid),
+        ), mock.patch(
+            'chat.capacity_swap_runtime._capacity_context_source_member_from_db',
+            side_effect=lambda **kwargs: source_members[
+                'turn:%d:%d' % (kwargs['user_id'], kwargs['assistant_id'])
+            ],
+        ), mock.patch(
+            'chat.capacity_swap_runtime.prepare_capacity_swap_for_plan',
+        ) as legacy_prepare, mock.patch(
+            'chat.capacity_swap_runtime.transform_transcript',
+            wraps=real_transform_transcript,
+        ) as transform:
+            result = prepare_capacity_swap_for_context_plan(
+                plan=plan,
+                context_plan=context_plan,
+                trigger_reason='soft_context',
+                static_system='STATIC_PERSONA',
+            )
+
+        self.assertTrue(result.ok, result.warnings)
+        candidate = result.candidate
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.selected_round_count, 2)
+        self.assertEqual(
+            candidate.selected_message_ids,
+            (1, 2, 5, 6, 7),
+        )
+        self.assertIn('CANONICAL_ONE', candidate.serialized_jsonl)
+        self.assertIn('CANONICAL_TOOL_USER', candidate.serialized_jsonl)
+        self.assertIn('TOOL_OUTCOME', candidate.serialized_jsonl)
+        self.assertNotIn('CANONICAL_TWO', candidate.serialized_jsonl)
+        self.assertNotIn('old-two', candidate.serialized_jsonl)
+        self.assertEqual(
+            candidate.serialized_jsonl.count('"type":"tool_use"'),
+            1,
+        )
+        self.assertEqual(
+            candidate.serialized_jsonl.count('"type":"tool_result"'),
+            1,
+        )
+        request = transform.call_args.args[1]
+        self.assertEqual(request.selection_policy, SelectionPolicy.FIXED_ROUND_COUNT)
+        self.assertEqual(request.keep_rounds, 2)
+        self.assertEqual(
+            request.exclude_round_candidate_uuids,
+            frozenset({'u2'}),
+        )
+        self.assertEqual(request.thinking_policy, ThinkingPolicy.DROP)
+        self.assertEqual(request.sidechain_policy, SidechainPolicy.EXCLUDE)
+        self.assertEqual(request.summary_policy, SummaryPolicy.DROP)
+        legacy_prepare.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -225,5 +225,17 @@ class ContextContinuityTests(unittest.TestCase):
         self.assertIn("Authorization: `Bearer ${ownerToken}`", mcp_source)
 
 
+def load_tests(loader, tests, pattern):
+    """Keep R1 on the existing Context continuity guard, not a parallel CI path."""
+    r1_spec = importlib.util.spec_from_file_location(
+        "continuity_r1_source_contract_tests",
+        os.path.join(ROOT, "tests", "test_continuity_source_contract.py"),
+    )
+    r1_module = importlib.util.module_from_spec(r1_spec)
+    r1_spec.loader.exec_module(r1_module)
+    tests.addTests(loader.loadTestsFromModule(r1_module))
+    return tests
+
+
 if __name__ == "__main__":
     unittest.main()

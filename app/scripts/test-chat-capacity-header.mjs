@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   CAPACITY_SOFT_LIMIT,
+  DEFAULT_CHAT_CONTEXT_LIMITS,
+  normalizeChatContextLimits,
   fmtCapacityK,
   formatCapacityLabel,
   findLatestRoundContext,
@@ -9,12 +11,19 @@ import {
 } from '../src/lib/chat.ts';
 
 assert.equal(fmtCapacityK(49515), '49.5k');
-assert.equal(fmtCapacityK(90000), '90k');
+assert.equal(fmtCapacityK(150000), '150k');
 assert.equal(fmtCapacityK(999), '999');
-assert.equal(formatCapacityLabel(49515), '49.5k / 90k');
-assert.equal(formatCapacityLabel(null), '— / 90k');
-assert.equal(formatCapacityLabel(0), '— / 90k');
-assert.equal(CAPACITY_SOFT_LIMIT, 90000);
+assert.equal(formatCapacityLabel(49515), '49.5k / 150k');
+assert.equal(formatCapacityLabel(49515, 160000), '49.5k / 160k');
+assert.equal(formatCapacityLabel(null), '— / 150k');
+assert.equal(formatCapacityLabel(0), '— / 150k');
+assert.equal(CAPACITY_SOFT_LIMIT, 150000);
+assert.deepEqual(normalizeChatContextLimits({ context_soft_limit: 160000, max_resident_turns: 46 }), {
+  softLimit: 160000,
+  maxResidentTurns: 46,
+  authoritative: true,
+});
+assert.equal(DEFAULT_CHAT_CONTEXT_LIMITS.softLimit, 150000);
 
 const parsed = normalizeCacheInfo({ last_round_context: 49515, lastRoundContext: 0 });
 assert.equal(parsed?.lastRoundContext, 49515);
@@ -42,7 +51,8 @@ const partialOnly = [
 assert.equal(findLatestRoundContext(partialOnly), null);
 
 const screen = fs.readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
-assert.match(screen, /formatCapacityLabel\(findLatestRoundContext\(msgs\)\)/);
+assert.match(screen, /fetchChatContextLimits/);
+assert.match(screen, /formatCapacityLabel\(findLatestRoundContext\(msgs\), contextLimits\.softLimit\)/);
 assert.doesNotMatch(screen, /always here/);
 assert.doesNotMatch(screen, /away for now/);
 assert.match(screen, /chatBreathe 2\.2s ease-in-out infinite/);
@@ -53,6 +63,6 @@ assert.doesNotMatch(
   screen.slice(screen.indexOf('capacityLabel'), screen.indexOf('capacityLabel') + 400),
   /compactToolbar/,
 );
-assert.match(screen, /上下文容量；90k 为 soft Swap 门槛，另有 30 轮触发/);
+assert.match(screen, /contextLimits\.maxResidentTurns/);
 
 console.log('test-chat-capacity-header: ok');

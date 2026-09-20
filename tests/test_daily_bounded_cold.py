@@ -405,6 +405,63 @@ class DailyColdFenceTests(unittest.TestCase):
         )
         return plan, ids
 
+    def test_t5_75k_is_allowed_below_90k_target(self):
+        plan, _ids = self._make_cold_plan(history_budget=24_000)
+        resident = self._fake_resident()
+        with mock.patch(
+            'chat.cold_bootstrap_budget.estimate_whole_prompt',
+            return_value=75_000,
+        ) as estimate, mock.patch(
+            'chat.cold_bootstrap_budget.cold_rebuild_guard',
+            return_value=70_000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90_000,
+        ), mock.patch.object(dr, '_registered_generation_requires_respawn', return_value=False), \
+           mock.patch.object(dr, 'verify_epoch_token'), \
+           mock.patch.object(dr.LeaseHeartbeat, 'start'), \
+           mock.patch.object(dr.LeaseHeartbeat, 'stop', return_value=False), \
+           mock.patch.object(dr, '_capture_transcript_start'), \
+           mock.patch.object(dr, '_capture_transcript_end'):
+            list(dr.ensure_resident_and_stream(
+                plan, resident=resident, env={}, static_system='STATIC',
+            ))
+        self.assertEqual(estimate.call_count, 1)
+        self.assertEqual(len(self.send_calls), 1)
+        self.assertFalse(plan.manifest.get('cold_budget_overflow'))
+        self.assertNotIn('cold_rebuild_guard_overflow', plan.manifest)
+        self.assertEqual(plan.manifest.get('cold_prompt_target'), 90_000)
+
+
+    def test_t5_guard_value_does_not_change_75k_admission(self):
+        for guard_value in (60_000, 70_000, 80_000):
+            with self.subTest(guard=guard_value):
+                plan, _ids = self._make_cold_plan(history_budget=24_000)
+                resident = self._fake_resident()
+                with mock.patch(
+                    'chat.cold_bootstrap_budget.estimate_whole_prompt',
+                    return_value=75_000,
+                ) as estimate, mock.patch(
+                    'chat.cold_bootstrap_budget.cold_rebuild_guard',
+                    return_value=guard_value,
+                ), mock.patch(
+                    'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+                    return_value=90_000,
+                ), mock.patch.object(
+                    dr,
+                    '_registered_generation_requires_respawn',
+                    return_value=False,
+                ), mock.patch.object(dr, 'verify_epoch_token'),                    mock.patch.object(dr.LeaseHeartbeat, 'start'),                    mock.patch.object(dr.LeaseHeartbeat, 'stop', return_value=False),                    mock.patch.object(dr, '_capture_transcript_start'),                    mock.patch.object(dr, '_capture_transcript_end'):
+                    list(dr.ensure_resident_and_stream(
+                        plan, resident=resident, env={}, static_system='STATIC',
+                    ))
+                self.assertEqual(estimate.call_count, 1)
+                self.assertEqual(len(self.send_calls), 1)
+                self.assertFalse(plan.manifest.get('cold_budget_overflow'))
+                self.assertNotIn('cold_rebuild_guard_overflow', plan.manifest)
+                self.assertEqual(plan.manifest.get('cold_prompt_target'), 90_000)
+                self.send_calls.clear()
+
     def test_t6_whole_prompt_rebuild_shrinks_history(self):
         plan, _ids = self._make_cold_plan(history_budget=24_000)
         resident = self._fake_resident()
@@ -414,11 +471,15 @@ class DailyColdFenceTests(unittest.TestCase):
         def fake_estimate(system, content):
             estimates['n'] += 1
             if estimates['n'] == 1:
-                return 100_000
-            return 1_000
+                return 91_000
+            return 60_000
 
         with mock.patch('chat.cold_bootstrap_budget.estimate_whole_prompt', side_effect=fake_estimate), \
-             mock.patch('chat.cold_bootstrap_budget.cold_prompt_target', return_value=5_000), \
+             mock.patch('chat.cold_bootstrap_budget.cold_rebuild_guard', return_value=70_000), \
+             mock.patch(
+                 'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+                 return_value=90_000,
+             ), \
              mock.patch('chat.daily_history._build_state_text', return_value=('', 'none', {})), \
              mock.patch('config_store.get_int', side_effect=lambda k, d=0: {
                  'HISTORY_TOKEN_BUDGET': 24_000,
@@ -440,14 +501,20 @@ class DailyColdFenceTests(unittest.TestCase):
         self.assertTrue(any(e == 'done' for e, _ in events))
         self.assertLessEqual(plan.manifest['cold_history_budget'], 24_000)
         self.assertFalse(plan.manifest.get('cold_budget_overflow'))
+        self.assertFalse(plan.manifest.get('cold_budget_overflow'))
+        self.assertNotIn('cold_rebuild_guard_overflow', plan.manifest)
+        self.assertEqual(plan.manifest.get('cold_prompt_target'), 90_000)
 
     def test_t7_unshrinkable_fails_before_send(self):
         plan, _ids = self._make_cold_plan(history_budget=24_000)
         resident = self._fake_resident()
         with mock.patch(
-            'chat.cold_bootstrap_budget.estimate_whole_prompt', return_value=100_000,
+            'chat.cold_bootstrap_budget.estimate_whole_prompt', return_value=91_000,
         ), mock.patch(
-            'chat.cold_bootstrap_budget.cold_prompt_target', return_value=1_000,
+            'chat.cold_bootstrap_budget.cold_rebuild_guard', return_value=70_000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90_000,
         ), mock.patch(
             'chat.daily_history._build_state_text', return_value=('', 'none', {}),
         ), mock.patch(
@@ -462,10 +529,14 @@ class DailyColdFenceTests(unittest.TestCase):
            mock.patch.object(dr, 'verify_epoch_token'), \
            mock.patch.object(dr.LeaseHeartbeat, 'start'), \
            mock.patch.object(dr.LeaseHeartbeat, 'stop', return_value=False):
-            with self.assertRaises(ColdBootstrapOverflow):
+            with self.assertRaises(ColdBootstrapOverflow) as ctx:
                 list(dr.ensure_resident_and_stream(
                     plan, resident=resident, env={}, static_system='S' * 400,
                 ))
+        self.assertEqual(ctx.exception.error_code, 'cold_bootstrap_overflow')
+        self.assertTrue(ctx.exception.usage.get('cold_budget_overflow'))
+        self.assertFalse(ctx.exception.usage.get('cold_rebuild_guard_overflow', False))
+        self.assertEqual(ctx.exception.usage.get('cold_prompt_target'), 90_000)
         self.assertEqual(self.send_calls, [])
         cursor = dc.get_resident_history_cursor(
             plan.context_id, plan.resident_generation, db_path=self.db,
@@ -485,7 +556,10 @@ class DailyColdFenceTests(unittest.TestCase):
         with mock.patch(
             'chat.cold_bootstrap_budget.estimate_whole_prompt', return_value=50_000,
         ), mock.patch(
-            'chat.cold_bootstrap_budget.cold_prompt_target', return_value=90_000,
+            'chat.cold_bootstrap_budget.cold_rebuild_guard', return_value=70_000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90_000,
         ), mock.patch.object(dr, '_registered_generation_requires_respawn', return_value=False), \
            mock.patch.object(dr, 'verify_epoch_token'), \
            mock.patch.object(dr.LeaseHeartbeat, 'start'), \
@@ -508,7 +582,10 @@ class DailyColdFenceTests(unittest.TestCase):
         with mock.patch(
             'chat.cold_bootstrap_budget.estimate_whole_prompt', return_value=8_000,
         ), mock.patch(
-            'chat.cold_bootstrap_budget.cold_prompt_target', return_value=90_000,
+            'chat.cold_bootstrap_budget.cold_rebuild_guard', return_value=70_000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.resident_rebuild_prompt_target',
+            return_value=90_000,
         ), mock.patch.object(dr, '_registered_generation_requires_respawn', return_value=False), \
            mock.patch.object(dr, 'verify_epoch_token'), \
            mock.patch.object(dr.LeaseHeartbeat, 'start'), \

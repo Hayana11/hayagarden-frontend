@@ -75,6 +75,7 @@ class MappingPassRequest:
     assistant_message_id: int
     expected_start_offset: int
     observed_end_offset: int
+    terminal_receipt: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -82,8 +83,11 @@ class MappingPassResult:
     ok: bool
     error_code: Optional[str] = None
     mapped_event_uuids: list[str] = field(default_factory=list)
+    inserted_event_uuids: list[str] = field(default_factory=list)
+    confirmed_existing_event_uuids: list[str] = field(default_factory=list)
     scan_offset: Optional[int] = None
     registry: Optional[dict[str, Any]] = None
+    terminal_receipt_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -317,8 +321,11 @@ def _event_fields_equal(existing: Mapping[str, Any], planned: Mapping[str, Any])
     return int(left_off) == int(right_off)
 
 
-def _insert_mapping_row(conn: sqlite3.Connection, planned: dict[str, Any]) -> str:
-    """Insert or idempotently confirm one mapping row. Returns event_uuid."""
+def _insert_mapping_row_with_receipt(
+    conn: sqlite3.Connection,
+    planned: dict[str, Any],
+) -> tuple[str, bool]:
+    """Insert or confirm one mapping row, returning ``(uuid, inserted)``."""
     uid = str(planned['event_uuid'])
     existing = conn.execute(
         'SELECT * FROM chat_message_claude_events WHERE event_uuid=?',
@@ -330,7 +337,7 @@ def _insert_mapping_row(conn: sqlite3.Connection, planned: dict[str, Any]) -> st
                 f'event_uuid {uid} bound to conflicting mapping',
                 error_code='event_uuid_conflict',
             )
-        return uid
+        return uid, False
 
     if str(planned['role']) == ROLE_USER:
         other = conn.execute(
@@ -367,6 +374,12 @@ def _insert_mapping_row(conn: sqlite3.Connection, planned: dict[str, Any]) -> st
         raise MappingConflict(
             f'mapping integrity: {exc}', error_code='mapping_integrity',
         ) from exc
+    return uid, True
+
+
+def _insert_mapping_row(conn: sqlite3.Connection, planned: dict[str, Any]) -> str:
+    """Insert or idempotently confirm one mapping row. Returns event_uuid."""
+    uid, _inserted = _insert_mapping_row_with_receipt(conn, planned)
     return uid
 
 
@@ -869,6 +882,10 @@ def _commit_mapping_work(
             raise MappingRejected('chat_id mismatch', error_code='chat_id_mismatch')
 
         mapped: list[str] = []
+        inserted: list[str] = []
+        confirmed_existing: list[str] = []
+        inserted_rows: list[dict[str, Any]] = []
+        inserted_set: set[str] = set()
         final_offset = int(registry['scan_offset'])
         last_mapped_asst: Optional[int] = (
             int(registry['last_mapped_message_id'])
@@ -904,7 +921,23 @@ def _commit_mapping_work(
                         resident_generation=int(req.resident_generation),
                         expected_role=ROLE_ASSISTANT,
                     )
-                mapped.append(_insert_mapping_row(conn, row))
+                uid, was_inserted = _insert_mapping_row_with_receipt(conn, row)
+                mapped.append(uid)
+                if was_inserted or uid in inserted_set:
+                    if uid not in inserted_set:
+                        inserted_set.add(uid)
+                        inserted.append(uid)
+                        inserted_rows.append({
+                            key: row.get(key)
+                            for key in (
+                                'event_uuid', 'message_id', 'role',
+                                'claude_session_id', 'context_id',
+                                'context_epoch', 'resident_generation',
+                                'jsonl_byte_offset',
+                            )
+                        })
+                else:
+                    confirmed_existing.append(uid)
                 if str(row['role']) == ROLE_ASSISTANT:
                     last_mapped_asst = int(row['message_id'])
 
@@ -925,6 +958,28 @@ def _commit_mapping_work(
                 raise MappingRejected('registry missing', error_code='registry_missing')
             final_offset = int(new_off)
 
+        receipt_id: Optional[int] = None
+        if req.terminal_receipt is not None:
+            metadata = dict(req.terminal_receipt)
+            receipt_id = dc.insert_terminal_mapping_receipt(
+                conn=conn,
+                assistant_message_id=int(req.assistant_message_id),
+                user_message_id=int(req.user_message_id),
+                context_id=int(req.context_id),
+                context_epoch=int(req.context_epoch),
+                resident_generation=int(req.resident_generation),
+                expected_cursor=metadata.get('expected_cursor'),
+                transcript_path=str(metadata.get('transcript_path') or ''),
+                claude_session_id=str(metadata.get('claude_session_id') or ''),
+                transcript_start_offset=metadata.get('transcript_start_offset'),
+                transcript_end_offset=metadata.get('transcript_end_offset'),
+                pre_registry_snapshot=metadata.get('pre_registry_snapshot'),
+                post_registry_snapshot=registry,
+                inserted_event_uuids=inserted,
+                confirmed_existing_event_uuids=confirmed_existing,
+                mapped_event_uuids=mapped,
+                inserted_event_rows=inserted_rows,
+            )
         conn.commit()
         final_reg = get_context_claude_session(
             int(req.context_id), int(req.resident_generation), db_path=db_path,
@@ -932,8 +987,11 @@ def _commit_mapping_work(
         return MappingPassResult(
             ok=True,
             mapped_event_uuids=mapped,
+            inserted_event_uuids=inserted,
+            confirmed_existing_event_uuids=confirmed_existing,
             scan_offset=final_offset,
             registry=final_reg,
+            terminal_receipt_id=receipt_id,
         )
     except (MappingRejected, MappingConflict, SessionRegistryConflict, SessionRegistryNotFound) as exc:
         conn.rollback()

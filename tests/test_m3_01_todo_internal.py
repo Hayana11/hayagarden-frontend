@@ -269,7 +269,7 @@ class TodoInternalAdapterTests(unittest.TestCase):
 
     def test_live_surface_uses_capability_todo_read_and_forbids_home_todo(self):
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
-        self.assertEqual(set(plan["mcp_config"]["mcpServers"]), {"home", "internal", "capability"})
+        self.assertEqual(set(plan["mcp_config"]["mcpServers"]), {"home", "internal", "capability", "external"})
         self.assertIn("mcp__capability__todo_read", plan["surface_allowlist"])
         self.assertNotIn("mcp__internal__get_todos", plan["surface_allowlist"])
         self.assertIn("mcp__internal__get_todos", plan["disallowed_tools"])
