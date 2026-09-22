@@ -72,6 +72,10 @@ _DEFAULTS = {
     'CC_CHAT_MODEL': '',
     # CC-CHAT-EFFORT-R1：空=跟随 Claude Code 默认（不传 --effort）。
     'CC_CHAT_EFFORT': '',
+    # Codex 蓝色线路独立模型；空=跟随 app-server 当前推荐默认模型。
+    'CODEX_CHAT_MODEL': '',
+    # DeepSeek 官方直连 / fallback 独立模型；默认使用当前官方 Flash 别名。
+    'DEEPSEEK_CHAT_MODEL': 'deepseek-flash',
     # R0：staged rewrite 机会型 native session fork（默认关闭；缺 mapping/SDK 时 cold fallback）。
     'CC_REWRITE_NATIVE_FORK_ENABLED': '0',
     # Fyodor solo chat authored/display thinking compatibility.

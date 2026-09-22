@@ -18,9 +18,11 @@ import threading
 import time
 from typing import Iterator
 
+import config_store
 import group_chat_store
 
 
+CODEX_CHAT_MODEL_KEY = "CODEX_CHAT_MODEL"
 DEFAULT_DB_PATH = os.environ.get("HAYA_DB_PATH", "/opt/frontend/memories.db")
 DEFAULT_CWD = os.environ.get("CODEX_CHAT_CWD", "/tmp/hayagarden-codex-chat")
 DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", "/root/.codex")
@@ -97,6 +99,8 @@ class CodexAppServer:
         self._messages: queue.Queue = queue.Queue()
         self._request_id = 0
         self._stderr_tail: deque[str] = deque(maxlen=40)
+        self._model_cache_at = 0.0
+        self._model_cache: list[dict] = []
 
     def _environment(self) -> dict:
         env = dict(os.environ)
@@ -191,6 +195,78 @@ class CodexAppServer:
     def close(self) -> None:
         with self._lock:
             self._stop_locked()
+
+    def configured_model(self) -> str:
+        return str(config_store.get(CODEX_CHAT_MODEL_KEY, '') or '').strip()
+
+    def set_configured_model(self, model: str | None) -> str:
+        value = str(model or '').strip()
+        config_store.set(CODEX_CHAT_MODEL_KEY, value)
+        return value
+
+    def list_models(self, *, force: bool = False) -> list[dict]:
+        """Return the visible model catalog exposed by the logged-in app-server."""
+        with self._lock:
+            now = time.monotonic()
+            if not force and self._model_cache and now - self._model_cache_at < 30:
+                return [dict(row) for row in self._model_cache]
+            self._start_locked()
+            rows: list[dict] = []
+            cursor: str | None = None
+            while True:
+                params = {"limit": 100, "includeHidden": False}
+                if cursor:
+                    params["cursor"] = cursor
+                result = self._request_locked("model/list", params, timeout=20)
+                for raw in result.get("data") or []:
+                    if not isinstance(raw, dict):
+                        continue
+                    model_id = str(raw.get("id") or raw.get("model") or '').strip()
+                    if not model_id:
+                        continue
+                    efforts = []
+                    for effort in raw.get("supportedReasoningEfforts") or []:
+                        if isinstance(effort, dict):
+                            name = str(effort.get("reasoningEffort") or '').strip()
+                            if name:
+                                efforts.append(name)
+                    rows.append({
+                        "id": model_id,
+                        "label": str(raw.get("displayName") or model_id),
+                        "is_default": bool(raw.get("isDefault")),
+                        "default_effort": str(raw.get("defaultReasoningEffort") or ''),
+                        "efforts": efforts,
+                        "input_modalities": list(raw.get("inputModalities") or ["text", "image"]),
+                    })
+                cursor = str(result.get("nextCursor") or '').strip() or None
+                if not cursor:
+                    break
+            self._model_cache = [dict(row) for row in rows]
+            self._model_cache_at = now
+            return [dict(row) for row in rows]
+
+    def resolved_model(self) -> tuple[str, str]:
+        """Return (model_id, mode), resolving empty config to app-server default."""
+        configured = self.configured_model()
+        if configured:
+            return configured, "explicit"
+        try:
+            models = self.list_models()
+        except Exception:
+            return '', "default"
+        default = next((row.get("id") for row in models if row.get("is_default")), '')
+        return str(default or ''), "default"
+
+    def _turn_params(self, thread_id: str, prompt: str) -> tuple[dict, str, str]:
+        model, mode = self.resolved_model()
+        params = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt}],
+            "approvalPolicy": "never",
+        }
+        if model:
+            params["model"] = model
+        return params, model, mode
 
     def _send_locked(self, payload: dict) -> None:
         process = self._process
@@ -355,13 +431,10 @@ class CodexAppServer:
                 self._start_locked()
                 bound_id = self._ensure_bound_thread_locked(thread_id, instructions)
                 early: list[dict] = []
+                turn_params, turn_model, turn_model_mode = self._turn_params(bound_id, prompt)
                 result = self._request_locked(
                     "turn/start",
-                    {
-                        "threadId": bound_id,
-                        "input": [{"type": "text", "text": prompt}],
-                        "approvalPolicy": "never",
-                    },
+                    turn_params,
                     timeout=30,
                     early_notifications=early,
                 )
@@ -403,7 +476,13 @@ class CodexAppServer:
                                 if text:
                                     saw_delta = True
                                     yield "text", text
-                        yield "done", {"thread_id": bound_id, "turn_id": turn_id, "status": status}
+                        yield "done", {
+                            "thread_id": bound_id,
+                            "turn_id": turn_id,
+                            "status": status,
+                            "model": turn_model,
+                            "model_mode": turn_model_mode,
+                        }
                         return
                     elif method == "error":
                         error = params.get("error") or params
@@ -427,13 +506,10 @@ class CodexAppServer:
                 self._start_locked()
                 thread_id = self._ensure_thread_locked(room, instructions)
                 early: list[dict] = []
+                turn_params, turn_model, turn_model_mode = self._turn_params(thread_id, prompt)
                 result = self._request_locked(
                     "turn/start",
-                    {
-                        "threadId": thread_id,
-                        "input": [{"type": "text", "text": prompt}],
-                        "approvalPolicy": "never",
-                    },
+                    turn_params,
                     timeout=30,
                     early_notifications=early,
                 )
@@ -484,6 +560,8 @@ class CodexAppServer:
                             "thread_id": thread_id,
                             "turn_id": turn_id,
                             "status": status,
+                            "model": turn_model,
+                            "model_mode": turn_model_mode,
                         }
                         return
                     elif method == "error":

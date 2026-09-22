@@ -986,19 +986,25 @@ def get_chat_messages():
     })
 
 
-def _group_chat_secret_present(name):
-    """Check whether a secret exists without ever returning its value."""
-    if (os.environ.get(name) or '').strip():
-        return True
+def _deployment_secret(name):
+    """Read a deployment secret for server-side use only; never return it to clients."""
+    value = (os.environ.get(name) or '').strip()
+    if value:
+        return value
     try:
         with open('/opt/frontend/.env', encoding='utf-8') as env_file:
             for raw_line in env_file:
-                key, sep, value = raw_line.partition('=')
-                if sep and key.strip() == name and value.strip():
-                    return True
+                key, sep, candidate = raw_line.partition('=')
+                if sep and key.strip() == name and candidate.strip():
+                    value = candidate.strip()
     except OSError:
         pass
-    return False
+    return value
+
+
+def _group_chat_secret_present(name):
+    """Check whether a secret exists without ever returning its value."""
+    return bool(_deployment_secret(name))
 
 
 @app.route('/api/group-chat/status', methods=['GET'])
@@ -1024,6 +1030,63 @@ def group_chat_status():
             },
         }
     })
+
+
+@app.route('/api/group-chat/codex-models', methods=['GET'])
+def group_chat_codex_models():
+    status = codex_app_server.runtime_status()
+    configured = codex_app_server.client.configured_model()
+    if not status.get('ready'):
+        return jsonify({
+            'ready': False,
+            'models': [],
+            'configured_model': configured or None,
+            'model_mode': 'explicit' if configured else 'default',
+            'current': configured,
+            'detail': status.get('detail') or '蓝色线路尚未就绪',
+        })
+    try:
+        force = request.args.get('refresh') == '1'
+        models = codex_app_server.client.list_models(force=force)
+        default_model = next((row.get('id') for row in models if row.get('is_default')), '')
+        return jsonify({
+            'ready': True,
+            'models': models,
+            'configured_model': configured or None,
+            'model_mode': 'explicit' if configured else 'default',
+            'default_model': default_model or None,
+            'current': configured or default_model or '',
+        })
+    except Exception as exc:
+        return jsonify({'error': str(exc), 'models': []}), 502
+
+
+@app.route('/api/group-chat/codex-model', methods=['POST'])
+def group_chat_codex_model():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'model' not in data:
+        return jsonify({'error': 'missing model'}), 400
+    raw = data.get('model')
+    if raw is not None and not isinstance(raw, str):
+        return jsonify({'error': 'model must be string or null'}), 400
+    model = str(raw or '').strip()
+    try:
+        models = codex_app_server.client.list_models(force=True)
+        allowed = {str(row.get('id') or '') for row in models}
+        if model and model not in allowed:
+            return jsonify({'error': 'CODEX_MODEL_NOT_ALLOWED', 'rejected_model': model}), 400
+        codex_app_server.client.set_configured_model(model)
+        default_model = next((row.get('id') for row in models if row.get('is_default')), '')
+        return jsonify({
+            'ok': True,
+            'configured_model': model or None,
+            'model_mode': 'explicit' if model else 'default',
+            'default_model': default_model or None,
+            'current': model or default_model or '',
+            'effective_from': 'next_turn',
+        })
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 502
 
 
 @app.route('/api/group-chat/messages', methods=['GET'])
@@ -2022,6 +2085,80 @@ def config_model_catalog():
         'relay': state.get('relay'),
         'relay_name': state.get('relay_name'),
     })
+
+def _deepseek_model_catalog():
+    """Fetch the current official DeepSeek model ids without exposing the API key."""
+    import json as _json
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    key = _deployment_secret('DEEPSEEK_API_KEY')
+    if not key:
+        return [], 'missing_key'
+    request_obj = _ur.Request(
+        'https://api.deepseek.com/models',
+        headers={'Authorization': 'Bearer ' + key},
+        method='GET',
+    )
+    try:
+        with _ur.urlopen(request_obj, timeout=10) as response:
+            payload = _json.loads(response.read().decode('utf-8', 'ignore') or '{}')
+    except _ue.HTTPError as exc:
+        if exc.code in (401, 403):
+            return [], 'unauthorized'
+        return [], 'upstream_error'
+    except Exception:
+        return [], 'unavailable'
+    models = []
+    for row in payload.get('data') or []:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get('id') or '').strip()
+        if model_id:
+            models.append({'id': model_id, 'label': model_id})
+    return models, ''
+
+
+@app.route('/api/config/deepseek', methods=['GET'])
+def config_get_deepseek():
+    configured = str(config_store.get('DEEPSEEK_CHAT_MODEL', 'deepseek-flash') or '').strip() or 'deepseek-flash'
+    key_configured = _group_chat_secret_present('DEEPSEEK_API_KEY')
+    models, error = _deepseek_model_catalog() if key_configured else ([], 'missing_key')
+    return jsonify({
+        'ready': bool(key_configured and not error),
+        'key_configured': key_configured,
+        'configured_model': configured,
+        'current': configured,
+        'models': models,
+        'error': error or None,
+        'source': 'https://api.deepseek.com',
+    })
+
+
+@app.route('/api/config/deepseek/model', methods=['POST'])
+def config_set_deepseek_model():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'model' not in data:
+        return jsonify({'error': 'missing model'}), 400
+    raw = data.get('model')
+    if not isinstance(raw, str) or not raw.strip():
+        return jsonify({'error': 'model must be a non-empty string'}), 400
+    model = raw.strip()
+    models, error = _deepseek_model_catalog()
+    if error:
+        status = 409 if error in ('missing_key', 'unauthorized') else 502
+        return jsonify({'error': 'DEEPSEEK_MODEL_CATALOG_UNAVAILABLE', 'detail': error}), status
+    allowed = {str(row.get('id') or '') for row in models}
+    if model not in allowed:
+        return jsonify({'error': 'DEEPSEEK_MODEL_NOT_ALLOWED', 'rejected_model': model}), 400
+    config_store.set('DEEPSEEK_CHAT_MODEL', model)
+    return jsonify({
+        'ok': True,
+        'configured_model': model,
+        'current': model,
+        'effective_from': 'next_deepseek_call',
+    })
+
 
 @app.route('/api/config/key-status', methods=['GET'])
 def config_key_status():

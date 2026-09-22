@@ -149,6 +149,16 @@ export interface ConfigModel {
   dot: string;
 }
 
+export interface DeepSeekConfig {
+  ready: boolean;
+  keyConfigured: boolean;
+  configuredModel: string;
+  current: string;
+  models: Array<{ id: string; label: string }>;
+  error: string;
+  source: string;
+}
+
 export interface ConfigUsageSummary {
   win5Pct: number;
   win7Pct: number;
@@ -215,6 +225,39 @@ export async function getKeyStatus(): Promise<KeyStatus> {
     source: data.source || '—',
     todayMessages: Number(data.today_msgs || 0),
   };
+}
+
+function normalizeDeepSeekConfig(data: {
+  ready?: boolean;
+  key_configured?: boolean;
+  configured_model?: string;
+  current?: string;
+  models?: Array<{ id?: string; label?: string }>;
+  error?: string | null;
+  source?: string;
+}): DeepSeekConfig {
+  return {
+    ready: Boolean(data.ready),
+    keyConfigured: Boolean(data.key_configured),
+    configuredModel: data.configured_model || '',
+    current: data.current || data.configured_model || '',
+    models: (data.models || []).flatMap((row) => {
+      const id = String(row.id || '').trim();
+      return id ? [{ id, label: row.label || id }] : [];
+    }),
+    error: data.error || '',
+    source: data.source || 'https://api.deepseek.com',
+  };
+}
+
+export async function getDeepSeekConfig(): Promise<DeepSeekConfig> {
+  const data = await http.get<Parameters<typeof normalizeDeepSeekConfig>[0]>('/api/config/deepseek');
+  return normalizeDeepSeekConfig(data);
+}
+
+export async function updateDeepSeekModel(model: string): Promise<DeepSeekConfig> {
+  await http.post('/api/config/deepseek/model', { model });
+  return getDeepSeekConfig();
 }
 
 export async function getRelayEndpoints(): Promise<RelayEndpoint[]> {

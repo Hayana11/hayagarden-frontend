@@ -27,6 +27,25 @@ export interface GroupStatus {
   agents: Record<GroupAgent, AgentStatus>;
 }
 
+export interface CodexModelEntry {
+  id: string;
+  label: string;
+  isDefault: boolean;
+  defaultEffort: string;
+  efforts: string[];
+  inputModalities: string[];
+}
+
+export interface CodexModelState {
+  ready: boolean;
+  models: CodexModelEntry[];
+  configuredModel: string | null;
+  current: string;
+  modelMode: 'default' | 'explicit';
+  defaultModel: string | null;
+  detail: string;
+}
+
 export function enrichGroupMessage(message: GroupMessage): GroupMessage {
   if (!message.meta) return message;
   try {
@@ -40,6 +59,52 @@ export function enrichGroupMessage(message: GroupMessage): GroupMessage {
 
 export const getGroupStatus = () =>
   http.get<GroupStatus>('/api/group-chat/status');
+
+function normalizeCodexModelState(data: {
+  ready?: boolean;
+  models?: Array<{
+    id?: string;
+    label?: string;
+    is_default?: boolean;
+    default_effort?: string;
+    efforts?: string[];
+    input_modalities?: string[];
+  }>;
+  configured_model?: string | null;
+  current?: string;
+  model_mode?: string;
+  default_model?: string | null;
+  detail?: string;
+}): CodexModelState {
+  return {
+    ready: Boolean(data.ready),
+    models: (data.models || []).flatMap((row) => {
+      const id = String(row.id || '').trim();
+      if (!id) return [];
+      return [{
+        id,
+        label: row.label || id,
+        isDefault: Boolean(row.is_default),
+        defaultEffort: row.default_effort || '',
+        efforts: (row.efforts || []).filter(Boolean),
+        inputModalities: (row.input_modalities || []).filter(Boolean),
+      }];
+    }),
+    configuredModel: data.configured_model ?? null,
+    current: data.current || '',
+    modelMode: data.model_mode === 'explicit' ? 'explicit' : 'default',
+    defaultModel: data.default_model ?? null,
+    detail: data.detail || '',
+  };
+}
+
+export const getCodexModels = (refresh = false) =>
+  http.get<Parameters<typeof normalizeCodexModelState>[0]>(`/api/group-chat/codex-models${refresh ? '?refresh=1' : ''}`)
+    .then(normalizeCodexModelState);
+
+export const setCodexModel = (model: string | null) =>
+  http.post('/api/group-chat/codex-model', { model })
+    .then(() => getCodexModels());
 
 export const getGroupMessages = (room: GroupRoom) =>
   http.get<{ messages: GroupMessage[]; has_more_before: boolean }>(

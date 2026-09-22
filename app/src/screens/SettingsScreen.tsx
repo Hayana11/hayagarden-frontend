@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { RealityPromptPreviewCard } from '../components/RealityPromptPreviewCard';
 import { HttpError } from '../lib/http';
-import { getGroupStatus, type AgentStatus } from '../lib/groupChat';
+import { getCodexModels, getGroupStatus, setCodexModel, type AgentStatus, type CodexModelState } from '../lib/groupChat';
 import {
   activateRelayEndpoint,
   ccChatModelLabel,
@@ -11,6 +11,7 @@ import {
   clearRelayAccountCredentials,
   createRelayEndpoint,
   getAvailableModels,
+  getDeepSeekConfig,
   getKeyStatus,
   getModelCatalog,
   getProviderConfig,
@@ -22,9 +23,11 @@ import {
   runPlayground,
   saveRelayAccountCredentials,
   updateCurrentModel,
+  updateDeepSeekModel,
   updateProvider,
   type ChatProvider,
   type ConfigModel,
+  type DeepSeekConfig,
   type EndpointCapabilities,
   type KeyStatus,
   type RelayBalance,
@@ -83,6 +86,10 @@ export function SettingsScreen() {
   const [provider, setProvider] = useState<'api_relay' | 'claude_code'>('api_relay');
   const [ccTokenSet, setCcTokenSet] = useState(false);
   const [codexStatus, setCodexStatus] = useState<AgentStatus | null>(null);
+  const [codexModels, setCodexModels] = useState<CodexModelState | null>(null);
+  const [codexExpanded, setCodexExpanded] = useState(false);
+  const [deepSeekConfig, setDeepSeekConfig] = useState<DeepSeekConfig | null>(null);
+  const [deepSeekExpanded, setDeepSeekExpanded] = useState(false);
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
   const [hostRtt, setHostRtt] = useState<number | null>(null);
   const [relays, setRelays] = useState<RelayEndpoint[]>([]);
@@ -129,8 +136,10 @@ export function SettingsScreen() {
       getModelCatalog(),
       getAvailableModels(),
       getGroupStatus(),
+      getCodexModels(),
+      getDeepSeekConfig(),
     ]);
-    const [providerResult, keyResult, relayResult, catalogResult, availableResult, groupStatusResult] = results;
+    const [providerResult, keyResult, relayResult, catalogResult, availableResult, groupStatusResult, codexModelsResult, deepSeekResult] = results;
     if (providerResult.status === 'fulfilled') {
       setProvider(providerResult.value.provider);
       setCcTokenSet(providerResult.value.ccTokenSet);
@@ -177,6 +186,8 @@ export function SettingsScreen() {
     }
     if (availableResult.status === 'fulfilled') setAvailableModels(availableResult.value);
     if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
+    if (codexModelsResult.status === 'fulfilled') setCodexModels(codexModelsResult.value);
+    if (deepSeekResult.status === 'fulfilled') setDeepSeekConfig(deepSeekResult.value);
     if (results.some((result) => result.status === 'rejected')) setWarning('部分实时数据暂时不可用，已保留成功读取的配置。');
     setBusy('');
   }, []);
@@ -389,6 +400,58 @@ export function SettingsScreen() {
         ? '当前中转站已失效，请重新选择中转站'
         : '模型切换失败');
     } finally { setBusy(''); }
+  };
+
+  const switchCodexLineModel = async (model: string | null) => {
+    if (!codexStatus?.ready) { showToast('Codex 线路还没就绪'); return; }
+    if (model === null && codexModels?.modelMode === 'default') return;
+    if (model && codexModels?.modelMode === 'explicit' && codexModels.configuredModel === model) return;
+    setBusy(`codex-model:${model || 'default'}`);
+    try {
+      const next = await setCodexModel(model);
+      setCodexModels(next);
+      showToast('Codex 下一轮起生效');
+    } catch (error) {
+      const code = error instanceof HttpError
+        ? String((error.payload as { error?: string } | undefined)?.error || error.code || '')
+        : '';
+      showToast(code === 'CODEX_MODEL_NOT_ALLOWED' ? '这个模型不在当前 Codex 账号的模型清单里' : 'Codex 模型切换失败');
+    } finally { setBusy(''); }
+  };
+
+  const refreshCodexModels = async () => {
+    setBusy('codex-models');
+    try {
+      setCodexModels(await getCodexModels(true));
+      showToast('Codex 模型清单已刷新');
+    } catch { showToast('Codex 模型清单读取失败'); } finally { setBusy(''); }
+  };
+
+  const switchDeepSeekLineModel = async (model: string) => {
+    if (!deepSeekConfig?.keyConfigured) { showToast('DeepSeek API Key 尚未在 VPS 配置'); return; }
+    if (deepSeekConfig.configuredModel === model) return;
+    setBusy(`deepseek-model:${model}`);
+    try {
+      setDeepSeekConfig(await updateDeepSeekModel(model));
+      showToast('DeepSeek 下一次调用起生效');
+    } catch (error) {
+      const code = error instanceof HttpError
+        ? String((error.payload as { error?: string } | undefined)?.error || error.code || '')
+        : '';
+      showToast(code === 'DEEPSEEK_MODEL_NOT_ALLOWED'
+        ? '这个模型不在当前 DeepSeek 账号的模型清单里'
+        : code === 'DEEPSEEK_MODEL_CATALOG_UNAVAILABLE'
+          ? 'DeepSeek 模型清单暂时不可用'
+          : 'DeepSeek 模型切换失败');
+    } finally { setBusy(''); }
+  };
+
+  const refreshDeepSeek = async () => {
+    setBusy('deepseek-models');
+    try {
+      setDeepSeekConfig(await getDeepSeekConfig());
+      showToast('DeepSeek 模型清单已刷新');
+    } catch { showToast('DeepSeek 模型清单读取失败'); } finally { setBusy(''); }
   };
 
   const refreshModels = async () => {
@@ -616,17 +679,59 @@ export function SettingsScreen() {
         </section>
 
         <section className="config-card config-endpoint">
-          <div className="config-endpoint-summary" style={{ cursor: 'default' }}>
+          <button className="config-endpoint-summary" type="button" onClick={() => setCodexExpanded((value) => !value)}>
             <i className={codexStatus?.ready ? 'online' : 'offline'} />
             <span><strong>Codex 官方订阅</strong><small>本地 CLI · 群聊蓝色线路</small></span>
-            <em>{codexStatus === null ? '读取中…' : codexStatus.ready ? '已连接' : codexStatus.installed ? '未登录' : '未安装'}<small>{codexStatus?.detail || ''}</small></em>
-          </div>
+            <em>{codexStatus === null ? '读取中…' : codexStatus.ready ? '已连接' : codexStatus.installed ? '未登录' : '未安装'}<small>{codexModels?.current || codexStatus?.detail || ''}</small></em>
+            <b className={codexExpanded ? 'open' : ''}>▾</b>
+          </button>
           <div className="config-endpoint-row">
-            <small>不接入 Fyodor 的官方端点切换 · 只服务群聊里的蓝色线路</small>
+            <CapabilityChips caps={{ thinking: true, cache: false, tools: false }} />
             {codexStatus?.ready
               ? <Link to="/codex-chat" className="config-current-badge" style={{ textDecoration: 'none' }}>去聊天</Link>
               : <button type="button" disabled>{codexStatus?.installed ? '等待登录' : '未安装'}</button>}
           </div>
+          {codexExpanded && <div className="config-endpoint-expanded">
+            <div className="config-expanded-title"><strong>模型 · {codexModels?.models.length || 0}</strong><span>app-server model/list 动态读取</span></div>
+            <div className="config-preset-list">
+              <button type="button" onClick={() => void switchCodexLineModel(null)} disabled={Boolean(busy) || !codexStatus?.ready}>
+                <i style={{ background: '#7FA6D0' }} />
+                <span><strong>默认{codexModels?.defaultModel ? `（${codexModels.defaultModel}）` : ''}</strong><small>跟随 Codex 当前推荐模型</small></span>
+                {codexModels?.modelMode === 'default' ? <em>使用中</em> : <b>切换</b>}
+              </button>
+              {(codexModels?.models || []).map((model) => <button type="button" key={model.id} onClick={() => void switchCodexLineModel(model.id)} disabled={Boolean(busy) || !codexStatus?.ready}>
+                <i style={{ background: '#5C8AC0' }} />
+                <span><strong>{model.label}</strong><small>{model.id}{model.efforts.length ? ` · ${model.efforts.join('/')}` : ''}</small></span>
+                {codexModels?.modelMode === 'explicit' && codexModels.configuredModel === model.id ? <em>使用中</em> : <b>切换</b>}
+              </button>)}
+            </div>
+            <div className="config-key-row"><span>LOGIN</span><b>{codexStatus?.ready ? '已登录 · 凭据不回传网页' : codexStatus?.detail || '未就绪'}</b></div>
+            <div className="config-endpoint-actions"><button type="button" onClick={() => void refreshCodexModels()} disabled={busy === 'codex-models'}>{busy === 'codex-models' ? '刷新中…' : '刷新模型'}</button></div>
+          </div>}
+        </section>
+
+        <section className="config-card config-endpoint">
+          <button className="config-endpoint-summary" type="button" onClick={() => setDeepSeekExpanded((value) => !value)}>
+            <i className={deepSeekConfig?.ready ? 'online' : 'offline'} />
+            <span><strong>DeepSeek 官方 API</strong><small>官方直连 · DeepSeek fallback</small></span>
+            <em>{deepSeekConfig === null ? '读取中…' : deepSeekConfig.ready ? '已连接' : deepSeekConfig.keyConfigured ? '接口异常' : '未配置'}<small>{deepSeekConfig?.current || '等待模型状态'}</small></em>
+            <b className={deepSeekExpanded ? 'open' : ''}>▾</b>
+          </button>
+          <div className="config-endpoint-row"><CapabilityChips caps={{ thinking: true, cache: false, tools: true }} /><span className="config-current-badge">备用线路</span></div>
+          {deepSeekExpanded && <div className="config-endpoint-expanded">
+            <div className="config-expanded-title"><strong>模型 · {deepSeekConfig?.models.length || 0}</strong><span>官方 /models 动态读取</span></div>
+            <div className="config-preset-list">
+              {(deepSeekConfig?.models || []).map((model) => <button type="button" key={model.id} onClick={() => void switchDeepSeekLineModel(model.id)} disabled={Boolean(busy) || !deepSeekConfig?.ready}>
+                <i style={{ background: '#6A7C8A' }} />
+                <span><strong>{model.label}</strong><small>{model.id}</small></span>
+                {deepSeekConfig?.configuredModel === model.id ? <em>使用中</em> : <b>切换</b>}
+              </button>)}
+              {deepSeekConfig?.keyConfigured && !deepSeekConfig.models.length && <div>官方模型列表暂时没有返回内容</div>}
+            </div>
+            <div className="config-key-row"><span>API KEY</span><b>{deepSeekConfig?.keyConfigured ? '已配置 · 不回传网页' : '未设置 DEEPSEEK_API_KEY'}</b></div>
+            <div className="config-key-row"><span>BASE URL</span><b>{deepSeekConfig?.source || 'https://api.deepseek.com'}</b></div>
+            <div className="config-endpoint-actions"><button type="button" onClick={() => void refreshDeepSeek()} disabled={busy === 'deepseek-models'}>{busy === 'deepseek-models' ? '刷新中…' : '刷新模型'}</button></div>
+          </div>}
         </section>
 
         <SectionLabel aside={<span>{relays.length} 个预设</span>}>RELAYS · 中转站</SectionLabel>
