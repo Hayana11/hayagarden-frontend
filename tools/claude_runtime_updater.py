@@ -304,10 +304,14 @@ def _save_rejection(version: str, reason: str) -> None:
     })
 
 
-def run_update_check(*, force: bool = False) -> str:
+def run_update_check(
+    *, force: bool = False, retry_rejected: Optional[str] = None,
+) -> str:
     from chat.cc_runtime import (
         MINIMUM_CLAUDE_CODE_VERSION,
         active_claude_version,
+        native_claude_binary,
+        probe_claude_version,
         service_home,
         version_tuple,
     )
@@ -322,6 +326,18 @@ def run_update_check(*, force: bool = False) -> str:
     )
 
     enabled, channel = _prefs()
+    if retry_rejected:
+        try:
+            requested_retry = version_tuple(retry_rejected)
+        except Exception:
+            return 'invalid_retry_version'
+        rejected = read_rejected_versions()
+        if retry_rejected not in rejected:
+            return 'retry_candidate_not_rejected'
+        if requested_retry < version_tuple(MINIMUM_CLAUDE_CODE_VERSION):
+            return 'retry_candidate_below_minimum'
+        if requested_retry <= version_tuple(active_claude_version()):
+            return 'retry_candidate_not_newer'
     if channel not in {'latest', 'stable'}:
         write_update_state({'status': 'error', 'last_error': 'invalid_update_channel'})
         return 'invalid_update_channel'
@@ -357,7 +373,26 @@ def run_update_check(*, force: bool = False) -> str:
     if result.returncode != 0:
         write_update_state({'status': 'error', 'last_error': 'native_update_failed'})
         return 'native_update_failed'
-    candidate = discover_downloaded_candidate(home=home)
+    if retry_rejected:
+        try:
+            retry_binary = native_claude_binary(retry_rejected, env=command_env)
+            retry_actual = probe_claude_version(
+                retry_binary, env=command_env, timeout=10.0,
+            )
+        except Exception:
+            retry_actual = None
+        if retry_actual != retry_rejected:
+            write_update_state({
+                'status': 'rejected',
+                'last_check_at': now,
+                'channel': channel,
+                'to': retry_rejected,
+                'last_error': 'retry_candidate_not_available',
+            })
+            return 'retry_candidate_not_available'
+        candidate = retry_rejected
+    else:
+        candidate = discover_downloaded_candidate(home=home)
     if candidate is None:
         prior_state = read_public_update_state()
         prior_candidate = read_version('candidate-version')
@@ -368,9 +403,11 @@ def run_update_check(*, force: bool = False) -> str:
         write_update_state({'status': 'up_to_date', 'last_check_at': now, 'channel': channel, 'last_error': None})
         return 'up_to_date'
     write_version('candidate-version', candidate)
-    if candidate in read_rejected_versions() and not force:
-        write_update_state({'status': 'rejected', 'last_check_at': now, 'channel': channel, 'to': candidate})
-        return 'candidate_rejected_previously'
+    if candidate in read_rejected_versions():
+        if candidate != retry_rejected:
+            write_update_state({'status': 'rejected', 'last_check_at': now, 'channel': channel, 'to': candidate})
+            return 'candidate_rejected_previously'
+        forget_rejected_version(candidate)
     write_update_state({
         'status': 'candidate',
         'last_check_at': now,
@@ -423,13 +460,7 @@ def run_locked_check(*, force: bool = False, retry_rejected: Optional[str] = Non
     with update_locks() as acquired:
         if not acquired:
             return 'skipped_lock_busy'
-        if retry_rejected:
-            from chat.claude_runtime_state import forget_rejected_version
-            try:
-                forget_rejected_version(retry_rejected)
-            except Exception:
-                return 'invalid_retry_version'
-        return run_update_check(force=force)
+        return run_update_check(force=force, retry_rejected=retry_rejected)
 
 
 def main(argv=None) -> int:
@@ -449,6 +480,10 @@ def main(argv=None) -> int:
         'active_runtime_below_minimum',
         'invalid_update_channel',
         'invalid_retry_version',
+        'retry_candidate_not_rejected',
+        'retry_candidate_below_minimum',
+        'retry_candidate_not_newer',
+        'retry_candidate_not_available',
     } else 1
 
 if __name__ == '__main__':
