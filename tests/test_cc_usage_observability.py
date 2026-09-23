@@ -818,8 +818,8 @@ class ResidentGenerationTests(unittest.TestCase):
         sess = ResidentSession("/tmp", "tool_a", "/tmp/cc-tools.json")
         self.assertEqual(sess.generation, 0)
         with mock.patch("subprocess.Popen", return_value=FakeProc([])), \
-             mock.patch("chat.cc_runtime.require_pinned_claude_version", return_value="2.1.220"), \
-             mock.patch("chat.cc_runtime.claude_cmd", side_effect=lambda *a, **k: ["claude", *a]):
+             mock.patch("chat.cc_runtime.require_managed_claude_runtime", return_value="2.1.280"), \
+             mock.patch("chat.cc_runtime.claude_cmd_for_version", side_effect=lambda _version, *a, **k: ["/managed/2.1.280", *a]):
             sess._spawn("S", {}, reason="process_dead")
             sess._spawn("S", {}, reason="idle")
         self.assertEqual(sess.generation, 2)
@@ -848,8 +848,8 @@ class IdleBeforeLastUsedTests(unittest.TestCase):
             json.dumps({"type": "result", "is_error": False, "result": "ok"}),
         ]
         with mock.patch("subprocess.Popen", return_value=FakeProc(lines)), \
-             mock.patch("chat.cc_runtime.require_pinned_claude_version", return_value="2.1.220"), \
-             mock.patch("chat.cc_runtime.claude_cmd", side_effect=lambda *a, **k: ["claude", *a]):
+             mock.patch("chat.cc_runtime.require_managed_claude_runtime", return_value="2.1.280"), \
+             mock.patch("chat.cc_runtime.claude_cmd_for_version", side_effect=lambda _version, *a, **k: ["/managed/2.1.280", *a]):
             sess._spawn("S", {}, reason="process_dead")
         # first success
         out = list(sess.send_turn("hello"))
