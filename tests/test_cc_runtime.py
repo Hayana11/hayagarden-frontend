@@ -194,6 +194,15 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         with mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name):
             self.assertEqual(updater.discover_downloaded_candidate(home=self.home), '2.1.281')
 
+    def test_download_discovery_never_downgrades_or_reselects_active(self):
+        from tools import claude_runtime_updater as updater
+
+        self._active('2.1.281')
+        for version in ('2.1.280', '2.1.281'):
+            self._native(version)
+        with mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name):
+            self.assertIsNone(updater.discover_downloaded_candidate(home=self.home))
+
     def test_candidate_canary_runs_only_metadata_and_no_input_surface(self):
         from tools import claude_runtime_updater as updater
 
@@ -353,6 +362,36 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \\
              mock.patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.280'):
             self.assertEqual(cc_model.cc_model_runtime_compatibility('claude-opus-5-5')[0], True)
+
+
+class ClaudeRuntimeArtifactContractTests(unittest.TestCase):
+    def test_deploy_requires_managed_runtime_without_exact_npm_runtime_install(self):
+        deploy = (Path(ROOT) / 'scripts' / 'deploy-frontend.sh').read_text(encoding='utf-8')
+        ensure = (Path(ROOT) / 'scripts' / 'ensure-claude-runtime.sh').read_text(encoding='utf-8')
+        self.assertIn('require_managed_claude_runtime', ensure)
+        self.assertIn('active_claude_binary', ensure)
+        self.assertIn('scripts/ensure-claude-runtime.sh', deploy)
+        self.assertIn('require_managed_claude_runtime', deploy)
+        self.assertNotIn('@anthropic-ai/claude-code@', deploy + ensure)
+        self.assertNotIn('npm install', ensure)
+
+    def test_usage_observation_records_resident_runtime_identity(self):
+        from tools import cc_usage_observability
+
+        runtime = cc_usage_observability.build_runtime(
+            resident_generation=3,
+            resident_pid=123,
+            resident_turn_count=2,
+            respawn_reason='runtime_changed',
+            idle_seconds_before_turn=0,
+            is_cold=True,
+            static_system='system',
+            runtime_identity='claude-code:2.1.281',
+            claude_code_version='2.1.281',
+        )
+        self.assertEqual(runtime['runtime_identity'], 'claude-code:2.1.281')
+        self.assertEqual(runtime['claude_code_version'], '2.1.281')
+        self.assertEqual(runtime['respawn_reason'], 'runtime_changed')
 
 
 if __name__ == '__main__':
