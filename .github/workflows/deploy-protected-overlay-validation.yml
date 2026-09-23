@@ -32,6 +32,45 @@ jobs:
           git fetch --no-tags origin main
           base="$(git merge-base HEAD origin/main)"
           git diff --check "$base" "$HEAD_SHA"
+          expected_files="$(cat <<'EXPECTED_FILES'
+.github/workflows/deploy-protected-overlay-validation.yml
+app.py
+app/src/lib/chat.ts
+app/src/lib/systemConfig.ts
+app/src/screens/ChatScreen.tsx
+app/src/screens/SettingsScreen.tsx
+cc_resident.py
+chat/capacity_swap.py
+chat/cc_model.py
+chat/cc_runtime.py
+chat/claude_runtime_state.py
+chat/context_window_fallback.py
+chat/context_window_nightly_forge.py
+deploy/systemd/hayagarden-claude-runtime-update.service
+deploy/systemd/hayagarden-claude-runtime-update.timer
+gateway.py
+scripts/deploy-frontend.sh
+scripts/ensure-claude-runtime.sh
+scripts/spike_claude_forge_resume.py
+static/chat.html
+tests/test_cc_effort.py
+tests/test_cc_model.py
+tests/test_cc_runtime.py
+tests/test_claude_forge_integration.py
+tests/test_context_window_nightly_forge.py
+tools/bootstrap_claude_native_runtime.py
+tools/cc_usage_observability.py
+tools/claude_forge_live_gate.py
+tools/claude_runtime_updater.py
+tools/context_window_admin.py
+EXPECTED_FILES
+          )"
+          actual_files="$(git diff --name-only "$base" "$HEAD_SHA" | LC_ALL=C sort)"
+          if [[ "$actual_files" != "$expected_files" ]]; then
+            echo "Unexpected PR file set." >&2
+            diff -u <(printf '%s\\n' "$expected_files") <(printf '%s\\n' "$actual_files") >&2 || true
+            exit 1
+          fi
 
       - name: Verify source boundary
         shell: bash
