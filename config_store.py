@@ -138,6 +138,11 @@ def get(key, default=None):
     return _DEFAULTS.get(key, '')
 
 
+def get_deepseek_chat_model():
+    """Return the configured DeepSeek chat model, defaulting safely to Flash."""
+    return str(get('DEEPSEEK_CHAT_MODEL', 'deepseek-flash') or '').strip() or 'deepseek-flash'
+
+
 def set(key, value):
     """写运行时配置。立即生效，其他进程下次 get() 就能读到（同一个 sqlite 文件）。"""
     conn = sqlite3.connect(DB_PATH, timeout=3)

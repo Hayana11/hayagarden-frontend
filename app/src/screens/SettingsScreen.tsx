@@ -405,7 +405,7 @@ export function SettingsScreen() {
   const switchCodexLineModel = async (model: string | null) => {
     if (!codexStatus?.ready) { showToast('Codex 线路还没就绪'); return; }
     if (model === null && codexModels?.modelMode === 'default') return;
-    if (model && codexModels?.modelMode === 'explicit' && codexModels.configuredModel === model) return;
+    if (model && codexModels?.modelMode === 'explicit' && codexModels.configuredModelId === model) return;
     setBusy(`codex-model:${model || 'default'}`);
     try {
       const next = await setCodexModel(model);
@@ -696,13 +696,13 @@ export function SettingsScreen() {
             <div className="config-preset-list">
               <button type="button" onClick={() => void switchCodexLineModel(null)} disabled={Boolean(busy) || !codexStatus?.ready}>
                 <i style={{ background: '#7FA6D0' }} />
-                <span><strong>默认{codexModels?.defaultModel ? `（${codexModels.defaultModel}）` : ''}</strong><small>跟随 Codex 当前推荐模型</small></span>
+                <span><strong>默认{codexModels?.defaultModel ? `（${codexModels.defaultModelId}）` : ''}</strong><small>跟随 Codex 当前推荐模型</small></span>
                 {codexModels?.modelMode === 'default' ? <em>使用中</em> : <b>切换</b>}
               </button>
               {(codexModels?.models || []).map((model) => <button type="button" key={model.id} onClick={() => void switchCodexLineModel(model.id)} disabled={Boolean(busy) || !codexStatus?.ready}>
                 <i style={{ background: '#5C8AC0' }} />
-                <span><strong>{model.label}</strong><small>{model.id}{model.efforts.length ? ` · ${model.efforts.join('/')}` : ''}</small></span>
-                {codexModels?.modelMode === 'explicit' && codexModels.configuredModel === model.id ? <em>使用中</em> : <b>切换</b>}
+                <span><strong>{model.label}</strong><small>{model.id === model.model ? model.id : `${model.id} → ${model.model}`}{model.efforts.length ? ` · ${model.efforts.join('/')}` : ''}</small></span>
+                {codexModels?.modelMode === 'explicit' && codexModels.configuredModelId === model.id ? <em>使用中</em> : <b>切换</b>}
               </button>)}
             </div>
             <div className="config-key-row"><span>LOGIN</span><b>{codexStatus?.ready ? '已登录 · 凭据不回传网页' : codexStatus?.detail || '未就绪'}</b></div>

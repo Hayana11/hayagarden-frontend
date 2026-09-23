@@ -8,7 +8,10 @@ import urllib.request
 
 DB_PATH = '/opt/frontend/memories.db'
 API_URL = 'https://api.deepseek.com/v1/chat/completions'
-MODEL = 'deepseek-chat'
+try:
+    from tools.deepseek_model import get_deepseek_chat_model
+except ImportError:
+    from deepseek_model import get_deepseek_chat_model
 TITLE_MAX = 12               # stored / AI-generated title length cap (raw char count)
 TITLE_SUFFIX = '···'
 
@@ -173,7 +176,8 @@ def _ask_deepseek(content):
         return None
     prompt = TITLE_PROMPT.format(content=(content or '')[:800])
     body = json.dumps({
-        'model': MODEL,
+        'model': get_deepseek_chat_model(),
+        'thinking': {'type': 'disabled'},
         'max_tokens': 32,
         'temperature': 0.25,
         'messages': [{'role': 'user', 'content': prompt}],

@@ -221,8 +221,9 @@ class CodexAppServer:
                 for raw in result.get("data") or []:
                     if not isinstance(raw, dict):
                         continue
-                    model_id = str(raw.get("id") or raw.get("model") or '').strip()
-                    if not model_id:
+                    model_id = str(raw.get("id") or '').strip()
+                    runtime_model = str(raw.get("model") or '').strip()
+                    if not model_id or not runtime_model:
                         continue
                     efforts = []
                     for effort in raw.get("supportedReasoningEfforts") or []:
@@ -232,6 +233,7 @@ class CodexAppServer:
                                 efforts.append(name)
                     rows.append({
                         "id": model_id,
+                        "model": runtime_model,
                         "label": str(raw.get("displayName") or model_id),
                         "is_default": bool(raw.get("isDefault")),
                         "default_effort": str(raw.get("defaultReasoningEffort") or ''),
@@ -246,7 +248,7 @@ class CodexAppServer:
             return [dict(row) for row in rows]
 
     def resolved_model(self) -> tuple[str, str]:
-        """Return (model_id, mode), resolving empty config to app-server default."""
+        """Return (runtime_model, mode), resolving empty config to app-server default."""
         configured = self.configured_model()
         if configured:
             return configured, "explicit"
@@ -254,7 +256,7 @@ class CodexAppServer:
             models = self.list_models()
         except Exception:
             return '', "default"
-        default = next((row.get("id") for row in models if row.get("is_default")), '')
+        default = next((row.get("model") for row in models if row.get("is_default")), '')
         return str(default or ''), "default"
 
     def _turn_params(self, thread_id: str, prompt: str) -> tuple[dict, str, str]:

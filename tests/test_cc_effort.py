@@ -1,6 +1,8 @@
 import sys
 import builtins
 import io
+import json
+import urllib.error
 import os
 import sqlite3
 import tempfile
@@ -323,6 +325,278 @@ class EffortRouteTests(unittest.TestCase):
         self.assertEqual(response.get_json()['provider'], 'api_relay')
         self.assertEqual(config_store.get('CHAT_PROVIDER'), 'api_relay')
         self.assertEqual(config_store.get('GW_PROVIDER'), 'claude_code')
+
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def read(self):
+        return self.payload
+
+
+class ModelControlRouteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app_module = EffortRouteTests.app_module
+        cls.client = EffortRouteTests.client
+        cls.codex_client = cls.app_module.codex_app_server.client
+
+    @classmethod
+    def _gateway_module(cls):
+        if 'gateway' in sys.modules:
+            return sys.modules['gateway']
+        real_connect = sqlite3.connect
+        real_open = builtins.open
+
+        def isolated_connect(database, *args, **kwargs):
+            raw = os.fspath(database)
+            if raw.startswith('/opt/frontend/'):
+                database = str(Path(EffortRouteTests.tmp.name) / Path(raw).name)
+            return real_connect(database, *args, **kwargs)
+
+        def isolated_open(file, *args, **kwargs):
+            try:
+                raw = os.fspath(file)
+            except TypeError:
+                raw = ''
+            if raw == '/opt/frontend/.env':
+                return io.StringIO('')
+            return real_open(file, *args, **kwargs)
+
+        with patch.object(sqlite3, 'connect', side_effect=isolated_connect), \
+                patch.object(builtins, 'open', side_effect=isolated_open):
+            import gateway
+        return gateway
+
+    def setUp(self):
+        config_store.set('CODEX_CHAT_MODEL', '')
+        config_store.set('DEEPSEEK_CHAT_MODEL', 'deepseek-flash')
+
+    def test_codex_catalog_keeps_identity_and_runtime_model_separate(self):
+        server = self.app_module.codex_app_server.CodexAppServer(db_path=':memory:')
+        response_payload = {
+            'data': [{
+                'id': 'catalog-alias',
+                'model': 'gpt-5.6-sol',
+                'displayName': 'GPT-5.6-Sol',
+                'isDefault': True,
+                'defaultReasoningEffort': 'low',
+                'supportedReasoningEfforts': [{'reasoningEffort': 'low'}],
+            }],
+            'nextCursor': None,
+        }
+        with patch.object(server, '_start_locked'), \
+                patch.object(server, '_request_locked', return_value=response_payload):
+            models = server.list_models(force=True)
+        self.assertEqual(models[0]['id'], 'catalog-alias')
+        self.assertEqual(models[0]['model'], 'gpt-5.6-sol')
+        with patch.object(config_store, 'get', return_value=''):
+            self.assertEqual(server.resolved_model(), ('gpt-5.6-sol', 'default'))
+            params, model, _mode = server._turn_params('thread-one', 'hello')
+        self.assertEqual(model, 'gpt-5.6-sol')
+        self.assertEqual(params['model'], 'gpt-5.6-sol')
+
+    def test_codex_catalog_drops_rows_without_runtime_model(self):
+        server = self.app_module.codex_app_server.CodexAppServer(db_path=':memory:')
+        with patch.object(server, '_start_locked'), \
+                patch.object(server, '_request_locked', return_value={
+                    'data': [{'id': 'catalog-only'}],
+                    'nextCursor': None,
+                }):
+            self.assertEqual(server.list_models(force=True), [])
+
+    def test_codex_get_exposes_runtime_and_identity_fields(self):
+        models = [{
+            'id': 'catalog-alias',
+            'model': 'gpt-5.6-sol',
+            'label': 'GPT-5.6-Sol',
+            'is_default': True,
+            'default_effort': 'low',
+            'efforts': ['low'],
+            'input_modalities': ['text'],
+        }]
+        with patch.object(self.app_module.codex_app_server, 'runtime_status', return_value={'ready': True}), \
+                patch.object(self.codex_client, 'configured_model', return_value='gpt-5.6-sol'), \
+                patch.object(self.codex_client, 'list_models', return_value=models):
+            response = self.client.get('/api/group-chat/codex-models')
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['models'][0]['id'], 'catalog-alias')
+        self.assertEqual(body['models'][0]['model'], 'gpt-5.6-sol')
+        self.assertEqual(body['configured_model_id'], 'catalog-alias')
+        self.assertEqual(body['configured_model'], 'gpt-5.6-sol')
+        self.assertEqual(body['default_model_id'], 'catalog-alias')
+        self.assertEqual(body['default_model'], 'gpt-5.6-sol')
+
+    def test_codex_post_maps_catalog_id_to_runtime_turn_model(self):
+        models = [
+            {'id': 'catalog-alias', 'model': 'gpt-5.6-sol', 'is_default': False},
+            {'id': 'catalog-default', 'model': 'gpt-6-default', 'is_default': True},
+        ]
+        with patch.object(self.codex_client, 'list_models', return_value=models):
+            response = self.client.post('/api/group-chat/codex-model', json={'model_id': 'catalog-alias'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(config_store.get('CODEX_CHAT_MODEL'), 'gpt-5.6-sol')
+        body = response.get_json()
+        self.assertEqual(body['configured_model_id'], 'catalog-alias')
+        self.assertEqual(body['configured_model'], 'gpt-5.6-sol')
+        params, model, mode = self.codex_client._turn_params('thread-one', 'hello')
+        self.assertEqual((model, mode), ('gpt-5.6-sol', 'explicit'))
+        self.assertEqual(params['model'], 'gpt-5.6-sol')
+
+    def test_codex_invalid_identity_does_not_change_runtime_setting(self):
+        config_store.set('CODEX_CHAT_MODEL', 'existing-runtime-model')
+        with patch.object(self.codex_client, 'list_models', return_value=[
+            {'id': 'catalog-alias', 'model': 'gpt-5.6-sol', 'is_default': True},
+        ]):
+            response = self.client.post('/api/group-chat/codex-model', json={'model_id': 'unknown-id'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(config_store.get('CODEX_CHAT_MODEL'), 'existing-runtime-model')
+
+    def test_deepseek_catalog_uses_server_key_and_never_returns_it(self):
+        secret = 'deepseek-key-sentinel-never-return'
+        api_response = _FakeHTTPResponse(json.dumps({
+            'data': [{'id': 'deepseek-flash'}, {'id': 'deepseek-v4-pro'}],
+        }).encode())
+        with patch.object(self.app_module, '_deployment_secret', return_value=secret), \
+                patch('urllib.request.urlopen', return_value=api_response) as upstream:
+            response = self.client.get('/api/config/deepseek')
+        request_obj = upstream.call_args.args[0]
+        self.assertEqual(request_obj.headers.get('Authorization'), 'Bearer ' + secret)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['key_configured'])
+        self.assertNotIn(secret, response.get_data(as_text=True))
+
+    def test_deepseek_catalog_rejects_invalid_shape_without_leaking_key(self):
+        secret = 'deepseek-key-sentinel-invalid'
+        with patch.object(self.app_module, '_deployment_secret', return_value=secret), \
+                patch('urllib.request.urlopen', return_value=_FakeHTTPResponse(b'[]')):
+            models, error = self.app_module._deepseek_model_catalog()
+        self.assertEqual(models, [])
+        self.assertEqual(error, 'invalid_response')
+
+    def test_deepseek_get_without_key_is_stable_and_secret_free(self):
+        with patch.object(self.app_module, '_deployment_secret', return_value=''):
+            response = self.client.get('/api/config/deepseek')
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()['key_configured'])
+        self.assertEqual(response.get_json()['error'], 'missing_key')
+        self.assertNotIn('api_key', response.get_data(as_text=True).lower())
+
+    def test_deepseek_catalog_auth_failure_is_generic(self):
+        secret = 'deepseek-key-sentinel-unauthorized'
+        error = urllib.error.HTTPError(
+            'https://api.deepseek.com/models', 401, 'unauthorized', {}, None,
+        )
+        with patch.object(self.app_module, '_deployment_secret', return_value=secret), \
+                patch('urllib.request.urlopen', side_effect=error):
+            response = self.client.post('/api/config/deepseek/model', json={'model': 'deepseek-v4-pro'})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['detail'], 'unauthorized')
+        self.assertNotIn(secret, response.get_data(as_text=True))
+        self.assertEqual(config_store.get('DEEPSEEK_CHAT_MODEL'), 'deepseek-flash')
+
+    def test_deepseek_invalid_model_does_not_change_configuration(self):
+        config_store.set('DEEPSEEK_CHAT_MODEL', 'deepseek-flash')
+        with patch.object(self.app_module, '_deepseek_model_catalog', return_value=(
+            [{'id': 'deepseek-flash'}], '',
+        )):
+            response = self.client.post('/api/config/deepseek/model', json={'model': 'unknown-model'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(config_store.get('DEEPSEEK_CHAT_MODEL'), 'deepseek-flash')
+        self.assertNotIn('deepseek-key-sentinel', response.get_data(as_text=True))
+
+    def test_all_active_deepseek_callers_use_the_shared_runtime_setting(self):
+        paths = (
+            'app.py',
+            'emotion_engine.py',
+            'gateway.py',
+            'tools/llm_lite.py',
+            'tools/repair_agent.py',
+            'tools/rolling_summary.py',
+            'tools/cleaner.py',
+            'tools/summary_title.py',
+        )
+        for relative_path in paths:
+            with self.subTest(path=relative_path):
+                source = (_ROOT / relative_path).read_text(encoding='utf-8')
+                self.assertNotIn('deepseek-chat', source)
+                self.assertIn('get_deepseek_chat_model', source)
+                self.assertIn("'thinking': {'type': 'disabled'}", source)
+
+    def test_codex_catalog_failure_does_not_write_runtime_setting(self):
+        config_store.set('CODEX_CHAT_MODEL', 'existing-runtime-model')
+        with patch.object(self.codex_client, 'list_models', side_effect=RuntimeError('catalog unavailable')):
+            get_response = self.client.get('/api/group-chat/codex-models')
+            post_response = self.client.post('/api/group-chat/codex-model', json={'model_id': 'catalog-id'})
+        self.assertEqual(get_response.status_code, 502)
+        self.assertEqual(post_response.status_code, 502)
+        self.assertEqual(config_store.get('CODEX_CHAT_MODEL'), 'existing-runtime-model')
+
+    def test_deepseek_server_error_does_not_write_or_leak_key(self):
+        secret = 'deepseek-key-sentinel-upstream-error'
+        error = urllib.error.HTTPError(
+            'https://api.deepseek.com/models', 503, 'upstream unavailable', {}, None,
+        )
+        with patch.object(self.app_module, '_deployment_secret', return_value=secret), \
+                patch('urllib.request.urlopen', side_effect=error):
+            response = self.client.post('/api/config/deepseek/model', json={'model': 'deepseek-v4-pro'})
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.get_json()['detail'], 'upstream_error')
+        self.assertEqual(config_store.get('DEEPSEEK_CHAT_MODEL'), 'deepseek-flash')
+        self.assertNotIn(secret, response.get_data(as_text=True))
+
+    def test_codex_null_restores_runtime_default(self):
+        models = [{'id': 'catalog-default', 'model': 'gpt-6-default', 'is_default': True}]
+        with patch.object(self.codex_client, 'list_models', return_value=models):
+            response = self.client.post('/api/group-chat/codex-model', json={'model_id': None})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(config_store.get('CODEX_CHAT_MODEL'), '')
+        self.assertEqual(response.get_json()['current'], 'gpt-6-default')
+        self.assertEqual(response.get_json()['current_model_id'], 'catalog-default')
+
+    def test_deepseek_setting_is_read_by_real_summary_fallback_payload(self):
+        secret = 'deepseek-key-sentinel-fallback'
+        catalog_response = _FakeHTTPResponse(json.dumps({
+            'data': [{'id': 'deepseek-flash'}, {'id': 'deepseek-v4-pro'}],
+        }).encode())
+        with patch.object(self.app_module, '_deployment_secret', return_value=secret), \
+                patch('urllib.request.urlopen', return_value=catalog_response) as catalog_request:
+            save_response = self.client.post('/api/config/deepseek/model', json={'model': 'deepseek-v4-pro'})
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(catalog_request.call_args.args[0].headers.get('Authorization'), 'Bearer ' + secret)
+        self.assertNotIn(secret, save_response.get_data(as_text=True))
+        self.assertEqual(config_store.get_deepseek_chat_model(), 'deepseek-v4-pro')
+
+        gateway = self._gateway_module()
+        from relay.manager import relay as diary_relay
+
+        upstream_response = _FakeHTTPResponse(json.dumps({
+            'choices': [{'message': {'content': 'summary'}}],
+        }).encode())
+        relay_error = urllib.error.HTTPError('relay', 401, 'unauthorized', {}, None)
+        with patch.object(gateway, '_get_provider', return_value='api_relay'), \
+                patch.object(diary_relay, 'call', side_effect=relay_error), \
+                patch.object(gateway.urllib.request, 'urlopen', return_value=upstream_response) as upstream, \
+                patch.dict(os.environ, {'DEEPSEEK_API_KEY': secret}):
+            with gateway.app.test_request_context(
+                '/api/summarize', method='POST', json={'prompt': 'a short prompt'},
+            ):
+                response = gateway.api_summarize()
+        request_obj = upstream.call_args.args[0]
+        payload = json.loads(request_obj.data)
+        self.assertEqual(payload['model'], 'deepseek-v4-pro')
+        self.assertEqual(payload['thinking'], {'type': 'disabled'})
+        self.assertEqual(response.get_json(), {'ok': True, 'text': 'summary'})
+        self.assertNotIn(secret, response.get_data(as_text=True))
 
 
 if __name__ == '__main__':

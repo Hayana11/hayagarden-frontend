@@ -1041,21 +1041,33 @@ def group_chat_codex_models():
             'ready': False,
             'models': [],
             'configured_model': configured or None,
+            'configured_model_id': None,
             'model_mode': 'explicit' if configured else 'default',
             'current': configured,
+            'current_model_id': None,
+            'default_model': None,
+            'default_model_id': None,
             'detail': status.get('detail') or '蓝色线路尚未就绪',
         })
     try:
         force = request.args.get('refresh') == '1'
         models = codex_app_server.client.list_models(force=force)
-        default_model = next((row.get('id') for row in models if row.get('is_default')), '')
+        default_entry = next((row for row in models if row.get('is_default')), None)
+        configured_entry = next((row for row in models if configured and row.get('model') == configured), None)
+        default_model = str((default_entry or {}).get('model') or '')
+        default_model_id = str((default_entry or {}).get('id') or '')
+        configured_model_id = str((configured_entry or {}).get('id') or '')
+        current_model_id = configured_model_id if configured else default_model_id
         return jsonify({
             'ready': True,
             'models': models,
             'configured_model': configured or None,
+            'configured_model_id': configured_model_id or None,
             'model_mode': 'explicit' if configured else 'default',
             'default_model': default_model or None,
+            'default_model_id': default_model_id or None,
             'current': configured or default_model or '',
+            'current_model_id': current_model_id or None,
         })
     except Exception as exc:
         return jsonify({'error': str(exc), 'models': []}), 502
@@ -1064,25 +1076,33 @@ def group_chat_codex_models():
 @app.route('/api/group-chat/codex-model', methods=['POST'])
 def group_chat_codex_model():
     data = request.get_json(silent=True)
-    if not isinstance(data, dict) or 'model' not in data:
-        return jsonify({'error': 'missing model'}), 400
-    raw = data.get('model')
+    if not isinstance(data, dict) or 'model_id' not in data:
+        return jsonify({'error': 'missing model_id'}), 400
+    raw = data.get('model_id')
     if raw is not None and not isinstance(raw, str):
-        return jsonify({'error': 'model must be string or null'}), 400
-    model = str(raw or '').strip()
+        return jsonify({'error': 'model_id must be string or null'}), 400
+    model_id = str(raw or '').strip()
     try:
         models = codex_app_server.client.list_models(force=True)
-        allowed = {str(row.get('id') or '') for row in models}
-        if model and model not in allowed:
-            return jsonify({'error': 'CODEX_MODEL_NOT_ALLOWED', 'rejected_model': model}), 400
-        codex_app_server.client.set_configured_model(model)
-        default_model = next((row.get('id') for row in models if row.get('is_default')), '')
+        selected = next((row for row in models if row.get('id') == model_id), None) if model_id else None
+        if model_id and not selected:
+            return jsonify({'error': 'CODEX_MODEL_NOT_ALLOWED', 'rejected_model_id': model_id}), 400
+        runtime_model = str((selected or {}).get('model') or '').strip()
+        if model_id and not runtime_model:
+            return jsonify({'error': 'CODEX_MODEL_NOT_ALLOWED', 'rejected_model_id': model_id}), 400
+        default_entry = next((row for row in models if row.get('is_default')), None)
+        default_model = str((default_entry or {}).get('model') or '')
+        default_model_id = str((default_entry or {}).get('id') or '')
+        codex_app_server.client.set_configured_model(runtime_model)
         return jsonify({
             'ok': True,
-            'configured_model': model or None,
-            'model_mode': 'explicit' if model else 'default',
+            'configured_model': runtime_model or None,
+            'configured_model_id': model_id or None,
+            'model_mode': 'explicit' if model_id else 'default',
             'default_model': default_model or None,
-            'current': model or default_model or '',
+            'default_model_id': default_model_id or None,
+            'current': runtime_model or default_model,
+            'current_model_id': model_id or default_model_id or None,
             'effective_from': 'next_turn',
         })
     except Exception as exc:
@@ -2109,6 +2129,8 @@ def _deepseek_model_catalog():
         return [], 'upstream_error'
     except Exception:
         return [], 'unavailable'
+    if not isinstance(payload, dict) or not isinstance(payload.get('data'), list):
+        return [], 'invalid_response'
     models = []
     for row in payload.get('data') or []:
         if not isinstance(row, dict):
@@ -2121,7 +2143,7 @@ def _deepseek_model_catalog():
 
 @app.route('/api/config/deepseek', methods=['GET'])
 def config_get_deepseek():
-    configured = str(config_store.get('DEEPSEEK_CHAT_MODEL', 'deepseek-flash') or '').strip() or 'deepseek-flash'
+    configured = config_store.get_deepseek_chat_model()
     key_configured = _group_chat_secret_present('DEEPSEEK_API_KEY')
     models, error = _deepseek_model_catalog() if key_configured else ([], 'missing_key')
     return jsonify({
@@ -5265,7 +5287,8 @@ def classified_generate():
     user_content = '当前北京时间：' + now_str + '\n场景：' + scene + '\n请生成今日档案。'
 
     payload = _j.dumps({
-        'model': 'deepseek-chat',
+        'model': config_store.get_deepseek_chat_model(),
+        'thinking': {'type': 'disabled'},
         'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user',   'content': user_content},

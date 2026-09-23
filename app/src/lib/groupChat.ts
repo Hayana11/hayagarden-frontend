@@ -29,6 +29,7 @@ export interface GroupStatus {
 
 export interface CodexModelEntry {
   id: string;
+  model: string;
   label: string;
   isDefault: boolean;
   defaultEffort: string;
@@ -40,9 +41,12 @@ export interface CodexModelState {
   ready: boolean;
   models: CodexModelEntry[];
   configuredModel: string | null;
+  configuredModelId: string | null;
   current: string;
+  currentModelId: string | null;
   modelMode: 'default' | 'explicit';
   defaultModel: string | null;
+  defaultModelId: string | null;
   detail: string;
 }
 
@@ -64,6 +68,7 @@ function normalizeCodexModelState(data: {
   ready?: boolean;
   models?: Array<{
     id?: string;
+    model?: string;
     label?: string;
     is_default?: boolean;
     default_effort?: string;
@@ -71,18 +76,23 @@ function normalizeCodexModelState(data: {
     input_modalities?: string[];
   }>;
   configured_model?: string | null;
+  configured_model_id?: string | null;
   current?: string;
+  current_model_id?: string | null;
   model_mode?: string;
   default_model?: string | null;
+  default_model_id?: string | null;
   detail?: string;
 }): CodexModelState {
   return {
     ready: Boolean(data.ready),
     models: (data.models || []).flatMap((row) => {
       const id = String(row.id || '').trim();
-      if (!id) return [];
+      const model = String(row.model || '').trim();
+      if (!id || !model) return [];
       return [{
         id,
+        model,
         label: row.label || id,
         isDefault: Boolean(row.is_default),
         defaultEffort: row.default_effort || '',
@@ -91,9 +101,12 @@ function normalizeCodexModelState(data: {
       }];
     }),
     configuredModel: data.configured_model ?? null,
+    configuredModelId: data.configured_model_id ?? null,
     current: data.current || '',
+    currentModelId: data.current_model_id ?? null,
     modelMode: data.model_mode === 'explicit' ? 'explicit' : 'default',
     defaultModel: data.default_model ?? null,
+    defaultModelId: data.default_model_id ?? null,
     detail: data.detail || '',
   };
 }
@@ -102,8 +115,8 @@ export const getCodexModels = (refresh = false) =>
   http.get<Parameters<typeof normalizeCodexModelState>[0]>(`/api/group-chat/codex-models${refresh ? '?refresh=1' : ''}`)
     .then(normalizeCodexModelState);
 
-export const setCodexModel = (model: string | null) =>
-  http.post('/api/group-chat/codex-model', { model })
+export const setCodexModel = (modelId: string | null) =>
+  http.post('/api/group-chat/codex-model', { model_id: modelId })
     .then(() => getCodexModels());
 
 export const getGroupMessages = (room: GroupRoom) =>

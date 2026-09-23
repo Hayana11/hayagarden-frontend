@@ -12,6 +12,7 @@ import urllib.request
 import sqlite3
 import re
 import os
+from tools.deepseek_model import get_deepseek_chat_model
 
 DB_PATH = os.environ.get('MEMORIES_DB', '/opt/frontend/memories.db')
 _DS_KEY = None
@@ -355,7 +356,8 @@ def _deepseek_score(text: str) -> dict:
     ])
 
     body = json.dumps({
-        'model': 'deepseek-chat',
+        'model': get_deepseek_chat_model(),
+        'thinking': {'type': 'disabled'},
         'messages': [
             {'role': 'system', 'content': system},
             {'role': 'user', 'content': text[:2000]},
