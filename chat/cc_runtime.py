@@ -178,10 +178,19 @@ def claude_argv_prefix(*, env: Optional[dict[str, str]] = None) -> list[str]:
     """Return only the exact native binary selected by active-version."""
     return [str(active_claude_binary(env=env))]
 
+def claude_cmd_for_version(
+    version: str,
+    *args: str,
+    env: Optional[dict[str, str]] = None,
+) -> list[str]:
+    """Construct argv for one validated immutable native version path."""
+    binary = native_claude_binary(version, env=env)
+    return [str(binary), *[str(arg) for arg in args]]
+
+
 def claude_cmd(*args: str, root: Optional[Path] = None, env: Optional[dict[str, str]] = None) -> list[str]:
     del root  # retained as a compatibility keyword; runtime is not repository-local.
-    return claude_argv_prefix(env=env) + [str(arg) for arg in args]
-
+    return claude_cmd_for_version(active_claude_version(), *args, env=env)
 
 def require_pinned_claude_version(**kwargs) -> str:
     """Deprecated compatibility alias; enforces the managed minimum contract."""
