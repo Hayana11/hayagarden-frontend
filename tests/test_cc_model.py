@@ -18,6 +18,7 @@ os.environ['HAYAGARDEN_CONFIG_DB_PATH'] = str(
     Path(tempfile.gettempdir()) / 'hayagarden-test-cc-model-runtime.db'
 )
 
+from chat import cc_model as cc_model_module  # noqa: E402
 from chat.cc_model import (  # noqa: E402
     CC_MODEL_CATALOG,
     CC_MODEL_NOT_ALLOWED,
@@ -79,7 +80,8 @@ class CcModelHelperTests(unittest.TestCase):
             store[key] = value
 
         with mock.patch.object(config_store, 'get', side_effect=_get), \
-             mock.patch.object(config_store, 'set', side_effect=_set):
+             mock.patch.object(config_store, 'set', side_effect=_set), \
+             mock.patch.object(cc_model_module, '_active_runtime_version_for_catalog', return_value='2.1.280'):
             out = set_cc_chat_model('claude-opus-4-8')
             self.assertEqual(store['CC_CHAT_MODEL'], 'claude-opus-4-8')
             self.assertEqual(out['model_mode'], 'explicit')
