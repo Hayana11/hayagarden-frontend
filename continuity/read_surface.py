@@ -242,11 +242,19 @@ def _messages_for_members(
     return messages
 
 
-def _span_from_members(members: Iterable[SourceMember]) -> tuple[str | None, str | None]:
-    stamps = [str(member.created_at) for member in members if str(member.created_at or '').strip()]
+def _span_from_timestamps(values: Iterable[str | None]) -> tuple[str | None, str | None]:
+    stamps = [str(value) for value in values if str(value or '').strip()]
     if not stamps:
         return None, None
     return min(stamps), max(stamps)
+
+
+def _span_from_members(members: Iterable[SourceMember]) -> tuple[str | None, str | None]:
+    return _span_from_timestamps(member.created_at for member in members)
+
+
+def _span_from_messages(messages: Iterable[Mapping[str, Any]]) -> tuple[str | None, str | None]:
+    return _span_from_timestamps(item.get('created_at') for item in messages)
 
 
 def _map_status(job_status: str | None, chunk_status: str | None) -> str:
@@ -393,6 +401,9 @@ def _make_block(
                 if original_char_count == 0:
                     original_char_count = len(materialized.body)
                 materialization_available = True
+                message_span = _span_from_messages(messages)
+                if message_span[0]:
+                    start_at, end_at = message_span
             except SourceMaterializationError as exc:
                 materialization_error = str(exc)
                 messages = []
@@ -621,7 +632,9 @@ def get_current(
 
         messages = _messages_for_members(unclaimed, rows)
         original_char_count = sum(len(item['content']) for item in messages)
-        start_at, end_at = _span_from_members(unclaimed)
+        start_at, end_at = _span_from_messages(messages)
+        if start_at is None:
+            start_at, end_at = _span_from_members(unclaimed)
         body = None
         materialization_error = None
         try:

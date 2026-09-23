@@ -295,6 +295,8 @@ class ContextCompressionReadSurfaceTests(unittest.TestCase):
         self.assertEqual(payload['chunk']['body'], '压缩总结正文')
         contents = [item['content'] for item in payload['messages']]
         self.assertEqual(contents, ['用户第0句', '陪伴第0句'])
+        self.assertEqual(payload['block']['start_at'], '2026-09-14 01:00:00')
+        self.assertEqual(payload['block']['end_at'], '2026-09-14 01:00:30')
         self.assertTrue(all(item['role'] in ('user', 'assistant') for item in payload['messages']))
         self.assertTrue(all('thinking' not in item for item in payload['messages']))
         self.assertNotIn('private thinking must never be evidence', json.dumps(payload, ensure_ascii=False))
@@ -353,6 +355,8 @@ class ContextCompressionReadSurfaceTests(unittest.TestCase):
             [item['content'] for item in payload['messages']],
             ['用户第0句', '陪伴第0句', '用户第1句', '陪伴第1句', '用户第2句', '陪伴第2句'],
         )
+        self.assertEqual(payload['start_at'], payload['messages'][0]['created_at'])
+        self.assertEqual(payload['end_at'], payload['messages'][-1]['created_at'])
         self.assertNotIn('private thinking must never be evidence', json.dumps(payload, ensure_ascii=False))
 
         conn = sqlite3.connect(self.db_path)
