@@ -124,7 +124,7 @@ class ResidentLeaseIsolationTests(unittest.TestCase):
                  "chat.cc_runtime.claude_cmd_for_version",
                  side_effect=lambda _version, *a, **k: ["claude", *a],
              ), \
-                 mock.patch("chat.cc_model.cc_model_snapshot", return_value=("model", "identity", [])), \
+                 mock.patch("chat.cc_model.cc_model_snapshot", return_value=("", "default", [])), \
                  mock.patch("cc_resident.subprocess.Popen") as popen, \
                  mock.patch("tools.cc_tool_surface.capture_tool_surface_snapshot", return_value={}):
                 resident._spawn(
