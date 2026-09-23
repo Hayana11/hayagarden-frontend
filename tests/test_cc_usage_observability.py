@@ -819,7 +819,8 @@ class ResidentGenerationTests(unittest.TestCase):
         self.assertEqual(sess.generation, 0)
         with mock.patch("subprocess.Popen", return_value=FakeProc([])), \
              mock.patch("chat.cc_runtime.require_managed_claude_runtime", return_value="2.1.280"), \
-             mock.patch("chat.cc_runtime.claude_cmd_for_version", side_effect=lambda _version, *a, **k: ["/managed/2.1.280", *a]):
+             mock.patch("chat.cc_runtime.claude_cmd_for_version", side_effect=lambda _version, *a, **k: ["/managed/2.1.280", *a]), \
+             mock.patch("chat.cc_model.cc_model_runtime_compatibility", return_value=(True, None)):
             sess._spawn("S", {}, reason="process_dead")
             sess._spawn("S", {}, reason="idle")
         self.assertEqual(sess.generation, 2)

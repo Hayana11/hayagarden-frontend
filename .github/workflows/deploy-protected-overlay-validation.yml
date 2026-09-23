@@ -63,6 +63,15 @@ tools/cc_usage_observability.py
 tools/claude_forge_live_gate.py
 tools/claude_runtime_updater.py
 tools/context_window_admin.py
+chat/authoritative_planner.py
+chat/background_generation.py
+tests/test_background_generation.py
+tests/test_cc_capability_adapter.py
+tests/test_cc_context_dedup.py
+tests/test_cc_deferred_resume.py
+tests/test_cc_usage_observability.py
+tests/test_m2_02b_surface_generation.py
+tools/cc_capability_adapter.py
 EXPECTED_FILES
           )"
           actual_files="$(git diff --name-only "$base" "$HEAD_SHA" | LC_ALL=C sort)"

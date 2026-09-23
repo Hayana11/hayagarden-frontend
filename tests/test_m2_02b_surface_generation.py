@@ -108,13 +108,20 @@ class SurfaceGenerationTests(unittest.TestCase):
         )
         stack.enter_context(
             mock.patch(
-                "chat.cc_runtime.require_pinned_claude_version",
+                "chat.cc_runtime.require_managed_claude_runtime",
+                return_value="2.1.280",
             )
         )
         stack.enter_context(
             mock.patch(
-                "chat.cc_runtime.claude_cmd",
-                side_effect=lambda *args: list(args),
+                "chat.cc_runtime.claude_cmd_for_version",
+                side_effect=lambda _version, *args, **kwargs: list(args),
+            )
+        )
+        stack.enter_context(
+            mock.patch(
+                "chat.cc_model.cc_model_runtime_compatibility",
+                return_value=(True, None),
             )
         )
         stack.enter_context(
