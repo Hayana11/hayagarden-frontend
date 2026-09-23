@@ -515,7 +515,7 @@ export async function getModelCatalog(force = false): Promise<ChatModelState> {
         thinking: model.thinking || 'none',
         primary: Boolean(model.primary),
         dot: model.dot || '#B76E79',
-        runtimeCompatible: model.runtime_compatible !== false,
+        runtimeCompatible: typeof model.runtime_compatible === 'boolean' ? model.runtime_compatible : false,
         runtimeRequirement: model.runtime_requirement || model.min_claude_code_version || null,
       }];
     }),
