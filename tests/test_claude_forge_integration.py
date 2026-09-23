@@ -148,6 +148,17 @@ def _mock_subprocess_runner(
 
 
 class IntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self._managed_command_patch = mock.patch.object(
+            spike,
+            '_managed_claude_cmd',
+            side_effect=lambda *args: ['/service-home/.local/share/claude/versions/2.1.280', *args],
+        )
+        self._managed_command_patch.start()
+
+    def tearDown(self):
+        self._managed_command_patch.stop()
+
     def _run_mocked_live(self, tmp: str, **runner_kwargs: Any) -> dict:
         work_root = Path(tmp)
         isolated = work_root / 'isolated-project'
@@ -346,11 +357,11 @@ class IntegrationTests(unittest.TestCase):
             args, kwargs = runner.call_args
             self.assertEqual(
                 args[0],
-                ['npx', '--yes', '@anthropic-ai/claude-code@2.1.220', 'auth', 'status'],
+                ['/service-home/.local/share/claude/versions/2.1.280', 'auth', 'status'],
             )
             self.assertEqual(kwargs['cwd'], str(isolated_cwd))
             self.assertEqual(kwargs['env']['CLAUDE_CONFIG_DIR'], str(claude_home))
-            self.assertEqual(kwargs['env']['DISABLE_AUTOUPDATER'], '1')
+            self.assertNotIn('DISABLE_AUTOUPDATER', kwargs['env'])
 
     def test_isolated_auth_status_removes_auth_and_provider_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
