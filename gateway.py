@@ -4651,6 +4651,7 @@ def _cc_resident_stream_gen(
                     claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
                     model=usage.pop('_obs_model', None),
                     effort=observed_effort,
+                    runtime_identity=getattr(_CC_RESIDENT, '_runtime_identity', None),
                     thinking_config={
                         'thinking_display': 'summarized',
                         'effort': observed_effort,
