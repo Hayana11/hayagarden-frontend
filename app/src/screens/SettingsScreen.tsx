@@ -11,6 +11,9 @@ import {
   clearRelayAccountCredentials,
   createRelayEndpoint,
   getAvailableModels,
+  getClaudeRuntime,
+  checkClaudeRuntime,
+  updateClaudeRuntime,
   getDeepSeekConfig,
   getKeyStatus,
   getModelCatalog,
@@ -27,6 +30,7 @@ import {
   updateProvider,
   type ChatProvider,
   type ConfigModel,
+  type ClaudeRuntimeState,
   type DeepSeekConfig,
   type EndpointCapabilities,
   type KeyStatus,
@@ -90,6 +94,8 @@ export function SettingsScreen() {
   const [codexExpanded, setCodexExpanded] = useState(false);
   const [deepSeekConfig, setDeepSeekConfig] = useState<DeepSeekConfig | null>(null);
   const [deepSeekExpanded, setDeepSeekExpanded] = useState(false);
+  const [claudeRuntime, setClaudeRuntime] = useState<ClaudeRuntimeState | null>(null);
+  const [runtimeBusy, setRuntimeBusy] = useState('');
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
   const [hostRtt, setHostRtt] = useState<number | null>(null);
   const [relays, setRelays] = useState<RelayEndpoint[]>([]);
@@ -197,6 +203,57 @@ export function SettingsScreen() {
   }, []);
 
   useEffect(() => { void loadAll(); }, [loadAll]);
+
+  const refreshClaudeRuntime = useCallback(async () => {
+    try {
+      setClaudeRuntime(await getClaudeRuntime());
+    } catch {
+      setClaudeRuntime(null);
+    }
+  }, []);
+
+  useEffect(() => { void refreshClaudeRuntime(); }, [refreshClaudeRuntime]);
+  useEffect(() => {
+    if (!claudeRuntime || !['checking', 'candidate', 'promoting'].includes(claudeRuntime.status)) return;
+    const timer = window.setTimeout(() => { void refreshClaudeRuntime(); }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [claudeRuntime, refreshClaudeRuntime]);
+
+  const saveClaudeRuntime = async (update: Partial<Pick<ClaudeRuntimeState, 'autoUpdate' | 'channel'>>) => {
+    setRuntimeBusy('settings');
+    try {
+      setClaudeRuntime(await updateClaudeRuntime(update));
+      showToast('Claude Code 更新设置已保存');
+    } catch {
+      showToast('Claude Code 更新设置保存失败');
+      void refreshClaudeRuntime();
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+
+  const checkClaudeRuntimeNow = async () => {
+    setRuntimeBusy('check');
+    try {
+      await checkClaudeRuntime();
+      showToast('已开始检查 Claude Code 更新');
+      void refreshClaudeRuntime();
+    } catch {
+      showToast('Claude Code 更新检查未能启动');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+
+  const claudeRuntimeStatusLabel = (() => {
+    if (!claudeRuntime) return '状态不可用';
+    if (claudeRuntime.status === 'healthy') return '已是最新';
+    if (claudeRuntime.status === 'checking') return '正在检查';
+    if (claudeRuntime.status === 'candidate' || claudeRuntime.status === 'promoting') return '正在验证候选版本';
+    if (claudeRuntime.status === 'rejected' || claudeRuntime.status === 'rolled_back') return '验证失败，继续使用当前版本';
+    if (claudeRuntime.status === 'uninitialized') return '尚未完成 native runtime 初始化';
+    return '运行时不可用';
+  })();
 
   const activeRelay = relays.find((relay) => relay.active) || null;
   const currentEndpointName = provider === 'claude_code' ? 'Claude Code 订阅' : activeRelay?.name || '未选择中转站';
@@ -382,6 +439,10 @@ export function SettingsScreen() {
 
   const switchModel = async (model: ConfigModel) => {
     if (chatModelProvider === 'claude_code') {
+      if (model.runtimeCompatible === false) {
+        showToast(`需要 Claude Code ≥ ${model.runtimeRequirement || '更高版本'}`);
+        return;
+      }
       if (modelMode === 'explicit' && model.id === currentModel) return;
       setBusy(`model:${model.id}`);
       try {
@@ -394,9 +455,11 @@ export function SettingsScreen() {
         const code = err instanceof HttpError
           ? String((err.payload as { error?: string } | undefined)?.error || err.code || '')
           : '';
-        showToast(code === 'CC_MODEL_NOT_ALLOWED'
-          ? '该模型不属于 Claude Code 模型清单'
-          : '模型切换失败');
+        showToast(code === 'CC_MODEL_RUNTIME_INCOMPATIBLE'
+          ? `当前 Claude Code 版本不支持该模型，需要 ≥ ${model.runtimeRequirement || '更高版本'}`
+          : code === 'CC_MODEL_NOT_ALLOWED'
+            ? '该模型不属于 Claude Code 模型清单'
+            : '模型切换失败');
       } finally { setBusy(''); }
       return;
     }
@@ -837,6 +900,34 @@ export function SettingsScreen() {
               ? '安全 fallback 清单（非实时账号目录）· 账号可用性未知 · 与中转模型池隔离 · 下一条消息起生效'
               : 'Claude Code 模型目录 · 与中转模型池隔离 · 下一条消息起生效'
             : '当前端点实时模型 + models.json 策展清单 · 共 ' + unifiedModels.length + ' 个'}</p>
+          {chatModelProvider === 'claude_code' && (
+            <div className="config-claude-runtime" aria-label="Claude Code runtime">
+              <div><strong>Claude Code</strong><span>当前版本　{claudeRuntime?.activeVersion || '—'}</span></div>
+              <div><span>更新通道</span>
+                <select
+                  aria-label="Claude Code 更新通道"
+                  value={claudeRuntime?.channel || 'latest'}
+                  disabled={!claudeRuntime || Boolean(runtimeBusy)}
+                  onChange={(event) => void saveClaudeRuntime({ channel: event.target.value as 'latest' | 'stable' })}
+                >
+                  <option value="latest">Latest</option><option value="stable">Stable</option>
+                </select>
+              </div>
+              <div><span>自动更新</span>
+                <button type="button" disabled={!claudeRuntime || Boolean(runtimeBusy)}
+                  aria-pressed={Boolean(claudeRuntime?.autoUpdate)}
+                  onClick={() => claudeRuntime && void saveClaudeRuntime({ autoUpdate: !claudeRuntime.autoUpdate })}>
+                  {claudeRuntime?.autoUpdate ? '开' : '关'}
+                </button>
+              </div>
+              <div><span>状态</span><span>{claudeRuntimeStatusLabel}</span></div>
+              {claudeRuntime?.candidateVersion && <div><span>候选版本</span><span>{claudeRuntime.candidateVersion} · 正在验证</span></div>}
+              {claudeRuntime?.lastError && <div role="status"><span>最近错误</span><span>{claudeRuntime.lastError}</span></div>}
+              <button type="button" onClick={() => void checkClaudeRuntimeNow()} disabled={Boolean(runtimeBusy)}>
+                {runtimeBusy === 'check' ? '启动中…' : '立即检查'}
+              </button>
+            </div>
+          )}
           {chatModelProvider === 'claude_code' && modelMode === 'explicit' && configuredModelAvailable === false && <div className="config-warning">当前配置 {currentModel} 不在已知模型清单中；保留原配置，账号可用性未知，不会自动改写。</div>}
           <h3>常用预设</h3>
           {chatModelProvider === 'claude_code' ? (
@@ -847,9 +938,11 @@ export function SettingsScreen() {
                 {modelMode === 'default' ? <em>使用中</em> : <b>切换</b>}
               </button>
               {catalog.filter((model) => model.primary).map((model) => (
-                <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy)}>
+                <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy) || model.runtimeCompatible === false}>
                   <i style={{ background: model.dot }} />
-                  <span><strong>{model.label}</strong><small>{model.id}</small></span>
+                  <span><strong>{model.label}</strong><small>{model.runtimeCompatible === false
+                    ? `需要 Claude Code ≥ ${model.runtimeRequirement || '更高版本'}`
+                    : model.id}</small></span>
                   {modelMode === 'explicit' && model.id === currentModel ? <em>使用中</em> : <b>切换</b>}
                 </button>
               ))}
@@ -865,11 +958,13 @@ export function SettingsScreen() {
                   const query = modelFilter.trim().toLowerCase();
                   return !query || model.id.toLowerCase().includes(query) || model.label.toLowerCase().includes(query);
                 }).map((model) => (
-                  <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy)}>
+                  <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy) || model.runtimeCompatible === false}>
                     <i style={{ background: model.dot }} />
                     <span>Claude Code</span>
                     <strong>{model.id}</strong>
-                    {modelMode === 'explicit' && model.id === currentModel ? <em>使用中</em> : <b>切换</b>}
+                    {model.runtimeCompatible === false
+                      ? <em>需要 Claude Code ≥ {model.runtimeRequirement || '更高版本'}</em>
+                      : modelMode === 'explicit' && model.id === currentModel ? <em>使用中</em> : <b>切换</b>}
                   </button>
                 ))
                 : <div>暂无 Claude Code 模型清单</div>)
