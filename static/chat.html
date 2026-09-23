@@ -2620,9 +2620,15 @@ async function streamReply(){
           setSendStatus('生成失败','error');
           ensureLiveRow();
           if(/仍在生成|generating/i.test(String(ev.d||''))) releaseGenLock(true);
-          live.innerHTML='<div class="stream-err-wrap">⚠ '+escHtml(ev.d)+
-            '<br><button class="stream-err-retry" onclick="retryStream()">重试</button></div>';
-          err=new Error(ev.d); err.displayed=true;
+          var _runtimeMeta='';
+          if(ev.runtime_version) _runtimeMeta+='<br>当前 runtime：'+escHtml(ev.runtime_version);
+          if(ev.selected_model) _runtimeMeta+='<br>模型：'+escHtml(ev.selected_model);
+          var _retryMarkup=ev.retryable===false?'':'<br><button class="stream-err-retry" onclick="retryStream()">重试</button>';
+          live.innerHTML='<div class="stream-err-wrap">⚠ '+escHtml(ev.message||ev.d)+_runtimeMeta+
+            _retryMarkup+'</div>';
+          err=new Error(ev.message||ev.d); err.displayed=true;
+          err.error_code=String(ev.error_code||ev.code||'');
+          err.noFallback=err.error_code==='CC_MODEL_RUNTIME_INCOMPATIBLE'||err.error_code.indexOf('claude_runtime_')===0;
         } else if(ev.t==='done'){
           setSendStatus('回复完成','working');
           streamCompleted=true;
