@@ -817,7 +817,7 @@ class ResidentGenerationTests(unittest.TestCase):
         from cc_resident import ResidentSession
         sess = ResidentSession("/tmp", "tool_a", "/tmp/cc-tools.json")
         self.assertEqual(sess.generation, 0)
-        with mock.patch("subprocess.Popen", return_value=FakeProc([])), \
+        with mock.patch("subprocess.Popen", side_effect=lambda *a, **k: FakeProc([])), \
              mock.patch("chat.cc_runtime.require_managed_claude_runtime", return_value="2.1.280"), \
              mock.patch("chat.cc_runtime.claude_cmd_for_version", side_effect=lambda _version, *a, **k: ["/managed/2.1.280", *a]), \
              mock.patch("chat.cc_model.cc_model_runtime_compatibility", return_value=(True, None)):

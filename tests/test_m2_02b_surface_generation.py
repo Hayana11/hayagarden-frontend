@@ -328,12 +328,16 @@ class SurfaceGenerationTests(unittest.TestCase):
                     side_effect=OSError("spawn failed"),
                 )
             )
-            with self.assertRaises(OSError):
+            with self.assertRaises(cc_resident.ResidentError) as caught:
                 session._spawn(
                     "SYS",
                     {},
                     tool_profile=cc_resident.TOOL_PROFILE_UH_A0,
                 )
+            self.assertEqual(
+                caught.exception.error_code,
+                "claude_runtime_startup_failed",
+            )
         self.assertEqual(
             session.bound_tool_surface_fingerprint,
             "old-surface",
