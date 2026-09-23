@@ -40,6 +40,11 @@ test -f "$ROOT/requirements.txt" || fail "requirements.txt is missing"
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another deployment is already running"
+# Lock order is deploy → runtime update everywhere; updater skips if deploy owns the first lock.
+RUNTIME_UPDATE_LOCK="/run/lock/hayagarden-claude-runtime-update.lock"
+mkdir -p "$(dirname "$RUNTIME_UPDATE_LOCK")"
+exec 8>"$RUNTIME_UPDATE_LOCK"
+flock -n 8 || fail "Claude runtime updater is active"
 
 cd "$ROOT"
 git fetch --prune "$REMOTE"
@@ -220,7 +225,7 @@ restore_runtime
 protected_overlay_apply "$ROOT"
 protected_overlay_verify "$ROOT"
 install_dashboard
-# Project-local Claude Code pin (not PATH /usr/bin/claude). Fail closed before restart.
+# Managed native runtime is validated before any production service restart.
 bash "$ROOT/scripts/ensure-claude-runtime.sh" "$ROOT"
 systemctl restart "${SERVICES[@]}"
 health_ok=0
@@ -245,11 +250,11 @@ if [[ "$health_ok" -ne 1 ]]; then
   echo "Health check failed after 5 attempts." >&2
   false
 fi
-# Post-deploy runtime pin check (fail closed → rollback via ERR trap).
+# Post-deploy runtime contract check; exact patch versions are not deployment pins.
 "$PYTHON" - <<'PY'
-from chat.cc_runtime import EXPECTED_CLAUDE_CODE_VERSION, require_pinned_claude_version
-actual = require_pinned_claude_version()
-print('deploy claude runtime ok:', actual, '(expected', EXPECTED_CLAUDE_CODE_VERSION + ')')
+from chat.cc_runtime import MINIMUM_CLAUDE_CODE_VERSION, require_managed_claude_runtime
+actual = require_managed_claude_runtime()
+print('deploy claude runtime ok:', actual, '(minimum', MINIMUM_CLAUDE_CODE_VERSION + ')')
 PY
 
 mkdir -p "$STATE_DIR"
