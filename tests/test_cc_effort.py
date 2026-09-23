@@ -451,7 +451,7 @@ class ModelControlRouteTests(_AppRouteTestCase):
             cc_model.cc_model_args_from_identity('explicit:--dangerous')
 
     def test_cc_opus_55_selection_and_default_semantics(self):
-        with patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.280'), \\
+        with patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.280'), \
              patch('urllib.request.urlopen', side_effect=AssertionError('selection must not call a model API')):
             response = self.client.post('/api/config/model', json={'model': 'claude-opus-5-5'})
             self.assertEqual(response.status_code, 200)
@@ -750,8 +750,8 @@ class ClaudeRuntimeRouteTests(_AppRouteTestCase):
     def test_runtime_post_validates_channel_and_only_accepts_allowed_fields(self):
         import contextlib
 
-        with patch('tools.claude_runtime_updater.update_locks', return_value=contextlib.nullcontext(True)), \\
-             patch('tools.claude_runtime_updater.sync_native_update_settings') as sync, \\
+        with patch('tools.claude_runtime_updater.update_locks', return_value=contextlib.nullcontext(True)), \
+             patch('tools.claude_runtime_updater.sync_native_update_settings') as sync, \
              patch('chat.claude_runtime_state.runtime_public_status', return_value={
                  'active_version': '2.1.280', 'last_good_version': '2.1.280',
                  'candidate_version': None, 'channel': 'stable', 'auto_update': True,
@@ -771,7 +771,7 @@ class ClaudeRuntimeRouteTests(_AppRouteTestCase):
     def test_manual_check_uses_detached_zero_generation_worker(self):
         import subprocess
 
-        with patch('chat.cc_runtime.service_home', return_value=Path(self.tmp.name)), \\
+        with patch('chat.cc_runtime.service_home', return_value=Path(self.tmp.name)), \
              patch('subprocess.Popen') as popen:
             response = self.client.post('/api/config/claude-runtime/check', json={})
         self.assertEqual(response.status_code, 202)
