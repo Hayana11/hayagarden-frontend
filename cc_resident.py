@@ -581,6 +581,7 @@ class ResidentSession:
         self._last_turn_stdin_write_started = False
         self._last_turn_stdin_flushed = False
         self._runtime_identity = None
+        self._runtime_rollback_pending = None
         self._next_spawn_reason = None
         self._tool_profile = TOOL_PROFILE_LEGACY
         # Provider-authoritative deferred tool call awaiting user confirmation.
@@ -961,6 +962,32 @@ class ResidentSession:
             with self._turn_state_lock:
                 if self._turn_active:
                     raise ResidentError('resident_turn_in_progress')
+            pending_runtime = getattr(self, '_runtime_rollback_pending', None)
+            if pending_runtime:
+                from chat.cc_runtime import active_claude_version
+                try:
+                    active_runtime = active_claude_version()
+                except Exception as exc:
+                    raise ResidentError(
+                        'Claude Code runtime is unavailable',
+                        error_code='claude_runtime_rollback_pending',
+                    ) from exc
+                if active_runtime == pending_runtime:
+                    try:
+                        from tools.claude_runtime_updater import rollback_active_runtime
+                        rolled_back = rollback_active_runtime(
+                            expected_active=pending_runtime,
+                            reason='provider_failure_after_stdin',
+                        )
+                    except Exception:
+                        rolled_back = None
+                    if not rolled_back:
+                        raise ResidentError(
+                            'Claude Code runtime is unhealthy; rollback is waiting for the lifecycle lock.',
+                            error_code='claude_runtime_rollback_pending',
+                        )
+                    self._next_spawn_reason = 'runtime_changed'
+                self._runtime_rollback_pending = None
             reason = self._decide_respawn_reason(system_text, tool_profile=tool_profile)
             if not reason:
                 return self._cold
@@ -988,7 +1015,9 @@ class ResidentSession:
                 except Exception:
                     rolled_back = None
                 if not rolled_back:
+                    self._runtime_rollback_pending = expected_active
                     raise
+                self._runtime_rollback_pending = None
                 if self._alive() and self._runtime_identity == 'claude-code:%s' % rolled_back:
                     self._next_spawn_reason = None
                     return self._cold
@@ -1635,6 +1664,7 @@ class ResidentSession:
                         )
                     except Exception:
                         pass
+                    self._runtime_rollback_pending = None if rolled_back else expected_active
                     self._next_spawn_reason = 'runtime_changed' if rolled_back else 'process_dead'
                     self._kill(quiet=True)
                     safe_error = ResidentError(
