@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flask import Flask, send_from_directory
+from flask import Flask, jsonify, send_from_directory
 
 
 def build_dash_app(dist_dir: Path, static_dir: Path) -> Flask:
@@ -35,6 +35,11 @@ def build_dash_app(dist_dir: Path, static_dir: Path) -> Flask:
         asset_path = dist_dir / subpath
         if asset_path.is_file():
             return send_from_directory(dist, subpath)
+        if subpath == '__continuity' or subpath.startswith('__continuity/'):
+            resp = jsonify({'ok': False, 'error': 'not_found'})
+            resp.status_code = 404
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
         resp = send_from_directory(dist, 'index.html')
         resp.headers['Cache-Control'] = 'no-store, must-revalidate'
         return resp
@@ -101,6 +106,19 @@ class DashSpaFallbackTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('console.log(1)', resp.get_data(as_text=True))
         self.assertNotIn(SPA_MARKER, resp.get_data(as_text=True))
+
+    def test_continuity_prefix_is_not_swallowed_by_spa_html(self) -> None:
+        for path in (
+            '/dash/__continuity/blocks',
+            '/dash/__continuity/current',
+            '/dash/__continuity/settings',
+        ):
+            with self.subTest(path=path):
+                resp = self.client.get(path)
+                self.assertEqual(resp.status_code, 404, path)
+                self.assertEqual(resp.get_json(), {'ok': False, 'error': 'not_found'})
+                self.assertEqual(resp.headers.get('Cache-Control'), 'no-store')
+                self.assertNotIn(SPA_MARKER, resp.get_data(as_text=True))
 
     def test_read_and_board_not_swallowed_by_dash_fallback(self) -> None:
         read = self.client.get('/read')

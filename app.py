@@ -148,6 +148,8 @@ app.register_blueprint(create_moments_blueprint(
 ))
 app.register_blueprint(create_external_mcp_admin_blueprint())
 app.register_blueprint(create_monopoly_blueprint(MonopolyService(db_path=DB_PATH)))
+from context_compression_routes import create_context_compression_blueprint
+app.register_blueprint(create_context_compression_blueprint(db_path=DB_PATH))
 
 
 
@@ -271,6 +273,11 @@ def dash_subpath(subpath):
     asset_path = os.path.join(APP_DIST_DIR, subpath)
     if os.path.isfile(asset_path):
         return send_from_directory(APP_DIST_DIR, subpath)
+    if subpath == '__continuity' or subpath.startswith('__continuity/'):
+        resp = jsonify({'ok': False, 'error': 'not_found'})
+        resp.status_code = 404
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
     # React Router fallback
     resp = send_from_directory(APP_DIST_DIR, 'index.html')
     resp.headers['Cache-Control'] = 'no-store, must-revalidate'

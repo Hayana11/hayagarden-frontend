@@ -1,4 +1,5 @@
 """Continuity Compression stable-core contracts.
 
-R1 is shadow-only: no production consumer imports this package yet.
+The read-only HTTP surface may import store/read_surface. Importing this
+package does not start the producer or mutate resident state.
 """
