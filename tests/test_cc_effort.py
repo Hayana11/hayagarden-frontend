@@ -777,9 +777,8 @@ class ClaudeRuntimeRouteTests(_AppRouteTestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.get_json()['model_generation_requests'], 0)
         argv = popen.call_args.args[0]
-        self.assertTrue(argv[-1].endswith('claude_runtime_updater.py'))
-        self.assertEqual(argv[-1], str(Path(argv[-1])))
-        self.assertIn('--manual', argv)
+        self.assertTrue(argv[1].endswith('claude_runtime_updater.py'))
+        self.assertEqual(argv[-1], '--manual')
         self.assertIs(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
         self.assertTrue(popen.call_args.kwargs['start_new_session'])
 
