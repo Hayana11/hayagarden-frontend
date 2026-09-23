@@ -36,7 +36,7 @@ OLD_PROMPT = '请只回复两个字：收到'
 def _auth_status_process(payload: Any, *, returncode: int = 0) -> subprocess.CompletedProcess[str]:
     stdout = payload if isinstance(payload, str) else json.dumps(payload)
     return subprocess.CompletedProcess(
-        args=['npx', 'auth', 'status'],
+        args=['/service-home/.local/share/claude/versions/2.1.280', 'auth', 'status'],
         returncode=returncode,
         stdout=stdout,
         stderr='sensitive auth status diagnostics must not enter the report',
