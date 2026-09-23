@@ -9,6 +9,8 @@ Never reads MODEL / ACTIVE_RELAY / relay catalog.
 
 from __future__ import annotations
 
+import re
+from copy import deepcopy
 from typing import Any
 
 import config_store
@@ -16,14 +18,21 @@ import config_store
 CC_CHAT_MODEL_KEY = 'CC_CHAT_MODEL'
 CC_MODEL_NOT_ALLOWED = 'CC_MODEL_NOT_ALLOWED'
 
-# Official Claude Code model IDs only. Not derived from relay models.json.
-CC_MODEL_CATALOG: list[dict[str, Any]] = [
+# Curated Claude Code fallback IDs; separate from relay models.json.
+CC_FALLBACK_MODEL_CATALOG: list[dict[str, Any]] = [
     {
         'id': 'claude-sonnet-5',
         'label': 'Sonnet 5',
         'desc': '主力均衡',
         'primary': True,
         'dot': '#6a8a7c',
+    },
+    {
+        'id': 'claude-opus-5-5',
+        'label': 'Opus 5.5',
+        'desc': '新一代旗舰',
+        'primary': True,
+        'dot': '#8a5a72',
     },
     {
         'id': 'claude-opus-5',
@@ -62,6 +71,77 @@ CC_MODEL_CATALOG: list[dict[str, Any]] = [
     },
 ]
 
+# Deprecated compatibility alias; in-tree runtime code uses the explicit fallback name.
+CC_MODEL_CATALOG = CC_FALLBACK_MODEL_CATALOG
+
+_CC_MODEL_ID_RE = re.compile(r'^claude-[a-z0-9]+(?:-[a-z0-9]+)*$')
+
+
+def _is_well_formed_cc_model_id(model_id: str) -> bool:
+    return bool(_CC_MODEL_ID_RE.fullmatch(str(model_id or '').strip()))
+
+
+def _native_model_catalog_adapter(*, force: bool = False) -> dict[str, Any] | None:
+    """Future adapter seam for a stable, machine-readable subscription catalog.
+
+    The pinned Claude Code runtime has no supported account-catalog API.
+    Do not infer one from the interactive /model picker, TUI, HTML, errors,
+    or gateway /v1/models. Implement this adapter only after an official,
+    non-generative subscription catalog contract is verified.
+    """
+    return None
+
+
+def _normalized_model_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for candidate in value:
+        if not isinstance(candidate, dict):
+            continue
+        model_id = str(candidate.get('id') or '').strip()
+        if not _is_well_formed_cc_model_id(model_id):
+            continue
+        row: dict[str, Any] = {'id': model_id}
+        for key in ('label', 'desc', 'thinking', 'primary', 'dot'):
+            if key in candidate:
+                row[key] = candidate[key]
+        rows.append(row)
+    return rows
+
+
+def get_cc_model_catalog(*, force: bool = False) -> dict[str, Any]:
+    """Return native catalog when a stable adapter exists, else safe fallback.
+
+    Ready means there is a usable selection catalog, not that account
+    entitlements were verified. A fallback response never claims per-account
+    availability and has no synthetic refresh timestamp.
+    """
+    catalog_error = None
+    try:
+        native = _native_model_catalog_adapter(force=force)
+    except Exception:
+        native = None
+        catalog_error = 'native_discovery_failed'
+    if isinstance(native, dict):
+        models = _normalized_model_rows(native.get('models'))
+        if models:
+            return {
+                'models': models,
+                'catalog_source': 'native',
+                'catalog_ready': True,
+                'catalog_error': None,
+                'catalog_refreshed_at': str(native.get('refreshed_at') or '') or None,
+            }
+        catalog_error = 'invalid_native_catalog'
+    return {
+        'models': deepcopy(CC_FALLBACK_MODEL_CATALOG),
+        'catalog_source': 'fallback',
+        'catalog_ready': True,
+        'catalog_error': catalog_error,
+        'catalog_refreshed_at': None,
+    }
+
 
 def get_cc_chat_model() -> str:
     """Return stripped CC_CHAT_MODEL, or '' for default."""
@@ -71,13 +151,13 @@ def get_cc_chat_model() -> str:
 def cc_catalog_ids() -> frozenset[str]:
     return frozenset(
         str(row.get('id') or '').strip()
-        for row in CC_MODEL_CATALOG
+        for row in get_cc_model_catalog()['models']
         if str(row.get('id') or '').strip()
     )
 
 
 def is_allowed_cc_model(model_id: str) -> bool:
-    """True only for CC_MODEL_CATALOG ids. Relay aliases never pass."""
+    """True only for current native/fallback CC catalog ids; relay aliases never pass."""
     return str(model_id or '').strip() in cc_catalog_ids()
 
 
@@ -125,7 +205,9 @@ def cc_model_from_identity(identity: str) -> str:
     if not identity.startswith(prefix):
         raise ValueError('invalid CC model identity: %s' % (identity or '<empty>'))
     model = identity[len(prefix):].strip()
-    if not model or not is_allowed_cc_model(model):
+    # Frozen authorities must not be revalidated against a refreshable catalog:
+    # a list change must not invalidate an already captured background task.
+    if not _is_well_formed_cc_model_id(model):
         raise ValueError('invalid CC model identity: %s' % identity)
     return model
 
@@ -145,8 +227,8 @@ def describe_cc_model_state() -> dict[str, Any]:
 def set_cc_chat_model(model: str | None) -> dict[str, Any]:
     """Write CC_CHAT_MODEL. None/'' clears to default.
 
-    Non-empty values must be CC_MODEL_CATALOG ids. Relay aliases and other
-    free-form strings are rejected without mutating CC_CHAT_MODEL.
+    Non-empty values must be in the current native/fallback CC catalog.
+    Relay aliases and other free-form strings are rejected without mutation.
     """
     if model is None:
         value = ''
@@ -169,7 +251,7 @@ def set_cc_chat_model(model: str | None) -> dict[str, Any]:
 
 def cc_catalog_label(model_id: str) -> str:
     mid = str(model_id or '').strip()
-    for row in CC_MODEL_CATALOG:
+    for row in get_cc_model_catalog()['models']:
         if row.get('id') == mid:
             return str(row.get('label') or mid)
     return mid

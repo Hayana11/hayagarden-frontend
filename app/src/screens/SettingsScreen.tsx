@@ -94,6 +94,8 @@ export function SettingsScreen() {
   const [hostRtt, setHostRtt] = useState<number | null>(null);
   const [relays, setRelays] = useState<RelayEndpoint[]>([]);
   const [catalog, setCatalog] = useState<ConfigModel[]>([]);
+  const [catalogSource, setCatalogSource] = useState<'native' | 'fallback' | ''>('');
+  const [configuredModelAvailable, setConfiguredModelAvailable] = useState<boolean | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [currentModel, setCurrentModel] = useState('');
   const [modelMode, setModelMode] = useState<'default' | 'explicit' | 'unknown' | ''>('');
@@ -168,6 +170,8 @@ export function SettingsScreen() {
     }
     if (catalogResult.status === 'fulfilled') {
       setCatalog(catalogResult.value.models);
+      setCatalogSource(catalogResult.value.catalogSource);
+      setConfiguredModelAvailable(catalogResult.value.configuredModelAvailable);
       // Catalog is authoritative for chat-model space when available.
       const catalogProvider = catalogResult.value.provider;
       const fallbackProvider = providerResult.status === 'fulfilled'
@@ -245,10 +249,14 @@ export function SettingsScreen() {
     setCurrentModel(local.currentModel);
     setModelMode(local.modelMode);
     setCatalog([]);
+    setCatalogSource('');
+    setConfiguredModelAvailable(null);
     setAvailableModels([]);
     let refreshFailed = false;
     try {
       const catalogState = await getModelCatalog();
+      setCatalogSource(catalogState.catalogSource);
+      setConfiguredModelAvailable(catalogState.configuredModelAvailable);
       if (catalogState.provider === 'claude_code' || catalogState.provider === 'api_relay') {
         setChatModelProvider(catalogState.provider);
       }
@@ -304,6 +312,8 @@ export function SettingsScreen() {
     setCurrentModel(local.currentModel);
     setModelMode(local.modelMode);
     setCatalog([]);
+    setCatalogSource('');
+    setConfiguredModelAvailable(null);
     setAvailableModels([]);
     let refreshFailed = false;
     try {
@@ -311,6 +321,8 @@ export function SettingsScreen() {
     } catch { refreshFailed = true; }
     try {
       const catalogState = await getModelCatalog();
+      setCatalogSource(catalogState.catalogSource);
+      setConfiguredModelAvailable(catalogState.configuredModelAvailable);
       if (catalogState.provider === 'claude_code' || catalogState.provider === 'api_relay') {
         setChatModelProvider(catalogState.provider);
       }
@@ -361,6 +373,7 @@ export function SettingsScreen() {
       await updateCurrentModel(null);
       setModelMode('default');
       setCurrentModel('');
+      setConfiguredModelAvailable(null);
       showToast('下一条消息起生效');
     } catch {
       showToast('模型切换失败');
@@ -375,6 +388,7 @@ export function SettingsScreen() {
         const result = await updateCurrentModel(model.id);
         setModelMode(result.modelMode || 'explicit');
         setCurrentModel(result.configuredModel || model.id);
+        setConfiguredModelAvailable(true);
         showToast('下一条消息起生效');
       } catch (err) {
         const code = err instanceof HttpError
@@ -458,12 +472,16 @@ export function SettingsScreen() {
     setBusy('models');
     try {
       if (chatModelProvider === 'claude_code') {
-        const catalogState = await getModelCatalog();
+        const catalogState = await getModelCatalog(true);
         setCatalog(catalogState.models);
+        setCatalogSource(catalogState.catalogSource);
+        setConfiguredModelAvailable(catalogState.configuredModelAvailable);
         const mode = catalogState.modelMode;
         setModelMode(mode === 'explicit' || mode === 'default' ? mode : 'unknown');
         setCurrentModel(catalogState.configuredModel || catalogState.current || '');
-        showToast('Claude Code 模型清单已刷新');
+        showToast(catalogState.catalogSource === 'fallback'
+          ? '安全 fallback 清单已重新读取；账号可用性仍未知'
+          : 'Claude Code 模型清单已刷新');
       } else {
         setAvailableModels(await getAvailableModels());
         showToast('模型列表已刷新');
@@ -670,12 +688,12 @@ export function SettingsScreen() {
           <button className="config-endpoint-summary" type="button" onClick={() => setOfficialExpanded((value) => !value)}>
             <i className={ccTokenSet ? 'online' : 'offline'} />
             <span><strong>Claude Code 订阅</strong><small>VPS 终端凭据 · 官方原生</small></span>
-            <em>{ccTokenSet ? '已连接' : '未配置'}<small>{catalog.length} 个策展模型</small></em>
+            <em>{ccTokenSet ? '已连接' : '未配置'}<small>{catalogSource === 'fallback' ? catalog.length + ' 个安全 fallback' : catalog.length + ' 个模型'}</small></em>
             <b className={officialExpanded ? 'open' : ''}>▾</b>
           </button>
           <div className="config-endpoint-row"><CapabilityChips caps={{ thinking: true, cache: true, tools: false }} />{provider === 'claude_code' ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchToClaude()} disabled={Boolean(busy)}>切换</button>}</div>
           <div className="config-effort"><span>Effort</span><div><button type="button" disabled>LOW</button><button type="button" disabled>MED</button><button type="button" disabled>HIGH</button></div><small>后端尚未接入</small></div>
-          {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div><div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
+          {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div>{catalogSource === 'fallback' && <small>安全 fallback 清单；当前 Claude Code 运行时没有可用的官方订阅模型目录接口，账号实际可用性未知。</small>}<div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
         </section>
 
         <section className="config-card config-endpoint">
@@ -813,10 +831,13 @@ export function SettingsScreen() {
 
         <SectionLabel>MODELS · 统一模型池</SectionLabel>
         <section className="config-card config-model-pool">
-          <div className="config-card-heading"><h2>模型池</h2><button type="button" onClick={() => void refreshModels()}>{busy === 'models' ? '拉取中…' : '⟳ 统一拉取'}</button></div>
+          <div className="config-card-heading"><h2>模型池</h2><button type="button" onClick={() => void refreshModels()}>{busy === 'models' ? '拉取中…' : chatModelProvider === 'claude_code' && catalogSource === 'fallback' ? '⟳ 重读 fallback' : '⟳ 统一拉取'}</button></div>
           <p>{chatModelProvider === 'claude_code'
-            ? 'Claude Code 官方模型 ID · 与中转模型池隔离 · 下一条消息起生效'
-            : `当前端点实时模型 + models.json 策展清单 · 共 ${unifiedModels.length} 个`}</p>
+            ? catalogSource === 'fallback'
+              ? '安全 fallback 清单（非实时账号目录）· 账号可用性未知 · 与中转模型池隔离 · 下一条消息起生效'
+              : 'Claude Code 模型目录 · 与中转模型池隔离 · 下一条消息起生效'
+            : '当前端点实时模型 + models.json 策展清单 · 共 ' + unifiedModels.length + ' 个'}</p>
+          {chatModelProvider === 'claude_code' && modelMode === 'explicit' && configuredModelAvailable === false && <div className="config-warning">当前配置 {currentModel} 不在已知模型清单中；保留原配置，账号可用性未知，不会自动改写。</div>}
           <h3>常用预设</h3>
           {chatModelProvider === 'claude_code' ? (
             <div className="config-preset-list">

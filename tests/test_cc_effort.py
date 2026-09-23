@@ -38,7 +38,7 @@ def _load_chat_module(name):
 
 
 cc_effort = _load_chat_module('chat.cc_effort')
-_load_chat_module('chat.cc_model')
+cc_model = _load_chat_module('chat.cc_model')
 
 
 class CcEffortHelperTests(unittest.TestCase):
@@ -378,8 +378,110 @@ class ModelControlRouteTests(_AppRouteTestCase):
         return gateway
 
     def setUp(self):
+        config_store.set('CHAT_PROVIDER', 'claude_code')
         config_store.set('CODEX_CHAT_MODEL', '')
         config_store.set('DEEPSEEK_CHAT_MODEL', 'deepseek-flash')
+
+    def test_cc_catalog_reports_safe_fallback_and_preserves_default(self):
+        config_store.set('CC_CHAT_MODEL', '')
+        with patch.object(cc_model, '_native_model_catalog_adapter', return_value=None) as adapter:
+            with patch('urllib.request.urlopen', side_effect=AssertionError('CC fallback must not make network calls')):
+                response = self.client.get('/api/config/model-catalog')
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['provider'], 'claude_code')
+        self.assertEqual(body['model_mode'], 'default')
+        self.assertIsNone(body['configured_model'])
+        self.assertTrue(body['configured_model_available'])
+        self.assertEqual(body['catalog_source'], 'fallback')
+        self.assertTrue(body['catalog_ready'])
+        self.assertIsNone(body['catalog_error'])
+        self.assertIsNone(body['catalog_refreshed_at'])
+        opus = next(model for model in body['models'] if model['id'] == 'claude-opus-5-5')
+        self.assertEqual(opus['label'], 'Opus 5.5')
+        self.assertEqual(len(body['models']), 7)
+        self.assertNotIn('api_key', body)
+        adapter.assert_called_once_with(force=False)
+        self.assertEqual(config_store.get('CC_CHAT_MODEL'), '')
+
+    def test_cc_catalog_refresh_is_explicit_and_non_generative(self):
+        with patch.object(cc_model, '_native_model_catalog_adapter', return_value=None) as adapter:
+            with patch('urllib.request.urlopen', side_effect=AssertionError('catalog refresh must not call a model API')):
+                response = self.client.get('/api/config/model-catalog?refresh=1')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['catalog_source'], 'fallback')
+        adapter.assert_called_once_with(force=True)
+
+    def test_cc_discovery_failure_falls_back_without_clearing_configuration(self):
+        stale_model = 'claude-opus-5-5-preview'
+        config_store.set('CC_CHAT_MODEL', stale_model)
+        with patch.object(cc_model, '_native_model_catalog_adapter', side_effect=RuntimeError('unavailable')):
+            response = self.client.get('/api/config/model-catalog?refresh=1')
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['catalog_source'], 'fallback')
+        self.assertTrue(body['catalog_ready'])
+        self.assertEqual(body['catalog_error'], 'native_discovery_failed')
+        self.assertIsNone(body['catalog_refreshed_at'])
+        self.assertEqual(body['configured_model'], stale_model)
+        self.assertFalse(body['configured_model_available'])
+        self.assertEqual(config_store.get('CC_CHAT_MODEL'), stale_model)
+
+    def test_cc_stale_configured_model_is_retained_and_reported(self):
+        stale_model = 'claude-opus-5-5-preview'
+        config_store.set('CC_CHAT_MODEL', stale_model)
+        response = self.client.get('/api/config/model-catalog')
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['configured_model'], stale_model)
+        self.assertEqual(body['current'], stale_model)
+        self.assertEqual(body['model_mode'], 'explicit')
+        self.assertFalse(body['configured_model_available'])
+        self.assertEqual(config_store.get('CC_CHAT_MODEL'), stale_model)
+        # Frozen task authority stays parseable without consulting a changing catalog.
+        with patch.object(cc_model, 'get_cc_model_catalog', side_effect=AssertionError('frozen identity must not refresh catalog')):
+            self.assertEqual(
+                cc_model.cc_model_args_from_identity('explicit:' + stale_model),
+                ['--model', stale_model],
+            )
+        with self.assertRaises(ValueError):
+            cc_model.cc_model_args_from_identity('explicit:--dangerous')
+
+    def test_cc_opus_55_selection_and_default_semantics(self):
+        with patch('urllib.request.urlopen', side_effect=AssertionError('selection must not call a model API')):
+            response = self.client.post('/api/config/model', json={'model': 'claude-opus-5-5'})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(config_store.get('CC_CHAT_MODEL'), 'claude-opus-5-5')
+            self.assertEqual(cc_model.cc_model_args(), ['--model', 'claude-opus-5-5'])
+            invalid = self.client.post('/api/config/model', json={'model': 'relay-only-model'})
+            self.assertEqual(invalid.status_code, 400)
+            self.assertEqual(config_store.get('CC_CHAT_MODEL'), 'claude-opus-5-5')
+            clear = self.client.post('/api/config/model', json={'model': None})
+        self.assertEqual(clear.status_code, 200)
+        self.assertEqual(config_store.get('CC_CHAT_MODEL'), '')
+        self.assertEqual(cc_model.cc_model_args(), [])
+
+    def test_relay_catalog_does_not_consult_cc_catalog_or_mutate_cc_model(self):
+        config_store.set('CHAT_PROVIDER', 'api_relay')
+        config_store.set('CC_CHAT_MODEL', 'claude-opus-5-5')
+        real_open = builtins.open
+
+        def open_models_file(path, *args, **kwargs):
+            if os.fspath(path) == '/opt/frontend/models.json':
+                return io.StringIO('[{"id":"relay-only","label":"Relay Only"}]')
+            return real_open(path, *args, **kwargs)
+
+        with patch.object(cc_model, 'get_cc_model_catalog') as cc_catalog:
+            with patch('builtins.open', side_effect=open_models_file):
+                response = self.client.get('/api/config/model-catalog?refresh=1')
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['models'], [{'id': 'relay-only', 'label': 'Relay Only'}])
+        self.assertEqual(body['provider'], 'api_relay')
+        self.assertNotIn('catalog_source', body)
+        self.assertNotIn('configured_model_available', body)
+        cc_catalog.assert_not_called()
+        self.assertEqual(config_store.get('CC_CHAT_MODEL'), 'claude-opus-5-5')
 
     def test_codex_catalog_keeps_identity_and_runtime_model_separate(self):
         server = self.app_module.codex_app_server.CodexAppServer(db_path=':memory:')

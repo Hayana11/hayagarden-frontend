@@ -2077,18 +2077,30 @@ def config_set_effort():
 @app.route('/api/config/model-catalog', methods=['GET'])
 def config_model_catalog():
     """Chat-provider model catalog + current state.
-    Claude Code uses CC_MODEL_CATALOG; api_relay uses models.json.
+    Claude Code has an isolated native/fallback catalog; api_relay keeps its
+    existing models.json path and response contract.
     Never mixes the two spaces."""
-    from chat.cc_model import CC_MODEL_CATALOG
     state = _chat_model_payload()
     if state.get('provider') == 'claude_code':
+        from chat.cc_model import get_cc_model_catalog
+        catalog = get_cc_model_catalog(force=request.args.get('refresh') == '1')
         current = state.get('configured_model') or ''
+        model_ids = {
+            str(row.get('id') or '').strip()
+            for row in catalog['models']
+            if str(row.get('id') or '').strip()
+        }
         return jsonify({
-            'models': list(CC_MODEL_CATALOG),
+            'models': catalog['models'],
             'current': current,
             'provider': 'claude_code',
             'model_mode': state.get('model_mode'),
             'configured_model': state.get('configured_model'),
+            'configured_model_available': not current or current in model_ids,
+            'catalog_source': catalog['catalog_source'],
+            'catalog_ready': catalog['catalog_ready'],
+            'catalog_error': catalog['catalog_error'],
+            'catalog_refreshed_at': catalog['catalog_refreshed_at'],
         })
     try:
         with open('/opt/frontend/models.json') as f:
