@@ -7,6 +7,7 @@ const read = (path) => readFileSync(join(root, path), 'utf8');
 
 const app = read('src/App.tsx');
 const navigation = read('src/navigation.ts');
+const chat = read('src/screens/ChatScreen.tsx');
 const screen = read('src/screens/ContextCompressionScreen.tsx');
 const css = read('src/screens/ContextCompressionScreen.css');
 const settings = read('src/screens/contextCompression/CompressionSettings.tsx');
@@ -21,6 +22,10 @@ assert.match(
 );
 assert.match(app, /<Route path=\{ROUTES\.contextCompression\} element=\{<ContextCompressionScreen \/>\} \/>/);
 assert.match(app, /CONTEXT_COMPRESSION_PREVIEW_PATH/);
+assert.match(chat, /to=\{ROUTES\.contextCompression\}/);
+assert.match(chat, /上下文压缩/);
+assert.match(chat, /压缩历史 · 当前块/);
+assert.doesNotMatch(chat, /to=["']\/dash\/context-compression["']/);
 
 const navBlock = navigation.slice(navigation.indexOf('export const NAV_ITEMS'));
 assert.doesNotMatch(navBlock, /key:\s*'contextCompression'/);

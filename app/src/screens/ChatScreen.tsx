@@ -2770,6 +2770,14 @@ export function ChatScreen() {
                 </div>
                 <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
               </Link>
+              <Link to={ROUTES.contextCompression} onClick={() => setSidebarOpen(false)} className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(251,242,245,.92),rgba(232,210,216,.55))' }}>
+                <div style={{ width: 34, height: 34, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, background: 'rgba(213,160,176,.16)', color: 'var(--rose)', fontSize: 17 }}>✦</div>
+                <div className="vstack vstack-2" style={{ minWidth: 0 }}>
+                  <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>上下文压缩</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>压缩历史 · 当前块</span>
+                </div>
+                <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
+              </Link>
               <Link to="/settings" className="hstack hstack-12" style={{ textDecoration: 'none', padding: '13px 14px', borderRadius: 16, background: 'linear-gradient(135deg,rgba(226,218,238,.72),rgba(249,228,232,.76))' }}>
                 <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                   <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>系统配置</span>
