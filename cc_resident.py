@@ -740,7 +740,7 @@ class ResidentSession:
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot
         from chat.cc_effort import cc_effort_snapshot
-        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_managed_claude_runtime
+        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, require_managed_claude_runtime
         with self._turn_state_lock:
             if self._turn_active:
                 raise ResidentError('resident_turn_in_progress')
@@ -769,7 +769,7 @@ class ResidentSession:
         tool_flags = self._build_spawn_tool_flags(env=env)
         surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
         self._kill(quiet=True)
-        base_args = claude_cmd(
+        base_args = claude_cmd_for_version(runtime_version,
             '-p',
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
@@ -965,7 +965,7 @@ class ResidentSession:
             try:
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             except ResidentError as exc:
-                if reason != 'runtime_changed' or not str(exc.error_code or '').startswith('claude_runtime_'):
+                if not str(exc.error_code or '').startswith('claude_runtime_'):
                     raise
                 from chat.cc_runtime import active_claude_version
                 expected_active = active_claude_version()
@@ -1048,7 +1048,7 @@ class ResidentSession:
             raise ResidentError('resume_session_id required')
         from chat.cc_model import cc_model_snapshot
         from chat.cc_effort import cc_effort_snapshot
-        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_managed_claude_runtime
+        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, require_managed_claude_runtime
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
@@ -1062,7 +1062,7 @@ class ResidentSession:
             effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
             surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
-            base_args = claude_cmd(
+            base_args = claude_cmd_for_version(runtime_version,
                 '-p',
                 '--input-format', 'stream-json',
                 '--output-format', 'stream-json',
@@ -1269,7 +1269,7 @@ class ResidentSession:
             raise ResidentError('session_id must be uuid') from exc
         from chat.cc_model import cc_model_snapshot
         from chat.cc_effort import cc_effort_snapshot
-        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_managed_claude_runtime
+        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, require_managed_claude_runtime
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
@@ -1283,7 +1283,7 @@ class ResidentSession:
             effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
             surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
-            base_args = claude_cmd(
+            base_args = claude_cmd_for_version(runtime_version,
                 '-p',
                 '--input-format', 'stream-json',
                 '--output-format', 'stream-json',
