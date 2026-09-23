@@ -2,7 +2,7 @@
 Description=Check Claude Code native runtime candidates every six hours
 
 [Timer]
-OnBootSec=20min
+OnActiveSec=20min
 OnUnitActiveSec=6h
 RandomizedDelaySec=5min
 Persistent=true
