@@ -108,7 +108,7 @@ def _generate_claude_code(
         raise BackgroundGenerationError('cc_background_token_unavailable')
 
     from chat.cc_model import cc_model_args_from_identity, cc_model_from_identity
-    from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, repo_root, require_pinned_claude_version
+    from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, repo_root, require_managed_claude_runtime
 
     try:
         expected_model = cc_model_from_identity(authority.model_identity)
@@ -121,14 +121,14 @@ def _generate_claude_code(
     env['CLAUDE_CODE_OAUTH_TOKEN'] = token
     env.pop('ANTHROPIC_API_KEY', None)
     try:
-        require_pinned_claude_version(
+        runtime_version = require_managed_claude_runtime(
             env=env,
             cwd=str(root),
-            root=root,
             timeout=min(float(request.timeout_sec), 60.0),
         )
         proc = subprocess.run(
-            claude_cmd(
+            claude_cmd_for_version(
+                runtime_version,
                 '-p', request.prompt_text,
                 '--output-format', 'stream-json',
                 '--verbose',
@@ -137,7 +137,7 @@ def _generate_claude_code(
                 '--system-prompt', request.system_text,
                 '--safe-mode',
                 '--no-session-persistence',
-                root=root,
+                env=env,
             ) + model_args,
             cwd=str(root),
             env=env,
