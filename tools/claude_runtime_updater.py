@@ -407,7 +407,6 @@ def run_update_check(
         if candidate != retry_rejected:
             write_update_state({'status': 'rejected', 'last_check_at': now, 'channel': channel, 'to': candidate})
             return 'candidate_rejected_previously'
-        forget_rejected_version(candidate)
     write_update_state({
         'status': 'candidate',
         'last_check_at': now,
@@ -419,6 +418,8 @@ def run_update_check(
         _save_rejection(candidate, 'startup_canary_failed')
         return 'candidate_rejected'
     promote_candidate(candidate, channel=channel, checked_at=now)
+    if candidate == retry_rejected:
+        forget_rejected_version(candidate)
     return 'promoted'
 
 
