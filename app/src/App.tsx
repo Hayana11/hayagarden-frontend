@@ -17,9 +17,10 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { MonopolyRoomScreen } from './screens/MonopolyRoomScreen';
 import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewScreen';
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
+import { ContextCompressionScreen } from './screens/ContextCompressionScreen';
 import { ToolroomScreen } from './screens/ToolroomScreen';
 import { useLegacyNativeCompat } from './hooks/useLegacyNativeCompat';
-import { MONOPOLY_ROOM_PATH, ROUTES } from './navigation';
+import { CONTEXT_COMPRESSION_PREVIEW_PATH, MONOPOLY_ROOM_PATH, ROUTES } from './navigation';
 import { resolveRouterBasename } from './routerBasename';
 
 function AppRoutes() {
@@ -41,6 +42,10 @@ function AppRoutes() {
       <Route path={MONOPOLY_ROOM_PATH} element={<MonopolyRoomScreen />} />
       <Route path={ROUTES.dailySoftWindow} element={<DailySoftWindowPreviewScreen />} />
       <Route path={ROUTES.manualContextWindow} element={<ManualContextWindowPreviewScreen />} />
+      <Route path={ROUTES.contextCompression} element={<ContextCompressionScreen />} />
+      {import.meta.env.BASE_URL === '/preview/' ? (
+        <Route path={CONTEXT_COMPRESSION_PREVIEW_PATH} element={<ContextCompressionScreen />} />
+      ) : null}
       <Route path={ROUTES.toolroom} element={<ToolroomScreen />} />
     </Routes>
   );

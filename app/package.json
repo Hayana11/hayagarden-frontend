@@ -25,6 +25,7 @@
     "test:chat-durable-order": "vite-node scripts/test-chat-durable-order.mjs",
     "test:legacy-transcript-window": "vite-node scripts/test-legacy-transcript-window.mjs",
     "test:react-shell-architecture": "vite-node scripts/test-react-shell-architecture.mjs",
+    "test:context-compression-page": "vite-node scripts/test-context-compression-page.mjs",
     "test:typography-semantics": "vite-node scripts/test-typography-semantics.mjs",
     "test:usage-chrome78-runtime": "vite-node scripts/test-usage-chrome78-runtime.mjs",
     "test:page-header-geometry": "vite-node scripts/test-page-header-geometry.mjs",

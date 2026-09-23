@@ -28,7 +28,12 @@ export const ROUTES = {
   dailySoftWindow: '/daily-soft-window',
   manualContextWindow: '/manual-context-window',
   toolroom: '/toolroom',
+  contextCompression: '/context-compression',
 } as const;
+
+// Preview deep-link alias when BrowserRouter basename is `/preview`.
+// SPA links still use ROUTES.contextCompression.
+export const CONTEXT_COMPRESSION_PREVIEW_PATH = `/dash${ROUTES.contextCompression}`;
 
 export type SpaRoute = (typeof ROUTES)[keyof typeof ROUTES];
 
@@ -65,6 +70,7 @@ export const ROUTE_META = {
   profile: { chrome: 'fullscreen', globalNav: false },
   dailySoftWindow: { chrome: 'fullscreen', globalNav: false },
   toolroom: { chrome: 'fullscreen', globalNav: false },
+  contextCompression: { chrome: 'fullscreen', globalNav: false },
 } as const satisfies Record<keyof typeof ROUTES, RouteMeta>;
 
 /** Chrome for dynamic monopoly room routes (`/monopoly/:roomId`). */
@@ -82,6 +88,9 @@ const ROUTE_PATH_TO_KEY = Object.fromEntries(
 
 /** Resolve shell chrome for a React Router pathname (basename already stripped). */
 export function resolveRouteMeta(pathname: string): RouteMeta {
+  if (import.meta.env.BASE_URL === '/preview/' && pathname === CONTEXT_COMPRESSION_PREVIEW_PATH) {
+    return ROUTE_META.contextCompression;
+  }
   if (pathname.startsWith('/monopoly/')) return MONOPOLY_ROUTE_META;
   const key = ROUTE_PATH_TO_KEY[pathname as SpaRoute];
   if (key) return ROUTE_META[key];
