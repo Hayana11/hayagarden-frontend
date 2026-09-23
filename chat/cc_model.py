@@ -17,6 +17,7 @@ import config_store
 
 CC_CHAT_MODEL_KEY = 'CC_CHAT_MODEL'
 CC_MODEL_NOT_ALLOWED = 'CC_MODEL_NOT_ALLOWED'
+CC_MODEL_RUNTIME_INCOMPATIBLE = 'CC_MODEL_RUNTIME_INCOMPATIBLE'
 
 # Curated Claude Code fallback IDs; separate from relay models.json.
 CC_FALLBACK_MODEL_CATALOG: list[dict[str, Any]] = [
@@ -32,6 +33,7 @@ CC_FALLBACK_MODEL_CATALOG: list[dict[str, Any]] = [
         'label': 'Opus 5.5',
         'desc': '新一代旗舰',
         'primary': True,
+        'min_claude_code_version': '2.1.280',
         'dot': '#8a5a72',
     },
     {
@@ -84,7 +86,7 @@ def _is_well_formed_cc_model_id(model_id: str) -> bool:
 def _native_model_catalog_adapter(*, force: bool = False) -> dict[str, Any] | None:
     """Future adapter seam for a stable, machine-readable subscription catalog.
 
-    The pinned Claude Code runtime has no supported account-catalog API.
+    Claude Code has no supported account-catalog API.
     Do not infer one from the interactive /model picker, TUI, HTML, errors,
     or gateway /v1/models. Implement this adapter only after an official,
     non-generative subscription catalog contract is verified.
@@ -103,19 +105,59 @@ def _normalized_model_rows(value: Any) -> list[dict[str, Any]]:
         if not _is_well_formed_cc_model_id(model_id):
             continue
         row: dict[str, Any] = {'id': model_id}
-        for key in ('label', 'desc', 'thinking', 'primary', 'dot'):
+        for key in ('label', 'desc', 'thinking', 'primary', 'dot', 'min_claude_code_version'):
             if key in candidate:
                 row[key] = candidate[key]
         rows.append(row)
     return rows
 
 
-def get_cc_model_catalog(*, force: bool = False) -> dict[str, Any]:
-    """Return native catalog when a stable adapter exists, else safe fallback.
+def _active_runtime_version_for_catalog() -> str | None:
+    try:
+        from chat.cc_runtime import require_managed_claude_runtime
+        return require_managed_claude_runtime(timeout=10.0)
+    except Exception:
+        return None
 
-    Ready means there is a usable selection catalog, not that account
-    entitlements were verified. A fallback response never claims per-account
-    availability and has no synthetic refresh timestamp.
+
+def annotate_runtime_compatibility(
+    models: list[dict[str, Any]], *, runtime_version: str | None = None,
+) -> list[dict[str, Any]]:
+    from chat.cc_runtime import version_tuple
+
+    version = runtime_version if runtime_version is not None else _active_runtime_version_for_catalog()
+    annotated = []
+    for source in models:
+        row = dict(source)
+        required = str(row.get('min_claude_code_version') or '').strip() or None
+        compatible = True
+        if required:
+            try:
+                compatible = bool(version) and version_tuple(version) >= version_tuple(required)
+            except Exception:
+                compatible = False
+        row['runtime_compatible'] = compatible
+        row['runtime_requirement'] = required
+        annotated.append(row)
+    return annotated
+
+
+def cc_model_runtime_compatibility(model_id: str) -> tuple[bool, str | None]:
+    row = next(
+        (item for item in get_cc_model_catalog()['models'] if item.get('id') == str(model_id or '').strip()),
+        None,
+    )
+    if row is None:
+        return False, None
+    decorated = annotate_runtime_compatibility([row])[0]
+    return bool(decorated.get('runtime_compatible')), decorated.get('runtime_requirement')
+
+
+def get_cc_model_catalog(*, force: bool = False) -> dict[str, Any]:
+    """Return a selection catalog annotated against the verified active runtime.
+
+    Catalog availability is not account-entitlement proof. Runtime compatibility
+    is independent and comes only from the managed active-version authority.
     """
     catalog_error = None
     try:
@@ -127,7 +169,7 @@ def get_cc_model_catalog(*, force: bool = False) -> dict[str, Any]:
         models = _normalized_model_rows(native.get('models'))
         if models:
             return {
-                'models': models,
+                'models': annotate_runtime_compatibility(models),
                 'catalog_source': 'native',
                 'catalog_ready': True,
                 'catalog_error': None,
@@ -135,7 +177,7 @@ def get_cc_model_catalog(*, force: bool = False) -> dict[str, Any]:
             }
         catalog_error = 'invalid_native_catalog'
     return {
-        'models': deepcopy(CC_FALLBACK_MODEL_CATALOG),
+        'models': annotate_runtime_compatibility(deepcopy(CC_FALLBACK_MODEL_CATALOG)),
         'catalog_source': 'fallback',
         'catalog_ready': True,
         'catalog_error': catalog_error,
@@ -241,6 +283,16 @@ def set_cc_chat_model(model: str | None) -> dict[str, Any]:
         state['rejected_model'] = value
         state['scope'] = 'cc_chat_model'
         return state
+    if value:
+        compatible, requirement = cc_model_runtime_compatibility(value)
+        if not compatible:
+            state = describe_cc_model_state()
+            state['ok'] = False
+            state['error'] = CC_MODEL_RUNTIME_INCOMPATIBLE
+            state['runtime_requirement'] = requirement
+            state['rejected_model'] = value
+            state['scope'] = 'cc_chat_model'
+            return state
     config_store.set(CC_CHAT_MODEL_KEY, value)
     state = describe_cc_model_state()
     state['ok'] = True
