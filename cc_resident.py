@@ -793,6 +793,13 @@ class ResidentSession:
                 'Claude Code 启动失败',
                 error_code='claude_runtime_startup_failed',
             ) from exc
+        time.sleep(0.1)
+        if self._proc.poll() is not None:
+            self._kill(quiet=True)
+            raise ResidentError(
+                'Claude Code 启动失败',
+                error_code='claude_runtime_startup_failed',
+            )
         if surface_fingerprint is not None:
             self._bound_tool_surface_fingerprint = surface_fingerprint
         # Bind epoch only after a successful spawn. A failed Popen must leave
@@ -896,7 +903,10 @@ class ResidentSession:
                 from chat.cc_runtime import active_claude_version
                 active_runtime_identity = 'claude-code:%s' % active_claude_version()
             except Exception as exc:
-                raise ResidentError('claude_runtime:active_version_unavailable') from exc
+                raise ResidentError(
+                    'Claude Code runtime is unavailable',
+                    error_code='claude_runtime_unavailable',
+                ) from exc
             if active_runtime_identity != stored_runtime_identity:
                 return 'runtime_changed'
         # Never-used residents (_last_used == 0) have no idle age — peek_idle_seconds
@@ -1057,7 +1067,13 @@ class ResidentSession:
             try:
                 runtime_version = require_managed_claude_runtime(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
-                raise ResidentError('claude_runtime:%s' % exc) from exc
+                message = str(exc)
+                code = (
+                    'claude_runtime_below_minimum' if 'below minimum' in message
+                    else 'claude_runtime_version_mismatch' if 'mismatch' in message
+                    else 'claude_runtime_unavailable'
+                )
+                raise ResidentError('Claude Code runtime is unavailable', error_code=code) from exc
             _model, model_identity, model_args = cc_model_snapshot()
             effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
@@ -1084,7 +1100,10 @@ class ResidentSession:
                 self._runtime_identity = self._managed_runtime_identity(runtime_version)
             except Exception as exc:
                 self._proc = None
-                raise ResidentError('staged_spawn_failed:%s' % exc) from exc
+                raise ResidentError(
+                    'Claude Code 启动失败',
+                    error_code='claude_runtime_startup_failed',
+                ) from exc
             if surface_fingerprint is not None:
                 self._bound_tool_surface_fingerprint = surface_fingerprint
             try:
@@ -1278,7 +1297,13 @@ class ResidentSession:
             try:
                 runtime_version = require_managed_claude_runtime(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
-                raise ResidentError('claude_runtime:%s' % exc) from exc
+                message = str(exc)
+                code = (
+                    'claude_runtime_below_minimum' if 'below minimum' in message
+                    else 'claude_runtime_version_mismatch' if 'mismatch' in message
+                    else 'claude_runtime_unavailable'
+                )
+                raise ResidentError('Claude Code runtime is unavailable', error_code=code) from exc
             _model, model_identity, model_args = cc_model_snapshot()
             effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
@@ -1594,16 +1619,14 @@ class ResidentSession:
             except ResidentError as exc:
                 write_started = bool(self._turn_write_started)
                 runtime_identity = str(getattr(self, '_runtime_identity', '') or '')
-                failure_codes = {
-                    'stdin_write_failed',
-                    'provider_stall_timeout',
-                    'provider_hard_timeout',
-                    'result_missing_after_end_turn',
-                    'result_missing_before_terminal',
-                    'provider_error',
-                }
-                if write_started and exc.error_code in failure_codes and runtime_identity.startswith('claude-code:'):
+                runtime_failure_codes = {'stdin_write_failed', 'provider_error'}
+                if (
+                    write_started
+                    and exc.error_code in runtime_failure_codes
+                    and runtime_identity.startswith('claude-code:')
+                ):
                     expected_active = runtime_identity.split(':', 1)[1]
+                    rolled_back = None
                     try:
                         from tools.claude_runtime_updater import rollback_active_runtime
                         rolled_back = rollback_active_runtime(
@@ -1611,18 +1634,17 @@ class ResidentSession:
                             reason='provider_failure_after_stdin',
                         )
                     except Exception:
-                        rolled_back = None
-                    if rolled_back:
-                        self._next_spawn_reason = 'runtime_changed'
-                        self._kill(quiet=True)
-                        safe_error = ResidentError(
-                            'Claude Code 回复失败；本轮消息已提交，未自动重试。',
-                            usage=exc.usage,
-                            diagnostics=exc.diagnostics,
-                            error_code='claude_runtime_post_send_failure',
-                        )
-                        safe_error.runtime_version = expected_active
-                        raise safe_error from exc
+                        pass
+                    self._next_spawn_reason = 'runtime_changed' if rolled_back else 'process_dead'
+                    self._kill(quiet=True)
+                    safe_error = ResidentError(
+                        'Claude Code 回复失败；本轮消息已提交，未自动重试。',
+                        usage=exc.usage,
+                        diagnostics=exc.diagnostics,
+                        error_code='claude_runtime_post_send_failure',
+                    )
+                    safe_error.runtime_version = expected_active
+                    raise safe_error from exc
                 raise
             finally:
                 with self._turn_state_lock:
