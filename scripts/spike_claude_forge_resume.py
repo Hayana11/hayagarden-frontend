@@ -32,8 +32,6 @@ from tools.claude_forge_core import (  # noqa: E402
     verify_work_root,
 )
 from tools.claude_forge_live_gate import (  # noqa: E402
-    CLAUDE_CODE_NPM_SPEC,
-    CLAUDE_CODE_PINNED_VERSION,
     SYSTEM_PROMPT,
     build_live_user_prompt,
     decide_verdict,
@@ -48,12 +46,6 @@ from tools.claude_forge_subprocess import SubprocessRunResult, run_subprocess_wi
 from tools.claude_forge_validator import validate_forged_transcript  # noqa: E402
 from tools.cc_jsonl_usage import claude_project_slug  # noqa: E402
 
-CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'npx')
-CLAUDE_ARGS_PREFIX = (
-    ['--yes', CLAUDE_CODE_NPM_SPEC]
-    if CLAUDE_BIN == 'npx'
-    else []
-)
 PROBE_TIMEOUT_SECONDS = 120
 AUTH_STATUS_TIMEOUT_SECONDS = 60
 ISOLATED_SUBSCRIPTION_AUTH_SOURCE = 'ISOLATED_CLAUDE_APP_SUBSCRIPTION'
@@ -87,23 +79,17 @@ def redact(text: str) -> str:
 
 
 def claude_version_check() -> tuple[str, bool, str]:
-    env = os.environ.copy()
-    env['DISABLE_AUTOUPDATER'] = '1'
-    try:
-        proc = subprocess.run(
-            [CLAUDE_BIN, *CLAUDE_ARGS_PREFIX, '--version'],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            env=env,
-        )
-        raw = (proc.stdout or proc.stderr or '').strip() or 'unknown'
-        ok = CLAUDE_CODE_PINNED_VERSION in raw
-        return raw, ok, '' if ok else f'expected {CLAUDE_CODE_PINNED_VERSION}, got {raw}'
-    except Exception as exc:
-        return f'error:{type(exc).__name__}', False, str(exc)
+    from chat.cc_runtime import require_managed_claude_runtime, service_home
 
+    env = os.environ.copy()
+    env['HOME'] = str(service_home({}))
+    for name in AUTH_PROVIDER_OVERRIDE_VARS:
+        env.pop(name, None)
+    try:
+        version = require_managed_claude_runtime(env=env, timeout=15.0)
+        return version + ' (managed native Claude Code)', True, ''
+    except Exception:
+        return 'managed runtime unavailable', False, 'managed_runtime_unavailable'
 
 def explicit_auth_available() -> tuple[bool, str]:
     if os.environ.get('ANTHROPIC_API_KEY', '').strip():
@@ -123,7 +109,6 @@ def isolated_claude_env(
         for name in AUTH_PROVIDER_OVERRIDE_VARS:
             env.pop(name, None)
     env['CLAUDE_CONFIG_DIR'] = str(claude_home)
-    env['DISABLE_AUTOUPDATER'] = '1'
     return env
 
 
@@ -195,7 +180,7 @@ def isolated_subscription_auth_status(
     env = isolated_claude_env(claude_home, remove_auth_overrides=True)
     try:
         proc = _auth_status_runner(
-            ['npx', '--yes', CLAUDE_CODE_NPM_SPEC, 'auth', 'status'],
+            _managed_claude_cmd('auth', 'status'),
             cwd=str(isolated_cwd),
             env=env,
             capture_output=True,
@@ -320,8 +305,13 @@ def _git(cmd: list[str]) -> str:
         return ''
 
 
+def _managed_claude_cmd(*args: str) -> list[str]:
+    from chat.cc_runtime import claude_cmd
+    return claude_cmd(*args, env={})
+
+
 def _claude_cmd(*args: str) -> list[str]:
-    return [CLAUDE_BIN, *CLAUDE_ARGS_PREFIX, *args]
+    return _managed_claude_cmd(*args)
 
 
 def _run_claude(
@@ -720,7 +710,7 @@ def run_spike(
     report.claude_home = str(claude_home)
 
     if structural_only:
-        version_raw = f'{CLAUDE_CODE_PINNED_VERSION} (pinned; structural-only did not execute Claude)'
+        version_raw = 'managed native runtime (structural-only did not execute Claude)'
         version_ok = True
         version_err = ''
     else:
