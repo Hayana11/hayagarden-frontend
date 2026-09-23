@@ -1058,12 +1058,12 @@ class ToolSurfaceFingerprintTests(unittest.TestCase):
             with (
                 mock.patch("cc_resident.subprocess.Popen", return_value=FakeProc([])),
                 mock.patch(
-                    "chat.cc_runtime.require_pinned_claude_version",
-                    return_value="2.1.220",
+                    "chat.cc_runtime.require_managed_claude_runtime",
+                    return_value="2.1.280",
                 ),
                 mock.patch(
-                    "chat.cc_runtime.claude_cmd",
-                    side_effect=lambda *a, **k: ["claude", *a],
+                    "chat.cc_runtime.claude_cmd_for_version",
+                    side_effect=lambda _version, *a, **k: ["claude", *a],
                 ),
                 mock.patch.object(
                     surface,
