@@ -185,7 +185,7 @@ class UsageEffortTests(unittest.TestCase):
 
 
 
-class EffortRouteTests(unittest.TestCase):
+class _AppRouteTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -257,6 +257,8 @@ class EffortRouteTests(unittest.TestCase):
         cls.config_patch.stop()
         cls.tmp.cleanup()
 
+
+class EffortRouteTests(_AppRouteTestCase):
     def setUp(self):
         conn = sqlite3.connect(config_store.DB_PATH)
         conn.execute('DELETE FROM runtime_config')
@@ -342,11 +344,10 @@ class _FakeHTTPResponse:
         return self.payload
 
 
-class ModelControlRouteTests(unittest.TestCase):
+class ModelControlRouteTests(_AppRouteTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app_module = EffortRouteTests.app_module
-        cls.client = EffortRouteTests.client
+        super().setUpClass()
         cls.codex_client = cls.app_module.codex_app_server.client
 
     @classmethod
@@ -359,7 +360,7 @@ class ModelControlRouteTests(unittest.TestCase):
         def isolated_connect(database, *args, **kwargs):
             raw = os.fspath(database)
             if raw.startswith('/opt/frontend/'):
-                database = str(Path(EffortRouteTests.tmp.name) / Path(raw).name)
+                database = str(Path(cls.tmp.name) / Path(raw).name)
             return real_connect(database, *args, **kwargs)
 
         def isolated_open(file, *args, **kwargs):
@@ -534,7 +535,8 @@ class ModelControlRouteTests(unittest.TestCase):
 
     def test_codex_catalog_failure_does_not_write_runtime_setting(self):
         config_store.set('CODEX_CHAT_MODEL', 'existing-runtime-model')
-        with patch.object(self.codex_client, 'list_models', side_effect=RuntimeError('catalog unavailable')):
+        with patch.object(self.app_module.codex_app_server, 'runtime_status', return_value={'ready': True}), \
+                patch.object(self.codex_client, 'list_models', side_effect=RuntimeError('catalog unavailable')):
             get_response = self.client.get('/api/group-chat/codex-models')
             post_response = self.client.post('/api/group-chat/codex-model', json={'model_id': 'catalog-id'})
         self.assertEqual(get_response.status_code, 502)
