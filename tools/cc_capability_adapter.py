@@ -15,7 +15,7 @@ import shlex
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-from chat.cc_runtime import EXPECTED_CLAUDE_CODE_VERSION
+from chat.cc_runtime import MINIMUM_CLAUDE_CODE_VERSION
 from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
@@ -356,7 +356,7 @@ def diagnose_tool_search(
         )
 
     return {
-        "expected_claude_code_version": EXPECTED_CLAUDE_CODE_VERSION,
+        "minimum_claude_code_version": MINIMUM_CLAUDE_CODE_VERSION,
         "actual_claude_code_version": actual_version or "",
         "anthropic_base_url_class": base_url_class,
         "host_class": host_class,
