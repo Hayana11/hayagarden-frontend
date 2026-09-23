@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LIVE_ROOT = Path(os.environ.get('HAYAGARDEN_LIVE_ROOT', '/opt/frontend'))
+LIVE_ROOT = Path('/opt/frontend')
 SYSTEMD_DIR = Path('/etc/systemd/system')
 SERVICE_NAME = 'hayagarden-claude-runtime-update.service'
 TIMER_NAME = 'hayagarden-claude-runtime-update.timer'
@@ -22,8 +22,10 @@ TIMER_NAME = 'hayagarden-claude-runtime-update.timer'
 
 def _install_systemd_file(source: Path, target: Path) -> None:
     payload = source.read_bytes()
+    if target.is_symlink():
+        raise RuntimeError('existing Claude runtime unit is a symlink; refusing overwrite')
     if target.exists():
-        if target.read_bytes() != payload:
+        if not target.is_file() or target.read_bytes() != payload:
             raise RuntimeError('existing Claude runtime unit differs; refusing overwrite')
         return
     fd, temp_name = tempfile.mkstemp(prefix='.%s.' % target.name, dir=str(target.parent))
@@ -73,51 +75,54 @@ def main() -> int:
     if os.geteuid() != 0:
         print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=requires_root')
         return 2
+
     from chat.cc_runtime import (
         MINIMUM_CLAUDE_CODE_VERSION,
         NATIVE_VERSIONS_RELATIVE,
         active_claude_binary,
-        active_claude_version,
         service_home,
         version_tuple,
         probe_claude_version,
     )
     from chat.claude_runtime_state import (
-        atomic_write,
+        reject_version,
         read_version,
-        runtime_state_dir,
         utc_now_iso,
         write_update_state,
         write_version,
     )
     from tools.claude_runtime_updater import (
+        _native_updater,
         canary_candidate,
         sync_native_update_settings,
         update_locks,
     )
 
+    home = service_home()
+    env = os.environ.copy()
+    env['HOME'] = str(home)
+    legacy_version = _legacy_runtime_version()
+
     with update_locks() as acquired:
         if not acquired:
             print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=lock_busy')
             return 3
-        legacy_version = _legacy_runtime_version()
+
         active = read_version('active-version')
         if active:
             try:
                 if version_tuple(active) < version_tuple(MINIMUM_CLAUDE_CODE_VERSION):
                     raise RuntimeError('active runtime below minimum')
-                if probe_claude_version(active_claude_binary()) != active:
+                if probe_claude_version(active_claude_binary(), env=env) != active:
                     raise RuntimeError('active runtime mismatch')
+                _native_updater(home)
             except Exception:
                 print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=existing_active_unhealthy')
                 return 4
             version = active
         else:
-            home = service_home()
-            env = os.environ.copy()
-            env['HOME'] = str(home)
-            # Official installer owns acquisition; HayaGarden does not scrape
-            # npm/releases or overwrite the retained legacy .claude-runtime.
+            # Anthropic's installer owns downloading/version discovery. Keep
+            # the legacy project-local npm runtime untouched as rollback evidence.
             installer = subprocess.run(
                 ['bash', '-o', 'pipefail', '-c', 'curl -fsSL https://claude.ai/install.sh | bash'],
                 cwd=str(ROOT),
@@ -131,6 +136,12 @@ def main() -> int:
             if installer.returncode != 0:
                 print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=native_install_failed')
                 return 5
+            try:
+                _native_updater(home)
+            except Exception:
+                print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=native_updater_unavailable')
+                return 6
+
             versions = home / NATIVE_VERSIONS_RELATIVE
             candidates = []
             try:
@@ -149,19 +160,37 @@ def main() -> int:
                     continue
             if not candidates:
                 print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=no_supported_native_version')
-                return 6
-            version = max(candidates)[1]
-            if not canary_candidate(version, env=env):
-                print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=initial_canary_failed')
                 return 7
+
+            version = max(candidates)[1]
             checked_at = utc_now_iso()
-            # First migration has no prior active native version. Preserve the
-            # 2.1.220 npm install as rollback evidence; do not remove or edit it.
-            state_dir = runtime_state_dir()
-            state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.chmod(state_dir, 0o700)
-            write_version('last-good-version', version)
             write_version('candidate-version', version)
+            write_update_state({
+                'status': 'candidate',
+                'to': version,
+                'channel': 'latest',
+                'checked_at': checked_at,
+                'last_check_at': checked_at,
+                'canary': 'pending',
+                'last_error': None,
+            })
+            if not canary_candidate(version, env=env):
+                reject_version(version, 'bootstrap_canary_failed')
+                write_update_state({
+                    'status': 'rejected',
+                    'to': version,
+                    'channel': 'latest',
+                    'checked_at': checked_at,
+                    'last_check_at': checked_at,
+                    'canary': 'fail',
+                    'last_error': 'bootstrap_canary_failed',
+                })
+                print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=initial_canary_failed')
+                return 8
+
+            # First native selection has no native predecessor. Preserve the
+            # npm runtime separately; never point production at it implicitly.
+            write_version('last-good-version', version)
             write_update_state({
                 'status': 'promoting',
                 'from': None,
@@ -185,15 +214,20 @@ def main() -> int:
                 'canary': 'pass',
                 'last_error': None,
             })
+
         sync_native_update_settings(enabled=True, channel='latest')
-        _ensure_timer()
-        print(
-            'CLAUDE_RUNTIME_BOOTSTRAP_OK source=native active=%s minimum=%s '
-            'channel=latest auto_update=true legacy_npm_version=%s '
-            'model_generation_requests=0'
-            % (version, MINIMUM_CLAUDE_CODE_VERSION, legacy_version)
-        )
-        return 0
+
+    # Start the timer only after lifecycle locks are released; otherwise an
+    # immediately due OnBootSec timer could race bootstrap and skip its check.
+    _ensure_timer()
+    print(
+        'CLAUDE_RUNTIME_BOOTSTRAP_OK source=native active=%s minimum=%s '
+        'channel=latest auto_update=true legacy_npm_version=%s '
+        'model_generation_requests=0'
+        % (version, MINIMUM_CLAUDE_CODE_VERSION, legacy_version)
+    )
+    return 0
+
 
 
 if __name__ == '__main__':
