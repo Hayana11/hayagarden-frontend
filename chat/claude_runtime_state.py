@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,16 @@ from chat.cc_runtime import (
 )
 
 _ALLOWED_CHANNELS = frozenset({'latest', 'stable'})
+_SAFE_ERROR_CODES = frozenset({
+    'invalid_update_channel', 'active_runtime_below_minimum', 'native_update_failed',
+    'native_updater_unavailable', 'candidate_command_failed', 'startup_canary_failed',
+    'bootstrap_canary_failed', 'last_good_runtime_unavailable', 'provider_failure_after_stdin',
+    'runtime_startup_failed', 'runtime_error',
+})
+_ALLOWED_REJECTION_REASONS = frozenset({
+    'startup_canary_failed', 'bootstrap_canary_failed', 'provider_failure_after_stdin',
+    'runtime_startup_failed', 'runtime_unhealthy',
+})
 _PUBLIC_STATE_KEYS = frozenset({
     'status', 'last_check_at', 'last_promoted_at', 'last_error',
     'from', 'to', 'channel', 'canary', 'checked_at', 'promoted_at',
@@ -29,20 +40,19 @@ def utc_now_iso() -> str:
 def _secure_state_dir() -> Path:
     directory = runtime_state_dir()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        os.chmod(directory, 0o700)
-    except OSError:
-        pass
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError('Claude runtime state directory is invalid')
+    os.chmod(directory, 0o700)
+    metadata = directory.stat()
+    if stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_uid != os.geteuid():
+        raise RuntimeError('Claude runtime state directory permissions are invalid')
     return directory
-
 
 def atomic_write(path: Path, content: bytes, *, mode: int = 0o600) -> None:
     directory = path.parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        os.chmod(directory, 0o700)
-    except OSError:
-        pass
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError('atomic write parent directory is invalid')
     fd, temp_name = tempfile.mkstemp(prefix='.%s.' % path.name, dir=str(directory))
     try:
         os.fchmod(fd, mode)
@@ -119,7 +129,9 @@ def write_update_state(state: dict[str, Any]) -> None:
     for key in _PUBLIC_STATE_KEYS:
         if key in state:
             value = state[key]
-            safe[key] = None if value is None else str(value)[:500]
+            if key == 'last_error' and value is not None and str(value) not in _SAFE_ERROR_CODES:
+                value = 'runtime_error'
+            safe[key] = None if value is None else str(value)[:120]
     payload = json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
     atomic_write(_secure_state_dir() / 'update-state.json', payload)
 
@@ -155,8 +167,11 @@ def reject_version(version: str, reason: str) -> None:
     rejected = read_rejected_versions()
     now = utc_now_iso()
     previous = rejected.get(version) or {}
+    safe_reason = str(reason or 'runtime_unhealthy')
+    if safe_reason not in _ALLOWED_REJECTION_REASONS:
+        safe_reason = 'runtime_unhealthy'
     rejected[version] = {
-        'reason': str(reason or 'candidate_rejected')[:120],
+        'reason': safe_reason,
         'first_seen': previous.get('first_seen') or now,
         'last_seen': now,
     }
@@ -225,27 +240,38 @@ def promote_candidate(
     return {'from': previous, 'to': candidate, 'checked_at': checked, 'promoted_at': promoted}
 
 
-def rollback_to_last_good(*, reason: str) -> Optional[str]:
+def rollback_to_last_good(
+    *,
+    reason: str,
+    expected_active: Optional[str] = None,
+) -> Optional[str]:
     current = active_claude_version()
+    if expected_active is not None and current != expected_active:
+        return None
     last_good = read_version('last-good-version')
     if not last_good or last_good == current:
         write_update_state({'status': 'error', 'last_error': 'last_good_runtime_unavailable'})
         return None
-    reject_version(current, reason)
+    safe_reason = str(reason or 'runtime_unhealthy')
+    if safe_reason not in _ALLOWED_REJECTION_REASONS:
+        safe_reason = 'runtime_unhealthy'
+    # Switch the authority pointer first. Receipts and quarantine follow; a
+    # failed receipt write can never leave a false rollback status in front of
+    # the actual active version.
+    write_version('active-version', last_good)
+    write_version('candidate-version', None)
+    reject_version(current, safe_reason)
     write_update_state({
         'status': 'rolled_back',
         'from': current,
         'to': last_good,
-        'last_error': str(reason or 'runtime_unhealthy')[:120],
+        'last_error': safe_reason,
         'canary': 'fail',
     })
-    write_version('active-version', last_good)
-    write_version('candidate-version', None)
     return last_good
 
-
 def runtime_public_status(*, auto_update: bool, channel: str) -> dict[str, Any]:
-    from chat.cc_runtime import active_claude_binary, runtime_status_dict
+    from chat.cc_runtime import runtime_status_dict
 
     runtime = runtime_status_dict()
     state = read_public_update_state()
