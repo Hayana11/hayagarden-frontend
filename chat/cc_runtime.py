@@ -6,7 +6,6 @@ or npx. Runtime state contains no authentication material.
 """
 from __future__ import annotations
 
-import json
 import os
 import pwd
 import re
@@ -18,11 +17,6 @@ from typing import Any, Optional
 MINIMUM_CLAUDE_CODE_VERSION = '2.1.280'
 RUNTIME_STATE_DIR = Path('/var/lib/hayagarden/claude-runtime')
 NATIVE_VERSIONS_RELATIVE = Path('.local/share/claude/versions')
-
-ARGV_OVERRIDE_ENV = 'HAYA_CLAUDE_ARGV_JSON'
-SKIP_VERSION_PROBE_ENV = 'HAYA_CLAUDE_SKIP_VERSION_PROBE'
-STATE_DIR_OVERRIDE_ENV = 'HAYA_CLAUDE_RUNTIME_STATE_DIR'
-HOME_OVERRIDE_ENV = 'HAYA_CLAUDE_HOME'
 
 _VERSION_RE = re.compile(r'^(\d+)\.(\d+)\.(\d+)$')
 _CACHE_SECONDS = 30.0
@@ -38,15 +32,11 @@ def repo_root() -> Path:
 
 
 def runtime_state_dir() -> Path:
-    override = (os.environ.get(STATE_DIR_OVERRIDE_ENV) or '').strip()
-    return Path(override) if override else RUNTIME_STATE_DIR
+    return RUNTIME_STATE_DIR
 
 
 def service_home(env: Optional[dict[str, str]] = None) -> Path:
     source = env if env is not None else os.environ
-    override = (source.get(HOME_OVERRIDE_ENV) or '').strip()
-    if override:
-        return Path(override).expanduser()
     value = (source.get('HOME') or '').strip()
     if value:
         return Path(value).expanduser()
@@ -169,10 +159,6 @@ def require_managed_claude_runtime(
 ) -> str:
     """Return the verified active version, failing closed below the minimum."""
     floor = version_tuple(minimum_version)
-    if (os.environ.get(SKIP_VERSION_PROBE_ENV) or '').strip().lower() in ('1', 'true', 'yes'):
-        if not (os.environ.get(ARGV_OVERRIDE_ENV) or '').strip():
-            raise ClaudeRuntimeError('version probe bypass requires test argv override')
-        return minimum_version
     version = active_claude_version()
     if version_tuple(version) < floor:
         raise ClaudeRuntimeError('active Claude Code runtime is below minimum version')
@@ -183,25 +169,14 @@ def require_managed_claude_runtime(
         raise ClaudeRuntimeError('active Claude Code runtime version mismatch')
     return actual
 
-
 def claude_runtime_identity(*, env: Optional[dict[str, str]] = None) -> str:
     version = require_managed_claude_runtime(env=env)
     return 'claude-code:%s' % version
 
 
 def claude_argv_prefix(*, env: Optional[dict[str, str]] = None) -> list[str]:
-    """Return a test override or the binary selected by active-version."""
-    raw = (os.environ.get(ARGV_OVERRIDE_ENV) or '').strip()
-    if raw:
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError) as exc:
-            raise ClaudeRuntimeError('%s must be a JSON string array' % ARGV_OVERRIDE_ENV) from exc
-        if not isinstance(parsed, list) or not parsed or not all(isinstance(x, str) and x for x in parsed):
-            raise ClaudeRuntimeError('%s must be a JSON string array' % ARGV_OVERRIDE_ENV)
-        return list(parsed)
+    """Return only the exact native binary selected by active-version."""
     return [str(active_claude_binary(env=env))]
-
 
 def claude_cmd(*args: str, root: Optional[Path] = None, env: Optional[dict[str, str]] = None) -> list[str]:
     del root  # retained as a compatibility keyword; runtime is not repository-local.
