@@ -195,6 +195,7 @@ def candidate_surface_canary(binary: Path, *, env: dict[str, str], stable_second
         '--output-format', 'stream-json',
         '--verbose',
         '--include-partial-messages',
+        '--system-prompt', 'HayaGarden startup canary; no user turn is sent.',
         '--max-turns', '5',
         '--tools', '',
         '--thinking-display', 'summarized',
@@ -367,9 +368,16 @@ def run_update_check(*, force: bool = False) -> str:
         write_update_state({'status': 'up_to_date', 'last_check_at': now, 'channel': channel, 'last_error': None})
         return 'up_to_date'
     write_version('candidate-version', candidate)
-    write_update_state({'status': 'candidate', 'last_check_at': now, 'channel': channel, 'to': candidate})
     if candidate in read_rejected_versions() and not force:
+        write_update_state({'status': 'rejected', 'last_check_at': now, 'channel': channel, 'to': candidate})
         return 'candidate_rejected_previously'
+    write_update_state({
+        'status': 'candidate',
+        'last_check_at': now,
+        'channel': channel,
+        'to': candidate,
+        'canary': 'pending',
+    })
     if not canary_candidate(candidate, env=command_env):
         _save_rejection(candidate, 'startup_canary_failed')
         return 'candidate_rejected'
