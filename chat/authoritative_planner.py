@@ -16,9 +16,9 @@ from typing import Any, Callable, Optional
 
 from chat.cc_model import cc_model_args
 from chat.cc_runtime import (
-    claude_cmd,
+    claude_cmd_for_version,
     repo_root,
-    require_pinned_claude_version,
+    require_managed_claude_runtime,
 )
 
 _PLANNER_TIMEOUT_SEC = 25.0
@@ -189,13 +189,13 @@ def invoke_cc_planner(
     env = os.environ.copy()
     env.pop('ANTHROPIC_API_KEY', None)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = _main_chat_oauth_token()
-    runtime_version = require_pinned_claude_version(
+    runtime_version = require_managed_claude_runtime(
         env=env,
         cwd=str(root),
-        root=root,
         timeout=min(float(timeout_sec), 60.0),
     )
-    argv = claude_cmd(
+    argv = claude_cmd_for_version(
+        runtime_version,
         '-p',
         user_payload,
         '--output-format',
@@ -207,7 +207,7 @@ def invoke_cc_planner(
         '',
         '--system-prompt',
         _SYSTEM_PROMPT,
-        root=root,
+        env=env,
     ) + cc_model_args()
     proc = subprocess.run(
         argv,

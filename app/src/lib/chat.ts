@@ -418,6 +418,9 @@ export interface StreamHandlers {
 export interface StreamResult {
   ok: boolean;
   error?: string;
+  errorCode?: string;
+  runtimeVersion?: string | null;
+  selectedModel?: string | null;
   deferredTool?: ChatToolCall;
   assistantMessageId?: number;
   canonicalSha256?: string;
@@ -440,6 +443,11 @@ interface SseEvent {
   last_round_context?: number;
   resident_turn_count?: number;
   respawn_reason?: string;
+  code?: string;
+  error_code?: string;
+  message?: string;
+  runtime_version?: string | null;
+  selected_model?: string | null;
   assistant_message_id?: number;
   canonical_sha256?: string;
 }
@@ -585,7 +593,12 @@ export async function streamChatReply(
             break;
           }
           case 'err':
-            result = { ok: false, error: String(ev.d ?? '未知错误') };
+            result = { ok: false,
+              error: String(ev.message ?? ev.d ?? '未知错误'),
+              errorCode: String(ev.error_code ?? ev.code ?? '') || undefined,
+              runtimeVersion: ev.runtime_version ? String(ev.runtime_version) : null,
+              selectedModel: ev.selected_model ? String(ev.selected_model) : null,
+            };
             break;
           default:
             break; // workspace_job / tool_progress / future events

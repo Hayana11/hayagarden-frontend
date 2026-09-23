@@ -85,7 +85,7 @@ class NightlyForgeFocusedTests(unittest.TestCase):
     def test_07_auth_failure_skips_live_resume(self):
         """Item 7: auth fail ⇒ no live resume."""
         with mock.patch.object(nf, 'check_claude_pin', return_value={
-            'ok': True, 'version_raw': '2.1.220', 'pinned': '2.1.220', 'reason': '',
+            'ok': True, 'version': '2.1.280', 'version_raw': '2.1.280 (Claude Code)', 'minimum_version': '2.1.280', 'reason': '',
         }), mock.patch.object(
             nf, 'probe_nightly_auth', return_value=(False, 'isolated_auth_not_logged_in'),
         ), mock.patch.object(
@@ -107,7 +107,7 @@ class NightlyForgeFocusedTests(unittest.TestCase):
     def test_08_model_not_started_is_environment_blocked(self):
         """Item 8: process never started ⇒ ENVIRONMENT_BLOCKED."""
         with mock.patch.object(nf, 'check_claude_pin', return_value={
-            'ok': True, 'version_raw': '2.1.220', 'pinned': '2.1.220', 'reason': '',
+            'ok': True, 'version': '2.1.280', 'version_raw': '2.1.280 (Claude Code)', 'minimum_version': '2.1.280', 'reason': '',
         }), mock.patch.object(
             nf, 'probe_nightly_auth',
             return_value=(True, 'ISOLATED_CLAUDE_APP_SUBSCRIPTION'),
@@ -149,7 +149,7 @@ class NightlyForgeFocusedTests(unittest.TestCase):
             }
 
         with mock.patch.object(nf, 'check_claude_pin', return_value={
-            'ok': True, 'version_raw': '2.1.220', 'pinned': '2.1.220', 'reason': '',
+            'ok': True, 'version': '2.1.280', 'version_raw': '2.1.280 (Claude Code)', 'minimum_version': '2.1.280', 'reason': '',
         }), mock.patch.object(
             nf, 'probe_nightly_auth',
             return_value=(True, 'ISOLATED_CLAUDE_APP_SUBSCRIPTION'),

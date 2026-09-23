@@ -1972,7 +1972,7 @@ def config_set_model():
     if provider == 'claude_code':
         # MODEL-1B: model=null / "" → default; non-empty → explicit CC_CHAT_MODEL.
         # Non-catalog ids (incl. relay aliases) → 400, config unchanged.
-        from chat.cc_model import CC_MODEL_NOT_ALLOWED
+        from chat.cc_model import CC_MODEL_NOT_ALLOWED, CC_MODEL_RUNTIME_INCOMPATIBLE
         if 'model' not in data:
             return jsonify({'error': 'missing model'}), 400
         raw = data.get('model')
@@ -1982,6 +1982,8 @@ def config_set_model():
             result = set_cc_chat_model(raw)
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+        if result.get('error') == CC_MODEL_RUNTIME_INCOMPATIBLE:
+            return jsonify(result), 409
         if result.get('error') == CC_MODEL_NOT_ALLOWED or result.get('ok') is False:
             return jsonify(result), 400
         return jsonify(result)
@@ -2072,6 +2074,95 @@ def config_set_effort():
     result = dict(result)
     result['provider'] = 'claude_code'
     return jsonify(result)
+
+
+def _claude_runtime_update_preferences():
+    enabled_value = config_store.get('CC_AUTO_UPDATE_ENABLED')
+    channel_value = config_store.get('CC_AUTO_UPDATE_CHANNEL')
+    enabled_text = str(enabled_value or 'true').strip().lower()
+    channel = str(channel_value or 'latest').strip().lower()
+    enabled = enabled_text in ('1', 'true', 'yes', 'on')
+    if channel not in ('latest', 'stable'):
+        channel = 'latest'
+    return enabled, channel
+
+
+@app.route('/api/config/claude-runtime', methods=['GET'])
+def config_get_claude_runtime():
+    from chat.claude_runtime_state import runtime_public_status
+    enabled, channel = _claude_runtime_update_preferences()
+    try:
+        payload = runtime_public_status(auto_update=enabled, channel=channel)
+    except Exception:
+        payload = {
+            'active_version': None,
+            'last_good_version': None,
+            'candidate_version': None,
+            'channel': channel,
+            'auto_update': enabled,
+            'status': 'error',
+            'last_check_at': None,
+            'last_promoted_at': None,
+            'last_error': 'runtime_status_unavailable',
+            'minimum_version': '2.1.280',
+        }
+    return jsonify(payload)
+
+
+@app.route('/api/config/claude-runtime', methods=['POST'])
+def config_set_claude_runtime():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data:
+        return jsonify({'error': 'invalid_runtime_settings'}), 400
+    if set(data) - {'auto_update', 'channel'}:
+        return jsonify({'error': 'unsupported_runtime_setting'}), 400
+    enabled, channel = _claude_runtime_update_preferences()
+    if 'auto_update' in data:
+        if not isinstance(data['auto_update'], bool):
+            return jsonify({'error': 'auto_update must be boolean'}), 400
+        enabled = data['auto_update']
+    if 'channel' in data:
+        if not isinstance(data['channel'], str) or data['channel'] not in ('latest', 'stable'):
+            return jsonify({'error': 'invalid_update_channel'}), 400
+        channel = data['channel']
+    try:
+        from tools.claude_runtime_updater import sync_native_update_settings, update_locks
+        with update_locks() as acquired:
+            if not acquired:
+                return jsonify({'error': 'CLAUDE_RUNTIME_UPDATE_BUSY'}), 409
+            sync_native_update_settings(enabled=enabled, channel=channel)
+            config_store.set('CC_AUTO_UPDATE_ENABLED', 'true' if enabled else 'false')
+            config_store.set('CC_AUTO_UPDATE_CHANNEL', channel)
+    except Exception:
+        return jsonify({'error': 'CLAUDE_RUNTIME_SETTINGS_UNAVAILABLE'}), 503
+    from chat.claude_runtime_state import runtime_public_status
+    return jsonify(runtime_public_status(auto_update=enabled, channel=channel))
+
+
+@app.route('/api/config/claude-runtime/check', methods=['POST'])
+def config_check_claude_runtime():
+    import subprocess as _subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+    from chat.cc_runtime import service_home
+
+    script = _Path(__file__).resolve().parent / 'tools' / 'claude_runtime_updater.py'
+    env = os.environ.copy()
+    env['HOME'] = str(service_home(env))
+    try:
+        _subprocess.Popen(
+            [_sys.executable, str(script), '--manual'],
+            cwd=str(_Path(__file__).resolve().parent),
+            env=env,
+            stdin=_subprocess.DEVNULL,
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError:
+        return jsonify({'error': 'CLAUDE_RUNTIME_UPDATER_UNAVAILABLE'}), 503
+    return jsonify({'ok': True, 'status': 'checking', 'model_generation_requests': 0}), 202
 
 
 @app.route('/api/config/model-catalog', methods=['GET'])

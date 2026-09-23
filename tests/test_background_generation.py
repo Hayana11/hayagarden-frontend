@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -63,7 +64,16 @@ class BackgroundGenerationTests(unittest.TestCase):
         return mock.patch('chat.background_generation.subprocess.run', return_value=proc)
 
     def _cc_runtime(self):
-        return mock.patch('chat.cc_runtime.require_pinned_claude_version', return_value='2.1.220')
+        stack = ExitStack()
+        stack.enter_context(mock.patch(
+            'chat.cc_runtime.require_managed_claude_runtime',
+            return_value='2.1.280',
+        ))
+        stack.enter_context(mock.patch(
+            'chat.cc_runtime.claude_cmd_for_version',
+            side_effect=lambda _version, *args, **kwargs: ['/managed/2.1.280', *args],
+        ))
+        return stack
 
     def test_cc_explicit_model_is_frozen_and_payload_is_transparent(self):
         authority = GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5')

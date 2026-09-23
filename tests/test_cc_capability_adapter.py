@@ -360,7 +360,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             diag["tool_search_status"],
             {"AVAILABLE", "PRELOAD_FALLBACK", "ENVIRONMENT_BLOCKED"},
         )
-        self.assertEqual(diag["expected_claude_code_version"], "2.1.220")
+        self.assertEqual(diag["minimum_claude_code_version"], "2.1.280")
         self.assertEqual(diag["anthropic_base_url_class"], "absent")
         self.assertFalse(diag["enable_tool_search_set"])
         # Current production-shaped env (no ENABLE_TOOL_SEARCH) => preload fallback.

@@ -117,11 +117,17 @@ class ResidentLeaseIsolationTests(unittest.TestCase):
                 }
 
             resident._build_spawn_tool_flags = mock.Mock(side_effect=fake_spawn_flags)
-            with mock.patch("chat.cc_runtime.require_pinned_claude_version"), \
-                 mock.patch("chat.cc_runtime.claude_cmd", return_value=["claude"]), \
-                 mock.patch("chat.cc_model.cc_model_snapshot", return_value=("model", "identity", [])), \
+            with mock.patch(
+                 "chat.cc_runtime.require_managed_claude_runtime",
+                 return_value="2.1.280",
+             ), mock.patch(
+                 "chat.cc_runtime.claude_cmd_for_version",
+                 side_effect=lambda _version, *a, **k: ["claude", *a],
+             ), \
+                 mock.patch("chat.cc_model.cc_model_snapshot", return_value=("", "default", [])), \
                  mock.patch("cc_resident.subprocess.Popen") as popen, \
                  mock.patch("tools.cc_tool_surface.capture_tool_surface_snapshot", return_value={}):
+                popen.return_value.poll.return_value = None
                 resident._spawn(
                     "SYS",
                     {"UH_A0_TURN_LEASE_PATH": "/stale", "KEEP": "yes"},

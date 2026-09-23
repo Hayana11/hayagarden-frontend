@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Claude Code native runtime candidates every six hours
+
+[Timer]
+OnActiveSec=20min
+OnUnitActiveSec=6h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=hayagarden-claude-runtime-update.service
+
+[Install]
+WantedBy=timers.target

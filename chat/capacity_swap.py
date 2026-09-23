@@ -45,6 +45,7 @@ REJECTED_NON_CAPACITY_REASONS = frozenset({
     'system_changed',
     'tool_profile_changed',
     'model_changed',
+    'runtime_changed',
     'history_rewrite',
 })
 

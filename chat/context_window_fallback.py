@@ -1085,14 +1085,14 @@ def probe_isolated_subscription_auth(
     Clears API/Bedrock/Vertex overlays and queries ``claude auth status`` under
     ``CLAUDE_CONFIG_DIR``. Does not treat host env tokens as Owner Canary auth.
     """
-    from tools.claude_forge_live_gate import CLAUDE_CODE_NPM_SPEC
+    from chat.cc_runtime import claude_cmd
 
     home = Path(claude_home)
     cwd = Path(isolated_cwd)
     env = isolated_owner_canary_env(home)
     try:
         proc = _auth_status_runner(
-            ['npx', '--yes', CLAUDE_CODE_NPM_SPEC, 'auth', 'status'],
+            claude_cmd('auth', 'status', env={}),
             cwd=str(cwd),
             env=env,
             capture_output=True,

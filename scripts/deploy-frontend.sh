@@ -40,6 +40,11 @@ test -f "$ROOT/requirements.txt" || fail "requirements.txt is missing"
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another deployment is already running"
+# Lock order is deploy → runtime update everywhere; updater skips if deploy owns the first lock.
+RUNTIME_UPDATE_LOCK="/run/lock/hayagarden-claude-runtime-update.lock"
+mkdir -p "$(dirname "$RUNTIME_UPDATE_LOCK")"
+exec 8>"$RUNTIME_UPDATE_LOCK"
+flock -n 8 || fail "Claude runtime updater is active"
 
 cd "$ROOT"
 git fetch --prune "$REMOTE"
@@ -200,9 +205,10 @@ bash "$ROOT/tools/backup.sh"
 protected_overlay_write_manifest "$ROOT" "$current_sha" "$target_sha" "$protected_manifest"
 snapshot_runtime
 
+restart_attempted=0
 rollback() {
   trap - ERR
-  echo "Health check failed; rolling back to $current_sha" >&2
+  echo "Deployment failed; rolling back to $current_sha" >&2
   clear_runtime_for_checkout
   git checkout --detach -f "$current_sha"
   restore_runtime
@@ -210,7 +216,13 @@ rollback() {
   if ! protected_overlay_apply "$ROOT" || ! protected_overlay_verify "$ROOT"; then
     fail "ROLLBACK_PROTECTED_OVERLAY_FAILED"
   fi
-  systemctl restart "${SERVICES[@]}"
+  if [[ "$restart_attempted" -eq 1 ]]; then
+    if bash "$ROOT/scripts/ensure-claude-runtime.sh" "$ROOT"; then
+      systemctl restart "${SERVICES[@]}"
+    else
+      echo "Rollback restart withheld: managed Claude runtime is not healthy." >&2
+    fi
+  fi
 }
 trap rollback ERR
 
@@ -220,8 +232,9 @@ restore_runtime
 protected_overlay_apply "$ROOT"
 protected_overlay_verify "$ROOT"
 install_dashboard
-# Project-local Claude Code pin (not PATH /usr/bin/claude). Fail closed before restart.
+# Managed native runtime is validated before any production service restart.
 bash "$ROOT/scripts/ensure-claude-runtime.sh" "$ROOT"
+restart_attempted=1
 systemctl restart "${SERVICES[@]}"
 health_ok=0
 for attempt in 1 2 3 4 5; do
@@ -245,11 +258,11 @@ if [[ "$health_ok" -ne 1 ]]; then
   echo "Health check failed after 5 attempts." >&2
   false
 fi
-# Post-deploy runtime pin check (fail closed → rollback via ERR trap).
+# Post-deploy runtime contract check; exact patch versions are not deployment pins.
 "$PYTHON" - <<'PY'
-from chat.cc_runtime import EXPECTED_CLAUDE_CODE_VERSION, require_pinned_claude_version
-actual = require_pinned_claude_version()
-print('deploy claude runtime ok:', actual, '(expected', EXPECTED_CLAUDE_CODE_VERSION + ')')
+from chat.cc_runtime import MINIMUM_CLAUDE_CODE_VERSION, require_managed_claude_runtime
+actual = require_managed_claude_runtime()
+print('deploy claude runtime ok:', actual, '(minimum', MINIMUM_CLAUDE_CODE_VERSION + ')')
 PY
 
 mkdir -p "$STATE_DIR"

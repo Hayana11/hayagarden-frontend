@@ -35,6 +35,49 @@ def _chat_stream_exception_text(exc):
             text = text.replace(secret, '<redacted>')
     return text[:1200] or '<empty>'
 
+def _claude_runtime_stream_error(exc):
+    """Expose only stable runtime diagnostics; never forward provider stderr."""
+    code = str(getattr(exc, 'error_code', None) or '')
+    if code != 'CC_MODEL_RUNTIME_INCOMPATIBLE' and not code.startswith('claude_runtime_'):
+        return None
+    if code == 'CC_MODEL_RUNTIME_INCOMPATIBLE':
+        message = '当前 Claude Code 版本不支持这个模型。'
+    elif code == 'claude_runtime_startup_failed':
+        message = 'Claude Code 启动失败。'
+    elif code == 'claude_runtime_post_send_failure':
+        message = 'Claude Code 回复失败；本轮消息已提交，未自动重试。'
+    else:
+        message = 'Claude Code 运行时暂不可用。'
+    version = str(getattr(exc, 'runtime_version', None) or '')
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        version = ''
+        try:
+            from chat.cc_runtime import active_claude_version
+            version = active_claude_version()
+        except Exception:
+            pass
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        version = None
+    model = str(getattr(exc, 'selected_model', None) or '')
+    if not model:
+        try:
+            from chat.cc_model import cc_model_snapshot
+            model = str(cc_model_snapshot()[0] or '')
+        except Exception:
+            model = ''
+    if not re.fullmatch(r'claude-[a-z0-9-]{1,80}', model):
+        model = None
+    return {
+        't': 'err',
+        'd': message,
+        'message': message,
+        'code': code,
+        'error_code': code,
+        'runtime_version': version,
+        'selected_model': model,
+        'retryable': False,
+    }
+
 
 _WAKE_LIVE_TRACE_FIELDS = frozenset({
     'provider', 'mode', 'ready', 'reason', 'detail',
@@ -4608,6 +4651,7 @@ def _cc_resident_stream_gen(
                     claude_session_id=usage.pop('_obs_claude_session_id', _CC_RESIDENT.session_id),
                     model=usage.pop('_obs_model', None),
                     effort=observed_effort,
+                    runtime_identity=getattr(_CC_RESIDENT, '_runtime_identity', None),
                     thinking_config={
                         'thinking_display': 'summarized',
                         'effort': observed_effort,
@@ -7196,16 +7240,20 @@ def _stream_cc_daily_soft_window(
                 'partial_rescue': bool(cleanup.get('partial_rescue_performed')),
             })
             return None
+        runtime_error = _claude_runtime_stream_error(exc)
         if _daily_plan:
             _daily_rt.handle_provider_failure(
                 _daily_plan,
-                error_code=str(exc),
+                error_code=runtime_error['error_code'] if runtime_error else str(exc),
                 resident=_CC_RESIDENT,
             )
         turn_terminal = True
-        yield 'data: ' + json.dumps({
-            't': 'err', 'd': str(exc), 'retryable': False,
-        }) + SSE_END
+        if runtime_error:
+            yield 'data: ' + json.dumps(runtime_error, ensure_ascii=False) + SSE_END
+        else:
+            yield 'data: ' + json.dumps({
+                't': 'err', 'd': str(exc), 'retryable': False,
+            }, ensure_ascii=False) + SSE_END
         yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     finally:

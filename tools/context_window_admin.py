@@ -187,7 +187,7 @@ def _run_isolated_subscription_login(
     official browser flow. Host API/OAuth/Bedrock/Vertex overlays stay removed.
     HOME and CLAUDE_CONFIG_DIR both point inside the Canary temp root.
     """
-    from tools.claude_forge_live_gate import CLAUDE_CODE_NPM_SPEC
+    from chat.cc_runtime import claude_cmd
 
     home = Path(claude_home)
     cwd = Path(isolated_cwd)
@@ -195,10 +195,7 @@ def _run_isolated_subscription_login(
     env['HOME'] = str(_temp_home_for_claude(home))
     try:
         proc = _auth_login_runner(
-            [
-                'npx', '--yes', CLAUDE_CODE_NPM_SPEC,
-                'auth', 'login', '--claudeai',
-            ],
+            claude_cmd('auth', 'login', '--claudeai', env={}),
             cwd=str(cwd),
             env=env,
             check=False,

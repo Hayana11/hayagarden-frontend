@@ -37,8 +37,6 @@ from chat.daily_context import DEFAULT_DB_PATH
 from tools.cc_jsonl_usage import claude_project_slug
 from tools.claude_forge_core import dump_jsonl, session_jsonl_path_for_cwd
 from tools.claude_forge_live_gate import (
-    CLAUDE_CODE_NPM_SPEC,
-    CLAUDE_CODE_PINNED_VERSION,
     SYSTEM_PROMPT,
     parse_raw_jsonl_append,
     parse_stdout_events,
@@ -115,7 +113,20 @@ def _isolated_env(claude_home: Path) -> dict[str, str]:
 
 
 def _claude_cmd(*args: str) -> list[str]:
-    return ['npx', '--yes', CLAUDE_CODE_NPM_SPEC, *args]
+    from chat.cc_runtime import claude_cmd
+    # Resolve the service account's managed native version even while the
+    # subprocess itself uses an isolated temporary HOME for auth canaries.
+    return claude_cmd(*args, env={})
+
+
+def _managed_runtime_version() -> str:
+    from chat.cc_runtime import require_managed_claude_runtime, service_home
+
+    env = os.environ.copy()
+    env['HOME'] = str(service_home({}))
+    for name in AUTH_PROVIDER_OVERRIDE_VARS:
+        env.pop(name, None)
+    return require_managed_claude_runtime(env=env, cwd=str(REPO_ROOT), timeout=15.0)
 
 
 def probe_nightly_auth(claude_home: Path, cwd: Path) -> tuple[bool, str]:
@@ -163,36 +174,24 @@ def run_nightly_login(claude_home: Path, cwd: Path) -> dict[str, Any]:
 
 
 def check_claude_pin() -> dict[str, Any]:
-    env = os.environ.copy()
-    env['DISABLE_AUTOUPDATER'] = '1'
-    for name in AUTH_PROVIDER_OVERRIDE_VARS:
-        env.pop(name, None)
     try:
-        proc = subprocess.run(
-            _claude_cmd('--version'),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            env=env,
-        )
-        raw = (proc.stdout or proc.stderr or '').strip() or 'unknown'
-        ok = CLAUDE_CODE_PINNED_VERSION in raw
+        version = _managed_runtime_version()
+        from chat.cc_runtime import MINIMUM_CLAUDE_CODE_VERSION
         return {
-            'ok': ok,
-            'version_raw': raw,
-            'pinned': CLAUDE_CODE_PINNED_VERSION,
-            'reason': '' if ok else 'claude_pin_mismatch',
+            'ok': True,
+            'version': version,
+            'version_raw': version + ' (Claude Code)',
+            'minimum_version': MINIMUM_CLAUDE_CODE_VERSION,
+            'reason': '',
         }
-    except Exception as exc:
+    except Exception:
         return {
             'ok': False,
+            'version': None,
             'version_raw': '',
-            'pinned': CLAUDE_CODE_PINNED_VERSION,
-            'reason': 'claude_pin_check_failed',
-            'detail': str(exc)[:300],
+            'minimum_version': None,
+            'reason': 'managed_runtime_unavailable',
         }
-
 
 def _plain_user_text_from_event(raw: dict[str, Any]) -> str:
     message = raw.get('message') if isinstance(raw.get('message'), dict) else {}
@@ -348,7 +347,7 @@ def _forge_from_native_jsonl(
         sidechain_policy=SidechainPolicy.EXCLUDE,
         summary_policy=SummaryPolicy.DROP,
         unknown_event_policy=UnknownEventPolicy.DROP,
-        version=CLAUDE_CODE_PINNED_VERSION,
+        version=_managed_runtime_version(),
     )
     transform_result = _transform_impl(graph, request)
     validation = _validate_impl(

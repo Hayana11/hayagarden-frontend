@@ -108,13 +108,20 @@ class SurfaceGenerationTests(unittest.TestCase):
         )
         stack.enter_context(
             mock.patch(
-                "chat.cc_runtime.require_pinned_claude_version",
+                "chat.cc_runtime.require_managed_claude_runtime",
+                return_value="2.1.280",
             )
         )
         stack.enter_context(
             mock.patch(
-                "chat.cc_runtime.claude_cmd",
-                side_effect=lambda *args: list(args),
+                "chat.cc_runtime.claude_cmd_for_version",
+                side_effect=lambda _version, *args, **kwargs: list(args),
+            )
+        )
+        stack.enter_context(
+            mock.patch(
+                "chat.cc_model.cc_model_runtime_compatibility",
+                return_value=(True, None),
             )
         )
         stack.enter_context(
@@ -321,12 +328,16 @@ class SurfaceGenerationTests(unittest.TestCase):
                     side_effect=OSError("spawn failed"),
                 )
             )
-            with self.assertRaises(OSError):
+            with self.assertRaises(cc_resident.ResidentError) as caught:
                 session._spawn(
                     "SYS",
                     {},
                     tool_profile=cc_resident.TOOL_PROFILE_UH_A0,
                 )
+            self.assertEqual(
+                caught.exception.error_code,
+                "claude_runtime_startup_failed",
+            )
         self.assertEqual(
             session.bound_tool_surface_fingerprint,
             "old-surface",

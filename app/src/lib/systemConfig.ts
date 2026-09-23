@@ -147,6 +147,21 @@ export interface ConfigModel {
   thinking: string;
   primary: boolean;
   dot: string;
+  runtimeCompatible?: boolean;
+  runtimeRequirement?: string | null;
+}
+
+export interface ClaudeRuntimeState {
+  activeVersion: string | null;
+  lastGoodVersion: string | null;
+  candidateVersion: string | null;
+  channel: 'latest' | 'stable';
+  autoUpdate: boolean;
+  status: string;
+  lastCheckAt: string | null;
+  lastPromotedAt: string | null;
+  lastError: string | null;
+  minimumVersion: string;
 }
 
 export interface DeepSeekConfig {
@@ -449,6 +464,9 @@ export async function getModelCatalog(force = false): Promise<ChatModelState> {
       thinking?: string;
       primary?: boolean;
       dot?: string;
+      min_claude_code_version?: string | null;
+      runtime_compatible?: boolean;
+      runtime_requirement?: string | null;
     }>;
     current?: string | null;
     provider?: string;
@@ -497,9 +515,75 @@ export async function getModelCatalog(force = false): Promise<ChatModelState> {
         thinking: model.thinking || 'none',
         primary: Boolean(model.primary),
         dot: model.dot || '#B76E79',
+        runtimeCompatible: typeof model.runtime_compatible === 'boolean' ? model.runtime_compatible : false,
+        runtimeRequirement: model.runtime_requirement || model.min_claude_code_version || null,
       }];
     }),
   };
+}
+
+
+export async function getClaudeRuntime(): Promise<ClaudeRuntimeState> {
+  const data = await http.get<{
+    active_version?: string | null;
+    last_good_version?: string | null;
+    candidate_version?: string | null;
+    channel?: 'latest' | 'stable';
+    auto_update?: boolean;
+    status?: string;
+    last_check_at?: string | null;
+    last_promoted_at?: string | null;
+    last_error?: string | null;
+    minimum_version?: string;
+  }>('/api/config/claude-runtime');
+  return {
+    activeVersion: data.active_version ? String(data.active_version) : null,
+    lastGoodVersion: data.last_good_version ? String(data.last_good_version) : null,
+    candidateVersion: data.candidate_version ? String(data.candidate_version) : null,
+    channel: data.channel === 'stable' ? 'stable' : 'latest',
+    autoUpdate: data.auto_update !== false,
+    status: String(data.status || 'unknown'),
+    lastCheckAt: data.last_check_at ? String(data.last_check_at) : null,
+    lastPromotedAt: data.last_promoted_at ? String(data.last_promoted_at) : null,
+    lastError: data.last_error ? String(data.last_error) : null,
+    minimumVersion: String(data.minimum_version || '2.1.280'),
+  };
+}
+
+export async function updateClaudeRuntime(
+  update: Partial<Pick<ClaudeRuntimeState, 'autoUpdate' | 'channel'>>,
+): Promise<ClaudeRuntimeState> {
+  const payload: { auto_update?: boolean; channel?: 'latest' | 'stable' } = {};
+  if (typeof update.autoUpdate === 'boolean') payload.auto_update = update.autoUpdate;
+  if (update.channel) payload.channel = update.channel;
+  const data = await http.post<{
+    active_version?: string | null;
+    last_good_version?: string | null;
+    candidate_version?: string | null;
+    channel?: 'latest' | 'stable';
+    auto_update?: boolean;
+    status?: string;
+    last_check_at?: string | null;
+    last_promoted_at?: string | null;
+    last_error?: string | null;
+    minimum_version?: string;
+  }>('/api/config/claude-runtime', payload);
+  return {
+    activeVersion: data.active_version ? String(data.active_version) : null,
+    lastGoodVersion: data.last_good_version ? String(data.last_good_version) : null,
+    candidateVersion: data.candidate_version ? String(data.candidate_version) : null,
+    channel: data.channel === 'stable' ? 'stable' : 'latest',
+    autoUpdate: data.auto_update !== false,
+    status: String(data.status || 'unknown'),
+    lastCheckAt: data.last_check_at ? String(data.last_check_at) : null,
+    lastPromotedAt: data.last_promoted_at ? String(data.last_promoted_at) : null,
+    lastError: data.last_error ? String(data.last_error) : null,
+    minimumVersion: String(data.minimum_version || '2.1.280'),
+  };
+}
+
+export async function checkClaudeRuntime(): Promise<void> {
+  await http.post<{ ok?: boolean }>('/api/config/claude-runtime/check', {});
 }
 
 export async function getAvailableModels(): Promise<string[]> {

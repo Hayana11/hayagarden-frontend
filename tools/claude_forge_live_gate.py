@@ -9,9 +9,6 @@ from typing import Any, Mapping, Optional
 from tools.claude_forge_core import UUID_RE, _content_blocks, _message_text, new_uuid, scan_unknown_uuid_strings
 from tools.claude_forge_validator import validate_forged_transcript
 
-CLAUDE_CODE_PINNED_VERSION = '2.1.220'
-CLAUDE_CODE_NPM_SPEC = f'@anthropic-ai/claude-code@{CLAUDE_CODE_PINNED_VERSION}'
-
 SYSTEM_PROMPT = '你是隔离 Spike 测试助手。只回复简短确认，不要调用工具。'
 CONVERSATIONAL_EVENT_TYPES = frozenset({'user', 'assistant'})
 RAW_CONVERSATION_NODE = 'conversation_node'
@@ -85,7 +82,7 @@ def prepare_history_for_live_gate(
         'timestamp': leaf.get('timestamp') or '2026-07-30T00:00:00.000Z',
         'sessionId': session_id,
         'cwd': cwd,
-        'version': f'{CLAUDE_CODE_PINNED_VERSION}-spike',
+        'version': 'managed-runtime-spike',
         'message': {
             'role': 'assistant',
             'content': [{'type': 'text', 'text': f'[history-canary:{canary}]'}],

@@ -1,0 +1,14 @@
+[Unit]
+Description=HayaGarden Claude Code native runtime candidate check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=HOME=/root
+UMask=0077
+WorkingDirectory=/opt/frontend
+ExecStart=/usr/bin/python3.11 /opt/frontend/tools/claude_runtime_updater.py --check
+TimeoutStartSec=45min

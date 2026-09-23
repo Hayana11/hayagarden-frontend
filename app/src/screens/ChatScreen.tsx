@@ -449,7 +449,12 @@ export function ChatScreen() {
   const [endpointOnline, setEndpointOnline] = useState<boolean | null>(null);
   const [initialHistoryReady, setInitialHistoryReady] = useState(() => warmSnapshot !== null);
   const [refreshing, setRefreshing] = useState(false);
-  const [chatError, setChatError] = useState<{ message: string; hint: string } | null>(null);
+  const [chatError, setChatError] = useState<{
+    message: string;
+    hint: string;
+    runtimeVersion?: string | null;
+    selectedModel?: string | null;
+  } | null>(null);
   const [gallery, setGallery] = useState<{ items: ChatMediaItem[]; currentIndex: number } | null>(null);
   const [pickedChoices, setPickedChoices] = useState<Record<number, string>>({});
   const [layoutDiag, setLayoutDiag] = useState<LayoutDiagRow[] | null>(null);
@@ -1189,7 +1194,17 @@ export function ChatScreen() {
       if (!res.ok || res.deferredTool) clearLivePresentation();
       if (!res.ok && res.error) {
         if (!ctrl.signal.aborted) {
-          setChatError({ message: res.error, hint: guessChatErrorHint(res.error) });
+          const runtimeFailure = Boolean(res.errorCode?.startsWith('claude_runtime_') || res.errorCode === 'CC_MODEL_RUNTIME_INCOMPATIBLE');
+          setChatError({
+            message: res.errorCode === 'CC_MODEL_RUNTIME_INCOMPATIBLE'
+              ? '当前 Claude Code 版本不支持这个模型。'
+              : res.errorCode === 'claude_runtime_startup_failed'
+                ? 'Claude Code 启动失败。'
+                : res.error,
+            hint: runtimeFailure ? '请检查 Claude Code runtime 与当前模型兼容性。' : guessChatErrorHint(res.error),
+            runtimeVersion: res.runtimeVersion,
+            selectedModel: res.selectedModel,
+          });
           scrollBottom(true);
         }
       }
@@ -2449,6 +2464,8 @@ export function ChatScreen() {
                 textAlign: 'center',
               }}>
                 <span style={{ fontSize: 13, lineHeight: 1.65, letterSpacing: 0.3 }}>{chatError.message}</span>
+                {chatError.runtimeVersion && <span style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(247,237,234,0.82)' }}>当前 runtime：{chatError.runtimeVersion}</span>}
+                {chatError.selectedModel && <span style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(247,237,234,0.82)' }}>模型：{chatError.selectedModel}</span>}
                 <span style={{ fontSize: 11.5, lineHeight: 1.6, color: 'rgba(247,237,234,0.72)' }}>{chatError.hint}</span>
               </div>
             </div>

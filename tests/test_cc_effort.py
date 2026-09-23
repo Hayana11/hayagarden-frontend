@@ -70,8 +70,11 @@ class ResidentEffortTests(unittest.TestCase):
     def _runtime_modules(self):
         runtime = types.ModuleType('chat.cc_runtime')
         runtime.ClaudeRuntimeError = RuntimeError
-        runtime.claude_cmd = lambda *args: ['claude', *args]
-        runtime.require_pinned_claude_version = lambda **kwargs: None
+        runtime.MINIMUM_CLAUDE_CODE_VERSION = '2.1.280'
+        runtime.version_tuple = lambda value: tuple(int(part) for part in str(value).split('.'))
+        runtime.claude_cmd_for_version = lambda version, *args, **kwargs: ['/native/versions/' + version, *args]
+        runtime.require_managed_claude_runtime = lambda **kwargs: '2.1.280'
+        runtime.require_pinned_claude_version = runtime.require_managed_claude_runtime
         history = types.ModuleType('chat.cc_history_rewrite')
         history.current_history_rewrite_epoch = lambda: ''
         history.sanitize_bound_epoch = lambda value: str(value or '')
@@ -448,7 +451,8 @@ class ModelControlRouteTests(_AppRouteTestCase):
             cc_model.cc_model_args_from_identity('explicit:--dangerous')
 
     def test_cc_opus_55_selection_and_default_semantics(self):
-        with patch('urllib.request.urlopen', side_effect=AssertionError('selection must not call a model API')):
+        with patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.280'), \
+             patch('urllib.request.urlopen', side_effect=AssertionError('selection must not call a model API')):
             response = self.client.post('/api/config/model', json={'model': 'claude-opus-5-5'})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(config_store.get('CC_CHAT_MODEL'), 'claude-opus-5-5')
@@ -460,6 +464,14 @@ class ModelControlRouteTests(_AppRouteTestCase):
         self.assertEqual(clear.status_code, 200)
         self.assertEqual(config_store.get('CC_CHAT_MODEL'), '')
         self.assertEqual(cc_model.cc_model_args(), [])
+
+    def test_opus_55_is_rejected_below_runtime_floor_without_config_mutation(self):
+        config_store.set('CC_CHAT_MODEL', 'claude-opus-5')
+        with patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.220'):
+            response = self.client.post('/api/config/model', json={'model': 'claude-opus-5-5'})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['error'], 'CC_MODEL_RUNTIME_INCOMPATIBLE')
+        self.assertEqual(config_store.get('CC_CHAT_MODEL'), 'claude-opus-5')
 
     def test_relay_catalog_does_not_consult_cc_catalog_or_mutate_cc_model(self):
         config_store.set('CHAT_PROVIDER', 'api_relay')
@@ -702,6 +714,73 @@ class ModelControlRouteTests(_AppRouteTestCase):
         self.assertEqual(response.get_json(), {'ok': True, 'text': 'summary'})
         self.assertNotIn(secret, response.get_data(as_text=True))
 
+
+
+class ClaudeRuntimeRouteTests(_AppRouteTestCase):
+    def setUp(self):
+        conn = sqlite3.connect(config_store.DB_PATH)
+        conn.execute('DELETE FROM runtime_config')
+        conn.commit()
+        conn.close()
+        config_store.set('CHAT_PROVIDER', 'claude_code')
+
+    def test_runtime_get_is_read_only_and_secret_free(self):
+        from chat import claude_runtime_state
+
+        safe = {
+            'active_version': '2.1.280',
+            'last_good_version': '2.1.280',
+            'candidate_version': None,
+            'channel': 'latest',
+            'auto_update': True,
+            'status': 'healthy',
+            'last_check_at': None,
+            'last_promoted_at': None,
+            'last_error': None,
+            'minimum_version': '2.1.280',
+        }
+        with patch.object(claude_runtime_state, 'runtime_public_status', return_value=safe):
+            response = self.client.get('/api/config/claude-runtime')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['active_version'], '2.1.280')
+        text = response.get_data(as_text=True).lower()
+        for forbidden in ('oauth', 'token', 'credential', '/root', 'home'):
+            self.assertNotIn(forbidden, text)
+
+    def test_runtime_post_validates_channel_and_only_accepts_allowed_fields(self):
+        import contextlib
+
+        with patch('tools.claude_runtime_updater.update_locks', return_value=contextlib.nullcontext(True)), \
+             patch('tools.claude_runtime_updater.sync_native_update_settings') as sync, \
+             patch('chat.claude_runtime_state.runtime_public_status', return_value={
+                 'active_version': '2.1.280', 'last_good_version': '2.1.280',
+                 'candidate_version': None, 'channel': 'stable', 'auto_update': True,
+                 'status': 'healthy', 'minimum_version': '2.1.280',
+             }):
+            response = self.client.post('/api/config/claude-runtime', json={'channel': 'stable'})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(config_store.get('CC_AUTO_UPDATE_CHANNEL'), 'stable')
+            sync.assert_called_once_with(enabled=True, channel='stable')
+            invalid = self.client.post('/api/config/claude-runtime', json={'channel': 'preview'})
+            extra = self.client.post('/api/config/claude-runtime', json={'channel': 'latest', 'token': 'secret'})
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(extra.status_code, 400)
+        self.assertEqual(config_store.get('CC_AUTO_UPDATE_CHANNEL'), 'stable')
+        self.assertEqual(sync.call_count, 1)
+
+    def test_manual_check_uses_detached_zero_generation_worker(self):
+        import subprocess
+
+        with patch('chat.cc_runtime.service_home', return_value=Path(self.tmp.name)), \
+             patch('subprocess.Popen') as popen:
+            response = self.client.post('/api/config/claude-runtime/check', json={})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()['model_generation_requests'], 0)
+        argv = popen.call_args.args[0]
+        self.assertTrue(argv[1].endswith('claude_runtime_updater.py'))
+        self.assertEqual(argv[-1], '--manual')
+        self.assertIs(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
+        self.assertTrue(popen.call_args.kwargs['start_new_session'])
 
 if __name__ == '__main__':
     unittest.main()
