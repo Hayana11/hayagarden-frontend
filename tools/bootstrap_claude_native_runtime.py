@@ -137,9 +137,26 @@ def main() -> int:
                 print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=native_install_failed')
                 return 5
             try:
-                _native_updater(home)
+                updater = _native_updater(home)
+                # Set the requested native channel before invoking the official
+                # updater, so first migration explicitly downloads latest >= floor.
+                sync_native_update_settings(enabled=True, channel='latest')
             except Exception:
                 print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=native_updater_unavailable')
+                return 6
+
+            download = subprocess.run(
+                [str(updater), 'update'],
+                cwd=str(ROOT),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1800,
+                check=False,
+            )
+            if download.returncode != 0:
+                print('CLAUDE_RUNTIME_BOOTSTRAP_REFUSED=native_update_failed')
                 return 6
 
             versions = home / NATIVE_VERSIONS_RELATIVE
