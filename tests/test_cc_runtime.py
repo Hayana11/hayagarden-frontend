@@ -203,6 +203,50 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         with mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name):
             self.assertIsNone(updater.discover_downloaded_candidate(home=self.home))
 
+    def test_manual_check_preserves_quarantine_without_explicit_retry(self):
+        from tools import claude_runtime_updater as updater
+
+        self._active('2.1.280')
+        self._native('2.1.281')
+        claude_runtime_state.write_version('candidate-version', '2.1.281')
+        claude_runtime_state.reject_version('2.1.281', 'startup_canary_failed')
+        claude_runtime_state.write_update_state({
+            'status': 'rejected',
+            'to': '2.1.281',
+            'canary': 'fail',
+            'last_error': 'startup_canary_failed',
+        })
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
+             mock.patch.object(updater, 'sync_native_update_settings'), \\
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \\
+             mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name), \\
+             mock.patch.object(updater, 'canary_candidate') as canary:
+            self.assertEqual(updater.run_update_check(force=True), 'candidate_rejected_previously')
+        self.assertEqual(claude_runtime_state.read_version('candidate-version'), '2.1.281')
+        self.assertIn('2.1.281', claude_runtime_state.read_rejected_versions())
+        canary.assert_not_called()
+
+    def test_cli_retry_clears_quarantine_only_after_promotion(self):
+        from tools import claude_runtime_updater as updater
+
+        self._active('2.1.280')
+        self._native('2.1.281')
+        claude_runtime_state.reject_version('2.1.281', 'startup_canary_failed')
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
+             mock.patch.object(updater, 'sync_native_update_settings'), \\
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \\
+             mock.patch.object(cc_runtime, 'probe_claude_version', return_value='2.1.281'), \\
+             mock.patch.object(updater, 'canary_candidate', return_value=True):
+            self.assertEqual(
+                updater.run_update_check(retry_rejected='2.1.281'),
+                'promoted',
+            )
+        self.assertEqual(cc_runtime.active_claude_version(), '2.1.281')
+        self.assertEqual(claude_runtime_state.read_version('last-good-version'), '2.1.280')
+        self.assertNotIn('2.1.281', claude_runtime_state.read_rejected_versions())
+
     def test_candidate_canary_runs_only_metadata_and_no_input_surface(self):
         from tools import claude_runtime_updater as updater
 
