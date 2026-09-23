@@ -1056,7 +1056,10 @@ class ToolSurfaceFingerprintTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             resident = ResidentSession(tmp, "mcp__home__light_on", "/tmp/mcp.json")
             with (
-                mock.patch("cc_resident.subprocess.Popen", return_value=FakeProc([])),
+                mock.patch(
+                    "cc_resident.subprocess.Popen",
+                    side_effect=lambda *args, **kwargs: FakeProc([]),
+                ),
                 mock.patch(
                     "chat.cc_runtime.require_managed_claude_runtime",
                     return_value="2.1.280",
