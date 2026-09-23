@@ -90,6 +90,8 @@ def sync_native_update_settings(*, enabled: bool, channel: str) -> None:
     from chat.claude_runtime_state import atomic_write
 
     path = _settings_path()
+    if path.parent.is_symlink() or path.is_symlink():
+        raise RuntimeError('Claude update settings path is invalid')
     try:
         original = path.read_bytes()
         raw = json.loads(original.decode('utf-8'))
@@ -102,6 +104,8 @@ def sync_native_update_settings(*, enabled: bool, channel: str) -> None:
         mode = 0o600
     except (OSError, UnicodeError, ValueError, TypeError) as exc:
         raise RuntimeError('Claude update settings are unreadable') from exc
+    if raw.get('autoUpdates') is bool(enabled) and raw.get('autoUpdatesChannel') == channel:
+        return
     raw['autoUpdates'] = bool(enabled)
     raw['autoUpdatesChannel'] = channel
     payload = (json.dumps(raw, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
@@ -153,7 +157,7 @@ def discover_downloaded_candidate(*, home: Optional[Path] = None) -> Optional[st
         if name_version < version_tuple(MINIMUM_CLAUDE_CODE_VERSION) or name in rejected:
             continue
         try:
-            actual = probe_claude_version(path)
+            actual = probe_claude_version(path, timeout=10.0)
         except Exception:
             continue
         if actual != name or not path.is_file() or not os.access(str(path), os.X_OK):
@@ -373,10 +377,50 @@ def run_update_check(*, force: bool = False) -> str:
     return 'promoted'
 
 
-def run_locked_check(*, force: bool = False) -> str:
+def rollback_active_runtime(*, expected_active: str, reason: str) -> Optional[str]:
+    """Lifecycle-locked, verified rollback; never touches resident processes."""
+    from chat.cc_runtime import (
+        MINIMUM_CLAUDE_CODE_VERSION,
+        active_claude_version,
+        native_claude_binary,
+        probe_claude_version,
+        service_home,
+        version_tuple,
+    )
+    from chat.claude_runtime_state import read_version, rollback_to_last_good, write_update_state
+
+    with update_locks() as acquired:
+        if not acquired:
+            return None
+        try:
+            if active_claude_version() != expected_active:
+                return None
+            last_good = read_version('last-good-version')
+            if not last_good or version_tuple(last_good) < version_tuple(MINIMUM_CLAUDE_CODE_VERSION):
+                write_update_state({'status': 'error', 'last_error': 'last_good_runtime_unavailable'})
+                return None
+            binary = native_claude_binary(last_good)
+            env = os.environ.copy()
+            env['HOME'] = str(service_home(env))
+            if probe_claude_version(binary, env=env, timeout=10.0) != last_good:
+                write_update_state({'status': 'error', 'last_error': 'last_good_runtime_unavailable'})
+                return None
+        except Exception:
+            write_update_state({'status': 'error', 'last_error': 'last_good_runtime_unavailable'})
+            return None
+        return rollback_to_last_good(reason=reason, expected_active=expected_active)
+
+
+def run_locked_check(*, force: bool = False, retry_rejected: Optional[str] = None) -> str:
     with update_locks() as acquired:
         if not acquired:
             return 'skipped_lock_busy'
+        if retry_rejected:
+            from chat.claude_runtime_state import forget_rejected_version
+            try:
+                forget_rejected_version(retry_rejected)
+            except Exception:
+                return 'invalid_retry_version'
         return run_update_check(force=force)
 
 
@@ -386,12 +430,11 @@ def main(argv=None) -> int:
     parser.add_argument('--manual', action='store_true', help='run an owner-triggered check even when automatic updates are disabled')
     parser.add_argument('--retry-rejected')
     args = parser.parse_args(argv)
-    if args.retry_rejected:
-        from chat.claude_runtime_state import forget_rejected_version
-        try:
-            forget_rejected_version(args.retry_rejected)
-        except Exception:
-            print('CLAUDE_RUNTIME_UPDATE_RESULT=invalid_retry_version')
+    result = run_locked_check(
+        force=bool(args.manual or args.retry_rejected),
+        retry_rejected=args.retry_rejected,
+    )
+    print('CLAUDE_RUNTIME_UPDATE_RESULT=invalid_retry_version')
             return 2
     result = run_locked_check(force=bool(args.manual or args.retry_rejected))
     print('CLAUDE_RUNTIME_UPDATE_RESULT=%s MODEL_GENERATION_REQUESTS=0' % result)
