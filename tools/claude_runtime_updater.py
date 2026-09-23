@@ -434,12 +434,14 @@ def main(argv=None) -> int:
         force=bool(args.manual or args.retry_rejected),
         retry_rejected=args.retry_rejected,
     )
-    print('CLAUDE_RUNTIME_UPDATE_RESULT=invalid_retry_version')
-            return 2
-    result = run_locked_check(force=bool(args.manual or args.retry_rejected))
     print('CLAUDE_RUNTIME_UPDATE_RESULT=%s MODEL_GENERATION_REQUESTS=0' % result)
-    return 0 if result not in {'native_update_failed', 'candidate_rejected', 'active_runtime_below_minimum', 'invalid_update_channel'} else 1
-
+    return 0 if result not in {
+        'native_update_failed',
+        'candidate_rejected',
+        'active_runtime_below_minimum',
+        'invalid_update_channel',
+        'invalid_retry_version',
+    } else 1
 
 if __name__ == '__main__':
     raise SystemExit(main())
