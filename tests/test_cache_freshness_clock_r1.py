@@ -87,8 +87,14 @@ def _result_event(*, is_error=False, stop_reason='end_turn'):
 
 
 def _resident(events, *, write_error=None):
-    session = object.__new__(cc_resident.ResidentSession)
-    session._lock = threading.Lock()
+    # Exercise the real ResidentSession lifecycle contract.  These focused
+    # fixtures override process/cache fields below, but must not bypass
+    # __init__ now that turn/runtime serialization lives there.
+    session = cc_resident.ResidentSession(
+        cwd='.',
+        allowed_tools='',
+        mcp_config_path='',
+    )
     session._tool_profile = cc_resident.TOOL_PROFILE_LEGACY
     session._proc = None
     session._session_id = 'session-1'
@@ -305,7 +311,7 @@ class CacheFreshnessBoundaryTests(unittest.TestCase):
 
     def test_candidate_capture_is_single_and_before_write(self):
         source = _function_source(
-            _source_file('cc_resident.py'), 'send_turn', indent='    ',
+            _source_file('cc_resident.py'), '_send_turn_impl', indent='    ',
         )
         self.assertEqual(
             source.count('candidate_cache_refresh_at = time.time()'), 1,
@@ -319,7 +325,7 @@ class CacheFreshnessBoundaryTests(unittest.TestCase):
 
     def test_multi_round_candidate_is_first_request_metadata(self):
         source = _function_source(
-            _source_file('cc_resident.py'), 'send_turn', indent='    ',
+            _source_file('cc_resident.py'), '_send_turn_impl', indent='    ',
         )
         self.assertEqual(
             source.count('candidate_cache_refresh_monotonic = time.monotonic()'),
