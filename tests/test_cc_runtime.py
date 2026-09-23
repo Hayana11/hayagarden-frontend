@@ -154,5 +154,206 @@ class ClaudeRuntimeContractTests(unittest.TestCase):
         self.assertNotIn(str(self.home).lower(), serialized)
 
 
+
+class ClaudeRuntimeLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.state = self.root / 'runtime-state'
+        self.home = self.root / 'service-home'
+        self.versions = self.home / cc_runtime.NATIVE_VERSIONS_RELATIVE
+        self.versions.mkdir(parents=True)
+        self.state_patch = mock.patch.object(cc_runtime, 'RUNTIME_STATE_DIR', self.state)
+        self.home_patch = mock.patch.object(cc_runtime, 'service_home', return_value=self.home)
+        self.state_patch.start()
+        self.home_patch.start()
+        cc_runtime.clear_version_cache()
+
+    def tearDown(self):
+        self.home_patch.stop()
+        self.state_patch.stop()
+        cc_runtime.clear_version_cache()
+        self.temp.cleanup()
+
+    def _native(self, version):
+        binary = self.versions / version
+        binary.write_text('#!/bin/sh\\necho "%s (Claude Code)"\\n' % version, encoding='utf-8')
+        binary.chmod(0o755)
+        return binary
+
+    def _active(self, version='2.1.280'):
+        claude_runtime_state.write_version('active-version', version)
+
+    def test_newer_downloaded_candidate_is_selected_and_rejected_version_is_skipped(self):
+        from tools import claude_runtime_updater as updater
+
+        self._active('2.1.280')
+        for version in ('2.1.280', '2.1.281', '2.1.282'):
+            self._native(version)
+        claude_runtime_state.reject_version('2.1.282', 'startup_canary_failed')
+        with mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name):
+            self.assertEqual(updater.discover_downloaded_candidate(home=self.home), '2.1.281')
+
+    def test_candidate_canary_runs_only_metadata_and_no_input_surface(self):
+        from tools import claude_runtime_updater as updater
+
+        self._native('2.1.281')
+        with mock.patch.object(cc_runtime, 'probe_claude_version', return_value='2.1.281'), \\
+             mock.patch.object(updater, '_run_candidate_command') as command, \\
+             mock.patch.object(updater, 'candidate_surface_canary', return_value=True) as surface:
+            self.assertTrue(updater.canary_candidate('2.1.281', env={'HOME': str(self.home)}))
+        self.assertEqual([call.args[1] for call in command.call_args_list], [['--help'], ['doctor']])
+        self.assertEqual(surface.call_args.args[0], self.versions / '2.1.281')
+        self.assertNotIn('hello', str(command.call_args_list).lower())
+
+    def test_failed_candidate_canary_is_quarantined_without_promotion(self):
+        from tools import claude_runtime_updater as updater
+
+        self._active('2.1.280')
+        self._native('2.1.281')
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
+             mock.patch.object(updater, 'sync_native_update_settings'), \\
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \\
+             mock.patch.object(updater, 'discover_downloaded_candidate', return_value='2.1.281'), \\
+             mock.patch.object(updater, 'canary_candidate', return_value=False):
+            self.assertEqual(updater.run_update_check(), 'candidate_rejected')
+        self.assertEqual(cc_runtime.active_claude_version(), '2.1.280')
+        self.assertEqual(claude_runtime_state.read_version('candidate-version'), '2.1.281')
+        self.assertEqual(
+            claude_runtime_state.read_rejected_versions()['2.1.281']['reason'],
+            'startup_canary_failed',
+        )
+        self.assertEqual(claude_runtime_state.read_public_update_state()['status'], 'rejected')
+
+    def test_candidate_canary_pass_promotes_and_preserves_last_good(self):
+        from tools import claude_runtime_updater as updater
+
+        self._active('2.1.280')
+        self._native('2.1.281')
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
+             mock.patch.object(updater, 'sync_native_update_settings'), \\
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)) as run, \\
+             mock.patch.object(updater, 'discover_downloaded_candidate', return_value='2.1.281'), \\
+             mock.patch.object(updater, 'canary_candidate', return_value=True):
+            self.assertEqual(updater.run_update_check(), 'promoted')
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[-1], 'update')
+        self.assertIs(run.call_args.kwargs['stdin'], updater.subprocess.DEVNULL)
+        self.assertEqual(cc_runtime.active_claude_version(), '2.1.281')
+        self.assertEqual(claude_runtime_state.read_version('last-good-version'), '2.1.280')
+        self.assertIsNone(claude_runtime_state.read_version('candidate-version'))
+
+    def test_verified_last_good_rollback_quarantines_bad_active(self):
+        import contextlib
+        from tools import claude_runtime_updater as updater
+
+        self._active('2.1.281')
+        claude_runtime_state.write_version('last-good-version', '2.1.280')
+        self._native('2.1.280')
+        self._native('2.1.281')
+        with mock.patch.object(updater, 'update_locks', return_value=contextlib.nullcontext(True)), \\
+             mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name):
+            result = updater.rollback_active_runtime(
+                expected_active='2.1.281',
+                reason='provider_failure_after_stdin',
+            )
+        self.assertEqual(result, '2.1.280')
+        self.assertEqual(cc_runtime.active_claude_version(), '2.1.280')
+        self.assertEqual(
+            claude_runtime_state.read_rejected_versions()['2.1.281']['reason'],
+            'provider_failure_after_stdin',
+        )
+
+    def test_runtime_identity_change_is_a_respawn_reason(self):
+        import cc_resident
+
+        session = cc_resident.ResidentSession('/tmp', '', '/tmp/mcp.json')
+        session._proc = mock.Mock()
+        session._proc.poll.return_value = None
+        session._runtime_identity = 'claude-code:2.1.280'
+        session._model_identity = None
+        session._effort_identity = None
+        with mock.patch('chat.cc_history_rewrite.current_history_rewrite_epoch', return_value=''), \\
+             mock.patch('chat.cc_history_rewrite.is_unreadable_epoch', return_value=False), \\
+             mock.patch('chat.cc_history_rewrite.sanitize_bound_epoch', side_effect=lambda value: value), \\
+             mock.patch('chat.cc_model.cc_model_identity', return_value=None), \\
+             mock.patch('chat.cc_effort.cc_effort_identity', return_value=None), \\
+             mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'):
+            self.assertEqual(session._decide_respawn_reason('sys'), 'runtime_changed')
+
+    def test_pre_stdin_startup_failure_rolls_back_and_spawns_last_good_once(self):
+        import cc_resident
+        from tools import claude_runtime_updater as updater
+
+        session = cc_resident.ResidentSession('/tmp', '', '/tmp/mcp.json')
+        calls = []
+
+        def spawn(_system, _env, *, reason, tool_profile):
+            calls.append(reason)
+            if len(calls) == 1:
+                raise cc_resident.ResidentError(
+                    'Claude Code 启动失败',
+                    error_code='claude_runtime_startup_failed',
+                )
+            session._runtime_identity = 'claude-code:2.1.280'
+
+        with mock.patch.object(session, '_decide_respawn_reason', return_value='runtime_changed'), \\
+             mock.patch.object(session, '_alive', return_value=False), \\
+             mock.patch.object(session, '_spawn', side_effect=spawn), \\
+             mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'), \\
+             mock.patch.object(updater, 'rollback_active_runtime', return_value='2.1.280') as rollback:
+            session.ensure_alive('sys', {'HOME': str(self.home)})
+        self.assertEqual(calls, ['runtime_changed', 'runtime_changed'])
+        rollback.assert_called_once_with(
+            expected_active='2.1.281',
+            reason='runtime_startup_failed',
+        )
+        self.assertFalse(session._last_turn_stdin_flushed)
+
+    def test_post_stdin_runtime_failure_never_replays_turn(self):
+        import cc_resident
+        from tools import claude_runtime_updater as updater
+
+        session = cc_resident.ResidentSession('/tmp', '', '/tmp/mcp.json')
+        session._runtime_identity = 'claude-code:2.1.281'
+        attempts = []
+
+        def fail_after_flush(*args, **kwargs):
+            attempts.append(1)
+            session._turn_write_started = True
+            session._turn_stdin_flushed = True
+            raise cc_resident.ResidentError(
+                'provider failed',
+                error_code='provider_error',
+            )
+
+        session._send_turn_impl = fail_after_flush
+        with mock.patch.object(updater, 'rollback_active_runtime', return_value='2.1.280'), \\
+             mock.patch.object(session, '_kill'):
+            with self.assertRaises(cc_resident.ResidentError) as raised:
+                list(session.send_turn('same user turn'))
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(raised.exception.error_code, 'claude_runtime_post_send_failure')
+        self.assertIn('未自动重试', str(raised.exception))
+        self.assertTrue(session._last_turn_stdin_flushed)
+
+    def test_opus_55_runtime_compatibility_and_config_write_gate(self):
+        from chat import cc_model
+
+        opus = {'id': 'claude-opus-5-5', 'min_claude_code_version': '2.1.280'}
+        catalog = {'models': [opus]}
+        with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \\
+             mock.patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.220'), \\
+             mock.patch.object(cc_model.config_store, 'set') as write:
+            result = cc_model.set_cc_chat_model('claude-opus-5-5')
+            self.assertEqual(result['error'], cc_model.CC_MODEL_RUNTIME_INCOMPATIBLE)
+            write.assert_not_called()
+        with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \\
+             mock.patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.280'):
+            self.assertEqual(cc_model.cc_model_runtime_compatibility('claude-opus-5-5')[0], True)
+
+
 if __name__ == '__main__':
     unittest.main()
