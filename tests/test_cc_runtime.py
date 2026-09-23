@@ -391,6 +391,14 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         self.assertEqual(raised.exception.error_code, 'claude_runtime_post_send_failure')
         self.assertIn('未自动重试', str(raised.exception))
         self.assertTrue(session._last_turn_stdin_flushed)
+        self.assertEqual(session._runtime_rollback_pending, '2.1.281')
+        with mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'), \\
+             mock.patch.object(updater, 'rollback_active_runtime', return_value=None), \\
+             mock.patch.object(session, '_spawn') as spawn:
+            with self.assertRaises(cc_resident.ResidentError) as pending:
+                session.ensure_alive('system', {'HOME': str(self.home)})
+            self.assertEqual(pending.exception.error_code, 'claude_runtime_rollback_pending')
+            spawn.assert_not_called()
 
     def test_opus_55_runtime_compatibility_and_config_write_gate(self):
         from chat import cc_model
