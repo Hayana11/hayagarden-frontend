@@ -205,9 +205,10 @@ bash "$ROOT/tools/backup.sh"
 protected_overlay_write_manifest "$ROOT" "$current_sha" "$target_sha" "$protected_manifest"
 snapshot_runtime
 
+restart_attempted=0
 rollback() {
   trap - ERR
-  echo "Health check failed; rolling back to $current_sha" >&2
+  echo "Deployment failed; rolling back to $current_sha" >&2
   clear_runtime_for_checkout
   git checkout --detach -f "$current_sha"
   restore_runtime
@@ -215,7 +216,13 @@ rollback() {
   if ! protected_overlay_apply "$ROOT" || ! protected_overlay_verify "$ROOT"; then
     fail "ROLLBACK_PROTECTED_OVERLAY_FAILED"
   fi
-  systemctl restart "${SERVICES[@]}"
+  if [[ "$restart_attempted" -eq 1 ]]; then
+    if bash "$ROOT/scripts/ensure-claude-runtime.sh" "$ROOT"; then
+      systemctl restart "${SERVICES[@]}"
+    else
+      echo "Rollback restart withheld: managed Claude runtime is not healthy." >&2
+    fi
+  fi
 }
 trap rollback ERR
 
@@ -227,6 +234,7 @@ protected_overlay_verify "$ROOT"
 install_dashboard
 # Managed native runtime is validated before any production service restart.
 bash "$ROOT/scripts/ensure-claude-runtime.sh" "$ROOT"
+restart_attempted=1
 systemctl restart "${SERVICES[@]}"
 health_ok=0
 for attempt in 1 2 3 4 5; do
