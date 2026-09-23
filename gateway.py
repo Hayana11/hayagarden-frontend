@@ -49,14 +49,14 @@ def _claude_runtime_stream_error(exc):
     else:
         message = 'Claude Code 运行时暂不可用。'
     version = str(getattr(exc, 'runtime_version', None) or '')
-    if not re.fullmatch(r'\\d+\\.\\d+\\.\\d+', version):
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         version = ''
         try:
             from chat.cc_runtime import active_claude_version
             version = active_claude_version()
         except Exception:
             pass
-    if not re.fullmatch(r'\\d+\\.\\d+\\.\\d+', version):
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         version = None
     model = str(getattr(exc, 'selected_model', None) or '')
     if not model:
