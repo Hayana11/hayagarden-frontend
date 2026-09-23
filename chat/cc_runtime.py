@@ -1,186 +1,262 @@
-"""Pinned Claude Code runtime contract for production Fyodor / Manual Forge.
+"""Managed native Claude Code runtime resolver.
 
-Production must not invoke bare PATH ``claude`` (global package drift).
-All resident spawns resolve through this module and fail closed when the
-actual CLI version is not ``EXPECTED_CLAUDE_CODE_VERSION``.
+HayaGarden owns the active-version pointer; Anthropic's native installer owns
+acquiring versioned binaries. Production callers never fall back to PATH, npm,
+or npx. Runtime state contains no authentication material.
 """
 from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional
 
-EXPECTED_CLAUDE_CODE_VERSION = '2.1.220'
-CLAUDE_CODE_NPM_PACKAGE = '@anthropic-ai/claude-code'
-CLAUDE_CODE_NPM_SPEC = '%s@%s' % (CLAUDE_CODE_NPM_PACKAGE, EXPECTED_CLAUDE_CODE_VERSION)
-RUNTIME_DIR_NAME = '.claude-runtime'
+MINIMUM_CLAUDE_CODE_VERSION = '2.1.280'
+RUNTIME_STATE_DIR = Path('/var/lib/hayagarden/claude-runtime')
+NATIVE_VERSIONS_RELATIVE = Path('.local/share/claude/versions')
 
-# Optional test/ops override: JSON array argv prefix, e.g. '["/tmp/fake-claude"]'.
 ARGV_OVERRIDE_ENV = 'HAYA_CLAUDE_ARGV_JSON'
-# Optional: skip live --version probe (unit tests only). Still requires override argv.
 SKIP_VERSION_PROBE_ENV = 'HAYA_CLAUDE_SKIP_VERSION_PROBE'
+STATE_DIR_OVERRIDE_ENV = 'HAYA_CLAUDE_RUNTIME_STATE_DIR'
+HOME_OVERRIDE_ENV = 'HAYA_CLAUDE_HOME'
 
-_VERSION_RE = re.compile(r'(\d+\.\d+\.\d+)')
-_cache_lock_version: Optional[tuple[str, str, float]] = None  # (argv_key, version, monotonic)
+_VERSION_RE = re.compile(r'^(\d+)\.(\d+)\.(\d+)$')
+_CACHE_SECONDS = 30.0
+_version_cache: dict[str, tuple[str, float]] = {}
 
 
 class ClaudeRuntimeError(RuntimeError):
-    """Pinned Claude Code runtime missing or version mismatch."""
+    """Managed Claude Code runtime is missing, invalid, or unsupported."""
 
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def runtime_prefix_dir(root: Optional[Path] = None) -> Path:
-    return (root or repo_root()) / RUNTIME_DIR_NAME
+def runtime_state_dir() -> Path:
+    override = (os.environ.get(STATE_DIR_OVERRIDE_ENV) or '').strip()
+    return Path(override) if override else RUNTIME_STATE_DIR
 
 
-def local_claude_bin(root: Optional[Path] = None) -> Optional[Path]:
-    """Return project-local pinned binary if present."""
-    base = (
-        runtime_prefix_dir(root)
-        / 'node_modules'
-        / '@anthropic-ai'
-        / 'claude-code'
-        / 'bin'
-    )
-    for name in ('claude', 'claude.exe'):
-        candidate = base / name
-        if candidate.is_file():
-            return candidate
-    return None
+def service_home(env: Optional[dict[str, str]] = None) -> Path:
+    source = env if env is not None else os.environ
+    override = (source.get(HOME_OVERRIDE_ENV) or '').strip()
+    if override:
+        return Path(override).expanduser()
+    value = (source.get('HOME') or '').strip()
+    if value:
+        return Path(value).expanduser()
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError, AttributeError):
+        raise ClaudeRuntimeError('service home is unavailable')
 
 
-def claude_argv_prefix(root: Optional[Path] = None) -> list[str]:
-    """Argv prefix that starts the pinned Claude Code consumer.
-
-    Prefer ``.claude-runtime`` install (deploy-managed). Fall back to
-    ``npx --yes @anthropic-ai/claude-code@EXPECTED`` so the pin is still
-    explicit when the local tree is not yet installed.
-    Never returns bare ``['claude']``.
-    """
-    raw = (os.environ.get(ARGV_OVERRIDE_ENV) or '').strip()
-    if raw:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, list) or not parsed or not all(isinstance(x, str) for x in parsed):
-            raise ClaudeRuntimeError('%s must be a JSON string array' % ARGV_OVERRIDE_ENV)
-        return list(parsed)
-
-    local = local_claude_bin(root)
-    if local is not None:
-        return [str(local)]
-    return ['npx', '--yes', CLAUDE_CODE_NPM_SPEC]
+def version_tuple(value: str) -> tuple[int, int, int]:
+    text = str(value or '').strip()
+    match = _VERSION_RE.fullmatch(text)
+    if not match:
+        raise ClaudeRuntimeError('invalid Claude Code version')
+    return tuple(int(part) for part in match.groups())
 
 
-def claude_cmd(*args: str, root: Optional[Path] = None) -> list[str]:
-    return claude_argv_prefix(root=root) + [str(a) for a in args]
+def _read_version_file(name: str) -> str:
+    path = runtime_state_dir() / name
+    try:
+        value = path.read_text(encoding='ascii').strip()
+    except OSError as exc:
+        raise ClaudeRuntimeError('%s is unavailable' % name) from exc
+    version_tuple(value)
+    return value
+
+
+def active_claude_version() -> str:
+    """Read the sole production version authority; never infer from PATH."""
+    return _read_version_file('active-version')
+
+
+def last_good_claude_version() -> Optional[str]:
+    path = runtime_state_dir() / 'last-good-version'
+    try:
+        value = path.read_text(encoding='ascii').strip()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ClaudeRuntimeError('last-good-version is unreadable') from exc
+    if not value:
+        return None
+    version_tuple(value)
+    return value
+
+
+def native_claude_binary(version: str, *, env: Optional[dict[str, str]] = None) -> Path:
+    version_tuple(version)
+    versions_dir = service_home(env) / NATIVE_VERSIONS_RELATIVE
+    binary = versions_dir / version
+    try:
+        resolved_root = versions_dir.resolve(strict=True)
+        resolved_binary = binary.resolve(strict=True)
+    except OSError as exc:
+        raise ClaudeRuntimeError('managed native Claude Code binary is missing') from exc
+    if resolved_binary.parent != resolved_root or not resolved_binary.is_file():
+        raise ClaudeRuntimeError('managed native Claude Code binary is invalid')
+    if not os.access(str(resolved_binary), os.X_OK):
+        raise ClaudeRuntimeError('managed native Claude Code binary is not executable')
+    return resolved_binary
+
+
+def active_claude_binary(*, env: Optional[dict[str, str]] = None) -> Path:
+    """Resolve active-version to exactly native versions/<version>."""
+    return native_claude_binary(active_claude_version(), env=env)
 
 
 def parse_claude_version_text(text: str) -> str:
-    match = _VERSION_RE.search(text or '')
+    match = re.search(r'(?<!\d)(\d+\.\d+\.\d+)(?!\d)', text or '')
     if not match:
-        raise ClaudeRuntimeError('unparseable claude --version output: %r' % (text or '')[:200])
-    return match.group(1)
+        raise ClaudeRuntimeError('Claude Code version output is invalid')
+    value = match.group(1)
+    version_tuple(value)
+    return value
+
+
+def _probe_binary(binary: Path, *, env=None, cwd=None, timeout=30.0) -> str:
+    key = str(binary)
+    now = time.monotonic()
+    cached = _version_cache.get(key)
+    if cached and (now - cached[1]) < _CACHE_SECONDS:
+        return cached[0]
+    try:
+        proc = subprocess.run(
+            [str(binary), '--version'],
+            cwd=cwd or str(repo_root()),
+            env=env or os.environ.copy(),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ClaudeRuntimeError('Claude Code version probe failed') from exc
+    if proc.returncode != 0:
+        raise ClaudeRuntimeError('Claude Code version probe failed')
+    value = parse_claude_version_text((proc.stdout or '') + '\n' + (proc.stderr or ''))
+    _version_cache[key] = (value, now)
+    return value
 
 
 def probe_claude_version(
+    binary: Optional[str | Path] = None,
     *,
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
-    root: Optional[Path] = None,
-    timeout: float = 60.0,
+    timeout: float = 30.0,
 ) -> str:
-    prefix = claude_argv_prefix(root=root)
-    proc = subprocess.run(
-        prefix + ['--version'],
-        cwd=cwd or str(repo_root()),
-        env=env or os.environ.copy(),
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
-    blob = ((proc.stdout or '') + '\n' + (proc.stderr or '')).strip()
-    if proc.returncode != 0:
-        raise ClaudeRuntimeError(
-            'claude --version failed (exit %s): %s' % (proc.returncode, blob[:300])
-        )
-    return parse_claude_version_text(blob)
+    """Probe one exact binary (active native binary by default)."""
+    path = Path(binary) if binary is not None else active_claude_binary(env=env)
+    return _probe_binary(path, env=env, cwd=cwd, timeout=timeout)
 
 
-def require_pinned_claude_version(
+def require_managed_claude_runtime(
     *,
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
-    root: Optional[Path] = None,
-    timeout: float = 60.0,
+    minimum_version: str = MINIMUM_CLAUDE_CODE_VERSION,
+    timeout: float = 30.0,
 ) -> str:
-    """Return actual version; raise ClaudeRuntimeError on mismatch/unavailable."""
-    global _cache_lock_version
-    prefix = claude_argv_prefix(root=root)
-    argv_key = json.dumps(prefix)
-
-    if (os.environ.get(SKIP_VERSION_PROBE_ENV) or '').strip() in ('1', 'true', 'yes'):
-        # Tests supply a fake argv; treat expected pin as satisfied.
-        return EXPECTED_CLAUDE_CODE_VERSION
-
-    now = time.monotonic()
-    cached = _cache_lock_version
-    if cached and cached[0] == argv_key and (now - cached[2]) < 300.0:
-        actual = cached[1]
-    else:
-        actual = probe_claude_version(env=env, cwd=cwd, root=root, timeout=timeout)
-        _cache_lock_version = (argv_key, actual, now)
-
-    if actual != EXPECTED_CLAUDE_CODE_VERSION:
-        raise ClaudeRuntimeError(
-            'claude runtime version mismatch: expected %s, got %s (argv=%s)'
-            % (EXPECTED_CLAUDE_CODE_VERSION, actual, prefix)
-        )
+    """Return the verified active version, failing closed below the minimum."""
+    floor = version_tuple(minimum_version)
+    if (os.environ.get(SKIP_VERSION_PROBE_ENV) or '').strip().lower() in ('1', 'true', 'yes'):
+        if not (os.environ.get(ARGV_OVERRIDE_ENV) or '').strip():
+            raise ClaudeRuntimeError('version probe bypass requires test argv override')
+        return minimum_version
+    version = active_claude_version()
+    if version_tuple(version) < floor:
+        raise ClaudeRuntimeError('active Claude Code runtime is below minimum version')
+    binary = active_claude_binary(env=env)
+    actual = probe_claude_version(binary, env=env, cwd=cwd, timeout=timeout)
+    if actual != version:
+        _version_cache.pop(str(binary), None)
+        raise ClaudeRuntimeError('active Claude Code runtime version mismatch')
     return actual
 
 
-def pinned_runtime_available(
-    *,
-    env: Optional[dict[str, str]] = None,
-    cwd: Optional[str] = None,
-    root: Optional[Path] = None,
-) -> bool:
+def claude_runtime_identity(*, env: Optional[dict[str, str]] = None) -> str:
+    version = require_managed_claude_runtime(env=env)
+    return 'claude-code:%s' % version
+
+
+def claude_argv_prefix(*, env: Optional[dict[str, str]] = None) -> list[str]:
+    """Return a test override or the binary selected by active-version."""
+    raw = (os.environ.get(ARGV_OVERRIDE_ENV) or '').strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ClaudeRuntimeError('%s must be a JSON string array' % ARGV_OVERRIDE_ENV) from exc
+        if not isinstance(parsed, list) or not parsed or not all(isinstance(x, str) and x for x in parsed):
+            raise ClaudeRuntimeError('%s must be a JSON string array' % ARGV_OVERRIDE_ENV)
+        return list(parsed)
+    return [str(active_claude_binary(env=env))]
+
+
+def claude_cmd(*args: str, root: Optional[Path] = None, env: Optional[dict[str, str]] = None) -> list[str]:
+    del root  # retained as a compatibility keyword; runtime is not repository-local.
+    return claude_argv_prefix(env=env) + [str(arg) for arg in args]
+
+
+def require_pinned_claude_version(**kwargs) -> str:
+    """Deprecated compatibility alias; enforces the managed minimum contract."""
+    return require_managed_claude_runtime(**kwargs)
+
+
+def pinned_runtime_available(*, env=None, cwd=None, root=None) -> bool:
+    del root
     try:
-        require_pinned_claude_version(env=env, cwd=cwd, root=root, timeout=30.0)
+        require_managed_claude_runtime(env=env, cwd=cwd, timeout=15.0)
         return True
     except Exception:
         return False
 
 
 def clear_version_cache() -> None:
-    global _cache_lock_version
-    _cache_lock_version = None
+    _version_cache.clear()
 
 
-def runtime_status_dict(
-    *,
-    env: Optional[dict[str, str]] = None,
-    cwd: Optional[str] = None,
-    root: Optional[Path] = None,
-) -> dict[str, Any]:
-    prefix = claude_argv_prefix(root=root)
-    out: dict[str, Any] = {
-        'expected_version': EXPECTED_CLAUDE_CODE_VERSION,
-        'npm_spec': CLAUDE_CODE_NPM_SPEC,
-        'argv_prefix': prefix,
-        'local_bin': str(local_claude_bin(root) or ''),
-        'ok': False,
-        'actual_version': '',
-        'error': '',
-    }
+def runtime_status_dict(*, env=None, cwd=None, root=None) -> dict[str, Any]:
+    del root
+    active = None
+    binary_exists = False
+    error_code = None
     try:
-        out['actual_version'] = require_pinned_claude_version(env=env, cwd=cwd, root=root)
-        out['ok'] = True
-    except Exception as exc:
-        out['error'] = str(exc)
-    return out
+        active = active_claude_version()
+        binary = active_claude_binary(env=env)
+        binary_exists = True
+        actual = probe_claude_version(binary, env=env, cwd=cwd, timeout=10.0)
+        if actual != active:
+            raise ClaudeRuntimeError('active Claude Code runtime version mismatch')
+        if version_tuple(active) < version_tuple(MINIMUM_CLAUDE_CODE_VERSION):
+            error_code = 'runtime_below_minimum'
+        else:
+            error_code = None
+    except ClaudeRuntimeError as exc:
+        code = str(exc)
+        if 'below minimum' in code:
+            error_code = 'runtime_below_minimum'
+        elif 'missing' in code or 'unavailable' in code:
+            error_code = 'runtime_unavailable'
+        elif 'mismatch' in code:
+            error_code = 'runtime_version_mismatch'
+        else:
+            error_code = 'runtime_invalid'
+    return {
+        'minimum_version': MINIMUM_CLAUDE_CODE_VERSION,
+        'active_version': active,
+        'binary_exists': binary_exists,
+        'identity': ('claude-code:%s' % active) if active and binary_exists else None,
+        'status': 'healthy' if error_code is None and active else ('uninitialized' if active is None else 'error'),
+        'error_code': error_code,
+    }
