@@ -341,6 +341,9 @@ def run_update_check(
     if channel not in {'latest', 'stable'}:
         write_update_state({'status': 'error', 'last_error': 'invalid_update_channel'})
         return 'invalid_update_channel'
+    from chat.claude_runtime_state import read_public_update_state
+    prior_state = read_public_update_state()
+    prior_candidate = read_version('candidate-version')
     now = __import__('chat.claude_runtime_state', fromlist=['utc_now_iso']).utc_now_iso()
     write_update_state({'status': 'checking', 'last_check_at': now, 'channel': channel, 'last_error': None})
     sync_native_update_settings(enabled=enabled, channel=channel)
@@ -394,8 +397,6 @@ def run_update_check(
     else:
         candidate = discover_downloaded_candidate(home=home)
     if candidate is None:
-        prior_state = read_public_update_state()
-        prior_candidate = read_version('candidate-version')
         if prior_state.get('status') == 'rejected' and prior_candidate:
             write_update_state({'last_check_at': now, 'channel': channel})
             return 'candidate_rejected_previously'
