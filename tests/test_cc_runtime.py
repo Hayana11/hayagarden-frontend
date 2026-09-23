@@ -383,7 +383,7 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
             )
 
         session._send_turn_impl = fail_after_flush
-        with mock.patch.object(updater, 'rollback_active_runtime', return_value='2.1.280'), \
+        with mock.patch.object(updater, 'rollback_active_runtime', return_value=None), \
              mock.patch.object(session, '_kill'):
             with self.assertRaises(cc_resident.ResidentError) as raised:
                 list(session.send_turn('same user turn'))
