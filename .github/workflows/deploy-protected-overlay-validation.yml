@@ -68,7 +68,7 @@ EXPECTED_FILES
           actual_files="$(git diff --name-only "$base" "$HEAD_SHA" | LC_ALL=C sort)"
           if [[ "$actual_files" != "$expected_files" ]]; then
             echo "Unexpected PR file set." >&2
-            diff -u <(printf '%s\\n' "$expected_files") <(printf '%s\\n' "$actual_files") >&2 || true
+            diff -u <(printf '%s\n' "$expected_files") <(printf '%s\n' "$actual_files") >&2 || true
             exit 1
           fi
 
