@@ -593,8 +593,7 @@ export async function streamChatReply(
             break;
           }
           case 'err':
-            result = {
-              ok: false,
+            result = { ok: false,
               error: String(ev.message ?? ev.d ?? '未知错误'),
               errorCode: String(ev.error_code ?? ev.code ?? '') || undefined,
               runtimeVersion: ev.runtime_version ? String(ev.runtime_version) : null,
