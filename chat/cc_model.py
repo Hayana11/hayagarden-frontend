@@ -123,21 +123,27 @@ def _active_runtime_version_for_catalog() -> str | None:
 def annotate_runtime_compatibility(
     models: list[dict[str, Any]], *, runtime_version: str | None = None,
 ) -> list[dict[str, Any]]:
-    from chat.cc_runtime import version_tuple
+    from chat.cc_runtime import MINIMUM_CLAUDE_CODE_VERSION, version_tuple
 
     version = runtime_version if runtime_version is not None else _active_runtime_version_for_catalog()
+    try:
+        runtime_ready = bool(version) and (
+            version_tuple(version) >= version_tuple(MINIMUM_CLAUDE_CODE_VERSION)
+        )
+    except Exception:
+        runtime_ready = False
     annotated = []
     for source in models:
         row = dict(source)
         required = str(row.get('min_claude_code_version') or '').strip() or None
-        compatible = True
-        if required:
+        compatible = runtime_ready
+        if compatible and required:
             try:
-                compatible = bool(version) and version_tuple(version) >= version_tuple(required)
+                compatible = version_tuple(version) >= version_tuple(required)
             except Exception:
                 compatible = False
         row['runtime_compatible'] = compatible
-        row['runtime_requirement'] = required
+        row['runtime_requirement'] = required or MINIMUM_CLAUDE_CODE_VERSION
         annotated.append(row)
     return annotated
 
