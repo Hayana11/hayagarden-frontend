@@ -19,7 +19,6 @@ import config_store as _cfg
 
 DB_PATH = '/opt/frontend/memories.db'
 API_URL = 'https://api.deepseek.com/v1/chat/completions'
-MODEL = 'deepseek-chat'
 LOG_FILE = '/var/log/rolling_summary.log'
 
 API_KEY = ''
@@ -83,7 +82,9 @@ def _summarize_rows(rows, *, maxchar):
 
 def _ask(prompt):
     body = json.dumps({
-        'model': MODEL, 'max_tokens': 700,
+        'model': _cfg.get_deepseek_chat_model(),
+        'thinking': {'type': 'disabled'},
+        'max_tokens': 700,
         'messages': [{'role': 'user', 'content': prompt}],
     }).encode()
     req = _req.Request(API_URL, data=body, method='POST',

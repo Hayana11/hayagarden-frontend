@@ -149,6 +149,16 @@ export interface ConfigModel {
   dot: string;
 }
 
+export interface DeepSeekConfig {
+  ready: boolean;
+  keyConfigured: boolean;
+  configuredModel: string;
+  current: string;
+  models: Array<{ id: string; label: string }>;
+  error: string;
+  source: string;
+}
+
 export interface ConfigUsageSummary {
   win5Pct: number;
   win7Pct: number;
@@ -215,6 +225,39 @@ export async function getKeyStatus(): Promise<KeyStatus> {
     source: data.source || '—',
     todayMessages: Number(data.today_msgs || 0),
   };
+}
+
+function normalizeDeepSeekConfig(data: {
+  ready?: boolean;
+  key_configured?: boolean;
+  configured_model?: string;
+  current?: string;
+  models?: Array<{ id?: string; label?: string }>;
+  error?: string | null;
+  source?: string;
+}): DeepSeekConfig {
+  return {
+    ready: Boolean(data.ready),
+    keyConfigured: Boolean(data.key_configured),
+    configuredModel: data.configured_model || '',
+    current: data.current || data.configured_model || '',
+    models: (data.models || []).flatMap((row) => {
+      const id = String(row.id || '').trim();
+      return id ? [{ id, label: row.label || id }] : [];
+    }),
+    error: data.error || '',
+    source: data.source || 'https://api.deepseek.com',
+  };
+}
+
+export async function getDeepSeekConfig(): Promise<DeepSeekConfig> {
+  const data = await http.get<Parameters<typeof normalizeDeepSeekConfig>[0]>('/api/config/deepseek');
+  return normalizeDeepSeekConfig(data);
+}
+
+export async function updateDeepSeekModel(model: string): Promise<DeepSeekConfig> {
+  await http.post('/api/config/deepseek/model', { model });
+  return getDeepSeekConfig();
 }
 
 export async function getRelayEndpoints(): Promise<RelayEndpoint[]> {
@@ -368,6 +411,11 @@ export interface ChatModelState {
   provider: ChatProvider | '';
   modelMode: ChatModelMode;
   configuredModel: string | null;
+  catalogSource: 'native' | 'fallback' | '';
+  catalogReady: boolean | null;
+  catalogError: string;
+  catalogRefreshedAt: string | null;
+  configuredModelAvailable: boolean | null;
 }
 
 /** Claude Code pill/label — never invent "默认" without server confirmation. */
@@ -391,7 +439,8 @@ export function ccChatModelLabel(opts: {
   return 'Claude Code · 状态未知';
 }
 
-export async function getModelCatalog(): Promise<ChatModelState> {
+export async function getModelCatalog(force = false): Promise<ChatModelState> {
+  const query = force ? '?refresh=1' : '';
   const data = await http.get<{
     models?: Array<{
       id?: string;
@@ -405,7 +454,12 @@ export async function getModelCatalog(): Promise<ChatModelState> {
     provider?: string;
     model_mode?: string;
     configured_model?: string | null;
-  }>('/api/config/model-catalog');
+    configured_model_available?: boolean | null;
+    catalog_source?: string;
+    catalog_ready?: boolean;
+    catalog_error?: string | null;
+    catalog_refreshed_at?: string | null;
+  }>(`/api/config/model-catalog${query}`);
 
   const provider: ChatProvider | '' =
     data.provider === 'claude_code' || data.provider === 'api_relay'
@@ -425,6 +479,14 @@ export async function getModelCatalog(): Promise<ChatModelState> {
     modelMode,
     configuredModel: configured,
     current: configured || data.current || '',
+    catalogSource: data.catalog_source === 'native' || data.catalog_source === 'fallback' ? data.catalog_source : '',
+    catalogReady: typeof data.catalog_ready === 'boolean' ? data.catalog_ready : null,
+    catalogError: String(data.catalog_error || ''),
+    catalogRefreshedAt: data.catalog_refreshed_at ? String(data.catalog_refreshed_at) : null,
+    configuredModelAvailable:
+      typeof data.configured_model_available === 'boolean'
+        ? data.configured_model_available
+        : null,
     models: (data.models || []).flatMap((model) => {
       const id = model.id?.trim();
       if (!id) return [];

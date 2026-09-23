@@ -97,6 +97,43 @@ class CodexAppServerTests(unittest.TestCase):
             'result': {'permissions': {}, 'scope': 'turn'},
         })
 
+    def test_model_list_exposes_default_and_efforts(self):
+        payload = {
+            'data': [{
+                'id': 'gpt-5.6-sol',
+                'displayName': 'GPT-5.6-Sol',
+                'isDefault': True,
+                'defaultReasoningEffort': 'low',
+                'supportedReasoningEfforts': [
+                    {'reasoningEffort': 'low'},
+                    {'reasoningEffort': 'high'},
+                ],
+                'inputModalities': ['text', 'image'],
+            }],
+            'nextCursor': None,
+        }
+        with mock.patch.object(self.client, '_start_locked'), \
+             mock.patch.object(self.client, '_request_locked', return_value=payload):
+            models = self.client.list_models(force=True)
+
+        self.assertEqual(models[0]['id'], 'gpt-5.6-sol')
+        self.assertEqual(models[0]['label'], 'GPT-5.6-Sol')
+        self.assertTrue(models[0]['is_default'])
+        self.assertEqual(models[0]['efforts'], ['low', 'high'])
+        with mock.patch.object(codex_app_server.config_store, 'get', return_value=''):
+            self.assertEqual(self.client.resolved_model(), ('gpt-5.6-sol', 'default'))
+
+    def test_explicit_configured_model_is_sent_with_turn(self):
+        with mock.patch.object(
+            codex_app_server.config_store, 'get', return_value='gpt-5.6-sol'
+        ):
+            params, model, mode = self.client._turn_params('thread-one', 'hello')
+
+        self.assertEqual(model, 'gpt-5.6-sol')
+        self.assertEqual(mode, 'explicit')
+        self.assertEqual(params['model'], 'gpt-5.6-sol')
+        self.assertEqual(params['threadId'], 'thread-one')
+
 
 if __name__ == '__main__':
     unittest.main()

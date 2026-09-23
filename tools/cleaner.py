@@ -9,7 +9,10 @@ import urllib.error as _err
 
 DB_PATH = '/opt/frontend/memories.db'
 API_URL = 'https://api.deepseek.com/v1/chat/completions'
-MODEL   = 'deepseek-chat'
+try:
+    from tools.deepseek_model import get_deepseek_chat_model
+except ImportError:
+    from deepseek_model import get_deepseek_chat_model
 
 API_KEY = ''
 for line in open('/opt/frontend/.env'):
@@ -28,7 +31,8 @@ def get_db():
 def ask(prompt, expect_json=False):
     """Call DeepSeek; return stripped text or parsed JSON."""
     body = json.dumps({
-        'model': MODEL,
+        'model': get_deepseek_chat_model(),
+        'thinking': {'type': 'disabled'},
         'max_tokens': 256,
         'messages': [{'role': 'user', 'content': prompt}],
     }).encode()

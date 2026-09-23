@@ -986,19 +986,25 @@ def get_chat_messages():
     })
 
 
-def _group_chat_secret_present(name):
-    """Check whether a secret exists without ever returning its value."""
-    if (os.environ.get(name) or '').strip():
-        return True
+def _deployment_secret(name):
+    """Read a deployment secret for server-side use only; never return it to clients."""
+    value = (os.environ.get(name) or '').strip()
+    if value:
+        return value
     try:
         with open('/opt/frontend/.env', encoding='utf-8') as env_file:
             for raw_line in env_file:
-                key, sep, value = raw_line.partition('=')
-                if sep and key.strip() == name and value.strip():
-                    return True
+                key, sep, candidate = raw_line.partition('=')
+                if sep and key.strip() == name and candidate.strip():
+                    value = candidate.strip()
     except OSError:
         pass
-    return False
+    return value
+
+
+def _group_chat_secret_present(name):
+    """Check whether a secret exists without ever returning its value."""
+    return bool(_deployment_secret(name))
 
 
 @app.route('/api/group-chat/status', methods=['GET'])
@@ -1024,6 +1030,83 @@ def group_chat_status():
             },
         }
     })
+
+
+@app.route('/api/group-chat/codex-models', methods=['GET'])
+def group_chat_codex_models():
+    status = codex_app_server.runtime_status()
+    configured = codex_app_server.client.configured_model()
+    if not status.get('ready'):
+        return jsonify({
+            'ready': False,
+            'models': [],
+            'configured_model': configured or None,
+            'configured_model_id': None,
+            'model_mode': 'explicit' if configured else 'default',
+            'current': configured,
+            'current_model_id': None,
+            'default_model': None,
+            'default_model_id': None,
+            'detail': status.get('detail') or '蓝色线路尚未就绪',
+        })
+    try:
+        force = request.args.get('refresh') == '1'
+        models = codex_app_server.client.list_models(force=force)
+        default_entry = next((row for row in models if row.get('is_default')), None)
+        configured_entry = next((row for row in models if configured and row.get('model') == configured), None)
+        default_model = str((default_entry or {}).get('model') or '')
+        default_model_id = str((default_entry or {}).get('id') or '')
+        configured_model_id = str((configured_entry or {}).get('id') or '')
+        current_model_id = configured_model_id if configured else default_model_id
+        return jsonify({
+            'ready': True,
+            'models': models,
+            'configured_model': configured or None,
+            'configured_model_id': configured_model_id or None,
+            'model_mode': 'explicit' if configured else 'default',
+            'default_model': default_model or None,
+            'default_model_id': default_model_id or None,
+            'current': configured or default_model or '',
+            'current_model_id': current_model_id or None,
+        })
+    except Exception as exc:
+        return jsonify({'error': str(exc), 'models': []}), 502
+
+
+@app.route('/api/group-chat/codex-model', methods=['POST'])
+def group_chat_codex_model():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'model_id' not in data:
+        return jsonify({'error': 'missing model_id'}), 400
+    raw = data.get('model_id')
+    if raw is not None and not isinstance(raw, str):
+        return jsonify({'error': 'model_id must be string or null'}), 400
+    model_id = str(raw or '').strip()
+    try:
+        models = codex_app_server.client.list_models(force=True)
+        selected = next((row for row in models if row.get('id') == model_id), None) if model_id else None
+        if model_id and not selected:
+            return jsonify({'error': 'CODEX_MODEL_NOT_ALLOWED', 'rejected_model_id': model_id}), 400
+        runtime_model = str((selected or {}).get('model') or '').strip()
+        if model_id and not runtime_model:
+            return jsonify({'error': 'CODEX_MODEL_NOT_ALLOWED', 'rejected_model_id': model_id}), 400
+        default_entry = next((row for row in models if row.get('is_default')), None)
+        default_model = str((default_entry or {}).get('model') or '')
+        default_model_id = str((default_entry or {}).get('id') or '')
+        codex_app_server.client.set_configured_model(runtime_model)
+        return jsonify({
+            'ok': True,
+            'configured_model': runtime_model or None,
+            'configured_model_id': model_id or None,
+            'model_mode': 'explicit' if model_id else 'default',
+            'default_model': default_model or None,
+            'default_model_id': default_model_id or None,
+            'current': runtime_model or default_model,
+            'current_model_id': model_id or default_model_id or None,
+            'effective_from': 'next_turn',
+        })
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 502
 
 
 @app.route('/api/group-chat/messages', methods=['GET'])
@@ -1994,18 +2077,30 @@ def config_set_effort():
 @app.route('/api/config/model-catalog', methods=['GET'])
 def config_model_catalog():
     """Chat-provider model catalog + current state.
-    Claude Code uses CC_MODEL_CATALOG; api_relay uses models.json.
+    Claude Code has an isolated native/fallback catalog; api_relay keeps its
+    existing models.json path and response contract.
     Never mixes the two spaces."""
-    from chat.cc_model import CC_MODEL_CATALOG
     state = _chat_model_payload()
     if state.get('provider') == 'claude_code':
+        from chat.cc_model import get_cc_model_catalog
+        catalog = get_cc_model_catalog(force=request.args.get('refresh') == '1')
         current = state.get('configured_model') or ''
+        model_ids = {
+            str(row.get('id') or '').strip()
+            for row in catalog['models']
+            if str(row.get('id') or '').strip()
+        }
         return jsonify({
-            'models': list(CC_MODEL_CATALOG),
+            'models': catalog['models'],
             'current': current,
             'provider': 'claude_code',
             'model_mode': state.get('model_mode'),
             'configured_model': state.get('configured_model'),
+            'configured_model_available': not current or current in model_ids,
+            'catalog_source': catalog['catalog_source'],
+            'catalog_ready': catalog['catalog_ready'],
+            'catalog_error': catalog['catalog_error'],
+            'catalog_refreshed_at': catalog['catalog_refreshed_at'],
         })
     try:
         with open('/opt/frontend/models.json') as f:
@@ -2022,6 +2117,82 @@ def config_model_catalog():
         'relay': state.get('relay'),
         'relay_name': state.get('relay_name'),
     })
+
+def _deepseek_model_catalog():
+    """Fetch the current official DeepSeek model ids without exposing the API key."""
+    import json as _json
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    key = _deployment_secret('DEEPSEEK_API_KEY')
+    if not key:
+        return [], 'missing_key'
+    request_obj = _ur.Request(
+        'https://api.deepseek.com/models',
+        headers={'Authorization': 'Bearer ' + key},
+        method='GET',
+    )
+    try:
+        with _ur.urlopen(request_obj, timeout=10) as response:
+            payload = _json.loads(response.read().decode('utf-8', 'ignore') or '{}')
+    except _ue.HTTPError as exc:
+        if exc.code in (401, 403):
+            return [], 'unauthorized'
+        return [], 'upstream_error'
+    except Exception:
+        return [], 'unavailable'
+    if not isinstance(payload, dict) or not isinstance(payload.get('data'), list):
+        return [], 'invalid_response'
+    models = []
+    for row in payload.get('data') or []:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get('id') or '').strip()
+        if model_id:
+            models.append({'id': model_id, 'label': model_id})
+    return models, ''
+
+
+@app.route('/api/config/deepseek', methods=['GET'])
+def config_get_deepseek():
+    configured = config_store.get_deepseek_chat_model()
+    key_configured = _group_chat_secret_present('DEEPSEEK_API_KEY')
+    models, error = _deepseek_model_catalog() if key_configured else ([], 'missing_key')
+    return jsonify({
+        'ready': bool(key_configured and not error),
+        'key_configured': key_configured,
+        'configured_model': configured,
+        'current': configured,
+        'models': models,
+        'error': error or None,
+        'source': 'https://api.deepseek.com',
+    })
+
+
+@app.route('/api/config/deepseek/model', methods=['POST'])
+def config_set_deepseek_model():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'model' not in data:
+        return jsonify({'error': 'missing model'}), 400
+    raw = data.get('model')
+    if not isinstance(raw, str) or not raw.strip():
+        return jsonify({'error': 'model must be a non-empty string'}), 400
+    model = raw.strip()
+    models, error = _deepseek_model_catalog()
+    if error:
+        status = 409 if error in ('missing_key', 'unauthorized') else 502
+        return jsonify({'error': 'DEEPSEEK_MODEL_CATALOG_UNAVAILABLE', 'detail': error}), status
+    allowed = {str(row.get('id') or '') for row in models}
+    if model not in allowed:
+        return jsonify({'error': 'DEEPSEEK_MODEL_NOT_ALLOWED', 'rejected_model': model}), 400
+    config_store.set('DEEPSEEK_CHAT_MODEL', model)
+    return jsonify({
+        'ok': True,
+        'configured_model': model,
+        'current': model,
+        'effective_from': 'next_deepseek_call',
+    })
+
 
 @app.route('/api/config/key-status', methods=['GET'])
 def config_key_status():
@@ -5128,7 +5299,8 @@ def classified_generate():
     user_content = '当前北京时间：' + now_str + '\n场景：' + scene + '\n请生成今日档案。'
 
     payload = _j.dumps({
-        'model': 'deepseek-chat',
+        'model': config_store.get_deepseek_chat_model(),
+        'thinking': {'type': 'disabled'},
         'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user',   'content': user_content},

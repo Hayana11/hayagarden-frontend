@@ -13,9 +13,9 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from codebase.client import CODEBASE_TOOLS, openai_tool_specs, run_codebase_tool
+from tools.deepseek_model import get_deepseek_chat_model
 
 DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions'
-MODEL = 'deepseek-chat'
 
 SYSTEM_PROMPT = '''你是一个专门维修 love-style.xyz 服务器的维修工。你可以调用 codebase 工具读代码、搜符号、看 git、打补丁。
 
@@ -59,7 +59,8 @@ def repair_chat(message, history=None, max_rounds=8):
 
     for _ in range(max_rounds):
         payload = {
-            'model': MODEL,
+            'model': get_deepseek_chat_model(),
+            'thinking': {'type': 'disabled'},
             'max_tokens': 1200,
             'messages': messages,
             'tools': tools,

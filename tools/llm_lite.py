@@ -8,7 +8,11 @@ import time
 import urllib.request as _req
 
 API_URL = 'https://api.deepseek.com/v1/chat/completions'
-MODEL = 'deepseek-chat'
+
+try:
+    from tools.deepseek_model import get_deepseek_chat_model
+except ImportError:
+    from deepseek_model import get_deepseek_chat_model
 
 _API_KEY = None
 
@@ -33,7 +37,9 @@ def ask(prompt, max_tokens=600, timeout=90, expect_json=False):
     if not key:
         return None if expect_json else ''
     body = json.dumps({
-        'model': MODEL, 'max_tokens': max_tokens,
+        'model': get_deepseek_chat_model(),
+        'thinking': {'type': 'disabled'},
+        'max_tokens': max_tokens,
         'messages': [{'role': 'user', 'content': prompt}],
     }, ensure_ascii=False).encode('utf-8')
     req = _req.Request(API_URL, data=body, method='POST', headers={

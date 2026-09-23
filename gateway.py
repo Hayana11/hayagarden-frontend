@@ -8076,7 +8076,13 @@ def chat_stream():
                             _text_parts = [c.get('text', '') for c in _mc if isinstance(c, dict) and c.get('type') == 'text']
                             if _text_parts:
                                 _ds_msgs.append({'role': _role, 'content': ''.join(_text_parts)})
-                    _ds_pay = {'model': 'deepseek-chat', 'max_tokens': 8000, 'messages': _ds_msgs}
+                    _ds_model = config_store.get_deepseek_chat_model()
+                    _ds_pay = {
+                        'model': _ds_model,
+                        'thinking': {'type': 'disabled'},
+                        'max_tokens': 8000,
+                        'messages': _ds_msgs,
+                    }
                     _ds_req = urllib.request.Request(
                         'https://api.deepseek.com/chat/completions',
                         data=json.dumps(_ds_pay).encode(),
@@ -9773,8 +9779,11 @@ def api_summarize():
             except urllib.error.HTTPError as _he:
                 if _he.code in (401, 403, 503):
                     _ds_key = os.environ.get('DEEPSEEK_API_KEY', '')
+                    _ds_model = config_store.get_deepseek_chat_model()
                     _ds_payload = {
-                        'model': 'deepseek-chat', 'max_tokens': 500,
+                        'model': _ds_model,
+                        'thinking': {'type': 'disabled'},
+                        'max_tokens': 500,
                         'messages': [
                             {'role': 'system', 'content': _diary_sys},
                             {'role': 'user', 'content': prompt_text},
