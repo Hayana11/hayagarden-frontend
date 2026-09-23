@@ -120,12 +120,14 @@ class DeferredResumeContractTests(unittest.TestCase):
             session._proc = FakeProcess([assistant_tool_use, deferred_result], pid=100)
             runtime = UH_A0TurnRuntime(lease_path)
 
-            with mock.patch.dict(
-                os.environ,
-                {
-                    cc_runtime.ARGV_OVERRIDE_ENV: json.dumps(["/opt/pin/claude"]),
-                    cc_runtime.SKIP_VERSION_PROBE_ENV: "1",
-                },
+            with mock.patch.object(
+                cc_runtime,
+                "require_managed_claude_runtime",
+                return_value="2.1.280",
+            ), mock.patch.object(
+                cc_runtime,
+                "claude_cmd_for_version",
+                side_effect=lambda _version, *args, **kwargs: ["/fake/claude", *args],
             ), mock.patch.object(
                 session, "_attach_jsonl_usage_with_retry",
                 side_effect=lambda usage, cursor=None: usage,
