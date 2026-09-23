@@ -216,11 +216,11 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
             'canary': 'fail',
             'last_error': 'startup_canary_failed',
         })
-        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
-             mock.patch.object(updater, 'sync_native_update_settings'), \\
-             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
-             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \\
-             mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name), \\
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \
+             mock.patch.object(updater, 'sync_native_update_settings'), \
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \
+             mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name), \
              mock.patch.object(updater, 'canary_candidate') as canary:
             self.assertEqual(updater.run_update_check(force=True), 'candidate_rejected_previously')
         self.assertEqual(claude_runtime_state.read_version('candidate-version'), '2.1.281')
@@ -233,11 +233,11 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         self._active('2.1.280')
         self._native('2.1.281')
         claude_runtime_state.reject_version('2.1.281', 'startup_canary_failed')
-        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
-             mock.patch.object(updater, 'sync_native_update_settings'), \\
-             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
-             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \\
-             mock.patch.object(cc_runtime, 'probe_claude_version', return_value='2.1.281'), \\
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \
+             mock.patch.object(updater, 'sync_native_update_settings'), \
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \
+             mock.patch.object(cc_runtime, 'probe_claude_version', return_value='2.1.281'), \
              mock.patch.object(updater, 'canary_candidate', return_value=True):
             self.assertEqual(
                 updater.run_update_check(retry_rejected='2.1.281'),
@@ -251,8 +251,8 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         from tools import claude_runtime_updater as updater
 
         self._native('2.1.281')
-        with mock.patch.object(cc_runtime, 'probe_claude_version', return_value='2.1.281'), \\
-             mock.patch.object(updater, '_run_candidate_command') as command, \\
+        with mock.patch.object(cc_runtime, 'probe_claude_version', return_value='2.1.281'), \
+             mock.patch.object(updater, '_run_candidate_command') as command, \
              mock.patch.object(updater, 'candidate_surface_canary', return_value=True) as surface:
             self.assertTrue(updater.canary_candidate('2.1.281', env={'HOME': str(self.home)}))
         self.assertEqual([call.args[1] for call in command.call_args_list], [['--help'], ['doctor']])
@@ -264,11 +264,11 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
 
         self._active('2.1.280')
         self._native('2.1.281')
-        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
-             mock.patch.object(updater, 'sync_native_update_settings'), \\
-             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
-             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \\
-             mock.patch.object(updater, 'discover_downloaded_candidate', return_value='2.1.281'), \\
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \
+             mock.patch.object(updater, 'sync_native_update_settings'), \
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)), \
+             mock.patch.object(updater, 'discover_downloaded_candidate', return_value='2.1.281'), \
              mock.patch.object(updater, 'canary_candidate', return_value=False):
             self.assertEqual(updater.run_update_check(), 'candidate_rejected')
         self.assertEqual(cc_runtime.active_claude_version(), '2.1.280')
@@ -284,11 +284,11 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
 
         self._active('2.1.280')
         self._native('2.1.281')
-        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \\
-             mock.patch.object(updater, 'sync_native_update_settings'), \\
-             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \\
-             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)) as run, \\
-             mock.patch.object(updater, 'discover_downloaded_candidate', return_value='2.1.281'), \\
+        with mock.patch.object(updater, '_prefs', return_value=(True, 'latest')), \
+             mock.patch.object(updater, 'sync_native_update_settings'), \
+             mock.patch.object(updater, '_native_updater', return_value=self.home / '.local/bin/claude'), \
+             mock.patch.object(updater.subprocess, 'run', return_value=mock.Mock(returncode=0)) as run, \
+             mock.patch.object(updater, 'discover_downloaded_candidate', return_value='2.1.281'), \
              mock.patch.object(updater, 'canary_candidate', return_value=True):
             self.assertEqual(updater.run_update_check(), 'promoted')
         argv = run.call_args.args[0]
@@ -306,7 +306,7 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         claude_runtime_state.write_version('last-good-version', '2.1.280')
         self._native('2.1.280')
         self._native('2.1.281')
-        with mock.patch.object(updater, 'update_locks', return_value=contextlib.nullcontext(True)), \\
+        with mock.patch.object(updater, 'update_locks', return_value=contextlib.nullcontext(True)), \
              mock.patch.object(cc_runtime, 'probe_claude_version', side_effect=lambda path, **kw: Path(path).name):
             result = updater.rollback_active_runtime(
                 expected_active='2.1.281',
@@ -328,11 +328,11 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         session._runtime_identity = 'claude-code:2.1.280'
         session._model_identity = None
         session._effort_identity = None
-        with mock.patch('chat.cc_history_rewrite.current_history_rewrite_epoch', return_value=''), \\
-             mock.patch('chat.cc_history_rewrite.is_unreadable_epoch', return_value=False), \\
-             mock.patch('chat.cc_history_rewrite.sanitize_bound_epoch', side_effect=lambda value: value), \\
-             mock.patch('chat.cc_model.cc_model_identity', return_value=None), \\
-             mock.patch('chat.cc_effort.cc_effort_identity', return_value=None), \\
+        with mock.patch('chat.cc_history_rewrite.current_history_rewrite_epoch', return_value=''), \
+             mock.patch('chat.cc_history_rewrite.is_unreadable_epoch', return_value=False), \
+             mock.patch('chat.cc_history_rewrite.sanitize_bound_epoch', side_effect=lambda value: value), \
+             mock.patch('chat.cc_model.cc_model_identity', return_value=None), \
+             mock.patch('chat.cc_effort.cc_effort_identity', return_value=None), \
              mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'):
             self.assertEqual(session._decide_respawn_reason('sys'), 'runtime_changed')
 
@@ -352,10 +352,10 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
                 )
             session._runtime_identity = 'claude-code:2.1.280'
 
-        with mock.patch.object(session, '_decide_respawn_reason', return_value='runtime_changed'), \\
-             mock.patch.object(session, '_alive', return_value=False), \\
-             mock.patch.object(session, '_spawn', side_effect=spawn), \\
-             mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'), \\
+        with mock.patch.object(session, '_decide_respawn_reason', return_value='runtime_changed'), \
+             mock.patch.object(session, '_alive', return_value=False), \
+             mock.patch.object(session, '_spawn', side_effect=spawn), \
+             mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'), \
              mock.patch.object(updater, 'rollback_active_runtime', return_value='2.1.280') as rollback:
             session.ensure_alive('sys', {'HOME': str(self.home)})
         self.assertEqual(calls, ['runtime_changed', 'runtime_changed'])
@@ -383,7 +383,7 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
             )
 
         session._send_turn_impl = fail_after_flush
-        with mock.patch.object(updater, 'rollback_active_runtime', return_value='2.1.280'), \\
+        with mock.patch.object(updater, 'rollback_active_runtime', return_value='2.1.280'), \
              mock.patch.object(session, '_kill'):
             with self.assertRaises(cc_resident.ResidentError) as raised:
                 list(session.send_turn('same user turn'))
@@ -392,8 +392,8 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         self.assertIn('未自动重试', str(raised.exception))
         self.assertTrue(session._last_turn_stdin_flushed)
         self.assertEqual(session._runtime_rollback_pending, '2.1.281')
-        with mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'), \\
-             mock.patch.object(updater, 'rollback_active_runtime', return_value=None), \\
+        with mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'), \
+             mock.patch.object(updater, 'rollback_active_runtime', return_value=None), \
              mock.patch.object(session, '_spawn') as spawn:
             with self.assertRaises(cc_resident.ResidentError) as pending:
                 session.ensure_alive('system', {'HOME': str(self.home)})
@@ -405,13 +405,13 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
 
         opus = {'id': 'claude-opus-5-5', 'min_claude_code_version': '2.1.280'}
         catalog = {'models': [opus]}
-        with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \\
-             mock.patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.220'), \\
+        with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \
+             mock.patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.220'), \
              mock.patch.object(cc_model.config_store, 'set') as write:
             result = cc_model.set_cc_chat_model('claude-opus-5-5')
             self.assertEqual(result['error'], cc_model.CC_MODEL_RUNTIME_INCOMPATIBLE)
             write.assert_not_called()
-        with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \\
+        with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \
              mock.patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.280'):
             self.assertEqual(cc_model.cc_model_runtime_compatibility('claude-opus-5-5')[0], True)
 
