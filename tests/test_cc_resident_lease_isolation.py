@@ -127,6 +127,7 @@ class ResidentLeaseIsolationTests(unittest.TestCase):
                  mock.patch("chat.cc_model.cc_model_snapshot", return_value=("", "default", [])), \
                  mock.patch("cc_resident.subprocess.Popen") as popen, \
                  mock.patch("tools.cc_tool_surface.capture_tool_surface_snapshot", return_value={}):
+                popen.return_value.poll.return_value = None
                 resident._spawn(
                     "SYS",
                     {"UH_A0_TURN_LEASE_PATH": "/stale", "KEEP": "yes"},
