@@ -11,4 +11,4 @@ Environment=HOME=/root
 UMask=0077
 WorkingDirectory=/opt/frontend
 ExecStart=/usr/bin/python3.11 /opt/frontend/tools/claude_runtime_updater.py --check
-TimeoutStartSec=35min
+TimeoutStartSec=45min
