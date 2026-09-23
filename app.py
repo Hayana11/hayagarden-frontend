@@ -2079,8 +2079,8 @@ def config_set_effort():
 def _claude_runtime_update_preferences():
     enabled_value = config_store.get('CC_AUTO_UPDATE_ENABLED')
     channel_value = config_store.get('CC_AUTO_UPDATE_CHANNEL')
-    enabled_text = str('true' if enabled_value is None else enabled_value).strip().lower()
-    channel = str('latest' if channel_value is None else channel_value).strip().lower()
+    enabled_text = str(enabled_value or 'true').strip().lower()
+    channel = str(channel_value or 'latest').strip().lower()
     enabled = enabled_text in ('1', 'true', 'yes', 'on')
     if channel not in ('latest', 'stable'):
         channel = 'latest'
@@ -2151,7 +2151,7 @@ def config_check_claude_runtime():
     env['HOME'] = str(service_home(env))
     try:
         _subprocess.Popen(
-            [_sys.executable, str(script), '--check'],
+            [_sys.executable, str(script), '--manual'],
             cwd=str(_Path(__file__).resolve().parent),
             env=env,
             stdin=_subprocess.DEVNULL,
