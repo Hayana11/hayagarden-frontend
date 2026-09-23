@@ -21,7 +21,7 @@ from typing import Optional
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_LOCK = Path('/var/lock/hayagarden-frontend-deploy.lock')
 UPDATE_LOCK = Path('/run/lock/hayagarden-claude-runtime-update.lock')
-SEVERE_STDERR_RE = re.compile(r'(?i)\\b(fatal|uncaught exception|failed to initialize)\\b')
+SEVERE_STDERR_RE = re.compile(r'(?i)\b(fatal|uncaught exception|failed to initialize)\b')
 
 
 def _runtime_imports():
@@ -71,10 +71,10 @@ def update_locks():
 def _prefs():
     import config_store
 
-    enabled = config_store.get('CC_AUTO_UPDATE_ENABLED')
-    channel = config_store.get('CC_AUTO_UPDATE_CHANNEL')
-    enabled_text = str(enabled if enabled is not None else 'true').strip().lower()
-    channel_text = str(channel if channel is not None else 'latest').strip().lower()
+    enabled = config_store.get('CC_AUTO_UPDATE_ENABLED') or 'true'
+    channel = config_store.get('CC_AUTO_UPDATE_CHANNEL') or 'latest'
+    enabled_text = str(enabled).strip().lower()
+    channel_text = str(channel).strip().lower()
     return enabled_text in {'1', 'true', 'yes', 'on'}, channel_text
 
 
@@ -184,12 +184,17 @@ def _run_candidate_command(binary: Path, args: list[str], *, env: dict[str, str]
 
 
 def candidate_surface_canary(binary: Path, *, env: dict[str, str], stable_seconds: float = 1.0) -> bool:
-    """Start the resident stream-json surface without ever writing stdin."""
+    """Start resident-shaped stream-json pipes and prove startup without sending input."""
     command = [
         str(binary), '-p',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
         '--verbose',
+        '--include-partial-messages',
+        '--max-turns', '5',
+        '--tools', '',
+        '--thinking-display', 'summarized',
+        '--exclude-dynamic-system-prompt-sections',
     ]
     try:
         process = subprocess.Popen(
@@ -199,28 +204,51 @@ def candidate_surface_canary(binary: Path, *, env: dict[str, str], stable_second
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            bufsize=0,
         )
     except (OSError, subprocess.SubprocessError):
         return False
+    healthy = True
+    stderr_sample = bytearray()
+    stdout_bytes = 0
     try:
+        selector = selectors.DefaultSelector()
+        for name, stream in (('stdout', process.stdout), ('stderr', process.stderr)):
+            if stream is None:
+                healthy = False
+                continue
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
         deadline = time.monotonic() + max(0.1, float(stable_seconds))
-        while time.monotonic() < deadline:
+        while healthy and time.monotonic() < deadline:
             if process.poll() is not None:
-                return False
-            if process.stderr is not None:
-                selector = selectors.DefaultSelector()
+                healthy = False
+                break
+            for key, _ in selector.select(timeout=0.025):
                 try:
-                    selector.register(process.stderr, selectors.EVENT_READ)
-                    if selector.select(timeout=0):
-                        sample = process.stderr.read(1)
-                        if sample and SEVERE_STDERR_RE.search(sample):
-                            return False
-                finally:
-                    selector.close()
-            time.sleep(0.025)
-        return process.poll() is None
+                    sample = os.read(key.fileobj.fileno(), 4096)
+                except BlockingIOError:
+                    continue
+                if not sample:
+                    try:
+                        selector.unregister(key.fileobj)
+                    except Exception:
+                        pass
+                    continue
+                if key.data == 'stderr':
+                    stderr_sample.extend(sample[:4096 - len(stderr_sample)])
+                    if SEVERE_STDERR_RE.search(stderr_sample.decode('utf-8', errors='replace')):
+                        healthy = False
+                        break
+                else:
+                    stdout_bytes += len(sample)
+                    if stdout_bytes > 65536:
+                        healthy = False
+                        break
+        selector.close()
+        return healthy and process.poll() is None
+    except (OSError, ValueError):
+        return False
     finally:
         try:
             process.terminate()
@@ -237,7 +265,6 @@ def candidate_surface_canary(binary: Path, *, env: dict[str, str], stable_second
                     stream.close()
             except Exception:
                 pass
-
 
 def canary_candidate(version: str, *, env: Optional[dict[str, str]] = None) -> bool:
     from chat.cc_runtime import (
@@ -284,6 +311,9 @@ def run_update_check(*, force: bool = False) -> str:
         write_update_state,
         promote_candidate,
         forget_rejected_version,
+        read_public_update_state,
+        read_version,
+        write_version,
     )
 
     enabled, channel = _prefs()
@@ -324,8 +354,15 @@ def run_update_check(*, force: bool = False) -> str:
         return 'native_update_failed'
     candidate = discover_downloaded_candidate(home=home)
     if candidate is None:
-        write_update_state({'status': 'healthy', 'last_check_at': now, 'channel': channel, 'last_error': None})
+        prior_state = read_public_update_state()
+        prior_candidate = read_version('candidate-version')
+        if prior_state.get('status') == 'rejected' and prior_candidate:
+            write_update_state({'last_check_at': now, 'channel': channel})
+            return 'candidate_rejected_previously'
+        write_version('candidate-version', None)
+        write_update_state({'status': 'up_to_date', 'last_check_at': now, 'channel': channel, 'last_error': None})
         return 'up_to_date'
+    write_version('candidate-version', candidate)
     write_update_state({'status': 'candidate', 'last_check_at': now, 'channel': channel, 'to': candidate})
     if candidate in read_rejected_versions() and not force:
         return 'candidate_rejected_previously'
@@ -345,7 +382,8 @@ def run_locked_check(*, force: bool = False) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--check', action='store_true')
+    parser.add_argument('--check', action='store_true', help='run a scheduled update check')
+    parser.add_argument('--manual', action='store_true', help='run an owner-triggered check even when automatic updates are disabled')
     parser.add_argument('--retry-rejected')
     args = parser.parse_args(argv)
     if args.retry_rejected:
@@ -355,7 +393,7 @@ def main(argv=None) -> int:
         except Exception:
             print('CLAUDE_RUNTIME_UPDATE_RESULT=invalid_retry_version')
             return 2
-    result = run_locked_check(force=bool(args.retry_rejected))
+    result = run_locked_check(force=bool(args.manual or args.retry_rejected))
     print('CLAUDE_RUNTIME_UPDATE_RESULT=%s MODEL_GENERATION_REQUESTS=0' % result)
     return 0 if result not in {'native_update_failed', 'candidate_rejected', 'active_runtime_below_minimum', 'invalid_update_channel'} else 1
 
