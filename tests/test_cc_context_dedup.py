@@ -638,8 +638,8 @@ class ResidentFileRefTests(unittest.TestCase):
         ref = file_ref_key('/static/a.txt', file_content_sha256(body))
         sess._committed_file_hashes = {ref}
         with mock.patch('subprocess.Popen', return_value=FakeProc([])), \
-             mock.patch('chat.cc_runtime.require_pinned_claude_version', return_value='2.1.220'), \
-             mock.patch('chat.cc_runtime.claude_cmd', side_effect=lambda *a, **k: ['claude', *a]):
+             mock.patch('chat.cc_runtime.require_managed_claude_runtime', return_value='2.1.280'), \
+             mock.patch('chat.cc_runtime.claude_cmd_for_version', side_effect=lambda _version, *a, **k: ['/managed/2.1.280', *a]):
             sess._spawn('STATIC', {}, reason='turn_limit')
         self.assertEqual(sess.committed_file_hashes, set())
 
@@ -1017,8 +1017,8 @@ class ResidentRespawnTests(unittest.TestCase):
         sess._last_rel_fingerprint = 'rel-v2:old'
         sess._turns_since_rel_sent = 6
         with mock.patch('subprocess.Popen', return_value=FakeProc([])), \
-             mock.patch('chat.cc_runtime.require_pinned_claude_version', return_value='2.1.220'), \
-             mock.patch('chat.cc_runtime.claude_cmd', side_effect=lambda *a, **k: ['claude', *a]):
+             mock.patch('chat.cc_runtime.require_managed_claude_runtime', return_value='2.1.280'), \
+             mock.patch('chat.cc_runtime.claude_cmd_for_version', side_effect=lambda _version, *a, **k: ['/managed/2.1.280', *a]):
             sess._spawn('STATIC', {}, reason='turn_limit')
         self.assertEqual(sess.last_state_snapshot, {})
         self.assertEqual(sess.last_group_message_id, 0)
