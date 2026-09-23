@@ -83,7 +83,8 @@ const settingsPath = fileURLToPath(
   new URL('../src/screens/SettingsScreen.tsx', import.meta.url),
 );
 const settingsSource = readFileSync(settingsPath, 'utf8');
-assert.ok(settingsSource.includes("RealityPromptPreviewCard"));
-assert.ok(settingsSource.includes('<RealityPromptPreviewCard />'));
+assert.equal(settingsSource.includes('RealityPromptPreviewCard'), false);
+assert.equal(settingsSource.includes('<RealityPromptPreviewCard />'), false);
+assert.equal(settingsSource.includes('现实 Prompt 预览'), false);
 
 console.log('P2C.1g reality prompt preview tests: PASS');
