@@ -574,6 +574,13 @@ class ResidentSession:
         self._last_used = 0.0
         self._generation = 0
         self._lock = threading.Lock()
+        self._turn_state_lock = threading.Lock()
+        self._turn_active = False
+        self._turn_write_started = False
+        self._turn_stdin_flushed = False
+        self._last_turn_stdin_write_started = False
+        self._last_turn_stdin_flushed = False
+        self._runtime_identity = None
         self._next_spawn_reason = None
         self._tool_profile = TOOL_PROFILE_LEGACY
         # Provider-authoritative deferred tool call awaiting user confirmation.
@@ -615,11 +622,13 @@ class ResidentSession:
         return os.path.join(lease_dir, f'{uuid.uuid4().hex}.json')
 
     def _prepare_spawn_env(self, env):
-        """Bind the resident-owned lease path for every UH-A0 spawn."""
-        if self._tool_profile != TOOL_PROFILE_UH_A0:
-            return env
+        """Bind the service home and resident-owned lease path for each spawn."""
         prepared = dict(os.environ if env is None else env)
-        prepared['UH_A0_TURN_LEASE_PATH'] = self._uh_a0_turn_lease_path
+        if not str(prepared.get('HOME') or '').strip():
+            from chat.cc_runtime import service_home
+            prepared['HOME'] = str(service_home(prepared))
+        if self._tool_profile == TOOL_PROFILE_UH_A0:
+            prepared['UH_A0_TURN_LEASE_PATH'] = self._uh_a0_turn_lease_path
         return prepared
 
     def _reset_session_meta(self, *, respawn_reason):
@@ -649,6 +658,16 @@ class ResidentSession:
         self._last_cache_refresh_at = None
         self._last_cache_refresh_monotonic = None
         self._tool_surface_snapshot = {}
+
+    @staticmethod
+    def _managed_runtime_identity(version):
+        from chat.cc_runtime import MINIMUM_CLAUDE_CODE_VERSION, version_tuple
+        try:
+            if version_tuple(version) < version_tuple(MINIMUM_CLAUDE_CODE_VERSION):
+                return None
+        except Exception as exc:
+            raise ResidentError('claude_runtime:invalid_version') from exc
+        return 'claude-code:%s' % version
 
     def _build_spawn_tool_flags(self, *, env=None):
         """Split built-in availability (--tools) from MCP permission args.
@@ -718,13 +737,16 @@ class ResidentSession:
         from chat.cc_model import cc_model_snapshot
         from chat.cc_effort import cc_effort_snapshot
         from chat.cc_runtime import ClaudeRuntimeError, claude_cmd, require_pinned_claude_version
-        self._kill(quiet=True)
+        with self._turn_state_lock:
+            if self._turn_active:
+                raise ResidentError('resident_turn_in_progress')
         self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
         env = self._prepare_spawn_env(env)
         try:
-            require_pinned_claude_version(env=env, cwd=self._cwd)
+            runtime_version = require_pinned_claude_version(env=env, cwd=self._cwd)
         except ClaudeRuntimeError as exc:
             raise ResidentError('claude_runtime:%s' % exc) from exc
+        self._kill(quiet=True)
         _model, model_identity, model_args = cc_model_snapshot()
         effort, effort_identity, effort_args = cc_effort_snapshot()
         tool_flags = self._build_spawn_tool_flags(env=env)
@@ -760,6 +782,7 @@ class ResidentSession:
             bound_epoch = ''
         self._history_rewrite_epoch = bound_epoch
         self._system_text = system_text
+        self._runtime_identity = self._managed_runtime_identity(runtime_version)
         self._model_identity = model_identity
         self._effort_identity = effort_identity
         self._effort_value = effort or None
@@ -842,6 +865,15 @@ class ResidentSession:
             and cc_effort_identity() != stored_effort_identity
         ):
             return 'effort_changed'
+        stored_runtime_identity = getattr(self, '_runtime_identity', None)
+        if stored_runtime_identity is not None:
+            try:
+                from chat.cc_runtime import active_claude_version
+                active_runtime_identity = 'claude-code:%s' % active_claude_version()
+            except Exception as exc:
+                raise ResidentError('claude_runtime:active_version_unavailable') from exc
+            if active_runtime_identity != stored_runtime_identity:
+                return 'runtime_changed'
         # Never-used residents (_last_used == 0) have no idle age — peek_idle_seconds
         # returns None. Only reap after a real successful use older than IDLE_REAP.
         idle_seconds = self.peek_idle_seconds()
@@ -891,6 +923,9 @@ class ResidentSession:
 
     def ensure_alive(self, system_text, env, *, tool_profile=TOOL_PROFILE_LEGACY):
         with self._lock:
+            with self._turn_state_lock:
+                if self._turn_active:
+                    raise ResidentError('resident_turn_in_progress')
             reason = self._decide_respawn_reason(system_text, tool_profile=tool_profile)
             if reason:
                 if reason == 'history_rewrite':
@@ -971,7 +1006,7 @@ class ResidentSession:
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
             env = self._prepare_spawn_env(env)
             try:
-                require_pinned_claude_version(env=env, cwd=self._cwd)
+                runtime_version = require_pinned_claude_version(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
@@ -997,6 +1032,7 @@ class ResidentSession:
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, bufsize=1, cwd=self._cwd, env=env,
                 )
+                self._runtime_identity = self._managed_runtime_identity(runtime_version)
             except Exception as exc:
                 self._proc = None
                 raise ResidentError('staged_spawn_failed:%s' % exc) from exc
@@ -1191,7 +1227,7 @@ class ResidentSession:
             self._tool_profile = str(tool_profile or TOOL_PROFILE_LEGACY)
             env = self._prepare_spawn_env(env)
             try:
-                require_pinned_claude_version(env=env, cwd=self._cwd)
+                runtime_version = require_pinned_claude_version(env=env, cwd=self._cwd)
             except ClaudeRuntimeError as exc:
                 raise ResidentError('claude_runtime:%s' % exc) from exc
             _model, model_identity, model_args = cc_model_snapshot()
@@ -1221,6 +1257,7 @@ class ResidentSession:
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, bufsize=1, cwd=self._cwd, env=env,
                 )
+                self._runtime_identity = self._managed_runtime_identity(runtime_version)
             except Exception as exc:
                 self._proc = None
                 raise ResidentError('staged_spawn_failed:%s' % exc) from exc
@@ -1494,7 +1531,23 @@ class ResidentSession:
                 )
         return last_merged
 
-    def send_turn(
+    def send_turn(self, *args, **kwargs):
+        """Serialize one whole resident turn and fence respawn while it is live."""
+        with self._turn_state_lock:
+            if self._turn_active:
+                raise ResidentError('resident_turn_in_progress')
+            self._turn_active = True
+            self._turn_write_started = False
+            self._turn_stdin_flushed = False
+        try:
+            yield from self._send_turn_impl(*args, **kwargs)
+        finally:
+            with self._turn_state_lock:
+                self._last_turn_stdin_write_started = bool(self._turn_write_started)
+                self._last_turn_stdin_flushed = bool(self._turn_stdin_flushed)
+                self._turn_active = False
+
+    def _send_turn_impl(
         self,
         content,
         commit_meta=None,
@@ -1576,9 +1629,11 @@ class ResidentSession:
         # stdin.write and committed only by the route-specific success proof.
         candidate_cache_refresh_at = time.time()
         candidate_cache_refresh_monotonic = time.monotonic()
+        self._turn_write_started = True
         try:
             proc.stdin.write(payload + NL)
             proc.stdin.flush()
+            self._turn_stdin_flushed = True
         except (BrokenPipeError, OSError) as e:
             if uh_a0_runtime is not None:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
@@ -1999,6 +2054,7 @@ class ResidentSession:
         usage['_obs_resident_generation'] = self._generation
         usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
         usage['_obs_claude_session_id'] = self._session_id
+        usage['_obs_runtime_identity'] = self._runtime_identity
         usage['_obs_last_provider_event_type'] = terminal.last_provider_event_type
         usage['_obs_last_provider_activity_at'] = terminal.last_provider_activity_at
         usage['_obs_end_turn_seen'] = bool(terminal.end_turn_seen)
