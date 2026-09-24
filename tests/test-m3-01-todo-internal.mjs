@@ -148,4 +148,8 @@ await noProfile.client.close();
 await withProfile.client.close();
 await new Promise((resolve) => listener.close(resolve));
 rmSync(tempRoot, { recursive: true, force: true });
+// Reuse this existing local shadow job to exercise Xiaomi's one-tool MCP
+// contract with a mocked provider; no Xiaomi account or cloud request is used.
+await import('./test-xiaomi-health-internal-mcp.mjs');
+
 console.log('test-m3-01-todo-internal: ok');
