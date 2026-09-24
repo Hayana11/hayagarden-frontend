@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from tools.xiaomi_health.client import AGGREGATED_PATH, XiaomiHealthClient, XiaomiProviderError
+from tools.xiaomi_health.client import API_BASE, AGGREGATED_PATH, XiaomiHealthClient, XiaomiProviderError
 from tools.xiaomi_health.crypto import rc4_drop
 from tools.xiaomi_health.internal_adapter import run
 from tools.xiaomi_health.parser import MalformedHealthResponse, latest_date, parse_series_response
@@ -170,10 +170,63 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(captured["method"], "GET")
         self.assertEqual(captured["path"], AGGREGATED_PATH)
+        self.assertTrue(client._http.call_args.args[0].startswith(f"{API_BASE}{AGGREGATED_PATH}?"))
+        headers = client._http.call_args.kwargs["headers"]
+        self.assertEqual(headers["region_tag"], "cn")
+        self.assertEqual(headers["handleparams"], "true")
+        self.assertEqual(headers["Cookie"], f"cUserId={SECRET_VALUES['c_user_id']}; serviceToken={SECRET_VALUES['service_token']}")
         self.assertEqual(captured["params"]["relative_uid"], SECRET_VALUES["user_id"])
         self.assertEqual(captured["params"]["key"], "steps")
         self.assertEqual(captured["params"]["tag"], "daily_report")
         self.assertEqual(captured["params"]["limit"], 2)
+
+    def test_steps_request_and_safe_diagnostic_contract(self) -> None:
+        self.store.save(SECRET_VALUES)
+        client = XiaomiHealthClient(self.store)
+        captured: dict[str, object] = {}
+        now = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
+        def encrypted(method, path, security, params):
+            captured.update({"method": method, "path": path, "params": params})
+            return {"_nonce": "nonce", "data": "encrypted"}
+        upstream = {
+            "code": 3001,
+            "result": {"data_list": [{"user_id": SECRET_VALUES["user_id"], "service_token": SECRET_VALUES["service_token"]}]},
+            "pass_token": SECRET_VALUES["pass_token"],
+        }
+        with mock.patch("tools.xiaomi_health.client.build_encrypted_params", side_effect=encrypted):
+            with mock.patch("tools.xiaomi_health.client.decrypt_response", return_value=upstream):
+                client._http = mock.Mock(return_value=(200, {}, b"encrypted"))
+                with self.assertRaises(XiaomiProviderError) as raised:
+                    client._request_health(SECRET_VALUES, "steps", 2, now=now)
+        params = captured["params"]
+        self.assertEqual(captured["method"], "GET")
+        self.assertEqual(captured["path"], AGGREGATED_PATH)
+        self.assertEqual(params["relative_uid"], SECRET_VALUES["user_id"])
+        self.assertEqual(params["key"], "steps")
+        self.assertEqual(params["tag"], "daily_report")
+        self.assertEqual(params["start_time"], int(datetime(2026, 9, 22, 16, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(params["end_time"], int(datetime(2026, 9, 24, 15, 59, 59, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(params["limit"], 2)
+        diagnostic = client.last_diagnostic
+        self.assertEqual(raised.exception.code, "api_error")
+        self.assertEqual(diagnostic["metric"], "steps")
+        self.assertEqual(diagnostic["endpoint_path"], AGGREGATED_PATH)
+        self.assertEqual(diagnostic["http_status"], 200)
+        self.assertEqual(diagnostic["xiaomi_response_code"], 3001)
+        self.assertEqual(diagnostic["response_top_level_keys"], ["code", "pass_token", "result"])
+        self.assertTrue(diagnostic["data_list_present"])
+        self.assertEqual(diagnostic["row_count"], 1)
+        serialized = json.dumps(diagnostic)
+        for field in ("user_id", "service_token", "pass_token"):
+            self.assertNotIn(SECRET_VALUES[field], serialized)
+
+    def test_latest_preserves_first_metric_dependency_failure(self) -> None:
+        self.store.save(SECRET_VALUES)
+        client = XiaomiHealthClient(self.store)
+        with mock.patch.object(client, "get_series", side_effect=XiaomiProviderError("api_error")) as get_series:
+            with self.assertRaises(XiaomiProviderError):
+                client.get_latest()
+        get_series.assert_called_once_with("steps", 2)
 
     def test_days_boundaries_and_invalid_values(self) -> None:
         self.store.save(SECRET_VALUES)

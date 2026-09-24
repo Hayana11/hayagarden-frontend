@@ -93,6 +93,7 @@ class XiaomiHealthClient:
         self.store = store
         self._opener = opener or _opener()
         self.timeout = timeout
+        self.last_diagnostic: dict[str, Any] | None = None
 
     def _http(self, url: str, *, method: str = "GET", headers: Mapping[str, str] | None = None, body: bytes | None = None, timeout: float | None = None):
         req = urllib.request.Request(url, data=body, headers=dict(headers or {}), method=method)
@@ -247,38 +248,73 @@ class XiaomiHealthClient:
             "end_time": end,
             "limit": days,
         }
+        diagnostic: dict[str, Any] = {
+            "metric": metric if metric in METRICS else "unknown",
+            "endpoint_path": AGGREGATED_PATH,
+            "http_status": None,
+            "xiaomi_response_code": None,
+            "error_class": None,
+            "sanitized_error_message": None,
+            "response_top_level_keys": [],
+            "data_list_present": False,
+            "row_count": 0,
+        }
+        self.last_diagnostic = diagnostic
+
+        def fail(code: str, error_class: str, message: str) -> None:
+            diagnostic["error_class"] = error_class
+            diagnostic["sanitized_error_message"] = message
+            self.last_diagnostic = dict(diagnostic)
+            raise XiaomiProviderError(code)
+
         encrypted = build_encrypted_params("GET", AGGREGATED_PATH, bundle["ssecurity"], params)
         url = f"{API_BASE}{AGGREGATED_PATH}?{urllib.parse.urlencode(encrypted)}"
-        status, _, body = self._http(url, headers={
-            "User-Agent": API_USER_AGENT,
-            "region_tag": "cn",
-            "handleparams": "true",
-            "Cookie": _cookie_header({"cUserId": bundle["c_user_id"], "serviceToken": bundle["service_token"]}),
-        })
+        try:
+            status, _, body = self._http(url, headers={
+                "User-Agent": API_USER_AGENT,
+                "region_tag": "cn",
+                "handleparams": "true",
+                "Cookie": _cookie_header({"cUserId": bundle["c_user_id"], "serviceToken": bundle["service_token"]}),
+            })
+        except XiaomiProviderError as exc:
+            fail(exc.code, "TransportError", exc.code)
+        diagnostic["http_status"] = status
         if status in {401, 403}:
-            raise XiaomiProviderError("auth_expired")
+            fail("auth_expired", "HTTPStatusError", f"HTTP {status}")
         if status != 200:
-            raise XiaomiProviderError("api_error")
+            fail("api_error", "HTTPStatusError", f"HTTP {status}")
         try:
             result = decrypt_response(bundle["ssecurity"], encrypted["_nonce"], body.decode("utf-8"))
-        except (CryptoError, UnicodeError) as exc:
-            raise XiaomiProviderError("malformed_response") from exc
+        except (CryptoError, UnicodeError):
+            fail("malformed_response", "ResponseDecryptError", "response decrypt failed")
         if not isinstance(result, dict):
-            raise XiaomiProviderError("malformed_response")
+            fail("malformed_response", "MalformedResponse", "invalid response envelope")
+        diagnostic["response_top_level_keys"] = sorted(
+            key if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", key) else "<nonstandard>"
+            for key in result
+            if isinstance(key, str)
+        )
         try:
             code = int(result.get("code", -1))
         except (TypeError, ValueError):
-            raise XiaomiProviderError("malformed_response")
+            fail("malformed_response", "MalformedResponse", "invalid response code")
+        diagnostic["xiaomi_response_code"] = code
+        envelope = result.get("result")
+        if isinstance(envelope, dict):
+            data_list = envelope.get("data_list")
+            diagnostic["data_list_present"] = "data_list" in envelope
+            diagnostic["row_count"] = len(data_list) if isinstance(data_list, list) else 0
         if code != 0:
             if code in AUTH_FAILURE_CODES:
-                raise XiaomiProviderError("auth_expired")
-            raise XiaomiProviderError("api_error")
-        # Normalizes the expected envelope before it can leave the provider runtime.
-        parsed = {"result": result.get("result")}
+                fail("auth_expired", "XiaomiResponseError", f"Xiaomi response code {code}")
+            fail("api_error", "XiaomiResponseError", f"Xiaomi response code {code}")
+        parsed = {"result": envelope}
         try:
-            return parse_series_response(parsed, metric, days=days)
-        except MalformedHealthResponse as exc:
-            raise XiaomiProviderError("malformed_response") from exc
+            records = parse_series_response(parsed, metric, days=days)
+        except MalformedHealthResponse:
+            fail("malformed_response", "MalformedHealthResponse", "malformed health rows")
+        self.last_diagnostic = dict(diagnostic)
+        return records
 
     def get_series(self, metric: str, days: int) -> dict[str, Any]:
         if metric not in METRICS or not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 30:

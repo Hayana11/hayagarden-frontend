@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import stat
 import sys
@@ -28,6 +29,8 @@ def _run_canary(*, timeout_seconds: int = MAX_LOGIN_SECONDS) -> tuple[int, dict[
         "steps": {"status": "FAIL", "rows": 0, "latest_date": None},
         "sleep": {"status": "FAIL", "rows": 0, "latest_date": None},
         "heart_rate": {"status": "FAIL", "rows": 0, "latest_date": None},
+        "diagnostics": {},
+        "latest_dependency": None,
     }
     owns_artifacts = False
     try:
@@ -52,6 +55,9 @@ def _run_canary(*, timeout_seconds: int = MAX_LOGIN_SECONDS) -> tuple[int, dict[
             result["latest"] = "PASS" if any(latest.get(key) is not None for key in ("steps", "sleep", "heart_rate")) else "EMPTY"
         except XiaomiProviderError:
             result["latest"] = "FAIL"
+            diagnostic = client.last_diagnostic
+            result["diagnostics"]["latest"] = diagnostic
+            result["latest_dependency"] = diagnostic.get("metric") if diagnostic else None
         for metric in ("steps", "sleep", "heart_rate"):
             try:
                 series = client.get_series(metric, 2)
@@ -63,6 +69,7 @@ def _run_canary(*, timeout_seconds: int = MAX_LOGIN_SECONDS) -> tuple[int, dict[
                 }
             except XiaomiProviderError:
                 result[metric] = {"status": "FAIL", "rows": 0, "latest_date": None}
+            result["diagnostics"][metric] = client.last_diagnostic
         exit_code = 0 if result["health_status"] == "PASS" and result["latest"] in {"PASS", "EMPTY"} and all(result[m]["status"] in {"PASS", "EMPTY"} for m in ("steps", "sleep", "heart_rate")) else 1
         return exit_code, result
     except Exception:
@@ -90,9 +97,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"CANARY_AUTH={result['auth']}")
     print(f"CANARY_HEALTH_STATUS={result['health_status']}")
     print(f"CANARY_LATEST={result['latest']}")
+    if result.get("latest_dependency"):
+        print(f"CANARY_LATEST_DEPENDENCY={result['latest_dependency']}")
     for metric in ("steps", "sleep", "heart_rate"):
         item = result[metric]
         print(f"CANARY_{metric.upper()}={item['status']} ROWS={item['rows']} LATEST_DATE={item['latest_date'] or 'null'}")
+    for stage, diagnostic in result.get("diagnostics", {}).items():
+        if isinstance(diagnostic, dict):
+            safe_fields = ("metric", "endpoint_path", "http_status", "xiaomi_response_code", "error_class", "sanitized_error_message", "response_top_level_keys", "data_list_present", "row_count")
+            safe = {key: diagnostic.get(key) for key in safe_fields}
+            print(f"CANARY_SAFE_DIAGNOSTIC={json.dumps({'stage': stage, **safe}, sort_keys=True, separators=(',', ':'))}")
     cleaned = not os.path.exists(CANARY_CREDENTIAL_PATH) and not os.path.exists(QR_PATH)
     print(f"CANARY_CREDENTIAL_CLEANED={'YES' if cleaned else 'NO'}")
     return code if cleaned else 1
