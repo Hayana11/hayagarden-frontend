@@ -59,11 +59,11 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(result["capability_id"], "memory.search")
         self.assertEqual(result["lease_decision"], "ALLOW")
 
-    def test_a_health_internal_read_is_chat_auto_allowed(self):
+    def test_a_health_internal_read_requires_explicit_intent_lease(self):
         result = evaluate_tool_call(
             "mcp__internal__get.health",
             {"metric": "steps", "days": 2},
-            self.lease(),
+            self.lease(source="explicit_user_intent", requested=("health.read",)),
         )
         self.assertEqual(result["capability_id"], "health.read")
         self.assertEqual(result["lease_decision"], "ALLOW")
