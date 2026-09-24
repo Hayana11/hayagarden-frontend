@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from tools.xiaomi_health.client import API_BASE, AGGREGATED_PATH, FITNESS_DATA_PATH, XiaomiHealthClient, XiaomiProviderError
@@ -126,6 +127,118 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(rows[0]["value"], 72)
         self.assertEqual(rows[0]["unit"], "bpm")
         self.assertNotIn("cookie-private", json.dumps(rows))
+
+    @staticmethod
+    def _live_heart_rate_row(outer: Any, latest: dict[str, Any]) -> dict[str, Any]:
+        return {"time": outer, "value": json.dumps({
+            "avg_hr": 70,
+            "avg_rhr": 60,
+            "max_hr": 120,
+            "min_hr": 50,
+            "latest_hr": latest,
+        })}
+
+    def test_heart_rate_uses_nested_latest_hr_bpm_and_time(self) -> None:
+        outer = int(datetime(2026, 9, 23, 16, tzinfo=timezone.utc).timestamp())
+        latest = int(datetime(2026, 9, 24, 3, 15, 30, tzinfo=timezone.utc).timestamp())
+        response = {"result": {"data_list": [self._live_heart_rate_row(outer, {
+            "bpm": 82, "time": latest, "dbTime": latest + 5, "dbKey": "synthetic",
+        })]}}
+        rows = parse_series_response(response, "heart_rate", days=7)
+        self.assertEqual(rows, [{
+            "sampledAt": "2026-09-24T03:15:30Z",
+            "dataDate": "2026-09-24",
+            "value": 82,
+            "unit": "bpm",
+        }])
+
+    def test_heart_rate_latest_hr_time_accepts_milliseconds(self) -> None:
+        outer = int(datetime(2026, 9, 23, 16, tzinfo=timezone.utc).timestamp())
+        latest_ms = int(datetime(2026, 9, 23, 17, 30, tzinfo=timezone.utc).timestamp()) * 1000
+        response = {"result": {"data_list": [self._live_heart_rate_row(outer, {"bpm": 77, "time": latest_ms})]}}
+        row = parse_series_response(response, "heart_rate", days=7)[0]
+        self.assertEqual(row["value"], 77)
+        self.assertEqual(row["sampledAt"], "2026-09-23T17:30:00Z")
+        self.assertEqual(row["dataDate"], "2026-09-24")
+
+    def test_heart_rate_invalid_latest_time_falls_back_to_outer_time(self) -> None:
+        outer = int(datetime(2026, 9, 24, 2, tzinfo=timezone.utc).timestamp())
+        for bad_time in (None, "not-a-time", -5, 0, "", {"nested": 1}):
+            latest = {"bpm": 91} if bad_time is None else {"bpm": 91, "time": bad_time}
+            response = {"result": {"data_list": [self._live_heart_rate_row(outer, latest)]}}
+            row = parse_series_response(response, "heart_rate", days=7)[0]
+            self.assertEqual(row["value"], 91)
+            self.assertEqual(row["sampledAt"], "2026-09-24T02:00:00Z")
+            self.assertEqual(row["dataDate"], "2026-09-24")
+
+    def test_heart_rate_invalid_latest_bpm_uses_top_level_fallback(self) -> None:
+        outer = int(datetime(2026, 9, 24, 2, tzinfo=timezone.utc).timestamp())
+        latest = int(datetime(2026, 9, 24, 5, tzinfo=timezone.utc).timestamp())
+        for bad_bpm in (None, "abc", float("nan"), True, {"x": 1}):
+            response = {"result": {"data_list": [{"time": outer, "value": {
+                "bpm": 66, "latest_hr": {"bpm": bad_bpm, "time": latest},
+            }}]}}
+            row = parse_series_response(response, "heart_rate", days=7)[0]
+            self.assertEqual(row["value"], 66)
+            self.assertEqual(row["sampledAt"], "2026-09-24T02:00:00Z")
+        response = {"result": {"data_list": [{"time": outer, "value": {"latest_hr": "not-an-object", "heart_rate": 64}}]}}
+        self.assertEqual(parse_series_response(response, "heart_rate", days=7)[0]["value"], 64)
+        response = {"result": {"data_list": [{"time": outer, "value": json.dumps({"avg_hr": 70, "latest_hr": {}})}]}}
+        self.assertIsNone(parse_series_response(response, "heart_rate", days=7)[0]["value"])
+
+    def test_heart_rate_records_sort_by_normalized_sample_time(self) -> None:
+        def ts(day: int, hour: int) -> int:
+            return int(datetime(2026, 9, day, hour, tzinfo=timezone.utc).timestamp())
+        response = {"result": {"data_list": [
+            self._live_heart_rate_row(ts(22, 16), {"bpm": 81, "time": ts(24, 4)}),
+            self._live_heart_rate_row(ts(23, 16), {"bpm": 72, "time": ts(23, 1)}),
+            self._live_heart_rate_row(ts(21, 16), {"bpm": 68, "time": "bad"}),
+            {"time": ts(24, 2), "value": {"avg_heart_rate": 75}},
+        ]}}
+        rows = parse_series_response(response, "heart_rate", days=7)
+        self.assertEqual([row["sampledAt"] for row in rows], sorted(row["sampledAt"] for row in rows))
+        self.assertEqual([row["value"] for row in rows], [68, 72, 75, 81])
+        self.assertEqual(rows[-1]["sampledAt"], "2026-09-24T04:00:00Z")
+
+    def test_heart_rate_latest_uses_most_recent_nested_sample(self) -> None:
+        def ts(day: int, hour: int) -> int:
+            return int(datetime(2026, 9, day, hour, tzinfo=timezone.utc).timestamp())
+        records = parse_series_response({"result": {"data_list": [
+            self._live_heart_rate_row(ts(23, 16), {"bpm": 72, "time": ts(23, 18)}),
+            self._live_heart_rate_row(ts(22, 16), {"bpm": 84, "time": ts(24, 6)}),
+        ]}}, "heart_rate", days=7)
+        client = XiaomiHealthClient(self.store)
+        series = {
+            "steps": {"records": [{"sampledAt": "2026-09-24T00:00:00Z", "dataDate": "2026-09-24", "value": 10, "unit": "steps"}]},
+            "sleep": {"records": []},
+            "heart_rate": {"records": records},
+        }
+        with mock.patch.object(client, "get_series", side_effect=lambda metric, days: series[metric]):
+            latest = client.get_latest(7)
+        self.assertEqual(latest["heart_rate"]["value"], 84)
+        self.assertEqual(latest["heart_rate"]["sampledAt"], "2026-09-24T06:00:00Z")
+        self.assertEqual(latest["steps"]["value"], 10)
+        self.assertIsNone(latest["sleep"])
+
+    def test_heart_rate_latest_hr_sensitive_fields_are_dropped(self) -> None:
+        outer = int(datetime(2026, 9, 24, 2, tzinfo=timezone.utc).timestamp())
+        latest = int(datetime(2026, 9, 24, 3, tzinfo=timezone.utc).timestamp())
+        response = {"result": {"data_list": [self._live_heart_rate_row(outer, {
+            "bpm": 79,
+            "time": latest,
+            "dbTime": 1790000000123,
+            "dbKey": "dbkey-synthetic-private",
+            "cookie": "cookie-synthetic-private",
+            "service_token": SECRET_VALUES["service_token"],
+            "arbitrary_secret": "arbitrary-synthetic-secret",
+        })]}}
+        rows = parse_series_response(response, "heart_rate", days=7)
+        public = json.dumps(rows, sort_keys=True)
+        self.assertEqual(set(rows[0]), {"sampledAt", "dataDate", "value", "unit"})
+        for leaked in ("dbTime", "dbKey", "1790000000123", "dbkey-synthetic-private", "cookie", "cookie-synthetic-private",
+                       "service_token", SECRET_VALUES["service_token"], "arbitrary_secret", "arbitrary-synthetic-secret",
+                       "avg_hr", "avg_rhr", "max_hr", "min_hr", "latest_hr"):
+            self.assertNotIn(leaked, public)
 
     def test_empty_and_malformed_responses(self) -> None:
         self.assertEqual(parse_series_response({"result": {"data_list": []}}, "steps", days=2), [])
