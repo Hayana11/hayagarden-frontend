@@ -54,7 +54,7 @@ function callInternalAdapter(operation, input, { dbPath, python, cwd } = {}) {
     input: JSON.stringify(payload),
     encoding: 'utf8',
     timeout: HEALTH_OPERATIONS.has(operation)
-      ? (input.metric === 'all' ? 40_000 : 17_000)
+      ? (input.metric === 'all' || input.metric === 'cycle' ? 40_000 : 17_000)
       : 5000,
   });
   return JSON.parse(output || '{}');
@@ -266,8 +266,8 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
   server.tool(
     'get.health',
     {
-      metric: z.enum(['all', 'status', 'steps', 'sleep', 'heart_rate']).default('all').describe('健康指标，默认 all'),
-      days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天'),
+      metric: z.enum(['all', 'status', 'steps', 'sleep', 'heart_rate', 'cycle']).default('all').describe('健康指标，默认 all'),
+      days: z.number().int().min(1).max(365).optional().describe('普通指标范围 1 到 30 天，默认 7 天；cycle 范围 1 到 365 天，默认 180 天'),
     },
     async ({ metric, days }) => ({
       content: [{ type: 'text', text: JSON.stringify(await health.get({ metric, days })) }],
@@ -354,3 +354,4 @@ module.exports = {
   startInternalMcpServer,
   verifyCurrentInternalAction,
 };
+

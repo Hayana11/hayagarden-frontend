@@ -20,6 +20,14 @@ const healthAdapter = async (operation, input) => {
     heart_rate: null,
     pass_token: secrets[3],
   };
+  if (input.metric === 'cycle') return {
+    status: 'PASS',
+    events: [{ type: 'period_start', timestamp: '2000-01-01T00:00:00Z', updated_at: '2000-01-02T00:00:00Z' }],
+    periods: [{ start: '2000-01-01T00:00:00Z', end: null, open: true, source: 'recorded' }],
+    symptoms: [],
+    predictions: { secret: secrets[1] },
+    service_token: secrets[1],
+  };
   return {
     status: 'PASS',
     metric: input.metric,
@@ -49,17 +57,21 @@ try {
   for (const legacy of legacyNames) assert.equal(listed.tools.some((tool) => tool.name === legacy), false);
 
   const schema = publicHealthTools[0].inputSchema;
-  assert.deepEqual(schema.properties.metric.enum, ['all', 'status', 'steps', 'sleep', 'heart_rate']);
+  assert.deepEqual(schema.properties.metric.enum, ['all', 'status', 'steps', 'sleep', 'heart_rate', 'cycle']);
   assert.equal(schema.properties.metric.default, 'all');
   assert.equal(schema.properties.days.minimum, 1);
-  assert.equal(schema.properties.days.maximum, 30);
-  assert.equal(schema.properties.days.default, 7);
+  assert.equal(schema.properties.days.maximum, 365);
+  assert.equal(schema.properties.days.default, undefined);
+  assert.match(schema.properties.days.description, /1 到 30/);
+  assert.match(schema.properties.days.description, /1 到 365/);
+  assert.match(schema.properties.days.description, /180/);
 
   const status = JSON.parse(textOf(await client.callTool({ name: 'get.health', arguments: { metric: 'status' } })));
   const all = JSON.parse(textOf(await client.callTool({ name: 'get.health', arguments: { metric: 'all', days: 1 } })));
   const steps = JSON.parse(textOf(await client.callTool({ name: 'get.health', arguments: { metric: 'steps', days: 2 } })));
   const sleep = JSON.parse(textOf(await client.callTool({ name: 'get.health', arguments: { metric: 'sleep', days: 2 } })));
   const heartRate = JSON.parse(textOf(await client.callTool({ name: 'get.health', arguments: { metric: 'heart_rate', days: 2 } })));
+  const cycle = JSON.parse(textOf(await client.callTool({ name: 'get.health', arguments: { metric: 'cycle' } })));
 
   assert.equal(status.source, 'xiaomi_fitness_cloud');
   assert.equal(status.connected, true);
@@ -70,11 +82,16 @@ try {
   assert.equal(steps.records.length, 1);
   assert.equal(sleep.source, 'xiaomi_fitness_cloud');
   assert.equal(heartRate.source, 'xiaomi_fitness_cloud');
-  assert.deepEqual(calls.map((item) => item.operation), Array(5).fill('get_health'));
-  assert.deepEqual(calls.map((item) => item.input.metric), ['status', 'all', 'steps', 'sleep', 'heart_rate']);
-  assert.deepEqual(calls.map((item) => item.input.days), [7, 1, 2, 2, 2]);
+  assert.equal(cycle.source, 'xiaomi_fitness_cloud');
+  assert.equal(cycle.days, 180);
+  assert.equal(cycle.events.length, 1);
+  assert.equal(cycle.periods[0].open, true);
+  assert.equal(cycle.predictions, null);
+  assert.deepEqual(calls.map((item) => item.operation), Array(6).fill('get_health'));
+  assert.deepEqual(calls.map((item) => item.input.metric), ['status', 'all', 'steps', 'sleep', 'heart_rate', 'cycle']);
+  assert.deepEqual(calls.map((item) => item.input.days), [7, 1, 2, 2, 2, 180]);
 
-  const output = JSON.stringify({ status, all, steps, sleep, heartRate });
+  const output = JSON.stringify({ status, all, steps, sleep, heartRate, cycle });
   for (const secret of secrets) assert.equal(output.includes(secret), false);
 } finally {
   await client.close().catch(() => {});
@@ -82,3 +99,4 @@ try {
 }
 
 console.log('test-xiaomi-health-internal-mcp: ok');
+

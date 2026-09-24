@@ -44,6 +44,14 @@ const runAdapter = async (operation, input) => {
     heart_rate: null,
     ...secretFields,
   };
+  if (input.metric === 'cycle') return {
+    status: 'PASS',
+    events: [{ type: 'period_start', timestamp: '2000-01-01T00:00:00Z', updated_at: '2000-01-02T00:00:00Z' }],
+    periods: [{ start: '2000-01-01T00:00:00Z', end: null, open: true, source: 'untrusted' }],
+    symptoms: [{ timestamp: '2000-01-01T00:00:00Z', hp: 'much', mood: 'happy', pain: 'heavy', note: secrets[1] }],
+    predictions: { secret: secrets[2] },
+    ...secretFields,
+  };
   return {
     status: 'PASS',
     provider: 'bad-source',
@@ -99,10 +107,28 @@ assert.equal(staleSeries.stale, true);
 assert.equal(staleSeries.records.length, 1);
 for (const secret of secrets) assert.equal(JSON.stringify(staleSeries).includes(secret), false);
 
+fail = false;
+calls = [];
+const cycle = await health.get({ metric: 'cycle' });
+assert.equal(cycle.status, 'PASS');
+assert.equal(cycle.days, 180);
+assert.equal(cycle.events[0].type, 'period_start');
+assert.equal(cycle.periods[0].open, true);
+assert.equal(cycle.periods[0].source, 'recorded');
+assert.equal(cycle.symptoms[0].hp, 'much');
+assert.equal(cycle.predictions, null);
+assert.equal(calls[0].input.days, 180);
+assert.equal((await health.get({ metric: 'cycle', days: 365 })).days, 365);
+for (const secret of secrets) assert.equal(JSON.stringify(cycle).includes(secret), false);
+
 for (const invalid of [0, 31, -1, 1.5, '2', true]) {
   await assert.rejects(() => health.get({ metric: 'steps', days: invalid }), RangeError);
+}
+for (const invalid of [0, 366, -1, 1.5, '2', true]) {
+  await assert.rejects(() => health.get({ metric: 'cycle', days: invalid }), RangeError);
 }
 await assert.rejects(() => health.get({ metric: 'unknown', days: 2 }), TypeError);
 assert.equal(LATEST_TTL_MS, 60_000);
 assert.equal(SERIES_TTL_MS, 15 * 60_000);
 console.log('test-xiaomi-health-capability: ok');
+
