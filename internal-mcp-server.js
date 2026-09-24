@@ -6,6 +6,7 @@ const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/ser
 const { execFileSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
+const { createHealthCapabilities } = require('./tools/xiaomi_health/capability');
 
 const INTERNAL_SERVER_NAME = 'internal-mcp';
 const INTERNAL_TOOL_NAMES = Object.freeze([
@@ -16,7 +17,9 @@ const INTERNAL_TOOL_NAMES = Object.freeze([
   'add_ledger',
   'search_memories',
   'write_memory',
+  'get.health',
 ]);
+const HEALTH_OPERATIONS = new Set(['get_health']);
 
 function adapterCommand({ python = process.env.PYTHON || 'python3', cwd = process.env.UH_A0_REPO_ROOT || process.cwd() } = {}) {
   return { python, cwd };
@@ -35,6 +38,9 @@ function adapterModuleFor(operation) {
   if (operation === 'write_memory') {
     return 'tools.memory_write_adapter';
   }
+  if (HEALTH_OPERATIONS.has(operation)) {
+    return 'tools.xiaomi_health.internal_adapter';
+  }
   throw new Error('unknown Internal MCP operation');
 }
 
@@ -47,7 +53,9 @@ function callInternalAdapter(operation, input, { dbPath, python, cwd } = {}) {
     env: { ...process.env, ...(dbPath ? { TODO_INTERNAL_DB_PATH: dbPath } : {}) },
     input: JSON.stringify(payload),
     encoding: 'utf8',
-    timeout: 5000,
+    timeout: HEALTH_OPERATIONS.has(operation)
+      ? (input.metric === 'all' ? 40_000 : 17_000)
+      : 5000,
   });
   return JSON.parse(output || '{}');
 }
@@ -87,8 +95,13 @@ function formatMemorySearch(posts) {
   return items.join('\n---\n') || '没有找到相关记忆';
 }
 
-function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd, uhA0Profile = false } = {}) {
+function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd, uhA0Profile = false, healthAdapter = null } = {}) {
   const server = new McpServer({ name: INTERNAL_SERVER_NAME, version: '1.0.0' });
+  const health = createHealthCapabilities({
+    runAdapter: (operation, input) => healthAdapter
+      ? healthAdapter(operation, input)
+      : callInternalAdapter(operation, input, { dbPath, python, cwd }),
+  });
 
   server.tool(
     'get_todos',
@@ -248,6 +261,17 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
         return { content: [{ type: 'text', text: 'MEMORY_WRITE_FAILED' }] };
       }
     },
+  );
+
+  server.tool(
+    'get.health',
+    {
+      metric: z.enum(['all', 'status', 'steps', 'sleep', 'heart_rate']).default('all').describe('健康指标，默认 all'),
+      days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天'),
+    },
+    async ({ metric, days }) => ({
+      content: [{ type: 'text', text: JSON.stringify(await health.get({ metric, days })) }],
+    }),
   );
 
   return server;

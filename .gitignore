@@ -1,4 +1,6 @@
 .env
+/.xiaomi-health.env
+/.xiaomi-health.env.*.tmp
 memories.db
 backups/
 node_modules/
