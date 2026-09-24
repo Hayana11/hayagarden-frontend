@@ -65,7 +65,7 @@ class ToolInventoryTest(unittest.TestCase):
             tool
             for group in groups
             for tool in group["tools"]
-            if tool["capability_id"] == "health.read"
+            if tool["tool_name"] == "health.read"
         )
         published = binding in actual_surface
         self.assertEqual(health["provider"], binding)
@@ -85,7 +85,7 @@ class ToolInventoryTest(unittest.TestCase):
             tool
             for group in disabled_groups
             for tool in group["tools"]
-            if tool["capability_id"] == "health.read"
+            if tool["tool_name"] == "health.read"
         )
         self.assertFalse(disabled_health["available"])
         self.assertEqual(disabled_health["reason_code"], "runtime_disabled")
