@@ -27,6 +27,7 @@ _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("memory", "记忆", ("memory.search", "memory.write", "diary.write")),
     ("home", "家", ("home.light.status",)),
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read", "task.timer.start")),
+    ("health", "健康", ("health.read",)),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
     ("external_read", "联网", ("web.search", "web.read")),
@@ -72,6 +73,11 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "开始行动计时",
         "companion_hint": "当对话上下文表明一个具体行动适合马上计时时，可以创建行动计时；模糊建议、信息不足或没有具体动作时不创建。",
         "physical_boundary": "只创建行动计时任务；不会写待办、日期倒计时或自主触发，也不会替代完成反馈和浮窗。",
+    },
+    "health.read": {
+        "display_label": "查看健康数据",
+        "companion_hint": "当她问起近期步数、睡眠或心率时，可以从当前连接的健康数据源读取真实记录；如果数据不可用或为空，就说明无法确认，不要猜测。",
+        "physical_boundary": "只读取当前连接的健康数据源提供的真实记录；不写入或修改健康记录。数据不可用时不得推测，不声明未经验证的设备型号。",
     },
     "ledger.read": {
         "display_label": "查看账本",

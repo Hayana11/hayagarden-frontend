@@ -255,7 +255,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "side_effect": "none",
         "autonomy_mode": "read_auto",
         "trigger": "回答依赖本人最近健康数据，且当前上下文不足以可靠确认时。",
-        "purpose": "读取本人同步到 Xiaomi Fitness Cloud 的健康摘要与指标序列。",
+        "purpose": "读取本人已同步的健康摘要与指标序列。",
         "deny_when": "当前问题不依赖健康数据，或账号未连接时。",
         "failure_behavior": "说明读取失败或数据为空，不得推测本人健康数据。",
         "loading_policy": "deferred",

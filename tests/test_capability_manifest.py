@@ -177,6 +177,24 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "mcp__home__get_light_status",
         )
 
+    def test_health_read_is_provider_neutral_read_capability(self):
+        item = get_capability("health.read")
+        self.assertEqual(item["kind"], "read")
+        self.assertEqual(item["side_effect"], "none")
+        self.assertEqual(item["autonomy_mode"], "read_auto")
+        self.assertEqual(item["purpose"], "读取本人已同步的健康摘要与指标序列。")
+        for field in ("purpose", "trigger", "deny_when", "failure_behavior"):
+            self.assertNotIn("Xiaomi", item[field])
+            self.assertNotIn("Smart Band 11", item[field])
+        self.assertEqual(
+            item["provider_bindings"]["claude_code"],
+            "mcp__internal__get.health",
+        )
+        self.assertEqual(
+            item["provider_bindings"]["internal_mcp"],
+            "mcp__internal__get.health",
+        )
+
     def test_task_timer_contract(self):
         item = get_capability("task.timer.start")
         self.assertEqual(item["display_name"], "开始行动计时")

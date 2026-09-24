@@ -4,6 +4,7 @@ from unittest import mock
 
 from tools import tool_companion_hints
 from tools import tool_inventory
+from tools.cc_capability_adapter import physical_surface_names as current_physical_surface_names
 from tools.capability_manifest import P1_ENABLED_CAPABILITY_IDS, get_capability
 
 
@@ -14,6 +15,8 @@ class ToolInventoryTest(unittest.TestCase):
             for capability_id in P1_ENABLED_CAPABILITY_IDS
         }
         bindings.discard(None)
+        # B1 registers health.read, while its physical Claude tool is still unpublished.
+        bindings.discard("mcp__internal__get.health")
         self.surface_patch = mock.patch(
             "tools.tool_inventory.physical_surface_names",
             return_value=tuple(sorted(bindings)),
@@ -30,21 +33,62 @@ class ToolInventoryTest(unittest.TestCase):
 
     def test_current_groups_derive_from_companion_catalog(self):
         expected_ids = [group_id for group_id, _, _ in tool_companion_hints._EXPECTED_GROUPS]
-        self.assertEqual(expected_ids, ["memory", "home", "plans", "ledger", "files", "external_read"])
-        self.assertEqual([group["id"] for group in self.p["groups"][:6]], expected_ids)
+        self.assertEqual(expected_ids, ["memory", "home", "plans", "health", "ledger", "files", "external_read"])
+        self.assertEqual([group["id"] for group in self.p["groups"][:len(tool_companion_hints._EXPECTED_GROUPS)]], expected_ids)
         self.assertEqual(self.groups["plans"]["label"], "计划")
         self.assertEqual(
             {
                 tool["tool_name"]
-                for group in self.p["groups"][:6]
+                for group in self.p["groups"][:len(tool_companion_hints._EXPECTED_GROUPS)]
                 for tool in group["tools"]
             },
             set(P1_ENABLED_CAPABILITY_IDS),
         )
+        self.assertIn("health.read", self.t)
+        self.assertFalse(self.t["health.read"]["available"])
+        self.assertEqual(self.t["health.read"]["reason_code"], "runtime_disabled")
         self.assertIn("task.timer.start", self.t)
         self.assertTrue(self.t["task.timer.start"]["available"])
         self.assertEqual(self.t["task.timer.start"]["display_label"], "开始行动计时")
         self.assertFalse(hasattr(tool_inventory, "_ACTIVE"))
+
+    def test_health_inventory_tracks_only_the_physical_surface(self):
+        actual_surface = tuple(current_physical_surface_names())
+        binding = "mcp__internal__get.health"
+
+        with mock.patch(
+            "tools.tool_inventory.physical_surface_names",
+            return_value=actual_surface,
+        ):
+            groups = tool_inventory._current_capability_groups()
+        health = next(
+            tool
+            for group in groups
+            for tool in group["tools"]
+            if tool["capability_id"] == "health.read"
+        )
+        published = binding in actual_surface
+        self.assertEqual(health["provider"], binding)
+        self.assertEqual(health["available"], published)
+        self.assertEqual(
+            health["reason_code"],
+            "active" if published else "runtime_disabled",
+        )
+
+        absent_surface = tuple(name for name in actual_surface if name != binding)
+        with mock.patch(
+            "tools.tool_inventory.physical_surface_names",
+            return_value=absent_surface,
+        ):
+            disabled_groups = tool_inventory._current_capability_groups()
+        disabled_health = next(
+            tool
+            for group in disabled_groups
+            for tool in group["tools"]
+            if tool["capability_id"] == "health.read"
+        )
+        self.assertFalse(disabled_health["available"])
+        self.assertEqual(disabled_health["reason_code"], "runtime_disabled")
 
     def test_inventory_has_no_duplicate_tool_names(self):
         names = tool_inventory.inventory_names()
@@ -59,7 +103,7 @@ class ToolInventoryTest(unittest.TestCase):
     def test_historical_groups_are_explicit_and_do_not_duplicate_current_rows(self):
         current_names = {
             tool["tool_name"]
-            for group in self.p["groups"][:6]
+            for group in self.p["groups"][:len(tool_companion_hints._EXPECTED_GROUPS)]
             for tool in group["tools"]
         }
         self.assertIn("browse_github", {tool["tool_name"] for tool in self.groups["legacy:web"]["tools"]})

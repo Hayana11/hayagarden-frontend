@@ -34,9 +34,58 @@ class ToolCompanionHintsTest(unittest.TestCase):
     def test_catalog_is_exactly_the_enabled_manifest(self):
         grouped = [cid for _, _, ids in hints._EXPECTED_GROUPS for cid in ids]
         self.assertEqual(set(grouped), set(P1_ENABLED_CAPABILITY_IDS))
-        self.assertEqual(len(grouped), 16)
+        self.assertEqual(len(grouped), 17)
         self.assertEqual(len(grouped), len(set(grouped)))
         self.assertEqual(set(hints._DEFAULTS), set(P1_ENABLED_CAPABILITY_IDS))
+
+    def test_health_read_companion_is_provider_neutral_and_read_only(self):
+        group = next(row for row in hints.payload()["groups"] if row["id"] == "health")
+        self.assertEqual(group["label"], "健康")
+        self.assertEqual(
+            [tool["capability_id"] for tool in group["tools"]],
+            ["health.read"],
+        )
+        row = group["tools"][0]
+        self.assertEqual(row["display_label"], "查看健康数据")
+        self.assertIn("真实记录", row["companion_hint"])
+        self.assertIn("数据不可用或为空", row["companion_hint"])
+        self.assertIn("不要猜测", row["companion_hint"])
+        self.assertIn("只读取", row["physical_boundary"])
+        self.assertIn("不写入或修改健康记录", row["physical_boundary"])
+        self.assertIn("不得推测", row["physical_boundary"])
+        copy = " ".join(
+            (
+                row["display_label"],
+                row["companion_hint"],
+                row["physical_boundary"],
+            )
+        )
+        self.assertNotIn("Xiaomi", copy)
+        self.assertNotIn("Smart Band 11", copy)
+
+    def test_validate_catalog_rejects_duplicate_and_drift(self):
+        duplicate_groups = hints._EXPECTED_GROUPS + (
+            ("duplicate", "重复", ("health.read",)),
+        )
+        with mock.patch.object(hints, "_EXPECTED_GROUPS", duplicate_groups):
+            with self.assertRaisesRegex(RuntimeError, "duplicate capability IDs"):
+                hints.validate_catalog()
+
+        groups_without_health = tuple(
+            group for group in hints._EXPECTED_GROUPS if group[0] != "health"
+        )
+        with mock.patch.object(hints, "_EXPECTED_GROUPS", groups_without_health):
+            with self.assertRaisesRegex(RuntimeError, "groups drifted"):
+                hints.validate_catalog()
+
+        defaults_without_health = {
+            capability_id: row
+            for capability_id, row in hints._DEFAULTS.items()
+            if capability_id != "health.read"
+        }
+        with mock.patch.object(hints, "_DEFAULTS", defaults_without_health):
+            with self.assertRaisesRegex(RuntimeError, "defaults drifted"):
+                hints.validate_catalog()
 
     def test_external_read_hints_are_exact_and_round_trip(self):
         expected_search = (
