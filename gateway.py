@@ -79,6 +79,78 @@ def _claude_runtime_stream_error(exc):
     }
 
 
+def _chat_stream_failure_event(exc, *, partial_rescue=False):
+    """Build a safe client error terminal without forwarding provider stderr."""
+    runtime_error = _claude_runtime_stream_error(exc)
+    if runtime_error is not None:
+        event = dict(runtime_error)
+    else:
+        code = str(getattr(exc, 'error_code', None) or '')
+        error_type = str(getattr(exc, 'provider_error_type', None) or '')
+        category = str(getattr(exc, 'provider_error_category', None) or '')
+        failure_class = str(getattr(exc, 'turn_failure_class', None) or '')
+        if category == 'reasoning_extraction' or category == 'content_safety_refusal':
+            message = 'Claude 拒绝了本轮请求，请调整内容后再试。'
+        elif category == 'rate_limit':
+            message = 'Claude 请求暂时受限，请稍后再试。'
+        elif category == 'invalid_request':
+            message = 'Claude 无法处理本轮请求。'
+        elif category == 'transport':
+            message = 'Claude Code 本轮连接异常，当前生成已停止。'
+        elif code == 'stdin_write_failed':
+            message = 'Claude Code 未能接收本轮输入；本轮不会自动重试。'
+        elif code in ('provider_stall_timeout', 'provider_hard_timeout'):
+            message = 'Claude Code 本轮生成超时，当前生成已停止。'
+        elif code in ('result_missing_after_end_turn', 'result_missing_before_terminal'):
+            message = 'Claude Code 本轮未能完成收尾；已停止当前生成。'
+        elif getattr(exc, 'provider_error_type', None):
+            message = 'Claude provider 请求失败；本轮未自动重试。'
+        else:
+            message = _chat_stream_exception_text(exc)
+        event = {
+            't': 'err',
+            'd': message,
+            'message': message,
+            'code': code or type(exc).__name__,
+            'error_code': code or type(exc).__name__,
+            'retryable': bool(getattr(exc, 'retryable', False)),
+        }
+        if error_type:
+            event['provider_error_type'] = error_type
+        if category:
+            event['provider_error_category'] = category
+        if failure_class:
+            event['turn_failure_class'] = failure_class
+    if partial_rescue:
+        event['partial_rescue'] = True
+    return event
+
+
+def _chat_sse_terminal_kind(chunk):
+    """Return the client terminal type for one serialized SSE data chunk."""
+    if not isinstance(chunk, str):
+        return None
+    for line in chunk.splitlines():
+        if not line.startswith('data:'):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except Exception:
+            return None
+        if isinstance(event, dict) and event.get('t') in ('err', 'done'):
+            return str(event['t'])
+        return None
+    return None
+
+
+def _resident_display_thinking_mode(configured_mode):
+    from chat.display_thinking import resolve_effective_display_thinking_mode
+    return resolve_effective_display_thinking_mode(
+        configured_mode,
+        getattr(_CC_RESIDENT, '_model_identity', None),
+    )
+
+
 _WAKE_LIVE_TRACE_FIELDS = frozenset({
     'provider', 'mode', 'ready', 'reason', 'detail',
     'resident_generation', 'resident_pid', 'session_id_hash',
@@ -4154,6 +4226,7 @@ def _cc_resident_stream_gen(
     from chat.display_thinking import (
         append_authored_thinking_instruction,
         authored_thinking_instruction_suffix,
+        resolve_effective_display_thinking_mode,
     )
     from tools import cc_usage_observability as _cc_obs
 
@@ -4199,6 +4272,10 @@ def _cc_resident_stream_gen(
             is_cold = True
         else:
             is_cold = _CC_RESIDENT.ensure_alive(full_system, env)
+    display_thinking_mode = resolve_effective_display_thinking_mode(
+        display_thinking_mode,
+        getattr(_CC_RESIDENT, '_model_identity', None),
+    )
 
     relationship_text = ''
     rel_context_usage = None
@@ -4933,7 +5010,7 @@ def _run_unified_normal_main_chat_turn(
         saw_done = False
         for evt, payload in filter_display_thinking_events(
             guard_cc_generation(guarded_events()),
-            display_thinking_mode,
+            lambda: _resident_display_thinking_mode(display_thinking_mode),
         ):
             if evt == 'text':
                 text_acc.append(str(payload or ''))
@@ -5804,7 +5881,6 @@ def _sse_json(payload: dict) -> str:
 
 def _confirmation_error(message='LEASE_MISMATCH'):
     yield _sse_json({'t': 'err', 'd': message, 'code': message})
-    yield _sse_json({'t': 'done', 'ok': False})
 
 
 def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
@@ -5953,7 +6029,6 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
         yield _sse_json(done_event)
     except Exception as exc:
         yield _sse_json({'t': 'err', 'd': str(exc), 'code': str(exc)})
-        yield _sse_json({'t': 'done', 'ok': False})
 
 def _gw_first_turn_jsonl_grew(session) -> bool:
     """True when candidate JSONL grew past claim-time start_offset."""
@@ -6426,7 +6501,6 @@ def _stream_cc_first_turn(
                                         'd': '换窗交接失败，请稍后再试。',
                                         'code': 'FIRST_TURN_HANDOFF_RECOVER_FAILED',
                                     })
-                                    yield _sse_json({'t': 'done', 'ok': False})
                                     return
                             else:
                                 log.exception('first_turn ingest failed: %s', exc)
@@ -6438,7 +6512,6 @@ def _stream_cc_first_turn(
                                     'code': getattr(exc, 'error_code', None)
                                     or 'FIRST_TURN_INGEST_FAILED',
                                 })
-                                yield _sse_json({'t': 'done', 'ok': False})
                                 return
                         else:
                             delta_released = delta.released_text
@@ -6468,7 +6541,6 @@ def _stream_cc_first_turn(
                             'd': '换窗第一句未产生正文，请稍后再试。',
                             'code': 'FIRST_TURN_DONE_BEFORE_TEXT',
                         })
-                        yield _sse_json({'t': 'done', 'ok': False})
                         return
 
                     _ft_text, thinking_text, cache_info_json, choices_json, display_segments_json, usage = (
@@ -6500,7 +6572,6 @@ def _stream_cc_first_turn(
                             'code': getattr(exc, 'error_code', None)
                             or 'FIRST_TURN_COMPLETE_FAILED',
                         })
-                        yield _sse_json({'t': 'done', 'ok': False})
                         return
                     if usage:
                         _usage_evt = {'t': 'usage'}
@@ -6536,7 +6607,6 @@ def _stream_cc_first_turn(
                 'd': '模型流中断，请稍后再试。',
                 'code': 'FIRST_TURN_STREAM_END',
             })
-            yield _sse_json({'t': 'done', 'ok': False})
             return
 
         # Post-commit incomplete stream: drain before killing staged resident.
@@ -6562,7 +6632,6 @@ def _stream_cc_first_turn(
             'd': '模型流中断，请稍后再试。',
             'code': 'FIRST_TURN_STREAM_END',
         })
-        yield _sse_json({'t': 'done', 'ok': False})
     except FirstTurnError as exc:
         pending.clear()
         yield _sse_json({
@@ -6570,7 +6639,6 @@ def _stream_cc_first_turn(
             'd': '换窗第一句未能开始，请稍后再试。',
             'code': exc.error_code,
         })
-        yield _sse_json({'t': 'done', 'ok': False})
     except GeneratorExit:
         if _handle_client_detach():
             raise
@@ -6590,7 +6658,6 @@ def _stream_cc_first_turn(
                     'd': '回答已保存但收尾未完成，请勿重复发送。',
                     'code': 'FIRST_TURN_TRANSCRIPT_RECOVERY_FINALIZE_PENDING',
                 })
-                yield _sse_json({'t': 'done', 'ok': False})
                 return
             # Not FIRST_TURN_COMPLETE_FAILED (that path returns earlier, fail-closed).
             _close_event_iter()
@@ -6604,7 +6671,6 @@ def _stream_cc_first_turn(
             'd': '换窗第一句失败，请稍后再试。',
             'code': getattr(exc, 'error_code', None) or 'FIRST_TURN_STREAM_FAILED',
         })
-        yield _sse_json({'t': 'done', 'ok': False})
     finally:
         _close_event_iter()
 
@@ -6657,7 +6723,6 @@ def _stream_cc_daily_soft_window(
                 'd': '换窗准备与当前窗口不一致，请关闭后重试。',
                 'code': 'FIRST_TURN_SOURCE_MISMATCH',
             })
-            yield _sse_json({'t': 'done', 'ok': False})
             return
         if st in (_cw.INTENT_COMMITTING, _cw.INTENT_HANDOFF_PENDING):
             # Cross-process / new request: no FirstTurnSession → no auto recover.
@@ -6667,7 +6732,6 @@ def _stream_cc_daily_soft_window(
                 'code': 'FIRST_TURN_BUSY',
                 'retryable': True,
             })
-            yield _sse_json({'t': 'done', 'ok': False})
             return
 
     # COMMITTED is not an "active" switch status, but incomplete first-turn
@@ -6695,7 +6759,6 @@ def _stream_cc_daily_soft_window(
                 'code': 'FIRST_TURN_FINALIZE_PENDING',
                 'retryable': True,
             })
-            yield _sse_json({'t': 'done', 'ok': False})
             return
 
     _daily_plan = None
@@ -6710,7 +6773,10 @@ def _stream_cc_daily_soft_window(
     cc_tool_calls = []
 
     def _rescue_and_abort(error_code, *, respawn=True):
-        nonlocal assistant_persisted
+        nonlocal assistant_persisted, turn_terminal
+        if turn_terminal:
+            return {'partial_rescue_performed': False, 'lease_released': False}
+        turn_terminal = True
         if _daily_plan is None:
             return {'partial_rescue_performed': False, 'lease_released': False}
         partial_rescue = False
@@ -6813,7 +6879,8 @@ def _stream_cc_daily_soft_window(
             static_system=_full_system,
         )
         for evt, payload in filter_display_thinking_events(
-            _daily_events, _display_thinking_mode,
+            _daily_events,
+            lambda: _resident_display_thinking_mode(_display_thinking_mode),
         ):
             heartbeat_sse = _daily_heartbeat_sse(evt)
             if heartbeat_sse is not None:
@@ -6918,7 +6985,6 @@ def _stream_cc_daily_soft_window(
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': 'empty provider response', 'retryable': False,
             }) + SSE_END
-            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
 
         _cache_info_json = (
@@ -6957,7 +7023,6 @@ def _stream_cc_daily_soft_window(
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': str(exc), 'retryable': False, 'code': 'epoch_mismatch',
             }) + SSE_END
-            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
         except Exception as exc:
             _daily_rt.abort_daily_turn(
@@ -6969,7 +7034,6 @@ def _stream_cc_daily_soft_window(
             yield 'data: ' + json.dumps({
                 't': 'err', 'd': 'assistant persist failed: %s' % exc, 'retryable': False,
             }) + SSE_END
-            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
 
         try:
@@ -6994,7 +7058,6 @@ def _stream_cc_daily_soft_window(
                 'code': 'cursor_cas_conflict',
                 'assistant_message_id': exc.assistant_message_id,
             }) + SSE_END
-            yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
             return
 
         if (
@@ -7118,14 +7181,12 @@ def _stream_cc_daily_soft_window(
             'retryable': False,
             'code': str(getattr(exc, 'error_code', None) or 'canonical_turn_unavailable'),
         }, ensure_ascii=False) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except _daily_rt.DuplicateTurnInProgress as exc:
         turn_terminal = True
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'duplicate_turn_in_progress',
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except _daily_ctx.DeferredError as exc:
         if _daily_plan:
@@ -7134,7 +7195,6 @@ def _stream_cc_daily_soft_window(
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'rollover_deferred',
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except (_daily_ctx.ConflictError, _daily_rt.LeaseConflictError) as exc:
         if _daily_plan:
@@ -7143,7 +7203,6 @@ def _stream_cc_daily_soft_window(
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': True, 'code': 'resident_turn_lease_conflict',
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except _daily_rt.FirstTurnFinalizePendingError as exc:
         turn_terminal = True
@@ -7153,7 +7212,6 @@ def _stream_cc_daily_soft_window(
             'retryable': True,
             'code': 'FIRST_TURN_FINALIZE_PENDING',
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except _daily_rt.LeaseHeartbeatTerminalFailure as exc:
         if _daily_plan:
@@ -7167,7 +7225,6 @@ def _stream_cc_daily_soft_window(
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'retryable': False, 'code': 'lease_heartbeat_terminal_failure',
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except _daily_rt.DailyWindowToolFencePending as exc:
         if _daily_plan:
@@ -7180,7 +7237,6 @@ def _stream_cc_daily_soft_window(
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'code': 'DailyWindowToolFencePending', 'retryable': False,
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except _daily_rt.EpochMismatchError as exc:
         if _daily_plan:
@@ -7194,7 +7250,6 @@ def _stream_cc_daily_soft_window(
         yield 'data: ' + json.dumps({
             't': 'err', 'd': str(exc), 'code': 'epoch_mismatch', 'retryable': False,
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except (_cbb.ColdBootstrapOverflow, _cbb.NoBenefitRespawnError) as exc:
         if _daily_plan:
@@ -7220,41 +7275,21 @@ def _stream_cc_daily_soft_window(
             'code': getattr(exc, 'respawn_reason', None) or type(exc).__name__,
             'retryable': False,
         }) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
         return None
     except Exception as exc:
-        if getattr(exc, 'error_code', None) == 'result_missing_after_end_turn':
-            cleanup = _rescue_and_abort('result_missing_after_end_turn', respawn=True)
-            turn_terminal = True
-            diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
-            diagnostics.update({
-                'partial_rescue_performed': bool(cleanup.get('partial_rescue_performed')),
-                'lock_released': False,
-            })
+        error_code = str(getattr(exc, 'error_code', None) or type(exc).__name__)
+        cleanup = _rescue_and_abort(error_code, respawn=True)
+        diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
+        diagnostics.update({
+            'partial_rescue_performed': bool(cleanup.get('partial_rescue_performed')),
+            'lock_released': False,
+        })
+        if diagnostics:
             _turn_data['_terminal_contract_diag'] = diagnostics
-            yield _sse_json({
-                't': 'err',
-                'd': '回复收尾异常，已保留收到的内容，可以继续发送。',
-                'retryable': True,
-                'code': 'result_missing_after_end_turn',
-                'partial_rescue': bool(cleanup.get('partial_rescue_performed')),
-            })
-            return None
-        runtime_error = _claude_runtime_stream_error(exc)
-        if _daily_plan:
-            _daily_rt.handle_provider_failure(
-                _daily_plan,
-                error_code=runtime_error['error_code'] if runtime_error else str(exc),
-                resident=_CC_RESIDENT,
-            )
-        turn_terminal = True
-        if runtime_error:
-            yield 'data: ' + json.dumps(runtime_error, ensure_ascii=False) + SSE_END
-        else:
-            yield 'data: ' + json.dumps({
-                't': 'err', 'd': str(exc), 'retryable': False,
-            }, ensure_ascii=False) + SSE_END
-        yield 'data: ' + json.dumps({'t': 'done', 'ok': False}) + SSE_END
+        yield _sse_json(_chat_stream_failure_event(
+            exc,
+            partial_rescue=bool(cleanup.get('partial_rescue_performed')),
+        ))
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
@@ -7311,7 +7346,6 @@ def chat_stream():
                         _begin_staged_rewrite_generation(_turn_data)
                     except Exception as _rw_exc:
                         yield 'data: ' + json.dumps({'t': 'err', 'd': f'rewrite prepare failed: {_rw_exc}'}) + SSE_END
-                        yield 'data: ' + json.dumps({'t': 'done', 'ok': False, 'rewrite_id': _rewrite_id}) + SSE_END
                         return
                 # touch_user_interaction() runs inside insert_user_message after persist.
                 if _uc:
@@ -7346,26 +7380,43 @@ def chat_stream():
                 if _daily_ctx.enabled() and not _rewrite_id:
                     phase = 'daily_soft_window'
                     _daily_out = None
+                    _daily_stream = _stream_cc_daily_soft_window(
+                        _turn_data,
+                        _uc,
+                        request_reality_context=request_reality_context,
+                    )
                     try:
-                        for _chunk in _stream_cc_daily_soft_window(
-                            _turn_data,
-                            _uc,
-                            request_reality_context=request_reality_context,
-                        ):
+                        for _chunk in _daily_stream:
                             if isinstance(_chunk, tuple) and _chunk[0] == 'persisted':
                                 _daily_out = _chunk
+                                if not _released[0]:
+                                    _released[0] = True
+                                    _persisted[0] = True
+                                    _gen_release((_daily_out[1], _daily_out[2]))
                                 continue
+                            if _chat_sse_terminal_kind(_chunk):
+                                if not _released[0]:
+                                    _released[0] = True
+                                    if _turn_data.get('_daily_partial_rescued'):
+                                        _persisted[0] = True
+                                    _gen_release(None)
+                                yield _chunk
+                                break
                             yield _chunk
                     finally:
-                        _released[0] = True
-                        if _daily_out:
-                            _persisted[0] = True
-                            _gen_release((_daily_out[1], _daily_out[2]))
-                        elif _turn_data.get('_daily_partial_rescued'):
-                            _persisted[0] = True
-                            _gen_release(None)
-                        else:
-                            _gen_release(None)
+                        close_stream = getattr(_daily_stream, 'close', None)
+                        if callable(close_stream):
+                            close_stream()
+                        if not _released[0]:
+                            _released[0] = True
+                            if _daily_out:
+                                _persisted[0] = True
+                                _gen_release((_daily_out[1], _daily_out[2]))
+                            elif _turn_data.get('_daily_partial_rescued'):
+                                _persisted[0] = True
+                                _gen_release(None)
+                            else:
+                                _gen_release(None)
                     _terminal_diag = _turn_data.get('_terminal_contract_diag')
                     if _terminal_diag:
                         _terminal_diag = dict(_terminal_diag)
@@ -7468,7 +7519,8 @@ def chat_stream():
                         reality_context=request_reality_context,
                     )
                     for evt, payload in filter_display_thinking_events(
-                        _resident_events, _display_thinking_mode,
+                        _resident_events,
+                        lambda: _resident_display_thinking_mode(_display_thinking_mode),
                     ):
                         if evt == 'text':
                             display_segments.append_text(str(payload or ''))
@@ -7659,9 +7711,7 @@ def chat_stream():
                             'cold_history_budget', 'cold_history_trimmed', 'cold_budget_mode',
                         ) if k in _partial
                     }}) + SSE_END
-                yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
-                if _rewrite_id:
-                    yield 'data: ' + json.dumps({'t': 'done', 'ok': False, 'rewrite_id': _rewrite_id}) + SSE_END
+                yield _sse_json(_chat_stream_failure_event(e))
             finally:
                 release_turn(
                     conversation_id=_conv,

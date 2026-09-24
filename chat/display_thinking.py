@@ -46,6 +46,17 @@ def normalize_display_thinking_mode(value: Any) -> str:
     return mode if mode in VALID_MODES else 'auto'
 
 
+def resolve_effective_display_thinking_mode(
+    configured_mode: Any, model_identity: Any,
+) -> str:
+    """Use Claude's native thinking for Opus 5.5 when the setting is auto."""
+    configured = normalize_display_thinking_mode(configured_mode)
+    identity = str(model_identity or '').strip().lower()
+    if configured == 'auto' and identity == 'explicit:claude-opus-5-5':
+        return 'native'
+    return configured
+
+
 def get_display_thinking_mode(getter=None) -> str:
     if getter is None:
         import config_store
@@ -143,8 +154,11 @@ def prepare_daily_display_thinking_plan(
     prompt: Any = None,
 ):
     """Set a non-persistent provider-only Daily turn suffix."""
+    effective_mode = normalize_display_thinking_mode(mode)
+    plan.provider_display_thinking_mode = normalize_display_thinking_mode(mode)
+    plan.provider_display_thinking_effective_mode = effective_mode
     plan.provider_display_thinking_suffix = authored_thinking_instruction_suffix(
-        mode, prompt,
+        effective_mode, prompt,
     )
     plan.provider_display_thinking_prompt = (
         AUTHORED_THINKING_INSTRUCTION
@@ -305,29 +319,41 @@ def filter_display_thinking_events(
     mode: Any,
 ) -> Iterator[tuple[str, Any]]:
     """Filter resident events while preserving tool/status/done contracts."""
-    parser = DisplayThinkingStreamParser(mode)
+    parser = None
     done_seen = False
+
+    def get_parser():
+        nonlocal parser
+        if parser is None:
+            effective_mode = mode() if callable(mode) else mode
+            parser = DisplayThinkingStreamParser(effective_mode)
+        return parser
+
     for event, payload in events:
+        if event in ('text', 'think', 'done'):
+            current_parser = get_parser()
+        else:
+            current_parser = parser
         if event == 'text':
-            yield from parser.feed_text(payload)
+            yield from current_parser.feed_text(payload)
             continue
         if event == 'think':
-            yield from parser.feed_native(payload)
+            yield from current_parser.feed_native(payload)
             continue
         if event == 'done':
             done_seen = True
             if isinstance(payload, tuple):
                 if not parser.saw_text_event and payload:
-                    yield from parser.feed_text(payload[0])
+                    yield from current_parser.feed_text(payload[0])
                 if (
                     len(payload) >= 2
                     and not parser.saw_native_event
                     and payload[1]
                 ):
-                    yield from parser.feed_native(payload[1])
-            yield from parser.finish()
-            yield ('done', _replace_done_payload(payload, parser))
+                    yield from current_parser.feed_native(payload[1])
+            yield from current_parser.finish()
+            yield ('done', _replace_done_payload(payload, current_parser))
             continue
         yield (event, payload)
-    if not done_seen:
+    if not done_seen and parser is not None:
         yield from parser.finish()

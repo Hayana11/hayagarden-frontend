@@ -48,16 +48,97 @@ class ChatTerminalContractTests(unittest.TestCase):
 
     def test_t6_gateway_emits_one_abnormal_terminal_envelope(self):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
-        start = source.index("if getattr(exc, 'error_code', None) == 'result_missing_after_end_turn':")
-        block = source[start:source.index("        if _daily_plan:", start)]
-        self.assertIn("'t': 'err'", block)
-        self.assertIn("return None", block)
-        self.assertNotIn("'t': 'done'", block)
+        start = source.index('def _stream_cc_daily_soft_window(')
+        end = source.index("\n\n@app.route('/chat/stream'", start)
+        daily = source[start:end]
+        self.assertIn('cleanup = _rescue_and_abort(error_code, respawn=True)', daily)
+        self.assertIn('yield _sse_json(_chat_stream_failure_event(', daily)
+        self.assertNotIn("'t': 'done', 'ok': False", daily)
+
+    def test_t6b_terminal_wrapper_releases_lock_and_stops_at_first_terminal(self):
+        source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
+        start = source.index('if _daily_ctx.enabled() and not _rewrite_id:')
+        end = source.index('                    return\n                text, thinking = None, None', start)
+        wrapper = source[start:end]
+        terminal = wrapper.index('if _chat_sse_terminal_kind(_chunk):')
+        release = wrapper.index('_gen_release(None)', terminal)
+        emit = wrapper.index('yield _chunk', terminal)
+        self.assertLess(release, emit)
+        self.assertIn('break', wrapper[emit:])
 
     def test_t7_frontend_consumes_err_as_terminal(self):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'app' / 'src' / 'lib' / 'chat.ts').read_text(encoding='utf-8')
         self.assertIn("case 'err':", source)
         self.assertIn("result = { ok: false", source)
+
+    def test_failure_code_taxonomy_keeps_recovery_state_out_of_rollback_allowlist(self):
+        self.assertEqual(
+            'TURN_LEVEL', cc_resident.resident_failure_class('provider_error'),
+        )
+        self.assertEqual(
+            'TURN_LEVEL', cc_resident.resident_failure_class('provider_refusal'),
+        )
+        self.assertEqual(
+            'PROCESS_LEVEL', cc_resident.resident_failure_class('stdin_write_failed'),
+        )
+        self.assertEqual(
+            'PROCESS_LEVEL', cc_resident.resident_failure_class('provider_hard_timeout'),
+        )
+        self.assertEqual(
+            'RUNTIME_LEVEL', cc_resident.resident_failure_class('claude_runtime_startup_failed'),
+        )
+        self.assertEqual(
+            'RUNTIME_LEVEL', cc_resident.resident_failure_class('claude_runtime_rollback_pending'),
+        )
+        self.assertNotIn('claude_runtime_rollback_pending', cc_resident._RUNTIME_FAILURE_CODES)
+
+    def test_provider_error_taxonomy_is_safe_and_typed(self):
+        error = cc_resident.classify_provider_error_event({
+            'type': 'result',
+            'is_error': True,
+            'error': {'type': 'invalid_request_error'},
+            'result': 'reasoning_extraction private-provider-detail secret-token',
+        }, refusal_marker=True)
+        self.assertEqual('provider_refusal', error['error_code'])
+        self.assertEqual('reasoning_extraction', error['provider_error_category'])
+        self.assertEqual('TURN_LEVEL', error['turn_failure_class'])
+        self.assertFalse(error['retryable'])
+        self.assertNotIn('private-provider-detail', error['public_message'])
+        self.assertNotIn('secret-token', error['public_message'])
+        cases = (
+            ({'error': {'type': 'invalid_request_error'}}, 'invalid_request', 'TURN_LEVEL'),
+            ({'error': {'type': 'rate_limit_error'}}, 'rate_limit', 'TURN_LEVEL'),
+            ({'error': {'type': 'connection_error'}}, 'provider_error', 'PROCESS_LEVEL'),
+        )
+        for event, error_code, failure_class in cases:
+            with self.subTest(event=event):
+                result = cc_resident.classify_provider_error_event(event)
+                self.assertEqual(error_code, result['error_code'])
+                self.assertEqual(failure_class, result['turn_failure_class'])
+
+    def test_frontend_done_false_is_visible_and_finality_events_are_nonterminal(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        frontend = (root / 'app' / 'src' / 'lib' / 'chat.ts').read_text(encoding='utf-8')
+        self.assertIn("result = ev.ok === false", frontend)
+        self.assertIn('本轮生成未完成。', frontend)
+        gateway = (root / 'gateway.py').read_text(encoding='utf-8')
+        helper = gateway[gateway.index('def _chat_sse_terminal_kind('):gateway.index('_WAKE_LIVE_TRACE_FIELDS')]
+        self.assertIn("event.get('t') in ('err', 'done')", helper)
+        self.assertNotIn("'turn_final'", helper)
+        self.assertNotIn("'turn_reconcile'", helper)
+
+    def test_daily_partial_and_complete_paths_close_after_persistence(self):
+        source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
+        start = source.index('def _stream_cc_daily_soft_window(')
+        end = source.index("\n\n@app.route('/chat/stream'", start)
+        daily = source[start:end]
+        self.assertIn('persist_partial_daily_stream_rescue(', daily)
+        self.assertIn("partial_rescue=bool(cleanup.get('partial_rescue_performed'))", daily)
+        persist = daily.index('persist_daily_assistant_for_plan(')
+        persisted = daily.index("yield ('persisted', canonical.content, canonical.thinking)")
+        success_terminal = daily.index("'ok': True", persisted)
+        self.assertLess(persist, persisted)
+        self.assertLess(persisted, success_terminal)
 
     def test_t8_slow_turn_without_end_turn_has_no_post_end_grace(self):
         tracker = cc_resident.ProviderTerminalTracker(30)
@@ -119,7 +200,7 @@ class ChatTerminalContractTests(unittest.TestCase):
 
     def test_t10_cleanup_and_next_turn_contract_is_wired(self):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
-        self.assertIn("_rescue_and_abort('result_missing_after_end_turn'", source)
+        self.assertIn('_rescue_and_abort(error_code, respawn=True)', source)
         self.assertIn("_gen_release(None)", source)
         self.assertIn("'_daily_partial_rescued'", source)
 

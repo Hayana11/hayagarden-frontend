@@ -419,6 +419,10 @@ export interface StreamResult {
   ok: boolean;
   error?: string;
   errorCode?: string;
+  providerErrorType?: string;
+  providerErrorCategory?: string;
+  turnFailureClass?: string;
+  retryable?: boolean;
   runtimeVersion?: string | null;
   selectedModel?: string | null;
   deferredTool?: ChatToolCall;
@@ -445,6 +449,10 @@ interface SseEvent {
   respawn_reason?: string;
   code?: string;
   error_code?: string;
+  provider_error_type?: string;
+  provider_error_category?: string;
+  turn_failure_class?: string;
+  retryable?: boolean;
   message?: string;
   runtime_version?: string | null;
   selected_model?: string | null;
@@ -589,13 +597,29 @@ export async function streamChatReply(
             const canonicalSha256 = typeof ev.canonical_sha256 === 'string'
               ? ev.canonical_sha256
               : undefined;
-            result = { ok: ev.ok !== false, deferredTool, assistantMessageId, canonicalSha256 };
+            result = ev.ok === false
+              ? {
+                ok: false,
+                error: String(ev.message ?? ev.d ?? '本轮生成未完成。'),
+                errorCode: String(ev.error_code ?? ev.code ?? '') || undefined,
+                providerErrorType: ev.provider_error_type,
+                providerErrorCategory: ev.provider_error_category,
+                turnFailureClass: ev.turn_failure_class,
+                retryable: ev.retryable,
+                runtimeVersion: ev.runtime_version ? String(ev.runtime_version) : null,
+                selectedModel: ev.selected_model ? String(ev.selected_model) : null,
+              }
+              : { ok: true, deferredTool, assistantMessageId, canonicalSha256 };
             break;
           }
           case 'err':
             result = { ok: false,
               error: String(ev.message ?? ev.d ?? '未知错误'),
               errorCode: String(ev.error_code ?? ev.code ?? '') || undefined,
+              providerErrorType: ev.provider_error_type,
+              providerErrorCategory: ev.provider_error_category,
+              turnFailureClass: ev.turn_failure_class,
+              retryable: ev.retryable,
               runtimeVersion: ev.runtime_version ? String(ev.runtime_version) : null,
               selectedModel: ev.selected_model ? String(ev.selected_model) : null,
             };
