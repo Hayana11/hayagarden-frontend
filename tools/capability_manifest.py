@@ -194,7 +194,7 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "deny_when": "当前话题与本人健康数据无关时。",
         "failure_behavior": "说明数据读取失败或为空；缓存数据必须标示 cached/stale，不得伪装为实时数据。",
         "loading_policy": "deferred",
-        "provider_bindings": {"claude_code": "mcp__internal__get_health", "internal_mcp": "get.health"},
+        "provider_bindings": {"internal_mcp": "get.health"},
     },
     {
         "capability_id": "files.read",

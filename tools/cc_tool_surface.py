@@ -121,13 +121,6 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"content": {"type": "string", "maxLength": 4000}},
         "required": ["content"],
     },
-    "mcp__internal__get_health": {
-        "type": "object",
-        "properties": {
-            "metric": {"type": "string", "enum": ["all", "status", "steps", "sleep", "heart_rate"], "default": "all"},
-            "days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7},
-        },
-    },
 }
 
 _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {

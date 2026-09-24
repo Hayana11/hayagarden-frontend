@@ -65,10 +65,6 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
 
 INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ()
 
-XIAOMI_HEALTH_CAPABILITY_IDS: tuple[str, ...] = (
-    "get.health",
-)
-
 CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
     "memory.write",
@@ -172,11 +168,6 @@ def uh_a0_home_mcp_tools() -> tuple[str, ...]:
 def uh_a0_internal_mcp_tools() -> tuple[str, ...]:
     """Exact Internal MCP CC names for Daily read capabilities."""
     return tuple(_claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS)
-
-
-def uh_a0_xiaomi_health_tools() -> tuple[str, ...]:
-    """Exact Internal MCP CC name for the Xiaomi read-only health capability."""
-    return tuple(_provider_binding(cid, "claude_code") for cid in XIAOMI_HEALTH_CAPABILITY_IDS)
 
 
 def uh_a0_capability_proxy_tools() -> tuple[str, ...]:
@@ -442,7 +433,6 @@ def _surface_snapshot() -> dict[str, Any]:
     """Build one fail-closed, runtime-state-aware UH-A0 surface snapshot."""
     home_bindings = {cid: _claude_binding(cid) for cid in HOME_MCP_CAPABILITY_IDS}
     internal_bindings = {cid: _claude_binding(cid) for cid in INTERNAL_MCP_CAPABILITY_IDS}
-    health_bindings = {cid: _provider_binding(cid, "claude_code") for cid in XIAOMI_HEALTH_CAPABILITY_IDS}
     proxy_bindings = {cid: _claude_binding(cid) for cid in CAPABILITY_PROXY_CAPABILITY_IDS}
     legacy_home_tools = uh_a0_home_legacy_tools()
     compatibility_home_tools = uh_a0_home_compatibility_tools()
@@ -456,7 +446,6 @@ def _surface_snapshot() -> dict[str, Any]:
     all_capability_ids = (
         HOME_MCP_CAPABILITY_IDS
         + INTERNAL_MCP_CAPABILITY_IDS
-        + XIAOMI_HEALTH_CAPABILITY_IDS
         + CAPABILITY_PROXY_CAPABILITY_IDS
         + NATIVE_FILE_CAPABILITY_IDS
         + EXTERNAL_READ_CAPABILITY_IDS
@@ -476,20 +465,15 @@ def _surface_snapshot() -> dict[str, Any]:
     if status == "FAIL_CLOSED":
         visible_home_ids: tuple[str, ...] = ()
         visible_internal_ids: tuple[str, ...] = ()
-        visible_health_ids: tuple[str, ...] = ()
         visible_proxy_ids: tuple[str, ...] = ()
         visible_native_file_ids: tuple[str, ...] = ()
         visible_external_ids: tuple[str, ...] = ()
         hidden_home = compatibility_home_tools + tuple(home_bindings.values()) + legacy_home_tools
-        hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings.values()) + tuple(health_bindings.values())
+        hidden_internal = INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS + tuple(internal_bindings.values())
         hidden_proxy = tuple(proxy_bindings.values())
     else:
         visible_home_ids = tuple(cid for cid in HOME_MCP_CAPABILITY_IDS if states[cid] in visible_states)
         visible_internal_ids = tuple(cid for cid in INTERNAL_MCP_CAPABILITY_IDS if states[cid] in visible_states)
-        # Health is an internal provider surface, not a globally P1-enabled
-        # Tool Drawer capability. It is included only while the shared
-        # fail-closed capability-state read is healthy.
-        visible_health_ids = XIAOMI_HEALTH_CAPABILITY_IDS
         visible_proxy_ids = tuple(cid for cid in CAPABILITY_PROXY_CAPABILITY_IDS if states[cid] in visible_states)
         visible_native_file_ids = tuple(cid for cid in NATIVE_FILE_CAPABILITY_IDS if states[cid] in visible_states)
         visible_external_ids = tuple(cid for cid in EXTERNAL_READ_CAPABILITY_IDS if states[cid] in visible_states)
@@ -499,7 +483,7 @@ def _surface_snapshot() -> dict[str, Any]:
 
     built_in_tools = tuple(native_file_bindings[cid] for cid in visible_native_file_ids) + tuple(external_bindings[cid] for cid in visible_external_ids)
     home_tools = tuple(home_bindings[cid] for cid in visible_home_ids)
-    internal_tools = tuple(internal_bindings[cid] for cid in visible_internal_ids) + tuple(health_bindings[cid] for cid in visible_health_ids)
+    internal_tools = tuple(internal_bindings[cid] for cid in visible_internal_ids)
     proxy_tools = tuple(proxy_bindings[cid] for cid in visible_proxy_ids)
     return {
         "runtime_state_status": status,
@@ -666,3 +650,4 @@ def assert_reserved_absent_from_surface(surface: Sequence[str]) -> None:
     overlap.update(surface_set.intersection(FORBIDDEN_BUILTIN_TOOLS))
     if overlap:
         raise AssertionError(f"RESERVED tools leaked into surface: {sorted(overlap)}")
+
