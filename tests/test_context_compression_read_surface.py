@@ -284,14 +284,16 @@ class ContextCompressionReadSurfaceTests(unittest.TestCase):
         self.assertEqual(block['model'], 'model-A')
         self.assertEqual(block['generation_job_status'], 'ready')
         self.assertEqual(block['chunk_status'], 'ready')
-        self.assertTrue(block['materialization_available'])
-        self.assertGreater(block['original_char_count'], 0)
+        self.assertFalse(block['materialization_available'])
+        self.assertIsNone(block['original_char_count'])
         self.assertEqual(block['compressed_char_count'], len('压缩总结正文'))
 
         detail = self.client.get('/dash/__continuity/blocks/' + candidate.candidate_id)
         self.assertEqual(detail.status_code, 200)
         payload = detail.get_json()
         self.assertEqual(payload['ok'], True)
+        self.assertTrue(payload['block']['materialization_available'])
+        self.assertGreater(payload['block']['original_char_count'], 0)
         self.assertEqual(payload['chunk']['body'], '压缩总结正文')
         contents = [item['content'] for item in payload['messages']]
         self.assertEqual(contents, ['用户第0句', '陪伴第0句'])

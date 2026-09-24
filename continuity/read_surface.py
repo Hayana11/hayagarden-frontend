@@ -328,6 +328,7 @@ def _make_block(
     *,
     rows_cache: dict[tuple[int, int], tuple[dict[str, object], ...]],
     include_messages: bool,
+    hydrate_source: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, list[dict[str, Any]]]:
     snapshot = load_snapshot(conn, candidate.snapshot_id)
     job = _latest_generation_job(conn, candidate.candidate_id)
@@ -373,44 +374,45 @@ def _make_block(
                 if member.source_ref in set(candidate.source_refs)
             ],
         }
-        cache_key = None
-        if snapshot.context_id is not None and snapshot.context_epoch is not None:
-            cache_key = (int(snapshot.context_id), int(snapshot.context_epoch))
-        rows: tuple[dict[str, object], ...] = ()
-        if cache_key is not None:
-            if cache_key not in rows_cache:
+        if hydrate_source:
+            cache_key = None
+            if snapshot.context_id is not None and snapshot.context_epoch is not None:
+                cache_key = (int(snapshot.context_id), int(snapshot.context_epoch))
+            rows: tuple[dict[str, object], ...] = ()
+            if cache_key is not None:
+                if cache_key not in rows_cache:
+                    try:
+                        rows_cache[cache_key] = _scope_rows(
+                            conn,
+                            context_id=cache_key[0],
+                            context_epoch=cache_key[1],
+                        )
+                    except (OSError, sqlite3.Error, TypeError, ValueError, LookupError) as exc:
+                        rows_cache[cache_key] = ()
+                        materialization_error = str(exc) or 'source_rows_unavailable'
+                rows = rows_cache[cache_key]
+            if rows:
                 try:
-                    rows_cache[cache_key] = _scope_rows(
-                        conn,
-                        context_id=cache_key[0],
-                        context_epoch=cache_key[1],
+                    materialized = materialize_candidate(snapshot, candidate, rows)
+                    selected = tuple(
+                        member for member in snapshot.members
+                        if member.source_ref in set(candidate.source_refs)
                     )
-                except (OSError, sqlite3.Error, TypeError, ValueError, LookupError) as exc:
-                    rows_cache[cache_key] = ()
-                    materialization_error = str(exc) or 'source_rows_unavailable'
-            rows = rows_cache[cache_key]
-        if rows:
-            try:
-                materialized = materialize_candidate(snapshot, candidate, rows)
-                selected = tuple(
-                    member for member in snapshot.members
-                    if member.source_ref in set(candidate.source_refs)
-                )
-                messages = _messages_for_members(selected, rows)
-                original_char_count = sum(len(item['content']) for item in messages)
-                if original_char_count == 0:
-                    original_char_count = len(materialized.body)
-                materialization_available = True
-                message_span = _span_from_messages(messages)
-                if message_span[0]:
-                    start_at, end_at = message_span
-            except SourceMaterializationError as exc:
-                materialization_error = str(exc)
-                messages = []
-        elif materialization_error is None and (
-            snapshot.context_id is None or snapshot.context_epoch is None
-        ):
-            materialization_error = 'generation_scope_identity_unavailable'
+                    messages = _messages_for_members(selected, rows)
+                    original_char_count = sum(len(item['content']) for item in messages)
+                    if original_char_count == 0:
+                        original_char_count = len(materialized.body)
+                    materialization_available = True
+                    message_span = _span_from_messages(messages)
+                    if message_span[0]:
+                        start_at, end_at = message_span
+                except SourceMaterializationError as exc:
+                    materialization_error = str(exc)
+                    messages = []
+            elif materialization_error is None and (
+                snapshot.context_id is None or snapshot.context_epoch is None
+            ):
+                materialization_error = 'generation_scope_identity_unavailable'
 
     block = {
         'candidate_id': candidate.candidate_id,
@@ -488,7 +490,11 @@ def _validate_window_identity(raw: Mapping[str, Any], requested_chat_id: str) ->
 
 
 def list_blocks(*, db_path: str | Path) -> dict[str, Any]:
-    """Return persisted candidate history for the page list."""
+    """Return persisted candidate history for the page list.
+
+    List cards only need candidate/job/chunk metadata. Source materialization
+    stays on the detail endpoint so a long history cannot stall GET /blocks.
+    """
     try:
         conn = open_read_only(db_path)
     except (OSError, sqlite3.Error):
@@ -508,6 +514,7 @@ def list_blocks(*, db_path: str | Path) -> dict[str, Any]:
                 continue
             block, _source, _chunk, _messages = _make_block(
                 conn, candidate, rows_cache=cache, include_messages=False,
+                hydrate_source=False,
             )
             blocks.append(block)
         return {
