@@ -6,6 +6,7 @@ const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/ser
 const { execFileSync } = require('child_process');
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
+const { createHealthCapabilities } = require('./tools/xiaomi_health/capability');
 
 const INTERNAL_SERVER_NAME = 'internal-mcp';
 const INTERNAL_TOOL_NAMES = Object.freeze([
@@ -16,6 +17,18 @@ const INTERNAL_TOOL_NAMES = Object.freeze([
   'add_ledger',
   'search_memories',
   'write_memory',
+  'health_status',
+  'health_latest',
+  'health_steps',
+  'health_sleep',
+  'health_heart_rate',
+]);
+const HEALTH_OPERATIONS = new Set([
+  'health_status',
+  'health_latest',
+  'health_steps',
+  'health_sleep',
+  'health_heart_rate',
 ]);
 
 function adapterCommand({ python = process.env.PYTHON || 'python3', cwd = process.env.UH_A0_REPO_ROOT || process.cwd() } = {}) {
@@ -35,6 +48,9 @@ function adapterModuleFor(operation) {
   if (operation === 'write_memory') {
     return 'tools.memory_write_adapter';
   }
+  if (HEALTH_OPERATIONS.has(operation)) {
+    return 'tools.xiaomi_health.internal_adapter';
+  }
   throw new Error('unknown Internal MCP operation');
 }
 
@@ -47,7 +63,9 @@ function callInternalAdapter(operation, input, { dbPath, python, cwd } = {}) {
     env: { ...process.env, ...(dbPath ? { TODO_INTERNAL_DB_PATH: dbPath } : {}) },
     input: JSON.stringify(payload),
     encoding: 'utf8',
-    timeout: 5000,
+    timeout: HEALTH_OPERATIONS.has(operation)
+      ? (operation === 'health_latest' ? 40_000 : 17_000)
+      : 5000,
   });
   return JSON.parse(output || '{}');
 }
@@ -87,8 +105,13 @@ function formatMemorySearch(posts) {
   return items.join('\n---\n') || '没有找到相关记忆';
 }
 
-function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd, uhA0Profile = false } = {}) {
+function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd, uhA0Profile = false, healthAdapter = null } = {}) {
   const server = new McpServer({ name: INTERNAL_SERVER_NAME, version: '1.0.0' });
+  const health = createHealthCapabilities({
+    runAdapter: (operation, input) => healthAdapter
+      ? healthAdapter(operation, input)
+      : callInternalAdapter(operation, input, { dbPath, python, cwd }),
+  });
 
   server.tool(
     'get_todos',
@@ -248,6 +271,32 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
         return { content: [{ type: 'text', text: 'MEMORY_WRITE_FAILED' }] };
       }
     },
+  );
+
+  server.tool('health_status', {}, async () => ({
+    content: [{ type: 'text', text: JSON.stringify(await health.status()) }],
+  }));
+
+  server.tool('health_latest', {}, async () => ({
+    content: [{ type: 'text', text: JSON.stringify(await health.latest()) }],
+  }));
+
+  server.tool(
+    'health_steps',
+    { days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天') },
+    async ({ days }) => ({ content: [{ type: 'text', text: JSON.stringify(await health.series('steps', days)) }] }),
+  );
+
+  server.tool(
+    'health_sleep',
+    { days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天') },
+    async ({ days }) => ({ content: [{ type: 'text', text: JSON.stringify(await health.series('sleep', days)) }] }),
+  );
+
+  server.tool(
+    'health_heart_rate',
+    { days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天') },
+    async ({ days }) => ({ content: [{ type: 'text', text: JSON.stringify(await health.series('heart_rate', days)) }] }),
   );
 
   return server;

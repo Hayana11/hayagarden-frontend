@@ -11,7 +11,7 @@ from unittest import mock
 import cc_resident
 import chat.cc_history_rewrite
 import chat.daily_runtime as daily_runtime
-from tools.cc_tool_surface import _CAPABILITY_PROXY_TOOL_SCHEMAS, _HOME_TOOL_SCHEMAS
+from tools.cc_tool_surface import _CAPABILITY_PROXY_TOOL_SCHEMAS, _HOME_TOOL_SCHEMAS, _INTERNAL_TOOL_SCHEMAS
 from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
@@ -27,6 +27,7 @@ from tools.cc_capability_adapter import (
     HOME_MCP_CAPABILITY_IDS,
     CAPABILITY_PROXY_CAPABILITY_IDS,
     INTERNAL_MCP_CAPABILITY_IDS,
+    XIAOMI_HEALTH_CAPABILITY_IDS,
     INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
     NON_P3_HOME_MCP_TOOLS,
     TOOL_PROFILE_UH_A0,
@@ -40,6 +41,7 @@ from tools.cc_capability_adapter import (
     physical_surface_names,
     uh_a0_home_mcp_tools,
     uh_a0_internal_mcp_tools,
+    uh_a0_xiaomi_health_tools,
     uh_a0_capability_proxy_tools,
     uh_a0_home_legacy_tools,
     uh_a0_home_compatibility_tools,
@@ -86,17 +88,21 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
     def test_a_bindings_come_from_capability_manifest(self):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
-        self.assertEqual(
-            INTERNAL_MCP_CAPABILITY_IDS,
-            (),
-        )
+        self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ())
+        self.assertEqual(XIAOMI_HEALTH_CAPABILITY_IDS, ("health.status", "health.latest", "health.steps", "health.sleep", "health.heart_rate"))
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
             ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
         )
         self.assertEqual(
-            uh_a0_internal_mcp_tools(),
-            (),
+            uh_a0_xiaomi_health_tools(),
+            (
+                "mcp__internal__health_status",
+                "mcp__internal__health_latest",
+                "mcp__internal__health_steps",
+                "mcp__internal__health_sleep",
+                "mcp__internal__health_heart_rate",
+            ),
         )
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
@@ -115,6 +121,14 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for cid in HOME_MCP_CAPABILITY_IDS:
             expected = get_capability(cid)["provider_bindings"]["claude_code"]
             self.assertIn(expected, home)
+        self.assertEqual(uh_a0_internal_mcp_tools(), ())
+        for cid, tool_name in zip(
+            XIAOMI_HEALTH_CAPABILITY_IDS,
+            uh_a0_xiaomi_health_tools(),
+            strict=True,
+        ):
+            self.assertEqual(get_capability(cid)["provider_bindings"]["internal_mcp"], tool_name)
+            self.assertIn(cid, P1_ENABLED_CAPABILITY_IDS)
         self.assertEqual(native["files.read"], "Read")
         self.assertEqual(native["files.find"], "Glob")
         self.assertEqual(native["code.search"], "Grep")
@@ -127,6 +141,25 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 if get_capability(cid)["provider_bindings"].get("claude_code") == name
             ]
             self.assertEqual(len(matches), 1, name)
+
+    def test_health_read_capabilities_are_internal_mcp_only(self):
+        plan = self._plan()
+        expected = set(uh_a0_xiaomi_health_tools())
+        self.assertEqual(len(expected), 5)
+        self.assertTrue(expected.issubset(set(plan["internal_mcp_tools"])))
+        self.assertTrue(expected.issubset(set(plan["surface_allowlist"])))
+        self.assertTrue(expected.isdisjoint(set(plan["disallowed_tools"])))
+
+    def test_health_days_schema_is_bounded(self):
+        for name in (
+            "mcp__internal__health_steps",
+            "mcp__internal__health_sleep",
+            "mcp__internal__health_heart_rate",
+        ):
+            schema = _INTERNAL_TOOL_SCHEMAS[name]
+            self.assertEqual(schema["properties"]["days"]["minimum"], 1)
+            self.assertEqual(schema["properties"]["days"]["maximum"], 30)
+            self.assertEqual(schema["properties"]["days"]["default"], 7)
 
     def test_b_home_legacy_tools_keep_todo_and_ledger_order(self):
         self.assertEqual(
@@ -539,4 +572,3 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
