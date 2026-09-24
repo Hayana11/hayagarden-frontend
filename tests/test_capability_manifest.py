@@ -38,6 +38,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "memory.write",
                 "diary.write",
                 "home.light.status",
+                "health.read",
                 "todo.read",
                 "todo.write",
                 "task.timer.start",
@@ -127,6 +128,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "countdown.read",
             "ledger.read",
             "ledger.budget.read",
+            "health.read",
         ):
             item = get_capability(capability_id)
             self.assertEqual(item["kind"], "read")
@@ -163,6 +165,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "code.search": "Grep",
             "web.search": "WebSearch",
             "web.read": "WebFetch",
+            "health.read": "mcp__internal__get.health",
         }
         for capability_id, binding in expected_cc_bindings.items():
             self.assertEqual(
@@ -172,6 +175,24 @@ class CapabilityManifestContractTests(unittest.TestCase):
         self.assertEqual(
             get_capability("home.light.status")["provider_bindings"].get("home_mcp"),
             "mcp__home__get_light_status",
+        )
+
+    def test_health_read_is_provider_neutral_read_capability(self):
+        item = get_capability("health.read")
+        self.assertEqual(item["kind"], "read")
+        self.assertEqual(item["side_effect"], "none")
+        self.assertEqual(item["autonomy_mode"], "read_auto")
+        self.assertEqual(item["purpose"], "读取本人已同步的健康摘要与指标序列。")
+        for field in ("purpose", "trigger", "deny_when", "failure_behavior"):
+            self.assertNotIn("Xiaomi", item[field])
+            self.assertNotIn("Smart Band 11", item[field])
+        self.assertEqual(
+            item["provider_bindings"]["claude_code"],
+            "mcp__internal__get.health",
+        )
+        self.assertEqual(
+            item["provider_bindings"]["internal_mcp"],
+            "mcp__internal__get.health",
         )
 
     def test_task_timer_contract(self):

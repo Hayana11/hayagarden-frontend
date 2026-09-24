@@ -249,6 +249,22 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "provider_bindings": {"claude_code": "WebFetch"},
     },
     {
+        "capability_id": "health.read",
+        "display_name": "查看健康数据",
+        "kind": "read",
+        "side_effect": "none",
+        "autonomy_mode": "read_auto",
+        "trigger": "回答依赖本人最近健康数据，且当前上下文不足以可靠确认时。",
+        "purpose": "读取本人已同步的健康摘要与指标序列。",
+        "deny_when": "当前问题不依赖健康数据，或账号未连接时。",
+        "failure_behavior": "说明读取失败或数据为空，不得推测本人健康数据。",
+        "loading_policy": "deferred",
+        "provider_bindings": {
+            "claude_code": "mcp__internal__get.health",
+            "internal_mcp": "mcp__internal__get.health",
+        },
+    },
+    {
         "capability_id": "github.read",
         "display_name": "读取 GitHub",
         "kind": "read",
@@ -321,6 +337,7 @@ P1_ENABLED_CAPABILITY_IDS = frozenset(
         "code.search",
         "web.search",
         "web.read",
+        "health.read",
     }
 )
 
