@@ -112,10 +112,6 @@ def qr_matrix(text: str) -> list[list[bool]]:
     finder(0, 0)
     finder(SIZE - 7, 0)
     finder(0, SIZE - 7)
-    for i in range(8, SIZE - 8):
-        set_function(i, 6, i % 2 == 0)
-        set_function(6, i, i % 2 == 0)
-
     for cy in ALIGNMENT:
         for cx in ALIGNMENT:
             if modules[cy][cx] is not None:
@@ -123,6 +119,13 @@ def qr_matrix(text: str) -> list[list[bool]]:
             for dy in range(-2, 3):
                 for dx in range(-2, 3):
                     set_function(cx + dx, cy + dy, max(abs(dx), abs(dy)) != 1)
+
+    # Preserve alignment patterns where they cross the timing axes.
+    for i in range(8, SIZE - 8):
+        if modules[6][i] is None:
+            set_function(i, 6, i % 2 == 0)
+        if modules[i][6] is None:
+            set_function(6, i, i % 2 == 0)
 
     # Format information: error-correction level L (01), fixed valid mask 0.
     format_value = _bch((0b01 << 3) | 0, 0x537, 10) ^ 0x5412
@@ -152,12 +155,12 @@ def qr_matrix(text: str) -> list[list[bool]]:
     index = 0
     right = SIZE - 1
     while right >= 1:
-        if right == 6:
-            right = 5
+        # Skip timing column 6 without shifting the traversal's next pair.
+        col = right - 1 if right == 6 else right
         for vert in range(SIZE):
             y = SIZE - 1 - vert if ((right + 1) & 2) == 0 else vert
             for offset in range(2):
-                x = right - offset
+                x = col - offset
                 if modules[y][x] is None:
                     bit = bit_stream[index] if index < len(bit_stream) else 0
                     index += 1

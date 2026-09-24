@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -129,6 +130,22 @@ class XiaomiHealthProviderTests(unittest.TestCase):
 
     def test_rc4_known_vector(self) -> None:
         self.assertEqual(rc4_drop(b"Key", b"Plaintext", drop=0).hex(), "bbf316e8d940af0ad3")
+
+    def test_qr_matrix_matches_independently_decoded_vector(self) -> None:
+        matrix = qr_matrix("https://example.com/")
+        packed = bytes(1 if cell else 0 for row in matrix for cell in row)
+        self.assertEqual(
+            hashlib.sha256(packed).hexdigest(),
+            "a3ec45b2f6bb914a0ba62a49783b3d88648b7eed75f6b760ca8bb7ca53a4477c",
+        )
+
+    def test_qr_matrix_preserves_alignment_patterns_on_timing_axes(self) -> None:
+        matrix = qr_matrix("https://example.com/")
+        for center_x, center_y in ((28, 6), (6, 28)):
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    expected = max(abs(dx), abs(dy)) != 1
+                    self.assertEqual(matrix[center_y + dy][center_x + dx], expected)
 
     def test_qr_svg_does_not_print_or_embed_login_url(self) -> None:
         login_url = "https://account.xiaomi.com/longPolling/login?ticket=private-qr-ticket"
