@@ -479,12 +479,12 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         with mock.patch('chat.cc_model.cc_model_identity', return_value='explicit:claude-opus-4-6'), \
              mock.patch.object(session, '_decide_respawn_reason', return_value='process_dead'), \
              mock.patch.object(session, '_spawn') as spawn:
+            self.assertEqual(cc_model.cc_model_identity(), 'explicit:claude-opus-4-6')
             session.ensure_alive('system', {'HOME': str(self.home)})
             turn_b = list(session.send_turn('new Opus 4.6 turn'))
         rollback.assert_not_called()
         spawn.assert_called_once()
         self.assertEqual(spawn.call_args.kwargs['reason'], 'process_dead')
-        self.assertEqual(cc_model.cc_model_identity(), 'explicit:claude-opus-4-6')
         self.assertEqual(turn_b_inputs, ['new Opus 4.6 turn'])
         self.assertEqual(turn_b, [('done', ('Opus 4.6 reply', '', {}, {}))])
 

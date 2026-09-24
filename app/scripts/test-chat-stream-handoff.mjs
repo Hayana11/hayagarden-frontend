@@ -325,14 +325,39 @@ assert.match(
   /done_event = \{'t': 'done', 'ok': True\}[\s\S]{0,240}assistant_message_id/s,
 );
 
-// Terminal P0 result-loss remains an error-only abnormal path with no fabricated success ID.
-const resultMissingStart = gatewaySource.indexOf(
-  "if getattr(exc, 'error_code', None) == 'result_missing_after_end_turn'",
+// Result-missing failures use the shared safe error terminal without a fabricated assistant ID.
+const failureHelperStart = gatewaySource.indexOf('def _chat_stream_failure_event(');
+const failureHelperEnd = gatewaySource.indexOf(
+  String.fromCharCode(10) + 'def _chat_sse_terminal_kind(',
+  failureHelperStart,
 );
-assert.notEqual(resultMissingStart, -1);
-const resultMissingBlock = gatewaySource.slice(resultMissingStart, gatewaySource.indexOf(
-  "if _daily_plan:", resultMissingStart,
-));
-assert.doesNotMatch(resultMissingBlock, /assistant_message_id/);
+assert.notEqual(failureHelperStart, -1);
+assert.notEqual(failureHelperEnd, -1);
+const failureHelperBlock = gatewaySource.slice(failureHelperStart, failureHelperEnd);
+assert.match(failureHelperBlock, /result_missing_after_end_turn/);
+assert.match(failureHelperBlock, /result_missing_before_terminal/);
+assert.doesNotMatch(failureHelperBlock, /assistant_message_id/);
+
+// Daily abnormal turns share recovery and publish one mapped error terminal.
+const dailySoftWindowStart = gatewaySource.indexOf('def _stream_cc_daily_soft_window(');
+const chatStreamRouteStart = gatewaySource.indexOf(
+  String.fromCharCode(10) + "@app.route('/chat/stream', methods=['POST'])",
+  dailySoftWindowStart,
+);
+assert.notEqual(dailySoftWindowStart, -1);
+assert.notEqual(chatStreamRouteStart, -1);
+const dailySoftWindowBlock = gatewaySource.slice(dailySoftWindowStart, chatStreamRouteStart);
+assert.match(
+  dailySoftWindowBlock,
+  /cleanup = _rescue_and_abort\(error_code, respawn=True\)/,
+);
+assert.match(
+  dailySoftWindowBlock,
+  /yield _sse_json\(_chat_stream_failure_event\(/,
+);
+assert.doesNotMatch(
+  dailySoftWindowBlock,
+  /['"]t['"]\s*:\s*['"]done['"]\s*,\s*['"]ok['"]\s*:\s*False/,
+);
 
 console.log('test:chat-stream-handoff — T1-T20 + gateway terminal ID contract all checks passed');
