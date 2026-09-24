@@ -68,11 +68,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 result = evaluate_tool_call(
                     tool_name,
                     {"month": "2026-08"},
-                    self.lease(
-                    mode=mode,
-                    source="explicit_user_intent",
-                    requested=("health.read",),
-                ),
+                    self.lease(mode=mode),
                 )
                 self.assertEqual(result["capability_id"], capability_id)
                 self.assertEqual(result["lease_decision"], "ALLOW")
@@ -93,7 +89,11 @@ class ExecutionFenceTests(unittest.TestCase):
             result = evaluate_tool_call(
                 "mcp__internal__get.health",
                 {"metric": "steps", "days": 2},
-                self.lease(mode=mode),
+                self.lease(
+                    mode=mode,
+                    source="explicit_user_intent",
+                    requested=("health.read",),
+                ),
             )
             self.assertEqual(result["capability_id"], "health.read")
             self.assertEqual(result["lease_decision"], "ALLOW")
