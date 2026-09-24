@@ -378,9 +378,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__capability__todo_read",
                 "mcp__capability__todo_write", "mcp__capability__ledger_read",
                 "mcp__capability__ledger_write",
-                "mcp__internal__health_status", "mcp__internal__health_latest",
-                "mcp__internal__health_steps", "mcp__internal__health_sleep",
-                "mcp__internal__health_heart_rate",
+                "mcp__internal__get_health",
             },
         )
 

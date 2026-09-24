@@ -53,6 +53,7 @@ function safeStatus(result) {
   return {
     connected: result?.connected === true && authState === 'valid',
     provider: SOURCE,
+    source: SOURCE,
     auth_state: authState,
     last_success_at: validSample(result?.last_success_at),
     last_error: SAFE_ERRORS.has(error) ? error : null,
@@ -65,6 +66,7 @@ function safeSeries(metric, days, result, cache = {}) {
   return {
     status: successful ? (rows.length ? 'PASS' : 'EMPTY') : 'FAIL',
     provider: SOURCE,
+    source: SOURCE,
     metric,
     days,
     records: rows,
@@ -74,7 +76,7 @@ function safeSeries(metric, days, result, cache = {}) {
   };
 }
 
-function safeLatest(result, cache = {}) {
+function safeLatest(result, cache = {}, days = 7) {
   const source = result && typeof result === 'object' ? result : {};
   const metrics = {};
   for (const metric of Object.keys(METRICS)) metrics[metric] = sanitizeRecord(metric, source[metric]);
@@ -83,6 +85,8 @@ function safeLatest(result, cache = {}) {
   return {
     status: failed ? 'FAIL' : (hasData ? 'PASS' : 'EMPTY'),
     provider: SOURCE,
+    source: SOURCE,
+    days,
     sampledAt: validSample(source.sampledAt),
     dataDate: validDate(source.dataDate),
     ...metrics,
@@ -114,20 +118,24 @@ function createHealthCapabilities({ runAdapter, now = Date.now } = {}) {
   }
 
   return Object.freeze({
-    async status() {
-      try {
-        return safeStatus(await runAdapter('health_status', {}));
-      } catch {
-        return safeStatus({ auth_state: 'unavailable', last_error: 'unavailable' });
+    async get({ metric = 'all', days = 7 } = {}) {
+      if (!['all', 'status', ...Object.keys(METRICS)].includes(metric)) {
+        throw new TypeError('unsupported health metric');
       }
-    },
-    async latest() {
-      return read('latest', 'health_latest', {}, LATEST_TTL_MS, safeLatest);
-    },
-    async series(metric, days = 7) {
-      if (!Object.hasOwn(METRICS, metric)) throw new TypeError('unsupported health metric');
-      if (!Number.isInteger(days) || days < 1 || days > 30) throw new RangeError('days must be between 1 and 30');
-      return read(`${metric}:${days}`, `health_${metric}`, { days }, SERIES_TTL_MS, (result, cacheState) => safeSeries(metric, days, result, cacheState));
+      if (!Number.isInteger(days) || days < 1 || days > 30) {
+        throw new RangeError('days must be between 1 and 30');
+      }
+      if (metric === 'status') {
+        try {
+          return safeStatus(await runAdapter('get_health', { metric, days }));
+        } catch {
+          return safeStatus({ auth_state: 'unavailable', last_error: 'unavailable' });
+        }
+      }
+      if (metric === 'all') {
+        return read(`all:${days}`, 'get_health', { metric, days }, LATEST_TTL_MS, (result, cacheState) => safeLatest(result, cacheState, days));
+      }
+      return read(`${metric}:${days}`, 'get_health', { metric, days }, SERIES_TTL_MS, (result, cacheState) => safeSeries(metric, days, result, cacheState));
     },
   });
 }

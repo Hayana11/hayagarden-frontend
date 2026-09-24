@@ -89,7 +89,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
     def test_a_bindings_come_from_capability_manifest(self):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
         self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ())
-        self.assertEqual(XIAOMI_HEALTH_CAPABILITY_IDS, ("health.status", "health.latest", "health.steps", "health.sleep", "health.heart_rate"))
+        self.assertEqual(XIAOMI_HEALTH_CAPABILITY_IDS, ("get.health",))
         self.assertTrue(set(XIAOMI_HEALTH_CAPABILITY_IDS).isdisjoint(P1_ENABLED_CAPABILITY_IDS))
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
@@ -97,13 +97,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             uh_a0_xiaomi_health_tools(),
-            (
-                "mcp__internal__health_status",
-                "mcp__internal__health_latest",
-                "mcp__internal__health_steps",
-                "mcp__internal__health_sleep",
-                "mcp__internal__health_heart_rate",
-            ),
+            ("mcp__internal__get_health",),
         )
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
@@ -146,21 +140,21 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
     def test_health_read_capabilities_are_internal_mcp_only(self):
         plan = self._plan()
         expected = set(uh_a0_xiaomi_health_tools())
-        self.assertEqual(len(expected), 5)
+        self.assertEqual(len(expected), 1)
         self.assertTrue(expected.issubset(set(plan["internal_mcp_tools"])))
         self.assertTrue(expected.issubset(set(plan["surface_allowlist"])))
         self.assertTrue(expected.isdisjoint(set(plan["disallowed_tools"])))
 
     def test_health_days_schema_is_bounded(self):
-        for name in (
-            "mcp__internal__health_steps",
-            "mcp__internal__health_sleep",
-            "mcp__internal__health_heart_rate",
-        ):
-            schema = _INTERNAL_TOOL_SCHEMAS[name]
-            self.assertEqual(schema["properties"]["days"]["minimum"], 1)
-            self.assertEqual(schema["properties"]["days"]["maximum"], 30)
-            self.assertEqual(schema["properties"]["days"]["default"], 7)
+        schema = _INTERNAL_TOOL_SCHEMAS["mcp__internal__get_health"]
+        self.assertEqual(
+            schema["properties"]["metric"]["enum"],
+            ["all", "status", "steps", "sleep", "heart_rate"],
+        )
+        self.assertEqual(schema["properties"]["metric"]["default"], "all")
+        self.assertEqual(schema["properties"]["days"]["minimum"], 1)
+        self.assertEqual(schema["properties"]["days"]["maximum"], 30)
+        self.assertEqual(schema["properties"]["days"]["default"], 7)
 
     def test_b_home_legacy_tools_keep_todo_and_ledger_order(self):
         self.assertEqual(

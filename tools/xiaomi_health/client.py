@@ -341,10 +341,10 @@ class XiaomiHealthClient:
             "records": records,
         }
 
-    def get_latest(self) -> dict[str, Any]:
+    def get_latest(self, days: int = 2) -> dict[str, Any]:
         metrics = {}
         for metric in ("steps", "sleep", "heart_rate"):
-            series = self.get_series(metric, 2)
+            series = self.get_series(metric, days)
             metrics[metric] = series["records"][-1] if series["records"] else None
         sampled = [row["sampledAt"] for row in metrics.values() if row]
         dates = [row["dataDate"] for row in metrics.values() if row]

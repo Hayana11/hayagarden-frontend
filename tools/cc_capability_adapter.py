@@ -66,11 +66,7 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
 INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ()
 
 XIAOMI_HEALTH_CAPABILITY_IDS: tuple[str, ...] = (
-    "health.status",
-    "health.latest",
-    "health.steps",
-    "health.sleep",
-    "health.heart_rate",
+    "get.health",
 )
 
 CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
@@ -179,7 +175,7 @@ def uh_a0_internal_mcp_tools() -> tuple[str, ...]:
 
 
 def uh_a0_xiaomi_health_tools() -> tuple[str, ...]:
-    """Exact Internal MCP CC names for Xiaomi read-only health capabilities."""
+    """Exact Internal MCP CC name for the Xiaomi read-only health capability."""
     return tuple(_provider_binding(cid, "claude_code") for cid in XIAOMI_HEALTH_CAPABILITY_IDS)
 
 

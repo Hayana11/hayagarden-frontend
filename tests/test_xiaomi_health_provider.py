@@ -75,7 +75,7 @@ class XiaomiHealthProviderTests(unittest.TestCase):
 
     def test_status_reports_expired_without_secret_reflection(self) -> None:
         self.store.save({**SECRET_VALUES, "auth_state": "auth_expired"})
-        result = run("health_status", store=self.store)
+        result = run("get_health", metric="status", store=self.store)
         public = json.dumps(result, sort_keys=True)
         self.assertFalse(result["connected"])
         self.assertEqual(result["auth_state"], "auth_expired")
@@ -249,12 +249,26 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertNotIn("private-token-must-not-escape", str(raised.exception))
         self.assertEqual(self.store.status()["last_error"], "timeout")
 
+    def test_internal_adapter_has_one_dispatch_contract(self) -> None:
+        self.store.save(SECRET_VALUES)
+        client = mock.Mock()
+        client.get_latest.return_value = {"provider": "xiaomi_fitness_cloud"}
+        client.get_series.return_value = {"status": "PASS", "records": []}
+
+        self.assertEqual(run("get_health", metric="status", days=1, store=self.store, client=client)["provider"], SOURCE)
+        client.get_latest.assert_not_called()
+        self.assertEqual(run("get_health", metric="all", days=1, store=self.store, client=client), {"provider": "xiaomi_fitness_cloud"})
+        client.get_latest.assert_called_once_with(1)
+        self.assertEqual(run("get_health", metric="steps", days=2, store=self.store, client=client)["status"], "PASS")
+        client.get_series.assert_called_once_with("steps", 2)
+        self.assertEqual(run("health_steps", days=2, store=self.store, client=client)["error_code"], "unavailable")
+
     def test_adapter_redacts_unexpected_provider_exception(self) -> None:
         class BrokenClient:
             def get_series(self, metric, days):
                 raise RuntimeError(SECRET_VALUES["service_token"])
 
-        result = run("health_steps", days=2, store=self.store, client=BrokenClient())
+        result = run("get_health", metric="steps", days=2, store=self.store, client=BrokenClient())
         self.assertEqual(result["error_code"], "unavailable")
         self.assertNotIn(SECRET_VALUES["service_token"], json.dumps(result))
 

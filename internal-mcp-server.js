@@ -17,19 +17,9 @@ const INTERNAL_TOOL_NAMES = Object.freeze([
   'add_ledger',
   'search_memories',
   'write_memory',
-  'health_status',
-  'health_latest',
-  'health_steps',
-  'health_sleep',
-  'health_heart_rate',
+  'get.health',
 ]);
-const HEALTH_OPERATIONS = new Set([
-  'health_status',
-  'health_latest',
-  'health_steps',
-  'health_sleep',
-  'health_heart_rate',
-]);
+const HEALTH_OPERATIONS = new Set(['get_health']);
 
 function adapterCommand({ python = process.env.PYTHON || 'python3', cwd = process.env.UH_A0_REPO_ROOT || process.cwd() } = {}) {
   return { python, cwd };
@@ -64,7 +54,7 @@ function callInternalAdapter(operation, input, { dbPath, python, cwd } = {}) {
     input: JSON.stringify(payload),
     encoding: 'utf8',
     timeout: HEALTH_OPERATIONS.has(operation)
-      ? (operation === 'health_latest' ? 40_000 : 17_000)
+      ? (input.metric === 'all' ? 40_000 : 17_000)
       : 5000,
   });
   return JSON.parse(output || '{}');
@@ -273,30 +263,15 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
     },
   );
 
-  server.tool('health_status', {}, async () => ({
-    content: [{ type: 'text', text: JSON.stringify(await health.status()) }],
-  }));
-
-  server.tool('health_latest', {}, async () => ({
-    content: [{ type: 'text', text: JSON.stringify(await health.latest()) }],
-  }));
-
   server.tool(
-    'health_steps',
-    { days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天') },
-    async ({ days }) => ({ content: [{ type: 'text', text: JSON.stringify(await health.series('steps', days)) }] }),
-  );
-
-  server.tool(
-    'health_sleep',
-    { days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天') },
-    async ({ days }) => ({ content: [{ type: 'text', text: JSON.stringify(await health.series('sleep', days)) }] }),
-  );
-
-  server.tool(
-    'health_heart_rate',
-    { days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天') },
-    async ({ days }) => ({ content: [{ type: 'text', text: JSON.stringify(await health.series('heart_rate', days)) }] }),
+    'get.health',
+    {
+      metric: z.enum(['all', 'status', 'steps', 'sleep', 'heart_rate']).default('all').describe('健康指标，默认 all'),
+      days: z.number().int().min(1).max(30).default(7).describe('读取最近 1 到 30 天，默认 7 天'),
+    },
+    async ({ metric, days }) => ({
+      content: [{ type: 'text', text: JSON.stringify(await health.get({ metric, days })) }],
+    }),
   );
 
   return server;

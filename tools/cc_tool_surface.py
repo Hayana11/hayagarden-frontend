@@ -121,19 +121,12 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"content": {"type": "string", "maxLength": 4000}},
         "required": ["content"],
     },
-    "mcp__internal__health_status": _EMPTY_SCHEMA,
-    "mcp__internal__health_latest": _EMPTY_SCHEMA,
-    "mcp__internal__health_steps": {
+    "mcp__internal__get_health": {
         "type": "object",
-        "properties": {"days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}},
-    },
-    "mcp__internal__health_sleep": {
-        "type": "object",
-        "properties": {"days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}},
-    },
-    "mcp__internal__health_heart_rate": {
-        "type": "object",
-        "properties": {"days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7}},
+        "properties": {
+            "metric": {"type": "string", "enum": ["all", "status", "steps", "sleep", "heart_rate"], "default": "all"},
+            "days": {"type": "integer", "minimum": 1, "maximum": 30, "default": 7},
+        },
     },
 }
 
