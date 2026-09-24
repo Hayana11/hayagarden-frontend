@@ -84,22 +84,6 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertNotIn("mcp__internal__get_ledger", chat_plan["surface_allowlist"])
         self.assertIn("mcp__internal__get_ledger", chat_plan["disallowed_tools"])
 
-    def test_a_health_read_is_allowed_for_chat_and_wake(self):
-        for mode in ("chat", "wake"):
-            result = evaluate_tool_call(
-                "mcp__internal__get.health",
-                {"metric": "steps", "days": 2},
-                self.lease(
-                    mode=mode,
-                    source="explicit_user_intent",
-                    requested=("health.read",),
-                ),
-            )
-            self.assertEqual(result["capability_id"], "health.read")
-            self.assertEqual(result["lease_decision"], "ALLOW")
-        plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
-        self.assertIn("mcp__internal__get.health", plan["surface_allowlist"])
-
     def test_b_task_native_reads_allowed(self):
         lease = self.lease(mode="task")
         for tool, capability in (
@@ -394,7 +378,6 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__capability__todo_read",
                 "mcp__capability__todo_write", "mcp__capability__ledger_read",
                 "mcp__capability__ledger_write",
-                "mcp__internal__get.health",
             },
         )
 

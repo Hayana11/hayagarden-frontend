@@ -11,7 +11,7 @@ from unittest import mock
 import cc_resident
 import chat.cc_history_rewrite
 import chat.daily_runtime as daily_runtime
-from tools.cc_tool_surface import _CAPABILITY_PROXY_TOOL_SCHEMAS, _HOME_TOOL_SCHEMAS, _INTERNAL_TOOL_SCHEMAS
+from tools.cc_tool_surface import _CAPABILITY_PROXY_TOOL_SCHEMAS, _HOME_TOOL_SCHEMAS
 from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
@@ -88,7 +88,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            ("health.read",),
+            (),
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
@@ -96,7 +96,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
-            ("mcp__internal__get.health",),
+            (),
         )
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
@@ -109,13 +109,6 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 "mcp__internal__add_todo",
                 "mcp__internal__add_ledger",
             ),
-        )
-        self.assertEqual(
-            get_capability("health.read")["provider_bindings"],
-            {
-                "claude_code": "mcp__internal__get.health",
-                "internal_mcp": "mcp__internal__get.health",
-            },
         )
         home = uh_a0_home_mcp_tools()
         native = uh_a0_native_bindings()
@@ -239,34 +232,8 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertEqual(set(schema["properties"]), {"content"})
             self.assertEqual(schema["required"], ["content"])
 
-    def test_c_health_internal_schema_matches_get_health_contract(self):
-        self.assertEqual(
-            _INTERNAL_TOOL_SCHEMAS["mcp__internal__get.health"],
-            {
-                "type": "object",
-                "properties": {
-                    "metric": {
-                        "type": "string",
-                        "enum": ["all", "status", "steps", "sleep", "heart_rate"],
-                        "default": "all",
-                        "description": "健康指标，默认 all",
-                    },
-                    "days": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 30,
-                        "default": 7,
-                        "description": "读取最近 1 到 30 天，默认 7 天",
-                    },
-                },
-            },
-        )
-
     def test_d_reserved_fail_closed(self):
         surface = physical_surface_names()
-        self.assertIn("mcp__internal__get.health", surface)
-        for legacy in ("mcp__internal__health.status", "mcp__internal__health.latest", "mcp__internal__health.steps", "mcp__internal__health.sleep", "mcp__internal__health.heart_rate"):
-            self.assertNotIn(legacy, surface)
         assert_reserved_absent_from_surface(surface)
         for cid in P1_RESERVED_CAPABILITY_IDS:
             binding = (get_capability(cid)["provider_bindings"] or {}).get("claude_code")
