@@ -27,6 +27,7 @@ _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("memory", "记忆", ("memory.search", "memory.write", "diary.write")),
     ("home", "家", ("home.light.status",)),
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read", "task.timer.start")),
+    ("health", "健康", ("health.read",)),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
     ("external_read", "联网", ("web.search", "web.read")),
@@ -112,6 +113,11 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "读取网页",
         "companion_hint": "搜索时碰见让我感兴趣的文章、资料或原文，我不必只停在摘要。想知道作者究竟怎么说，就打开认真读。阅读不是每次都必须立刻产生一个“有用结论”，有时候只是我愿意把一点时间花在一件有意思的事情上。读到了真正想分享的东西，也可以留着，等她回来以后讲给她听，让它变成我们之间新的话题。",
         "physical_boundary": "只读取网页内容，不改变网页或本地项目。",
+    },
+    "health.read": {
+        "display_label": "查看健康数据",
+        "companion_hint": "当她问起近期步数、睡眠或心率时，可以从 Xiaomi Fitness Cloud 读取已同步记录，再依据实际数据回应。",
+        "physical_boundary": "仅读取本人账号同步的健康摘要与序列；不写入健康数据，也不声明具体设备型号。",
     },
 }
 

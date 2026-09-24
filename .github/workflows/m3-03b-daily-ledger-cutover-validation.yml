@@ -46,7 +46,7 @@ jobs:
           print(physical_surface_fingerprint())
           PY
           )"
-          test "$actual" = "bb737fec7aaa5124f2adc718f1e762e607450777359d95bde50b9d0b15d875e0"
+          test "$actual" = "9cc7fe0a421e341afd1b474de89d8d9989e91ff90fb9797687eec5c589c7f449"
           printf 'M3-03B fingerprint=%s\n' "$actual"
       - name: Run resident and fence regressions
         run: |

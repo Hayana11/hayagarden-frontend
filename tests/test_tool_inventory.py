@@ -30,13 +30,13 @@ class ToolInventoryTest(unittest.TestCase):
 
     def test_current_groups_derive_from_companion_catalog(self):
         expected_ids = [group_id for group_id, _, _ in tool_companion_hints._EXPECTED_GROUPS]
-        self.assertEqual(expected_ids, ["memory", "home", "plans", "ledger", "files", "external_read"])
-        self.assertEqual([group["id"] for group in self.p["groups"][:6]], expected_ids)
+        self.assertEqual(expected_ids, ["memory", "home", "plans", "health", "ledger", "files", "external_read"])
+        self.assertEqual([group["id"] for group in self.p["groups"][:7]], expected_ids)
         self.assertEqual(self.groups["plans"]["label"], "计划")
         self.assertEqual(
             {
                 tool["tool_name"]
-                for group in self.p["groups"][:6]
+                for group in self.p["groups"][:7]
                 for tool in group["tools"]
             },
             set(P1_ENABLED_CAPABILITY_IDS),
@@ -59,7 +59,7 @@ class ToolInventoryTest(unittest.TestCase):
     def test_historical_groups_are_explicit_and_do_not_duplicate_current_rows(self):
         current_names = {
             tool["tool_name"]
-            for group in self.p["groups"][:6]
+            for group in self.p["groups"][:7]
             for tool in group["tools"]
         }
         self.assertIn("browse_github", {tool["tool_name"] for tool in self.groups["legacy:web"]["tools"]})
