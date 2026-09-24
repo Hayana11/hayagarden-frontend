@@ -37,11 +37,14 @@ function textOf(result) {
   return result?.content?.find((item) => item.type === 'text')?.text ?? '';
 }
 
-const legacyNames = ['health_status', 'health_latest', 'health_steps', 'health_sleep', 'health_heart_rate'];
+const legacyNames = [
+  'health.status', 'health.latest', 'health.steps', 'health.sleep', 'health.heart_rate',
+  'health_status', 'health_latest', 'health_steps', 'health_sleep', 'health_heart_rate',
+];
 try {
   await client.connect(transport);
   const listed = await client.listTools();
-  const publicHealthTools = listed.tools.filter((tool) => tool.name.startsWith('health_') || tool.name === 'get.health');
+  const publicHealthTools = listed.tools.filter((tool) => (tool.name.startsWith('health_') || tool.name.startsWith('health.')) || tool.name === 'get.health');
   assert.deepEqual(publicHealthTools.map((tool) => tool.name), ['get.health']);
   for (const legacy of legacyNames) assert.equal(listed.tools.some((tool) => tool.name === legacy), false);
 
