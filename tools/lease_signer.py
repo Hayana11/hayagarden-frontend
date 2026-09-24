@@ -61,6 +61,7 @@ DEFAULT_ALLOWED_CAPABILITIES: dict[str, tuple[str, ...]] = {
         "ledger.read",
         "ledger.budget.read",
         "ledger.write",
+        "health.read",
     ),
     "wake": (
         "memory.search",
