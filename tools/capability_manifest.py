@@ -184,19 +184,6 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         "provider_bindings": {"claude_code": "mcp__capability__ledger_write", "internal_mcp": "mcp__internal__add_ledger", "home_mcp": "mcp__home__add_ledger"},
     },
     {
-        "capability_id": "get.health",
-        "display_name": "读取健康数据",
-        "kind": "read",
-        "side_effect": "none",
-        "autonomy_mode": "read_auto",
-        "trigger": "用户询问本人 Xiaomi Fitness Cloud 健康数据或连接状态时。",
-        "purpose": "通过单一只读入口读取脱敏连接状态、最近综合摘要、步数、睡眠或心率；metric 限定为 all、status、steps、sleep、heart_rate，days 限定为 1 到 30 天。",
-        "deny_when": "当前话题与本人健康数据无关时。",
-        "failure_behavior": "说明数据读取失败或为空；缓存数据必须标示 cached/stale，不得伪装为实时数据。",
-        "loading_policy": "deferred",
-        "provider_bindings": {"internal_mcp": "get.health"},
-    },
-    {
         "capability_id": "files.read",
         "display_name": "读取文件",
         "kind": "read",
@@ -360,3 +347,4 @@ def p1_enabled_capabilities() -> tuple[dict[str, Any], ...]:
         item for item in CAPABILITY_MANIFEST
         if item["capability_id"] in P1_ENABLED_CAPABILITY_IDS
     )
+
