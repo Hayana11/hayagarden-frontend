@@ -34,6 +34,7 @@ CHAT_DEFAULTS = (
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
+    "health.read",
 )
 WAKE_DEFAULTS = (
     "memory.search",
@@ -131,6 +132,7 @@ class LeaseSignerContractTests(unittest.TestCase):
             if mode == "chat":
                 self.assertIn("todo.write", lease["allowed_capabilities"])
                 self.assertIn("ledger.write", lease["allowed_capabilities"])
+                self.assertIn("health.read", lease["allowed_capabilities"])
             else:
                 self.assertNotIn("todo.write", lease["allowed_capabilities"])
                 self.assertNotIn("ledger.write", lease["allowed_capabilities"])

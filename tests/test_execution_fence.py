@@ -59,11 +59,9 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(result["capability_id"], "memory.search")
         self.assertEqual(result["lease_decision"], "ALLOW")
 
-    def test_a_health_internal_read_requires_explicit_intent_lease(self):
-        lease = self.lease(
-            source="explicit_user_intent",
-            requested=("health.read",),
-        )
+    def test_a_health_internal_read_is_allowed_by_default_chat_lease(self):
+        lease = self.lease()
+        self.assertIn("health.read", lease["allowed_capabilities"])
         for tool_name in (
             "mcp__internal__get.health",
             "mcp__internal__get_health",
@@ -77,6 +75,17 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertEqual(result["capability_id"], "health.read")
                 self.assertEqual(result["lease_decision"], "ALLOW")
                 self.assertNotIn("approval_id", result)
+
+        wake = self.lease(mode="wake")
+        self.assertNotIn("health.read", wake["allowed_capabilities"])
+        self.assertEqual(
+            evaluate_tool_call(
+                "mcp__internal__get_health",
+                {"metric": "steps", "days": 2},
+                wake,
+            )["lease_decision"],
+            "DENIED_CAPABILITY",
+        )
 
     def test_a_ledger_read_is_allowed_for_chat_and_wake(self):
         for mode in ("chat", "wake"):

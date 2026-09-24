@@ -547,6 +547,7 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             self.assertEqual(first.turn_lease['issued_from'], 'default_policy')
             self.assertIn('home.light.status', first.turn_lease['allowed_capabilities'])
             self.assertIn('todo.write', first.turn_lease['allowed_capabilities'])
+            self.assertIn('health.read', first.turn_lease['allowed_capabilities'])
             dr._release_lease(first)
 
             uid2 = _insert(db, 'hayana', 'second', '2026-07-27 10:01:00')
