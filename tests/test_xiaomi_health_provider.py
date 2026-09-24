@@ -129,6 +129,10 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertNotIn("cookie-private", json.dumps(rows))
 
     @staticmethod
+    def _wall_clock(dt: datetime) -> int:
+        return int(dt.timestamp()) + 8 * 3600
+
+    @staticmethod
     def _live_heart_rate_row(outer: Any, latest: dict[str, Any]) -> dict[str, Any]:
         return {"time": outer, "value": json.dumps({
             "avg_hr": 70,
@@ -140,9 +144,9 @@ class XiaomiHealthProviderTests(unittest.TestCase):
 
     def test_heart_rate_uses_nested_latest_hr_bpm_and_time(self) -> None:
         outer = int(datetime(2026, 9, 23, 16, tzinfo=timezone.utc).timestamp())
-        latest = int(datetime(2026, 9, 24, 3, 15, 30, tzinfo=timezone.utc).timestamp())
+        latest = self._wall_clock(datetime(2026, 9, 24, 3, 15, 30, tzinfo=timezone.utc))
         response = {"result": {"data_list": [self._live_heart_rate_row(outer, {
-            "bpm": 82, "time": latest, "dbTime": latest + 5, "dbKey": "synthetic",
+            "bpm": 82, "time": latest, "dbTime": latest - 8 * 3600, "dbKey": "synthetic",
         })]}}
         rows = parse_series_response(response, "heart_rate", days=7)
         self.assertEqual(rows, [{
@@ -154,16 +158,33 @@ class XiaomiHealthProviderTests(unittest.TestCase):
 
     def test_heart_rate_latest_hr_time_accepts_milliseconds(self) -> None:
         outer = int(datetime(2026, 9, 23, 16, tzinfo=timezone.utc).timestamp())
-        latest_ms = int(datetime(2026, 9, 23, 17, 30, tzinfo=timezone.utc).timestamp()) * 1000
+        latest_ms = self._wall_clock(datetime(2026, 9, 23, 17, 30, tzinfo=timezone.utc)) * 1000
         response = {"result": {"data_list": [self._live_heart_rate_row(outer, {"bpm": 77, "time": latest_ms})]}}
         row = parse_series_response(response, "heart_rate", days=7)[0]
         self.assertEqual(row["value"], 77)
         self.assertEqual(row["sampledAt"], "2026-09-23T17:30:00Z")
         self.assertEqual(row["dataDate"], "2026-09-24")
 
+    def test_heart_rate_latest_hr_time_is_utc_plus_8_wall_clock(self) -> None:
+        outer = int(datetime(2026, 9, 24, 0, tzinfo=timezone.utc).timestamp())
+        late_evening = self._wall_clock(datetime(2026, 9, 24, 15, 37, tzinfo=timezone.utc))
+        row = parse_series_response({"result": {"data_list": [
+            self._live_heart_rate_row(outer, {"bpm": 70, "time": late_evening}),
+        ]}}, "heart_rate", days=7)[0]
+        self.assertEqual(row["sampledAt"], "2026-09-24T15:37:00Z")
+        self.assertEqual(row["dataDate"], "2026-09-24")
+        row = parse_series_response({"result": {"data_list": [
+            self._live_heart_rate_row(outer, {"bpm": 70, "time": str(late_evening)}),
+        ]}}, "heart_rate", days=7)[0]
+        self.assertEqual(row["sampledAt"], "2026-09-24T15:37:00Z")
+        row = parse_series_response({"result": {"data_list": [
+            self._live_heart_rate_row(outer, {"bpm": 70, "time": "2026-09-24T15:37:00Z"}),
+        ]}}, "heart_rate", days=7)[0]
+        self.assertEqual(row["sampledAt"], "2026-09-24T15:37:00Z")
+
     def test_heart_rate_invalid_latest_time_falls_back_to_outer_time(self) -> None:
         outer = int(datetime(2026, 9, 24, 2, tzinfo=timezone.utc).timestamp())
-        for bad_time in (None, "not-a-time", -5, 0, "", {"nested": 1}):
+        for bad_time in (None, "not-a-time", -5, 0, "", True, {"nested": 1}):
             latest = {"bpm": 91} if bad_time is None else {"bpm": 91, "time": bad_time}
             response = {"result": {"data_list": [self._live_heart_rate_row(outer, latest)]}}
             row = parse_series_response(response, "heart_rate", days=7)[0]
@@ -190,8 +211,8 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         def ts(day: int, hour: int) -> int:
             return int(datetime(2026, 9, day, hour, tzinfo=timezone.utc).timestamp())
         response = {"result": {"data_list": [
-            self._live_heart_rate_row(ts(22, 16), {"bpm": 81, "time": ts(24, 4)}),
-            self._live_heart_rate_row(ts(23, 16), {"bpm": 72, "time": ts(23, 1)}),
+            self._live_heart_rate_row(ts(22, 16), {"bpm": 81, "time": ts(24, 4) + 8 * 3600}),
+            self._live_heart_rate_row(ts(23, 16), {"bpm": 72, "time": ts(23, 1) + 8 * 3600}),
             self._live_heart_rate_row(ts(21, 16), {"bpm": 68, "time": "bad"}),
             {"time": ts(24, 2), "value": {"avg_heart_rate": 75}},
         ]}}
@@ -204,8 +225,8 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         def ts(day: int, hour: int) -> int:
             return int(datetime(2026, 9, day, hour, tzinfo=timezone.utc).timestamp())
         records = parse_series_response({"result": {"data_list": [
-            self._live_heart_rate_row(ts(23, 16), {"bpm": 72, "time": ts(23, 18)}),
-            self._live_heart_rate_row(ts(22, 16), {"bpm": 84, "time": ts(24, 6)}),
+            self._live_heart_rate_row(ts(23, 16), {"bpm": 72, "time": ts(23, 18) + 8 * 3600}),
+            self._live_heart_rate_row(ts(22, 16), {"bpm": 84, "time": ts(24, 6) + 8 * 3600}),
         ]}}, "heart_rate", days=7)
         client = XiaomiHealthClient(self.store)
         series = {

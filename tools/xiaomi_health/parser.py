@@ -110,6 +110,16 @@ def _safe_details(metric: str, payload: Any) -> dict[str, float | int]:
     return output
 
 
+def _wall_clock_timestamp(value: Any) -> tuple[int, str, str] | None:
+    # Xiaomi encodes latest_hr.time as UTC+8 wall-clock seconds, not a true epoch.
+    parsed = _timestamp(value)
+    if parsed is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and not value.strip().isdigit():
+        return parsed
+    return _timestamp(parsed[0] - int(UTC_PLUS_8.utcoffset(None).total_seconds()))
+
+
 def _latest_heart_rate(payload: Any) -> tuple[float | int, tuple[int, str, str] | None] | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("latest_hr"), dict):
         return None
@@ -117,7 +127,7 @@ def _latest_heart_rate(payload: Any) -> tuple[float | int, tuple[int, str, str] 
     bpm = _number(latest.get("bpm"))
     if bpm is None:
         return None
-    return bpm, _timestamp(latest.get("time"))
+    return bpm, _wall_clock_timestamp(latest.get("time"))
 
 
 def parse_series_response(response: Any, metric: str, *, days: int, now: datetime | None = None) -> list[dict[str, Any]]:
