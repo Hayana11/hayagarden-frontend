@@ -11,7 +11,7 @@ from unittest import mock
 import cc_resident
 import chat.cc_history_rewrite
 import chat.daily_runtime as daily_runtime
-from tools.cc_tool_surface import _CAPABILITY_PROXY_TOOL_SCHEMAS, _HOME_TOOL_SCHEMAS
+from tools.cc_tool_surface import _CAPABILITY_PROXY_TOOL_SCHEMAS, _HOME_TOOL_SCHEMAS, _INTERNAL_TOOL_SCHEMAS
 from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
@@ -88,7 +88,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            (),
+            ("health.read",),
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
@@ -96,7 +96,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
-            (),
+            ("mcp__internal__get.health",),
         )
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
@@ -127,6 +127,37 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 if get_capability(cid)["provider_bindings"].get("claude_code") == name
             ]
             self.assertEqual(len(matches), 1, name)
+
+    def test_a_health_internal_surface_schema_matches_get_health_contract(self):
+        name = "mcp__internal__get.health"
+        self.assertEqual(uh_a0_internal_mcp_tools(), (name,))
+        self.assertEqual(
+            {
+                tool_name
+                for tool_name in _INTERNAL_TOOL_SCHEMAS
+                if "health" in tool_name
+            },
+            {name},
+        )
+        self.assertEqual(
+            _INTERNAL_TOOL_SCHEMAS[name],
+            {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "enum": ["all", "status", "steps", "sleep", "heart_rate"],
+                        "default": "all",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "default": 7,
+                    },
+                },
+            },
+        )
 
     def test_b_home_legacy_tools_keep_todo_and_ledger_order(self):
         self.assertEqual(

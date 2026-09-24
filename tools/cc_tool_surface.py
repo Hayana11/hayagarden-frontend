@@ -85,8 +85,24 @@ _HOME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
 }
 
-# Internal MCP Todo schemas mirror Home Todo schemas exactly.
+# Internal MCP schemas; Todo schemas mirror Home Todo schemas exactly.
 _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "mcp__internal__get.health": {
+        "type": "object",
+        "properties": {
+            "metric": {
+                "type": "string",
+                "enum": ["all", "status", "steps", "sleep", "heart_rate"],
+                "default": "all",
+            },
+            "days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30,
+                "default": 7,
+            },
+        },
+    },
     "mcp__internal__get_todos": _EMPTY_SCHEMA,
     "mcp__internal__add_todo": {
         "type": "object",
