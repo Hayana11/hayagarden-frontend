@@ -48,16 +48,28 @@ def tool_capability_index() -> dict[str, str]:
         bindings = entry.get("provider_bindings") or {}
         if not isinstance(bindings, Mapping):
             continue
-        for raw_binding in bindings.values():
+        for provider, raw_binding in bindings.items():
             for tool_name in _binding_values(raw_binding):
-                previous = owners.get(tool_name)
-                if previous is not None and previous != capability_id:
-                    raise ValueError(
-                        f"physical tool binding collision: {tool_name} "
-                        f"maps to {previous} and {capability_id}"
-                    )
-                owners[tool_name] = capability_id
-                out[tool_name] = capability_id
+                candidates = [tool_name]
+                # Claude Code normalizes punctuation in MCP tool names before
+                # emitting PreToolUse hooks (for example get.health -> get_health).
+                # Keep the manifest's canonical MCP binding while accepting the
+                # exact runtime hook alias at the execution fence.
+                if (
+                    provider == "claude_code"
+                    and tool_name.startswith("mcp__")
+                    and "." in tool_name
+                ):
+                    candidates.append(tool_name.replace(".", "_"))
+                for candidate in candidates:
+                    previous = owners.get(candidate)
+                    if previous is not None and previous != capability_id:
+                        raise ValueError(
+                            f"physical tool binding collision: {candidate} "
+                            f"maps to {previous} and {capability_id}"
+                        )
+                    owners[candidate] = capability_id
+                    out[candidate] = capability_id
     return out
 
 
