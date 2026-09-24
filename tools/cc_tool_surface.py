@@ -92,14 +92,14 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "metric": {
                 "type": "string",
-                "enum": ["all", "status", "steps", "sleep", "heart_rate"],
+                "enum": ["all", "status", "steps", "sleep", "heart_rate", "cycle"],
                 "default": "all",
             },
             "days": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 30,
-                "default": 7,
+                "maximum": 365,
+                "description": "Regular metrics: 1..30 days, default 7. Cycle: 1..365 days, default 180.",
             },
         },
     },
@@ -430,3 +430,4 @@ def capture_tool_surface_snapshot(
             item["name"]: item["surface_kind"] for item in surface
         },
     }
+

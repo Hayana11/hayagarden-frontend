@@ -146,14 +146,14 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 "properties": {
                     "metric": {
                         "type": "string",
-                        "enum": ["all", "status", "steps", "sleep", "heart_rate"],
+                        "enum": ["all", "status", "steps", "sleep", "heart_rate", "cycle"],
                         "default": "all",
                     },
                     "days": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 30,
-                        "default": 7,
+                        "maximum": 365,
+                        "description": "Regular metrics: 1..30 days, default 7. Cycle: 1..365 days, default 180.",
                     },
                 },
             },
@@ -570,4 +570,5 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
