@@ -90,6 +90,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
         self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ())
         self.assertEqual(XIAOMI_HEALTH_CAPABILITY_IDS, ("health.status", "health.latest", "health.steps", "health.sleep", "health.heart_rate"))
+        self.assertTrue(set(XIAOMI_HEALTH_CAPABILITY_IDS).isdisjoint(P1_ENABLED_CAPABILITY_IDS))
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
             ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
@@ -128,7 +129,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             strict=True,
         ):
             self.assertEqual(get_capability(cid)["provider_bindings"]["internal_mcp"], tool_name)
-            self.assertIn(cid, P1_ENABLED_CAPABILITY_IDS)
+            self.assertNotIn(cid, P1_ENABLED_CAPABILITY_IDS)
         self.assertEqual(native["files.read"], "Read")
         self.assertEqual(native["files.find"], "Glob")
         self.assertEqual(native["code.search"], "Grep")
