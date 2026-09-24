@@ -38,6 +38,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "memory.write",
                 "diary.write",
                 "home.light.status",
+                "health.read",
                 "todo.read",
                 "todo.write",
                 "task.timer.start",
@@ -127,6 +128,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "countdown.read",
             "ledger.read",
             "ledger.budget.read",
+            "health.read",
         ):
             item = get_capability(capability_id)
             self.assertEqual(item["kind"], "read")
@@ -163,6 +165,7 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "code.search": "Grep",
             "web.search": "WebSearch",
             "web.read": "WebFetch",
+            "health.read": "mcp__internal__get.health",
         }
         for capability_id, binding in expected_cc_bindings.items():
             self.assertEqual(

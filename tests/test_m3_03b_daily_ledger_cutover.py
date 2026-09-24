@@ -75,7 +75,14 @@ class DailyLedgerCutoverTests(unittest.TestCase):
     def test_manifest_provider_bindings_and_grouping(self):
         self.assertEqual(
             INTERNAL_MCP_CAPABILITY_IDS,
-            (),
+            ("health.read",),
+        )
+        self.assertEqual(
+            get_capability("health.read")["provider_bindings"],
+            {
+                "claude_code": "mcp__internal__get.health",
+                "internal_mcp": "mcp__internal__get.health",
+            },
         )
         self.assertEqual(
             get_capability("ledger.read")["provider_bindings"],
@@ -128,6 +135,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertTrue(set(LEDGER_INTERNAL_SHADOW).isdisjoint(allowed))
         self.assertTrue(set(LEDGER_HOME) <= disallowed)
         self.assertIn("mcp__capability__memory_search", allowed)
+        self.assertIn("mcp__internal__get.health", allowed)
         self.assertNotIn("mcp__home__search_memories", allowed)
         self.assertIn("mcp__home__search_memories", disallowed)
         self.assertIn("mcp__internal__search_memories", disallowed)
@@ -158,6 +166,7 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertTrue(set(LEDGER_PROXY) <= disallowed)
         self.assertTrue(set(LEDGER_HOME) <= disallowed)
         self.assertTrue({
+            "mcp__internal__get.health",
             "mcp__home__search_memories",
             "mcp__internal__search_memories",
             "mcp__capability__memory_search",
@@ -169,6 +178,27 @@ class DailyLedgerCutoverTests(unittest.TestCase):
         self.assertEqual(
             registry["mcp__internal__get_ledger_budget"],
             registry["mcp__home__get_ledger_budget"],
+        )
+        self.assertEqual(
+            registry["mcp__internal__get.health"],
+            {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "enum": ["all", "status", "steps", "sleep", "heart_rate"],
+                        "default": "all",
+                        "description": "健康指标，默认 all",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "default": 7,
+                        "description": "读取最近 1 到 30 天，默认 7 天",
+                    },
+                },
+            },
         )
         capability_read_schema = registry[LEDGER_PROXY[0]]
         legacy_read_schema = registry["mcp__internal__get_ledger"]

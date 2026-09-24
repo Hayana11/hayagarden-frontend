@@ -101,6 +101,24 @@ _INTERNAL_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {"month": {"type": "string"}},
     },
+    "mcp__internal__get.health": {
+        "type": "object",
+        "properties": {
+            "metric": {
+                "type": "string",
+                "enum": ["all", "status", "steps", "sleep", "heart_rate"],
+                "default": "all",
+                "description": "健康指标，默认 all",
+            },
+            "days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30,
+                "default": 7,
+                "description": "读取最近 1 到 30 天，默认 7 天",
+            },
+        },
+    },
     "mcp__internal__add_ledger": {
         "type": "object",
         "properties": {
