@@ -409,6 +409,38 @@ class DailyRuntimeTurnTests(unittest.TestCase):
                 static_system='STATIC',
             )
 
+    def test_auto_display_thinking_uses_resident_model_authority(self):
+        from chat.display_thinking import prepare_daily_display_thinking_plan
+
+        for identity, expected_suffix in (
+            ('explicit:claude-opus-5-5', False),
+            ('explicit:claude-opus-4-6', True),
+        ):
+            with self.subTest(model_identity=identity):
+                db = _tmp_db()
+                plan = None
+                try:
+                    _init_chat_messages(db)
+                    uid = _insert(db, 'hayana', 'hello', '2026-07-27 10:00:00')
+                    plan = self._prepare(db, uid)
+                    prepare_daily_display_thinking_plan(plan, 'auto')
+                    resident = _FakeResident()
+                    resident._model_identity = identity
+                    list(dr.stream_daily_resident_turn(
+                        plan, resident=resident, env={}, static_system='STATIC',
+                    ))
+                    marker = '正式回复不能为空。'
+                    self.assertEqual(expected_suffix, marker in resident.sent[0])
+                    self.assertEqual('auto', plan.provider_display_thinking_mode)
+                    self.assertEqual(
+                        'native' if not expected_suffix else 'auto',
+                        plan.provider_display_thinking_effective_mode,
+                    )
+                finally:
+                    if plan is not None:
+                        dr._release_lease(plan)
+                    os.unlink(db)
+
     def test_cold_turn_atomic_persist_and_cursor(self):
         db = _tmp_db()
         try:
@@ -2294,10 +2326,10 @@ class GatewayDailyCasSseTests(unittest.TestCase):
             for chunk in chunks:
                 if chunk.startswith('data: '):
                     events.append(json.loads(chunk[6:].strip()))
-            err_evt = next(e for e in events if e.get('t') == 'err')
-            done_evt = next(e for e in events if e.get('t') == 'done')
+            terminal_events = [e for e in events if e.get('t') in ('err', 'done')]
+            err_evt = next(e for e in terminal_events if e.get('t') == 'err')
             self.assertEqual(err_evt.get('code'), 'cursor_cas_conflict')
-            self.assertFalse(done_evt.get('ok'))
+            self.assertEqual([e.get('t') for e in terminal_events], ['err'])
             memo_mock.assert_not_called()
             moments_mock.assert_not_called()
             scoring_mock.assert_not_called()
@@ -2384,10 +2416,10 @@ class GatewayChatStreamGenReleaseCasTests(unittest.TestCase):
             for line in body.split('\n'):
                 if line.startswith('data: '):
                     events.append(json.loads(line[6:].strip()))
-            err_evt = next(e for e in events if e.get('t') == 'err')
-            done_evt = next(e for e in events if e.get('t') == 'done')
+            terminal_events = [e for e in events if e.get('t') in ('err', 'done')]
+            err_evt = next(e for e in terminal_events if e.get('t') == 'err')
             self.assertEqual(err_evt.get('code'), 'cursor_cas_conflict')
-            self.assertFalse(done_evt.get('ok'))
+            self.assertEqual([e.get('t') for e in terminal_events], ['err'])
             self.assertEqual(gen_release_calls, [None])
             success_tuples = [c for c in gen_release_calls if isinstance(c, tuple)]
             self.assertEqual(success_tuples, [])

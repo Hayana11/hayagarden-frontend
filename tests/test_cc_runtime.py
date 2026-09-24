@@ -365,7 +365,28 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         )
         self.assertFalse(session._last_turn_stdin_flushed)
 
-    def test_post_stdin_runtime_failure_never_replays_turn(self):
+    def test_t5b_unknown_future_runtime_prefixed_error_does_not_rollback(self):
+        import cc_resident
+        from tools import claude_runtime_updater as updater
+
+        session = cc_resident.ResidentSession('/tmp', '', '/tmp/mcp.json')
+        unknown = cc_resident.ResidentError(
+            'future turn error',
+            error_code='claude_runtime_some_future_turn_error',
+        )
+        with mock.patch.object(session, '_decide_respawn_reason', return_value='process_dead'), \
+             mock.patch.object(session, '_spawn', side_effect=unknown) as spawn, \
+             mock.patch.object(updater, 'rollback_active_runtime') as rollback, \
+             mock.patch('chat.cc_runtime.active_claude_version') as active_version:
+            with self.assertRaises(cc_resident.ResidentError) as raised:
+                session.ensure_alive('sys', {'HOME': str(self.home)})
+        self.assertIs(raised.exception, unknown)
+        spawn.assert_called_once()
+        rollback.assert_not_called()
+        active_version.assert_not_called()
+        self.assertIsNone(session._runtime_rollback_pending)
+
+    def _run_post_write_failure(self, error, *, flush=True):
         import cc_resident
         from tools import claude_runtime_updater as updater
 
@@ -373,32 +394,162 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
         session._runtime_identity = 'claude-code:2.1.281'
         attempts = []
 
-        def fail_after_flush(*args, **kwargs):
-            attempts.append(1)
+        def fail_after_write(*args, **kwargs):
+            attempts.append(args[0] if args else kwargs.get('content'))
+            session._turn_write_started = True
+            session._turn_stdin_flushed = flush
+            raise error
+
+        session._send_turn_impl = fail_after_write
+        with mock.patch.object(updater, 'rollback_active_runtime', return_value='2.1.280') as rollback, \
+             mock.patch.object(session, '_kill') as kill:
+            with self.assertRaises(type(error)):
+                list(session.send_turn('same user turn'))
+        return session, attempts, rollback, kill
+
+    def test_t1_provider_refusal_is_turn_level_and_never_rolls_back(self):
+        import cc_resident
+
+        refusal = cc_resident.ResidentError(
+            'safe refusal',
+            error_code='provider_refusal',
+            provider_error_type='model_refusal_no_fallback',
+            provider_error_category='reasoning_extraction',
+            turn_failure_class='TURN_LEVEL',
+            retryable=False,
+        )
+        session, attempts, rollback, kill = self._run_post_write_failure(refusal)
+        self.assertEqual(attempts, ['same user turn'])
+        rollback.assert_not_called()
+        kill.assert_called_once_with(quiet=True)
+        self.assertIsNone(session._runtime_rollback_pending)
+        self.assertEqual(session._next_spawn_reason, 'process_dead')
+
+    def test_t2_refusal_after_flush_clears_rollback_pending(self):
+        import cc_resident
+
+        refusal = cc_resident.ResidentError(
+            'safe refusal', error_code='provider_refusal',
+            provider_error_type='model_refusal_no_fallback',
+            provider_error_category='reasoning_extraction',
+        )
+        session, _attempts, rollback, _kill = self._run_post_write_failure(refusal, flush=True)
+        rollback.assert_not_called()
+        self.assertTrue(session._last_turn_stdin_flushed)
+        self.assertIsNone(session._runtime_rollback_pending)
+
+    def test_t3_refusal_kills_resident_and_next_ensure_spawns(self):
+        import cc_resident
+
+        refusal = cc_resident.ResidentError(
+            'safe refusal', error_code='provider_refusal',
+            provider_error_category='reasoning_extraction',
+        )
+        session, _attempts, rollback, kill = self._run_post_write_failure(refusal)
+        session._model_identity = 'explicit:claude-opus-5-5'
+        with mock.patch.object(session, '_decide_respawn_reason', return_value='process_dead'), \
+             mock.patch.object(session, '_spawn') as spawn:
+            session.ensure_alive('system', {'HOME': str(self.home)})
+        rollback.assert_not_called()
+        kill.assert_called_once_with(quiet=True)
+        spawn.assert_called_once_with(
+            'system', {'HOME': str(self.home)},
+            reason='process_dead', tool_profile=cc_resident.TOOL_PROFILE_LEGACY,
+        )
+
+    def test_t4_switch_from_opus55_to_opus46_allows_next_cold_spawn(self):
+        import cc_resident
+        from chat import cc_model
+
+        refusal = cc_resident.ResidentError(
+            'safe refusal', error_code='provider_refusal',
+            provider_error_category='reasoning_extraction',
+        )
+        session, _attempts, rollback, _kill = self._run_post_write_failure(refusal)
+        session._model_identity = 'explicit:claude-opus-5-5'
+        turn_b_inputs = []
+
+        def successful_new_turn(content, **kwargs):
+            turn_b_inputs.append(content)
             session._turn_write_started = True
             session._turn_stdin_flushed = True
-            raise cc_resident.ResidentError(
-                'provider failed',
-                error_code='provider_error',
-            )
+            yield ('done', ('Opus 4.6 reply', '', {}, {}))
 
-        session._send_turn_impl = fail_after_flush
-        with mock.patch.object(updater, 'rollback_active_runtime', return_value=None), \
-             mock.patch.object(session, '_kill'):
-            with self.assertRaises(cc_resident.ResidentError) as raised:
-                list(session.send_turn('same user turn'))
-        self.assertEqual(len(attempts), 1)
-        self.assertEqual(raised.exception.error_code, 'claude_runtime_post_send_failure')
-        self.assertIn('未自动重试', str(raised.exception))
-        self.assertTrue(session._last_turn_stdin_flushed)
-        self.assertEqual(session._runtime_rollback_pending, '2.1.281')
-        with mock.patch('chat.cc_runtime.active_claude_version', return_value='2.1.281'), \
-             mock.patch.object(updater, 'rollback_active_runtime', return_value=None), \
+        session._send_turn_impl = successful_new_turn
+        with mock.patch('chat.cc_model.cc_model_identity', return_value='explicit:claude-opus-4-6'), \
+             mock.patch.object(session, '_decide_respawn_reason', return_value='process_dead'), \
              mock.patch.object(session, '_spawn') as spawn:
-            with self.assertRaises(cc_resident.ResidentError) as pending:
-                session.ensure_alive('system', {'HOME': str(self.home)})
-            self.assertEqual(pending.exception.error_code, 'claude_runtime_rollback_pending')
-            spawn.assert_not_called()
+            self.assertEqual(cc_model.cc_model_identity(), 'explicit:claude-opus-4-6')
+            session.ensure_alive('system', {'HOME': str(self.home)})
+            turn_b = list(session.send_turn('new Opus 4.6 turn'))
+        rollback.assert_not_called()
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.kwargs['reason'], 'process_dead')
+        self.assertEqual(turn_b_inputs, ['new Opus 4.6 turn'])
+        self.assertEqual(turn_b, [('done', ('Opus 4.6 reply', '', {}, {}))])
+
+    def test_t6_stdin_write_failure_never_replays_or_rolls_back(self):
+        import cc_resident
+
+        failure = cc_resident.ResidentError(
+            'stdin failed', error_code='stdin_write_failed',
+        )
+        session, attempts, rollback, _kill = self._run_post_write_failure(failure, flush=False)
+        self.assertEqual(attempts, ['same user turn'])
+        rollback.assert_not_called()
+        self.assertIsNone(session._runtime_rollback_pending)
+
+    def test_t7_post_write_failure_matrix_never_replays_same_content(self):
+        import cc_resident
+
+        cases = (
+            ('provider_refusal', 'TURN_LEVEL', False),
+            ('invalid_request', 'TURN_LEVEL', False),
+            ('rate_limit', 'TURN_LEVEL', False),
+            ('provider_error', 'TURN_LEVEL', False),
+            ('stdin_write_failed', 'PROCESS_LEVEL', False),
+            ('provider_stall_timeout', 'PROCESS_LEVEL', False),
+            ('provider_hard_timeout', 'PROCESS_LEVEL', False),
+            ('result_missing_after_end_turn', 'PROCESS_LEVEL', False),
+            ('result_missing_before_terminal', 'PROCESS_LEVEL', False),
+            ('claude_runtime_startup_failed', 'RUNTIME_LEVEL', True),
+        )
+        for code, failure_class, should_rollback in cases:
+            with self.subTest(error_code=code):
+                failure = cc_resident.ResidentError(
+                    'failure', error_code=code, turn_failure_class=failure_class,
+                )
+                session, attempts, rollback, _kill = self._run_post_write_failure(failure)
+                self.assertEqual(attempts, ['same user turn'])
+                self.assertEqual(rollback.call_count, int(should_rollback))
+                self.assertFalse(session._turn_active)
+
+    def test_t14_disconnect_after_stdin_has_bounded_cleanup_and_next_turn_allowed(self):
+        import cc_resident
+        from tools import claude_runtime_updater as updater
+
+        session = cc_resident.ResidentSession('/tmp', '', '/tmp/mcp.json')
+        session._runtime_identity = 'claude-code:2.1.281'
+        attempts = []
+
+        def stream_then_wait(*args, **kwargs):
+            attempts.append(args[0] if args else kwargs.get('content'))
+            session._turn_write_started = True
+            session._turn_stdin_flushed = True
+            yield ('text', 'partial')
+            raise AssertionError('closed stream resumed')
+
+        session._send_turn_impl = stream_then_wait
+        stream = session.send_turn('one turn')
+        with mock.patch.object(updater, 'rollback_active_runtime') as rollback, \
+             mock.patch.object(session, '_kill') as kill:
+            self.assertEqual(next(stream), ('text', 'partial'))
+            stream.close()
+        self.assertEqual(attempts, ['one turn'])
+        kill.assert_called_once_with(quiet=True)
+        rollback.assert_not_called()
+        self.assertFalse(session._turn_active)
+        self.assertEqual(session._next_spawn_reason, 'process_dead')
 
     def test_opus_55_runtime_compatibility_and_config_write_gate(self):
         from chat import cc_model

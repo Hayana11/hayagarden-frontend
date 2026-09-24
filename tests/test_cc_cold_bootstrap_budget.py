@@ -57,8 +57,18 @@ from chat import rewrite_staging as rw
 
 
 def _import_gateway():
-    if 'gateway' in sys.modules:
-        return sys.modules['gateway']
+    expected = Path(ROOT, 'gateway.py').resolve()
+    loaded = sys.modules.get('gateway')
+    if loaded is not None:
+        loaded_path = Path(getattr(loaded, '__file__', '') or '').resolve()
+        if loaded_path == expected:
+            return loaded
+        sys.modules.pop('gateway', None)
+    # Some production helper modules prepend /opt/frontend to sys.path.
+    # Reassert this worktree as the import authority for the test gateway.
+    if ROOT in sys.path:
+        sys.path.remove(ROOT)
+    sys.path.insert(0, ROOT)
     stubbed = []
     if 'tools.workspace_registry' not in sys.modules:
         reg = mock.MagicMock()
@@ -73,6 +83,8 @@ def _import_gateway():
         sys.modules['tools.workspace_agent'] = wa
         stubbed.append('tools.workspace_agent')
     import gateway
+    if Path(gateway.__file__).resolve() != expected:
+        raise AssertionError('test imported gateway outside the isolated worktree')
     for name in stubbed:
         sys.modules.pop(name, None)
     return gateway
@@ -397,8 +409,11 @@ class ColdPreflightFenceTests(unittest.TestCase):
         suffix_marker = '正式回复不能为空。'
         suffix_start = '正式回复之前，先写一小段只用于界面展示的内心独白，并严格包在：'
 
-        def run_case(mode):
+        def run_case(mode, model_identity=None):
+            from chat.display_thinking import resolve_effective_display_thinking_mode
             resident = _FenceFakeResident()
+            resident._model_identity = model_identity
+            effective_mode = resolve_effective_display_thinking_mode(mode, model_identity)
             rebuild = mock.Mock(return_value=(
                 small_messages, {'conversation_content_trimmed': True},
             ))
@@ -412,14 +427,14 @@ class ColdPreflightFenceTests(unittest.TestCase):
 
             def fake_effective_budget(*, default_history_budget, non_history_estimate, cold_target):
                 budget_calls.append(non_history_estimate)
-                if mode in ('auto', 'authored'):
+                if effective_mode in ('auto', 'authored'):
                     return 1 if non_history_estimate >= 50 else 999
                 return 1
 
             def fake_whole_prompt(_system, _content):
                 estimate_calls.append(_content)
                 return 110 if len(estimate_calls) == 1 else (
-                    95 if mode in ('off', 'native') or (
+                    95 if effective_mode in ('off', 'native') or (
                         budget_calls and budget_calls[-1] >= 50
                     ) else 105
                 )
@@ -463,19 +478,21 @@ class ColdPreflightFenceTests(unittest.TestCase):
                 ))
 
             rebuild.assert_called_once()
-            expected_non_history = 50 if mode in ('auto', 'authored') else 30
+            expected_non_history = 50 if effective_mode in ('auto', 'authored') else 30
             self.assertEqual(budget_calls, [expected_non_history])
             self.assertEqual(len(estimate_calls), 2)
             self.assertEqual(messages_to_text_mock.call_count, 2)
             self.assertEqual(len(resident.send_turn_calls), 1)
             sent = resident.send_turn_calls[0]
-            expected_suffix_count = 1 if mode in ('auto', 'authored') else 0
+            expected_suffix_count = 1 if effective_mode in ('auto', 'authored') else 0
             self.assertEqual(sent.count(suffix_marker), expected_suffix_count)
             self.assertTrue(any(event == 'done' for event, _ in events))
 
         for mode in ('auto', 'authored', 'off', 'native'):
             with self.subTest(mode=mode):
                 run_case(mode)
+        with self.subTest(mode='auto', model='explicit:claude-opus-5-5'):
+            run_case('auto', 'explicit:claude-opus-5-5')
 
     def test_t5_latest_user_survives_rebuild(self):
         resident = _FenceFakeResident()

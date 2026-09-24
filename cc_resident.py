@@ -472,12 +472,176 @@ class StreamWatchdog:
             time.sleep(max(0.01, wait))
 
 
+_PROCESS_FAILURE_CODES = frozenset({
+    'stdin_write_failed',
+    'provider_stall_timeout',
+    'provider_hard_timeout',
+    'result_missing_after_end_turn',
+    'result_missing_before_terminal',
+    'claude_runtime_post_send_failure',
+})
+_RUNTIME_FAILURE_CODES = frozenset({
+    'claude_runtime_below_minimum',
+    'claude_runtime_invalid',
+    'claude_runtime_version_mismatch',
+    'claude_runtime_unavailable',
+    'claude_runtime_startup_failed',
+})
+_RUNTIME_CLASS_CODES = frozenset({
+    *_RUNTIME_FAILURE_CODES,
+    'claude_runtime_rollback_pending',
+    'CC_MODEL_RUNTIME_INCOMPATIBLE',
+})
+_TURN_FAILURE_CODES = frozenset({
+    'provider_refusal',
+    'invalid_request',
+    'rate_limit',
+    'provider_error',
+})
+
+
+def resident_failure_class(error_code):
+    code = str(error_code or '')
+    if code in _PROCESS_FAILURE_CODES:
+        return 'PROCESS_LEVEL'
+    if code in _RUNTIME_CLASS_CODES:
+        return 'RUNTIME_LEVEL'
+    if code in _TURN_FAILURE_CODES:
+        return 'TURN_LEVEL'
+    return None
+
+
+def classify_provider_error_event(event, *, refusal_marker=False):
+    """Reduce a Claude stream error to safe, stable public metadata.
+
+    Raw provider result text is inspected only for known classification tokens;
+    it is never copied into the exception message or SSE payload.
+    """
+    event = event if isinstance(event, dict) else {}
+    message = event.get('message') if isinstance(event.get('message'), dict) else {}
+    error_value = event.get('error')
+    error_type = ''
+    if isinstance(error_value, dict):
+        error_type = str(
+            error_value.get('type')
+            or error_value.get('code')
+            or error_value.get('name')
+            or ''
+        )
+    elif isinstance(error_value, str):
+        error_type = error_value
+    stop_details = event.get('stop_details')
+    stop_details = stop_details if isinstance(stop_details, dict) else {}
+    category = str(
+        event.get('error_category')
+        or stop_details.get('category')
+        or ''
+    ).strip().lower()
+    parts = [
+        error_type,
+        str(event.get('subtype') or ''),
+        str(event.get('stop_reason') or ''),
+        str(event.get('result') or ''),
+        category,
+    ]
+    for block in (message.get('content') or []):
+        if isinstance(block, dict) and block.get('type') == 'text':
+            parts.append(str(block.get('text') or ''))
+    searchable = ' '.join(parts).lower().replace('-', '_').replace(' ', '_')
+    safe_type = error_type.strip().lower().replace('-', '_').replace(' ', '_')
+    known_types = {
+        'invalid_request', 'invalid_request_error', 'rate_limit',
+        'rate_limit_error', 'overloaded_error', 'authentication_error',
+        'permission_error', 'connection_error', 'timeout_error',
+        'model_refusal_no_fallback',
+    }
+    if safe_type not in known_types:
+        safe_type = 'provider_api_error'
+
+    is_reasoning_refusal = 'reasoning_extraction' in searchable
+    is_refusal = (
+        refusal_marker
+        or 'model_refusal_no_fallback' in searchable
+        or 'refusal' in searchable
+        or 'safety' in searchable
+    )
+    is_rate_limit = 'rate_limit' in searchable or 'too_many_requests' in searchable
+    is_overload = 'overloaded_error' in searchable
+    is_transport = any(token in searchable for token in (
+        'connection_error', 'timeout_error', 'broken_pipe', 'transport_error',
+        'connection_reset', 'connection_closed',
+    ))
+
+    if is_reasoning_refusal:
+        failure_code = 'provider_refusal'
+        failure_category = 'reasoning_extraction'
+        public_message = 'Claude 拒绝了本轮请求，请调整内容后再试。'
+        failure_class = 'TURN_LEVEL'
+        retryable = False
+    elif is_refusal:
+        failure_code = 'provider_refusal'
+        failure_category = 'content_safety_refusal'
+        public_message = 'Claude 拒绝了本轮请求，请调整内容后再试。'
+        failure_class = 'TURN_LEVEL'
+        retryable = False
+    elif is_rate_limit:
+        failure_code = 'rate_limit'
+        failure_category = 'rate_limit'
+        public_message = 'Claude 请求暂时受限，请稍后再试。'
+        failure_class = 'TURN_LEVEL'
+        retryable = True
+    elif 'invalid_request' in searchable:
+        failure_code = 'invalid_request'
+        failure_category = 'invalid_request'
+        public_message = 'Claude 无法处理本轮请求。'
+        failure_class = 'TURN_LEVEL'
+        retryable = False
+    elif is_transport:
+        failure_code = 'provider_error'
+        failure_category = 'transport'
+        public_message = 'Claude Code 本轮连接异常，当前生成已停止。'
+        failure_class = 'PROCESS_LEVEL'
+        retryable = True
+    else:
+        failure_code = 'provider_error'
+        failure_category = 'provider_request_failure'
+        public_message = 'Claude provider 请求失败；本轮未自动重试。'
+        failure_class = 'TURN_LEVEL'
+        retryable = is_overload
+
+    return {
+        'error_code': failure_code,
+        'provider_error_type': safe_type,
+        'provider_error_category': failure_category,
+        'turn_failure_class': failure_class,
+        'retryable': retryable,
+        'public_message': public_message,
+    }
+
+
 class ResidentError(RuntimeError):
-    def __init__(self, message, *, usage=None, diagnostics=None, error_code=None):
+    def __init__(
+        self,
+        message,
+        *,
+        usage=None,
+        diagnostics=None,
+        error_code=None,
+        provider_error_type=None,
+        provider_error_category=None,
+        turn_failure_class=None,
+        retryable=None,
+    ):
         super().__init__(message)
         self.usage = usage or empty_usage()
         self.diagnostics = dict(diagnostics or {})
         self.error_code = error_code
+        self.provider_error_type = provider_error_type
+        self.provider_error_category = provider_error_category
+        self.turn_failure_class = (
+            turn_failure_class or resident_failure_class(error_code)
+        )
+        self.retryable = retryable
 
 
 def empty_usage(**overrides):
@@ -977,7 +1141,7 @@ class ResidentSession:
                         from tools.claude_runtime_updater import rollback_active_runtime
                         rolled_back = rollback_active_runtime(
                             expected_active=pending_runtime,
-                            reason='provider_failure_after_stdin',
+                            reason='runtime_failure_after_stdin',
                         )
                     except Exception:
                         rolled_back = None
@@ -1002,7 +1166,7 @@ class ResidentSession:
             try:
                 self._spawn(system_text, env, reason=reason, tool_profile=tool_profile)
             except ResidentError as exc:
-                if not str(exc.error_code or '').startswith('claude_runtime_'):
+                if exc.error_code not in _RUNTIME_FAILURE_CODES:
                     raise
                 from chat.cc_runtime import active_claude_version
                 expected_active = active_claude_version()
@@ -1645,36 +1809,38 @@ class ResidentSession:
                 self._turn_stdin_flushed = False
             try:
                 yield from self._send_turn_impl(*args, **kwargs)
-            except ResidentError as exc:
+            except BaseException as exc:
                 write_started = bool(self._turn_write_started)
-                runtime_identity = str(getattr(self, '_runtime_identity', '') or '')
-                runtime_failure_codes = {'stdin_write_failed', 'provider_error'}
-                if (
-                    write_started
-                    and exc.error_code in runtime_failure_codes
-                    and runtime_identity.startswith('claude-code:')
-                ):
-                    expected_active = runtime_identity.split(':', 1)[1]
-                    rolled_back = None
-                    try:
-                        from tools.claude_runtime_updater import rollback_active_runtime
-                        rolled_back = rollback_active_runtime(
-                            expected_active=expected_active,
-                            reason='provider_failure_after_stdin',
+                if write_started:
+                    runtime_identity = str(getattr(self, '_runtime_identity', '') or '')
+                    if (
+                        isinstance(exc, ResidentError)
+                        and exc.turn_failure_class == 'RUNTIME_LEVEL'
+                        and exc.error_code in _RUNTIME_FAILURE_CODES
+                        and runtime_identity.startswith('claude-code:')
+                    ):
+                        expected_active = runtime_identity.split(':', 1)[1]
+                        rolled_back = None
+                        try:
+                            from tools.claude_runtime_updater import rollback_active_runtime
+                            rolled_back = rollback_active_runtime(
+                                expected_active=expected_active,
+                                reason='runtime_failure_after_stdin',
+                            )
+                        except Exception:
+                            pass
+                        self._runtime_rollback_pending = (
+                            None if rolled_back else expected_active
                         )
-                    except Exception:
-                        pass
-                    self._runtime_rollback_pending = None if rolled_back else expected_active
-                    self._next_spawn_reason = 'runtime_changed' if rolled_back else 'process_dead'
+                        self._next_spawn_reason = (
+                            'runtime_changed' if rolled_back else 'process_dead'
+                        )
+                    else:
+                        # After any attempted stdin write, the current resident
+                        # session is not reusable and the same input is never replayed.
+                        self._runtime_rollback_pending = None
+                        self._next_spawn_reason = 'process_dead'
                     self._kill(quiet=True)
-                    safe_error = ResidentError(
-                        'Claude Code 回复失败；本轮消息已提交，未自动重试。',
-                        usage=exc.usage,
-                        diagnostics=exc.diagnostics,
-                        error_code='claude_runtime_post_send_failure',
-                    )
-                    safe_error.runtime_version = expected_active
-                    raise safe_error from exc
                 raise
             finally:
                 with self._turn_state_lock:
@@ -1821,7 +1987,8 @@ class ResidentSession:
         provider_text_acc = []
         rounds = []
         current_round = None
-        is_err = None
+        provider_error = None
+        provider_refusal_seen = False
         saw_result = False
         terminal_receipt = None
 
@@ -1931,6 +2098,11 @@ class ResidentSession:
                     t = d.get('type')
                     if t == 'system' and d.get('subtype') == 'init':
                         self._session_id = d.get('session_id') or self._session_id
+                    elif t == 'system' and d.get('subtype') == 'model_refusal_no_fallback':
+                        provider_refusal_seen = True
+                        provider_error = classify_provider_error_event(
+                            d, refusal_marker=True,
+                        )
                     elif t == 'stream_event':
                         ev = d.get('event') or {}
                         ev_type = ev.get('type')
@@ -2014,6 +2186,19 @@ class ResidentSession:
                                     think_acc.append(chunk)
                                     yield ('think', chunk)
                     elif t == 'assistant':
+                        if d.get('isApiErrorMessage') is True:
+                            provider_error = classify_provider_error_event(
+                                d, refusal_marker=provider_refusal_seen,
+                            )
+                            raise ResidentError(
+                                provider_error['public_message'],
+                                usage=empty_usage(),
+                                error_code=provider_error['error_code'],
+                                provider_error_type=provider_error['provider_error_type'],
+                                provider_error_category=provider_error['provider_error_category'],
+                                turn_failure_class=provider_error['turn_failure_class'],
+                                retryable=provider_error['retryable'],
+                            )
                         before_round = _diagnostic_round_snapshot(current_round)
                         created_round = current_round is None
                         msg = d.get('message') or {}
@@ -2139,7 +2324,9 @@ class ResidentSession:
                             self._kill(quiet=True)
                             yield ('tool_use', deferred_payload)
                         if d.get('is_error'):
-                            is_err = str(d.get('result', ''))[:300]
+                            provider_error = classify_provider_error_event(
+                                d, refusal_marker=provider_refusal_seen,
+                            )
                         elif d.get('stop_reason') == 'end_turn':
                             terminal_receipt = ProviderTerminalReceipt.from_result_event(
                                 d,
@@ -2208,6 +2395,17 @@ class ResidentSession:
         )
         usage['_obs_tool_count'] = surface.get('tool_count')
 
+        if provider_error is not None:
+            self._kill(quiet=True)
+            raise ResidentError(
+                provider_error['public_message'],
+                usage=usage,
+                error_code=provider_error['error_code'],
+                provider_error_type=provider_error['provider_error_type'],
+                provider_error_category=provider_error['provider_error_category'],
+                turn_failure_class=provider_error['turn_failure_class'],
+                retryable=provider_error['retryable'],
+            )
         if timeout_reason[0] == 'stall':
             raise ResidentError(
                 'claude code 长时间无活动 (%ds)，resident 进程已重启' % stall_timeout,
@@ -2252,11 +2450,6 @@ class ResidentSession:
                 diagnostics=diagnostics,
                 error_code='result_missing_before_terminal',
             )
-        if is_err:
-            # payload 已写入 resident：kill 强制下一轮冷启动，避免脏会话继续热轮
-            self._kill(quiet=True)
-            raise ResidentError('Claude Code provider returned an error', usage=usage, error_code='provider_error')
-
         # Only a successful authoritative provider terminal may enter JSONL
         # durable-finality proof.  Terminal failures deliberately skip replay;
         # in particular, Wake's extended profile must never mask a missing

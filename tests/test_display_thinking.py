@@ -8,6 +8,7 @@ from chat.display_thinking import (
     AUTHORED_THINKING_INSTRUCTION,
     DISPLAY_THINKING_PROMPT_KEY,
     append_authored_thinking_instruction,
+    authored_thinking_instruction_suffix,
     filter_display_thinking_events,
     get_display_thinking_mode,
     get_display_thinking_prompt,
@@ -15,6 +16,7 @@ from chat.display_thinking import (
     normalize_display_thinking_mode,
     validate_display_thinking_prompt,
     prepare_daily_display_thinking_plan,
+    resolve_effective_display_thinking_mode,
 )
 
 
@@ -306,6 +308,57 @@ class DisplayThinkingStreamTests(unittest.TestCase):
         ]
         self.assertEqual('formal', extract_text(blocks))
         self.assertEqual('native', extract_thinking(blocks))
+
+    def test_t8_opus55_auto_uses_native_and_omits_authored_suffix(self):
+        mode = resolve_effective_display_thinking_mode(
+            'auto', 'explicit:claude-opus-5-5',
+        )
+        self.assertEqual('native', mode)
+        self.assertEqual('', authored_thinking_instruction_suffix(mode))
+        plan = SimpleNamespace()
+        prepare_daily_display_thinking_plan(plan, mode)
+        self.assertEqual('native', plan.provider_display_thinking_mode)
+        self.assertEqual('', plan.provider_display_thinking_suffix)
+
+    def test_t9_explicit_authored_and_older_auto_behavior_are_preserved(self):
+        self.assertEqual(
+            'authored',
+            resolve_effective_display_thinking_mode(
+                'authored', 'explicit:claude-opus-5-5',
+            ),
+        )
+        self.assertEqual(
+            'auto',
+            resolve_effective_display_thinking_mode(
+                'auto', 'explicit:claude-sonnet-4-6',
+            ),
+        )
+        self.assertTrue(append_authored_thinking_instruction(
+            'hi', resolve_effective_display_thinking_mode(
+                'auto', 'explicit:claude-sonnet-4-6',
+            ),
+        ).endswith(AUTHORED_THINKING_INSTRUCTION))
+        self.assertTrue(append_authored_thinking_instruction(
+            'hi', 'authored',
+        ).endswith(AUTHORED_THINKING_INSTRUCTION))
+
+    def test_mode_resolver_is_lazy_until_provider_text_arrives(self):
+        current = {'identity': None}
+        calls = []
+        def source():
+            yield ('heartbeat', None)
+            current['identity'] = 'explicit:claude-opus-5-5'
+            yield ('text', '<思绪>A</思绪>B')
+            yield ('done', ('<思绪>A</思绪>B', '', {}))
+        def mode():
+            calls.append(current['identity'])
+            return resolve_effective_display_thinking_mode(
+                'auto', current['identity'],
+            )
+        output = list(filter_display_thinking_events(source(), mode))
+        self.assertEqual(['explicit:claude-opus-5-5'], calls)
+        self.assertEqual('B', ''.join(p for e, p in output if e == 'text'))
+        self.assertEqual('', ''.join(p for e, p in output if e == 'think'))
 
     def test_t16_prompt_and_filter_are_solo_chat_scoped(self):
         source = (ROOT / 'gateway.py').read_text(encoding='utf-8')

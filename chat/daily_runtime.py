@@ -172,6 +172,8 @@ class DailyTurnPlan:
     user_content: str = ''
     user_image_url: str = ''
     user_attachments: tuple[dict[str, str], ...] = ()
+    provider_display_thinking_mode: str = field(default='auto', repr=False)
+    provider_display_thinking_effective_mode: str = field(default='auto', repr=False)
     provider_display_thinking_suffix: str = field(default='', repr=False)
     provider_display_thinking_prompt: str = field(default='', repr=False)
     lease_acquired: bool = False
@@ -4188,10 +4190,16 @@ def _adopt_reprepared_plan_in_place(
     Gateway keeps the original DailyTurnPlan reference across stream → persist →
     cursor CAS → Mapping. Reprepare must therefore mutate that same object.
     """
+    provider_mode = getattr(current, 'provider_display_thinking_mode', 'auto')
+    effective_provider_mode = getattr(
+        current, 'provider_display_thinking_effective_mode', provider_mode,
+    )
     provider_suffix = getattr(current, 'provider_display_thinking_suffix', '')
     provider_prompt = getattr(current, 'provider_display_thinking_prompt', '')
     for f in fields(DailyTurnPlan):
         setattr(current, f.name, getattr(replacement, f.name))
+    current.provider_display_thinking_mode = provider_mode
+    current.provider_display_thinking_effective_mode = effective_provider_mode
     current.provider_display_thinking_suffix = provider_suffix
     current.provider_display_thinking_prompt = provider_prompt
     if resident is not None:
@@ -6438,6 +6446,26 @@ def ensure_resident_and_stream(
         actual_cold = bool(
             resident.ensure_alive(effective_system, env, tool_profile=plan.tool_profile)
         )
+        from chat.display_thinking import (
+            authored_thinking_instruction_suffix,
+            normalize_display_thinking_mode,
+            resolve_effective_display_thinking_mode,
+        )
+        configured_display_mode = normalize_display_thinking_mode(
+            getattr(plan, 'provider_display_thinking_mode', 'auto'),
+        )
+        effective_display_mode = resolve_effective_display_thinking_mode(
+            configured_display_mode,
+            getattr(resident, '_model_identity', None),
+        )
+        plan.provider_display_thinking_effective_mode = effective_display_mode
+        display_prompt = str(
+            getattr(plan, 'provider_display_thinking_prompt', '') or ''
+        ).strip()
+        if display_prompt:
+            plan.provider_display_thinking_suffix = authored_thinking_instruction_suffix(
+                effective_display_mode, display_prompt,
+            )
         if not plan.is_cold and not plan.is_respawn and actual_cold:
             heartbeat.stop()
             _release_lease(plan)
