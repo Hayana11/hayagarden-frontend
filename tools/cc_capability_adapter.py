@@ -63,7 +63,7 @@ HOME_MCP_CAPABILITY_IDS: tuple[str, ...] = (
     "countdown.read",
 )
 
-INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ()
+INTERNAL_MCP_CAPABILITY_IDS: tuple[str, ...] = ("health.read",)
 
 CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "memory.search",
