@@ -122,7 +122,9 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             uh_a0_xiaomi_health_tools(),
             strict=True,
         ):
-            self.assertEqual(get_capability(cid)["provider_bindings"]["internal_mcp"], tool_name)
+            bindings = get_capability(cid)["provider_bindings"]
+            self.assertEqual(bindings["claude_code"], tool_name)
+            self.assertEqual(bindings["internal_mcp"], "get.health")
             self.assertNotIn(cid, P1_ENABLED_CAPABILITY_IDS)
         self.assertEqual(native["files.read"], "Read")
         self.assertEqual(native["files.find"], "Glob")
