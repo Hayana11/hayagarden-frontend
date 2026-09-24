@@ -10,10 +10,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from tools.xiaomi_health.client import API_BASE, AGGREGATED_PATH, XiaomiHealthClient, XiaomiProviderError
+from tools.xiaomi_health.client import API_BASE, AGGREGATED_PATH, FITNESS_DATA_PATH, XiaomiHealthClient, XiaomiProviderError
 from tools.xiaomi_health.crypto import rc4_drop
 from tools.xiaomi_health.internal_adapter import run
-from tools.xiaomi_health.parser import MalformedHealthResponse, latest_date, parse_series_response
+from tools.xiaomi_health.parser import (
+    MalformedHealthResponse,
+    latest_date,
+    parse_menstrual_symptoms_rows,
+    parse_menstruation_rows,
+    parse_series_response,
+)
 from tools.xiaomi_health.qr import qr_matrix, render_qr_svg
 from tools.xiaomi_health.store import SOURCE, XiaomiCredentialStore
 
@@ -284,5 +290,191 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertNotIn(SECRET_VALUES["user_id"], json.dumps(status))
 
 
+class XiaomiCycleParserTests(unittest.TestCase):
+    START = 1_700_000_000
+    UPDATED = 1_700_000_111
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="xiaomi-cycle-test-")
+        self.path = Path(self.temp.name) / ".xiaomi-health.env"
+        self.store = XiaomiCredentialStore(str(self.path), require_root=False)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    @classmethod
+    def row(cls, *, status: int = 1, timestamp: int | None = None, updated_at: int | None = None, extra: dict | None = None):
+        value = {
+            "date_time": cls.START if timestamp is None else timestamp,
+            "status": status,
+            "update_time": cls.UPDATED if updated_at is None else updated_at,
+        }
+        if extra:
+            value.update(extra)
+        return {"value": json.dumps(value)}
+
+    @staticmethod
+    def timestamp(seconds: int) -> str:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def test_status_values_normalize_to_documented_event_types(self):
+        parsed = parse_menstruation_rows([self.row(status=1), self.row(status=2), self.row(status=3)])
+        self.assertEqual([event["type"] for event in parsed["events"]], [
+            "period_start", "period_end", "period_start_end",
+        ])
+        self.assertEqual(parsed["events"][0]["timestamp"], self.timestamp(self.START))
+        self.assertEqual(parsed["events"][0]["updated_at"], self.timestamp(self.UPDATED))
+
+    def test_start_end_pairing_closes_nearest_unmatched_start(self):
+        parsed = parse_menstruation_rows([
+            self.row(status=2, timestamp=self.START + 20),
+            self.row(status=1, timestamp=self.START),
+            self.row(status=2, timestamp=self.START + 30),
+            self.row(status=1, timestamp=self.START + 10),
+        ])
+        self.assertEqual(len(parsed["events"]), 4)
+        self.assertEqual(parsed["periods"], [
+            {"start": self.timestamp(self.START), "end": self.timestamp(self.START + 30), "open": False, "source": "recorded"},
+            {"start": self.timestamp(self.START + 10), "end": self.timestamp(self.START + 20), "open": False, "source": "recorded"},
+        ])
+
+    def test_open_start_and_orphan_end_do_not_invent_dates(self):
+        parsed = parse_menstruation_rows([
+            self.row(status=2, timestamp=self.START - 10),
+            self.row(status=1, timestamp=self.START),
+        ])
+        self.assertEqual(len(parsed["events"]), 2)
+        self.assertEqual(parsed["periods"], [{
+            "start": self.timestamp(self.START),
+            "end": None,
+            "open": True,
+            "source": "recorded",
+        }])
+
+    def test_start_end_is_a_same_timestamp_recorded_period(self):
+        parsed = parse_menstruation_rows([self.row(status=3)])
+        self.assertEqual(parsed["periods"], [{
+            "start": self.timestamp(self.START),
+            "end": self.timestamp(self.START),
+            "open": False,
+            "source": "recorded",
+        }])
+
+    def test_unordered_records_are_sorted_by_event_timestamp(self):
+        parsed = parse_menstruation_rows([
+            self.row(status=3, timestamp=self.START + 20),
+            self.row(status=1, timestamp=self.START),
+            self.row(status=2, timestamp=self.START + 10),
+        ])
+        self.assertEqual(
+            [event["timestamp"] for event in parsed["events"]],
+            [self.timestamp(self.START), self.timestamp(self.START + 10), self.timestamp(self.START + 20)],
+        )
+
+    def test_unknown_status_fails_closed(self):
+        with self.assertRaises(MalformedHealthResponse):
+            parse_menstruation_rows([self.row(status=4)])
+
+    def test_malformed_value_missing_timestamp_and_invalid_epoch_fail_closed(self):
+        for rows in (
+            [{"value": "{not-json"}],
+            [{"value": {"status": 1, "update_time": self.UPDATED}}],
+            [self.row(timestamp=0)],
+            [self.row(timestamp=True)],
+            [self.row(timestamp=float(self.START))],
+            [self.row(updated_at="1700000111")],
+        ):
+            with self.subTest(case=type(rows[0]["value"]).__name__):
+                with self.assertRaises(MalformedHealthResponse):
+                    parse_menstruation_rows(rows)
+
+    def test_empty_cycle_and_symptom_rows_are_valid(self):
+        self.assertEqual(parse_menstruation_rows([]), {"events": [], "periods": []})
+        self.assertEqual(parse_menstrual_symptoms_rows([]), [])
+
+    def test_symptom_enums_are_normalized_without_renaming_hp(self):
+        rows = [{
+            "value": json.dumps({
+                "date_time": self.START,
+                "hp": 2,
+                "mood": 0,
+                "pain": 1,
+            }),
+        }]
+        self.assertEqual(parse_menstrual_symptoms_rows(rows), [{
+            "timestamp": self.timestamp(self.START),
+            "hp": "much",
+            "mood": "happy",
+            "pain": "normal",
+        }])
+        unknown = parse_menstrual_symptoms_rows([{
+            "value": {"date_time": self.START, "hp": 8, "mood": "untrusted", "pain": None},
+        }])
+        self.assertEqual(unknown[0], {
+            "timestamp": self.timestamp(self.START),
+            "hp": None,
+            "mood": None,
+            "pain": None,
+        })
+
+    def test_parser_drops_unrecognized_sensitive_fields(self):
+        row = self.row(extra={"note": "synthetic-private-note", "user_id": SECRET_VALUES["user_id"]})
+        encoded = json.dumps(parse_menstruation_rows([row]))
+        self.assertNotIn("synthetic-private-note", encoded)
+        self.assertNotIn(SECRET_VALUES["user_id"], encoded)
+
+    def test_cycle_request_uses_self_uid_and_single_record_endpoint(self):
+        captured = {}
+        client = XiaomiHealthClient(self.store)
+
+        def encrypted(method, path, security, params):
+            captured.update({"method": method, "path": path, "params": params})
+            return {"_nonce": "synthetic-nonce", "data": "encrypted"}
+
+        self.store.save(SECRET_VALUES)
+        with mock.patch("tools.xiaomi_health.client.build_encrypted_params", side_effect=encrypted):
+            with mock.patch("tools.xiaomi_health.client.decrypt_response", return_value={"code": 0, "result": {"data_list": []}}):
+                client._http = mock.Mock(return_value=(200, {}, b"encrypted"))
+                rows = client._request_cycle_rows(SECRET_VALUES, "menstruation", 180)
+        self.assertEqual(rows, [])
+        self.assertEqual(captured["method"], "GET")
+        self.assertEqual(captured["path"], FITNESS_DATA_PATH)
+        self.assertTrue(client._http.call_args.args[0].startswith(f"{API_BASE}{FITNESS_DATA_PATH}?"))
+        self.assertEqual(captured["params"]["relative_uid"], SECRET_VALUES["user_id"])
+        self.assertEqual(captured["params"]["key"], "menstruation")
+        self.assertEqual(captured["params"]["tag"], "daily_report")
+        self.assertEqual(captured["params"]["limit"], 180)
+        diagnostic = json.dumps(client.last_diagnostic, sort_keys=True)
+        for secret in (SECRET_VALUES["user_id"], SECRET_VALUES["service_token"], SECRET_VALUES["ssecurity"]):
+            self.assertNotIn(secret, diagnostic)
+
+    def test_cycle_client_returns_empty_and_does_not_persist_status(self):
+        client = XiaomiHealthClient(self.store)
+        self.store.save(SECRET_VALUES)
+        with mock.patch.object(client, "_request_cycle_rows", side_effect=[[], []]) as request:
+            result = client.get_cycle()
+        self.assertEqual(result["status"], "EMPTY")
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["periods"], [])
+        self.assertEqual(result["symptoms"], [])
+        self.assertIsNone(result["predictions"])
+        self.assertEqual([call.args[1] for call in request.call_args_list], ["menstruation", "menstrual_symptoms"])
+        self.assertEqual(self.store.status()["auth_state"], "valid")
+
+    def test_internal_adapter_applies_cycle_specific_days_range(self):
+        client = mock.Mock()
+        client.get_cycle.return_value = {"status": "EMPTY"}
+        client.get_series.return_value = {"status": "EMPTY"}
+        store = object()
+        self.assertEqual(run("get_health", metric="cycle", store=store, client=client), {"status": "EMPTY"})
+        client.get_cycle.assert_called_once_with(180)
+        self.assertEqual(run("get_health", metric="cycle", days=365, store=store, client=client), {"status": "EMPTY"})
+        client.get_cycle.assert_called_with(365)
+        self.assertEqual(run("get_health", metric="steps", days=30, store=store, client=client)["status"], "EMPTY")
+        self.assertEqual(run("get_health", metric="steps", days=31, store=store, client=client)["error_code"], "malformed_response")
+        self.assertEqual(run("get_health", metric="cycle", days=366, store=store, client=client)["error_code"], "malformed_response")
+
+
 if __name__ == "__main__":
     unittest.main()
+

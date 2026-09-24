@@ -13,7 +13,12 @@ from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any, Mapping
 
 from .crypto import CryptoError, build_encrypted_params, decrypt_response
-from .parser import MalformedHealthResponse, parse_series_response
+from .parser import (
+    MalformedHealthResponse,
+    parse_menstrual_symptoms_rows,
+    parse_menstruation_rows,
+    parse_series_response,
+)
 from .store import XiaomiCredentialStore, utc_now
 
 
@@ -21,6 +26,7 @@ API_BASE = "https://hlth.io.mi.com"
 QR_URL = "https://account.xiaomi.com/longPolling/loginUrl"
 STS_URL = "https://sts-hlth.io.mi.com/healthapp/sts"
 AGGREGATED_PATH = "/app/v1/data/get_aggregated_fitness_data_by_time"
+FITNESS_DATA_PATH = "/app/v1/data/get_fitness_data_by_time"
 SERVICE_SID = "miothealth"
 TIMEOUT_SECONDS = 12
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -353,6 +359,122 @@ class XiaomiHealthClient:
             "sampledAt": max(sampled) if sampled else None,
             "dataDate": max(dates) if dates else None,
             **metrics,
+        }
+
+    def _request_cycle_rows(self, bundle: Mapping[str, Any], key: str, days: int, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        today = (now or datetime.now(CST)).astimezone(CST).date()
+        start = int(datetime.combine(today - timedelta(days=days - 1), dt_time.min, tzinfo=CST).timestamp())
+        end = int(datetime.combine(today, dt_time.max.replace(microsecond=0), tzinfo=CST).timestamp())
+        params = {
+            "relative_uid": bundle["user_id"],
+            "key": key,
+            "tag": "daily_report",
+            "start_time": start,
+            "end_time": end,
+            "limit": days,
+        }
+        diagnostic: dict[str, Any] = {
+            "metric": key if key in {"menstruation", "menstrual_symptoms"} else "unknown",
+            "endpoint_path": FITNESS_DATA_PATH,
+            "http_status": None,
+            "xiaomi_response_code": None,
+            "error_class": None,
+            "sanitized_error_message": None,
+            "response_top_level_keys": [],
+            "data_list_present": False,
+            "row_count": 0,
+        }
+        self.last_diagnostic = diagnostic
+
+        def fail(code: str, error_class: str, message: str) -> None:
+            diagnostic["error_class"] = error_class
+            diagnostic["sanitized_error_message"] = message
+            self.last_diagnostic = dict(diagnostic)
+            raise XiaomiProviderError(code)
+
+        encrypted = build_encrypted_params("GET", FITNESS_DATA_PATH, bundle["ssecurity"], params)
+        url = f"{API_BASE}{FITNESS_DATA_PATH}?{urllib.parse.urlencode(encrypted)}"
+        try:
+            status, _, body = self._http(url, headers={
+                "User-Agent": API_USER_AGENT,
+                "region_tag": "cn",
+                "handleparams": "true",
+                "Cookie": _cookie_header({"cUserId": bundle["c_user_id"], "serviceToken": bundle["service_token"]}),
+            })
+        except XiaomiProviderError as exc:
+            fail(exc.code, "TransportError", exc.code)
+        diagnostic["http_status"] = status
+        if status in {401, 403}:
+            fail("auth_expired", "HTTPStatusError", f"HTTP {status}")
+        if status != 200:
+            fail("api_error", "HTTPStatusError", f"HTTP {status}")
+        try:
+            result = decrypt_response(bundle["ssecurity"], encrypted["_nonce"], body.decode("utf-8"))
+        except (CryptoError, UnicodeError):
+            fail("malformed_response", "ResponseDecryptError", "response decrypt failed")
+        if not isinstance(result, dict):
+            fail("malformed_response", "MalformedResponse", "invalid response envelope")
+        diagnostic["response_top_level_keys"] = sorted(
+            key if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", key) else "<nonstandard>"
+            for key in result
+            if isinstance(key, str)
+        )
+        try:
+            code = int(result.get("code", -1))
+        except (TypeError, ValueError):
+            fail("malformed_response", "MalformedResponse", "invalid response code")
+        diagnostic["xiaomi_response_code"] = code
+        envelope = result.get("result")
+        if isinstance(envelope, dict):
+            data_list = envelope.get("data_list")
+            diagnostic["data_list_present"] = "data_list" in envelope
+            diagnostic["row_count"] = len(data_list) if isinstance(data_list, list) else 0
+        if code != 0:
+            if code in AUTH_FAILURE_CODES:
+                fail("auth_expired", "XiaomiResponseError", f"Xiaomi response code {code}")
+            fail("api_error", "XiaomiResponseError", f"Xiaomi response code {code}")
+        if not isinstance(envelope, dict) or not isinstance(envelope.get("data_list"), list):
+            fail("malformed_response", "MalformedResponse", "malformed cycle data list")
+        self.last_diagnostic = dict(diagnostic)
+        return envelope["data_list"]
+
+    def get_cycle(self, days: int = 180) -> dict[str, Any]:
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
+            raise XiaomiProviderError("malformed_response")
+        bundle = self._active_bundle()
+        try:
+            menstruation_rows = self._request_cycle_rows(bundle, "menstruation", days)
+            parsed = parse_menstruation_rows(menstruation_rows)
+        except MalformedHealthResponse as exc:
+            if self.last_diagnostic is not None:
+                self.last_diagnostic.update({
+                    "metric": "menstruation",
+                    "error_class": "MalformedHealthResponse",
+                    "sanitized_error_message": "malformed cycle rows",
+                })
+            raise XiaomiProviderError("malformed_response") from exc
+        try:
+            symptom_rows = self._request_cycle_rows(bundle, "menstrual_symptoms", days)
+            symptoms = parse_menstrual_symptoms_rows(symptom_rows)
+        except MalformedHealthResponse as exc:
+            if self.last_diagnostic is not None:
+                self.last_diagnostic.update({
+                    "metric": "menstrual_symptoms",
+                    "error_class": "MalformedHealthResponse",
+                    "sanitized_error_message": "malformed symptom rows",
+                })
+            raise XiaomiProviderError("malformed_response") from exc
+        has_data = bool(parsed["events"] or symptoms)
+        return {
+            "status": "PASS" if has_data else "EMPTY",
+            "provider": "xiaomi_fitness_cloud",
+            "source": "xiaomi_fitness_cloud",
+            "metric": "cycle",
+            "days": days,
+            "events": parsed["events"],
+            "periods": parsed["periods"],
+            "symptoms": symptoms,
+            "predictions": None,
         }
 
     def health_status(self) -> dict[str, Any]:

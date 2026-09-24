@@ -149,3 +149,106 @@ def parse_series_response(response: Any, metric: str, *, days: int, now: datetim
 def latest_date(records: list[dict[str, Any]]) -> str | None:
     dates = [row.get("dataDate") for row in records if isinstance(row.get("dataDate"), str)]
     return max(dates) if dates else None
+
+
+_MENSTRUATION_STATUS = {
+    1: "period_start",
+    2: "period_end",
+    3: "period_start_end",
+}
+_HP_ENUM = {0: "little", 1: "normal", 2: "much"}
+_MOOD_ENUM = {0: "happy", 1: "normal", 2: "uncomfortable"}
+_PAIN_ENUM = {0: "light", 1: "normal", 2: "heavy"}
+
+
+def _cycle_epoch(value: Any, field: str) -> str:
+    if type(value) is not int or value <= 0:
+        raise MalformedHealthResponse(f"invalid cycle {field}")
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError) as exc:
+        raise MalformedHealthResponse(f"invalid cycle {field}") from exc
+
+
+def _cycle_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise MalformedHealthResponse("malformed cycle value") from exc
+    if not isinstance(value, dict):
+        raise MalformedHealthResponse("malformed cycle value")
+    return value
+
+
+def parse_menstruation_rows(rows: Any) -> dict[str, list[dict[str, Any]]]:
+    """Normalize recorded Xiaomi cycle events and pair explicit start/end events."""
+    if not isinstance(rows, list):
+        raise MalformedHealthResponse("malformed menstruation rows")
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or "value" not in row:
+            raise MalformedHealthResponse("malformed menstruation row")
+        value = _cycle_value(row["value"])
+        status = value.get("status")
+        if type(status) is not int or status not in _MENSTRUATION_STATUS:
+            raise MalformedHealthResponse("unknown menstruation status")
+        timestamp = _cycle_epoch(value.get("date_time"), "date_time")
+        updated_at = _cycle_epoch(value.get("update_time"), "update_time")
+        events.append({
+            "type": _MENSTRUATION_STATUS[status],
+            "timestamp": timestamp,
+            "updated_at": updated_at,
+        })
+
+    events.sort(key=lambda event: event["timestamp"])
+    periods: list[dict[str, Any]] = []
+    unmatched_starts: list[dict[str, Any]] = []
+    for event in events:
+        if event["type"] == "period_start":
+            unmatched_starts.append({
+                "start": event["timestamp"],
+                "end": None,
+                "open": True,
+                "source": "recorded",
+            })
+        elif event["type"] == "period_start_end":
+            periods.append({
+                "start": event["timestamp"],
+                "end": event["timestamp"],
+                "open": False,
+                "source": "recorded",
+            })
+        elif unmatched_starts:
+            period = unmatched_starts.pop()
+            period["end"] = event["timestamp"]
+            period["open"] = False
+            periods.append(period)
+
+    periods.extend(unmatched_starts)
+    periods.sort(key=lambda period: (period["start"], period["end"] or ""))
+    return {"events": events, "periods": periods}
+
+
+def _cycle_enum(value: Any, values: dict[int, str]) -> str | None:
+    return values.get(value) if type(value) is int else None
+
+
+def parse_menstrual_symptoms_rows(rows: Any) -> list[dict[str, Any]]:
+    """Normalize only the published Xiaomi symptom enum fields; unknown values become null."""
+    if not isinstance(rows, list):
+        raise MalformedHealthResponse("malformed menstrual symptom rows")
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or "value" not in row:
+            raise MalformedHealthResponse("malformed menstrual symptom row")
+        value = _cycle_value(row["value"])
+        output.append({
+            "timestamp": _cycle_epoch(value.get("date_time"), "date_time"),
+            "hp": _cycle_enum(value.get("hp"), _HP_ENUM),
+            "mood": _cycle_enum(value.get("mood"), _MOOD_ENUM),
+            "pain": _cycle_enum(value.get("pain"), _PAIN_ENUM),
+        })
+    output.sort(key=lambda symptom: symptom["timestamp"])
+    return output
+

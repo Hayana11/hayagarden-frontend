@@ -8,6 +8,10 @@ const METRICS = Object.freeze({
 });
 const UNITS = Object.freeze({ steps: 'steps', sleep: 'minutes', heart_rate: 'bpm' });
 const SAFE_ERRORS = new Set(['auth_expired', 'timeout', 'api_error', 'malformed_response', 'unavailable']);
+const CYCLE_EVENT_TYPES = new Set(['period_start', 'period_end', 'period_start_end']);
+const HP_VALUES = new Set(['little', 'normal', 'much']);
+const MOOD_VALUES = new Set(['happy', 'normal', 'uncomfortable']);
+const PAIN_VALUES = new Set(['light', 'normal', 'heavy']);
 const SERIES_TTL_MS = 15 * 60 * 1000;
 const LATEST_TTL_MS = 60 * 1000;
 
@@ -96,6 +100,50 @@ function safeLatest(result, cache = {}, days = 7) {
   };
 }
 
+function safeCycle(result, cache = {}, days = 180) {
+  const successful = result?.status === 'PASS' || result?.status === 'EMPTY';
+  const events = Array.isArray(result?.events) ? result.events.flatMap((event) => {
+    if (!event || !CYCLE_EVENT_TYPES.has(event.type)) return [];
+    const timestamp = validSample(event.timestamp);
+    const updatedAt = validSample(event.updated_at);
+    return timestamp && updatedAt ? [{ type: event.type, timestamp, updated_at: updatedAt }] : [];
+  }) : [];
+  const periods = Array.isArray(result?.periods) ? result.periods.flatMap((period) => {
+    if (!period || !validSample(period.start)) return [];
+    const end = period.end === null ? null : validSample(period.end);
+    if (period.end !== null && !end) return [];
+    const open = end === null;
+    if (period.open !== open) return [];
+    return [{ start: period.start, end, open, source: 'recorded' }];
+  }) : [];
+  const enumValue = (value, allowed) => allowed.has(value) ? value : null;
+  const symptoms = Array.isArray(result?.symptoms) ? result.symptoms.flatMap((symptom) => {
+    if (!symptom || !validSample(symptom.timestamp)) return [];
+    return [{
+      timestamp: symptom.timestamp,
+      hp: enumValue(symptom.hp, HP_VALUES),
+      mood: enumValue(symptom.mood, MOOD_VALUES),
+      pain: enumValue(symptom.pain, PAIN_VALUES),
+    }];
+  }) : [];
+  const hasData = events.length > 0 || symptoms.length > 0;
+  const failed = !successful;
+  return {
+    status: failed ? 'FAIL' : (hasData ? 'PASS' : 'EMPTY'),
+    provider: SOURCE,
+    source: SOURCE,
+    metric: 'cycle',
+    days,
+    events,
+    periods,
+    symptoms,
+    predictions: null,
+    cached: cache.cached === true,
+    stale: cache.stale === true,
+    ...(failed ? { error_code: errorCode(result) } : {}),
+  };
+}
+
 function createHealthCapabilities({ runAdapter, now = Date.now } = {}) {
   if (typeof runAdapter !== 'function') throw new TypeError('runAdapter is required');
   const cache = new Map();
@@ -118,12 +166,14 @@ function createHealthCapabilities({ runAdapter, now = Date.now } = {}) {
   }
 
   return Object.freeze({
-    async get({ metric = 'all', days = 7 } = {}) {
-      if (!['all', 'status', ...Object.keys(METRICS)].includes(metric)) {
+    async get({ metric = 'all', days: requestedDays } = {}) {
+      if (!['all', 'status', ...Object.keys(METRICS), 'cycle'].includes(metric)) {
         throw new TypeError('unsupported health metric');
       }
-      if (!Number.isInteger(days) || days < 1 || days > 30) {
-        throw new RangeError('days must be between 1 and 30');
+      const days = requestedDays === undefined ? (metric === 'cycle' ? 180 : 7) : requestedDays;
+      const maximumDays = metric === 'cycle' ? 365 : 30;
+      if (!Number.isInteger(days) || days < 1 || days > maximumDays) {
+        throw new RangeError(metric === 'cycle' ? 'cycle days must be between 1 and 365' : 'days must be between 1 and 30');
       }
       if (metric === 'status') {
         try {
@@ -134,6 +184,9 @@ function createHealthCapabilities({ runAdapter, now = Date.now } = {}) {
       }
       if (metric === 'all') {
         return read(`all:${days}`, 'get_health', { metric, days }, LATEST_TTL_MS, (result, cacheState) => safeLatest(result, cacheState, days));
+      }
+      if (metric === 'cycle') {
+        return read(`cycle:${days}`, 'get_health', { metric, days }, SERIES_TTL_MS, (result, cacheState) => safeCycle(result, cacheState, days));
       }
       return read(`${metric}:${days}`, 'get_health', { metric, days }, SERIES_TTL_MS, (result, cacheState) => safeSeries(metric, days, result, cacheState));
     },
@@ -146,6 +199,8 @@ module.exports = {
   SOURCE,
   createHealthCapabilities,
   safeLatest,
+  safeCycle,
   safeSeries,
   safeStatus,
 };
+
