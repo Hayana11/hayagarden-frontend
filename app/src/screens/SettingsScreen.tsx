@@ -433,7 +433,7 @@ export function SettingsScreen() {
         setModelMode(result.modelMode || 'explicit');
         setCurrentModel(result.configuredModel || model.id);
         setConfiguredModelAvailable(true);
-        showToast('下一条消息起生效');
+        showToast('已切换');
       } catch (err) {
         const code = err instanceof HttpError
           ? String((err.payload as { error?: string } | undefined)?.error || err.code || '')
@@ -492,7 +492,7 @@ export function SettingsScreen() {
     setBusy(`cc-effort:${effort}`);
     try {
       setCcEffortState(await setCcEffort(effort));
-      showToast('下一条消息起生效');
+      showToast('已切换');
     } catch (error) {
       const code = error instanceof HttpError
         ? String((error.payload as { error?: string } | undefined)?.error || error.code || '')
@@ -777,7 +777,7 @@ export function SettingsScreen() {
             current={ccEffort?.configuredEffort || ''}
             options={effortOptions(ccEffort?.allowedEfforts, ccEffort?.configuredEffort || null, ['low', 'medium', 'high', 'xhigh', 'max'])}
             disabled={Boolean(busy)}
-            hint={ccEffort?.effortMode === 'explicit' ? '下一条消息起生效' : ''}
+            hint=""
             onSelect={(value) => void switchCcLineEffort(value)}
           />
           {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div><div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}

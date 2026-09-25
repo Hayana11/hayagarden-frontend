@@ -36,6 +36,7 @@ assert.doesNotMatch(settings, /默认（跟随 Claude Code）/);
 assert.doesNotMatch(settings, /config-back-chat/);
 assert.match(settings, /catalog\.filter\(\(model\) => model\.primary\)\.slice\(0, 3\)/);
 assert.doesNotMatch(settings, />默认<\/button>/);
+assert.doesNotMatch(settings, /下一条消息起生效/);
 const effortBlocks = settings.match(/<div className="config-effort">[\s\S]*?<\/div>\s*<\/div>/g) || [];
 assert.ok(effortBlocks.length >= 1, 'expected at least one config-effort block');
 for (const block of effortBlocks) {
