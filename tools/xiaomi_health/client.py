@@ -242,7 +242,7 @@ class XiaomiHealthClient:
             raise XiaomiProviderError("auth_expired")
         return bundle
 
-    def _request_health(self, bundle: Mapping[str, Any], metric: str, days: int, *, now: datetime | None = None) -> Any:
+    def _request_health(self, bundle: Mapping[str, Any], metric: str, days: int, *, now: datetime | None = None, request_timeout: float | None = None) -> Any:
         today = (now or datetime.now(CST)).astimezone(CST).date()
         start = int(datetime.combine(today - timedelta(days=days - 1), dt_time.min, tzinfo=CST).timestamp())
         end = int(datetime.combine(today, dt_time.max.replace(microsecond=0), tzinfo=CST).timestamp())
@@ -281,7 +281,7 @@ class XiaomiHealthClient:
                 "region_tag": "cn",
                 "handleparams": "true",
                 "Cookie": _cookie_header({"cUserId": bundle["c_user_id"], "serviceToken": bundle["service_token"]}),
-            })
+            }, timeout=request_timeout)
         except XiaomiProviderError as exc:
             fail(exc.code, "TransportError", exc.code)
         diagnostic["http_status"] = status
@@ -322,12 +322,12 @@ class XiaomiHealthClient:
         self.last_diagnostic = dict(diagnostic)
         return records
 
-    def get_series(self, metric: str, days: int) -> dict[str, Any]:
+    def get_series(self, metric: str, days: int, *, request_timeout: float | None = None) -> dict[str, Any]:
         if metric not in METRICS or not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 30:
             raise XiaomiProviderError("malformed_response")
         bundle = self._active_bundle()
         try:
-            records = self._request_health(bundle, metric, days)
+            records = self._request_health(bundle, metric, days, request_timeout=request_timeout)
         except XiaomiProviderError as exc:
             try:
                 self.store.update_status(auth_state="auth_expired" if exc.code == "auth_expired" else None, error=exc.code)
@@ -361,12 +361,12 @@ class XiaomiHealthClient:
             **metrics,
         }
 
-    def get_latest_partial(self, days: int = 2) -> dict[str, Any]:
+    def get_latest_partial(self, days: int = 2, *, request_timeout: float | None = None) -> dict[str, Any]:
         metrics: dict[str, Any] = {}
         metric_status: dict[str, dict[str, str]] = {}
         for metric in ("steps", "sleep", "heart_rate"):
             try:
-                series = self.get_series(metric, days)
+                series = self.get_series(metric, days, request_timeout=request_timeout)
                 records = series["records"] if isinstance(series, dict) and isinstance(series.get("records"), list) else []
                 if records:
                     metrics[metric] = records[-1]
@@ -392,7 +392,7 @@ class XiaomiHealthClient:
             "metric_status": metric_status,
         }
 
-    def _request_cycle_rows(self, bundle: Mapping[str, Any], key: str, days: int, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    def _request_cycle_rows(self, bundle: Mapping[str, Any], key: str, days: int, *, now: datetime | None = None, request_timeout: float | None = None) -> list[dict[str, Any]]:
         today = (now or datetime.now(CST)).astimezone(CST).date()
         start = int(datetime.combine(today - timedelta(days=days - 1), dt_time.min, tzinfo=CST).timestamp())
         end = int(datetime.combine(today, dt_time.max.replace(microsecond=0), tzinfo=CST).timestamp())
@@ -431,7 +431,7 @@ class XiaomiHealthClient:
                 "region_tag": "cn",
                 "handleparams": "true",
                 "Cookie": _cookie_header({"cUserId": bundle["c_user_id"], "serviceToken": bundle["service_token"]}),
-            })
+            }, timeout=request_timeout)
         except XiaomiProviderError as exc:
             fail(exc.code, "TransportError", exc.code)
         diagnostic["http_status"] = status
@@ -469,12 +469,12 @@ class XiaomiHealthClient:
         self.last_diagnostic = dict(diagnostic)
         return envelope["data_list"]
 
-    def get_cycle(self, days: int = 180) -> dict[str, Any]:
+    def get_cycle(self, days: int = 180, *, request_timeout: float | None = None) -> dict[str, Any]:
         if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
             raise XiaomiProviderError("malformed_response")
         bundle = self._active_bundle()
         try:
-            menstruation_rows = self._request_cycle_rows(bundle, "menstruation", days)
+            menstruation_rows = self._request_cycle_rows(bundle, "menstruation", days, request_timeout=request_timeout)
             parsed = parse_menstruation_rows(menstruation_rows)
         except MalformedHealthResponse as exc:
             if self.last_diagnostic is not None:
@@ -485,7 +485,7 @@ class XiaomiHealthClient:
                 })
             raise XiaomiProviderError("malformed_response") from exc
         try:
-            symptom_rows = self._request_cycle_rows(bundle, "menstrual_symptoms", days)
+            symptom_rows = self._request_cycle_rows(bundle, "menstrual_symptoms", days, request_timeout=request_timeout)
             symptoms = parse_menstrual_symptoms_rows(symptom_rows)
         except MalformedHealthResponse as exc:
             if self.last_diagnostic is not None:

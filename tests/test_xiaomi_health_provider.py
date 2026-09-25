@@ -13,7 +13,11 @@ from unittest import mock
 
 from tools.xiaomi_health.client import API_BASE, AGGREGATED_PATH, FITNESS_DATA_PATH, XiaomiHealthClient, XiaomiProviderError
 from tools.xiaomi_health.crypto import rc4_drop
-from tools.xiaomi_health.internal_adapter import run
+from tools.xiaomi_health.internal_adapter import (
+    ALL_UPSTREAM_TIMEOUT_SECONDS,
+    MAX_UPSTREAM_REQUESTS_FOR_ALL,
+    run,
+)
 from tools.xiaomi_health.parser import (
     MalformedHealthResponse,
     latest_date,
@@ -418,6 +422,61 @@ class XiaomiHealthProviderTests(unittest.TestCase):
             with self.assertRaises(XiaomiProviderError):
                 client.get_series("steps", bad)  # type: ignore[arg-type]
 
+    def test_http_timeout_defaults_to_client_timeout_and_honors_override(self) -> None:
+        opener = mock.Mock()
+        response = mock.Mock()
+        response.status = 200
+        response.headers = {}
+        response.read.return_value = b"{}"
+        opener.open.return_value = response
+        client = XiaomiHealthClient(self.store, opener=opener, timeout=12)
+
+        client._http("https://hlth.io.mi.com/default")
+        client._http("https://hlth.io.mi.com/all", timeout=6.0)
+
+        self.assertEqual(opener.open.call_args_list[0].kwargs["timeout"], 12)
+        self.assertEqual(opener.open.call_args_list[1].kwargs["timeout"], 6.0)
+
+    def test_series_timeout_override_reaches_health_request(self) -> None:
+        self.store.save(SECRET_VALUES)
+        client = XiaomiHealthClient(self.store)
+        with mock.patch.object(client, "_request_health", return_value=[]) as request:
+            client.get_series("steps", 7, request_timeout=6.0)
+        request.assert_called_once_with(SECRET_VALUES, "steps", 7, request_timeout=6.0)
+        with mock.patch.object(client, "_request_health", return_value=[]) as request:
+            client.get_series("sleep", 7)
+        request.assert_called_once_with(self.store.load(), "sleep", 7, request_timeout=None)
+
+    def test_all_five_upstream_paths_receive_six_second_timeout(self) -> None:
+        self.store.save(SECRET_VALUES)
+        client = XiaomiHealthClient(self.store)
+        decrypted = {"code": 0, "result": {"data_list": []}}
+        with mock.patch("tools.xiaomi_health.client.build_encrypted_params", return_value={"_nonce": "nonce", "data": "encrypted"}):
+            with mock.patch("tools.xiaomi_health.client.decrypt_response", return_value=decrypted):
+                for metric in ("steps", "sleep", "heart_rate"):
+                    with self.subTest(metric=metric):
+                        client._http = mock.Mock(return_value=(200, {}, b"encrypted"))
+                        client._request_health(SECRET_VALUES, metric, 7, request_timeout=6.0)
+                        self.assertEqual(client._http.call_args.kwargs["timeout"], 6.0)
+                for key in ("menstruation", "menstrual_symptoms"):
+                    with self.subTest(cycle_key=key):
+                        client._http = mock.Mock(return_value=(200, {}, b"encrypted"))
+                        client._request_cycle_rows(SECRET_VALUES, key, 180, request_timeout=6.0)
+                        self.assertEqual(client._http.call_args.kwargs["timeout"], 6.0)
+
+    def test_all_budget_timeout_still_maps_to_timeout(self) -> None:
+        self.store.save(SECRET_VALUES)
+        opener = mock.Mock()
+        opener.open.side_effect = TimeoutError("private-timeout-detail")
+        client = XiaomiHealthClient(self.store, opener=opener)
+
+        with self.assertRaises(XiaomiProviderError) as raised:
+            client.get_series("steps", 7, request_timeout=6.0)
+
+        self.assertEqual(raised.exception.code, "timeout")
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 6.0)
+        self.assertEqual(self.store.status()["last_error"], "timeout")
+
     def test_timeout_is_mapped_and_never_reflected(self) -> None:
         self.store.save(SECRET_VALUES)
         opener = mock.Mock()
@@ -466,20 +525,41 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(result["cycle"], {"status": "EMPTY", "days": 180, "predictions": None})
         self.assertEqual(result["status"], "EMPTY")
         self.assertFalse(result["partial"])
-        client.get_latest_partial.assert_called_once_with(1)
+        client.get_latest_partial.assert_called_once_with(1, request_timeout=6.0)
         client.get_latest.assert_not_called()
-        client.get_cycle.assert_called_once_with(180)
+        client.get_cycle.assert_called_once_with(180, request_timeout=6.0)
         self.assertEqual(run("get_health", metric="steps", days=2, store=self.store, client=client)["status"], "PASS")
         client.get_series.assert_called_once_with("steps", 2)
         self.assertEqual(run("health_steps", days=2, store=self.store, client=client)["error_code"], "unavailable")
+
+    def test_standalone_metric_dispatch_does_not_pass_timeout_override(self) -> None:
+        client = mock.Mock()
+        client.get_series.return_value = {"status": "EMPTY", "records": []}
+        client.get_cycle.return_value = {"status": "EMPTY"}
+        store = object()
+
+        for metric in ("steps", "sleep", "heart_rate"):
+            run("get_health", metric=metric, days=7, store=store, client=client)
+        run("get_health", metric="cycle", days=180, store=store, client=client)
+
+        self.assertEqual(
+            client.get_series.call_args_list,
+            [mock.call("steps", 7), mock.call("sleep", 7), mock.call("heart_rate", 7)],
+        )
+        client.get_cycle.assert_called_once_with(180)
+
+    def test_all_budget_constants_record_theoretical_upstream_cap(self) -> None:
+        self.assertEqual(ALL_UPSTREAM_TIMEOUT_SECONDS, 6.0)
+        self.assertEqual(MAX_UPSTREAM_REQUESTS_FOR_ALL, 5)
+        self.assertEqual(ALL_UPSTREAM_TIMEOUT_SECONDS * MAX_UPSTREAM_REQUESTS_FOR_ALL, 30.0)
 
     def test_all_uses_regular_days_and_fixed_cycle_window(self) -> None:
         client = mock.Mock()
         client.get_latest_partial.return_value = self._regular_latest(7)
         client.get_cycle.return_value = self._recorded_cycle(180)
         result = run("get_health", metric="all", days=7, store=self.store, client=client)
-        client.get_latest_partial.assert_called_once_with(7)
-        client.get_cycle.assert_called_once_with(180)
+        client.get_latest_partial.assert_called_once_with(7, request_timeout=6.0)
+        client.get_cycle.assert_called_once_with(180, request_timeout=6.0)
         self.assertEqual(result["steps"]["value"], 1000)
         self.assertEqual(result["sleep"]["value"], 420)
         self.assertEqual(result["heart_rate"]["value"], 72)
@@ -492,8 +572,8 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         client.get_latest_partial.return_value = self._regular_latest(30)
         client.get_cycle.return_value = self._recorded_cycle(180)
         result = run("get_health", metric="all", days=30, store=self.store, client=client)
-        client.get_latest_partial.assert_called_once_with(30)
-        client.get_cycle.assert_called_once_with(180)
+        client.get_latest_partial.assert_called_once_with(30, request_timeout=6.0)
+        client.get_cycle.assert_called_once_with(180, request_timeout=6.0)
         self.assertEqual(result["cycle"]["days"], 180)
 
     def test_all_keeps_regular_metrics_when_cycle_is_empty(self) -> None:
@@ -527,13 +607,18 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(result["metric_status"]["cycle"], {"status": "FAIL", "error_code": "timeout"})
 
         class ExplodingCycle:
-            def get_latest_partial(self, days):
+            def get_latest_partial(self, days, *, request_timeout=None):
+                self.latest_timeout = request_timeout
                 return {"steps": {"value": 9}}
 
-            def get_cycle(self, days):
+            def get_cycle(self, days, *, request_timeout=None):
+                self.cycle_timeout = request_timeout
                 raise RuntimeError(SECRET_VALUES["service_token"])
 
-        result = run("get_health", metric="all", days=7, store=self.store, client=ExplodingCycle())
+        exploding = ExplodingCycle()
+        result = run("get_health", metric="all", days=7, store=self.store, client=exploding)
+        self.assertEqual(exploding.latest_timeout, 6.0)
+        self.assertEqual(exploding.cycle_timeout, 6.0)
         self.assertEqual(result["steps"]["value"], 9)
         self.assertEqual(result["cycle"]["error_code"], "unavailable")
         self.assertEqual(result["status"], "PASS")
@@ -590,12 +675,22 @@ class XiaomiLatestPartialTests(unittest.TestCase):
         return {"status": "EMPTY" if empty else "PASS", "records": records}
 
     def _patch_series(self, outcomes: dict[str, Any]):
-        def get_series(metric, days):
+        def get_series(metric, days, *, request_timeout=None):
             item = outcomes[metric]
             if isinstance(item, Exception):
                 raise item
             return item
         return mock.patch.object(self.client, "get_series", side_effect=get_series)
+
+    def test_all_budget_override_reaches_each_regular_series(self) -> None:
+        outcomes = {metric: self._series(metric) for metric in ("steps", "sleep", "heart_rate")}
+        with self._patch_series(outcomes) as get_series:
+            result = self.client.get_latest_partial(7, request_timeout=6.0)
+        self.assertEqual(result["metric_status"], {metric: {"status": "PASS"} for metric in outcomes})
+        self.assertEqual(
+            [(call.args[0], call.args[1], call.kwargs["request_timeout"]) for call in get_series.call_args_list],
+            [("steps", 7, 6.0), ("sleep", 7, 6.0), ("heart_rate", 7, 6.0)],
+        )
 
     def test_steps_timeout_keeps_sleep_and_heart_rate(self) -> None:
         outcomes = {
@@ -714,6 +809,7 @@ class XiaomiLatestPartialTests(unittest.TestCase):
                 self.client.get_latest()
         self.assertEqual(raised.exception.code, "timeout")
         get_series.assert_called_once_with("steps", 2)
+        self.assertEqual(get_series.call_args.kwargs, {})
 
     def _partial_latest(self, **overrides: Any) -> dict[str, Any]:
         payload = {
@@ -760,7 +856,7 @@ class XiaomiLatestPartialTests(unittest.TestCase):
         self.assertEqual(result["heart_rate"]["value"], 72)
         self.assertEqual(result["cycle"]["status"], "PASS")
         self.assertEqual(result["metric_status"]["steps"], {"status": "FAIL", "error_code": "timeout"})
-        client.get_cycle.assert_called_once_with(180)
+        client.get_cycle.assert_called_once_with(180, request_timeout=6.0)
 
     def test_all_sleep_and_cycle_timeout_keep_other_data(self) -> None:
         client = mock.Mock()
@@ -1024,6 +1120,20 @@ class XiaomiCycleParserTests(unittest.TestCase):
         diagnostic = json.dumps(client.last_diagnostic, sort_keys=True)
         for secret in (SECRET_VALUES["user_id"], SECRET_VALUES["service_token"], SECRET_VALUES["ssecurity"]):
             self.assertNotIn(secret, diagnostic)
+
+    def test_cycle_budget_override_reaches_both_upstream_requests(self):
+        client = XiaomiHealthClient(self.store)
+        self.store.save(SECRET_VALUES)
+        with mock.patch.object(client, "_request_cycle_rows", side_effect=[[], []]) as request:
+            result = client.get_cycle(request_timeout=6.0)
+        self.assertEqual(result["status"], "EMPTY")
+        self.assertEqual(
+            request.call_args_list,
+            [
+                mock.call(SECRET_VALUES, "menstruation", 180, request_timeout=6.0),
+                mock.call(SECRET_VALUES, "menstrual_symptoms", 180, request_timeout=6.0),
+            ],
+        )
 
     def test_cycle_client_returns_empty_and_does_not_persist_status(self):
         client = XiaomiHealthClient(self.store)
