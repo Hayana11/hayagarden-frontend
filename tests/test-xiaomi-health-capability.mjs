@@ -40,7 +40,17 @@ const runAdapter = async (operation, input) => {
     sampledAt: '2026-09-24T01:00:00Z',
     dataDate: '2026-09-24',
     steps: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 1000, details: secretFields },
-    sleep: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420, unit: 'minutes' },
+    sleep: {
+      sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420, unit: 'minutes',
+      sleepWindow: {
+        bedtime: '2026-09-24T15:10:00Z',
+        wakeUpTime: '2026-09-24T22:45:00Z',
+        token: secrets[1],
+        timezone: 'private-timezone',
+        note: 'private-note',
+        raw: { cookie: secrets[4] },
+      },
+    },
     heart_rate: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 72, unit: 'bpm' },
     cycle: {
       status: 'PASS',
@@ -73,6 +83,16 @@ const runAdapter = async (operation, input) => {
       dataDate: '2026-09-24',
       value: 1000,
       details: secretFields,
+      ...(input.metric === 'sleep' ? {
+        sleepWindow: {
+          bedtime: '2026-09-24T15:10:00Z',
+          wakeUpTime: '2026-09-24T22:45:00Z',
+          token: secrets[1],
+          timezone: 'private-timezone',
+          note: 'private-note',
+          raw: { cookie: secrets[4] },
+        },
+      } : {}),
       ...secretFields,
     }],
   };
@@ -93,6 +113,10 @@ assert.equal(all.days, 7);
 assert.equal(all.steps.value, 1000);
 assert.equal(all.steps.details, undefined);
 assert.equal(all.sleep.value, 420);
+assert.deepEqual(all.sleep.sleepWindow, {
+  bedtime: '2026-09-24T15:10:00Z',
+  wakeUpTime: '2026-09-24T22:45:00Z',
+});
 assert.equal(all.heart_rate.value, 72);
 assert.equal(all.cycle.status, 'PASS');
 assert.equal(all.cycle.days, 180);
@@ -121,6 +145,10 @@ assert.equal(staleAll.steps.value, 1000);
 assert.equal(staleAll.metric_status.steps.status, 'PASS');
 assert.equal(staleAll.metric_status.cycle.status, 'PASS');
 assert.equal(staleAll.partial, false);
+assert.deepEqual(staleAll.sleep.sleepWindow, {
+  bedtime: '2026-09-24T15:10:00Z',
+  wakeUpTime: '2026-09-24T22:45:00Z',
+});
 for (const secret of secrets) assert.equal(JSON.stringify(staleAll).includes(secret), false);
 
 fail = false;
@@ -131,6 +159,10 @@ assert.deepEqual(calls[0], { operation: 'get_health', input: { metric: 'steps', 
 const dayThirty = await health.get({ metric: 'sleep', days: 30 });
 assert.equal(dayThirty.status, 'PASS');
 assert.equal(calls[1].input.days, 30);
+assert.deepEqual(dayThirty.records[0].sleepWindow, {
+  bedtime: '2026-09-24T15:10:00Z',
+  wakeUpTime: '2026-09-24T22:45:00Z',
+});
 assert.equal((await health.get({ metric: 'steps', days: 1 })).cached, true);
 clock += SERIES_TTL_MS + 1;
 fail = true;
@@ -328,5 +360,71 @@ assert.equal(malicious.cycle.predictions, null);
 assert.equal(malicious.partial, true);
 for (const secret of secrets) assert.equal(JSON.stringify(malicious).includes(secret), false);
 
-console.log('test-xiaomi-health-capability: ok');
+async function readSleepWindow(metric, sleepWindow) {
+  const capability = createHealthCapabilities({
+    now,
+    runAdapter: async () => {
+      const record = {
+        sampledAt: '2026-09-24T01:00:00Z',
+        dataDate: '2026-09-24',
+        value: 420,
+        unit: 'minutes',
+        sleepWindow,
+      };
+      if (metric === 'all') {
+        return {
+          status: 'PASS',
+          sleep: record,
+          cycle: { status: 'EMPTY', days: 180, events: [], periods: [], symptoms: [] },
+        };
+      }
+      return { status: 'PASS', records: [record] };
+    },
+  });
+  return capability.get({ metric, days: 7 });
+}
 
+const canonicalSleepWindow = {
+  bedtime: '2026-09-24T15:10:00Z',
+  wakeUpTime: '2026-09-24T22:45:00Z',
+};
+const standaloneWindow = await readSleepWindow('sleep', {
+  ...canonicalSleepWindow,
+  token: secrets[1],
+  timezone: 'private-timezone',
+  note: 'private-note',
+  raw: { cookie: secrets[4] },
+});
+assert.deepEqual(standaloneWindow.records[0].sleepWindow, canonicalSleepWindow);
+assert.deepEqual(Object.keys(standaloneWindow.records[0].sleepWindow).sort(), ['bedtime', 'wakeUpTime']);
+const allWindow = await readSleepWindow('all', {
+  ...canonicalSleepWindow,
+  token: secrets[1],
+  timezone: 'private-timezone',
+  note: 'private-note',
+  raw: { cookie: secrets[4] },
+});
+assert.deepEqual(allWindow.sleep.sleepWindow, canonicalSleepWindow);
+assert.deepEqual(Object.keys(allWindow.sleep.sleepWindow).sort(), ['bedtime', 'wakeUpTime']);
+for (const secret of secrets) {
+  assert.equal(JSON.stringify(standaloneWindow).includes(secret), false);
+  assert.equal(JSON.stringify(allWindow).includes(secret), false);
+}
+
+const invalidSleepWindows = [
+  null,
+  'not-an-object',
+  [],
+  { bedtime: 'invalid', wakeUpTime: canonicalSleepWindow.wakeUpTime },
+  { bedtime: canonicalSleepWindow.bedtime, wakeUpTime: 'invalid' },
+  { bedtime: canonicalSleepWindow.bedtime, wakeUpTime: '2026-09-24T15:10:00Z' },
+  { bedtime: canonicalSleepWindow.bedtime, wakeUpTime: '2026-09-24T14:00:00Z' },
+  { bedtime: '2026-02-30T15:10:00Z', wakeUpTime: canonicalSleepWindow.wakeUpTime },
+  { bedtime: '2026-09-24T15:10:00Z SECRET', wakeUpTime: canonicalSleepWindow.wakeUpTime },
+];
+for (const invalidWindow of invalidSleepWindows) {
+  const invalid = await readSleepWindow('sleep', invalidWindow);
+  assert.equal(invalid.records[0].sleepWindow, undefined);
+}
+
+console.log('test-xiaomi-health-capability: ok');
