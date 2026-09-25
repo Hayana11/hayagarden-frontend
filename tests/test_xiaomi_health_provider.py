@@ -455,17 +455,19 @@ class XiaomiHealthProviderTests(unittest.TestCase):
     def test_internal_adapter_has_one_dispatch_contract(self) -> None:
         self.store.save(SECRET_VALUES)
         client = mock.Mock()
-        client.get_latest.return_value = {"provider": "xiaomi_fitness_cloud"}
+        client.get_latest_partial.return_value = {"provider": "xiaomi_fitness_cloud"}
         client.get_cycle.return_value = {"status": "EMPTY", "days": 180, "predictions": None}
         client.get_series.return_value = {"status": "PASS", "records": []}
 
         self.assertEqual(run("get_health", metric="status", days=1, store=self.store, client=client)["provider"], SOURCE)
+        client.get_latest_partial.assert_not_called()
+        result = run("get_health", metric="all", days=1, store=self.store, client=client)
+        self.assertEqual(result["provider"], "xiaomi_fitness_cloud")
+        self.assertEqual(result["cycle"], {"status": "EMPTY", "days": 180, "predictions": None})
+        self.assertEqual(result["status"], "EMPTY")
+        self.assertFalse(result["partial"])
+        client.get_latest_partial.assert_called_once_with(1)
         client.get_latest.assert_not_called()
-        self.assertEqual(run("get_health", metric="all", days=1, store=self.store, client=client), {
-            "provider": "xiaomi_fitness_cloud",
-            "cycle": {"status": "EMPTY", "days": 180, "predictions": None},
-        })
-        client.get_latest.assert_called_once_with(1)
         client.get_cycle.assert_called_once_with(180)
         self.assertEqual(run("get_health", metric="steps", days=2, store=self.store, client=client)["status"], "PASS")
         client.get_series.assert_called_once_with("steps", 2)
@@ -473,28 +475,30 @@ class XiaomiHealthProviderTests(unittest.TestCase):
 
     def test_all_uses_regular_days_and_fixed_cycle_window(self) -> None:
         client = mock.Mock()
-        client.get_latest.return_value = self._regular_latest(7)
+        client.get_latest_partial.return_value = self._regular_latest(7)
         client.get_cycle.return_value = self._recorded_cycle(180)
         result = run("get_health", metric="all", days=7, store=self.store, client=client)
-        client.get_latest.assert_called_once_with(7)
+        client.get_latest_partial.assert_called_once_with(7)
         client.get_cycle.assert_called_once_with(180)
         self.assertEqual(result["steps"]["value"], 1000)
         self.assertEqual(result["sleep"]["value"], 420)
         self.assertEqual(result["heart_rate"]["value"], 72)
         self.assertEqual(result["cycle"]["days"], 180)
         self.assertIsNone(result["cycle"]["predictions"])
+        self.assertEqual(result["status"], "PASS")
+        self.assertFalse(result["partial"])
 
         client.reset_mock()
-        client.get_latest.return_value = self._regular_latest(30)
+        client.get_latest_partial.return_value = self._regular_latest(30)
         client.get_cycle.return_value = self._recorded_cycle(180)
         result = run("get_health", metric="all", days=30, store=self.store, client=client)
-        client.get_latest.assert_called_once_with(30)
+        client.get_latest_partial.assert_called_once_with(30)
         client.get_cycle.assert_called_once_with(180)
         self.assertEqual(result["cycle"]["days"], 180)
 
     def test_all_keeps_regular_metrics_when_cycle_is_empty(self) -> None:
         client = mock.Mock()
-        client.get_latest.return_value = self._regular_latest()
+        client.get_latest_partial.return_value = self._regular_latest()
         client.get_cycle.return_value = {
             "status": "EMPTY", "provider": SOURCE, "source": SOURCE, "metric": "cycle",
             "days": 180, "events": [], "periods": [], "symptoms": [], "predictions": None,
@@ -503,10 +507,12 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(result["steps"]["value"], 1000)
         self.assertEqual(result["cycle"]["status"], "EMPTY")
         self.assertIsNone(result["cycle"]["predictions"])
+        self.assertEqual(result["status"], "PASS")
+        self.assertFalse(result["partial"])
 
     def test_all_keeps_regular_metrics_when_cycle_fails_safely(self) -> None:
         client = mock.Mock()
-        client.get_latest.return_value = self._regular_latest()
+        client.get_latest_partial.return_value = self._regular_latest()
         client.get_cycle.side_effect = XiaomiProviderError("timeout")
         result = run("get_health", metric="all", days=7, store=self.store, client=client)
         self.assertEqual(result["steps"]["value"], 1000)
@@ -516,10 +522,12 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(result["cycle"]["error_code"], "timeout")
         self.assertEqual(result["cycle"]["days"], 180)
         self.assertIsNone(result["cycle"]["predictions"])
-        self.assertNotIn("status", result)
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["metric_status"]["cycle"], {"status": "FAIL", "error_code": "timeout"})
 
         class ExplodingCycle:
-            def get_latest(self, days):
+            def get_latest_partial(self, days):
                 return {"steps": {"value": 9}}
 
             def get_cycle(self, days):
@@ -528,14 +536,17 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         result = run("get_health", metric="all", days=7, store=self.store, client=ExplodingCycle())
         self.assertEqual(result["steps"]["value"], 9)
         self.assertEqual(result["cycle"]["error_code"], "unavailable")
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
         self.assertNotIn(SECRET_VALUES["service_token"], json.dumps(result))
 
-    def test_all_still_fails_when_regular_latest_fails(self) -> None:
+    def test_all_still_fails_when_partial_latest_raises(self) -> None:
         client = mock.Mock()
-        client.get_latest.side_effect = XiaomiProviderError("api_error")
+        client.get_latest_partial.side_effect = XiaomiProviderError("auth_expired")
         result = run("get_health", metric="all", days=7, store=self.store, client=client)
-        self.assertEqual(result, {"status": "FAIL", "provider": SOURCE, "error_code": "api_error"})
+        self.assertEqual(result, {"status": "FAIL", "provider": SOURCE, "error_code": "auth_expired"})
         client.get_cycle.assert_not_called()
+        client.get_latest.assert_not_called()
 
     def test_adapter_redacts_unexpected_provider_exception(self) -> None:
         class BrokenClient:
@@ -556,6 +567,304 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(status["auth_state"], "auth_expired")
         self.assertEqual(status["last_error"], "auth_expired")
         self.assertNotIn(SECRET_VALUES["user_id"], json.dumps(status))
+
+
+class XiaomiLatestPartialTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="xiaomi-partial-test-")
+        self.path = Path(self.temp.name) / ".xiaomi-health.env"
+        self.store = XiaomiCredentialStore(str(self.path), require_root=False)
+        self.store.save(SECRET_VALUES)
+        self.client = XiaomiHealthClient(self.store)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    @staticmethod
+    def _record(metric: str, value: int = 1) -> dict[str, Any]:
+        units = {"steps": "steps", "sleep": "minutes", "heart_rate": "bpm"}
+        return {"sampledAt": "2026-09-24T01:00:00Z", "dataDate": "2026-09-24", "value": value, "unit": units[metric]}
+
+    def _series(self, metric: str, *, empty: bool = False, value: int = 1) -> dict[str, Any]:
+        records = [] if empty else [self._record(metric, value)]
+        return {"status": "EMPTY" if empty else "PASS", "records": records}
+
+    def _patch_series(self, outcomes: dict[str, Any]):
+        def get_series(metric, days):
+            item = outcomes[metric]
+            if isinstance(item, Exception):
+                raise item
+            return item
+        return mock.patch.object(self.client, "get_series", side_effect=get_series)
+
+    def test_steps_timeout_keeps_sleep_and_heart_rate(self) -> None:
+        outcomes = {
+            "steps": XiaomiProviderError("timeout"),
+            "sleep": self._series("sleep", value=420),
+            "heart_rate": self._series("heart_rate", value=72),
+        }
+        with self._patch_series(outcomes) as get_series:
+            result = self.client.get_latest_partial(7)
+        self.assertEqual([call.args[0] for call in get_series.call_args_list], ["steps", "sleep", "heart_rate"])
+        self.assertIsNone(result["steps"])
+        self.assertEqual(result["sleep"]["value"], 420)
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["metric_status"]["steps"], {"status": "FAIL", "error_code": "timeout"})
+        self.assertEqual(result["metric_status"]["sleep"], {"status": "PASS"})
+        self.assertEqual(result["metric_status"]["heart_rate"], {"status": "PASS"})
+
+    def test_sleep_timeout_keeps_steps_and_heart_rate(self) -> None:
+        outcomes = {
+            "steps": self._series("steps", value=1000),
+            "sleep": XiaomiProviderError("timeout"),
+            "heart_rate": self._series("heart_rate", value=72),
+        }
+        with self._patch_series(outcomes):
+            result = self.client.get_latest_partial(7)
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertIsNone(result["sleep"])
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["metric_status"]["sleep"], {"status": "FAIL", "error_code": "timeout"})
+
+    def test_heart_rate_timeout_keeps_steps_and_sleep(self) -> None:
+        outcomes = {
+            "steps": self._series("steps", value=1000),
+            "sleep": self._series("sleep", value=420),
+            "heart_rate": XiaomiProviderError("timeout"),
+        }
+        with self._patch_series(outcomes):
+            result = self.client.get_latest_partial(7)
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertEqual(result["sleep"]["value"], 420)
+        self.assertIsNone(result["heart_rate"])
+        self.assertEqual(result["metric_status"]["heart_rate"], {"status": "FAIL", "error_code": "timeout"})
+
+    def test_two_timeouts_still_return_remaining_metric(self) -> None:
+        outcomes = {
+            "steps": XiaomiProviderError("timeout"),
+            "sleep": XiaomiProviderError("timeout"),
+            "heart_rate": self._series("heart_rate", value=72),
+        }
+        with self._patch_series(outcomes):
+            result = self.client.get_latest_partial(7)
+        self.assertIsNone(result["steps"])
+        self.assertIsNone(result["sleep"])
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["metric_status"]["steps"]["status"], "FAIL")
+        self.assertEqual(result["metric_status"]["sleep"]["status"], "FAIL")
+        self.assertEqual(result["metric_status"]["heart_rate"]["status"], "PASS")
+
+    def test_all_regular_timeouts_have_no_records(self) -> None:
+        outcomes = {
+            "steps": XiaomiProviderError("timeout"),
+            "sleep": XiaomiProviderError("timeout"),
+            "heart_rate": XiaomiProviderError("timeout"),
+        }
+        with self._patch_series(outcomes):
+            result = self.client.get_latest_partial(7)
+        self.assertIsNone(result["steps"])
+        self.assertIsNone(result["sleep"])
+        self.assertIsNone(result["heart_rate"])
+        self.assertTrue(all(item["status"] == "FAIL" and item["error_code"] == "timeout" for item in result["metric_status"].values()))
+
+    def test_empty_records_are_empty_not_fail(self) -> None:
+        outcomes = {
+            "steps": self._series("steps", empty=True),
+            "sleep": self._series("sleep", value=420),
+            "heart_rate": self._series("heart_rate", empty=True),
+        }
+        with self._patch_series(outcomes):
+            result = self.client.get_latest_partial(7)
+        self.assertIsNone(result["steps"])
+        self.assertEqual(result["sleep"]["value"], 420)
+        self.assertIsNone(result["heart_rate"])
+        self.assertEqual(result["metric_status"]["steps"], {"status": "EMPTY"})
+        self.assertEqual(result["metric_status"]["sleep"], {"status": "PASS"})
+        self.assertEqual(result["metric_status"]["heart_rate"], {"status": "EMPTY"})
+
+    def test_auth_expired_stops_later_regular_requests(self) -> None:
+        outcomes = {
+            "steps": XiaomiProviderError("auth_expired"),
+            "sleep": self._series("sleep", value=420),
+            "heart_rate": self._series("heart_rate", value=72),
+        }
+        with self._patch_series(outcomes) as get_series:
+            with self.assertRaises(XiaomiProviderError) as raised:
+                self.client.get_latest_partial(7)
+        self.assertEqual(raised.exception.code, "auth_expired")
+        self.assertEqual([call.args[0] for call in get_series.call_args_list], ["steps"])
+
+    def test_unexpected_error_is_unavailable_without_secret(self) -> None:
+        outcomes = {
+            "steps": self._series("steps", value=1000),
+            "sleep": RuntimeError(SECRET_VALUES["service_token"]),
+            "heart_rate": self._series("heart_rate", value=72),
+        }
+        with self._patch_series(outcomes):
+            result = self.client.get_latest_partial(7)
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertIsNone(result["sleep"])
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["metric_status"]["sleep"], {"status": "FAIL", "error_code": "unavailable"})
+        self.assertNotIn(SECRET_VALUES["service_token"], json.dumps(result))
+
+    def test_strict_get_latest_still_fail_fast(self) -> None:
+        with mock.patch.object(self.client, "get_series", side_effect=XiaomiProviderError("timeout")) as get_series:
+            with self.assertRaises(XiaomiProviderError) as raised:
+                self.client.get_latest()
+        self.assertEqual(raised.exception.code, "timeout")
+        get_series.assert_called_once_with("steps", 2)
+
+    def _partial_latest(self, **overrides: Any) -> dict[str, Any]:
+        payload = {
+            "provider": SOURCE,
+            "sampledAt": "2026-09-24T01:00:00Z",
+            "dataDate": "2026-09-24",
+            "steps": self._record("steps", 1000),
+            "sleep": self._record("sleep", 420),
+            "heart_rate": self._record("heart_rate", 72),
+            "metric_status": {
+                "steps": {"status": "PASS"},
+                "sleep": {"status": "PASS"},
+                "heart_rate": {"status": "PASS"},
+            },
+        }
+        payload.update(overrides)
+        return payload
+
+    def _recorded_cycle(self) -> dict[str, Any]:
+        return {
+            "status": "PASS",
+            "provider": SOURCE,
+            "source": SOURCE,
+            "metric": "cycle",
+            "days": 180,
+            "events": [{"type": "period_start", "timestamp": "2026-09-01T00:00:00Z", "updated_at": "2026-09-01T00:00:01Z"}],
+            "periods": [{"start": "2026-09-01T00:00:00Z", "end": None, "open": True, "source": "recorded"}],
+            "symptoms": [],
+            "predictions": None,
+        }
+
+    def test_all_steps_timeout_keeps_sleep_heart_rate_and_cycle(self) -> None:
+        client = mock.Mock()
+        client.get_latest_partial.return_value = self._partial_latest(
+            steps=None,
+            metric_status={"steps": {"status": "FAIL", "error_code": "timeout"}, "sleep": {"status": "PASS"}, "heart_rate": {"status": "PASS"}},
+        )
+        client.get_cycle.return_value = self._recorded_cycle()
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
+        self.assertIsNone(result["steps"])
+        self.assertEqual(result["sleep"]["value"], 420)
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["cycle"]["status"], "PASS")
+        self.assertEqual(result["metric_status"]["steps"], {"status": "FAIL", "error_code": "timeout"})
+        client.get_cycle.assert_called_once_with(180)
+
+    def test_all_sleep_and_cycle_timeout_keep_other_data(self) -> None:
+        client = mock.Mock()
+        client.get_latest_partial.return_value = self._partial_latest(
+            sleep=None,
+            metric_status={"steps": {"status": "PASS"}, "sleep": {"status": "FAIL", "error_code": "timeout"}, "heart_rate": {"status": "PASS"}},
+        )
+        client.get_cycle.side_effect = XiaomiProviderError("timeout")
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["metric_status"]["sleep"], {"status": "FAIL", "error_code": "timeout"})
+        self.assertEqual(result["metric_status"]["cycle"], {"status": "FAIL", "error_code": "timeout"})
+
+    def test_all_regular_pass_cycle_fail_stays_partial(self) -> None:
+        client = mock.Mock()
+        client.get_latest_partial.return_value = self._partial_latest()
+        client.get_cycle.side_effect = XiaomiProviderError("api_error")
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertEqual(result["metric_status"]["cycle"], {"status": "FAIL", "error_code": "api_error"})
+
+    def test_all_one_regular_fail_and_cycle_empty_is_partial_pass(self) -> None:
+        client = mock.Mock()
+        client.get_latest_partial.return_value = self._partial_latest(
+            steps=None,
+            metric_status={"steps": {"status": "FAIL", "error_code": "timeout"}, "sleep": {"status": "PASS"}, "heart_rate": {"status": "PASS"}},
+        )
+        client.get_cycle.return_value = {
+            "status": "EMPTY", "provider": SOURCE, "source": SOURCE, "metric": "cycle",
+            "days": 180, "events": [], "periods": [], "symptoms": [], "predictions": None,
+        }
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["metric_status"]["cycle"], {"status": "EMPTY"})
+
+    def test_all_regular_fail_cycle_pass_keeps_cycle_data(self) -> None:
+        client = mock.Mock()
+        client.get_latest_partial.return_value = {
+            "provider": SOURCE,
+            "sampledAt": None,
+            "dataDate": None,
+            "steps": None,
+            "sleep": None,
+            "heart_rate": None,
+            "metric_status": {
+                "steps": {"status": "FAIL", "error_code": "timeout"},
+                "sleep": {"status": "FAIL", "error_code": "timeout"},
+                "heart_rate": {"status": "FAIL", "error_code": "timeout"},
+            },
+        }
+        client.get_cycle.return_value = self._recorded_cycle()
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["cycle"]["status"], "PASS")
+        self.assertEqual(len(result["cycle"]["events"]), 1)
+        self.assertIsNone(result["steps"])
+
+    def test_all_regular_and_cycle_fail_is_top_level_fail(self) -> None:
+        client = mock.Mock()
+        client.get_latest_partial.return_value = {
+            "provider": SOURCE,
+            "steps": None,
+            "sleep": None,
+            "heart_rate": None,
+            "metric_status": {
+                "steps": {"status": "FAIL", "error_code": "timeout"},
+                "sleep": {"status": "FAIL", "error_code": "api_error"},
+                "heart_rate": {"status": "FAIL", "error_code": "timeout"},
+            },
+        }
+        client.get_cycle.side_effect = XiaomiProviderError("timeout")
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["status"], "FAIL")
+        self.assertFalse(result["partial"])
+        self.assertIn(result["error_code"], {"timeout", "api_error"})
+
+    def test_all_regular_and_cycle_empty_is_top_level_empty(self) -> None:
+        client = mock.Mock()
+        client.get_latest_partial.return_value = {
+            "provider": SOURCE,
+            "steps": None,
+            "sleep": None,
+            "heart_rate": None,
+            "metric_status": {
+                "steps": {"status": "EMPTY"},
+                "sleep": {"status": "EMPTY"},
+                "heart_rate": {"status": "EMPTY"},
+            },
+        }
+        client.get_cycle.return_value = {
+            "status": "EMPTY", "provider": SOURCE, "source": SOURCE, "metric": "cycle",
+            "days": 180, "events": [], "periods": [], "symptoms": [], "predictions": None,
+        }
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["status"], "EMPTY")
+        self.assertFalse(result["partial"])
+        self.assertNotIn("error_code", result)
 
 
 class XiaomiCycleParserTests(unittest.TestCase):

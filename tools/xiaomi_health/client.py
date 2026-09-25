@@ -361,6 +361,37 @@ class XiaomiHealthClient:
             **metrics,
         }
 
+    def get_latest_partial(self, days: int = 2) -> dict[str, Any]:
+        metrics: dict[str, Any] = {}
+        metric_status: dict[str, dict[str, str]] = {}
+        for metric in ("steps", "sleep", "heart_rate"):
+            try:
+                series = self.get_series(metric, days)
+                records = series["records"] if isinstance(series, dict) and isinstance(series.get("records"), list) else []
+                if records:
+                    metrics[metric] = records[-1]
+                    metric_status[metric] = {"status": "PASS"}
+                else:
+                    metrics[metric] = None
+                    metric_status[metric] = {"status": "EMPTY"}
+            except XiaomiProviderError as exc:
+                if exc.code == "auth_expired":
+                    raise XiaomiProviderError("auth_expired") from exc
+                metrics[metric] = None
+                metric_status[metric] = {"status": "FAIL", "error_code": exc.code if exc.code in {"timeout", "api_error", "malformed_response", "unavailable"} else "unavailable"}
+            except Exception:
+                metrics[metric] = None
+                metric_status[metric] = {"status": "FAIL", "error_code": "unavailable"}
+        sampled = [row["sampledAt"] for row in metrics.values() if isinstance(row, dict) and row.get("sampledAt")]
+        dates = [row["dataDate"] for row in metrics.values() if isinstance(row, dict) and row.get("dataDate")]
+        return {
+            "provider": "xiaomi_fitness_cloud",
+            "sampledAt": max(sampled) if sampled else None,
+            "dataDate": max(dates) if dates else None,
+            **metrics,
+            "metric_status": metric_status,
+        }
+
     def _request_cycle_rows(self, bundle: Mapping[str, Any], key: str, days: int, *, now: datetime | None = None) -> list[dict[str, Any]]:
         today = (now or datetime.now(CST)).astimezone(CST).date()
         start = int(datetime.combine(today - timedelta(days=days - 1), dt_time.min, tzinfo=CST).timestamp())

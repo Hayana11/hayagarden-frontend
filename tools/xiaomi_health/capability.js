@@ -80,25 +80,63 @@ function safeSeries(metric, days, result, cache = {}) {
   };
 }
 
+function componentStatus(entry, fallback) {
+  const allowed = new Set(['PASS', 'EMPTY', 'FAIL']);
+  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+    const status = allowed.has(entry.status) ? entry.status : 'FAIL';
+    const output = { status };
+    if (status === 'FAIL') output.error_code = SAFE_ERRORS.has(entry.error_code) ? entry.error_code : 'unavailable';
+    return output;
+  }
+  const status = allowed.has(fallback) ? fallback : 'FAIL';
+  const output = { status };
+  if (status === 'FAIL') output.error_code = 'unavailable';
+  return output;
+}
+
+function cycleHasData(cycle) {
+  return Boolean(cycle?.events?.length || cycle?.periods?.length || cycle?.symptoms?.length);
+}
+
+function sanitizeMetricStatus(source, metrics, cycle) {
+  const raw = source?.metric_status && typeof source.metric_status === 'object' && !Array.isArray(source.metric_status)
+    ? source.metric_status
+    : {};
+  const output = {};
+  for (const metric of Object.keys(METRICS)) {
+    const fallback = metrics[metric] ? 'PASS' : 'EMPTY';
+    output[metric] = componentStatus(raw[metric], fallback);
+    if (metrics[metric]) output[metric] = { status: 'PASS' };
+  }
+  output.cycle = componentStatus(raw.cycle || { status: cycle.status, error_code: cycle.error_code }, cycle.status);
+  return output;
+}
+
 function safeLatest(result, cache = {}, days = 7) {
   const source = result && typeof result === 'object' ? result : {};
   const metrics = {};
   for (const metric of Object.keys(METRICS)) metrics[metric] = sanitizeRecord(metric, source[metric]);
-  const hasData = Object.values(metrics).some(Boolean);
-  const failed = source.status === 'FAIL' || source.error_code;
   const cycleDays = Number.isInteger(source.cycle?.days) ? source.cycle.days : 180;
+  const cycle = safeCycle(source.cycle, cache, cycleDays);
+  const metricStatus = sanitizeMetricStatus(source, metrics, cycle);
+  const hasData = Object.values(metrics).some(Boolean) || cycleHasData(cycle);
+  const componentFailed = Object.values(metricStatus).some((item) => item.status === 'FAIL');
+  const topFailed = source.status === 'FAIL' || Boolean(source.error_code);
+  const status = hasData ? 'PASS' : ((componentFailed || topFailed) ? 'FAIL' : 'EMPTY');
   return {
-    status: failed ? 'FAIL' : (hasData ? 'PASS' : 'EMPTY'),
+    status,
     provider: SOURCE,
     source: SOURCE,
     days,
     sampledAt: validSample(source.sampledAt),
     dataDate: validDate(source.dataDate),
     ...metrics,
-    cycle: safeCycle(source.cycle, cache, cycleDays),
+    cycle,
+    partial: Boolean(hasData && componentFailed),
+    metric_status: metricStatus,
     cached: cache.cached === true,
     stale: cache.stale === true,
-    ...(failed ? { error_code: errorCode(source) } : {}),
+    ...(status === 'FAIL' ? { error_code: errorCode(source) } : {}),
   };
 }
 
