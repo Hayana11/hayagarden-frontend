@@ -23,6 +23,9 @@ import group_chat_store
 
 
 CODEX_CHAT_MODEL_KEY = "CODEX_CHAT_MODEL"
+CODEX_CHAT_EFFORT_KEY = "CODEX_CHAT_EFFORT"
+CODEX_EFFORT_FALLBACK = ("low", "medium", "high", "xhigh")
+CODEX_EFFORT_NOT_ALLOWED = "CODEX_EFFORT_NOT_ALLOWED"
 DEFAULT_DB_PATH = os.environ.get("HAYA_DB_PATH", "/opt/frontend/memories.db")
 DEFAULT_CWD = os.environ.get("CODEX_CHAT_CWD", "/tmp/hayagarden-codex-chat")
 DEFAULT_CODEX_HOME = os.environ.get("CODEX_HOME", "/root/.codex")
@@ -204,6 +207,37 @@ class CodexAppServer:
         config_store.set(CODEX_CHAT_MODEL_KEY, value)
         return value
 
+    def configured_effort(self) -> str:
+        return str(config_store.get(CODEX_CHAT_EFFORT_KEY, '') or '').strip().lower()
+
+    def set_configured_effort(self, effort: str | None) -> str:
+        value = str(effort or '').strip().lower()
+        config_store.set(CODEX_CHAT_EFFORT_KEY, value)
+        return value
+
+    @staticmethod
+    def allowed_efforts_for(models: list[dict], current_model: str = '') -> list[str]:
+        current = next((row for row in models if row.get('model') == current_model), None)
+        if current and current.get('efforts'):
+            return list(dict.fromkeys(str(item) for item in current.get('efforts') or [] if item))
+        collected: list[str] = []
+        for row in models:
+            for item in row.get('efforts') or []:
+                name = str(item or '').strip()
+                if name and name not in collected:
+                    collected.append(name)
+        return collected or list(CODEX_EFFORT_FALLBACK)
+
+    def describe_effort_state(self, models: list[dict] | None = None, current_model: str = '') -> dict:
+        configured = self.configured_effort()
+        allowed = self.allowed_efforts_for(models or [], current_model)
+        return {
+            'configured_effort': configured or None,
+            'effort_mode': 'explicit' if configured else 'default',
+            'allowed_efforts': allowed,
+            'configured_effort_available': (not configured) or configured in allowed,
+        }
+
     def list_models(self, *, force: bool = False) -> list[dict]:
         """Return the visible model catalog exposed by the logged-in app-server."""
         with self._lock:
@@ -268,6 +302,15 @@ class CodexAppServer:
         }
         if model:
             params["model"] = model
+        effort = self.configured_effort()
+        if effort:
+            allowed = (
+                self.allowed_efforts_for(self._model_cache, model)
+                if self._model_cache
+                else list(CODEX_EFFORT_FALLBACK)
+            )
+            if effort in allowed:
+                params["reasoningEffort"] = effort
         return params, model, mode
 
     def _send_locked(self, payload: dict) -> None:

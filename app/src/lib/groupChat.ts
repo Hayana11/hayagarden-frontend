@@ -47,6 +47,10 @@ export interface CodexModelState {
   modelMode: 'default' | 'explicit';
   defaultModel: string | null;
   defaultModelId: string | null;
+  configuredEffort: string | null;
+  effortMode: 'default' | 'explicit';
+  allowedEfforts: string[];
+  configuredEffortAvailable: boolean;
   detail: string;
 }
 
@@ -82,8 +86,15 @@ function normalizeCodexModelState(data: {
   model_mode?: string;
   default_model?: string | null;
   default_model_id?: string | null;
+  configured_effort?: string | null;
+  effort_mode?: string;
+  allowed_efforts?: string[];
+  configured_effort_available?: boolean;
   detail?: string;
 }): CodexModelState {
+  const configuredEffort = typeof data.configured_effort === 'string' && data.configured_effort
+    ? data.configured_effort
+    : null;
   return {
     ready: Boolean(data.ready),
     models: (data.models || []).flatMap((row) => {
@@ -107,6 +118,10 @@ function normalizeCodexModelState(data: {
     modelMode: data.model_mode === 'explicit' ? 'explicit' : 'default',
     defaultModel: data.default_model ?? null,
     defaultModelId: data.default_model_id ?? null,
+    configuredEffort,
+    effortMode: data.effort_mode === 'explicit' && configuredEffort ? 'explicit' : 'default',
+    allowedEfforts: (data.allowed_efforts || []).filter(Boolean),
+    configuredEffortAvailable: data.configured_effort_available !== false,
     detail: data.detail || '',
   };
 }
@@ -117,6 +132,10 @@ export const getCodexModels = (refresh = false) =>
 
 export const setCodexModel = (modelId: string | null) =>
   http.post('/api/group-chat/codex-model', { model_id: modelId })
+    .then(() => getCodexModels());
+
+export const setCodexEffort = (effort: string | null) =>
+  http.post('/api/group-chat/codex-effort', { effort })
     .then(() => getCodexModels());
 
 export const getGroupMessages = (room: GroupRoom) =>
