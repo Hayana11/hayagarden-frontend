@@ -16,15 +16,18 @@ import {
   fetchChatMessagesOrNull,
   ensureModelCatalog,
   getChatEffort,
+  getDisplayThinkingConfig,
   regenFinalize,
   regenPrepare,
   sendChatMessage,
   setChatEffort,
   setChatModel,
+  setDisplayThinkingAuthoredPrompt,
   switchChatBranch,
   uploadChatFile,
   type ChatModelCatalog,
   type ChatEffortMode,
+  type DisplayThinkingConfigState,
   type ModelCatalogEntry,
 } from '../lib/api';
 import {
@@ -387,6 +390,465 @@ function CopyIcon({ size = 15 }: { size?: number }) {
 
 const MAX_COMPOSER_ATTACHMENTS = 4;
 
+export const CHAT_PINNED_MODELS = [
+  {
+    id: 'claude-opus-5-5',
+    title: 'Opus 5.5',
+    blurb: '能力最强，适合复杂任务与长篇创作',
+  },
+  {
+    id: 'claude-opus-4-6',
+    title: 'Opus 4.6',
+    blurb: '稳定细腻，适合长期对话与日常使用',
+  },
+  {
+    id: 'claude-sonnet-5',
+    title: 'Sonnet 5',
+    blurb: '速度与能力均衡，适合日常任务',
+  },
+  {
+    id: 'claude-haiku-4-5-20251001',
+    title: 'Haiku 4.5',
+    blurb: '响应最快，适合简单问题',
+  },
+] as const;
+
+export const CHAT_PINNED_MODEL_IDS: string[] = CHAT_PINNED_MODELS.map((pin) => pin.id);
+
+export const CHAT_EFFORT_LABELS: Record<string, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '极高',
+  max: '最大',
+};
+
+export type ChatPickerModel = ModelCatalogEntry & {
+  runtimeCompatible?: boolean;
+  runtime_compatible?: boolean;
+  runtimeRequirement?: string | null;
+  runtime_requirement?: string | null;
+};
+
+export type ChatModelSheetPanel = 'main' | 'effort' | 'more';
+
+export function isChatPinnedModelId(id: string): boolean {
+  for (let i = 0; i < CHAT_PINNED_MODELS.length; i += 1) {
+    if (CHAT_PINNED_MODELS[i].id === id) return true;
+  }
+  return false;
+}
+
+export function findCatalogModelById(models: ChatPickerModel[], id: string): ChatPickerModel | null {
+  for (let i = 0; i < models.length; i += 1) {
+    if (models[i].id === id) return models[i];
+  }
+  return null;
+}
+
+export function pinnedModelsFromCatalog(models: ChatPickerModel[]) {
+  const rows: Array<{ id: string; title: string; blurb: string; model: ChatPickerModel }> = [];
+  for (let i = 0; i < CHAT_PINNED_MODELS.length; i += 1) {
+    const pin = CHAT_PINNED_MODELS[i];
+    const model = findCatalogModelById(models, pin.id);
+    if (!model) continue;
+    rows.push({ id: pin.id, title: pin.title, blurb: pin.blurb, model });
+  }
+  return rows;
+}
+
+export function moreModelsFromCatalog(models: ChatPickerModel[]): ChatPickerModel[] {
+  const extra: ChatPickerModel[] = [];
+  for (let i = 0; i < models.length; i += 1) {
+    if (!isChatPinnedModelId(models[i].id)) extra.push(models[i]);
+  }
+  return extra;
+}
+
+export function isPickerRuntimeIncompatible(model: ChatPickerModel): boolean {
+  return model.runtimeCompatible === false || model.runtime_compatible === false;
+}
+
+export function pickerRuntimeRequirement(model: ChatPickerModel): string {
+  return String(model.runtimeRequirement || model.runtime_requirement || '更高版本');
+}
+
+export function chatModelCapsuleLabel(opts: {
+  chatProvider: string;
+  modelMode: string;
+  currentModel: string;
+  models: ChatPickerModel[];
+}): string {
+  const currentModel = opts.currentModel;
+  if (opts.chatProvider === 'claude_code') {
+    if (opts.modelMode === 'explicit' && currentModel) {
+      for (let i = 0; i < CHAT_PINNED_MODELS.length; i += 1) {
+        if (CHAT_PINNED_MODELS[i].id === currentModel) return CHAT_PINNED_MODELS[i].title;
+      }
+      const hit = findCatalogModelById(opts.models, currentModel);
+      return hit && hit.label ? hit.label : currentModel;
+    }
+    if (opts.modelMode === 'default') return '默认';
+    return '读取中…';
+  }
+  if (currentModel) {
+    for (let i = 0; i < CHAT_PINNED_MODELS.length; i += 1) {
+      if (CHAT_PINNED_MODELS[i].id === currentModel) return CHAT_PINNED_MODELS[i].title;
+    }
+    const hit = findCatalogModelById(opts.models, currentModel);
+    if (hit && hit.label) return hit.label;
+    return currentModel.replace(/^.*\]\s*/, '').slice(0, 22) || '模型';
+  }
+  return '模型';
+}
+
+export function effortDisplayLabel(effortMode: string, currentEffort: string): string {
+  if (effortMode === 'default') return '默认';
+  if (!currentEffort) return '';
+  return CHAT_EFFORT_LABELS[currentEffort] || currentEffort;
+}
+
+export function isExplicitCurrentModel(modelMode: string, currentModel: string, modelId: string): boolean {
+  if (modelMode === 'default') return false;
+  return Boolean(currentModel) && currentModel === modelId;
+}
+
+export function moreModelsEntrySubtitle(opts: {
+  modelMode: string;
+  currentModel: string;
+  models: ChatPickerModel[];
+}): string {
+  if (opts.modelMode === 'default' || !opts.currentModel || isChatPinnedModelId(opts.currentModel)) {
+    return '查看全部可用模型';
+  }
+  return `当前：${chatModelCapsuleLabel({
+    chatProvider: 'claude_code',
+    modelMode: 'explicit',
+    currentModel: opts.currentModel,
+    models: opts.models,
+  })}`;
+}
+
+export type ThinkingControlState = 'native_locked' | 'configurable' | 'unavailable';
+
+export function thinkingControlForPicker(modelMode: string, currentModel: string): ThinkingControlState {
+  if (modelMode === 'explicit' && currentModel === 'claude-opus-5-5') return 'native_locked';
+  return 'unavailable';
+}
+
+export function thinkingRowCopy(state: ThinkingControlState): {
+  title: string;
+  note: string;
+  checked: boolean | null;
+} {
+  if (state === 'native_locked') {
+    return { title: '思考', note: '模型原生思考', checked: true };
+  }
+  return { title: '思考', note: '当前 Claude Code 未提供独立开关', checked: null };
+}
+
+export function authoredPromptRowCopy(opts: {
+  authoredPromptEffective: boolean;
+  thinkingControl: ThinkingControlState;
+}): { title: string; note: string; checked: boolean } {
+  if (opts.thinkingControl === 'native_locked' && !opts.authoredPromptEffective) {
+    return { title: '思考提示词', note: '使用原生思考，无需提示词', checked: false };
+  }
+  if (opts.authoredPromptEffective) {
+    return { title: '思考提示词', note: '用于可见思绪；下一条消息起生效', checked: true };
+  }
+  return { title: '思考提示词', note: '给非原生思考模型注入可见思绪提示词', checked: false };
+}
+
+function ChatModelPopSwitch(props: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  onToggle?: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={props.checked ? 'chat-model-pop-switch is-on' : 'chat-model-pop-switch'}
+      role="switch"
+      aria-checked={props.checked ? 'true' : 'false'}
+      aria-label={props.label}
+      disabled={props.disabled || !props.onToggle}
+      onClick={() => {
+        if (!props.disabled && props.onToggle) props.onToggle(!props.checked);
+      }}
+    >
+      <span className="chat-model-pop-switch-knob" aria-hidden="true" />
+    </button>
+  );
+}
+
+function pickerDotColor(model: ChatPickerModel | null | undefined, selected: boolean): string {
+  if (model && model.dot) return model.dot;
+  return selected ? 'var(--rose)' : 'var(--ghost)';
+}
+
+export function ChatModelPickerSheet(props: {
+  panel: ChatModelSheetPanel;
+  models: ChatPickerModel[];
+  currentModel: string;
+  modelMode: string;
+  chatProvider: string;
+  currentEffort: string;
+  effortMode: string;
+  allowedEfforts: string[];
+  authoredPromptEffective: boolean;
+  busy: boolean;
+  onClose: () => void;
+  onBack: () => void;
+  onOpenEffort: () => void;
+  onOpenMore: () => void;
+  onSelectModel: (modelId: string) => void;
+  onSelectEffort: (effort: string) => void;
+  onToggleAuthoredPrompt: (enabled: boolean) => void;
+}) {
+  const pinnedRows = pinnedModelsFromCatalog(props.models);
+  const moreRows = moreModelsFromCatalog(props.models);
+  const effortValue = effortDisplayLabel(props.effortMode, props.currentEffort);
+  const showEffort = props.chatProvider === 'claude_code' && props.effortMode !== 'unavailable';
+  const followingDefault = props.chatProvider === 'claude_code' && props.modelMode === 'default';
+  const dialogLabel = props.panel === 'effort' ? '思考强度' : props.panel === 'more' ? '更多模型' : '模型';
+  const thinkingControl = thinkingControlForPicker(props.modelMode, props.currentModel);
+  const thinkingCopy = thinkingRowCopy(thinkingControl);
+  const promptCopy = authoredPromptRowCopy({
+    authoredPromptEffective: props.authoredPromptEffective,
+    thinkingControl,
+  });
+
+  return (
+    <>
+      <button
+        type="button"
+        className="chat-model-pop-backdrop c78-fill-fixed"
+        aria-label="关闭模型选择"
+        onClick={props.onClose}
+      />
+      <div
+        className="chat-model-pop vstack vstack-4"
+        role="dialog"
+        aria-modal="true"
+        aria-label={dialogLabel}
+      >
+        {props.panel === 'main' && (
+          <>
+            {followingDefault && (
+              <p className="chat-model-pop-hint">当前跟随 Claude Code 默认模型</p>
+            )}
+            <MixedSectionLabel cn="模型" en="MODELS" style={{ padding: '8px 8px 4px', letterSpacing: 2.5, fontSize: 10.5 }} />
+            {pinnedRows.map((row) => {
+              const incompatible = isPickerRuntimeIncompatible(row.model);
+              const selected = isExplicitCurrentModel(props.modelMode, props.currentModel, row.id);
+              return (
+                <button
+                  key={row.id}
+                  type="button"
+                  className={selected ? 'chat-model-pop-row is-current hstack hstack-10' : 'chat-model-pop-row hstack hstack-10'}
+                  disabled={props.busy || incompatible}
+                  aria-pressed={selected}
+                  aria-current={selected ? 'true' : undefined}
+                  aria-label={row.title}
+                  data-model-id={row.id}
+                  onClick={() => {
+                    if (!props.busy && !incompatible) props.onSelectModel(row.id);
+                  }}
+                >
+                  <span
+                    className="chat-model-pop-dot"
+                    style={{ background: pickerDotColor(row.model, selected) }}
+                    aria-hidden="true"
+                  />
+                  <span className="chat-model-pop-copy">
+                    <span className="chat-model-pop-title">{row.title}</span>
+                    <span className="chat-model-pop-id">{row.id}</span>
+                    {incompatible ? (
+                      <span className="chat-model-pop-extra">
+                        需要 Claude Code ≥ {pickerRuntimeRequirement(row.model)}
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
+              );
+            })}
+            {!props.models.length && (
+              <p className="chat-model-pop-hint">模型清单还没拉到</p>
+            )}
+            <div className="chat-model-pop-sep">
+              {showEffort && (
+                <button
+                  type="button"
+                  className="chat-model-pop-row chat-model-pop-dir hstack hstack-10"
+                  aria-label="思考强度"
+                  data-picker-dir="effort"
+                  disabled={props.busy}
+                  onClick={() => { if (!props.busy) props.onOpenEffort(); }}
+                >
+                  <span className="chat-model-pop-copy">
+                    <span className="chat-model-pop-title">思考强度</span>
+                  </span>
+                  <span className="chat-model-pop-nav-value">{effortValue || '—'}</span>
+                  <span className="chat-model-pop-nav-chev" aria-hidden="true">›</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="chat-model-pop-row chat-model-pop-dir hstack hstack-10"
+                aria-label="更多模型"
+                data-picker-dir="more"
+                disabled={props.busy}
+                onClick={() => { if (!props.busy) props.onOpenMore(); }}
+              >
+                <span className="chat-model-pop-copy">
+                  <span className="chat-model-pop-title">更多模型</span>
+                  <span className="chat-model-pop-id">
+                    {moreModelsEntrySubtitle({
+                      modelMode: props.modelMode,
+                      currentModel: props.currentModel,
+                      models: props.models,
+                    })}
+                  </span>
+                </span>
+                <span className="chat-model-pop-nav-chev" aria-hidden="true">›</span>
+              </button>
+            </div>
+          </>
+        )}
+        {props.panel === 'effort' && (
+          <>
+            <button
+              type="button"
+              className="chat-model-pop-back hstack hstack-6"
+              aria-label="返回"
+              onClick={props.onBack}
+            >
+              <span aria-hidden="true">‹</span>
+              <span>思考强度</span>
+            </button>
+            {props.allowedEfforts.map((effort) => {
+              const selected = props.effortMode === 'explicit' && effort === props.currentEffort;
+              const label = CHAT_EFFORT_LABELS[effort] || effort;
+              return (
+                <button
+                  key={effort}
+                  type="button"
+                  className={selected ? 'chat-model-pop-row is-current hstack hstack-10' : 'chat-model-pop-row hstack hstack-10'}
+                  disabled={props.busy}
+                  aria-pressed={selected}
+                  aria-current={selected ? 'true' : undefined}
+                  aria-label={label}
+                  data-effort={effort}
+                  onClick={() => { if (!props.busy) props.onSelectEffort(effort); }}
+                >
+                  <span
+                    className="chat-model-pop-dot"
+                    style={{ background: selected ? 'var(--rose)' : 'var(--ghost)' }}
+                    aria-hidden="true"
+                  />
+                  <span className="chat-model-pop-copy">
+                    <span className="chat-model-pop-title">{label}</span>
+                  </span>
+                </button>
+              );
+            })}
+            <div className="chat-model-pop-settings vstack vstack-4">
+              <div
+                className="chat-model-pop-setting hstack hstack-10"
+                data-thinking-control={thinkingControl}
+              >
+                <span className="chat-model-pop-copy">
+                  <span className="chat-model-pop-title">{thinkingCopy.title}</span>
+                  <span className="chat-model-pop-note">{thinkingCopy.note}</span>
+                </span>
+                {thinkingCopy.checked === null ? (
+                  <span className="chat-model-pop-switch-idle" aria-hidden="true">--</span>
+                ) : (
+                  <ChatModelPopSwitch
+                    checked={thinkingCopy.checked}
+                    disabled
+                    label="思考"
+                  />
+                )}
+              </div>
+              <div
+                className="chat-model-pop-setting hstack hstack-10"
+                data-authored-prompt={promptCopy.checked ? 'on' : 'off'}
+              >
+                <span className="chat-model-pop-copy">
+                  <span className="chat-model-pop-title">{promptCopy.title}</span>
+                  <span className="chat-model-pop-note">{promptCopy.note}</span>
+                </span>
+                <ChatModelPopSwitch
+                  checked={promptCopy.checked}
+                  disabled={props.busy}
+                  label="思考提示词"
+                  onToggle={(checked) => {
+                    if (!props.busy) props.onToggleAuthoredPrompt(checked);
+                  }}
+                />
+              </div>
+            </div>
+          </>
+        )}
+        {props.panel === 'more' && (
+          <>
+            <button
+              type="button"
+              className="chat-model-pop-back hstack hstack-6"
+              aria-label="返回"
+              onClick={props.onBack}
+            >
+              <span aria-hidden="true">‹</span>
+              <span>更多模型</span>
+            </button>
+            {moreRows.map((model) => {
+              const incompatible = isPickerRuntimeIncompatible(model);
+              const selected = isExplicitCurrentModel(props.modelMode, props.currentModel, model.id);
+              const label = model.label || model.id;
+              return (
+                <button
+                  key={model.id}
+                  type="button"
+                  className={selected ? 'chat-model-pop-row is-current hstack hstack-10' : 'chat-model-pop-row hstack hstack-10'}
+                  disabled={props.busy || incompatible}
+                  aria-pressed={selected}
+                  aria-current={selected ? 'true' : undefined}
+                  aria-label={label}
+                  data-model-id={model.id}
+                  onClick={() => {
+                    if (!props.busy && !incompatible) props.onSelectModel(model.id);
+                  }}
+                >
+                  <span
+                    className="chat-model-pop-dot"
+                    style={{ background: pickerDotColor(model, selected) }}
+                    aria-hidden="true"
+                  />
+                  <span className="chat-model-pop-copy">
+                    <span className="chat-model-pop-title">{label}</span>
+                    <span className="chat-model-pop-id">{model.id}</span>
+                    {incompatible ? (
+                      <span className="chat-model-pop-extra">
+                        需要 Claude Code ≥ {pickerRuntimeRequirement(model)}
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
+              );
+            })}
+            {!moreRows.length && (
+              <p className="chat-model-pop-hint">没有更多模型</p>
+            )}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
 export function ChatScreen() {
   const [settings, setSettings] = useState<ChatPrefs>(loadChatPrefs);
   const [contextLimits, setContextLimits] = useState<ChatContextLimits>(DEFAULT_CHAT_CONTEXT_LIMITS);
@@ -428,14 +890,17 @@ export function ChatScreen() {
   const [navOpen, setNavOpen] = useState<null | 'wrench' | 'font' | 'search' | 'profile'>(null);
   const [searchQ, setSearchQ] = useState('');
   const [modelPopOpen, setModelPopOpen] = useState(false);
+  const [modelSheetPanel, setModelSheetPanel] = useState<ChatModelSheetPanel>('main');
+  const [modelBusy, setModelBusy] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
-  const [models, setModels] = useState<ModelCatalogEntry[]>([]);
+  const [models, setModels] = useState<ChatPickerModel[]>([]);
   const [currentModel, setCurrentModel] = useState('');
   const [chatProvider, setChatProvider] = useState<'api_relay' | 'claude_code' | ''>('');
   const [modelMode, setModelMode] = useState<'default' | 'explicit' | 'unknown' | ''>('');
   const [currentEffort, setCurrentEffort] = useState('');
   const [effortMode, setEffortMode] = useState<ChatEffortMode | ''>('');
   const [allowedEfforts, setAllowedEfforts] = useState<string[]>([]);
+  const [authoredPromptEffective, setAuthoredPromptEffective] = useState(false);
 
   const [openThink, setOpenThink] = useState<Record<string, boolean>>({});
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({});
@@ -484,6 +949,7 @@ export function ChatScreen() {
   const chatHandoffRef = useRef<ChatStreamHandoff | null>(null);
   const presentationByMessageRef = useRef(new Map<number, string>());
   const postingRef = useRef(false);
+  const modelBusyRef = useRef(false);
   const warmUpInflightRef = useRef<Promise<void> | null>(null);
   const coldStartRaceRef = useRef<ColdStartRaceState>(createColdStartRaceState());
   const composerMutationRevisionRef = useRef(0);
@@ -686,15 +1152,25 @@ export function ChatScreen() {
     setAllowedEfforts(r.allowedEfforts);
   }, []);
 
+  const applyDisplayThinking = useCallback((r: DisplayThinkingConfigState) => {
+    if (!r.ok) return;
+    setAuthoredPromptEffective(r.authoredPromptEffective);
+  }, []);
+
   const startModelCatalog = useCallback(() => {
     markChatColdStart('catalog_start');
-    void Promise.all([ensureModelCatalog(), getChatEffort()]).then(([catalog, effort]) => {
+    void Promise.all([
+      ensureModelCatalog(),
+      getChatEffort(),
+      getDisplayThinkingConfig(),
+    ]).then(([catalog, effort, displayThinking]) => {
       markChatColdStart('catalog_ready');
       if (!mountedRef.current) return;
       applyCatalog(catalog);
       applyEffort(effort);
+      applyDisplayThinking(displayThinking);
     });
-  }, [applyCatalog, applyEffort]);
+  }, [applyCatalog, applyEffort, applyDisplayThinking]);
 
   const runLegacyWarmUp = useCallback(async (anchorGen: number, earliestId: number) => {
     const race = coldStartRaceRef.current;
@@ -810,13 +1286,101 @@ export function ChatScreen() {
     await runLegacyWarmUp(race.historyGen, earliestId);
   }, [legacyCompat, msgs, runLegacyWarmUp]);
 
+  const closeModelSheet = useCallback(() => {
+    setModelPopOpen(false);
+    setModelSheetPanel('main');
+  }, []);
+
   const toggleModelPop = useCallback(() => {
     setModelPopOpen((open) => {
-      const next = !open;
-      if (next) startModelCatalog();
-      return next;
+      if (open) {
+        setModelSheetPanel('main');
+        return false;
+      }
+      setModelSheetPanel('main');
+      startModelCatalog();
+      return true;
     });
   }, [startModelCatalog]);
+
+  const pickerBusy = sending || posting || modelBusy;
+
+  const selectChatModel = useCallback(async (modelId: string) => {
+    if (sending || postingRef.current || modelBusyRef.current) return;
+    const hit = findCatalogModelById(models, modelId);
+    if (!hit) return;
+    if (isPickerRuntimeIncompatible(hit)) return;
+    if (modelMode !== 'default' && currentModel === modelId) return;
+    modelBusyRef.current = true;
+    setModelBusy(true);
+    try {
+      const result = await setChatModel(modelId);
+      if (result.ok) {
+        setModelMode(result.modelMode || 'explicit');
+        setCurrentModel(result.configuredModel || modelId);
+        showToast('下一条消息起生效');
+        const displayThinking = await getDisplayThinkingConfig();
+        if (mountedRef.current) applyDisplayThinking(displayThinking);
+        closeModelSheet();
+      } else {
+        showToast('模型切换失败');
+      }
+    } finally {
+      modelBusyRef.current = false;
+      setModelBusy(false);
+    }
+  }, [closeModelSheet, currentModel, modelMode, models, sending, showToast, applyDisplayThinking]);
+
+  const selectChatEffort = useCallback(async (effort: string) => {
+    if (sending || postingRef.current || modelBusyRef.current) return;
+    if (effortMode === 'explicit' && effort === currentEffort) return;
+    modelBusyRef.current = true;
+    setModelBusy(true);
+    try {
+      const result = await setChatEffort(effort);
+      if (result.ok) {
+        setCurrentEffort(result.configuredEffort || effort);
+        setEffortMode(result.effortMode || 'explicit');
+        showToast('下一条消息起生效');
+        setModelSheetPanel('main');
+      } else {
+        showToast('思考强度切换失败');
+      }
+    } finally {
+      modelBusyRef.current = false;
+      setModelBusy(false);
+    }
+  }, [currentEffort, effortMode, sending, showToast]);
+
+  const selectAuthoredPrompt = useCallback(async (enabled: boolean) => {
+    if (sending || postingRef.current || modelBusyRef.current) return;
+    if (enabled === authoredPromptEffective) return;
+    modelBusyRef.current = true;
+    setModelBusy(true);
+    try {
+      const result = await setDisplayThinkingAuthoredPrompt(enabled);
+      if (!result.ok) {
+        showToast('思考提示词设置失败');
+        return;
+      }
+      applyDisplayThinking(result);
+      showToast('下一条消息起生效');
+    } finally {
+      modelBusyRef.current = false;
+      setModelBusy(false);
+    }
+  }, [applyDisplayThinking, authoredPromptEffective, sending, showToast]);
+
+  useEffect(() => {
+    if (!modelPopOpen) return undefined;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (modelSheetPanel !== 'main') setModelSheetPanel('main');
+      else closeModelSheet();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [closeModelSheet, modelPopOpen, modelSheetPanel]);
 
   const toggleSearchNav = useCallback(() => {
     setNavOpen((open) => {
@@ -1650,18 +2214,12 @@ export function ChatScreen() {
     boxShadow: on ? '0 4px 10px var(--shadow)' : 'none',
   });
 
-  const modelBadge = useMemo(() => {
-    if (chatProvider === 'claude_code') {
-      if (modelMode === 'explicit' && currentModel) {
-        const hit = models.find((m) => m.id === currentModel);
-        return `Claude Code · ${hit?.label || currentModel}`;
-      }
-      if (modelMode === 'default') return 'Claude Code · 默认';
-      return 'Claude Code · 读取中…';
-    }
-    const hit = models.find((m) => m.id === currentModel);
-    return hit?.label || currentModel.replace(/^.*\]\s*/, '').slice(0, 22) || '模型';
-  }, [models, currentModel, chatProvider, modelMode]);
+  const modelBadge = useMemo(() => chatModelCapsuleLabel({
+    chatProvider,
+    modelMode,
+    currentModel,
+    models,
+  }), [models, currentModel, chatProvider, modelMode]);
 
   const canSend = Boolean(input.trim() || pendingFiles.length || pendingImages.length)
     && !sending
@@ -2485,138 +3043,26 @@ export function ChatScreen() {
             />
           )}
           {modelPopOpen && (
-            <>
-              <div onClick={() => setModelPopOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
-              <div className="chat-model-pop vstack vstack-4" style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, zIndex: 2, background: 'var(--card)', borderRadius: 18, boxShadow: '0 24px 60px var(--shadow2)', padding: 12, animation: 'chatFadeIn .15s ease', maxHeight: '50vh', overflowY: 'auto' }}>
-                <MixedSectionLabel cn="模型" en="MODELS" style={{ padding: '8px 8px 4px', letterSpacing: 2.5, fontSize: 10.5 }} />
-                {chatProvider === 'claude_code' ? (
-                  <>
-                    <div
-                      onClick={async () => {
-                        setModelPopOpen(false);
-                        if (modelMode === 'default') return;
-                        const result = await setChatModel(null);
-                        if (result.ok) {
-                          setModelMode('default');
-                          setCurrentModel('');
-                          showToast('下一条消息起生效');
-                        } else showToast('切换失败');
-                      }}
-                      className="hstack hstack-10" style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: modelMode === 'default' ? 'var(--rosebg)' : 'transparent' }}
-                    >
-                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: modelMode === 'default' ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
-                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                        <span style={{ fontSize: 14, color: 'var(--ink)' }}>默认（跟随 Claude Code）</span>
-                        <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)' }}>不传 --model</span>
-                      </div>
-                    </div>
-                    {models.map((mo) => (
-                      <div
-                        key={mo.id}
-                        onClick={async () => {
-                          setModelPopOpen(false);
-                          if (modelMode === 'explicit' && mo.id === currentModel) return;
-                          const result = await setChatModel(mo.id);
-                          if (result.ok) {
-                            setModelMode(result.modelMode || 'explicit');
-                            setCurrentModel(result.configuredModel || mo.id);
-                            showToast('下一条消息起生效');
-                          } else showToast('切换失败');
-                        }}
-                        className="hstack hstack-10" style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: modelMode === 'explicit' && mo.id === currentModel ? 'var(--rosebg)' : 'transparent' }}
-                      >
-                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: mo.dot || (modelMode === 'explicit' && mo.id === currentModel ? 'var(--rose)' : 'var(--ghost)'), flexShrink: 0 }} />
-                        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                          <span style={{ fontSize: 14, color: 'var(--ink)' }}>{mo.label || mo.id}</span>
-                          <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{mo.id}</span>
-                        </div>
-                      </div>
-                    ))}
-                    {effortMode !== 'unavailable' && (
-                      <div style={{ borderTop: '1px solid var(--line)', marginTop: 8, paddingTop: 4 }}>
-                        <MixedSectionLabel cn="思考强度" en="EFFORT" style={{ padding: '8px 8px 4px', letterSpacing: 2.5, fontSize: 10.5 }} />
-                        <div
-                          onClick={async () => {
-                            setModelPopOpen(false);
-                            if (effortMode === 'default') return;
-                            const result = await setChatEffort(null);
-                            if (result.ok) {
-                              setCurrentEffort('');
-                              setEffortMode('default');
-                              showToast('下一条消息起生效');
-                            } else showToast('切换失败');
-                          }}
-                          className="hstack hstack-10"
-                          style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: effortMode === 'default' ? 'var(--rosebg)' : 'transparent' }}
-                        >
-                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: effortMode === 'default' ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
-                          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                            <span style={{ fontSize: 14, color: 'var(--ink)' }}>默认（跟随 Claude Code）</span>
-                            <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)' }}>不传 --effort</span>
-                          </div>
-                        </div>
-                        {allowedEfforts.map((effort) => {
-                          const labels: Record<string, string> = {
-                            low: '低', medium: '中', high: '高', xhigh: '极高', max: '最大',
-                          };
-                          const selected = effortMode === 'explicit' && effort === currentEffort;
-                          return (
-                            <div
-                              key={effort}
-                              onClick={async () => {
-                                setModelPopOpen(false);
-                                if (selected) return;
-                                const result = await setChatEffort(effort);
-                                if (result.ok) {
-                                  setCurrentEffort(result.configuredEffort || effort);
-                                  setEffortMode(result.effortMode || 'explicit');
-                                  showToast('下一条消息起生效');
-                                } else showToast('切换失败');
-                              }}
-                              className="hstack hstack-10"
-                              style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: selected ? 'var(--rosebg)' : 'transparent' }}
-                            >
-                              <span style={{ width: 8, height: 8, borderRadius: '50%', background: selected ? 'var(--rose)' : 'var(--ghost)', flexShrink: 0 }} />
-                              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                                <span style={{ fontSize: 14, color: 'var(--ink)' }}>{labels[effort] || effort}</span>
-                                <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)' }}>--effort {effort}</span>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </>
-                ) : models.map((mo) => (
-                  <div
-                    key={mo.id}
-                    onClick={async () => {
-                      setModelPopOpen(false);
-                      if (mo.id === currentModel) return;
-                      const result = await setChatModel(mo.id);
-                      if (result.ok) {
-                        setCurrentModel(mo.id);
-                        showToast(`已切换到 ${mo.label || mo.id}`);
-                      } else showToast('切换失败');
-                    }}
-                    className="hstack hstack-10" style={{ cursor: 'pointer', padding: '9px 10px', borderRadius: 12, background: mo.id === currentModel ? 'var(--rosebg)' : 'transparent' }}
-                  >
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: mo.dot || (mo.id === currentModel ? 'var(--rose)' : 'var(--ghost)'), flexShrink: 0 }} />
-                    <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                      <span style={{ fontSize: 14, color: 'var(--ink)' }}>{mo.label || mo.id}</span>
-                      <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: 'var(--ghost)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{mo.id}</span>
-                    </div>
-                    {mo.thinking === 'none' && <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--ghost)', background: 'var(--card2)', borderRadius: 999, padding: '2px 8px', flexShrink: 0 }}>无思考</span>}
-                  </div>
-                ))}
-                {!models.length && <div style={{ fontSize: 12, color: 'var(--faint)', padding: '4px 10px' }}>模型清单还没拉到</div>}
-                <div style={{ fontSize: 10.5, color: 'var(--ghost)', borderTop: '1px solid var(--line)', marginTop: 6, padding: '8px 8px 2px' }}>
-                  {chatProvider === 'claude_code' ? 'Claude Code 模型空间 · 下一条消息起生效' : '清单来自 models.json · 切换作用于当前中转'}
-                </div>
-              </div>
-            </>
+            <ChatModelPickerSheet
+              panel={modelSheetPanel}
+              models={models}
+              currentModel={currentModel}
+              modelMode={modelMode}
+              chatProvider={chatProvider}
+              currentEffort={currentEffort}
+              effortMode={effortMode}
+              allowedEfforts={allowedEfforts}
+              authoredPromptEffective={authoredPromptEffective}
+              busy={pickerBusy}
+              onClose={closeModelSheet}
+              onBack={() => setModelSheetPanel('main')}
+              onOpenEffort={() => setModelSheetPanel('effort')}
+              onOpenMore={() => setModelSheetPanel('more')}
+              onSelectModel={(modelId) => { void selectChatModel(modelId); }}
+              onSelectEffort={(effort) => { void selectChatEffort(effort); }}
+              onToggleAuthoredPrompt={(enabled) => { void selectAuthoredPrompt(enabled); }}
+            />
           )}
-
           {attachMenuOpen && (
             <>
               <div onClick={() => setAttachMenuOpen(false)} className="c78-fill-fixed" style={{ zIndex: 1 }} />
@@ -2702,12 +3148,20 @@ export function ChatScreen() {
               <div onClick={() => { if (!postingRef.current) setAttachMenuOpen(!attachMenuOpen); }} style={{ cursor: posting ? 'default' : 'pointer', width: 38, height: 38, borderRadius: '50%', background: 'var(--card2)', color: 'var(--mut)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                 <Svg d={IC.plus} size={17} sw={1.8} />
               </div>
-              <div onClick={toggleModelPop} className="hstack hstack-6" style={{ cursor: 'pointer', padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0 }}>
+              <button
+                type="button"
+                onClick={toggleModelPop}
+                className="hstack hstack-6 chat-model-capsule"
+                aria-label="选择模型"
+                aria-haspopup="dialog"
+                aria-expanded={modelPopOpen}
+                style={{ cursor: 'pointer', padding: '9px 13px', borderRadius: 999, background: 'var(--card2)', minWidth: 0, border: 'none' }}
+              >
                 <span style={{ fontFamily: fontFamilyForText(modelBadge), fontSize: 12, letterSpacing: 0.5, color: 'var(--ink2)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{modelBadge}</span>
                 <svg viewBox="0 0 24 24" width={11} height={11} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--ghost)', flexShrink: 0 }}>
                   <path d="M18 15l-6-6-6 6" />
                 </svg>
-              </div>
+              </button>
               <div
                 onClick={() => { if (canSend) void send(); }}
                 style={{ marginLeft: 'auto', width: 42, height: 42, flexShrink: 0, borderRadius: '50%', background: canSend ? 'var(--deep)' : 'var(--card2)', color: canSend ? '#FBF3F0' : 'var(--ghost)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: canSend ? 'pointer' : 'default', boxShadow: canSend ? '0 8px 20px var(--shadow2)' : 'none', transition: 'background .15s ease' }}

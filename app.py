@@ -1701,6 +1701,44 @@ def set_display_thinking_prompt_config():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+def _display_thinking_config_payload():
+    from chat.display_thinking import (
+        display_thinking_config_state,
+        get_display_thinking_mode,
+    )
+    from chat.provider_router import capture_generation_authority
+    return display_thinking_config_state(
+        get_display_thinking_mode(),
+        capture_generation_authority().model_identity,
+    )
+
+
+@app.route('/api/config/display-thinking', methods=['GET'])
+def config_get_display_thinking():
+    try:
+        return jsonify(_display_thinking_config_payload())
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/config/display-thinking', methods=['POST'])
+def config_set_display_thinking():
+    from chat.display_thinking import configured_mode_from_authored_prompt_enabled
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'authored_prompt_enabled' not in data:
+        return jsonify({'ok': False, 'error': 'missing authored_prompt_enabled'}), 400
+    try:
+        mode = configured_mode_from_authored_prompt_enabled(
+            data.get('authored_prompt_enabled'),
+        )
+        config_store.set('DISPLAY_THINKING_MODE', mode)
+        return jsonify(_display_thinking_config_payload())
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 # ── User Profile (chatnest-compatible) ──
 
 @app.route('/api/profile', methods=['GET'])
