@@ -115,6 +115,46 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(rows[0]["details"], {"sleep_duration": 432, "deep_sleep": 101, "light_sleep": 250})
         self.assertNotIn(SECRET_VALUES["pass_token"], json.dumps(rows))
 
+    def test_sleep_parser_uses_live_total_duration_without_awake_or_segments(self) -> None:
+        timestamp = int(datetime(2026, 9, 23, 16, tzinfo=timezone.utc).timestamp())
+        response = {"result": {"data_list": [{"time": timestamp, "value": json.dumps({
+            "total_duration": 418,
+            "sleep_deep_duration": 90,
+            "sleep_light_duration": 220,
+            "sleep_rem_duration": 80,
+            "sleep_awake_duration": 28,
+            "sleep_score": 84,
+            "sleep_duration": 999,
+            "duration": 12,
+            "segment_details": [{
+                "duration": 12,
+                "bedtime": timestamp,
+                "wake_up_time": timestamp + 3600,
+                "sleep_deep_duration": 1,
+                "cookie": SECRET_VALUES["service_token"],
+            }],
+            "cookie": "cookie-private",
+            "service_token": SECRET_VALUES["service_token"],
+            "device_id": SECRET_VALUES["device_id"],
+        })}]}}
+        rows = parse_series_response(response, "sleep", days=7)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], 418)
+        self.assertEqual(rows[0]["unit"], "minutes")
+        self.assertEqual(rows[0]["details"], {
+            "deep_sleep": 90,
+            "light_sleep": 220,
+            "rem_sleep": 80,
+            "awake_minutes": 28,
+            "sleep_score": 84,
+            "sleep_duration": 999,
+            "duration": 12,
+        })
+        public = json.dumps(rows)
+        for leaked in ("cookie-private", SECRET_VALUES["service_token"], SECRET_VALUES["device_id"],
+                       "segment_details", "bedtime", "wake_up_time", "sleep_deep_duration"):
+            self.assertNotIn(leaked, public)
+
     def test_heart_rate_parser_normalizes_allowlisted_details(self) -> None:
         timestamp = int(datetime(2026, 9, 24, 2, tzinfo=timezone.utc).timestamp())
         response = {"result": {"data_list": [{"time": timestamp, "value": {
