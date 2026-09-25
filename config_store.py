@@ -74,6 +74,8 @@ _DEFAULTS = {
     'CC_CHAT_EFFORT': '',
     # Codex 蓝色线路独立模型；空=跟随 app-server 当前推荐默认模型。
     'CODEX_CHAT_MODEL': '',
+    # Codex 蓝色线路独立 effort；空=跟随当前模型默认（不传 reasoningEffort）。
+    'CODEX_CHAT_EFFORT': '',
     # DeepSeek 官方直连 / fallback 独立模型；默认使用当前官方 Flash 别名。
     'DEEPSEEK_CHAT_MODEL': 'deepseek-flash',
     # R0：staged rewrite 机会型 native session fork（默认关闭；缺 mapping/SDK 时 cold fallback）。
