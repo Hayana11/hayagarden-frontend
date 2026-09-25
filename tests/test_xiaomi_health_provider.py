@@ -389,19 +389,113 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertNotIn("private-token-must-not-escape", str(raised.exception))
         self.assertEqual(self.store.status()["last_error"], "timeout")
 
+    def _regular_latest(self, days: int = 7) -> dict[str, Any]:
+        return {
+            "provider": SOURCE,
+            "sampledAt": "2026-09-24T01:00:00Z",
+            "dataDate": "2026-09-24",
+            "steps": {"sampledAt": "2026-09-24T01:00:00Z", "dataDate": "2026-09-24", "value": 1000, "unit": "steps"},
+            "sleep": {"sampledAt": "2026-09-24T01:00:00Z", "dataDate": "2026-09-24", "value": 420, "unit": "minutes"},
+            "heart_rate": {"sampledAt": "2026-09-24T01:00:00Z", "dataDate": "2026-09-24", "value": 72, "unit": "bpm"},
+        }
+
+    def _recorded_cycle(self, days: int = 180) -> dict[str, Any]:
+        return {
+            "status": "PASS",
+            "provider": SOURCE,
+            "source": SOURCE,
+            "metric": "cycle",
+            "days": days,
+            "events": [{"type": "period_start", "timestamp": "2026-09-01T00:00:00Z", "updated_at": "2026-09-01T00:00:01Z"}],
+            "periods": [{"start": "2026-09-01T00:00:00Z", "end": None, "open": True, "source": "recorded"}],
+            "symptoms": [{"timestamp": "2026-09-01T00:00:00Z", "hp": "normal", "mood": "happy", "pain": None}],
+            "predictions": None,
+        }
+
     def test_internal_adapter_has_one_dispatch_contract(self) -> None:
         self.store.save(SECRET_VALUES)
         client = mock.Mock()
         client.get_latest.return_value = {"provider": "xiaomi_fitness_cloud"}
+        client.get_cycle.return_value = {"status": "EMPTY", "days": 180, "predictions": None}
         client.get_series.return_value = {"status": "PASS", "records": []}
 
         self.assertEqual(run("get_health", metric="status", days=1, store=self.store, client=client)["provider"], SOURCE)
         client.get_latest.assert_not_called()
-        self.assertEqual(run("get_health", metric="all", days=1, store=self.store, client=client), {"provider": "xiaomi_fitness_cloud"})
+        self.assertEqual(run("get_health", metric="all", days=1, store=self.store, client=client), {
+            "provider": "xiaomi_fitness_cloud",
+            "cycle": {"status": "EMPTY", "days": 180, "predictions": None},
+        })
         client.get_latest.assert_called_once_with(1)
+        client.get_cycle.assert_called_once_with(180)
         self.assertEqual(run("get_health", metric="steps", days=2, store=self.store, client=client)["status"], "PASS")
         client.get_series.assert_called_once_with("steps", 2)
         self.assertEqual(run("health_steps", days=2, store=self.store, client=client)["error_code"], "unavailable")
+
+    def test_all_uses_regular_days_and_fixed_cycle_window(self) -> None:
+        client = mock.Mock()
+        client.get_latest.return_value = self._regular_latest(7)
+        client.get_cycle.return_value = self._recorded_cycle(180)
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        client.get_latest.assert_called_once_with(7)
+        client.get_cycle.assert_called_once_with(180)
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertEqual(result["sleep"]["value"], 420)
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["cycle"]["days"], 180)
+        self.assertIsNone(result["cycle"]["predictions"])
+
+        client.reset_mock()
+        client.get_latest.return_value = self._regular_latest(30)
+        client.get_cycle.return_value = self._recorded_cycle(180)
+        result = run("get_health", metric="all", days=30, store=self.store, client=client)
+        client.get_latest.assert_called_once_with(30)
+        client.get_cycle.assert_called_once_with(180)
+        self.assertEqual(result["cycle"]["days"], 180)
+
+    def test_all_keeps_regular_metrics_when_cycle_is_empty(self) -> None:
+        client = mock.Mock()
+        client.get_latest.return_value = self._regular_latest()
+        client.get_cycle.return_value = {
+            "status": "EMPTY", "provider": SOURCE, "source": SOURCE, "metric": "cycle",
+            "days": 180, "events": [], "periods": [], "symptoms": [], "predictions": None,
+        }
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertEqual(result["cycle"]["status"], "EMPTY")
+        self.assertIsNone(result["cycle"]["predictions"])
+
+    def test_all_keeps_regular_metrics_when_cycle_fails_safely(self) -> None:
+        client = mock.Mock()
+        client.get_latest.return_value = self._regular_latest()
+        client.get_cycle.side_effect = XiaomiProviderError("timeout")
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result["steps"]["value"], 1000)
+        self.assertEqual(result["sleep"]["value"], 420)
+        self.assertEqual(result["heart_rate"]["value"], 72)
+        self.assertEqual(result["cycle"]["status"], "FAIL")
+        self.assertEqual(result["cycle"]["error_code"], "timeout")
+        self.assertEqual(result["cycle"]["days"], 180)
+        self.assertIsNone(result["cycle"]["predictions"])
+        self.assertNotIn("status", result)
+
+        class ExplodingCycle:
+            def get_latest(self, days):
+                return {"steps": {"value": 9}}
+
+            def get_cycle(self, days):
+                raise RuntimeError(SECRET_VALUES["service_token"])
+
+        result = run("get_health", metric="all", days=7, store=self.store, client=ExplodingCycle())
+        self.assertEqual(result["steps"]["value"], 9)
+        self.assertEqual(result["cycle"]["error_code"], "unavailable")
+        self.assertNotIn(SECRET_VALUES["service_token"], json.dumps(result))
+
+    def test_all_still_fails_when_regular_latest_fails(self) -> None:
+        client = mock.Mock()
+        client.get_latest.side_effect = XiaomiProviderError("api_error")
+        result = run("get_health", metric="all", days=7, store=self.store, client=client)
+        self.assertEqual(result, {"status": "FAIL", "provider": SOURCE, "error_code": "api_error"})
+        client.get_cycle.assert_not_called()
 
     def test_adapter_redacts_unexpected_provider_exception(self) -> None:
         class BrokenClient:

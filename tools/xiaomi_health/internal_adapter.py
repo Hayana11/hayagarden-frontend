@@ -36,17 +36,43 @@ def run(
         return store.status()
     client = client or XiaomiHealthClient(store)
     if metric == "all":
-        method = lambda: client.get_latest(days)
-    elif metric == "cycle":
-        method = lambda: client.get_cycle(days)
-    else:
-        method = lambda: client.get_series(metric, days)
+        try:
+            latest = client.get_latest(days)
+        except XiaomiProviderError as exc:
+            return {"status": "FAIL", "provider": SOURCE, "error_code": exc.code if exc.code in SAFE_ERRORS else "unavailable"}
+        except Exception:
+            return {"status": "FAIL", "provider": SOURCE, "error_code": "unavailable"}
+        if not isinstance(latest, dict):
+            return {"status": "FAIL", "provider": SOURCE, "error_code": "unavailable"}
+        try:
+            cycle = client.get_cycle(180)
+        except XiaomiProviderError as exc:
+            cycle = _safe_cycle_failure(exc.code)
+        except Exception:
+            cycle = _safe_cycle_failure("unavailable")
+        return {**latest, "cycle": cycle}
+    method = (lambda: client.get_cycle(days)) if metric == "cycle" else (lambda: client.get_series(metric, days))
     try:
         return method()
     except XiaomiProviderError as exc:
         return {"status": "FAIL", "provider": SOURCE, "error_code": exc.code if exc.code in SAFE_ERRORS else "unavailable"}
     except Exception:
         return {"status": "FAIL", "provider": SOURCE, "error_code": "unavailable"}
+
+
+def _safe_cycle_failure(code: str) -> dict[str, Any]:
+    return {
+        "status": "FAIL",
+        "provider": SOURCE,
+        "source": SOURCE,
+        "metric": "cycle",
+        "days": 180,
+        "events": [],
+        "periods": [],
+        "symptoms": [],
+        "predictions": None,
+        "error_code": code if code in SAFE_ERRORS else "unavailable",
+    }
 
 def main() -> int:
     try:

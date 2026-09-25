@@ -16,8 +16,17 @@ const healthAdapter = async (operation, input) => {
     sampledAt: '2026-09-24T01:00:00Z',
     dataDate: '2026-09-24',
     steps: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 8432, details: { service_token: secrets[1] }, ssecurity: secrets[2] },
-    sleep: null,
-    heart_rate: null,
+    sleep: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420, unit: 'minutes' },
+    heart_rate: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 72, unit: 'bpm' },
+    cycle: {
+      status: 'PASS',
+      days: 180,
+      events: [{ type: 'period_start', timestamp: '2000-01-01T00:00:00Z', updated_at: '2000-01-02T00:00:00Z' }],
+      periods: [{ start: '2000-01-01T00:00:00Z', end: null, open: true, source: 'recorded' }],
+      symptoms: [],
+      predictions: { secret: secrets[1] },
+      service_token: secrets[1],
+    },
     pass_token: secrets[3],
   };
   if (input.metric === 'cycle') return {
@@ -77,6 +86,11 @@ try {
   assert.equal(status.connected, true);
   assert.equal(all.source, 'xiaomi_fitness_cloud');
   assert.equal(all.steps.value, 8432);
+  assert.equal(all.sleep.value, 420);
+  assert.equal(all.heart_rate.value, 72);
+  assert.equal(all.cycle.status, 'PASS');
+  assert.equal(all.cycle.days, 180);
+  assert.equal(all.cycle.predictions, null);
   assert.equal(steps.status, 'PASS');
   assert.equal(steps.source, 'xiaomi_fitness_cloud');
   assert.equal(steps.records.length, 1);

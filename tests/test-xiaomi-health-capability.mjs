@@ -40,8 +40,20 @@ const runAdapter = async (operation, input) => {
     sampledAt: '2026-09-24T01:00:00Z',
     dataDate: '2026-09-24',
     steps: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 1000, details: secretFields },
-    sleep: null,
-    heart_rate: null,
+    sleep: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420, unit: 'minutes' },
+    heart_rate: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 72, unit: 'bpm' },
+    cycle: {
+      status: 'PASS',
+      days: 180,
+      events: [{ type: 'period_start', timestamp: '2000-01-01T00:00:00Z', updated_at: '2000-01-02T00:00:00Z' }],
+      periods: [{ start: '2000-01-01T00:00:00Z', end: null, open: true, source: 'untrusted' }],
+      symptoms: [{ timestamp: '2000-01-01T00:00:00Z', hp: 'much', mood: 'happy', pain: 'heavy', note: secrets[1] }],
+      predictions: { secret: secrets[2], next: '2026-10-01' },
+      token: secrets[1],
+      cookie: secrets[4],
+      note: 'cycle-note-private',
+      user_id: secrets[0],
+    },
     ...secretFields,
   };
   if (input.metric === 'cycle') return {
@@ -80,7 +92,19 @@ assert.equal(all.source, 'xiaomi_fitness_cloud');
 assert.equal(all.days, 7);
 assert.equal(all.steps.value, 1000);
 assert.equal(all.steps.details, undefined);
+assert.equal(all.sleep.value, 420);
+assert.equal(all.heart_rate.value, 72);
+assert.equal(all.cycle.status, 'PASS');
+assert.equal(all.cycle.days, 180);
+assert.equal(all.cycle.events[0].type, 'period_start');
+assert.equal(all.cycle.periods[0].source, 'recorded');
+assert.equal(all.cycle.symptoms[0].hp, 'much');
+assert.equal(all.cycle.predictions, null);
+assert.equal(all.cycle.note, undefined);
+assert.equal(all.cycle.token, undefined);
 for (const secret of secrets) assert.equal(JSON.stringify(all).includes(secret), false);
+assert.equal(JSON.stringify(all).includes('cycle-note-private'), false);
+assert.equal(JSON.stringify(all).includes('2026-10-01'), false);
 clock += LATEST_TTL_MS - 1;
 assert.equal((await health.get({ metric: 'all' })).cached, true);
 clock += 2;
@@ -130,5 +154,73 @@ for (const invalid of [0, 366, -1, 1.5, '2', true]) {
 await assert.rejects(() => health.get({ metric: 'unknown', days: 2 }), TypeError);
 assert.equal(LATEST_TTL_MS, 60_000);
 assert.equal(SERIES_TTL_MS, 15 * 60_000);
+
+const emptyCycleHealth = createHealthCapabilities({
+  now,
+  runAdapter: async (_operation, input) => {
+    if (input.metric !== 'all') throw new Error('unexpected');
+    return {
+      sampledAt: '2026-09-24T01:00:00Z',
+      dataDate: '2026-09-24',
+      steps: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 1000 },
+      sleep: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420 },
+      heart_rate: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 72 },
+      cycle: { status: 'EMPTY', days: 180, events: [], periods: [], symptoms: [], predictions: { secret: secrets[2] } },
+    };
+  },
+});
+const emptyAll = await emptyCycleHealth.get({ metric: 'all', days: 30 });
+assert.equal(emptyAll.status, 'PASS');
+assert.equal(emptyAll.days, 30);
+assert.equal(emptyAll.steps.value, 1000);
+assert.equal(emptyAll.cycle.status, 'EMPTY');
+assert.equal(emptyAll.cycle.days, 180);
+assert.equal(emptyAll.cycle.predictions, null);
+assert.equal(JSON.stringify(emptyAll).includes(secrets[2]), false);
+
+const failCycleHealth = createHealthCapabilities({
+  now,
+  runAdapter: async () => ({
+    sampledAt: '2026-09-24T01:00:00Z',
+    dataDate: '2026-09-24',
+    steps: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 1000 },
+    sleep: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420 },
+    heart_rate: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 72 },
+    cycle: {
+      status: 'FAIL',
+      error_code: 'timeout',
+      days: 180,
+      token: secrets[1],
+      cookie: secrets[4],
+      note: 'cycle-note-private',
+      user_id: secrets[0],
+      predictions: { secret: secrets[2] },
+    },
+  }),
+});
+const failAll = await failCycleHealth.get({ metric: 'all', days: 7 });
+assert.equal(failAll.status, 'PASS');
+assert.equal(failAll.steps.value, 1000);
+assert.equal(failAll.sleep.value, 420);
+assert.equal(failAll.heart_rate.value, 72);
+assert.equal(failAll.cycle.status, 'FAIL');
+assert.equal(failAll.cycle.error_code, 'timeout');
+assert.equal(failAll.cycle.days, 180);
+assert.equal(failAll.cycle.predictions, null);
+assert.equal(failAll.cycle.token, undefined);
+for (const secret of secrets) assert.equal(JSON.stringify(failAll).includes(secret), false);
+
+const unsafeCycleHealth = createHealthCapabilities({
+  now,
+  runAdapter: async () => ({
+    steps: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 1000 },
+    cycle: { status: 'FAIL', error_code: 'stack-trace-private', days: 180 },
+  }),
+});
+const unsafeAll = await unsafeCycleHealth.get({ metric: 'all', days: 7 });
+assert.equal(unsafeAll.cycle.status, 'FAIL');
+assert.equal(unsafeAll.cycle.error_code, 'unavailable');
+assert.equal(JSON.stringify(unsafeAll).includes('stack-trace-private'), false);
+
 console.log('test-xiaomi-health-capability: ok');
 
