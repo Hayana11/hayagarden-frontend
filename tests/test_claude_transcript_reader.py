@@ -23,6 +23,42 @@ from chat.claude_transcript_reader import (
 
 FIXTURE = ROOT / 'tests' / 'fixtures' / 'claude_transcript'
 
+def _reader_user(uid: str, parent: str | None, *, session: str = 's',
+                 content: object = 'user', sidechain: bool = False) -> dict:
+    return {
+        'type': 'user', 'uuid': uid, 'parentUuid': parent, 'sessionId': session,
+        'isSidechain': sidechain, 'message': {'role': 'user', 'content': content},
+    }
+
+
+def _reader_assistant(uid: str, parent: str | None, *, session: str = 's',
+                      content: object | None = None, sidechain: bool = False) -> dict:
+    if content is None:
+        content = [{'type': 'text', 'text': 'reply'}]
+    return {
+        'type': 'assistant', 'uuid': uid, 'parentUuid': parent, 'sessionId': session,
+        'isSidechain': sidechain,
+        'message': {'role': 'assistant', 'content': content},
+    }
+
+
+def _reader_attachment(uid: str, parent: str | None, *, session: str = 's',
+                       sidechain: bool = False) -> dict:
+    return {
+        'type': 'attachment', 'uuid': uid, 'parentUuid': parent,
+        'sessionId': session, 'isSidechain': sidechain,
+    }
+
+
+def _read_reader_rows(rows: list[dict]):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'transcript.jsonl'
+        path.write_text(
+            '\n'.join(json.dumps(row, ensure_ascii=False) for row in rows) + '\n',
+            encoding='utf-8',
+        )
+        return read_transcript(path)
+
 
 class TranscriptReaderTests(unittest.TestCase):
     def test_read_plain_candidate_user_not_confirmed(self) -> None:
@@ -106,6 +142,209 @@ class TranscriptReaderTests(unittest.TestCase):
                 roles['v2222222-2222-2222-2222-222222222222'],
                 EventRole.USER_CONTINUATION,
             )
+
+    def test_direct_parent_continuation_preserves_legacy_session_behavior(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None, session='s1'),
+            _reader_user('u2', 'u1', session='s2'),
+            _reader_assistant('a1', 'u2', session='s2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['u2'], EventRole.USER_CONTINUATION)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+
+    def test_attachment_parent_user_is_continuation(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None), _reader_attachment('att1', 'u1'),
+            _reader_user('u2', 'att1'), _reader_assistant('a1', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['att1'], EventRole.UNKNOWN)
+        self.assertEqual(roles['u2'], EventRole.USER_CONTINUATION)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+        self.assertEqual(graph.candidate_rounds[0].candidate_user_event_uuid, 'u1')
+
+    def test_multiple_attachment_parents_user_is_continuation(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None), _reader_attachment('att1', 'u1'),
+            _reader_attachment('att2', 'att1'), _reader_user('u2', 'att2'),
+            _reader_assistant('a1', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['att1'], EventRole.UNKNOWN)
+        self.assertEqual(roles['att2'], EventRole.UNKNOWN)
+        self.assertEqual(roles['u2'], EventRole.USER_CONTINUATION)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+
+    def test_user_assistant_user_stays_two_rounds(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None), _reader_assistant('a1', 'u1'),
+            _reader_user('u2', 'a1'), _reader_assistant('a2', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+        self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_user_attachment_assistant_user_stays_two_rounds(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None), _reader_attachment('att1', 'u1'),
+            _reader_assistant('a1', 'att1'), _reader_user('u2', 'a1'),
+            _reader_assistant('a2', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+        self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_assistant_attachment_user_does_not_merge_to_previous_user(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None), _reader_assistant('a1', 'u1'),
+            _reader_attachment('att1', 'a1'), _reader_user('u2', 'att1'),
+            _reader_assistant('a2', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+        self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_attachment_bridge_and_ancestor_session_mismatch_stay_candidate(self) -> None:
+        cases = [
+            ('bridge', 's1', 's2', 's1'),
+            ('ancestor', 's1', 's2', 's2'),
+        ]
+        for name, ancestor_session, bridge_session, user_session in cases:
+            with self.subTest(mismatch=name):
+                graph = _read_reader_rows([
+                    _reader_user('u1', None, session=ancestor_session),
+                    _reader_attachment('att1', 'u1', session=bridge_session),
+                    _reader_user('u2', 'att1', session=user_session),
+                    _reader_assistant('a1', 'u2', session=user_session),
+                ])
+                roles = {event.event_uuid: event.event_role for event in graph.events}
+                self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+                self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_sidechain_attachment_bridge_stays_candidate(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None),
+            _reader_attachment('att1', 'u1', sidechain=True),
+            _reader_user('u2', 'att1'), _reader_assistant('a1', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        attachment = graph.by_uuid['att1']
+        self.assertEqual(roles['att1'], EventRole.UNKNOWN)
+        self.assertTrue(attachment.is_sidechain)
+        self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+        self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_sidechain_during_attachment_bridge_blocks_continuation(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None), _reader_attachment('att1', 'u1'),
+            _reader_assistant('side', 'u1', sidechain=True),
+            _reader_user('u2', 'att1'), _reader_assistant('a1', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+        self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_missing_uuid_or_parent_attachment_is_not_a_bridge(self) -> None:
+        rows = [
+            [
+                _reader_user('u1', None),
+                {'type': 'attachment', 'parentUuid': 'u1', 'sessionId': 's'},
+                _reader_user('u2', 'missing-uuid'),
+            ],
+            [
+                _reader_user('u1', None),
+                _reader_attachment('att1', 'missing-parent'),
+                _reader_user('u2', 'att1'),
+            ],
+        ]
+        for case, items in enumerate(rows):
+            with self.subTest(case=case):
+                graph = _read_reader_rows(items + [_reader_assistant('a1', 'u2')])
+                roles = {event.event_uuid: event.event_role for event in graph.events}
+                self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+                self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_attachment_parent_cycle_stays_candidate_without_hanging(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None), _reader_attachment('att1', 'att2'),
+            _reader_attachment('att2', 'att1'), _reader_user('u2', 'att1'),
+            _reader_assistant('a1', 'u2'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+        self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_attachment_resolution_stops_at_non_candidate_roles(self) -> None:
+        blockers = {
+            'assistant': lambda: _reader_assistant('stop', 'u1'),
+            'tool_result_user': lambda: _reader_user(
+                'stop', 'u1',
+                content=[{'type': 'tool_result', 'tool_use_id': 'toolu_stop', 'content': 'x'}],
+            ),
+            'system': lambda: {
+                'type': 'system', 'uuid': 'stop', 'parentUuid': 'u1',
+                'sessionId': 's', 'subtype': 'compact_boundary',
+            },
+            'summary': lambda: {
+                'type': 'summary', 'uuid': 'stop', 'parentUuid': 'u1',
+                'sessionId': 's', 'summary': 'redacted',
+            },
+            'meta': {
+                'type': 'queue-operation', 'uuid': 'stop', 'parentUuid': 'u1',
+                'sessionId': 's',
+            },
+            'unknown': {
+                'type': 'future-envelope', 'uuid': 'stop', 'parentUuid': 'u1',
+                'sessionId': 's',
+            },
+            'sidechain': lambda: _reader_assistant('stop', 'u1', sidechain=True),
+        }
+        for name, blocker in blockers.items():
+            with self.subTest(parent_role=name):
+                blocker_event = blocker() if callable(blocker) else blocker
+                graph = _read_reader_rows([
+                    _reader_user('u1', None), blocker_event,
+                    _reader_attachment('att1', 'stop'), _reader_user('u2', 'att1'),
+                    _reader_assistant('a2', 'u2'),
+                ])
+                roles = {event.event_uuid: event.event_role for event in graph.events}
+                self.assertEqual(roles['u2'], EventRole.CANDIDATE_USER)
+                self.assertEqual(len(graph.candidate_rounds), 2)
+
+    def test_tool_result_user_is_never_reclassified_as_continuation(self) -> None:
+        graph = _read_reader_rows([
+            _reader_user('u1', None),
+            _reader_assistant(
+                'tool-use', 'u1',
+                content=[{'type': 'tool_use', 'id': 'toolu_x', 'name': 'Read', 'input': {}}],
+            ),
+            _reader_attachment('att1', 'tool-use'),
+            _reader_user(
+                'tool-result', 'att1',
+                content=[{'type': 'tool_result', 'tool_use_id': 'toolu_x', 'content': 'x'}],
+            ),
+            _reader_assistant('a1', 'tool-result'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['tool-result'], EventRole.TOOL_RESULT_USER)
+        self.assertNotEqual(roles['tool-result'], EventRole.USER_CONTINUATION)
+
+    def test_deidentified_production_multimodal_fixture_is_one_round(self) -> None:
+        graph = read_transcript(FIXTURE / 'attachment_aware_multimodal.jsonl')
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['prod-u2'], EventRole.USER_CONTINUATION)
+        self.assertEqual(roles['prod-attachment-1'], EventRole.UNKNOWN)
+        self.assertEqual(roles['prod-tool-result'], EventRole.TOOL_RESULT_USER)
+        candidates = [
+            event for event in graph.events
+            if event.event_role == EventRole.CANDIDATE_USER and not event.is_sidechain
+        ]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+        self.assertEqual(graph.candidate_rounds[0].candidate_user_event_uuid, 'prod-u1')
+        self.assertTrue(graph.candidate_rounds[0].has_assistant)
+        self.assertEqual(graph.candidate_rounds[0].event_uuids[-1], 'prod-a-final')
 
     def test_sidechain_marks_whole_round_impact(self) -> None:
         graph = read_transcript(FIXTURE / 'sidechain.jsonl')

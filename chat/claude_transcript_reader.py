@@ -234,6 +234,47 @@ def _has_sidechain_between(
     return False
 
 
+def _resolve_attachment_continuation_parent(
+    evt: TranscriptEvent,
+    direct_parent: TranscriptEvent,
+    *,
+    by_uuid: dict[str, TranscriptEvent],
+) -> Optional[TranscriptEvent]:
+    """Resolve a candidate user through attachment-only parent bridges."""
+    session_id = str(evt.session_id or '')
+    if not session_id:
+        return None
+
+    visited = {str(evt.event_uuid)}
+    cursor = direct_parent
+    while True:
+        cursor_uuid = str(cursor.event_uuid or '')
+        if not cursor_uuid or cursor_uuid in visited:
+            return None
+        visited.add(cursor_uuid)
+
+        if (
+            cursor.is_sidechain
+            or cursor.event_role == EventRole.SIDECHAIN
+            or str(cursor.session_id or '') != session_id
+        ):
+            return None
+
+        if str(cursor.raw.get('type') or '') != 'attachment':
+            if cursor.event_role != EventRole.CANDIDATE_USER:
+                return None
+            return cursor
+
+        if str(cursor.raw.get('uuid') or '') != cursor_uuid:
+            return None
+        parent_uuid = str(cursor.parent_uuid or '')
+        if not parent_uuid:
+            return None
+        cursor = by_uuid.get(parent_uuid)
+        if cursor is None:
+            return None
+
+
 def _is_user_continuation(
     evt: TranscriptEvent,
     *,
@@ -243,13 +284,22 @@ def _is_user_continuation(
     if evt.event_role != EventRole.CANDIDATE_USER or evt.is_sidechain:
         return False
     parent = by_uuid.get(evt.parent_uuid or '')
-    if (
-        parent is None
-        or parent.event_role != EventRole.CANDIDATE_USER
-        or parent.is_sidechain
-    ):
+    if parent is None:
         return False
-    return not _has_sidechain_between(parent, evt, events)
+
+    # Preserve the original direct-parent contract exactly.
+    if parent.event_role == EventRole.CANDIDATE_USER:
+        if parent.is_sidechain:
+            return False
+        return not _has_sidechain_between(parent, evt, events)
+
+    # Only raw attachment rows are transparent; all other roles stop traversal.
+    if str(parent.raw.get('type') or '') != 'attachment':
+        return False
+    ancestor = _resolve_attachment_continuation_parent(evt, parent, by_uuid=by_uuid)
+    if ancestor is None:
+        return False
+    return not _has_sidechain_between(ancestor, evt, events)
 
 
 def _reclassify_user_continuations(

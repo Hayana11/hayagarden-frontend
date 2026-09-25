@@ -748,6 +748,52 @@ class SessionRegistryMappingTests(unittest.TestCase):
         self.assertEqual(int(reg['scan_offset']), end)
         self.assertEqual(int(reg['last_mapped_message_id']), asst_id)
 
+    def test_attachment_aware_production_shape_maps_single_candidate_round(self) -> None:
+        from chat.claude_transcript_model import EventRole
+
+        self._register(scan_offset=0)
+        user_id, asst_id = self._seed_pair(
+            'deidentified-multimodal-user',
+            'deidentified-multimodal-assistant',
+        )
+        path = self._transcript_path()
+        end = _write_jsonl(
+            path,
+            (FIXTURE / 'attachment_aware_multimodal.jsonl')
+            .read_text(encoding='utf-8')
+            .splitlines(),
+        )
+        graph = read_transcript_range(path, 0, end)
+        candidates = [
+            event for event in graph.events
+            if event.event_role == EventRole.CANDIDATE_USER and not event.is_sidechain
+        ]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+        self.assertEqual(graph.candidate_rounds[0].candidate_user_event_uuid, 'prod-u1')
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['prod-u2'], EventRole.USER_CONTINUATION)
+        self.assertEqual(roles['prod-tool-result'], EventRole.TOOL_RESULT_USER)
+        self.assertEqual(graph.candidate_rounds[0].event_uuids[-1], 'prod-a-final')
+
+        result = run_mapping_pass(
+            MappingPassRequest(
+                context_id=self.context_id,
+                context_epoch=self.epoch,
+                resident_generation=self.gen,
+                chat_id='default',
+                user_message_id=user_id,
+                assistant_message_id=asst_id,
+                expected_start_offset=0,
+                observed_end_offset=end,
+            ),
+            db_path=self.db,
+        )
+        self.assertTrue(result.ok, result.error_code)
+        reg = get_context_claude_session(self.context_id, self.gen, db_path=self.db)
+        self.assertEqual(reg['scan_status'], SCAN_STATUS_READY)
+        self.assertEqual(int(reg['scan_offset']), end)
+
     def test_fail_closed_epoch_mismatch_and_event_conflict(self) -> None:
         self._register(scan_offset=0)
         user_id, asst_id = self._seed_pair('canon', 'a')
