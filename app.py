@@ -1044,6 +1044,7 @@ def group_chat_codex_models():
     status = codex_app_server.runtime_status()
     configured = codex_app_server.client.configured_model()
     if not status.get('ready'):
+        effort = codex_app_server.client.describe_effort_state([], configured or '')
         return jsonify({
             'ready': False,
             'models': [],
@@ -1055,6 +1056,7 @@ def group_chat_codex_models():
             'default_model': None,
             'default_model_id': None,
             'detail': status.get('detail') or '蓝色线路尚未就绪',
+            **effort,
         })
     try:
         force = request.args.get('refresh') == '1'
@@ -1065,6 +1067,8 @@ def group_chat_codex_models():
         default_model_id = str((default_entry or {}).get('id') or '')
         configured_model_id = str((configured_entry or {}).get('id') or '')
         current_model_id = configured_model_id if configured else default_model_id
+        current_model = configured or default_model or ''
+        effort = codex_app_server.client.describe_effort_state(models, current_model)
         return jsonify({
             'ready': True,
             'models': models,
@@ -1073,11 +1077,79 @@ def group_chat_codex_models():
             'model_mode': 'explicit' if configured else 'default',
             'default_model': default_model or None,
             'default_model_id': default_model_id or None,
-            'current': configured or default_model or '',
+            'current': current_model,
             'current_model_id': current_model_id or None,
+            **effort,
         })
     except Exception as exc:
         return jsonify({'error': str(exc), 'models': []}), 502
+
+
+def _codex_effort_payload(models=None, current_model=''):
+    return codex_app_server.client.describe_effort_state(models or [], current_model)
+
+
+@app.route('/api/group-chat/codex-effort', methods=['GET'])
+def group_chat_codex_effort():
+    status = codex_app_server.runtime_status()
+    configured = codex_app_server.client.configured_model()
+    models = []
+    current = configured or ''
+    if status.get('ready'):
+        try:
+            models = codex_app_server.client.list_models()
+            default_entry = next((row for row in models if row.get('is_default')), None)
+            current = configured or str((default_entry or {}).get('model') or '')
+        except Exception:
+            models = []
+    payload = _codex_effort_payload(models, current)
+    payload.update({
+        'ready': bool(status.get('ready')),
+        'current_model': current or None,
+    })
+    return jsonify(payload)
+
+
+@app.route('/api/group-chat/codex-effort', methods=['POST'])
+def group_chat_codex_set_effort():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'effort' not in data:
+        return jsonify({'error': 'missing effort'}), 400
+    raw = data.get('effort')
+    if raw is not None and not isinstance(raw, str):
+        return jsonify({'error': 'effort must be string or null'}), 400
+    normalized = str(raw or '').strip().lower()
+    status = codex_app_server.runtime_status()
+    configured = codex_app_server.client.configured_model()
+    models = []
+    current = configured or ''
+    if status.get('ready'):
+        try:
+            models = codex_app_server.client.list_models(force=True)
+            default_entry = next((row for row in models if row.get('is_default')), None)
+            current = configured or str((default_entry or {}).get('model') or '')
+        except Exception as exc:
+            return jsonify({'error': str(exc)}), 502
+    allowed = codex_app_server.CodexAppServer.allowed_efforts_for(models, current)
+    if normalized and normalized not in allowed:
+        payload = _codex_effort_payload(models, current)
+        payload.update({
+            'ok': False,
+            'error': codex_app_server.CODEX_EFFORT_NOT_ALLOWED,
+            'rejected_effort': normalized,
+            'ready': bool(status.get('ready')),
+            'current_model': current or None,
+        })
+        return jsonify(payload), 400
+    codex_app_server.client.set_configured_effort(normalized)
+    payload = _codex_effort_payload(models, current)
+    payload.update({
+        'ok': True,
+        'effective_from': 'next_turn',
+        'ready': bool(status.get('ready')),
+        'current_model': current or None,
+    })
+    return jsonify(payload)
 
 
 @app.route('/api/group-chat/codex-model', methods=['POST'])
@@ -2065,6 +2137,36 @@ def config_set_effort():
     provider = resolve_provider('chat')
     if provider != 'claude_code':
         return jsonify({'error': 'effort unavailable for provider', 'provider': provider}), 409
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'effort' not in data:
+        return jsonify({'error': 'missing effort'}), 400
+    raw = data.get('effort')
+    if raw is not None and not isinstance(raw, str):
+        return jsonify({'error': 'effort must be string or null'}), 400
+    from chat.cc_effort import CC_EFFORT_NOT_ALLOWED, set_cc_chat_effort
+    try:
+        result = set_cc_chat_effort(raw)
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+    if result.get('ok') is False or result.get('error') == CC_EFFORT_NOT_ALLOWED:
+        return jsonify(result), 400
+    result = dict(result)
+    result['provider'] = 'claude_code'
+    return jsonify(result)
+
+
+@app.route('/api/config/cc-effort', methods=['GET'])
+def config_get_cc_effort():
+    """Official Claude Code effort, independent of the current chat provider."""
+    from chat.cc_effort import describe_cc_effort_state
+    state = describe_cc_effort_state()
+    state['provider'] = 'claude_code'
+    return jsonify(state)
+
+
+@app.route('/api/config/cc-effort', methods=['POST'])
+def config_set_cc_effort():
+    """Set official Claude Code effort; null/empty means no --effort flag."""
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or 'effort' not in data:
         return jsonify({'error': 'missing effort'}), 400

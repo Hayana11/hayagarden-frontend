@@ -586,6 +586,55 @@ export async function checkClaudeRuntime(): Promise<void> {
   await http.post<{ ok?: boolean }>('/api/config/claude-runtime/check', {});
 }
 
+export type OfficialEffortMode = 'default' | 'explicit' | 'unknown';
+
+export interface OfficialEffortState {
+  configuredEffort: string | null;
+  effortMode: OfficialEffortMode;
+  allowedEfforts: string[];
+}
+
+const CC_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function normalizeOfficialEffort(data: {
+  configured_effort?: string | null;
+  effort_mode?: string;
+  allowed_efforts?: unknown;
+}): OfficialEffortState {
+  const allowed = Array.isArray(data.allowed_efforts)
+    ? data.allowed_efforts.filter((value): value is string => typeof value === 'string' && Boolean(value))
+    : [];
+  const configured = typeof data.configured_effort === 'string' && data.configured_effort
+    ? data.configured_effort
+    : null;
+  const effortMode = data.effort_mode === 'explicit' && configured
+    ? 'explicit'
+    : (data.effort_mode === 'default' && !configured ? 'default' : 'unknown');
+  return {
+    configuredEffort: configured,
+    effortMode,
+    allowedEfforts: allowed.length ? allowed : CC_EFFORTS.slice(),
+  };
+}
+
+export async function getCcEffort(): Promise<OfficialEffortState> {
+  const data = await http.get<{
+    configured_effort?: string | null;
+    effort_mode?: string;
+    allowed_efforts?: unknown;
+  }>('/api/config/cc-effort');
+  return normalizeOfficialEffort(data);
+}
+
+export async function setCcEffort(effort: string | null): Promise<OfficialEffortState> {
+  const data = await http.post<{
+    configured_effort?: string | null;
+    effort_mode?: string;
+    allowed_efforts?: unknown;
+  }>('/api/config/cc-effort', { effort });
+  return normalizeOfficialEffort(data);
+}
+
 export async function getAvailableModels(): Promise<string[]> {
   const data = await http.get<{ ok?: boolean; models?: string[] }>('/api/config/models');
   return data.ok ? (data.models || []).filter(Boolean) : [];

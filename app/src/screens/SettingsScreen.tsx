@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { RealityPromptPreviewCard } from '../components/RealityPromptPreviewCard';
 import { HttpError } from '../lib/http';
-import { getCodexModels, getGroupStatus, setCodexModel, type AgentStatus, type CodexModelState } from '../lib/groupChat';
+import { getCodexModels, getGroupStatus, setCodexEffort, setCodexModel, type AgentStatus, type CodexModelState } from '../lib/groupChat';
 import {
   activateRelayEndpoint,
   ccChatModelLabel,
@@ -11,6 +11,7 @@ import {
   clearRelayAccountCredentials,
   createRelayEndpoint,
   getAvailableModels,
+  getCcEffort,
   getClaudeRuntime,
   checkClaudeRuntime,
   updateClaudeRuntime,
@@ -25,6 +26,7 @@ import {
   removeRelayEndpoint,
   runPlayground,
   saveRelayAccountCredentials,
+  setCcEffort,
   updateCurrentModel,
   updateDeepSeekModel,
   updateProvider,
@@ -32,6 +34,8 @@ import {
   type ConfigModel,
   type ClaudeRuntimeState,
   type DeepSeekConfig,
+  type OfficialEffortMode,
+  type OfficialEffortState,
   type EndpointCapabilities,
   type KeyStatus,
   type RelayBalance,
@@ -51,6 +55,51 @@ function SectionLabel({ children, aside }: { children: React.ReactNode; aside?: 
 function CapabilityChips({ caps }: { caps: EndpointCapabilities }) {
   const labels: Array<[keyof EndpointCapabilities, string]> = [['thinking', '思考'], ['cache', '缓存'], ['tools', '工具']];
   return <div className="config-cap-chips">{labels.map(([key, label]) => <span key={key} className={caps[key] ? 'on' : 'off'}>{caps[key] ? '✓' : '×'} {label}</span>)}</div>;
+}
+
+const EFFORT_PILL_LABELS: Record<string, string> = {
+  low: 'LOW',
+  medium: 'MED',
+  high: 'HIGH',
+  xhigh: 'XHIGH',
+  max: 'MAX',
+};
+
+function EffortPills({
+  mode,
+  current,
+  options,
+  disabled,
+  hint,
+  onSelect,
+}: {
+  mode: OfficialEffortMode | '';
+  current: string;
+  options: string[];
+  disabled?: boolean;
+  hint: string;
+  onSelect: (value: string | null) => void;
+}) {
+  return (
+    <div className="config-effort">
+      <span>Effort</span>
+      <div>
+        <button type="button" className={mode === 'default' ? 'active' : ''} disabled={disabled} onClick={() => onSelect(null)}>默认</button>
+        {options.map((effort) => (
+          <button
+            key={effort}
+            type="button"
+            className={mode === 'explicit' && current === effort ? 'active' : ''}
+            disabled={disabled}
+            onClick={() => onSelect(effort)}
+          >
+            {EFFORT_PILL_LABELS[effort] || effort.toUpperCase()}
+          </button>
+        ))}
+      </div>
+      <small>{hint}</small>
+    </div>
+  );
 }
 
 function fmtTokens(value: number): string {
@@ -94,6 +143,7 @@ export function SettingsScreen() {
   const [codexExpanded, setCodexExpanded] = useState(false);
   const [deepSeekConfig, setDeepSeekConfig] = useState<DeepSeekConfig | null>(null);
   const [deepSeekExpanded, setDeepSeekExpanded] = useState(false);
+  const [ccEffort, setCcEffortState] = useState<OfficialEffortState | null>(null);
   const [claudeRuntime, setClaudeRuntime] = useState<ClaudeRuntimeState | null>(null);
   const observedRuntimeVersionRef = useRef<string | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState('');
@@ -147,8 +197,9 @@ export function SettingsScreen() {
       getGroupStatus(),
       getCodexModels(),
       getDeepSeekConfig(),
+      getCcEffort(),
     ]);
-    const [providerResult, keyResult, relayResult, catalogResult, availableResult, groupStatusResult, codexModelsResult, deepSeekResult] = results;
+    const [providerResult, keyResult, relayResult, catalogResult, availableResult, groupStatusResult, codexModelsResult, deepSeekResult, ccEffortResult] = results;
     if (providerResult.status === 'fulfilled') {
       setProvider(providerResult.value.provider);
       setCcTokenSet(providerResult.value.ccTokenSet);
@@ -199,6 +250,7 @@ export function SettingsScreen() {
     if (groupStatusResult.status === 'fulfilled') setCodexStatus(groupStatusResult.value.agents.codex);
     if (codexModelsResult.status === 'fulfilled') setCodexModels(codexModelsResult.value);
     if (deepSeekResult.status === 'fulfilled') setDeepSeekConfig(deepSeekResult.value);
+    if (ccEffortResult.status === 'fulfilled') setCcEffortState(ccEffortResult.value);
     if (results.some((result) => result.status === 'rejected')) setWarning('部分实时数据暂时不可用，已保留成功读取的配置。');
     setBusy('');
   }, []);
@@ -524,6 +576,36 @@ export function SettingsScreen() {
     } catch { showToast('Codex 模型清单读取失败'); } finally { setBusy(''); }
   };
 
+  const switchCcLineEffort = async (effort: string | null) => {
+    if (effort === null && ccEffort?.effortMode === 'default') return;
+    if (effort && ccEffort?.effortMode === 'explicit' && ccEffort.configuredEffort === effort) return;
+    setBusy(`cc-effort:${effort || 'default'}`);
+    try {
+      setCcEffortState(await setCcEffort(effort));
+      showToast('下一条消息起生效');
+    } catch (error) {
+      const code = error instanceof HttpError
+        ? String((error.payload as { error?: string } | undefined)?.error || error.code || '')
+        : '';
+      showToast(code === 'CC_EFFORT_NOT_ALLOWED' ? '这个 Effort 不在 Claude Code 允许清单里' : 'Claude Effort 切换失败');
+    } finally { setBusy(''); }
+  };
+
+  const switchCodexLineEffort = async (effort: string | null) => {
+    if (effort === null && codexModels?.effortMode === 'default') return;
+    if (effort && codexModels?.effortMode === 'explicit' && codexModels.configuredEffort === effort) return;
+    setBusy(`codex-effort:${effort || 'default'}`);
+    try {
+      setCodexModels(await setCodexEffort(effort));
+      showToast('Codex 下一轮起生效');
+    } catch (error) {
+      const code = error instanceof HttpError
+        ? String((error.payload as { error?: string } | undefined)?.error || error.code || '')
+        : '';
+      showToast(code === 'CODEX_EFFORT_NOT_ALLOWED' ? '这个 Effort 不在当前 Codex 模型的清单里' : 'Codex Effort 切换失败');
+    } finally { setBusy(''); }
+  };
+
   const switchDeepSeekLineModel = async (model: string) => {
     if (!deepSeekConfig?.keyConfigured) { showToast('DeepSeek API Key 尚未在 VPS 配置'); return; }
     if (deepSeekConfig.configuredModel === model) return;
@@ -775,7 +857,14 @@ export function SettingsScreen() {
             <b className={officialExpanded ? 'open' : ''}>▾</b>
           </button>
           <div className="config-endpoint-row"><CapabilityChips caps={{ thinking: true, cache: true, tools: false }} />{provider === 'claude_code' ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchToClaude()} disabled={Boolean(busy)}>切换</button>}</div>
-          <div className="config-effort"><span>Effort</span><div><button type="button" disabled>LOW</button><button type="button" disabled>MED</button><button type="button" disabled>HIGH</button></div><small>后端尚未接入</small></div>
+          <EffortPills
+            mode={ccEffort?.effortMode || ''}
+            current={ccEffort?.configuredEffort || ''}
+            options={ccEffort?.allowedEfforts || ['low', 'medium', 'high', 'xhigh', 'max']}
+            disabled={Boolean(busy)}
+            hint={ccEffort?.effortMode === 'explicit' ? '下一条消息起生效' : '不传 --effort'}
+            onSelect={(value) => void switchCcLineEffort(value)}
+          />
           {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div>{catalogSource === 'fallback' && <small>安全 fallback 清单；当前 Claude Code 运行时没有可用的官方订阅模型目录接口，账号实际可用性未知。</small>}<div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
         </section>
 
@@ -792,6 +881,16 @@ export function SettingsScreen() {
               ? <Link to="/codex-chat" className="config-current-badge" style={{ textDecoration: 'none' }}>去聊天</Link>
               : <button type="button" disabled>{codexStatus?.installed ? '等待登录' : '未安装'}</button>}
           </div>
+          <EffortPills
+            mode={codexModels?.effortMode || ''}
+            current={codexModels?.configuredEffort || ''}
+            options={(codexModels?.configuredEffort && !(codexModels.allowedEfforts || []).includes(codexModels.configuredEffort)
+              ? [...(codexModels.allowedEfforts || []), codexModels.configuredEffort]
+              : (codexModels?.allowedEfforts || ['low', 'medium', 'high', 'xhigh']))}
+            disabled={Boolean(busy) || !codexStatus?.ready}
+            hint={!codexStatus?.ready ? '线路就绪后可切换' : (codexModels?.effortMode === 'explicit' ? '下一轮起生效' : '跟随模型默认')}
+            onSelect={(value) => void switchCodexLineEffort(value)}
+          />
           {codexExpanded && <div className="config-endpoint-expanded">
             <div className="config-expanded-title"><strong>模型 · {codexModels?.models.length || 0}</strong><span>app-server model/list 动态读取</span></div>
             <div className="config-preset-list">

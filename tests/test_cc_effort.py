@@ -332,6 +332,48 @@ class EffortRouteTests(_AppRouteTestCase):
         self.assertEqual(config_store.get('GW_PROVIDER'), 'claude_code')
 
 
+class OfficialCcEffortRouteTests(_AppRouteTestCase):
+    def setUp(self):
+        conn = sqlite3.connect(config_store.DB_PATH)
+        conn.execute('DELETE FROM runtime_config')
+        conn.commit()
+        conn.close()
+        config_store.set('CHAT_PROVIDER', 'api_relay')
+        config_store.set('CC_CHAT_EFFORT', '')
+
+    def test_get_works_when_chat_provider_is_relay(self):
+        response = self.client.get('/api/config/cc-effort')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            'configured_effort': None,
+            'effort_mode': 'default',
+            'allowed_efforts': ['low', 'medium', 'high', 'xhigh', 'max'],
+            'provider': 'claude_code',
+        })
+
+    def test_post_high_persists_without_switching_chat_provider(self):
+        response = self.client.post('/api/config/cc-effort', json={'effort': 'high'})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body['ok'])
+        self.assertEqual(body['configured_effort'], 'high')
+        self.assertEqual(body['effort_mode'], 'explicit')
+        self.assertEqual(config_store.get('CC_CHAT_EFFORT'), 'high')
+        self.assertEqual(config_store.get('CHAT_PROVIDER'), 'api_relay')
+
+    def test_post_null_restores_default(self):
+        config_store.set('CC_CHAT_EFFORT', 'max')
+        response = self.client.post('/api/config/cc-effort', json={'effort': None})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(config_store.get('CC_CHAT_EFFORT'), '')
+        self.assertEqual(response.get_json()['effort_mode'], 'default')
+
+    def test_post_invalid_preserves_previous_config(self):
+        config_store.set('CC_CHAT_EFFORT', 'low')
+        response = self.client.post('/api/config/cc-effort', json={'effort': 'ultra'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(config_store.get('CC_CHAT_EFFORT'), 'low')
+
 
 class _FakeHTTPResponse:
     def __init__(self, payload):
@@ -383,6 +425,7 @@ class ModelControlRouteTests(_AppRouteTestCase):
     def setUp(self):
         config_store.set('CHAT_PROVIDER', 'claude_code')
         config_store.set('CODEX_CHAT_MODEL', '')
+        config_store.set('CODEX_CHAT_EFFORT', '')
         config_store.set('DEEPSEEK_CHAT_MODEL', 'deepseek-flash')
 
     def test_cc_catalog_reports_safe_fallback_and_preserves_default(self):
@@ -678,6 +721,60 @@ class ModelControlRouteTests(_AppRouteTestCase):
         self.assertEqual(config_store.get('CODEX_CHAT_MODEL'), '')
         self.assertEqual(response.get_json()['current'], 'gpt-6-default')
         self.assertEqual(response.get_json()['current_model_id'], 'catalog-default')
+
+    def test_codex_models_include_effort_state(self):
+        models = [{
+            'id': 'catalog-alias',
+            'model': 'gpt-5.6-sol',
+            'label': 'GPT-5.6-Sol',
+            'is_default': True,
+            'default_effort': 'low',
+            'efforts': ['low', 'high'],
+            'input_modalities': ['text'],
+        }]
+        config_store.set('CODEX_CHAT_EFFORT', 'high')
+        with patch.object(self.app_module.codex_app_server, 'runtime_status', return_value={'ready': True}), \
+                patch.object(self.codex_client, 'configured_model', return_value='gpt-5.6-sol'), \
+                patch.object(self.codex_client, 'list_models', return_value=models):
+            response = self.client.get('/api/group-chat/codex-models')
+        body = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body['configured_effort'], 'high')
+        self.assertEqual(body['effort_mode'], 'explicit')
+        self.assertEqual(body['allowed_efforts'], ['low', 'high'])
+
+    def test_codex_effort_post_persists_and_clears(self):
+        models = [{
+            'id': 'catalog-alias',
+            'model': 'gpt-5.6-sol',
+            'is_default': True,
+            'efforts': ['low', 'high'],
+        }]
+        with patch.object(self.app_module.codex_app_server, 'runtime_status', return_value={'ready': True}), \
+                patch.object(self.codex_client, 'list_models', return_value=models):
+            set_response = self.client.post('/api/group-chat/codex-effort', json={'effort': 'high'})
+            self.assertEqual(set_response.status_code, 200)
+            self.assertEqual(config_store.get('CODEX_CHAT_EFFORT'), 'high')
+            self.assertEqual(set_response.get_json()['configured_effort'], 'high')
+            clear_response = self.client.post('/api/group-chat/codex-effort', json={'effort': None})
+        self.assertEqual(clear_response.status_code, 200)
+        self.assertEqual(config_store.get('CODEX_CHAT_EFFORT'), '')
+        self.assertEqual(clear_response.get_json()['effort_mode'], 'default')
+
+    def test_codex_effort_rejects_unsupported_value(self):
+        models = [{
+            'id': 'catalog-alias',
+            'model': 'gpt-5.6-sol',
+            'is_default': True,
+            'efforts': ['low', 'high'],
+        }]
+        config_store.set('CODEX_CHAT_EFFORT', 'low')
+        with patch.object(self.app_module.codex_app_server, 'runtime_status', return_value={'ready': True}), \
+                patch.object(self.codex_client, 'list_models', return_value=models):
+            response = self.client.post('/api/group-chat/codex-effort', json={'effort': 'max'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'CODEX_EFFORT_NOT_ALLOWED')
+        self.assertEqual(config_store.get('CODEX_CHAT_EFFORT'), 'low')
 
     def test_deepseek_setting_is_read_by_real_summary_fallback_payload(self):
         secret = 'deepseek-key-sentinel-fallback'

@@ -101,6 +101,7 @@ class CodexAppServerTests(unittest.TestCase):
         payload = {
             'data': [{
                 'id': 'gpt-5.6-sol',
+                'model': 'gpt-5.6-sol',
                 'displayName': 'GPT-5.6-Sol',
                 'isDefault': True,
                 'defaultReasoningEffort': 'low',
@@ -133,6 +134,33 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(mode, 'explicit')
         self.assertEqual(params['model'], 'gpt-5.6-sol')
         self.assertEqual(params['threadId'], 'thread-one')
+        self.assertNotIn('reasoningEffort', params)
+
+    def test_explicit_configured_effort_is_sent_with_turn(self):
+        def config_get(key, default=''):
+            if key == 'CODEX_CHAT_MODEL':
+                return 'gpt-5.6-sol'
+            if key == 'CODEX_CHAT_EFFORT':
+                return 'high'
+            return default
+
+        with mock.patch.object(codex_app_server.config_store, 'get', side_effect=config_get):
+            params, model, mode = self.client._turn_params('thread-one', 'hello')
+
+        self.assertEqual(model, 'gpt-5.6-sol')
+        self.assertEqual(mode, 'explicit')
+        self.assertEqual(params['reasoningEffort'], 'high')
+
+    def test_default_effort_omits_reasoning_field(self):
+        def config_get(key, default=''):
+            if key == 'CODEX_CHAT_MODEL':
+                return 'gpt-5.6-sol'
+            return default
+
+        with mock.patch.object(codex_app_server.config_store, 'get', side_effect=config_get):
+            params, _model, _mode = self.client._turn_params('thread-one', 'hello')
+
+        self.assertNotIn('reasoningEffort', params)
 
 
 if __name__ == '__main__':
