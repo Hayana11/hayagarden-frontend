@@ -116,9 +116,12 @@ jobs:
           }
           assert manifest.get_capability("memory.search")["loading_policy"] == "always_load"
           assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
-          assert physical_surface_fingerprint() == (
-              "0309ce7e2df0e8274cbf1a8dbfd671a1ad3f111f3b4def7933e2a77750b30687"
-          )
+          # Catch-up after #484 promoted health.read onto the physical
+          # internal MCP surface. memory.search bindings are unchanged.
+          fingerprint = physical_surface_fingerprint()
+          assert fingerprint == (
+              "9cc7fe0a421e341afd1b474de89d8d9989e91ff90fb9797687eec5c589c7f449"
+          ), fingerprint
           print("memory provider/loading/Wake/fingerprint PASS")
           PY
 
