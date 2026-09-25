@@ -56,7 +56,8 @@ function textOf(result) {
 
 const legacyNames = [
   'health.status', 'health.latest', 'health.steps', 'health.sleep', 'health.heart_rate',
-  'health_status', 'health_latest', 'health_steps', 'health_sleep', 'health_heart_rate',
+  'health.all', 'health.cycle', 'health_status', 'health_latest', 'health_steps',
+  'health_sleep', 'health_heart_rate', 'get.steps', 'get.sleep', 'get.cycle',
 ];
 try {
   await client.connect(transport);
@@ -91,6 +92,9 @@ try {
   assert.equal(all.cycle.status, 'PASS');
   assert.equal(all.cycle.days, 180);
   assert.equal(all.cycle.predictions, null);
+  assert.equal(all.partial, false);
+  assert.equal(all.metric_status.steps.status, 'PASS');
+  assert.equal(all.metric_status.cycle.status, 'PASS');
   assert.equal(steps.status, 'PASS');
   assert.equal(steps.source, 'xiaomi_fitness_cloud');
   assert.equal(steps.records.length, 1);

@@ -37,7 +37,7 @@ def run(
     client = client or XiaomiHealthClient(store)
     if metric == "all":
         try:
-            latest = client.get_latest(days)
+            latest = client.get_latest_partial(days)
         except XiaomiProviderError as exc:
             return {"status": "FAIL", "provider": SOURCE, "error_code": exc.code if exc.code in SAFE_ERRORS else "unavailable"}
         except Exception:
@@ -50,7 +50,7 @@ def run(
             cycle = _safe_cycle_failure(exc.code)
         except Exception:
             cycle = _safe_cycle_failure("unavailable")
-        return {**latest, "cycle": cycle}
+        return _compose_all(latest, cycle)
     method = (lambda: client.get_cycle(days)) if metric == "cycle" else (lambda: client.get_series(metric, days))
     try:
         return method()
@@ -73,6 +73,63 @@ def _safe_cycle_failure(code: str) -> dict[str, Any]:
         "predictions": None,
         "error_code": code if code in SAFE_ERRORS else "unavailable",
     }
+
+
+def _safe_component_status(entry: Any, *, fallback: str | None = None) -> dict[str, str]:
+    if isinstance(entry, dict):
+        status = entry.get("status") if entry.get("status") in {"PASS", "EMPTY", "FAIL"} else "FAIL"
+        output = {"status": status}
+        if status == "FAIL":
+            output["error_code"] = entry.get("error_code") if entry.get("error_code") in SAFE_ERRORS else "unavailable"
+        return output
+    status = fallback if fallback in {"PASS", "EMPTY", "FAIL"} else "FAIL"
+    output = {"status": status}
+    if status == "FAIL":
+        output["error_code"] = "unavailable"
+    return output
+
+
+def _cycle_has_data(cycle: Any) -> bool:
+    if not isinstance(cycle, dict):
+        return False
+    return any(isinstance(cycle.get(key), list) and cycle.get(key) for key in ("events", "periods", "symptoms"))
+
+
+def _compose_all(latest: dict[str, Any], cycle: dict[str, Any]) -> dict[str, Any]:
+    raw_status = latest.get("metric_status") if isinstance(latest.get("metric_status"), dict) else {}
+    metric_status = {}
+    for name in ("steps", "sleep", "heart_rate"):
+        record = latest.get(name)
+        if isinstance(record, dict):
+            metric_status[name] = {"status": "PASS"}
+        else:
+            metric_status[name] = _safe_component_status(raw_status.get(name), fallback="EMPTY")
+    metric_status["cycle"] = _safe_component_status(
+        {"status": cycle.get("status"), "error_code": cycle.get("error_code")},
+        fallback="FAIL",
+    )
+    has_data = any(isinstance(latest.get(name), dict) for name in ("steps", "sleep", "heart_rate")) or _cycle_has_data(cycle)
+    any_fail = any(item.get("status") == "FAIL" for item in metric_status.values())
+    if has_data:
+        status = "PASS"
+    elif any_fail:
+        status = "FAIL"
+    else:
+        status = "EMPTY"
+    payload = {key: value for key, value in latest.items() if key != "metric_status"}
+    result = {
+        **payload,
+        "cycle": cycle,
+        "metric_status": metric_status,
+        "status": status,
+        "partial": bool(has_data and any_fail),
+    }
+    if status == "FAIL":
+        result["error_code"] = next(
+            (item["error_code"] for item in metric_status.values() if item.get("status") == "FAIL" and item.get("error_code") in SAFE_ERRORS),
+            "unavailable",
+        )
+    return result
 
 def main() -> int:
     try:

@@ -102,6 +102,11 @@ assert.equal(all.cycle.symptoms[0].hp, 'much');
 assert.equal(all.cycle.predictions, null);
 assert.equal(all.cycle.note, undefined);
 assert.equal(all.cycle.token, undefined);
+assert.equal(all.partial, false);
+assert.equal(all.metric_status.steps.status, 'PASS');
+assert.equal(all.metric_status.sleep.status, 'PASS');
+assert.equal(all.metric_status.heart_rate.status, 'PASS');
+assert.equal(all.metric_status.cycle.status, 'PASS');
 for (const secret of secrets) assert.equal(JSON.stringify(all).includes(secret), false);
 assert.equal(JSON.stringify(all).includes('cycle-note-private'), false);
 assert.equal(JSON.stringify(all).includes('2026-10-01'), false);
@@ -113,6 +118,9 @@ const staleAll = await health.get({ metric: 'all' });
 assert.equal(staleAll.cached, true);
 assert.equal(staleAll.stale, true);
 assert.equal(staleAll.steps.value, 1000);
+assert.equal(staleAll.metric_status.steps.status, 'PASS');
+assert.equal(staleAll.metric_status.cycle.status, 'PASS');
+assert.equal(staleAll.partial, false);
 for (const secret of secrets) assert.equal(JSON.stringify(staleAll).includes(secret), false);
 
 fail = false;
@@ -200,6 +208,7 @@ const failCycleHealth = createHealthCapabilities({
 });
 const failAll = await failCycleHealth.get({ metric: 'all', days: 7 });
 assert.equal(failAll.status, 'PASS');
+assert.equal(failAll.partial, true);
 assert.equal(failAll.steps.value, 1000);
 assert.equal(failAll.sleep.value, 420);
 assert.equal(failAll.heart_rate.value, 72);
@@ -208,6 +217,8 @@ assert.equal(failAll.cycle.error_code, 'timeout');
 assert.equal(failAll.cycle.days, 180);
 assert.equal(failAll.cycle.predictions, null);
 assert.equal(failAll.cycle.token, undefined);
+assert.equal(failAll.metric_status.cycle.status, 'FAIL');
+assert.equal(failAll.metric_status.cycle.error_code, 'timeout');
 for (const secret of secrets) assert.equal(JSON.stringify(failAll).includes(secret), false);
 
 const unsafeCycleHealth = createHealthCapabilities({
@@ -221,6 +232,101 @@ const unsafeAll = await unsafeCycleHealth.get({ metric: 'all', days: 7 });
 assert.equal(unsafeAll.cycle.status, 'FAIL');
 assert.equal(unsafeAll.cycle.error_code, 'unavailable');
 assert.equal(JSON.stringify(unsafeAll).includes('stack-trace-private'), false);
+
+let partialClock = 5_000;
+const partialNow = () => partialClock;
+let partialFail = false;
+const partialHealth = createHealthCapabilities({
+  now: partialNow,
+  runAdapter: async () => {
+    if (partialFail) throw new Error(secrets.join('|'));
+    return {
+      status: 'PASS',
+      sampledAt: '2026-09-24T01:00:00Z',
+      dataDate: '2026-09-24',
+      steps: null,
+      sleep: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420, unit: 'minutes' },
+      heart_rate: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 72, unit: 'bpm' },
+      cycle: {
+        status: 'PASS',
+        days: 180,
+        events: [{ type: 'period_start', timestamp: '2000-01-01T00:00:00Z', updated_at: '2000-01-02T00:00:00Z' }],
+        periods: [{ start: '2000-01-01T00:00:00Z', end: null, open: true, source: 'recorded' }],
+        symptoms: [],
+        predictions: null,
+      },
+      metric_status: {
+        steps: { status: 'FAIL', error_code: 'timeout', token: secrets[1], cookie: secrets[4], user_id: secrets[0], note: 'private-note' },
+        sleep: { status: 'PASS' },
+        heart_rate: { status: 'PASS' },
+        cycle: { status: 'PASS' },
+      },
+      partial: 'trusted-false',
+    };
+  },
+});
+const partialAll = await partialHealth.get({ metric: 'all', days: 7 });
+assert.equal(partialAll.status, 'PASS');
+assert.equal(partialAll.partial, true);
+assert.equal(partialAll.steps, null);
+assert.equal(partialAll.sleep.value, 420);
+assert.equal(partialAll.heart_rate.value, 72);
+assert.equal(partialAll.metric_status.steps.status, 'FAIL');
+assert.equal(partialAll.metric_status.steps.error_code, 'timeout');
+assert.equal(partialAll.metric_status.steps.token, undefined);
+assert.equal(partialAll.metric_status.steps.cookie, undefined);
+assert.equal(partialAll.metric_status.steps.user_id, undefined);
+assert.equal(partialAll.metric_status.steps.note, undefined);
+assert.equal(partialAll.cycle.predictions, null);
+partialClock += LATEST_TTL_MS + 1;
+partialFail = true;
+const stalePartial = await partialHealth.get({ metric: 'all', days: 7 });
+assert.equal(stalePartial.stale, true);
+assert.equal(stalePartial.cached, true);
+assert.equal(stalePartial.sleep.value, 420);
+assert.equal(stalePartial.heart_rate.value, 72);
+assert.equal(stalePartial.metric_status.steps.status, 'FAIL');
+assert.equal(stalePartial.metric_status.steps.error_code, 'timeout');
+assert.equal(stalePartial.partial, true);
+for (const secret of secrets) assert.equal(JSON.stringify(stalePartial).includes(secret), false);
+
+const maliciousHealth = createHealthCapabilities({
+  now: () => 9_000,
+  runAdapter: async () => ({
+    sampledAt: '2026-09-24T01:00:00Z',
+    dataDate: '2026-09-24',
+    steps: null,
+    sleep: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 420 },
+    heart_rate: { sampledAt: '2026-09-24T01:00:00Z', dataDate: '2026-09-24', value: 72 },
+    cycle: {
+      status: 'PASS',
+      days: 180,
+      events: [{ type: 'period_start', timestamp: '2000-01-01T00:00:00Z', updated_at: '2000-01-02T00:00:00Z' }],
+      periods: [{ start: '2000-01-01T00:00:00Z', end: null, open: true, source: 'recorded' }],
+      symptoms: [],
+      predictions: { secret: secrets[2] },
+    },
+    metric_status: {
+      steps: { status: 'SECRET_STATUS', error_code: 'private-stack-trace', token: secrets[1], cookie: secrets[4], user_id: secrets[0], note: 'note-private' },
+      sleep: { status: 'PASS', cookie: secrets[4] },
+      heart_rate: { status: 'PASS' },
+      cycle: { status: 'PASS', token: secrets[1] },
+    },
+    partial: true,
+  }),
+});
+const malicious = await maliciousHealth.get({ metric: 'all', days: 7 });
+assert.equal(malicious.metric_status.steps.status, 'FAIL');
+assert.equal(malicious.metric_status.steps.error_code, 'unavailable');
+assert.equal(JSON.stringify(malicious).includes('SECRET_STATUS'), false);
+assert.equal(JSON.stringify(malicious).includes('private-stack-trace'), false);
+assert.equal(malicious.metric_status.steps.token, undefined);
+assert.equal(malicious.metric_status.steps.cookie, undefined);
+assert.equal(malicious.metric_status.steps.user_id, undefined);
+assert.equal(malicious.metric_status.steps.note, undefined);
+assert.equal(malicious.cycle.predictions, null);
+assert.equal(malicious.partial, true);
+for (const secret of secrets) assert.equal(JSON.stringify(malicious).includes(secret), false);
 
 console.log('test-xiaomi-health-capability: ok');
 
