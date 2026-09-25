@@ -23,16 +23,27 @@ assert.match(settings, /setCcEffort\(/);
 assert.match(settings, /setCodexEffort\(/);
 assert.match(settings, /switchCcLineEffort/);
 assert.match(settings, /switchCodexLineEffort/);
+assert.match(settings, /updateDeepSeekKey/);
+assert.match(settings, /saveDeepSeekKey/);
+assert.match(settings, /ccOfficialModelShort/);
+assert.doesNotMatch(settings, /catalogSource === 'fallback' \? catalog.length \+ ' 个安全 fallback'/);
+const officialExpanded = settings.match(/officialExpanded && <div className="config-endpoint-expanded">[\s\S]*?<\/div>}/);
+assert.ok(officialExpanded, 'expected official Claude expanded block');
+assert.doesNotMatch(officialExpanded[0], /安全 fallback 清单/);
+assert.doesNotMatch(settings, />默认<\/button>/);
 const effortBlocks = settings.match(/<div className="config-effort">[\s\S]*?<\/div>\s*<\/div>/g) || [];
 assert.ok(effortBlocks.length >= 1, 'expected at least one config-effort block');
 for (const block of effortBlocks) {
   assert.doesNotMatch(block, /后端尚未接入/);
   assert.doesNotMatch(block, /disabled>LOW/);
+  assert.doesNotMatch(block, />默认</);
 }
 assert.equal(settings.includes('disabled>LOW</button><button type="button" disabled>MED</button>'), false);
 
-assert.match(css, /\.config-effort\s*\{[^}]*flex-wrap:\s*wrap/);
+assert.match(css, /\.config-effort > div\s*\{[^}]*flex-wrap:\s*nowrap/);
 assert.doesNotMatch(css, /\.config-effort[^{]*\{[^}]*\bgap:/);
+assert.match(systemConfig, /export async function updateDeepSeekKey/);
+assert.match(systemConfig, /'\/api\/config\/deepseek\/key'/);
 
 for (const forbidden of ['Array.prototype.at', 'Object.hasOwn', 'replaceAll', 'structuredClone']) {
   assert.equal(

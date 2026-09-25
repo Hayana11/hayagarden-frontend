@@ -28,13 +28,13 @@ import {
   saveRelayAccountCredentials,
   setCcEffort,
   updateCurrentModel,
+  updateDeepSeekKey,
   updateDeepSeekModel,
   updateProvider,
   type ChatProvider,
   type ConfigModel,
   type ClaudeRuntimeState,
   type DeepSeekConfig,
-  type OfficialEffortMode,
   type OfficialEffortState,
   type EndpointCapabilities,
   type KeyStatus,
@@ -65,31 +65,34 @@ const EFFORT_PILL_LABELS: Record<string, string> = {
   max: 'MAX',
 };
 
+function effortOptions(allowed: string[] | undefined, configured: string | null, fallback: string[]) {
+  const list = (allowed && allowed.length) ? allowed.slice() : fallback.slice();
+  if (configured && list.indexOf(configured) === -1) list.push(configured);
+  return list;
+}
+
 function EffortPills({
-  mode,
   current,
   options,
   disabled,
   hint,
   onSelect,
 }: {
-  mode: OfficialEffortMode | '';
   current: string;
   options: string[];
   disabled?: boolean;
   hint: string;
-  onSelect: (value: string | null) => void;
+  onSelect: (value: string) => void;
 }) {
   return (
     <div className="config-effort">
       <span>Effort</span>
       <div>
-        <button type="button" className={mode === 'default' ? 'active' : ''} disabled={disabled} onClick={() => onSelect(null)}>默认</button>
         {options.map((effort) => (
           <button
             key={effort}
             type="button"
-            className={mode === 'explicit' && current === effort ? 'active' : ''}
+            className={current === effort ? 'active' : ''}
             disabled={disabled}
             onClick={() => onSelect(effort)}
           >
@@ -97,7 +100,7 @@ function EffortPills({
           </button>
         ))}
       </div>
-      <small>{hint}</small>
+      {hint ? <small>{hint}</small> : null}
     </div>
   );
 }
@@ -143,6 +146,7 @@ export function SettingsScreen() {
   const [codexExpanded, setCodexExpanded] = useState(false);
   const [deepSeekConfig, setDeepSeekConfig] = useState<DeepSeekConfig | null>(null);
   const [deepSeekExpanded, setDeepSeekExpanded] = useState(false);
+  const [deepSeekKeyDraft, setDeepSeekKeyDraft] = useState('');
   const [ccEffort, setCcEffortState] = useState<OfficialEffortState | null>(null);
   const [claudeRuntime, setClaudeRuntime] = useState<ClaudeRuntimeState | null>(null);
   const observedRuntimeVersionRef = useRef<string | null>(null);
@@ -339,6 +343,11 @@ export function SettingsScreen() {
       loading: busy === 'provider' || busy === 'load',
     });
   }, [busy, catalog, chatModelProvider, currentModel, modelMode]);
+  const ccOfficialModelShort = useMemo(() => {
+    if (chatModelProvider !== 'claude_code') return currentModel || '—';
+    const prefix = 'Claude Code · ';
+    return ccModelLabel.indexOf(prefix) === 0 ? ccModelLabel.slice(prefix.length) : (ccModelLabel || '—');
+  }, [ccModelLabel, chatModelProvider, currentModel]);
   const unifiedModels = useMemo(() => {
     const byId = new Map<string, ConfigModel>();
     for (const model of catalog) byId.set(model.id, model);
@@ -576,10 +585,9 @@ export function SettingsScreen() {
     } catch { showToast('Codex 模型清单读取失败'); } finally { setBusy(''); }
   };
 
-  const switchCcLineEffort = async (effort: string | null) => {
-    if (effort === null && ccEffort?.effortMode === 'default') return;
-    if (effort && ccEffort?.effortMode === 'explicit' && ccEffort.configuredEffort === effort) return;
-    setBusy(`cc-effort:${effort || 'default'}`);
+  const switchCcLineEffort = async (effort: string) => {
+    if (ccEffort?.configuredEffort === effort) return;
+    setBusy(`cc-effort:${effort}`);
     try {
       setCcEffortState(await setCcEffort(effort));
       showToast('下一条消息起生效');
@@ -591,10 +599,9 @@ export function SettingsScreen() {
     } finally { setBusy(''); }
   };
 
-  const switchCodexLineEffort = async (effort: string | null) => {
-    if (effort === null && codexModels?.effortMode === 'default') return;
-    if (effort && codexModels?.effortMode === 'explicit' && codexModels.configuredEffort === effort) return;
-    setBusy(`codex-effort:${effort || 'default'}`);
+  const switchCodexLineEffort = async (effort: string) => {
+    if (codexModels?.configuredEffort === effort) return;
+    setBusy(`codex-effort:${effort}`);
     try {
       setCodexModels(await setCodexEffort(effort));
       showToast('Codex 下一轮起生效');
@@ -631,6 +638,19 @@ export function SettingsScreen() {
       setDeepSeekConfig(await getDeepSeekConfig());
       showToast('DeepSeek 模型清单已刷新');
     } catch { showToast('DeepSeek 模型清单读取失败'); } finally { setBusy(''); }
+  };
+
+  const saveDeepSeekKey = async () => {
+    const key = deepSeekKeyDraft.trim();
+    if (!key) { showToast('请先粘贴 DeepSeek API Key'); return; }
+    setBusy('deepseek-key');
+    try {
+      setDeepSeekConfig(await updateDeepSeekKey(key));
+      setDeepSeekKeyDraft('');
+      showToast(deepSeekConfig?.keyConfigured ? 'DeepSeek Key 已更新' : 'DeepSeek Key 已保存');
+    } catch {
+      showToast('DeepSeek Key 保存失败');
+    } finally { setBusy(''); }
   };
 
   const refreshModels = async () => {
@@ -853,19 +873,18 @@ export function SettingsScreen() {
           <button className="config-endpoint-summary" type="button" onClick={() => setOfficialExpanded((value) => !value)}>
             <i className={ccTokenSet ? 'online' : 'offline'} />
             <span><strong>Claude Code 订阅</strong><small>VPS 终端凭据 · 官方原生</small></span>
-            <em>{ccTokenSet ? '已连接' : '未配置'}<small>{catalogSource === 'fallback' ? catalog.length + ' 个安全 fallback' : catalog.length + ' 个模型'}</small></em>
+            <em>{ccTokenSet ? '已连接' : '未配置'}<small>{ccOfficialModelShort}</small></em>
             <b className={officialExpanded ? 'open' : ''}>▾</b>
           </button>
           <div className="config-endpoint-row"><CapabilityChips caps={{ thinking: true, cache: true, tools: false }} />{provider === 'claude_code' ? <span className="config-current-badge">使用中</span> : <button type="button" onClick={() => void switchToClaude()} disabled={Boolean(busy)}>切换</button>}</div>
           <EffortPills
-            mode={ccEffort?.effortMode || ''}
             current={ccEffort?.configuredEffort || ''}
-            options={ccEffort?.allowedEfforts || ['low', 'medium', 'high', 'xhigh', 'max']}
+            options={effortOptions(ccEffort?.allowedEfforts, ccEffort?.configuredEffort || null, ['low', 'medium', 'high', 'xhigh', 'max'])}
             disabled={Boolean(busy)}
-            hint={ccEffort?.effortMode === 'explicit' ? '下一条消息起生效' : '不传 --effort'}
+            hint={ccEffort?.effortMode === 'explicit' ? '下一条消息起生效' : ''}
             onSelect={(value) => void switchCcLineEffort(value)}
           />
-          {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div>{catalogSource === 'fallback' && <small>安全 fallback 清单；当前 Claude Code 运行时没有可用的官方订阅模型目录接口，账号实际可用性未知。</small>}<div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
+          {officialExpanded && <div className="config-endpoint-expanded"><div className="config-expanded-title"><strong>订阅配置</strong><span>凭据仅在 VPS 终端管理</span></div><div className="config-model-chips">{catalog.slice(0, 6).map((model) => <span key={model.id}>{model.label}</span>)}</div><div className="config-key-row"><span>OAUTH TOKEN</span><b>{ccTokenSet ? '已配置 · 不回传网页' : '未设置'}</b></div></div>}
         </section>
 
         <section className="config-card config-endpoint">
@@ -882,13 +901,10 @@ export function SettingsScreen() {
               : <button type="button" disabled>{codexStatus?.installed ? '等待登录' : '未安装'}</button>}
           </div>
           <EffortPills
-            mode={codexModels?.effortMode || ''}
             current={codexModels?.configuredEffort || ''}
-            options={(codexModels?.configuredEffort && !(codexModels.allowedEfforts || []).includes(codexModels.configuredEffort)
-              ? [...(codexModels.allowedEfforts || []), codexModels.configuredEffort]
-              : (codexModels?.allowedEfforts || ['low', 'medium', 'high', 'xhigh']))}
+            options={effortOptions(codexModels?.allowedEfforts, codexModels?.configuredEffort || null, ['low', 'medium', 'high', 'xhigh'])}
             disabled={Boolean(busy) || !codexStatus?.ready}
-            hint={!codexStatus?.ready ? '线路就绪后可切换' : (codexModels?.effortMode === 'explicit' ? '下一轮起生效' : '跟随模型默认')}
+            hint={!codexStatus?.ready ? '线路就绪后可切换' : (codexModels?.effortMode === 'explicit' ? '下一轮起生效' : '')}
             onSelect={(value) => void switchCodexLineEffort(value)}
           />
           {codexExpanded && <div className="config-endpoint-expanded">
@@ -928,9 +944,13 @@ export function SettingsScreen() {
               </button>)}
               {deepSeekConfig?.keyConfigured && !deepSeekConfig.models.length && <div>官方模型列表暂时没有返回内容</div>}
             </div>
-            <div className="config-key-row"><span>API KEY</span><b>{deepSeekConfig?.keyConfigured ? '已配置 · 不回传网页' : '未设置 DEEPSEEK_API_KEY'}</b></div>
+            <div className="config-key-row"><span>API KEY</span><b>{deepSeekConfig?.keyConfigured ? '已配置 · 不回传网页' : '未设置'}</b></div>
+            <input type="password" autoComplete="new-password" value={deepSeekKeyDraft} onChange={(event) => setDeepSeekKeyDraft(event.target.value)} placeholder={deepSeekConfig?.keyConfigured ? '粘贴新的 DeepSeek API Key' : '粘贴 DeepSeek API Key'} />
             <div className="config-key-row"><span>BASE URL</span><b>{deepSeekConfig?.source || 'https://api.deepseek.com'}</b></div>
-            <div className="config-endpoint-actions"><button type="button" onClick={() => void refreshDeepSeek()} disabled={busy === 'deepseek-models'}>{busy === 'deepseek-models' ? '刷新中…' : '刷新模型'}</button></div>
+            <div className="config-endpoint-actions">
+              <button type="button" onClick={() => void saveDeepSeekKey()} disabled={Boolean(busy) || !deepSeekKeyDraft.trim()}>{busy === 'deepseek-key' ? '保存中…' : (deepSeekConfig?.keyConfigured ? '更新 Key' : '保存 Key')}</button>
+              <button type="button" onClick={() => void refreshDeepSeek()} disabled={busy === 'deepseek-models'}>{busy === 'deepseek-models' ? '刷新中…' : '刷新模型'}</button>
+            </div>
           </div>}
         </section>
 

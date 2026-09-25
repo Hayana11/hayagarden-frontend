@@ -275,6 +275,11 @@ export async function updateDeepSeekModel(model: string): Promise<DeepSeekConfig
   return getDeepSeekConfig();
 }
 
+export async function updateDeepSeekKey(key: string): Promise<DeepSeekConfig> {
+  const data = await http.post<Parameters<typeof normalizeDeepSeekConfig>[0]>('/api/config/deepseek/key', { key });
+  return normalizeDeepSeekConfig(data);
+}
+
 export async function getRelayEndpoints(): Promise<RelayEndpoint[]> {
   const data = await http.get<{
     presets?: Array<{

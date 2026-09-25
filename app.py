@@ -1009,6 +1009,28 @@ def _deployment_secret(name):
     return value
 
 
+def _write_deployment_secret(name, value):
+    """Persist a deployment secret to .env and the current process env. Never return it."""
+    secret = str(value or '').strip()
+    if not secret:
+        raise ValueError('empty secret')
+    path = getattr(config_store, 'ENV_PATH', '/opt/frontend/.env')
+    try:
+        with open(path, encoding='utf-8') as env_file:
+            current = env_file.read()
+    except OSError:
+        current = ''
+    line = name + '=' + secret
+    pattern = re.compile(r'^' + re.escape(name) + r'=.*$', re.MULTILINE)
+    if pattern.search(current):
+        updated = pattern.sub(line, current)
+    else:
+        updated = current.rstrip() + ('\n' if current.strip() else '') + line + '\n'
+    with open(path, 'w', encoding='utf-8') as env_file:
+        env_file.write(updated)
+    os.environ[name] = secret
+
+
 def _group_chat_secret_present(name):
     """Check whether a secret exists without ever returning its value."""
     return bool(_deployment_secret(name))
@@ -2391,6 +2413,31 @@ def config_set_deepseek_model():
         'configured_model': model,
         'current': model,
         'effective_from': 'next_deepseek_call',
+    })
+
+
+@app.route('/api/config/deepseek/key', methods=['POST'])
+def config_set_deepseek_key():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'key' not in data:
+        return jsonify({'error': 'missing key'}), 400
+    raw = data.get('key')
+    if not isinstance(raw, str) or not raw.strip():
+        return jsonify({'error': 'key must be a non-empty string'}), 400
+    try:
+        _write_deployment_secret('DEEPSEEK_API_KEY', raw.strip())
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+    models, error = _deepseek_model_catalog()
+    return jsonify({
+        'ok': True,
+        'ready': bool(not error),
+        'key_configured': True,
+        'configured_model': config_store.get_deepseek_chat_model(),
+        'current': config_store.get_deepseek_chat_model(),
+        'models': models,
+        'error': error or None,
+        'source': 'https://api.deepseek.com',
     })
 
 

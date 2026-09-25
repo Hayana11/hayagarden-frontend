@@ -662,6 +662,44 @@ class ModelControlRouteTests(_AppRouteTestCase):
         self.assertNotIn(secret, response.get_data(as_text=True))
         self.assertEqual(config_store.get('DEEPSEEK_CHAT_MODEL'), 'deepseek-flash')
 
+    def test_deepseek_key_post_writes_env_and_never_returns_secret(self):
+        secret = 'deepseek-key-sentinel-write'
+        env_path = Path(config_store.ENV_PATH)
+        env_path.write_text('OTHER=keep\nDEEPSEEK_API_KEY=old-key\n', encoding='utf-8')
+        previous = os.environ.pop('DEEPSEEK_API_KEY', None)
+        try:
+            with patch.object(self.app_module, '_deepseek_model_catalog', return_value=([], 'unauthorized')):
+                response = self.client.post('/api/config/deepseek/key', json={'key': secret})
+            self.assertEqual(response.status_code, 200)
+            body = response.get_json()
+            self.assertTrue(body['ok'])
+            self.assertTrue(body['key_configured'])
+            self.assertNotIn(secret, response.get_data(as_text=True))
+            written = env_path.read_text(encoding='utf-8')
+            self.assertIn('DEEPSEEK_API_KEY=' + secret, written)
+            self.assertIn('OTHER=keep', written)
+            self.assertEqual(os.environ.get('DEEPSEEK_API_KEY'), secret)
+        finally:
+            if previous is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = previous
+
+    def test_deepseek_key_post_rejects_empty_without_writing(self):
+        env_path = Path(config_store.ENV_PATH)
+        env_path.write_text('DEEPSEEK_API_KEY=keep-me\n', encoding='utf-8')
+        previous = os.environ.pop('DEEPSEEK_API_KEY', None)
+        try:
+            response = self.client.post('/api/config/deepseek/key', json={'key': '   '})
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(env_path.read_text(encoding='utf-8'), 'DEEPSEEK_API_KEY=keep-me\n')
+            self.assertNotEqual(os.environ.get('DEEPSEEK_API_KEY'), '   ')
+        finally:
+            if previous is None:
+                os.environ.pop('DEEPSEEK_API_KEY', None)
+            else:
+                os.environ['DEEPSEEK_API_KEY'] = previous
+
     def test_deepseek_invalid_model_does_not_change_configuration(self):
         config_store.set('DEEPSEEK_CHAT_MODEL', 'deepseek-flash')
         with patch.object(self.app_module, '_deepseek_model_catalog', return_value=(
