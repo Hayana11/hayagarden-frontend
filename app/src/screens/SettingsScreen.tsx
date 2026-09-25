@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { RealityPromptPreviewCard } from '../components/RealityPromptPreviewCard';
@@ -12,9 +12,6 @@ import {
   createRelayEndpoint,
   getAvailableModels,
   getCcEffort,
-  getClaudeRuntime,
-  checkClaudeRuntime,
-  updateClaudeRuntime,
   getDeepSeekConfig,
   getKeyStatus,
   getModelCatalog,
@@ -33,7 +30,6 @@ import {
   updateProvider,
   type ChatProvider,
   type ConfigModel,
-  type ClaudeRuntimeState,
   type DeepSeekConfig,
   type OfficialEffortState,
   type EndpointCapabilities,
@@ -148,14 +144,10 @@ export function SettingsScreen() {
   const [deepSeekExpanded, setDeepSeekExpanded] = useState(false);
   const [deepSeekKeyDraft, setDeepSeekKeyDraft] = useState('');
   const [ccEffort, setCcEffortState] = useState<OfficialEffortState | null>(null);
-  const [claudeRuntime, setClaudeRuntime] = useState<ClaudeRuntimeState | null>(null);
-  const observedRuntimeVersionRef = useRef<string | null>(null);
-  const [runtimeBusy, setRuntimeBusy] = useState('');
   const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
   const [hostRtt, setHostRtt] = useState<number | null>(null);
   const [relays, setRelays] = useState<RelayEndpoint[]>([]);
   const [catalog, setCatalog] = useState<ConfigModel[]>([]);
-  const [catalogSource, setCatalogSource] = useState<'native' | 'fallback' | ''>('');
   const [configuredModelAvailable, setConfiguredModelAvailable] = useState<boolean | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [currentModel, setCurrentModel] = useState('');
@@ -232,7 +224,6 @@ export function SettingsScreen() {
     }
     if (catalogResult.status === 'fulfilled') {
       setCatalog(catalogResult.value.models);
-      setCatalogSource(catalogResult.value.catalogSource);
       setConfiguredModelAvailable(catalogResult.value.configuredModelAvailable);
       // Catalog is authoritative for chat-model space when available.
       const catalogProvider = catalogResult.value.provider;
@@ -260,76 +251,6 @@ export function SettingsScreen() {
   }, []);
 
   useEffect(() => { void loadAll(); }, [loadAll]);
-
-  const refreshClaudeRuntime = useCallback(async () => {
-    try {
-      const nextRuntime = await getClaudeRuntime();
-      const previousVersion = observedRuntimeVersionRef.current;
-      observedRuntimeVersionRef.current = nextRuntime.activeVersion;
-      if (previousVersion && nextRuntime.activeVersion && previousVersion !== nextRuntime.activeVersion) {
-        try {
-          const refreshed = await getModelCatalog(true);
-          setCatalog(refreshed.models);
-          setCatalogSource(refreshed.catalogSource);
-          setConfiguredModelAvailable(refreshed.configuredModelAvailable);
-          if (refreshed.provider === 'claude_code') {
-            setChatModelProvider('claude_code');
-            setModelMode(refreshed.modelMode === 'explicit' || refreshed.modelMode === 'default' ? refreshed.modelMode : 'unknown');
-            setCurrentModel(refreshed.configuredModel || refreshed.current || '');
-          }
-        } catch {
-          setWarning('Claude Code runtime 已更新；模型目录刷新失败，请稍后重新打开设置页。');
-        }
-      }
-      setClaudeRuntime(nextRuntime);
-    } catch {
-      setClaudeRuntime(null);
-    }
-  }, []);
-
-  useEffect(() => { void refreshClaudeRuntime(); }, [refreshClaudeRuntime]);
-  useEffect(() => {
-    if (!claudeRuntime || !['checking', 'candidate', 'promoting'].includes(claudeRuntime.status)) return;
-    const timer = window.setTimeout(() => { void refreshClaudeRuntime(); }, 5000);
-    return () => window.clearTimeout(timer);
-  }, [claudeRuntime, refreshClaudeRuntime]);
-
-  const saveClaudeRuntime = async (update: Partial<Pick<ClaudeRuntimeState, 'autoUpdate' | 'channel'>>) => {
-    setRuntimeBusy('settings');
-    try {
-      setClaudeRuntime(await updateClaudeRuntime(update));
-      showToast('Claude Code 更新设置已保存');
-    } catch {
-      showToast('Claude Code 更新设置保存失败');
-      void refreshClaudeRuntime();
-    } finally {
-      setRuntimeBusy('');
-    }
-  };
-
-  const checkClaudeRuntimeNow = async () => {
-    setRuntimeBusy('check');
-    try {
-      await checkClaudeRuntime();
-      showToast('已开始检查 Claude Code 更新');
-      void refreshClaudeRuntime();
-    } catch {
-      showToast('Claude Code 更新检查未能启动');
-    } finally {
-      setRuntimeBusy('');
-    }
-  };
-
-  const claudeRuntimeStatusLabel = (() => {
-    if (!claudeRuntime) return '状态不可用';
-    if (claudeRuntime.status === 'healthy') return '运行健康';
-    if (claudeRuntime.status === 'up_to_date') return '已是最新';
-    if (claudeRuntime.status === 'checking') return '正在检查';
-    if (claudeRuntime.status === 'candidate' || claudeRuntime.status === 'promoting') return '正在验证候选版本';
-    if (claudeRuntime.status === 'rejected' || claudeRuntime.status === 'rolled_back') return '验证失败，继续使用当前版本';
-    if (claudeRuntime.status === 'uninitialized') return '尚未完成 native runtime 初始化';
-    return '运行时不可用';
-  })();
 
   const activeRelay = relays.find((relay) => relay.active) || null;
   const currentEndpointName = provider === 'claude_code' ? 'Claude Code 订阅' : activeRelay?.name || '未选择中转站';
@@ -387,13 +308,11 @@ export function SettingsScreen() {
     setCurrentModel(local.currentModel);
     setModelMode(local.modelMode);
     setCatalog([]);
-    setCatalogSource('');
     setConfiguredModelAvailable(null);
     setAvailableModels([]);
     let refreshFailed = false;
     try {
       const catalogState = await getModelCatalog();
-      setCatalogSource(catalogState.catalogSource);
       setConfiguredModelAvailable(catalogState.configuredModelAvailable);
       if (catalogState.provider === 'claude_code' || catalogState.provider === 'api_relay') {
         setChatModelProvider(catalogState.provider);
@@ -450,7 +369,6 @@ export function SettingsScreen() {
     setCurrentModel(local.currentModel);
     setModelMode(local.modelMode);
     setCatalog([]);
-    setCatalogSource('');
     setConfiguredModelAvailable(null);
     setAvailableModels([]);
     let refreshFailed = false;
@@ -459,7 +377,6 @@ export function SettingsScreen() {
     } catch { refreshFailed = true; }
     try {
       const catalogState = await getModelCatalog();
-      setCatalogSource(catalogState.catalogSource);
       setConfiguredModelAvailable(catalogState.configuredModelAvailable);
       if (catalogState.provider === 'claude_code' || catalogState.provider === 'api_relay') {
         setChatModelProvider(catalogState.provider);
@@ -501,21 +418,6 @@ export function SettingsScreen() {
       ? `已切换到 ${relay.name}，部分状态刷新失败`
       : `已切换：${relay.name}`);
     setBusy('');
-  };
-
-  const switchCcDefault = async () => {
-    if (chatModelProvider !== 'claude_code') return;
-    if (modelMode === 'default') return;
-    setBusy('model:default');
-    try {
-      await updateCurrentModel(null);
-      setModelMode('default');
-      setCurrentModel('');
-      setConfiguredModelAvailable(null);
-      showToast('下一条消息起生效');
-    } catch {
-      showToast('模型切换失败');
-    } finally { setBusy(''); }
   };
 
   const switchModel = async (model: ConfigModel) => {
@@ -658,15 +560,12 @@ export function SettingsScreen() {
     try {
       if (chatModelProvider === 'claude_code') {
         const catalogState = await getModelCatalog(true);
-        setCatalog(catalogState.models);
-        setCatalogSource(catalogState.catalogSource);
-        setConfiguredModelAvailable(catalogState.configuredModelAvailable);
+      setCatalog(catalogState.models);
+      setConfiguredModelAvailable(catalogState.configuredModelAvailable);
         const mode = catalogState.modelMode;
         setModelMode(mode === 'explicit' || mode === 'default' ? mode : 'unknown');
         setCurrentModel(catalogState.configuredModel || catalogState.current || '');
-        showToast(catalogState.catalogSource === 'fallback'
-          ? '安全 fallback 清单已重新读取；账号可用性仍未知'
-          : 'Claude Code 模型清单已刷新');
+        showToast('Claude Code 模型清单已刷新');
       } else {
         setAvailableModels(await getAvailableModels());
         showToast('模型列表已刷新');
@@ -849,9 +748,6 @@ export function SettingsScreen() {
           title="系统配置"
           onBack={() => navigate('/chat')}
           backLabel="返回聊天"
-          aside={(
-            <button type="button" className="config-back-chat" onClick={() => navigate('/chat')}>返回聊天</button>
-          )}
         />
 
         {warning && <div className="config-warning">{warning}</div>}
@@ -1033,50 +929,13 @@ export function SettingsScreen() {
 
         <SectionLabel>MODELS · 统一模型池</SectionLabel>
         <section className="config-card config-model-pool">
-          <div className="config-card-heading"><h2>模型池</h2><button type="button" onClick={() => void refreshModels()}>{busy === 'models' ? '拉取中…' : chatModelProvider === 'claude_code' && catalogSource === 'fallback' ? '⟳ 重读 fallback' : '⟳ 统一拉取'}</button></div>
-          <p>{chatModelProvider === 'claude_code'
-            ? catalogSource === 'fallback'
-              ? '安全 fallback 清单（非实时账号目录）· 账号可用性未知 · 与中转模型池隔离 · 下一条消息起生效'
-              : 'Claude Code 模型目录 · 与中转模型池隔离 · 下一条消息起生效'
-            : '当前端点实时模型 + models.json 策展清单 · 共 ' + unifiedModels.length + ' 个'}</p>
-          {chatModelProvider === 'claude_code' && (
-            <div className="config-claude-runtime" aria-label="Claude Code runtime">
-              <div><strong>Claude Code</strong><span>当前版本　{claudeRuntime?.activeVersion || '—'}</span></div>
-              <div><span>更新通道</span>
-                <select
-                  aria-label="Claude Code 更新通道"
-                  value={claudeRuntime?.channel || 'latest'}
-                  disabled={!claudeRuntime || Boolean(runtimeBusy)}
-                  onChange={(event) => void saveClaudeRuntime({ channel: event.target.value as 'latest' | 'stable' })}
-                >
-                  <option value="latest">Latest</option><option value="stable">Stable</option>
-                </select>
-              </div>
-              <div><span>自动更新</span>
-                <button type="button" disabled={!claudeRuntime || Boolean(runtimeBusy)}
-                  aria-pressed={Boolean(claudeRuntime?.autoUpdate)}
-                  onClick={() => claudeRuntime && void saveClaudeRuntime({ autoUpdate: !claudeRuntime.autoUpdate })}>
-                  {claudeRuntime?.autoUpdate ? '开' : '关'}
-                </button>
-              </div>
-              <div><span>状态</span><span>{claudeRuntimeStatusLabel}</span></div>
-              {claudeRuntime?.candidateVersion && <div><span>候选版本</span><span>{claudeRuntime.candidateVersion} · {claudeRuntime.status === 'rejected' ? '验证失败，继续使用当前版本' : '正在验证'}</span></div>}
-              {claudeRuntime?.lastError && <div role="status"><span>最近错误</span><span>{claudeRuntime.lastError}</span></div>}
-              <button type="button" onClick={() => void checkClaudeRuntimeNow()} disabled={Boolean(runtimeBusy)}>
-                {runtimeBusy === 'check' ? '启动中…' : '立即检查'}
-              </button>
-            </div>
-          )}
+          <div className="config-card-heading"><h2>模型池</h2><button type="button" onClick={() => void refreshModels()}>{busy === 'models' ? '拉取中…' : '⟳ 统一拉取'}</button></div>
+          {chatModelProvider !== 'claude_code' && <p>当前端点实时模型 + models.json 策展清单 · 共 {unifiedModels.length} 个</p>}
           {chatModelProvider === 'claude_code' && modelMode === 'explicit' && configuredModelAvailable === false && <div className="config-warning">当前配置 {currentModel} 不在已知模型清单中；保留原配置，账号可用性未知，不会自动改写。</div>}
           <h3>常用预设</h3>
           {chatModelProvider === 'claude_code' ? (
             <div className="config-preset-list">
-              <button type="button" onClick={() => void switchCcDefault()} disabled={Boolean(busy) || modelMode === 'default'}>
-                <i style={{ background: '#7c6a8a' }} />
-                <span><strong>默认（跟随 Claude Code）</strong><small>不传 --model</small></span>
-                {modelMode === 'default' ? <em>使用中</em> : <b>切换</b>}
-              </button>
-              {catalog.filter((model) => model.primary).map((model) => (
+              {catalog.filter((model) => model.primary).slice(0, 3).map((model) => (
                 <button type="button" key={model.id} onClick={() => void switchModel(model)} disabled={Boolean(busy) || model.runtimeCompatible !== true}>
                   <i style={{ background: model.dot }} />
                   <span><strong>{model.label}</strong><small>{model.runtimeCompatible !== true
