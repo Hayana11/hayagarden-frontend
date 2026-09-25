@@ -57,6 +57,32 @@ def resolve_effective_display_thinking_mode(
     return configured
 
 
+def configured_mode_from_authored_prompt_enabled(enabled: Any) -> str:
+    """Map the UI authored-prompt switch onto DISPLAY_THINKING_MODE."""
+    if enabled is True:
+        return 'auto'
+    if enabled is False:
+        return 'native'
+    raise ValueError('authored_prompt_enabled must be boolean')
+
+
+def display_thinking_config_state(
+    configured_mode: Any, model_identity: Any,
+) -> dict[str, Any]:
+    """Read-model for GET/POST /api/config/display-thinking."""
+    configured = normalize_display_thinking_mode(configured_mode)
+    identity = str(model_identity or '').strip()
+    effective = resolve_effective_display_thinking_mode(configured, identity)
+    return {
+        'configured_mode': configured,
+        'effective_mode': effective,
+        'model_identity': identity,
+        'authored_prompt_effective': bool(
+            authored_thinking_instruction_suffix(effective),
+        ),
+    }
+
+
 def get_display_thinking_mode(getter=None) -> str:
     if getter is None:
         import config_store

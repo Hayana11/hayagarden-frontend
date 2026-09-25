@@ -13,8 +13,9 @@ assert.match(api, /setChatEffort\(effort: string \| null\)/);
 assert.match(api, /'\/api\/config\/effort'/);
 assert.match(api, /effortMode: 'unknown'/);
 assert.match(screen, /思考强度/);
-assert.match(screen, /不传 --effort/);
-assert.match(screen, /--effort \{effort\}/);
+assert.match(screen, /allowedEfforts\.map/);
+assert.match(screen, /setChatEffort\(effort\)/);
+assert.doesNotMatch(screen, /setChatEffort\(null\)/);
 assert.match(screen, /chatProvider === 'claude_code'/);
 
 for (const forbidden of ['Array.prototype.at', 'Object.hasOwn', 'replaceAll', 'structuredClone']) {

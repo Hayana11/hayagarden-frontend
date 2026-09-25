@@ -840,6 +840,68 @@ export function setChatEffort(effort: string | null): Promise<SetChatEffortResul
     .catch((): SetChatEffortResult => ({ ok: false }));
 }
 
+export interface DisplayThinkingConfigState {
+  ok: boolean;
+  configuredMode: string;
+  effectiveMode: string;
+  modelIdentity: string;
+  authoredPromptEffective: boolean;
+}
+
+function unknownDisplayThinkingConfig(): DisplayThinkingConfigState {
+  return {
+    ok: false,
+    configuredMode: '',
+    effectiveMode: '',
+    modelIdentity: '',
+    authoredPromptEffective: false,
+  };
+}
+
+function normalizeDisplayThinkingConfig(r: {
+  configured_mode?: string;
+  effective_mode?: string;
+  model_identity?: string;
+  authored_prompt_effective?: boolean;
+}): DisplayThinkingConfigState {
+  const configuredMode = typeof r.configured_mode === 'string' ? r.configured_mode : '';
+  const effectiveMode = typeof r.effective_mode === 'string' ? r.effective_mode : '';
+  const modelIdentity = typeof r.model_identity === 'string' ? r.model_identity : '';
+  return {
+    ok: Boolean(configuredMode && effectiveMode),
+    configuredMode,
+    effectiveMode,
+    modelIdentity,
+    authoredPromptEffective: r.authored_prompt_effective === true,
+  };
+}
+
+export function getDisplayThinkingConfig(): Promise<DisplayThinkingConfigState> {
+  return http
+    .get<{
+      configured_mode?: string;
+      effective_mode?: string;
+      model_identity?: string;
+      authored_prompt_effective?: boolean;
+    }>('/api/config/display-thinking')
+    .then((r) => normalizeDisplayThinkingConfig(r))
+    .catch(() => unknownDisplayThinkingConfig());
+}
+
+export function setDisplayThinkingAuthoredPrompt(
+  enabled: boolean,
+): Promise<DisplayThinkingConfigState> {
+  return http
+    .post<{
+      configured_mode?: string;
+      effective_mode?: string;
+      model_identity?: string;
+      authored_prompt_effective?: boolean;
+    }>('/api/config/display-thinking', { authored_prompt_enabled: enabled })
+    .then((r) => normalizeDisplayThinkingConfig(r))
+    .catch(() => unknownDisplayThinkingConfig());
+}
+
 export interface LedgerEntryDraft {
   date: string;
   amount: number;

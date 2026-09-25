@@ -9,6 +9,8 @@ from chat.display_thinking import (
     DISPLAY_THINKING_PROMPT_KEY,
     append_authored_thinking_instruction,
     authored_thinking_instruction_suffix,
+    configured_mode_from_authored_prompt_enabled,
+    display_thinking_config_state,
     filter_display_thinking_events,
     get_display_thinking_mode,
     get_display_thinking_prompt,
@@ -620,6 +622,111 @@ class DisplayThinkingStreamTests(unittest.TestCase):
                 self.assertEqual(AUTHORED_THINKING_INSTRUCTION, get_display_thinking_prompt())
             finally:
                 config_store.DB_PATH = original_db_path
+
+
+class DisplayThinkingConfigSurfaceTests(unittest.TestCase):
+    def test_opus55_auto_config_state_is_native_without_authored_suffix(self):
+        state = display_thinking_config_state(
+            'auto', 'explicit:claude-opus-5-5',
+        )
+        self.assertEqual('auto', state['configured_mode'])
+        self.assertEqual('native', state['effective_mode'])
+        self.assertEqual('explicit:claude-opus-5-5', state['model_identity'])
+        self.assertFalse(state['authored_prompt_effective'])
+        self.assertEqual(
+            '',
+            authored_thinking_instruction_suffix(state['effective_mode']),
+        )
+        self.assertNotIn(
+            AUTHORED_THINKING_INSTRUCTION,
+            authored_thinking_instruction_suffix(state['effective_mode']),
+        )
+
+    def test_opus55_native_config_state_omits_authored_suffix(self):
+        state = display_thinking_config_state(
+            'native', 'explicit:claude-opus-5-5',
+        )
+        self.assertEqual('native', state['configured_mode'])
+        self.assertEqual('native', state['effective_mode'])
+        self.assertFalse(state['authored_prompt_effective'])
+        self.assertEqual(
+            '',
+            authored_thinking_instruction_suffix(state['effective_mode']),
+        )
+
+    def test_sonnet_auto_config_state_keeps_authored_prompt(self):
+        state = display_thinking_config_state(
+            'auto', 'explicit:claude-sonnet-5',
+        )
+        self.assertEqual('auto', state['configured_mode'])
+        self.assertEqual('auto', state['effective_mode'])
+        self.assertTrue(state['authored_prompt_effective'])
+        self.assertIn(
+            AUTHORED_THINKING_INSTRUCTION,
+            authored_thinking_instruction_suffix(state['effective_mode']),
+        )
+
+    def test_sonnet_native_config_state_turns_prompt_off(self):
+        state = display_thinking_config_state(
+            'native', 'explicit:claude-sonnet-5',
+        )
+        self.assertEqual('native', state['effective_mode'])
+        self.assertFalse(state['authored_prompt_effective'])
+        self.assertEqual(
+            '',
+            authored_thinking_instruction_suffix(state['effective_mode']),
+        )
+
+    def test_authored_prompt_toggle_maps_only_auto_and_native(self):
+        self.assertEqual(
+            'auto', configured_mode_from_authored_prompt_enabled(True),
+        )
+        self.assertEqual(
+            'native', configured_mode_from_authored_prompt_enabled(False),
+        )
+        for invalid in ('auto', 'native', 'off', 1, 0, None, 'true'):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    configured_mode_from_authored_prompt_enabled(invalid)
+
+    def test_ui_toggle_cannot_reinject_opus55_authored_suffix(self):
+        for enabled in (True, False):
+            configured = configured_mode_from_authored_prompt_enabled(enabled)
+            state = display_thinking_config_state(
+                configured, 'explicit:claude-opus-5-5',
+            )
+            self.assertEqual('native', state['effective_mode'])
+            self.assertFalse(state['authored_prompt_effective'])
+            self.assertEqual(
+                '',
+                authored_thinking_instruction_suffix(state['effective_mode']),
+            )
+
+    def test_config_routes_reuse_resolver_and_reject_mode_strings(self):
+        source = (ROOT / 'app.py').read_text(encoding='utf-8')
+        start = source.index('def _display_thinking_config_payload(')
+        end = source.index('# ── User Profile', start)
+        route = source[start:end]
+        self.assertIn('display_thinking_config_state', route)
+        self.assertIn('configured_mode_from_authored_prompt_enabled', route)
+        self.assertIn('capture_generation_authority', route)
+        self.assertIn("config_store.set('DISPLAY_THINKING_MODE', mode)", route)
+        self.assertIn('authored_prompt_enabled', route)
+        self.assertNotIn("data.get('mode')", route)
+        self.assertNotIn('--thinking', route)
+        self.assertNotIn('thinking_enabled', route)
+        self.assertNotIn('rollback', route)
+        prompt_start = source.index(
+            "@app.route('/api/profile/display-thinking-prompt'",
+        )
+        self.assertLess(prompt_start, start)
+        module = (ROOT / 'chat' / 'display_thinking.py').read_text(
+            encoding='utf-8',
+        )
+        self.assertEqual(1, module.count('def resolve_effective_display_thinking_mode('))
+        self.assertEqual(1, module.count('def authored_thinking_instruction_suffix('))
+        self.assertNotIn('--thinking-enabled', module)
+        self.assertNotIn('--thinking ', module)
 
 
 if __name__ == '__main__':
