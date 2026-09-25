@@ -86,6 +86,7 @@ function safeLatest(result, cache = {}, days = 7) {
   for (const metric of Object.keys(METRICS)) metrics[metric] = sanitizeRecord(metric, source[metric]);
   const hasData = Object.values(metrics).some(Boolean);
   const failed = source.status === 'FAIL' || source.error_code;
+  const cycleDays = Number.isInteger(source.cycle?.days) ? source.cycle.days : 180;
   return {
     status: failed ? 'FAIL' : (hasData ? 'PASS' : 'EMPTY'),
     provider: SOURCE,
@@ -94,6 +95,7 @@ function safeLatest(result, cache = {}, days = 7) {
     sampledAt: validSample(source.sampledAt),
     dataDate: validDate(source.dataDate),
     ...metrics,
+    cycle: safeCycle(source.cycle, cache, cycleDays),
     cached: cache.cached === true,
     stale: cache.stale === true,
     ...(failed ? { error_code: errorCode(source) } : {}),

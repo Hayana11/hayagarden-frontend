@@ -18,6 +18,14 @@ DETAIL_FIELDS = {
     "sleep": ("asleep_minutes", "time_asleep_minutes", "sleep_minutes", "total_sleep_minutes", "sleep_duration", "duration_minutes", "duration", "awake_minutes", "awake_duration", "sleep_awake_duration", "deep_sleep", "light_sleep", "rem_sleep", "sleep_score", "score"),
     "heart_rate": ("bpm", "heart_rate", "avg_hrm", "avg_heart_rate", "average_heart_rate", "min_heart_rate", "max_heart_rate", "resting_heart_rate"),
 }
+SLEEP_DETAIL_ALIASES = {
+    "sleep_deep_duration": "deep_sleep",
+    "sleep_light_duration": "light_sleep",
+    "sleep_rem_duration": "rem_sleep",
+    "sleep_awake_duration": "awake_minutes",
+    "awake_duration": "awake_minutes",
+    "score": "sleep_score",
+}
 
 
 class MalformedHealthResponse(ValueError):
@@ -73,6 +81,9 @@ def _number(value: Any) -> float | int | None:
 def _metric_value(metric: str, payload: Any) -> float | int | None:
     if isinstance(payload, dict):
         if metric == "sleep":
+            total_duration = _number(payload.get("total_duration"))
+            if total_duration is not None:
+                return total_duration
             for key in ("asleep_minutes", "time_asleep_minutes", "sleep_minutes", "total_sleep_minutes", "total_sleep", "total_sleep_time"):
                 value = _number(payload.get(key))
                 if value is not None:
@@ -102,11 +113,18 @@ def _safe_details(metric: str, payload: Any) -> dict[str, float | int]:
     if metric not in DETAIL_FIELDS or not isinstance(payload, dict):
         return {}
     output: dict[str, float | int] = {}
+    if metric == "sleep":
+        for source, canonical in SLEEP_DETAIL_ALIASES.items():
+            if source not in payload:
+                continue
+            value = _number(payload[source])
+            if value is not None:
+                output[canonical] = value
     for key in DETAIL_FIELDS[metric]:
         if key in payload:
             value = _number(payload[key])
             if value is not None:
-                output[key] = value
+                output[SLEEP_DETAIL_ALIASES.get(key, key) if metric == "sleep" else key] = value
     return output
 
 
