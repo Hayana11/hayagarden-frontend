@@ -23,6 +23,19 @@ function validSample(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) ? value : null;
 }
 
+function safeSleepWindow(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const bedtime = validSample(value.bedtime);
+  const wakeUpTime = validSample(value.wakeUpTime);
+  if (!bedtime || !wakeUpTime) return null;
+  const bedtimeMs = Date.parse(bedtime);
+  const wakeUpTimeMs = Date.parse(wakeUpTime);
+  if (!Number.isFinite(bedtimeMs) || !Number.isFinite(wakeUpTimeMs) || wakeUpTimeMs <= bedtimeMs) return null;
+  const canonical = (milliseconds) => new Date(milliseconds).toISOString().replace(/\.000Z$/, 'Z');
+  if (canonical(bedtimeMs) !== bedtime || canonical(wakeUpTimeMs) !== wakeUpTime) return null;
+  return { bedtime, wakeUpTime };
+}
+
 function validNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -42,6 +55,10 @@ function sanitizeRecord(metric, row) {
       if (value !== null) safe[key] = value;
     }
     if (Object.keys(safe).length) output.details = safe;
+  }
+  if (metric === 'sleep') {
+    const sleepWindow = safeSleepWindow(row.sleepWindow);
+    if (sleepWindow) output.sleepWindow = sleepWindow;
   }
   return output;
 }
@@ -243,4 +260,3 @@ module.exports = {
   safeSeries,
   safeStatus,
 };
-

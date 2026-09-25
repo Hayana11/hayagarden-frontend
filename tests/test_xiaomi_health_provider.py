@@ -119,6 +119,12 @@ class XiaomiHealthProviderTests(unittest.TestCase):
         self.assertEqual(rows[0]["details"], {"sleep_duration": 432, "deep_sleep": 101, "light_sleep": 250})
         self.assertNotIn(SECRET_VALUES["pass_token"], json.dumps(rows))
 
+    @staticmethod
+    def _sleep_test_row(payload: dict[str, Any]) -> dict[str, Any]:
+        outer_time = int(datetime(2026, 9, 24, 0, tzinfo=timezone.utc).timestamp())
+        response = {"result": {"data_list": [{"time": outer_time, "value": payload}]}}
+        return parse_series_response(response, "sleep", days=7)[0]
+
     def test_sleep_parser_uses_live_total_duration_without_awake_or_segments(self) -> None:
         timestamp = int(datetime(2026, 9, 23, 16, tzinfo=timezone.utc).timestamp())
         response = {"result": {"data_list": [{"time": timestamp, "value": json.dumps({
@@ -154,10 +160,118 @@ class XiaomiHealthProviderTests(unittest.TestCase):
             "sleep_duration": 999,
             "duration": 12,
         })
+        self.assertEqual(rows[0]["sleepWindow"], {
+            "bedtime": datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wakeUpTime": datetime.fromtimestamp(timestamp + 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
         public = json.dumps(rows)
         for leaked in ("cookie-private", SECRET_VALUES["service_token"], SECRET_VALUES["device_id"],
-                       "segment_details", "bedtime", "wake_up_time", "sleep_deep_duration"):
+                       "segment_details", "wake_up_time", "sleep_deep_duration"):
             self.assertNotIn(leaked, public)
+
+    def test_sleep_window_uses_longest_segment_without_joining_nap_and_main_sleep(self) -> None:
+        base = 1_790_000_000
+        segments = [
+            {"bedtime": base, "wake_up_time": base + 2 * 3600, "duration": 60},
+            {"bedtime": base + 5 * 3600, "wake_up_time": base + 13 * 3600, "duration": 90},
+            {"bedtime": base + 20 * 3600, "wake_up_time": base + 20 * 3600 + 1800, "duration": 30},
+        ]
+        row = self._sleep_test_row({"total_duration": 418, "segment_details": segments})
+        self.assertEqual(row["sleepWindow"], {
+            "bedtime": datetime.fromtimestamp(base + 5 * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wakeUpTime": datetime.fromtimestamp(base + 13 * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        self.assertEqual(row["value"], 418)
+        self.assertEqual(row["unit"], "minutes")
+
+    def test_sleep_window_tie_prefers_later_wake_time(self) -> None:
+        base = 1_790_000_000
+        row = self._sleep_test_row({
+            "total_duration": 418,
+            "segment_details": [
+                {"bedtime": base, "wake_up_time": base + 7200},
+                {"bedtime": base + 3600, "wake_up_time": base + 10800},
+            ],
+        })
+        self.assertEqual(row["sleepWindow"], {
+            "bedtime": datetime.fromtimestamp(base + 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wakeUpTime": datetime.fromtimestamp(base + 10800, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+
+    def test_sleep_window_ignores_invalid_segments_and_omits_when_all_invalid(self) -> None:
+        base = 1_790_000_000
+        row = self._sleep_test_row({
+            "total_duration": 418,
+            "segment_details": [
+                {"bedtime": base, "wake_up_time": base},
+                {"bedtime": base + 7200, "wake_up_time": base},
+                {"bedtime": "invalid", "wake_up_time": base + 3600},
+                {"bedtime": base + 3600, "wake_up_time": base + 9000},
+            ],
+        })
+        self.assertEqual(row["sleepWindow"], {
+            "bedtime": datetime.fromtimestamp(base + 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wakeUpTime": datetime.fromtimestamp(base + 9000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+
+        for segments in (
+            [{"bedtime": base, "wake_up_time": base}],
+            [{"bedtime": base + 1, "wake_up_time": base}],
+            [{"bedtime": "invalid", "wake_up_time": "also-invalid"}],
+        ):
+            with self.subTest(segments=segments):
+                invalid_row = self._sleep_test_row({"total_duration": 418, "segment_details": segments})
+                self.assertNotIn("sleepWindow", invalid_row)
+
+    def test_sleep_window_omitted_for_non_list_segments_without_changing_sleep_fields(self) -> None:
+        for segments in (None, {"bedtime": 1, "wake_up_time": 2}, "invalid"):
+            with self.subTest(segments_type=type(segments).__name__):
+                row = self._sleep_test_row({"total_duration": 418, "segment_details": segments})
+                self.assertNotIn("sleepWindow", row)
+                self.assertEqual((row["value"], row["unit"]), (418, "minutes"))
+
+    def test_sleep_window_accepts_milliseconds_and_timezone_aware_iso(self) -> None:
+        base = 1_790_000_000
+        milliseconds = self._sleep_test_row({
+            "total_duration": 418,
+            "segment_details": [{"bedtime": base * 1000, "wake_up_time": (base + 3600) * 1000}],
+        })
+        self.assertEqual(milliseconds["sleepWindow"], {
+            "bedtime": datetime.fromtimestamp(base, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "wakeUpTime": datetime.fromtimestamp(base + 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        aware_iso = self._sleep_test_row({
+            "total_duration": 418,
+            "segment_details": [{
+                "bedtime": "2026-09-24T23:00:00+08:00",
+                "wake_up_time": "2026-09-25T07:00:00+08:00",
+            }],
+        })
+        self.assertEqual(aware_iso["sleepWindow"], {
+            "bedtime": "2026-09-24T15:00:00Z",
+            "wakeUpTime": "2026-09-24T23:00:00Z",
+        })
+
+    def test_sleep_window_only_extracts_public_times_from_malicious_segment(self) -> None:
+        base = 1_790_000_000
+        payload = {
+            "total_duration": 418,
+            "segment_details": [{
+                "bedtime": base,
+                "wake_up_time": base + 3600,
+                "cookie": "cookie-private",
+                "service_token": SECRET_VALUES["service_token"],
+                "user_id": SECRET_VALUES["user_id"],
+                "device_id": SECRET_VALUES["device_id"],
+                "unknown_private_field": "segment-private",
+            }],
+        }
+        row = self._sleep_test_row(payload)
+        self.assertEqual(set(row["sleepWindow"]), {"bedtime", "wakeUpTime"})
+        self.assertNotIn("wake_up_time", json.dumps(row))
+        for secret in ("cookie-private", SECRET_VALUES["service_token"], SECRET_VALUES["user_id"],
+                       SECRET_VALUES["device_id"], "segment-private", "segment_details"):
+            self.assertNotIn(secret, json.dumps(row))
 
     def test_heart_rate_parser_normalizes_allowlisted_details(self) -> None:
         timestamp = int(datetime(2026, 9, 24, 2, tzinfo=timezone.utc).timestamp())
@@ -1164,4 +1278,3 @@ class XiaomiCycleParserTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

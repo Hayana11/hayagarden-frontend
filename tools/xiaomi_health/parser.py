@@ -51,6 +51,48 @@ def _timestamp(value: Any) -> tuple[int, str, str] | None:
         return None
 
 
+def _sleep_window_timestamp(value: Any) -> tuple[int, str, str] | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdigit():
+            return _timestamp(raw)
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return None
+            return _timestamp(int(parsed.timestamp()))
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+    return _timestamp(value)
+
+
+def _sleep_window(payload: Any) -> dict[str, str] | None:
+    if not isinstance(payload, dict):
+        return None
+    segments = payload.get("segment_details")
+    if not isinstance(segments, list):
+        return None
+
+    selected: tuple[tuple[int, int, int], str, str] | None = None
+    # Select the longest valid recorded sleep segment as the canonical public sleep window.
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        bedtime = _sleep_window_timestamp(segment.get("bedtime"))
+        wake_up_time = _sleep_window_timestamp(segment.get("wake_up_time"))
+        if bedtime is None or wake_up_time is None or wake_up_time[0] <= bedtime[0]:
+            continue
+        window_seconds = wake_up_time[0] - bedtime[0]
+        rank = (window_seconds, wake_up_time[0], bedtime[0])
+        if selected is None or rank > selected[0]:
+            selected = (rank, bedtime[1], wake_up_time[1])
+    if selected is None:
+        return None
+    return {"bedtime": selected[1], "wakeUpTime": selected[2]}
+
+
 def _embedded(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -180,6 +222,10 @@ def parse_series_response(response: Any, metric: str, *, days: int, now: datetim
             "value": value,
             "unit": UNITS[metric],
         }
+        if metric == "sleep":
+            sleep_window = _sleep_window(payload)
+            if sleep_window is not None:
+                record["sleepWindow"] = sleep_window
         details = _safe_details(metric, payload)
         if details:
             record["details"] = details
@@ -295,4 +341,3 @@ def parse_menstrual_symptoms_rows(rows: Any) -> list[dict[str, Any]]:
         })
     output.sort(key=lambda symptom: symptom["timestamp"])
     return output
-
