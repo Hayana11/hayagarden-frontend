@@ -12,6 +12,8 @@ from .store import DEFAULT_CREDENTIAL_PATH, SOURCE, XiaomiCredentialStore
 OPERATIONS = frozenset({"get_health"})
 METRICS = frozenset({"all", "status", "steps", "sleep", "heart_rate", "cycle"})
 SAFE_ERRORS = frozenset({"auth_expired", "timeout", "api_error", "malformed_response", "unavailable"})
+ALL_UPSTREAM_TIMEOUT_SECONDS = 6.0
+MAX_UPSTREAM_REQUESTS_FOR_ALL = 5
 
 
 def run(
@@ -37,7 +39,7 @@ def run(
     client = client or XiaomiHealthClient(store)
     if metric == "all":
         try:
-            latest = client.get_latest_partial(days)
+            latest = client.get_latest_partial(days, request_timeout=ALL_UPSTREAM_TIMEOUT_SECONDS)
         except XiaomiProviderError as exc:
             return {"status": "FAIL", "provider": SOURCE, "error_code": exc.code if exc.code in SAFE_ERRORS else "unavailable"}
         except Exception:
@@ -45,7 +47,7 @@ def run(
         if not isinstance(latest, dict):
             return {"status": "FAIL", "provider": SOURCE, "error_code": "unavailable"}
         try:
-            cycle = client.get_cycle(180)
+            cycle = client.get_cycle(180, request_timeout=ALL_UPSTREAM_TIMEOUT_SECONDS)
         except XiaomiProviderError as exc:
             cycle = _safe_cycle_failure(exc.code)
         except Exception:
