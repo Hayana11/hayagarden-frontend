@@ -84,6 +84,8 @@ interface GalleryPhotoRow {
   source_type: string | null;
   summary: string;
   emotion: string;
+  visual_description: string;
+  first_impression: string;
   keywords: string[];
   importance: number;
 }
@@ -229,6 +231,8 @@ export interface GalleryPhoto {
   time: string;
   summary: string;
   emotion: string;
+  visualDescription: string;
+  firstImpression: string;
   keywords: string[];
 }
 
@@ -461,6 +465,8 @@ export async function fetchMomentsData(): Promise<MomentsData> {
     time: p.saved_at || p.created_at,
     summary: p.summary || '',
     emotion: p.emotion || '',
+    visualDescription: p.visual_description || '',
+    firstImpression: p.first_impression || '',
     keywords: p.keywords || [],
   }));
 
