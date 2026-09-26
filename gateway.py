@@ -1841,12 +1841,18 @@ _BASE_TOOLS = [
     },
     {
         'name': 'save_to_gallery',
-        'description': '把一张截图永久收藏进相册。截图（screenshot_chat / read_webpage）默认是临时的，最近 30 张 / 7 天后会自动删；觉得某张值得留下来（一段珍贵的对话、一个好看的页面）就用这个存进相册永久保留。传 attachment（上一步返回的 attachment://id）；可选 note 写一句话备注、album 指定相册名（不填进默认相册）。返回 gallery://id。',
+        'description': ('把值得留下的图片永久收藏进现有相册。普通聊天图片已在本轮被你看到时，可不传 attachment，服务端会从当前 user message 安全解析；本轮多张图时用 image_index（从 0 开始）。'
+                       '旧 screenshot_chat / pocket_screenshot / read_webpage 仍传其 attachment://id。first_impression 写你此刻对画面的主观第一印象，最多 800 字；note 是备注。'
+                       '正常回复照常写，不要机械复述 first_impression；普通图片不必每张收藏，用户明确说“帮我存这张/收进相册”时执行。允许自主收藏真正珍贵的画面，但不要因每次看到图片就收藏。'),
         'input_schema': {'type': 'object', 'properties': {
-            'attachment': {'type': 'string', 'description': 'attachment://id，来自 screenshot_chat 或 read_webpage 的结果'},
+            'attachment': {'type': 'string', 'description': '兼容旧路径：attachment://id，来自截图/网页工具；当前聊天上传图片不要猜路径'},
+            'image_index': {'type': 'integer', 'minimum': 0, 'maximum': 3,
+                            'description': '当前用户消息有多张图片且未传 attachment 时，选择第几张（从 0 开始）'},
             'note': {'type': 'string', 'description': '给这张图写一句备注/说明，可选'},
             'album': {'type': 'string', 'description': '相册名，如"雪""她""我们"；不填存进默认相册'},
-        }, 'required': ['attachment']},
+            'first_impression': {'type': 'string', 'maxLength': 800,
+                                  'description': '你第一次看到这张图时的主观印象；只写此刻反应，不要当成永久事实'},
+        }},
     },
     {
         'name': 'collect_chat_moment',
@@ -1867,10 +1873,15 @@ _BASE_TOOLS = [
     },
     {
         'name': 'recall_photo',
-        'description': '从相册里"突然想起"一张收藏的画面——当你心里泛起思念、怀旧、想给她看点什么的时候用，不用她开口。可选 keyword（想起和某事有关的，如"雪"）、emotion（某种情绪的画面）。返回这张画面的记忆(summary)和一个内联标记 [[gallery:pid]]；把这个标记放进你要发给她的消息里，照片就会跟着一起发出去，像"今天突然想到这张"。',
+        'description': ('从现有相册里回想一张画面。普通回忆只读取有损语义记忆，不代表你重新看了像素；'
+                        '如果用户问小字、精确颜色、角落细节、数量、空间关系，或明确要求再看原图，传 inspect_question，让工具通过现有视觉通道重新读取永久原图并回答可见事实。'
+                        '可传 pid 指定照片，否则按 keyword/emotion 选择。[[gallery:pid]] 发送机制保持不变。'),
         'input_schema': {'type': 'object', 'properties': {
             'keyword': {'type': 'string', 'description': '想起和某事/某物有关的画面，可选'},
             'emotion': {'type': 'string', 'description': '想起某种情绪的画面，如 幸福/思念，可选'},
+            'pid': {'type': 'string', 'description': '已知的 Gallery pid；用于读取指定照片，可选'},
+            'inspect_question': {'type': 'string', 'maxLength': 500,
+                                 'description': '需要根据永久原图重新核实的具体可见细节问题，可选'},
         }},
     },
     {
@@ -2659,30 +2670,56 @@ def _shop_login_status():
         parts.append('🖼 ' + ref)
     return '\n'.join(parts)
 
-def _gen_photo_meaning(note=''):
-    """看着刚收藏的画面 + 最近对话，生成 {summary, emotion, keywords, importance}。
-    走轻量 ws 模型；失败返回 None（照片照存，只是暂时没意义）。不用 OCR——意义来自上下文。"""
+def _gen_gallery_visual_description(pid, question=None):
+    """Use the existing multimodal relay on Gallery pixels only, without persona/history."""
     try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT author, content FROM chat_messages ORDER BY id DESC LIMIT 8").fetchall()
-        conn.close()
+        import gallery_store
+        from chat.gallery_visual import describe_image_bytes
+        photo = gallery_store.read_photo_bytes(pid)
+        if not photo:
+            return None
+        data, mime = photo
+        return describe_image_bytes(data, mime, question=question, timeout=15)
     except Exception:
-        rows = []
-    ctx = []
-    for r in reversed(rows):
-        who = '哈娅' if str(r['author']).lower() in ('hayana', 'haya', 'user') else '费佳'
-        c = (r['content'] or '').strip().replace('\n', ' ')
-        if c:
-            ctx.append('%s：%s' % (who, c[:120]))
-    ctx_str = '\n'.join(ctx) or '（没有最近对话）'
-    sys_p = ('你是费奥多尔。你刚把一张画面收进相册。根据备注和最近的对话，为它生成一条"记忆"。'
-             '严格只输出 JSON，不要多余文字：'
-             '{"summary":"一句话概括这张画面对应的时刻，第一人称、温度克制",'
-             '"emotion":"一个词的情绪，如 幸福/思念/心疼/平静/情欲",'
-             '"keywords":["3到6个检索关键词，如 雪 冬天 横滨"],'
-             '"importance":0到100的整数，越珍贵越高}')
-    user_p = '备注：%s\n\n最近的对话：\n%s' % (note or '（无）', ctx_str)
+        return None
+
+
+def _gen_photo_meaning(note='', first_impression='', visual_description='', source_msg_id=None):
+    """Generate relationship memory from supplied text and the exact source message, never unseen pixels."""
+    source_text = ''
+    if source_msg_id is not None:
+        conn = None
+        try:
+            conn = get_db()
+            row = conn.execute(
+                'SELECT author, content FROM chat_messages WHERE id=?',
+                (int(source_msg_id),),
+            ).fetchone()
+            if row:
+                who = '哈娅' if str(row['author']).lower() in ('hayana', 'haya', 'user') else '费佳'
+                source_text = '%s：%s' % (who, str(row['content'] or '').strip()[:500])
+        except Exception:
+            source_text = ''
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    sys_p = ('你是费奥多尔，正在整理一条关系性照片记忆。你没有在本次调用中看到图片像素；'
+             '只能参考明确提供的中性画面描述、当时第一印象、备注和绑定的来源消息。'
+             'summary 写这张图为何在那一刻值得留下，不要把 visual_description 改写成记忆摘要。'
+             '严格只输出 JSON：'
+             '{"summary":"一句克制的第一人称关系性记忆",'
+             '"emotion":"一个情绪词", "keywords":["3到6个检索词"],'
+             '"importance":0到100的整数}')
+    user_p = ('备注：%s\n那时的第一印象：%s\n中性画面描述：%s\n'
+              '与图片同条的来源消息：%s') % (
+        str(note or '')[:500] or '（无）',
+        str(first_impression or '')[:800] or '（无）',
+        str(visual_description or '')[:1000] or '（尚无）',
+        source_text or '（未能读取精确来源消息）',
+    )
     try:
         from relay.manager import relay as _r
         rd = _r.call({'max_tokens': 400, 'system': sys_p,
@@ -2705,31 +2742,68 @@ def _gen_photo_meaning(note=''):
         return None
 
 
-def _save_to_gallery(attachment, note='', album=None):
-    """把一张临时 attachment（screenshot_chat/read_webpage 返回的 attachment://id）
-    永久收藏进相册，返回 gallery://<pid>。"""
+def _save_to_gallery(attachment='', note='', album=None, image_index=None, first_impression=''):
+    """Save an explicit legacy attachment or one image from the bound current user message."""
     import gallery_store
-    ref = (attachment or '').strip()
-    if not ref:
-        return '要收藏哪张图？给我 attachment://id（screenshot_chat 或 read_webpage 返回的那个）。'
-    album_id = None
-    if album:
-        album_id = gallery_store.album_by_name(album) or gallery_store.create_album(album)
+    note = str(note or '')[:500]
+    first_impression = str(first_impression or '').strip()[:800]
+    album = str(album or '').strip()[:80] or None
+    source_msg_id = getattr(_tool_ctx, 'user_message_id', None)
+    source_chat_id = getattr(_tool_ctx, 'conversation_id', '') or ''
     try:
-        pid = gallery_store.save_from_attachment(ref, note=note or '', album_id=album_id, source_type='chat')
-    except Exception as e:
-        return f'收藏失败：{e}'
-    if not pid:
-        return '收藏失败：这张图可能已经过期了（临时图只留最近 30 张 / 7 天）。趁新鲜再截一张吧。'
-    where = ('《%s》相册' % album) if album else '默认相册'
-    out = ['📸 已收藏进%s' % where, '🖼 gallery://%s' % pid]
-    if note:
-        out.append('📝 ' + note)
-    # 第2步·照片记忆：生成意义，写进统一记忆(posts, type=PHOTO)，并回填到 gallery 行
-    meaning = _gen_photo_meaning(note=note or '')
+        if attachment:
+            if image_index is not None:
+                return '收藏失败：attachment 与 image_index 不能同时指定。'
+            result = gallery_store.save_attachment(
+                attachment, note=note, album_name=album, source_type='chat',
+                source_msg_id=source_msg_id, source_chat_id=source_chat_id,
+                first_impression=first_impression,
+            )
+        else:
+            from chat.gallery_context import resolve_current_turn_image
+            from chat.cc_vision_bridge import resolve_image_bytes
+            selected = resolve_current_turn_image(
+                source_msg_id, source_chat_id, get_db_fn=get_db, image_index=image_index,
+            )
+            image_bytes, mime = resolve_image_bytes(selected['ref'])
+            source_msg_id = selected['source_msg_id']
+            source_chat_id = selected['source_chat_id']
+            result = gallery_store.save_image_bytes(
+                image_bytes, mime, note=note, album_name=album, source_type='chat',
+                source_msg_id=source_msg_id, source_chat_id=source_chat_id,
+                first_impression=first_impression,
+            )
+    except Exception as exc:
+        return '收藏失败：%s' % str(exc)[:240]
+    if not result:
+        return '收藏失败：来源图片不存在、已过期或无法安全读取。'
+
+    pid = result['pid']
+    existing = gallery_store.get(pid) or {}
+    if result.get('reused_existing'):
+        current_album = next((a.get('name') for a in gallery_store.list_albums()
+                              if a.get('id') == existing.get('album_id')), None)
+        return json.dumps({
+            'ok': True, 'pid': pid, 'gallery_ref': 'gallery://%s' % pid,
+            'reused_existing': True, 'metadata_overwritten': False,
+            'album_preserved': current_album, 'source_msg_id': existing.get('source_msg_id'),
+            'visual_description_available': bool(existing.get('visual_description')),
+        }, ensure_ascii=False)
+
+    visual_description = _gen_gallery_visual_description(pid)
+    if visual_description:
+        try:
+            gallery_store.set_meaning(pid, visual_description=visual_description)
+        except Exception:
+            visual_description = None
+    meaning = _gen_photo_meaning(
+        note=note, first_impression=first_impression,
+        visual_description=visual_description or '', source_msg_id=source_msg_id,
+    )
+    summary = ''
     if meaning and meaning.get('summary'):
         try:
-            import memory_tool, gallery_store
+            import memory_tool
             tag_str = ('gallery:%s ' % pid) + ' '.join(meaning.get('keywords', []))
             if meaning.get('emotion'):
                 tag_str += ' ' + meaning['emotion']
@@ -2741,23 +2815,26 @@ def _save_to_gallery(attachment, note='', album=None):
                 pid, summary=meaning['summary'], emotion=meaning.get('emotion', ''),
                 keywords=meaning.get('keywords', []), importance=meaning.get('importance', 50),
                 mem_id=mem_id)
-            line = '💭 ' + meaning['summary']
-            if meaning.get('emotion'):
-                line += '（%s）' % meaning['emotion']
-            out.append(line)
+            summary = meaning['summary']
         except Exception:
             pass
-    return '\n'.join(out)
+    return json.dumps({
+        'ok': True, 'pid': pid, 'gallery_ref': 'gallery://%s' % pid,
+        'reused_existing': False, 'source_msg_id': source_msg_id,
+        'visual_description_available': bool(visual_description),
+        'first_impression_saved': bool(first_impression), 'summary_available': bool(summary),
+    }, ensure_ascii=False)
 
 
-def _recall_photo(keyword=None, emotion=None):
-    """第3步·主动回忆：从相册里"突然想起"一张画面，返回它的记忆 + 内联标记 [[gallery:pid]]。
-    把标记放进要发的消息里，照片就会跟着一起发出去。挑完标记为已发（避免反复发同一张），
-    并给关联的统一记忆加热。"""
+def _recall_photo(keyword=None, emotion=None, pid=None, inspect_question=None):
+    """Return lossy Gallery memory, optionally re-reading the permanent original."""
     import gallery_store
-    p = gallery_store.pick_for_recall(keyword=keyword, emotion=emotion)
+    p = gallery_store.get(str(pid).strip()) if pid else gallery_store.pick_for_recall(
+        keyword=keyword, emotion=emotion,
+    )
     if not p:
         return '相册里还没有值得突然想起的画面——先收藏几张带记忆的吧。'
+    # Keep the current pre-delivery marker behavior. Terminal-success accounting is a follow-up.
     gallery_store.mark_sent(p['pid'])
     if p.get('mem_id'):
         try:
@@ -2769,14 +2846,19 @@ def _recall_photo(keyword=None, emotion=None):
         kws = json.loads(p.get('keywords') or '[]')
     except Exception:
         kws = []
-    lines = ['想起了这张：', '💭 ' + (p.get('summary') or '')]
-    if p.get('emotion'):
-        lines.append('当时的情绪：' + p['emotion'])
-    if kws:
-        lines.append('关键词：' + ' '.join(kws))
-    lines.append('')
-    lines.append('若要把这张画面一起发给哈娅，在你要发的消息里放上标记 [[gallery:%s]] 即可。' % p['pid'])
-    return '\n'.join(lines)
+    question = str(inspect_question or '').strip()[:500]
+    inspected = _gen_gallery_visual_description(p['pid'], question=question) if question else None
+    return json.dumps({
+        'pid': p['pid'], 'summary': p.get('summary') or '',
+        'visual_description': p.get('visual_description') or '',
+        'first_impression': p.get('first_impression') or '',
+        'emotion': p.get('emotion') or '', 'keywords': kws,
+        'source_msg_id': p.get('source_msg_id'),
+        'semantic_memory_only': not bool(inspected),
+        'original_reloaded': bool(inspected),
+        'inspection_answer': inspected or None,
+        'delivery_marker': '[[gallery:%s]]' % p['pid'],
+    }, ensure_ascii=False)
 
 
 def _issue_command(title, countdown_seconds=None, caller='fyodor'):
@@ -3252,7 +3334,8 @@ def run_tool(name, args, caller='fyodor_cc'):
                                   args.get('paragraph_idx', 0), args.get('kind'),
                                   args.get('book_id'), args.get('chunk_id'))
         if name == 'recall_photo':
-            return _recall_photo(args.get('keyword'), args.get('emotion'))
+            return _recall_photo(args.get('keyword'), args.get('emotion'),
+                                 args.get('pid'), args.get('inspect_question'))
         if name == 'issue_command':
             return _issue_command(args.get('title', ''), args.get('countdown_seconds'), caller=caller)
         if name == 'browse_github':
@@ -3288,7 +3371,10 @@ def run_tool(name, args, caller='fyodor_cc'):
         if name == 'shop_login_status':
             return _shop_login_status()
         if name == 'save_to_gallery':
-            return _save_to_gallery(args.get('attachment', ''), args.get('note', ''), args.get('album'))
+            return _save_to_gallery(
+                args.get('attachment', ''), args.get('note', ''), args.get('album'),
+                args.get('image_index'), args.get('first_impression', ''),
+            )
         if name == 'collect_chat_moment':
             import moments_turn
             try:
@@ -7782,6 +7868,7 @@ def chat_stream():
             if _get_provider() != 'claude_code':
                 _api_turn_lease = _issue_api_chat_turn_lease(_turn_data.get('turn_key'))
             _tool_ctx.conversation_id = _conv
+            _tool_ctx.user_message_id = _turn_data.get('user_message_id')
             for _jev in _workspace_job_sse_payloads():
                 yield 'data: ' + json.dumps(_jev, ensure_ascii=False) + SSE_END
             # 持有锁，必须在 finally 里释放（含 GeneratorExit / 客户端断开场景）
@@ -8247,12 +8334,18 @@ def chat_stream():
             _fail_staged_rewrite(_turn_data, str(e))
             yield 'data: ' + json.dumps({'t': 'err', 'd': str(e)}) + SSE_END
         finally:
-            release_turn(
-                conversation_id=_conv,
-                memories_db_path=DB_PATH,
-                turn_key=_turn_data.get('turn_key'),
-                persisted=_persisted[0],
-            )
+            try:
+                release_turn(
+                    conversation_id=_conv,
+                    memories_db_path=DB_PATH,
+                    turn_key=_turn_data.get('turn_key'),
+                    persisted=_persisted[0],
+                )
+            finally:
+                try:
+                    del _tool_ctx.user_message_id
+                except AttributeError:
+                    pass
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
@@ -8430,11 +8523,12 @@ WAKE_TOOLS = [
     },
     {
         'name': 'save_to_gallery',
-        'description': '把一张截图永久收藏进相册（截图默认最近30张/7天后自动删）。醒来时若拍了张值得留的图，用这个存下来。传 attachment（attachment://id），可选 note、album。',
+        'description': '把值得留下的截图永久收藏。Wake 侧传 attachment://id；若模型已提供 first_impression，保存它当时的主观印象，不要把它当永久事实。',
         'input_schema': {'type': 'object', 'properties': {
             'attachment': {'type': 'string', 'description': 'attachment://id'},
             'note': {'type': 'string'},
             'album': {'type': 'string'},
+            'first_impression': {'type': 'string', 'maxLength': 800},
         }, 'required': ['attachment']},
     },
     {
@@ -8443,6 +8537,8 @@ WAKE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {
             'keyword': {'type': 'string'},
             'emotion': {'type': 'string'},
+            'pid': {'type': 'string'},
+            'inspect_question': {'type': 'string', 'maxLength': 500},
         }},
     },
     {

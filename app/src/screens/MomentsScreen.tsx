@@ -932,6 +932,11 @@ export function MomentsScreen() {
   const openGalleryFromFeed = useCallback((entry: FeedEntry) => {
     const media = entry.media[0];
     if (!media) return;
+    const savedPhoto = data?.gallery.find((photo) => photo.pid === media.pid);
+    if (savedPhoto) {
+      setLightbox(savedPhoto);
+      return;
+    }
     setLightbox({
       pid: media.pid,
       note: media.note,
@@ -941,9 +946,11 @@ export function MomentsScreen() {
       time: entry.createdAt || '',
       summary: media.note,
       emotion: '',
+      visualDescription: '',
+      firstImpression: '',
       keywords: entry.tags,
     });
-  }, []);
+  }, [data?.gallery]);
 
   useEffect(() => {
     if (moodSel) {
@@ -1224,7 +1231,7 @@ export function MomentsScreen() {
                   <div style={{ columns: 2, columnGap: 10 }}>
                     {(data?.gallery || []).map((g) => (
                       <div key={g.pid} onClick={() => setLightbox(g)} style={{ cursor: 'zoom-in', breakInside: 'avoid', marginBottom: 10, borderRadius: 16, overflow: 'hidden', background: 'var(--card)', boxShadow: '0 8px 20px var(--shadow)' }}>
-                        <img src={galleryPhotoUrl(g.pid)} alt={g.note} style={{ width: '100%', display: 'block', objectFit: 'cover' }} loading="lazy" />
+                        <img src={galleryPhotoUrl(g.pid)} alt={g.note || g.visualDescription || '相册照片'} style={{ width: '100%', display: 'block', objectFit: 'cover' }} loading="lazy" />
                         <div className="hstack hstack-6" style={{ padding: '9px 12px' }}>
                           <span style={{ fontSize: 11, color: 'var(--faint)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{g.note || g.summary || '未命名'}</span>
                           <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10, color: 'var(--ghost)', flexShrink: 0 }}>{g.time.slice(5, 10)}</span>
@@ -1584,14 +1591,40 @@ export function MomentsScreen() {
 
       {/* ── lightbox ── */}
       {lightbox && (
-        <div onClick={() => setLightbox(null)} className="vstack vstack-16 c78-fill-fixed" style={{ zIndex: 80, background: 'rgba(24,16,14,0.88)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, cursor: 'zoom-out' }}>
-          <img src={galleryPhotoUrl(lightbox.pid)} alt={lightbox.note} style={{ width: 'min(560px,92vw)', maxHeight: '70vh', objectFit: 'contain', borderRadius: 20, boxShadow: '0 40px 100px rgba(0,0,0,0.5)' }} />
-          <div className="vstack vstack-4" style={{ alignItems: 'center' }}>
-            <span style={{ fontSize: 13, color: 'rgba(247,237,234,0.9)', letterSpacing: 1 }}>{lightbox.note || lightbox.summary || '未命名'}</span>
-            <span style={{ fontSize: 11, color: 'rgba(247,237,234,0.5)' }}>
-              <span style={{ fontFamily: FONT_DISPLAY }}>{lightbox.time}</span>
-              <span style={{ fontFamily: FONT_CN }}> · 点击任意处关闭</span>
-            </span>
+        <div onClick={() => setLightbox(null)} className="vstack vstack-16 c78-fill-fixed" style={{ zIndex: 80, background: 'rgba(24,16,14,0.88)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 16, cursor: 'zoom-out' }}>
+          <div onClick={(e) => e.stopPropagation()} className="vstack vstack-12" style={{ width: '100%', maxWidth: 560, maxHeight: '92vh', overflowY: 'auto', background: 'var(--card)', color: 'var(--ink)', borderRadius: 20, padding: 14, boxShadow: '0 40px 100px rgba(0,0,0,0.5)', cursor: 'default' }}>
+            <img src={galleryPhotoUrl(lightbox.pid)} alt={lightbox.note || lightbox.visualDescription || '相册照片'} style={{ width: '100%', maxWidth: 560, maxHeight: '58vh', objectFit: 'contain', borderRadius: 14, background: 'var(--card2)' }} />
+            {lightbox.note && (
+              <div style={{ borderBottom: '1px solid var(--line)', padding: '2px 2px 10px' }}>
+                <div style={{ fontSize: 10, color: 'var(--faint)', letterSpacing: 1, marginBottom: 4 }}>备注</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ink)' }}>{lightbox.note}</div>
+              </div>
+            )}
+            {lightbox.visualDescription && (
+              <div style={{ borderBottom: '1px solid var(--line)', padding: '2px 2px 10px' }}>
+                <div style={{ fontSize: 10, color: 'var(--faint)', letterSpacing: 1, marginBottom: 4 }}>画面</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ink2)', whiteSpace: 'pre-wrap' }}>{lightbox.visualDescription}</div>
+              </div>
+            )}
+            {lightbox.firstImpression && (
+              <div style={{ borderBottom: '1px solid var(--line)', padding: '2px 2px 10px' }}>
+                <div style={{ fontSize: 10, color: 'var(--rose)', letterSpacing: 1, marginBottom: 4 }}>那时</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>{lightbox.firstImpression}</div>
+              </div>
+            )}
+            {lightbox.summary && (
+              <div style={{ borderBottom: '1px solid var(--line)', padding: '2px 2px 10px' }}>
+                <div style={{ fontSize: 10, color: 'var(--faint)', letterSpacing: 1, marginBottom: 4 }}>记得</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--ink2)', whiteSpace: 'pre-wrap' }}>{lightbox.summary}</div>
+              </div>
+            )}
+            {lightbox.time && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 2px 0', fontSize: 11, color: 'var(--faint)' }}>
+                <span>收藏时间</span>
+                <span style={{ fontFamily: FONT_DISPLAY }}>{lightbox.time}</span>
+              </div>
+            )}
+            <button type="button" onClick={() => setLightbox(null)} style={{ alignSelf: 'flex-end', border: '1px solid var(--line)', borderRadius: 999, padding: '6px 12px', background: 'var(--card2)', color: 'var(--ink2)', fontSize: 11 }}>关闭</button>
           </div>
         </div>
       )}

@@ -4124,6 +4124,8 @@ def gallery_photos_list():
             'created_at': p['created_at'], 'saved_at': p['saved_at'],
             'source_type': p['source_type'],
             'summary': p.get('summary') or '', 'emotion': p.get('emotion') or '',
+            'visual_description': p.get('visual_description') or '',
+            'first_impression': p.get('first_impression') or '',
             'keywords': _kw(p), 'importance': p.get('importance') or 0} for p in photos]
     return jsonify({'photos': out})
 
