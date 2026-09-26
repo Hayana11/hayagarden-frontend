@@ -18,3 +18,10 @@ aed5b2e11177b9d3c56c8e2255f2a2d2113be149
 38123fceccb5298ab394bfc9df6f37f248620734
 # Production-only Codex effort overlay recovered 2026-09-25; blobs match open PR #498, not reintroduced
 55ebaf0707ddf5ccdb0ac498351dbf8fd1df34c0
+# 2026-09-26 production dirty source recovery, acknowledged 2026-09-27.
+# Current VPS HEAD: 98de3a7f0d71e16954405307ea0cdf914b13e347 on recovery/prod-dirty-before-gallery-r1-20260926-vps.
+# Tree equals previously audited 69ce6702d3386e0cd7421a0818541e3d43adef52 (dc69626ed9295f6aaad7935f285caf5abdde6171).
+# 10 recovered paths match Gallery R1 target main; app.py equals pre-merge base c9864d8.
+# The only target-main difference among those paths is PR #500's Gallery API fields.
+# Do not merge or cherry-pick this VPS recovery branch.
+98de3a7f0d71e16954405307ea0cdf914b13e347
