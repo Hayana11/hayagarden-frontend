@@ -329,6 +329,54 @@ def _usage_diagnostics(result: Any, job: ContinuityGenerationJob, binding: dict[
     return normalized
 
 
+def _default_generate_with_native_fork(
+    conn: Any,
+    job: ContinuityGenerationJob,
+    candidate: Any,
+    snapshot: Any,
+    *,
+    prompt_body: str,
+    cwd: str | None,
+) -> Callable[[Any, Any], Any]:
+    """Return a ``generate_fn`` that tries R2 native fork, else the R3 one-shot.
+
+    Native fork is only ever attempted for the caller's own default execution
+    path — an explicitly injected ``generate_fn`` (as every existing test and
+    the producer's ``counted_generate`` wrapper use) bypasses this entirely
+    and is never touched by it (R3: different model, or anything not clearly
+    eligible, is the existing one-shot running unmodified, not a downgrade).
+    """
+
+    def _generate(request: Any, authority: Any) -> Any:
+        try:
+            from continuity.native_fork_eligibility import resolve_continuity_native_fork
+
+            resolved_cwd = cwd
+            if resolved_cwd is None:
+                from chat.cc_runtime import repo_root
+                resolved_cwd = str(repo_root())
+            plan = resolve_continuity_native_fork(
+                conn, job=job, candidate=candidate, snapshot=snapshot, cwd=resolved_cwd,
+            )
+        except Exception:
+            plan = None
+        if plan is not None and plan.eligible:
+            try:
+                from continuity.native_fork_executor import execute_continuity_native_fork
+
+                return execute_continuity_native_fork(
+                    plan, prompt_body=prompt_body, authority=authority, cwd=resolved_cwd,
+                )
+            except Exception:
+                # Native fork is a cache optimization only; any failure here
+                # falls back to the existing isolated one-shot, never to a
+                # failed generation job.
+                pass
+        return _default_generate(request, authority)
+
+    return _generate
+
+
 def generate_continuity_chunk(
     conn: Any,
     generation_job_id: str,
@@ -339,6 +387,7 @@ def generate_continuity_chunk(
     request_factory: Callable[..., Any] | None = None,
     persona_reader: Callable[[], str] | None = None,
     persona_text: str | None = None,
+    cwd: str | None = None,
     now: str | None = None,
 ) -> ContinuityChunk:
     """Generate one candidate-level shadow chunk with a frozen authority."""
@@ -399,18 +448,21 @@ def generate_continuity_chunk(
             raise ContinuityStoreConflict('ready generation job has no ready chunk')
         return existing
 
+    frozen_prompt_body = str(binding['prompt_body']) if binding is not None else ACCEPTED_PROMPT
     try:
         request = _request(
             source,
             request_factory=request_factory,
             persona_reader=persona_reader,
             persona_text=(str(binding['persona_body']) if binding is not None else persona_text),
-            prompt_body=(str(binding['prompt_body']) if binding is not None else None),
+            prompt_body=(frozen_prompt_body if binding is not None else None),
         )
     except PersonaContractError as exc:
         mark_generation_failed(conn, generation_job_id, exc.error_code, now=now)
         raise
-    generate = generate_fn or _default_generate
+    generate = generate_fn or _default_generate_with_native_fork(
+        conn, job, candidate, snapshot, prompt_body=frozen_prompt_body, cwd=cwd,
+    )
     try:
         result = generate(request, authority)
     except Exception:
