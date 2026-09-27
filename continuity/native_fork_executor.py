@@ -24,12 +24,13 @@ inventing new ones:
     ``BackgroundGenerationResult`` is byte-for-byte the same shape
     ``continuity/chunk_generation.py`` already validates and persists.
 
-Fail-closed and side-effect-free on failure: every error path raises
-``NativeForkGenerationError`` and touches nothing durable. The caller
-(``continuity/chunk_generation.py``) always has an existing isolated one-shot
-path to fall back to — this module never marks a generation job failed, never
-writes a Chunk, and never mutates sealing or settings authority. The child
-session is used once and then abandoned; nothing here deletes or reuses it.
+Failures raise ``NativeForkGenerationError`` and touch nothing durable. Its
+``provider_started`` flag splits them: before the child's provider process is
+launched the caller may run the existing isolated one-shot instead; once it
+is launched a model request may have consumed tokens, so the caller must fail
+the job rather than issue a second model call. This module never marks a job,
+never writes a Chunk, and never mutates sealing or settings authority. The
+child session is used once and then abandoned.
 """
 from __future__ import annotations
 
@@ -52,7 +53,20 @@ NATIVE_FORK_EXECUTOR = 'claude_code_continuity_native_fork'
 
 
 class NativeForkGenerationError(RuntimeError):
-    """Native fork could not complete; caller must fall back to one-shot."""
+    """Native fork could not complete.
+
+    ``provider_started`` is False only when no provider process was launched,
+    so the caller may safely run the isolated one-shot instead. Once it is
+    True a model request may already have consumed tokens: the caller must
+    fail the job and must not issue a second model call.
+    """
+
+    def __init__(self, reason: str, *, provider_started: bool = False):
+        super().__init__(reason)
+        self.reason = reason
+        self.provider_started = bool(provider_started)
+        stage = 'post_provider' if self.provider_started else 'pre_provider'
+        self.error_code = 'native_fork_%s:%s' % (stage, reason)
 
 
 def _redact(value: str) -> str:
@@ -94,6 +108,7 @@ def execute_continuity_native_fork(
     fork_session_fn: Optional[Callable[..., Any]] = None,
     popen_factory: Optional[Callable[..., Any]] = None,
     token_getter: Optional[Callable[[], str]] = None,
+    on_provider_start: Optional[Callable[[], None]] = None,
 ) -> BackgroundGenerationResult:
     """Fork the parent session and run one scoped resume turn on the child."""
     if not plan.eligible:
@@ -199,20 +214,29 @@ def execute_continuity_native_fork(
         env=env,
     ) + model_args
 
-    run = run_subprocess_with_timeout(
-        cmd=cmd,
-        cwd=str(root),
-        env=env,
-        stdin_payload=stdin_payload,
-        timeout_seconds=float(timeout_sec),
-        popen_factory=popen_factory,
-    )
+    # From here on a model request may be in flight: every failure is
+    # post-provider and must never be followed by a second model call.
+    if on_provider_start is not None:
+        on_provider_start()
+    try:
+        run = run_subprocess_with_timeout(
+            cmd=cmd,
+            cwd=str(root),
+            env=env,
+            stdin_payload=stdin_payload,
+            timeout_seconds=float(timeout_sec),
+            popen_factory=popen_factory,
+        )
+    except Exception as exc:
+        raise NativeForkGenerationError(
+            'spawn_error:%s' % type(exc).__name__, provider_started=True,
+        ) from exc
     if not run.process_started:
-        raise NativeForkGenerationError('spawn_failed')
+        raise NativeForkGenerationError('spawn_failed', provider_started=True)
     if run.timed_out:
-        raise NativeForkGenerationError('timeout')
+        raise NativeForkGenerationError('timeout', provider_started=True)
     if run.exit_code != 0:
-        raise NativeForkGenerationError('exit_%s' % run.exit_code)
+        raise NativeForkGenerationError('exit_%s' % run.exit_code, provider_started=True)
 
     # Parent must still be untouched after the whole generation window.
     final_parent_hash = before_hash
@@ -221,21 +245,24 @@ def execute_continuity_native_fork(
     except OSError:
         pass
     if final_parent_hash != before_hash:
-        raise NativeForkGenerationError('parent_mutated')
+        raise NativeForkGenerationError('parent_mutated', provider_started=True)
 
     terminal = _cc_terminal_from_stream(''.join(run.stdout_lines))
     if not terminal.result_seen:
-        raise NativeForkGenerationError('result_missing')
+        raise NativeForkGenerationError('result_missing', provider_started=True)
     if terminal.result_subtype != 'success' or terminal.result_is_error is not False:
-        raise NativeForkGenerationError('result_not_success:%s' % (terminal.result_subtype or '<missing>'))
+        raise NativeForkGenerationError(
+            'result_not_success:%s' % (terminal.result_subtype or '<missing>'),
+            provider_started=True,
+        )
     if expected_model and not terminal.init_model:
-        raise NativeForkGenerationError('model_unattested')
+        raise NativeForkGenerationError('model_unattested', provider_started=True)
     if expected_model and terminal.init_model != expected_model:
-        raise NativeForkGenerationError('model_mismatch')
+        raise NativeForkGenerationError('model_mismatch', provider_started=True)
 
     text = (terminal.result_text or terminal.delta_text).strip()
     if not text:
-        raise NativeForkGenerationError('empty_output')
+        raise NativeForkGenerationError('empty_output', provider_started=True)
 
     usage = dict(terminal.usage or {})
     if terminal.init_model:

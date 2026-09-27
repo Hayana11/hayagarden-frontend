@@ -476,14 +476,9 @@ def run_continuity_producer(
             rows_provider = _source_rows_provider(source_db_path, snapshot)
             call_count = 0
 
-            def counted_generate(request: Any, authority: Any) -> Any:
+            def count_provider_call() -> None:
                 nonlocal call_count
                 call_count += 1
-                if generate_fn is None:
-                    from continuity.chunk_generation import _default_generate
-
-                    return _default_generate(request, authority)
-                return generate_fn(request, authority)
 
             try:
                 chunk = generate_continuity_chunk(
@@ -491,10 +486,12 @@ def run_continuity_producer(
                     job.generation_job_id,
                     rows_provider=rows_provider,
                     capture_authority=capture_authority,
-                    generate_fn=counted_generate,
+                    generate_fn=generate_fn,
                     request_factory=request_factory,
                     persona_reader=persona_reader,
                     persona_text=persona_text,
+                    source_db_path=str(source_db_path),
+                    on_provider_call=count_provider_call,
                     now=stamp,
                 )
             except Exception as exc:

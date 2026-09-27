@@ -250,5 +250,131 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
             )
 
 
+class ProviderStageClassificationTest(ContinuityNativeForkExecutorTest):
+    """Pre-provider failures may fall back; post-provider failures never may."""
+
+    def _execute(self, *, fork_fn=None, token='tok', runtime_error=None, child_path='default', **run_kwargs):
+        starts = []
+        patch, _ = self._run_subprocess_patch(**run_kwargs)
+        with ExitStack() as stack:
+            if runtime_error is None:
+                stack.enter_context(self._runtime())
+            else:
+                stack.enter_context(mock.patch(
+                    'chat.cc_runtime.require_managed_claude_runtime', side_effect=runtime_error,
+                ))
+            stack.enter_context(patch)
+            stack.enter_context(mock.patch(
+                'continuity.native_fork_executor.session_jsonl_path',
+                return_value=self.child_path if child_path == 'default' else child_path,
+            ))
+            try:
+                execute_continuity_native_fork(
+                    self.plan, prompt_body='SUMMARIZE', authority=self.authority, cwd=self.cwd,
+                    fork_session_fn=fork_fn or self._fork_fn(), token_getter=lambda: token,
+                    on_provider_start=lambda: starts.append(1),
+                )
+            except NativeForkGenerationError as exc:
+                return exc, len(starts)
+        self.fail('expected NativeForkGenerationError')
+
+    def assertPre(self, exc, starts):
+        self.assertFalse(exc.provider_started, exc.error_code)
+        self.assertTrue(exc.error_code.startswith('native_fork_pre_provider:'))
+        self.assertEqual(starts, 0)
+
+    def assertPost(self, exc, starts):
+        self.assertTrue(exc.provider_started, exc.error_code)
+        self.assertTrue(exc.error_code.startswith('native_fork_post_provider:'))
+        self.assertEqual(starts, 1)
+
+    def test_fork_failure_is_pre_provider(self):
+        self.assertPre(*self._execute(fork_fn=self._fork_fn(raise_error=RuntimeError('x'))))
+
+    def test_token_missing_is_pre_provider(self):
+        self.assertPre(*self._execute(token=''))
+
+    def test_runtime_unavailable_is_pre_provider(self):
+        self.assertPre(*self._execute(runtime_error=RuntimeError('no cli')))
+
+    def test_child_transcript_missing_is_pre_provider(self):
+        self.assertPre(*self._execute(child_path=None))
+
+    def test_timeout_is_post_provider(self):
+        self.assertPost(*self._execute(timed_out=True))
+
+    def test_nonzero_exit_is_post_provider(self):
+        self.assertPost(*self._execute(exit_code=2))
+
+    def test_result_missing_is_post_provider(self):
+        stream = [json.dumps({'type': 'system', 'subtype': 'init', 'model': 'm'}) + '\n']
+        self.assertPost(*self._execute(stdout=stream))
+
+    def test_result_not_success_is_post_provider(self):
+        stream = [json.dumps({'type': 'result', 'subtype': 'error_max_turns', 'is_error': True}) + '\n']
+        self.assertPost(*self._execute(stdout=stream))
+
+    def test_model_unattested_is_post_provider(self):
+        self.authority = GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5')
+        stream = [json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'x'}) + '\n']
+        self.assertPost(*self._execute(stdout=stream))
+
+    def test_model_mismatch_is_post_provider(self):
+        self.authority = GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5')
+        self.assertPost(*self._execute(stdout=_cc_stream(model='claude-sonnet-5')))
+
+    def test_empty_output_is_post_provider(self):
+        self.assertPost(*self._execute(stdout=_cc_stream(text='   ')))
+
+    def test_parent_mutated_during_generation_is_post_provider(self):
+        def mutating_run(**kwargs):
+            self.parent_path.write_bytes(b'{"type":"user"}\n{"type":"assistant"}\n')
+            return SubprocessRunResult(exit_code=0, stdout_lines=_cc_stream(), process_started=True)
+
+        starts = []
+        with self._runtime(), mock.patch(
+            'continuity.native_fork_executor.run_subprocess_with_timeout', side_effect=mutating_run,
+        ), mock.patch(
+            'continuity.native_fork_executor.session_jsonl_path', return_value=self.child_path,
+        ):
+            with self.assertRaises(NativeForkGenerationError) as ctx:
+                execute_continuity_native_fork(
+                    self.plan, prompt_body='SUMMARIZE', authority=self.authority, cwd=self.cwd,
+                    fork_session_fn=self._fork_fn(), token_getter=lambda: 'tok',
+                    on_provider_start=lambda: starts.append(1),
+                )
+        self.assertPost(ctx.exception, len(starts))
+        self.assertIn('parent_mutated', ctx.exception.error_code)
+
+    def test_spawn_exception_is_post_provider(self):
+        starts = []
+        with self._runtime(), mock.patch(
+            'continuity.native_fork_executor.run_subprocess_with_timeout',
+            side_effect=OSError('pipe'),
+        ), mock.patch(
+            'continuity.native_fork_executor.session_jsonl_path', return_value=self.child_path,
+        ):
+            with self.assertRaises(NativeForkGenerationError) as ctx:
+                execute_continuity_native_fork(
+                    self.plan, prompt_body='SUMMARIZE', authority=self.authority, cwd=self.cwd,
+                    fork_session_fn=self._fork_fn(), token_getter=lambda: 'tok',
+                    on_provider_start=lambda: starts.append(1),
+                )
+        self.assertPost(ctx.exception, len(starts))
+
+    def test_success_reports_exactly_one_provider_start(self):
+        starts = []
+        patch, _ = self._run_subprocess_patch()
+        with self._runtime(), patch, mock.patch(
+            'continuity.native_fork_executor.session_jsonl_path', return_value=self.child_path,
+        ):
+            execute_continuity_native_fork(
+                self.plan, prompt_body='SUMMARIZE', authority=self.authority, cwd=self.cwd,
+                fork_session_fn=self._fork_fn(), token_getter=lambda: 'tok',
+                on_provider_start=lambda: starts.append(1),
+            )
+        self.assertEqual(len(starts), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
