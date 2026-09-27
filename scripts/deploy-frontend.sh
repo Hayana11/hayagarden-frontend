@@ -71,6 +71,7 @@ dirty="$(git status --porcelain --untracked-files=all -- . \
   ':(exclude)artifacts/treegpt-cache-probe-baseline.json' \
   ':(exclude)artifacts/treegpt-cache-probe-live.json' \
   ':(exclude)attachments.db' ':(exclude)attachments/**' \
+  ':(exclude)gallery.db' ':(exclude)gallery/**' \
   ':(exclude)client_errors.log' ':(exclude)client_errors.log.[0-9]*' ':(exclude)static/uploads/**' \
   ':(exclude)memories.db-shm' ':(exclude)memories.db-wal' \
   ':(exclude)memories.db.bak*' \
@@ -150,6 +151,8 @@ snapshot_runtime() {
   mkdir -p "$runtime_backup/static" "$runtime_backup/app"
   [[ ! -f "$ROOT/attachments.db" ]] || cp -a "$ROOT/attachments.db" "$runtime_backup/"
   [[ ! -d "$ROOT/attachments" ]] || cp -a "$ROOT/attachments" "$runtime_backup/"
+  [[ ! -f "$ROOT/gallery.db" ]] || cp -a "$ROOT/gallery.db" "$runtime_backup/"
+  [[ ! -d "$ROOT/gallery" ]] || cp -a "$ROOT/gallery" "$runtime_backup/"
   [[ ! -f "$ROOT/client_errors.log" ]] || cp -a "$ROOT/client_errors.log" "$runtime_backup/"
   shopt -s nullglob
   for path in "$ROOT"/client_errors.log.[0-9]*; do
@@ -175,11 +178,11 @@ restore_dashboard() {
   [[ ! -d "$runtime_backup/app/dist" ]] || cp -a "$runtime_backup/app/dist" "$ROOT/app/dist"
 }
 clear_runtime_for_checkout() {
-  rm -f "$ROOT/attachments.db" "$ROOT/client_errors.log"
+  rm -f "$ROOT/attachments.db" "$ROOT/gallery.db" "$ROOT/client_errors.log"
   shopt -s nullglob
   for path in "$ROOT"/client_errors.log.[0-9]*; do rm -f "$path"; done
   shopt -u nullglob
-  rm -rf "$ROOT/attachments" "$ROOT/static/uploads"
+  rm -rf "$ROOT/attachments" "$ROOT/gallery" "$ROOT/static/uploads"
   find "$ROOT" -maxdepth 1 -type f -name 'memories.db.bak*' -delete
 }
 restore_runtime() {
@@ -187,6 +190,11 @@ restore_runtime() {
   if [[ -d "$runtime_backup/attachments" ]]; then
     mkdir -p "$ROOT/attachments"
     cp -a "$runtime_backup/attachments/." "$ROOT/attachments/"
+  fi
+  [[ ! -f "$runtime_backup/gallery.db" ]] || cp -a "$runtime_backup/gallery.db" "$ROOT/"
+  if [[ -d "$runtime_backup/gallery" ]]; then
+    mkdir -p "$ROOT/gallery"
+    cp -a "$runtime_backup/gallery/." "$ROOT/gallery/"
   fi
   [[ ! -f "$runtime_backup/client_errors.log" ]] || cp -a "$runtime_backup/client_errors.log" "$ROOT/"
   shopt -s nullglob
