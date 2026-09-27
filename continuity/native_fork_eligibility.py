@@ -226,11 +226,13 @@ def _transcript_evidence(
     if (
         not invalid_cwd
         and len(cwd_values) == 1
-        and boundary_cwd is not None
-        and latest_cwd is not None
-        and boundary_cwd == latest_cwd == next(iter(cwd_values))
+        and (boundary_cwd is not None or latest_cwd is not None)
+        and (boundary_cwd is None or boundary_cwd == next(iter(cwd_values)))
+        and (latest_cwd is None or latest_cwd == next(iter(cwd_values)))
     ):
         transcript_cwd = boundary_cwd
+        if transcript_cwd is None:
+            transcript_cwd = latest_cwd
     return boundary_model, latest, transcript_cwd
 
 
