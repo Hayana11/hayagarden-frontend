@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from flask import Blueprint, jsonify, request
+from moments_auth import OwnerAuthError, require_owner
 
 from continuity.read_surface import get_block_detail, get_current, list_blocks, open_read_only
 
@@ -214,6 +215,15 @@ def create_context_compression_blueprint(
     def continuity_settings():
         if request.method not in ('GET', 'HEAD', 'POST'):
             return _method_not_allowed('GET, HEAD, POST')
+        if request.method == 'POST':
+            try:
+                require_owner(request)
+            except OwnerAuthError as exc:
+                response = jsonify({'ok': False, 'error': exc.message})
+                response.status_code = exc.status_code
+                if exc.status_code == 401:
+                    response.headers['WWW-Authenticate'] = 'Bearer'
+                return _no_store(response)
         if not _settings_tables_ready(db_path):
             return _json_error('not_found', 404)
         if request.method in ('GET', 'HEAD'):
