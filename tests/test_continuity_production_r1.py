@@ -506,6 +506,7 @@ class ContinuityProductionR1Tests(unittest.TestCase):
                 capture_authority=lambda: SimpleNamespace(provider=AUTHORITY[0], model_identity=AUTHORITY[1]),
                 generate_fn=lambda req, auth: fake_result,
                 request_factory=lambda **kw: SimpleNamespace(**kw),
+                persona_text=PERSONA,
             )
         self.assertIsNone(job.settings_revision_id)
         self.assertIsNone(chunk.settings_revision_id)
