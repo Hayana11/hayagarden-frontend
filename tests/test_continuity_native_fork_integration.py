@@ -299,8 +299,10 @@ class ProductionProducerEntryTest(unittest.TestCase):
         from tools.cc_jsonl_usage import session_jsonl_path
 
         self.cwd = str(repo_root())
-        self.parent_path = session_jsonl_path(self.cwd, self.PARENT)
-        self.child_path = session_jsonl_path(self.cwd, self.CHILD)
+        self.parent_cwd = str(root / 'parent-project')
+        Path(self.parent_cwd).mkdir()
+        self.parent_path = session_jsonl_path(self.parent_cwd, self.PARENT)
+        self.child_path = session_jsonl_path(self.parent_cwd, self.CHILD)
         self._write_source()
 
     def _write_source(self):
@@ -352,18 +354,24 @@ class ProductionProducerEntryTest(unittest.TestCase):
         event = {
             'type': 'assistant', 'uuid': 'ev-last', 'requestId': 'req-1',
             'timestamp': stamp.isoformat().replace('+00:00', 'Z'),
+            'cwd': self.parent_cwd,
             'message': {'model': self.parent_model, 'usage': {'input_tokens': 1, 'output_tokens': 1}},
         }
         self.parent_path.parent.mkdir(parents=True, exist_ok=True)
-        self.parent_path.write_text(json.dumps({'type': 'user', 'uuid': 'u'}) + '\n' + json.dumps(event) + '\n')
+        self.parent_path.write_text(
+            json.dumps({'type': 'user', 'uuid': 'u', 'cwd': self.parent_cwd})
+            + '\n' + json.dumps(event) + '\n'
+        )
 
     def _fake_fork(self, session_id, *, directory, up_to_message_id, title):
         assert session_id == self.PARENT and up_to_message_id == 'ev-last'
+        self.fork_directory = directory
         self.child_path.write_text(self.parent_path.read_text())
         return SimpleNamespace(session_id=self.CHILD)
 
     def _fake_subprocess(self, **kwargs):
         self.subprocess_calls += 1
+        self.subprocess_cwd = kwargs['cwd']
         if self.run_result is not None:
             return self.run_result
         lines = [
@@ -415,6 +423,8 @@ class ProductionProducerEntryTest(unittest.TestCase):
         self.assertEqual(self.oneshot_calls, 0)
         self.assertEqual(result.model_call_count, 1)
         self.assertEqual(self._chunk(result).actual_executor, NATIVE_FORK_EXECUTOR)
+        self.assertEqual(self.fork_directory, self.parent_cwd)
+        self.assertEqual(self.subprocess_cwd, self.parent_cwd)
         self.assertEqual(self.parent_path.read_bytes(), before)
 
     def test_default_producer_different_compression_model_uses_oneshot(self):
