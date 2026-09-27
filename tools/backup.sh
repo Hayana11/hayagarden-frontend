@@ -15,12 +15,16 @@ sqlite3 /opt/frontend/memories.db ".backup '$TMP/memories.db'"
 if [[ -f /opt/frontend/attachments.db ]]; then
   sqlite3 /opt/frontend/attachments.db ".backup '$TMP/attachments.db'"
 fi
+if [[ -f /opt/frontend/gallery.db ]]; then
+  sqlite3 /opt/frontend/gallery.db ".backup '$TMP/gallery.db'"
+fi
 
 cp /opt/frontend/.env            "$TMP/" 2>/dev/null || true
 cp /opt/frontend/.mijia_auth     "$TMP/" 2>/dev/null || true
 cp -r /opt/frontend/prompts      "$TMP/prompts"      2>/dev/null || true
 cp -r /opt/frontend/static/uploads "$TMP/uploads"    2>/dev/null || true
 cp -r /opt/frontend/attachments    "$TMP/attachments" 2>/dev/null || true
+cp -r /opt/frontend/gallery        "$TMP/gallery"     2>/dev/null || true
 cp /opt/frontend/client_errors.log "$TMP/"            2>/dev/null || true
 cp -r /opt/co-reading/data       "$TMP/co-reading-data" 2>/dev/null || true
 

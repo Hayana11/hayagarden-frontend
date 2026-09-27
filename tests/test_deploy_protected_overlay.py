@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ HELPER = ROOT / "scripts" / "deploy-protected-overlay.sh"
 DEPLOY = ROOT / "scripts" / "deploy-frontend.sh"
 A = "artifacts/treegpt-cache-probe-baseline.json"
 B = "artifacts/treegpt-cache-probe-live.json"
+BACKUP = ROOT / "tools" / "backup.sh"
 
 
 class OverlayBehaviorTests(unittest.TestCase):
@@ -159,6 +161,70 @@ class OverlayBehaviorTests(unittest.TestCase):
         self.assertTrue(extra.exists())
         self.assertTrue((self.repo / A).exists())
         self.assertTrue((self.repo / B).exists())
+
+
+    def test_gallery_runtime_db_and_directory_snapshot_clear_restore(self):
+        db = self.repo / "gallery.db"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE gallery_items (id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute("INSERT INTO gallery_items(name) VALUES ('keep-me')")
+        conn.commit()
+        conn.close()
+        gallery = self.repo / "gallery"
+        gallery.mkdir()
+        (gallery / "asset.bin").write_bytes(b"gallery-runtime")
+        backup = self.repo / "runtime-backup"
+        command = f'''
+set -Eeuo pipefail
+ROOT={shlex.quote(str(self.repo))}
+runtime_backup={shlex.quote(str(backup))}
+fail() {{ printf '%s\\n' "$*" >&2; return 1; }}
+{self.runtime_functions()}
+mkdir -p "$runtime_backup/static" "$runtime_backup/app"
+snapshot_runtime
+clear_runtime_for_checkout
+test ! -e "$ROOT/gallery.db"
+test ! -e "$ROOT/gallery"
+restore_runtime
+test -f "$ROOT/gallery.db"
+test -f "$ROOT/gallery/asset.bin"
+'''
+        result = subprocess.run(["bash", "-c", command], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        conn = sqlite3.connect(db)
+        try:
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(conn.execute("SELECT name FROM gallery_items").fetchone()[0], "keep-me")
+        finally:
+            conn.close()
+        self.assertEqual((gallery / "asset.bin").read_bytes(), b"gallery-runtime")
+
+    def test_gallery_runtime_files_are_excluded_but_unrelated_untracked_is_not(self):
+        (self.repo / "gallery.db").write_bytes(b"runtime-db")
+        (self.repo / "gallery").mkdir()
+        (self.repo / "gallery" / "asset.bin").write_bytes(b"runtime-file")
+        (self.repo / "random-debug.txt").write_text("unexpected\\n", encoding="utf-8")
+        command = [
+            "git", "-C", str(self.repo), "status", "--porcelain", "--untracked-files=all", "--",
+            ".",
+            ":(exclude)" + A,
+            ":(exclude)" + B,
+            ":(exclude)attachments.db",
+            ":(exclude)attachments/**",
+            ":(exclude)gallery.db",
+            ":(exclude)gallery/**",
+            ":(exclude)client_errors.log",
+            ":(exclude)client_errors.log.[0-9]*",
+        ]
+        result = subprocess.run(command, text=True, capture_output=True, check=True)
+        self.assertNotIn("gallery.db", result.stdout)
+        self.assertNotIn("gallery/asset.bin", result.stdout)
+        self.assertIn("random-debug.txt", result.stdout)
+
+    def test_backup_covers_gallery_sqlite_and_directory_runtime(self):
+        source = BACKUP.read_text(encoding="utf-8")
+        self.assertIn('sqlite3 /opt/frontend/gallery.db ".backup', source)
+        self.assertIn("cp -r /opt/frontend/gallery", source)
 
     def test_rotated_runtime_logs_snapshot_clear_restore(self):
         backup = self.repo / "runtime-backup"

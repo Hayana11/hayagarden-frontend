@@ -32,6 +32,8 @@ memories.db-shm
 memories.db-wal
 attachments.db
 attachments/
+gallery.db
+gallery/
 client_errors.log
 static/uploads/
 memories.db.bak*
