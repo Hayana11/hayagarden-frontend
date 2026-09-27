@@ -23,6 +23,10 @@ from continuity.chunk_generation import (
 from continuity.contracts import SourceMember, SourceSnapshot
 from continuity.coverage import source_hash
 from continuity.sealing import DEFAULT_SEALING_POLICY, CandidateBlock, SealingPolicy, seal_snapshot
+from continuity.settings import (
+    SettingsAuthorityError, binding_for_revision, ensure_authority,
+    load_authority, promote_pending_after_seal, sealing_policy_for_revision,
+)
 from continuity.store import (
     ContinuityStoreError,
     ContinuityStoreConflict,
@@ -246,6 +250,7 @@ def _sealed_prefix(
     policy: SealingPolicy,
     created_at: str,
     current_local_day: str,
+    max_candidates: int | None = None,
 ) -> tuple[SourceSnapshot, tuple[CandidateBlock, ...]]:
     # Claimed members are removed before this pass; compact seq values so the
     # immutable snapshot still satisfies the existing exact-coverage contract.
@@ -264,6 +269,8 @@ def _sealed_prefix(
         include_end_of_snapshot=False,
         close_partial_before_day=current_local_day,
     )
+    if max_candidates is not None:
+        candidates = candidates[:max(0, int(max_candidates))]
     if not candidates:
         return provisional, ()
     sealed_seqs = {
@@ -285,6 +292,8 @@ def _sealed_prefix(
         include_end_of_snapshot=False,
         close_partial_before_day=current_local_day,
     )
+    if max_candidates is not None:
+        persisted_candidates = persisted_candidates[:max(0, int(max_candidates))]
     return snapshot, persisted_candidates
 
 
@@ -306,7 +315,7 @@ def run_continuity_producer(
     source_db_path: str | Path,
     continuity_store_path: str | Path,
     chat_id: str = 'default',
-    policy: SealingPolicy = DEFAULT_SEALING_POLICY,
+    policy: SealingPolicy | None = None,
     window_identity_reader: Callable[[sqlite3.Connection, str], Mapping[str, Any]] | None = None,
     capture_authority: Callable[[], Any] | None = None,
     generate_fn: Callable[[Any, Any], Any] | None = None,
@@ -336,6 +345,31 @@ def run_continuity_producer(
         store_conn = _read_write_connection(continuity_store_path)
         try:
             ensure_schema(store_conn)
+            settings_binding = None
+            settings_authority = None
+            if policy is None:
+                try:
+                    settings_authority = load_authority(store_conn)
+                except SettingsAuthorityError as exc:
+                    if str(exc) != 'settings_authority_missing':
+                        raise
+                    captured_provider = captured_model = None
+                    if capture_authority is not None:
+                        captured = capture_authority()
+                        captured_provider = str(getattr(captured, 'provider', '') or '')
+                        captured_model = str(getattr(captured, 'model_identity', '') or '')
+                    injected_persona = persona_text
+                    if injected_persona is None and persona_reader is not None:
+                        injected_persona = str(persona_reader())
+                    settings_authority = ensure_authority(
+                        store_conn, provider=captured_provider, model_identity=captured_model,
+                        persona_text=injected_persona,
+                    )
+                active_revision = settings_authority['active_revision']
+                settings_binding = binding_for_revision(store_conn, str(active_revision['revision_id']))
+                policy = sealing_policy_for_revision(active_revision)
+            else:
+                policy = policy or DEFAULT_SEALING_POLICY
             claimed = load_claimed_source_revisions(
                 store_conn,
                 source_refs=(member.source_ref for member in members),
@@ -346,6 +380,14 @@ def run_continuity_producer(
             )
             unclaimed_count = len(unclaimed)
             stamp = _stamp(now)
+            outstanding_jobs = load_generation_jobs(
+                store_conn,
+                statuses=('pending', 'failed', 'generating'),
+            )
+            candidate_slots = max(
+                0,
+                MAX_GENERATION_JOBS_PER_RUN - len(outstanding_jobs),
+            )
             if unclaimed:
                 snapshot, candidates = _sealed_prefix(
                     unclaimed,
@@ -353,6 +395,7 @@ def run_continuity_producer(
                     policy=policy,
                     created_at=stamp,
                     current_local_day=_local_calendar_day(now),
+                    max_candidates=candidate_slots,
                 )
                 if candidates:
                     sealed_count = len(candidates)
@@ -369,6 +412,7 @@ def run_continuity_producer(
                         now=stamp,
                         include_end_of_snapshot=False,
                         close_partial_before_day=_local_calendar_day(now),
+                        settings_binding=settings_binding,
                     )
                     for candidate in stored_candidates:
                         enqueue_generation_job(
@@ -377,10 +421,24 @@ def run_continuity_producer(
                             snapshot,
                             generator_policy_version=GENERATOR_POLICY_VERSION,
                             prompt_policy_version=PROMPT_POLICY_VERSION,
-                            measurement_semantics=MEASUREMENT_SEMANTICS,
+                            measurement_semantics=(str(settings_binding['measurement_semantics']) if settings_binding else MEASUREMENT_SEMANTICS),
+                            settings_binding=settings_binding,
                             now=stamp,
                         )
                     queued_count = len(stored_candidates)
+                    if settings_authority and settings_authority.get('pending_revision') and stored_candidates:
+                        pending = settings_authority['pending_revision']
+                        anchor = settings_authority.get('pending_anchor') or {}
+                        for candidate in stored_candidates:
+                            if (anchor.get('first_source_ref'), anchor.get('first_source_revision')) in set(zip(candidate.source_refs, candidate.source_revisions)):
+                                job = next((item for item in load_generation_jobs(store_conn) if item.candidate_id == candidate.candidate_id), None)
+                                if job is None:
+                                    raise ContinuityStoreError('sealed_candidate_generation_job_missing')
+                                promote_pending_after_seal(
+                                    store_conn, candidate_id=candidate.candidate_id,
+                                    generation_job_id=job.generation_job_id, now=stamp,
+                                )
+                                break
 
             orphaned = load_generation_jobs(store_conn, statuses=('generating',))
             if orphaned:
@@ -398,6 +456,8 @@ def run_continuity_producer(
                 store_conn,
                 statuses=('pending', 'failed'),
             )
+            if settings_binding is not None:
+                runnable = tuple(item for item in runnable if item.settings_revision_id)
             if not runnable:
                 return ContinuityProducerResult(
                     status='idle',
@@ -481,7 +541,7 @@ def run_continuity_producer(
             sealed_candidate_count=sealed_count,
             queued_generation_job_count=queued_count,
         )
-    except (OSError, sqlite3.Error, TypeError, ValueError, ContinuityStoreConflict, ContinuityStoreError) as exc:
+    except (OSError, sqlite3.Error, TypeError, ValueError, SettingsAuthorityError, ContinuityStoreConflict, ContinuityStoreError) as exc:
         return ContinuityProducerResult(
             status='failed',
             error_code=str(exc) or 'producer_error',

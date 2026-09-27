@@ -81,6 +81,11 @@ class CandidateBlock:
     oversize: bool
     close_reason: str
     source_revision: str
+    settings_revision_id: str | None = None
+    sealing_policy_version: str | None = None
+    target_logical_size: int | None = None
+    max_completed_turns: int | None = None
+    measurement_semantics: str | None = None
 
 
 def _member_day(member: SourceMember) -> str:

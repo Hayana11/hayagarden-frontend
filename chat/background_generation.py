@@ -1,7 +1,7 @@
 """Provider-neutral, one-shot background text generation.
 
 This module is an execution adapter only. Callers own context and output
-semantics; the frozen GenerationAuthoritySnapshot owns provider and model.
+semantics; the supplied frozen authority owns provider and model.
 """
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from chat.provider_router import GenerationAuthoritySnapshot
+if TYPE_CHECKING:
+    from chat.provider_router import GenerationAuthoritySnapshot
 
 
 @dataclass(frozen=True)

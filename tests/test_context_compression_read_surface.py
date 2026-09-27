@@ -439,7 +439,7 @@ class ContextCompressionReadSurfaceTests(unittest.TestCase):
         self.assertNotIn('enqueue_generation_job', read_surface)
         self.assertNotIn('preview_context_settings', read_surface)
         self.assertNotIn('continuity.producer', routes)
-        self.assertNotIn('/settings', routes)
+        self.assertIn("@blueprint.route('/settings'", routes)
         self.assertNotIn('from flask', read_surface)
         app_py = Path(ROOT, 'app.py').read_text(encoding='utf-8')
         self.assertIn('create_context_compression_blueprint', app_py)

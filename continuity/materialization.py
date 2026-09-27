@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from continuity.contracts import SourceMember, SourceSnapshot, candidate_source_revision
@@ -271,7 +271,9 @@ def materialize_candidate(
             raise SourceMaterializationError(f'source revision/content drift: {source_ref}')
         if current_member.source_kind != stored_member.source_kind:
             raise SourceMaterializationError(f'source kind drift: {source_ref}')
-        selected_members.append(current_member)
+        # Candidate seqs are local to the frozen snapshot; the current source
+        # view can include earlier claimed members before this candidate.
+        selected_members.append(replace(current_member, seq=int(stored_member.seq)))
 
         if stored_member.source_kind == 'completed_turn':
             rendered.append(_render_turn(source_ref, rows_by_id))
