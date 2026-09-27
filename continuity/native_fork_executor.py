@@ -118,6 +118,10 @@ def execute_continuity_native_fork(
     if provider != 'claude_code':
         raise NativeForkGenerationError('unsupported_provider')
 
+    parent_cwd = str(getattr(plan, 'parent_cwd', '') or '').strip()
+    if not parent_cwd or not Path(parent_cwd).is_absolute():
+        raise NativeForkGenerationError('parent_cwd_missing')
+
     parent_path = Path(plan.parent_transcript_path)
     try:
         before_hash = _sha256_file(parent_path)
@@ -133,7 +137,7 @@ def execute_continuity_native_fork(
     try:
         result = fork_fn(
             plan.parent_session_id,
-            directory=str(cwd),
+            directory=parent_cwd,
             up_to_message_id=plan.fork_event_uuid,
             title=None,
         )
@@ -158,7 +162,7 @@ def execute_continuity_native_fork(
     if after_fork_hash != before_hash:
         raise NativeForkGenerationError('parent_mutated')
 
-    child_path = session_jsonl_path(cwd, child_sid, claude_home=claude_home)
+    child_path = session_jsonl_path(parent_cwd, child_sid, claude_home=claude_home)
     if child_path is None or not child_path.is_file():
         raise NativeForkGenerationError('child_transcript_missing')
 
@@ -221,7 +225,7 @@ def execute_continuity_native_fork(
     try:
         run = run_subprocess_with_timeout(
             cmd=cmd,
-            cwd=str(root),
+            cwd=parent_cwd,
             env=env,
             stdin_payload=stdin_payload,
             timeout_seconds=float(timeout_sec),

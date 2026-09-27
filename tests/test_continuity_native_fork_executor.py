@@ -16,6 +16,7 @@ import os
 import tempfile
 import unittest
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -45,6 +46,8 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.cwd = self.tmp.name
+        self.parent_cwd = os.path.join(self.tmp.name, 'parent-project')
+        os.makedirs(self.parent_cwd, exist_ok=True)
         self.parent_path = Path(self.tmp.name) / 'parent.jsonl'
         self.parent_path.write_bytes(b'{"type":"user"}\n')
         self.child_path = Path(self.tmp.name) / 'child.jsonl'
@@ -59,6 +62,7 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
             fork_event_uuid='ev1',
             boundary_message_id=2,
             parent_transcript_path=str(self.parent_path),
+            parent_cwd=self.parent_cwd,
             scope_completed_turns=3,
             context_id=1,
             context_epoch=1,
@@ -68,6 +72,7 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
 
     def _fork_fn(self, *, child_sid='child-sid', mutate_parent=False, raise_error=None):
         def _fn(session_id, *, directory, up_to_message_id, title):
+            self.fork_directory = directory
             if raise_error is not None:
                 raise raise_error
             if mutate_parent:
@@ -101,6 +106,7 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
 
         def _fake_run_subprocess(*, cmd, cwd, env, stdin_payload, timeout_seconds, popen_factory=None):
             recorded['cmd'] = cmd
+            recorded['cwd'] = cwd
             recorded['stdin_payload'] = stdin_payload
             return SubprocessRunResult(
                 exit_code=kwargs.get('exit_code', 0),
@@ -138,6 +144,8 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.assertEqual(result.actual_executor, NATIVE_FORK_EXECUTOR)
         self.assertEqual(result.text, 'summary text')
         self.assertEqual(result.usage['cache_read_input_tokens'], 9000)
+        self.assertEqual(self.fork_directory, self.parent_cwd)
+        self.assertEqual(recorded['cwd'], self.parent_cwd)
         self.assertIn('continuity_native_fork_parent_session_hash', result.usage)
         self.assertEqual(result.usage['continuity_native_fork_scope_completed_turns'], 3)
 
@@ -158,10 +166,22 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index('--allowedTools') + 1], '')
         self.assertNotIn('--system-prompt', cmd)
         self.assertNotIn('--no-session-persistence', cmd)
+        self.assertEqual(self.fork_directory, self.parent_cwd)
+        self.assertEqual(recorded['cwd'], self.parent_cwd)
         payload = json.loads(recorded['stdin_payload'].strip())
         self.assertEqual(payload['type'], 'user')
         self.assertIn('SUMMARIZE-ONLY', payload['message']['content'])
         self.assertIn('3', payload['message']['content'])
+
+    def test_missing_attested_parent_cwd_fails_before_fork(self):
+        plan = replace(self.plan, parent_cwd='')
+        fork = mock.Mock()
+        with self.assertRaisesRegex(NativeForkGenerationError, 'parent_cwd_missing'):
+            execute_continuity_native_fork(
+                plan, prompt_body='SUMMARIZE', authority=self.authority, cwd=self.cwd,
+                fork_session_fn=fork, token_getter=lambda: 'tok',
+            )
+        fork.assert_not_called()
 
     def test_parent_mutated_during_fork_raises_and_is_never_swallowed_as_success(self):
         with self.assertRaisesRegex(NativeForkGenerationError, 'parent_mutated'):

@@ -121,13 +121,19 @@ class ContinuityNativeForkEligibilityTest(unittest.TestCase):
             return self._flag_on
         return default
 
-    def _parent_path(self, session: str) -> Path:
-        return session_jsonl_path(self.cwd, session, claude_home=self.claude_home)
+    def _parent_path(self, session: str, *, cwd: str | None = None) -> Path:
+        return session_jsonl_path(cwd or self.cwd, session, claude_home=self.claude_home)
 
-    def _write_parent(self, session: str, events: list[dict]) -> Path:
-        path = self._parent_path(session)
+    def _write_parent(self, session: str, events: list[dict], *, cwd: str | None = None) -> Path:
+        parent_cwd = cwd or self.cwd
+        path = self._parent_path(session, cwd=parent_cwd)
         path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [json.dumps({'type': 'user', 'uuid': 'u0'})] + [json.dumps(e) for e in events]
+        rows = []
+        for event in events:
+            row = dict(event)
+            row.setdefault('cwd', parent_cwd)
+            rows.append(row)
+        lines = [json.dumps({'type': 'user', 'uuid': 'u0'})] + [json.dumps(e) for e in rows]
         path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         return path
 
@@ -157,11 +163,11 @@ class ContinuityNativeForkEligibilityTest(unittest.TestCase):
         self._registry()
         self._mapping()
 
-    def _resolve(self, *, job=None, candidate=None, snapshot=None, source_conn='default'):
+    def _resolve(self, *, job=None, candidate=None, snapshot=None, source_conn='default', cwd=None):
         return nfe.resolve_continuity_native_fork(
             self.conn if source_conn == 'default' else source_conn,
             job=job or _job(), candidate=candidate or _candidate(), snapshot=snapshot or _snapshot(),
-            cwd=self.cwd, claude_home=self.claude_home, now_wall=NOW,
+            cwd=cwd or self.cwd, claude_home=self.claude_home, now_wall=NOW,
         )
 
     def assertRefused(self, plan, reason):
@@ -177,6 +183,17 @@ class ContinuityNativeForkEligibilityTest(unittest.TestCase):
         self.assertEqual(plan.parent_model, MODEL)
         self.assertEqual(plan.resident_generation, 1)
         self.assertEqual(plan.parent_transcript_path, str(self._parent_path('s1')))
+        self.assertEqual(plan.parent_cwd, self.cwd)
+
+    def test_attested_parent_cwd_allows_producer_cwd_to_differ(self):
+        parent_cwd = os.path.join(self.tmp.name, 'parent-project')
+        parent_path = self._write_parent('s1', [assistant_event('ev1')], cwd=parent_cwd)
+        self._registry(transcript_path=str(parent_path))
+        self._mapping()
+        plan = self._resolve(cwd=self.cwd)
+        self.assertTrue(plan.eligible, plan.reason)
+        self.assertEqual(plan.parent_cwd, parent_cwd)
+        self.assertEqual(plan.parent_transcript_path, str(parent_path))
 
     def test_flag_off_refuses(self):
         self._flag_on = False
@@ -287,8 +304,27 @@ class ContinuityNativeForkEligibilityTest(unittest.TestCase):
         self.assertRefused(self._resolve(), nfe.REASON_SESSION_NOT_READY)
 
     def test_registered_path_not_fork_target_refuses(self):
-        self._write_parent('s1', [assistant_event('ev1')])
-        self._registry(transcript_path=os.path.join(self.tmp.name, 'elsewhere.jsonl'))
+        parent = self._write_parent('s1', [assistant_event('ev1')])
+        elsewhere = Path(self.tmp.name) / 'elsewhere.jsonl'
+        elsewhere.write_bytes(parent.read_bytes())
+        self._registry(transcript_path=str(elsewhere))
+        self._mapping()
+        self.assertRefused(self._resolve(), nfe.REASON_TRANSCRIPT_PATH_MISMATCH)
+
+    def test_missing_provider_cwd_refuses(self):
+        event = assistant_event('ev1')
+        event['cwd'] = None
+        self._write_parent('s1', [event])
+        self._registry()
+        self._mapping()
+        self.assertRefused(self._resolve(), nfe.REASON_TRANSCRIPT_PATH_MISMATCH)
+
+    def test_conflicting_provider_cwd_refuses(self):
+        event = assistant_event('ev1')
+        other = assistant_event('ev2', seconds_ago=30)
+        other['cwd'] = os.path.join(self.tmp.name, 'other-project')
+        self._write_parent('s1', [event, other])
+        self._registry()
         self._mapping()
         self.assertRefused(self._resolve(), nfe.REASON_TRANSCRIPT_PATH_MISMATCH)
 

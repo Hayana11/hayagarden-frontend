@@ -35,6 +35,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -86,6 +87,7 @@ class ContinuityForkPlan:
     fork_event_uuid: str = ''
     boundary_message_id: int = 0
     parent_transcript_path: str = ''
+    parent_cwd: str = ''
     parent_model: str = ''
     parent_last_use_age_seconds: Optional[float] = None
     scope_completed_turns: int = 0
@@ -167,11 +169,26 @@ def _parse_timestamp(raw: Any) -> Optional[float]:
     return parsed.timestamp()
 
 
-def _transcript_evidence(path: Path, fork_uuid: str) -> tuple[Optional[str], Optional[dict[str, Any]]]:
-    """Return (boundary event model, most recent assistant request record)."""
+def _attested_cwd(raw: Any) -> Optional[str]:
+    """Normalize an absolute provider cwd; never resolve relative to caller cwd."""
+    value = str(raw or '').strip()
+    if not value or not os.path.isabs(value):
+        return None
+    return os.path.normpath(value)
+
+
+def _transcript_evidence(
+    path: Path,
+    fork_uuid: str,
+) -> tuple[Optional[str], Optional[dict[str, Any]], Optional[str]]:
+    """Return boundary model, latest request, and one attested transcript cwd."""
     boundary_model: Optional[str] = None
     latest: Optional[dict[str, Any]] = None
     latest_ts: Optional[float] = None
+    boundary_cwd: Optional[str] = None
+    latest_cwd: Optional[str] = None
+    cwd_values: set[str] = set()
+    invalid_cwd = False
     with path.open('r', encoding='utf-8') as fh:
         for line in fh:
             line = line.strip()
@@ -183,10 +200,19 @@ def _transcript_evidence(path: Path, fork_uuid: str) -> tuple[Optional[str], Opt
                 continue
             if not isinstance(row, dict):
                 continue
+            raw_cwd = row.get('cwd')
+            row_cwd = None
+            if raw_cwd is not None:
+                row_cwd = _attested_cwd(raw_cwd)
+                if row_cwd is None:
+                    invalid_cwd = True
+                else:
+                    cwd_values.add(row_cwd)
             if str(row.get('uuid') or '') == fork_uuid and row.get('type') == 'assistant':
                 message = row.get('message')
                 model = message.get('model') if isinstance(message, dict) else None
                 boundary_model = str(model or '').strip() or None
+                boundary_cwd = row_cwd
             record = _request_record(row)
             if record is None:
                 continue
@@ -195,7 +221,17 @@ def _transcript_evidence(path: Path, fork_uuid: str) -> tuple[Optional[str], Opt
                 continue
             if latest_ts is None or ts >= latest_ts:
                 latest, latest_ts = dict(record, _ts=ts), ts
-    return boundary_model, latest
+                latest_cwd = row_cwd
+    transcript_cwd = None
+    if (
+        not invalid_cwd
+        and len(cwd_values) == 1
+        and boundary_cwd is not None
+        and latest_cwd is not None
+        and boundary_cwd == latest_cwd == next(iter(cwd_values))
+    ):
+        transcript_cwd = boundary_cwd
+    return boundary_model, latest, transcript_cwd
 
 
 def resolve_continuity_native_fork(
@@ -271,11 +307,6 @@ def resolve_continuity_native_fork(
             return _reject(REASON_SESSION_REGISTRY_MISSING)
 
         registered_path = Path(str(registry.get('transcript_path') or ''))
-        derived_path = session_jsonl_path(cwd, parent_sid, claude_home=claude_home)
-        if derived_path is None or registered_path != derived_path:
-            # fork_session locates the parent by cwd; it must be the same file
-            # whose hash we guard.
-            return _reject(REASON_TRANSCRIPT_PATH_MISMATCH)
         try:
             if not registered_path.is_file() or registered_path.stat().st_size <= 0:
                 return _reject(REASON_PARENT_TRANSCRIPT_MISSING)
@@ -302,7 +333,14 @@ def resolve_continuity_native_fork(
         if not fork_uuid:
             return _reject(REASON_MAPPING_MISSING)
 
-        boundary_model, latest = _transcript_evidence(registered_path, fork_uuid)
+        boundary_model, latest, parent_cwd = _transcript_evidence(registered_path, fork_uuid)
+        if parent_cwd is None:
+            return _reject(REASON_TRANSCRIPT_PATH_MISMATCH)
+        derived_path = session_jsonl_path(parent_cwd, parent_sid, claude_home=claude_home)
+        if derived_path is None or registered_path != derived_path:
+            # fork_session locates the parent by the attested cwd; it must be
+            # the same file whose hash we guard.
+            return _reject(REASON_TRANSCRIPT_PATH_MISMATCH)
         if boundary_model is None:
             return _reject(REASON_BOUNDARY_NOT_IN_TRANSCRIPT)
         if latest is None:
@@ -326,6 +364,7 @@ def resolve_continuity_native_fork(
             fork_event_uuid=fork_uuid,
             boundary_message_id=boundary_message_id,
             parent_transcript_path=str(registered_path),
+            parent_cwd=parent_cwd,
             parent_model=expected_model,
             parent_last_use_age_seconds=max(0.0, age),
             scope_completed_turns=int(candidate.completed_turn_count or 0),
