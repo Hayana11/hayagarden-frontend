@@ -13,6 +13,7 @@ from flask import Flask
 from continuity.settings import ensure_authority, load_authority
 from continuity.store import ensure_schema
 from context_compression_routes import create_context_compression_blueprint
+from moments_auth import OwnerAuthError
 
 PERSONA = "\n".join(f"## {name}\nsection {name}" for name in "ABCDEF")
 CATALOG = {"models": [{
@@ -39,6 +40,8 @@ class ContinuitySettingsRouteTests(unittest.TestCase):
         self.patches = [
             patch("chat.cc_model.get_cc_model_catalog", return_value=CATALOG),
             patch("continuity.settings._persona_from_runtime", return_value=PERSONA),
+            # Existing success-path tests model an authenticated same-origin owner.
+            patch("context_compression_routes.require_owner", return_value=None),
         ]
         for item in self.patches:
             item.start()
@@ -54,6 +57,79 @@ class ContinuitySettingsRouteTests(unittest.TestCase):
             return load_authority(conn)
         finally:
             conn.close()
+
+    def _valid_payload(self):
+        return {
+            "length": 16000,
+            "turns": 30,
+            "provider": "claude_code",
+            "model": "claude-opus-5-5",
+            "prompt": "frozen settings prompt",
+        }
+
+    def _revision_count(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM continuity_settings_revisions"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_unauthenticated_post_is_401_without_writing(self):
+        before = self._revision_count()
+        with patch(
+            "context_compression_routes.require_owner",
+            side_effect=OwnerAuthError("unauthorized", 401),
+        ):
+            response = self.client.post(
+                "/dash/__continuity/settings", json=self._valid_payload()
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.get_json()["error"], "unauthorized")
+        self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+        self.assertEqual(self._revision_count(), before)
+
+    def test_invalid_owner_post_is_401_without_writing(self):
+        before = self._revision_count()
+
+        def reject_owner(_request):
+            raise OwnerAuthError("unauthorized", 401)
+
+        with patch("context_compression_routes.require_owner", side_effect=reject_owner):
+            response = self.client.post(
+                "/dash/__continuity/settings", json=self._valid_payload()
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
+        self.assertEqual(self._revision_count(), before)
+
+    def test_owner_auth_unavailable_is_503_without_writing(self):
+        before = self._revision_count()
+        with patch(
+            "context_compression_routes.require_owner",
+            side_effect=OwnerAuthError("owner auth is not configured", 503),
+        ):
+            response = self.client.post(
+                "/dash/__continuity/settings", json=self._valid_payload()
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error"], "owner auth is not configured")
+        self.assertIsNone(response.headers.get("WWW-Authenticate"))
+        self.assertEqual(self._revision_count(), before)
+
+    def test_get_and_head_do_not_require_owner(self):
+        with patch(
+            "context_compression_routes.require_owner",
+            side_effect=AssertionError("GET/HEAD must not call owner auth"),
+        ):
+            self.assertEqual(
+                self.client.get("/dash/__continuity/settings").status_code, 200
+            )
+            self.assertEqual(
+                self.client.head("/dash/__continuity/settings").status_code, 200
+            )
+
 
     def test_get_exposes_single_active_authority_without_writing(self):
         before = self._authority()["active_revision"]["revision_id"]
