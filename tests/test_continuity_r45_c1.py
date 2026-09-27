@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from continuity.producer import run_continuity_producer
 from continuity.sealing import SealingPolicy
+from tests.test_continuity_settings_routes import ContinuitySettingsRouteTests
 
 
 PERSONA = '\n'.join(
