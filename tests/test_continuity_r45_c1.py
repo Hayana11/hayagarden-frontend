@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from continuity.producer import run_continuity_producer
 from continuity.sealing import SealingPolicy
 from tests.test_continuity_settings_routes import ContinuitySettingsRouteTests
+from tests.test_background_generation import BackgroundGenerationTests
+from tests.test_continuity_production_r1 import ContinuityProductionR1Tests
 
 
 PERSONA = '\n'.join(
