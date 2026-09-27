@@ -478,5 +478,144 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(before_counts, after_counts)
 
 
+    def test_settings_bound_candidate_policy_and_preflight_use_distinct_versions(self):
+        from unittest.mock import Mock, patch
+
+        import continuity.chunk_generation as generation
+        import continuity.store as store
+        from continuity.contracts import SourceMember, SourceSnapshot
+        from continuity.coverage import source_hash
+        from continuity.settings import (
+            binding_for_revision,
+            ensure_authority,
+            sealing_policy_for_revision,
+        )
+
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        try:
+            store.ensure_schema(conn)
+            authority = ensure_authority(
+                conn,
+                provider='claude_code',
+                model_identity='explicit:claude-opus-5-5',
+                persona_text=PERSONA,
+                now='2026-09-27T00:00:00+00:00',
+            )
+            active = authority['active_revision']
+            binding = binding_for_revision(conn, active['revision_id'])
+            policy = sealing_policy_for_revision(active)
+
+            member = SourceMember(
+                0,
+                'completed_turn',
+                'turn:binding:1',
+                'rev:binding:1',
+                'user',
+                'content-hash-binding-1',
+                logical_size=12000,
+                created_at='2026-09-27 00:00:00',
+                branch_id='active-transcript',
+            )
+            snapshot = SourceSnapshot(
+                'source:binding:1',
+                'identity',
+                'default',
+                'active-transcript',
+                '2026-09-27',
+                1,
+                'continuity_source_v1',
+                source_hash((member,)),
+                'ready',
+                '2026-09-27T00:00:00+00:00',
+                (member,),
+                7,
+                3,
+            )
+            store.save_source_snapshot(conn, snapshot)
+            sealing_job = store.enqueue_job(
+                conn, snapshot, policy, now='2026-09-27T00:00:00+00:00'
+            )
+            candidates = store.materialize_job(
+                conn,
+                sealing_job.job_id,
+                policy,
+                include_end_of_snapshot=True,
+                settings_binding=binding,
+                now='2026-09-27T00:00:00+00:00',
+            )
+            self.assertEqual(len(candidates), 1)
+            candidate = candidates[0]
+
+            # policy_version identifies the sealing algorithm/policy object;
+            # sealing_policy_version identifies the frozen settings authority value.
+            self.assertEqual(candidate.policy_version, policy.version)
+            self.assertEqual(
+                candidate.sealing_policy_version,
+                binding['sealing_policy_version'],
+            )
+            reloaded_candidate = store.load_candidate(conn, candidate.candidate_id)
+            self.assertIsNotNone(reloaded_candidate)
+            self.assertEqual(reloaded_candidate.policy_version, policy.version)
+            self.assertEqual(
+                reloaded_candidate.sealing_policy_version,
+                binding['sealing_policy_version'],
+            )
+
+            job = store.enqueue_generation_job(
+                conn,
+                candidate,
+                snapshot,
+                generator_policy_version=generation.GENERATOR_POLICY_VERSION,
+                prompt_policy_version=generation.PROMPT_POLICY_VERSION,
+                measurement_semantics=str(binding['measurement_semantics']),
+                settings_binding=binding,
+                now='2026-09-27T00:00:00+00:00',
+            )
+            reloaded_job = store.load_generation_job(conn, job.generation_job_id)
+            self.assertIsNotNone(reloaded_job)
+            self.assertEqual(
+                reloaded_job.settings_revision_id,
+                binding['settings_revision_id'],
+            )
+
+            # This is the exact pre-model validation path; the fake provider
+            # below proves that a successful preflight reaches one model call.
+            self.assertIsNotNone(
+                generation._frozen_binding(conn, reloaded_job, reloaded_candidate)
+            )
+            fake_generate = Mock(return_value=SimpleNamespace(
+                text='grounded generated chunk',
+                provider='claude_code',
+                model_identity='explicit:claude-opus-5-5',
+                actual_executor='fake-provider-once',
+                usage=None,
+            ))
+            fake_request = Mock(
+                side_effect=lambda **kwargs: SimpleNamespace(**kwargs)
+            )
+            materialized = SimpleNamespace(
+                body='source evidence',
+                source_token_estimate=100,
+                source_fingerprint='binding-source-fingerprint',
+            )
+            with patch.object(
+                generation, 'materialize_candidate', return_value=materialized
+            ):
+                chunk = generation.generate_continuity_chunk(
+                    conn,
+                    reloaded_job.generation_job_id,
+                    rows_provider=(),
+                    generate_fn=fake_generate,
+                    request_factory=fake_request,
+                    now='2026-09-27T00:01:00+00:00',
+                )
+            self.assertEqual(fake_generate.call_count, 1)
+            self.assertEqual(chunk.status, 'ready')
+        finally:
+            conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()
