@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 
 FinalityStatus = Literal['completed', 'incomplete']
@@ -141,6 +141,14 @@ class ContinuityGenerationJob:
     generation_id: str
     created_at: str
     updated_at: str
+    settings_revision_id: str | None = None
+    frozen_prompt_body: str | None = None
+    frozen_prompt_hash: str | None = None
+    frozen_prompt_revision: str | None = None
+    frozen_persona_body: str | None = None
+    frozen_persona_hash: str | None = None
+    frozen_persona_revision: str | None = None
+    persona_policy_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -164,4 +172,16 @@ class ContinuityChunk:
     generation_id: str
     status: str
     created_at: str
+    settings_revision_id: str | None = None
+    prompt_hash: str | None = None
+    prompt_revision: str | None = None
+    persona_revision: str | None = None
+    usage: dict[str, Any] | None = None
+    input_tokens: int | None = None
+    provider_output_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_hit: bool | None = None
+    cache_prefix_identity: str | None = None
+    cache_usage_status: str | None = None
 

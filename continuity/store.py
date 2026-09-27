@@ -11,9 +11,9 @@ import datetime as dt
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 from urllib.parse import quote
 
 from continuity.contracts import (
@@ -36,6 +36,9 @@ TABLES = (
     'continuity_candidate_members',
     'continuity_generation_jobs',
     'continuity_chunks',
+    'continuity_settings_revisions',
+    'continuity_settings_authority',
+    'continuity_settings_promotion_receipts',
 )
 
 
@@ -93,6 +96,8 @@ _REQUIRED_SCHEMA_COLUMNS = {
         'local_day', 'branch_id', 'source_start_seq', 'source_end_seq',
         'source_revision', 'snapshot_source_hash', 'logical_size',
         'completed_turn_count', 'oversize', 'close_reason', 'status', 'created_at',
+        'settings_revision_id', 'sealing_policy_version', 'target_logical_size',
+        'max_completed_turns', 'measurement_semantics',
     },
     'continuity_candidate_members': {
         'candidate_id', 'ordinal', 'source_seq', 'source_ref', 'source_revision',
@@ -103,14 +108,35 @@ _REQUIRED_SCHEMA_COLUMNS = {
         'candidate_source_revision', 'generator_policy_version',
         'prompt_policy_version', 'measurement_semantics', 'frozen_provider',
         'frozen_model_identity', 'status', 'attempt', 'error_code', 'generation_id',
-        'created_at', 'updated_at',
+        'created_at', 'updated_at', 'settings_revision_id', 'frozen_prompt_body',
+        'frozen_prompt_hash', 'frozen_prompt_revision', 'frozen_persona_body',
+        'frozen_persona_hash', 'frozen_persona_revision', 'persona_policy_version',
     },
     'continuity_chunks': {
         'chunk_id', 'generation_job_id', 'candidate_id', 'snapshot_id',
         'artifact_revision', 'body', 'body_hash', 'source_token_estimate',
         'output_token_estimate', 'generator_policy_version',
         'prompt_policy_version', 'provider', 'model_identity', 'actual_executor',
-        'generation_id', 'status', 'created_at',
+        'generation_id', 'status', 'created_at', 'settings_revision_id',
+        'prompt_hash', 'prompt_revision', 'persona_revision', 'usage_json',
+        'input_tokens', 'provider_output_tokens', 'cache_creation_input_tokens',
+        'cache_read_input_tokens', 'cache_hit', 'cache_prefix_identity',
+        'cache_usage_status',
+    },
+    'continuity_settings_revisions': {
+        'revision_id', 'revision_seq', 'created_at', 'created_by', 'source', 'lifecycle',
+        'target_logical_size', 'max_completed_turns', 'provider', 'model_identity',
+        'prompt_body', 'prompt_hash', 'prompt_revision', 'prompt_policy_version',
+        'persona_body', 'persona_hash', 'persona_revision', 'persona_policy_version',
+        'measurement_semantics', 'sealing_policy_version',
+    },
+    'continuity_settings_authority': {
+        'singleton_id', 'active_revision_id', 'pending_revision_id',
+        'pending_anchor_json', 'updated_at',
+    },
+    'continuity_settings_promotion_receipts': {
+        'receipt_id', 'idempotency_key', 'from_revision_id', 'to_revision_id',
+        'candidate_id', 'generation_job_id', 'promoted_at', 'evidence_hash', 'evidence_json',
     },
 }
 
@@ -122,6 +148,9 @@ _REQUIRED_PRIMARY_KEYS = {
     'continuity_candidate_members': ('candidate_id', 'ordinal'),
     'continuity_generation_jobs': ('generation_job_id',),
     'continuity_chunks': ('chunk_id',),
+    'continuity_settings_revisions': ('revision_id',),
+    'continuity_settings_authority': ('singleton_id',),
+    'continuity_settings_promotion_receipts': ('receipt_id',),
 }
 
 _REQUIRED_UNIQUES = {
@@ -130,6 +159,10 @@ _REQUIRED_UNIQUES = {
     'continuity_candidate_members': {('candidate_id', 'source_seq')},
     'continuity_generation_jobs': {('idempotency_key',)},
     'continuity_chunks': {('candidate_id', 'artifact_revision')},
+    'continuity_settings_revisions': {('revision_seq',)},
+    'continuity_settings_promotion_receipts': {
+        ('idempotency_key',), ('candidate_id',), ('generation_job_id',),
+    },
 }
 
 _REQUIRED_FOREIGN_KEYS = {
@@ -151,6 +184,14 @@ _REQUIRED_FOREIGN_KEYS = {
         ('candidate_id', 'continuity_candidate_blocks', 'candidate_id'),
         ('snapshot_id', 'continuity_source_snapshots', 'snapshot_id'),
     },
+    'continuity_settings_authority': {
+        ('active_revision_id', 'continuity_settings_revisions', 'revision_id'),
+        ('pending_revision_id', 'continuity_settings_revisions', 'revision_id'),
+    },
+    'continuity_settings_promotion_receipts': {
+        ('from_revision_id', 'continuity_settings_revisions', 'revision_id'),
+        ('to_revision_id', 'continuity_settings_revisions', 'revision_id'),
+    },
 }
 
 _IMMUTABLE_CHUNK_COLUMNS = (
@@ -159,6 +200,12 @@ _IMMUTABLE_CHUNK_COLUMNS = (
     'output_token_estimate', 'generator_policy_version',
     'prompt_policy_version', 'provider', 'model_identity', 'actual_executor',
     'generation_id', 'created_at',
+)
+_IMMUTABLE_CHUNK_R1_COLUMNS = (
+    'settings_revision_id', 'prompt_hash', 'prompt_revision', 'persona_revision',
+    'usage_json', 'input_tokens', 'provider_output_tokens',
+    'cache_creation_input_tokens', 'cache_read_input_tokens', 'cache_hit',
+    'cache_prefix_identity', 'cache_usage_status',
 )
 
 
@@ -258,6 +305,23 @@ def _schema_contract_status(conn: sqlite3.Connection) -> tuple[str, str | None]:
             or any(column.lower() not in trigger_sql for column in _IMMUTABLE_CHUNK_COLUMNS)
         ):
             return 'corrupt', 'continuity_schema_immutability_trigger'
+        provenance_trigger = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            ('continuity_chunks_immutable_provenance_r1',),
+        ).fetchone()
+        provenance_sql = str(provenance_trigger[0] or '').lower() if provenance_trigger is not None else ''
+        if not provenance_sql or any(column.lower() not in provenance_sql for column in _IMMUTABLE_CHUNK_R1_COLUMNS):
+            return 'corrupt', 'continuity_schema_r1_immutability_trigger'
+        authority_trigger = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            ('continuity_generation_jobs_authority_immutable_r1',),
+        ).fetchone()
+        authority_sql = str(authority_trigger[0] or '').lower() if authority_trigger is not None else ''
+        if (not authority_sql or 'before update of' not in authority_sql
+                or 'frozen_provider' not in authority_sql or 'frozen_model_identity' not in authority_sql
+                or 'old.frozen_provider is not null' not in authority_sql
+                or 'old.frozen_model_identity is not null' not in authority_sql):
+            return 'corrupt', 'continuity_schema_r1_authority_immutability_trigger'
     except sqlite3.Error:
         return 'corrupt', 'continuity_schema_introspection_failed'
     return 'ready', None
@@ -433,6 +497,63 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f'ALTER TABLE continuity_source_snapshots ADD COLUMN {column} {definition}'
             )
+    additive_columns = {
+        'continuity_candidate_blocks': (
+            ('settings_revision_id', 'TEXT'), ('sealing_policy_version', 'TEXT'),
+            ('target_logical_size', 'INTEGER'), ('max_completed_turns', 'INTEGER'),
+            ('measurement_semantics', 'TEXT'),
+        ),
+        'continuity_generation_jobs': (
+            ('settings_revision_id', 'TEXT'), ('frozen_prompt_body', 'TEXT'),
+            ('frozen_prompt_hash', 'TEXT'), ('frozen_prompt_revision', 'TEXT'),
+            ('frozen_persona_body', 'TEXT'), ('frozen_persona_hash', 'TEXT'),
+            ('frozen_persona_revision', 'TEXT'), ('persona_policy_version', 'TEXT'),
+        ),
+        'continuity_chunks': (
+            ('settings_revision_id', 'TEXT'), ('prompt_hash', 'TEXT'),
+            ('prompt_revision', 'TEXT'), ('persona_revision', 'TEXT'),
+            ('usage_json', 'TEXT'), ('input_tokens', 'INTEGER'),
+            ('provider_output_tokens', 'INTEGER'), ('cache_creation_input_tokens', 'INTEGER'),
+            ('cache_read_input_tokens', 'INTEGER'), ('cache_hit', 'INTEGER'),
+            ('cache_prefix_identity', 'TEXT'), ('cache_usage_status', 'TEXT'),
+        ),
+    }
+    for table, additions in additive_columns.items():
+        existing = {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        for column, definition in additions:
+            if column not in existing:
+                conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
+    from continuity.settings import ensure_schema as ensure_settings_schema
+    ensure_settings_schema(conn)
+    conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS continuity_chunks_immutable_provenance_r1
+        BEFORE UPDATE OF settings_revision_id,prompt_hash,prompt_revision,persona_revision,
+            usage_json,input_tokens,provider_output_tokens,cache_creation_input_tokens,
+            cache_read_input_tokens,cache_hit,cache_prefix_identity,cache_usage_status
+        ON continuity_chunks BEGIN
+            SELECT RAISE(ABORT,'continuity chunk frozen provenance is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuity_generation_jobs_binding_immutable_r1
+        BEFORE UPDATE OF settings_revision_id,frozen_prompt_body,frozen_prompt_hash,
+            frozen_prompt_revision,frozen_persona_body,frozen_persona_hash,
+            frozen_persona_revision,persona_policy_version
+        ON continuity_generation_jobs BEGIN
+            SELECT RAISE(ABORT,'continuity generation binding is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuity_generation_jobs_authority_immutable_r1
+        BEFORE UPDATE OF frozen_provider,frozen_model_identity ON continuity_generation_jobs
+        WHEN (OLD.frozen_provider IS NOT NULL AND NEW.frozen_provider IS NOT OLD.frozen_provider)
+          OR (OLD.frozen_model_identity IS NOT NULL AND NEW.frozen_model_identity IS NOT OLD.frozen_model_identity)
+        BEGIN
+            SELECT RAISE(ABORT,'continuity generation authority is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS continuity_candidate_settings_immutable_r1
+        BEFORE UPDATE OF settings_revision_id,sealing_policy_version,target_logical_size,
+            max_completed_turns,measurement_semantics
+        ON continuity_candidate_blocks BEGIN
+            SELECT RAISE(ABORT,'continuity candidate settings are immutable');
+        END;
+    """)
     conn.commit()
 
 
@@ -686,6 +807,7 @@ def materialize_job(
     now: str | None = None,
     include_end_of_snapshot: bool = True,
     close_partial_before_day: str | None = None,
+    settings_binding: Mapping[str, object] | None = None,
 ) -> tuple[CandidateBlock, ...]:
     """Materialize deterministic candidate metadata; repeat calls are idempotent."""
     job = load_job(conn, job_id)
@@ -714,7 +836,9 @@ def materialize_job(
             row = conn.execute(
                 'SELECT job_id, snapshot_id, policy_version, block_seq, local_day, branch_id, '
                 'source_start_seq, source_end_seq, source_revision, snapshot_source_hash, '
-                'logical_size, completed_turn_count, oversize, close_reason, status '
+                'logical_size, completed_turn_count, oversize, close_reason, status, '
+                'settings_revision_id,sealing_policy_version,target_logical_size,'
+                'max_completed_turns,measurement_semantics '
                 'FROM continuity_candidate_blocks WHERE candidate_id=?',
                 (candidate.candidate_id,),
             ).fetchone()
@@ -724,6 +848,11 @@ def materialize_job(
                 candidate.source_end_seq, candidate.source_revision, snapshot.source_hash,
                 candidate.logical_size, candidate.completed_turn_count,
                 int(candidate.oversize), candidate.close_reason, 'shadow',
+                (str(settings_binding['settings_revision_id']) if settings_binding else None),
+                (str(settings_binding['sealing_policy_version']) if settings_binding else None),
+                (int(settings_binding['target_logical_size']) if settings_binding else None),
+                (int(settings_binding['max_completed_turns']) if settings_binding else None),
+                (str(settings_binding['measurement_semantics']) if settings_binding else None),
             )
             if row is None:
                 conn.execute(
@@ -731,8 +860,9 @@ def materialize_job(
                     '(candidate_id, job_id, snapshot_id, policy_version, block_seq, local_day, '
                     'branch_id, source_start_seq, source_end_seq, source_revision, '
                     'snapshot_source_hash, logical_size, completed_turn_count, oversize, '
-                    'close_reason, status, created_at) '
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'shadow', ?)",
+                    'close_reason, status, created_at, settings_revision_id, sealing_policy_version, '
+                    'target_logical_size, max_completed_turns, measurement_semantics) '
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'shadow', ?,?,?,?,?,?)",
                     (
                         candidate.candidate_id, job.job_id, snapshot.snapshot_id,
                         policy.version, candidate.block_seq, candidate.local_day,
@@ -740,6 +870,7 @@ def materialize_job(
                         candidate.source_revision, snapshot.source_hash, candidate.logical_size,
                         candidate.completed_turn_count, int(candidate.oversize),
                         candidate.close_reason, stamp,
+                        expected[15], expected[16], expected[17], expected[18], expected[19],
                     ),
                 )
                 conn.executemany(
@@ -804,6 +935,15 @@ def materialize_job(
             (len(candidates), stamp, job.job_id),
         )
         conn.commit()
+        if settings_binding:
+            return tuple(replace(
+                candidate,
+                settings_revision_id=str(settings_binding['settings_revision_id']),
+                sealing_policy_version=str(settings_binding['sealing_policy_version']),
+                target_logical_size=int(settings_binding['target_logical_size']),
+                max_completed_turns=int(settings_binding['max_completed_turns']),
+                measurement_semantics=str(settings_binding['measurement_semantics']),
+            ) for candidate in candidates)
         return candidates
     except Exception:
         conn.rollback()
@@ -813,7 +953,8 @@ def load_candidates(conn: sqlite3.Connection, job_id: str) -> tuple[CandidateBlo
     rows = conn.execute(
         'SELECT candidate_id, snapshot_id, policy_version, block_seq, local_day, branch_id, '
         'source_start_seq, source_end_seq, source_revision, logical_size, '
-        'completed_turn_count, oversize, close_reason '
+        'completed_turn_count, oversize, close_reason, settings_revision_id, '
+        'sealing_policy_version, target_logical_size, max_completed_turns, measurement_semantics '
         'FROM continuity_candidate_blocks WHERE job_id=? ORDER BY block_seq',
         (job_id,),
     ).fetchall()
@@ -834,6 +975,11 @@ def load_candidates(conn: sqlite3.Connection, job_id: str) -> tuple[CandidateBlo
             source_refs=refs, source_revisions=revisions, logical_size=int(row[9]),
             completed_turn_count=int(row[10]), oversize=bool(row[11]),
             close_reason=str(row[12]), source_revision=str(row[8]),
+            settings_revision_id=str(row[13]) if row[13] is not None else None,
+            sealing_policy_version=str(row[14]) if row[14] is not None else None,
+            target_logical_size=int(row[15]) if row[15] is not None else None,
+            max_completed_turns=int(row[16]) if row[16] is not None else None,
+            measurement_semantics=str(row[17]) if row[17] is not None else None,
         ))
     return tuple(output)
 
@@ -881,6 +1027,7 @@ def _generation_identity(
     generator_policy_version: str,
     prompt_policy_version: str,
     measurement_semantics: str,
+    settings_binding: Mapping[str, object] | None = None,
 ) -> tuple[str, str, str]:
     identity = {
         'candidate_id': candidate.candidate_id,
@@ -890,6 +1037,9 @@ def _generation_identity(
         'generator_policy_version': generator_policy_version,
         'prompt_policy_version': prompt_policy_version,
         'measurement_semantics': measurement_semantics,
+        'settings_revision_id': str(settings_binding['settings_revision_id']) if settings_binding else None,
+        'prompt_hash': str(settings_binding['prompt_hash']) if settings_binding else None,
+        'persona_revision': str(settings_binding['persona_revision']) if settings_binding else None,
     }
     digest = _sha256(identity)
     return (
@@ -918,6 +1068,14 @@ def _generation_job_from_row(row: sqlite3.Row | tuple) -> ContinuityGenerationJo
         generation_id=str(values[13]),
         created_at=str(values[14]),
         updated_at=str(values[15]),
+        settings_revision_id=str(values[16]) if values[16] is not None else None,
+        frozen_prompt_body=str(values[17]) if values[17] is not None else None,
+        frozen_prompt_hash=str(values[18]) if values[18] is not None else None,
+        frozen_prompt_revision=str(values[19]) if values[19] is not None else None,
+        frozen_persona_body=str(values[20]) if values[20] is not None else None,
+        frozen_persona_hash=str(values[21]) if values[21] is not None else None,
+        frozen_persona_revision=str(values[22]) if values[22] is not None else None,
+        persona_policy_version=str(values[23]) if values[23] is not None else None,
     )
 
 
@@ -925,7 +1083,9 @@ _GENERATION_JOB_COLUMNS = (
     'generation_job_id, idempotency_key, candidate_id, snapshot_id, '
     'candidate_source_revision, generator_policy_version, prompt_policy_version, '
     'measurement_semantics, frozen_provider, frozen_model_identity, status, attempt, '
-    'error_code, generation_id, created_at, updated_at'
+    'error_code, generation_id, created_at, updated_at, settings_revision_id, '
+    'frozen_prompt_body, frozen_prompt_hash, frozen_prompt_revision, frozen_persona_body, '
+    'frozen_persona_hash, frozen_persona_revision, persona_policy_version'
 )
 
 
@@ -996,6 +1156,7 @@ def enqueue_generation_job(
     generator_policy_version: str,
     prompt_policy_version: str,
     measurement_semantics: str,
+    settings_binding: Mapping[str, object] | None = None,
     now: str | None = None,
 ) -> ContinuityGenerationJob:
     """Create one idempotent candidate-level generation job.
@@ -1008,7 +1169,20 @@ def enqueue_generation_job(
         generator_policy_version=generator_policy_version,
         prompt_policy_version=prompt_policy_version,
         measurement_semantics=measurement_semantics,
+        settings_binding=settings_binding,
     )
+    if settings_binding is not None:
+        if candidate.settings_revision_id != str(settings_binding.get('settings_revision_id') or ''):
+            raise ContinuityStoreConflict('candidate settings revision mismatch')
+        from continuity.settings import binding_for_revision
+        stored_binding = binding_for_revision(conn, str(settings_binding['settings_revision_id']))
+        frozen_keys = (
+            'provider','model_identity','prompt_body','prompt_hash','prompt_revision',
+            'prompt_policy_version','persona_body','persona_hash','persona_revision',
+            'persona_policy_version','measurement_semantics','settings_revision_id',
+        )
+        if any(settings_binding.get(key) != stored_binding.get(key) for key in frozen_keys):
+            raise ContinuityStoreConflict('settings binding does not match immutable revision')
     stamp = str(now or _stamp())
     conn.execute('BEGIN IMMEDIATE')
     try:
@@ -1029,8 +1203,11 @@ def enqueue_generation_job(
                 'INSERT INTO continuity_generation_jobs '
                 '(generation_job_id, idempotency_key, candidate_id, snapshot_id, '
                 'candidate_source_revision, generator_policy_version, prompt_policy_version, '
-                'measurement_semantics, status, attempt, generation_id, created_at, updated_at) '
-                "VALUES (?,?,?,?,?,?,?,?, 'pending',0,?,?,?)",
+                'measurement_semantics, frozen_provider, frozen_model_identity, status, attempt, '
+                'generation_id, created_at, updated_at, settings_revision_id,frozen_prompt_body, '
+                'frozen_prompt_hash,frozen_prompt_revision, '
+                'frozen_persona_body,frozen_persona_hash,frozen_persona_revision,persona_policy_version) '
+                "VALUES (?,?,?,?,?,?,?,?,?,?, 'pending',0,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     generation_job_id,
                     idempotency_key,
@@ -1040,9 +1217,19 @@ def enqueue_generation_job(
                     generator_policy_version,
                     prompt_policy_version,
                     measurement_semantics,
+                    (str(settings_binding['provider']) if settings_binding else None),
+                    (str(settings_binding['model_identity']) if settings_binding else None),
                     generation_id,
                     stamp,
                     stamp,
+                    (str(settings_binding['settings_revision_id']) if settings_binding else None),
+                    (str(settings_binding['prompt_body']) if settings_binding else None),
+                    (str(settings_binding['prompt_hash']) if settings_binding else None),
+                    (str(settings_binding['prompt_revision']) if settings_binding else None),
+                    (str(settings_binding['persona_body']) if settings_binding else None),
+                    (str(settings_binding['persona_hash']) if settings_binding else None),
+                    (str(settings_binding['persona_revision']) if settings_binding else None),
+                    (str(settings_binding['persona_policy_version']) if settings_binding else None),
                 ),
             )
             row = conn.execute(
@@ -1174,7 +1361,9 @@ def load_chunk(conn: sqlite3.Connection, chunk_id: str) -> ContinuityChunk | Non
         'SELECT chunk_id, generation_job_id, candidate_id, snapshot_id, artifact_revision, '
         'body, body_hash, source_token_estimate, output_token_estimate, '
         'generator_policy_version, prompt_policy_version, provider, model_identity, '
-        'actual_executor, generation_id, status, created_at '
+        'actual_executor, generation_id, status, created_at, settings_revision_id, prompt_hash, '
+        'prompt_revision, persona_revision, usage_json, input_tokens, provider_output_tokens, '
+        'cache_creation_input_tokens, cache_read_input_tokens, cache_hit, cache_prefix_identity, cache_usage_status '
         'FROM continuity_chunks WHERE chunk_id=?',
         (chunk_id,),
     ).fetchone()
@@ -1192,6 +1381,18 @@ def load_chunk(conn: sqlite3.Connection, chunk_id: str) -> ContinuityChunk | Non
         model_identity=text_value(values[12]), actual_executor=text_value(values[13]),
         generation_id=text_value(values[14]), status=text_value(values[15]),
         created_at=text_value(values[16]),
+        settings_revision_id=text_value(values[17]) or None,
+        prompt_hash=text_value(values[18]) or None,
+        prompt_revision=text_value(values[19]) or None,
+        persona_revision=text_value(values[20]) or None,
+        usage=json.loads(values[21]) if values[21] else None,
+        input_tokens=int(values[22]) if values[22] is not None else None,
+        provider_output_tokens=int(values[23]) if values[23] is not None else None,
+        cache_creation_input_tokens=int(values[24]) if values[24] is not None else None,
+        cache_read_input_tokens=int(values[25]) if values[25] is not None else None,
+        cache_hit=bool(values[26]) if values[26] is not None else None,
+        cache_prefix_identity=text_value(values[27]) or None,
+        cache_usage_status=text_value(values[28]) or None,
     )
 
 
@@ -1284,6 +1485,15 @@ def _validate_ready_chunk(conn: sqlite3.Connection, chunk: ContinuityChunk) -> N
         _corrupt('candidate_snapshot_hash_mismatch')
     if candidate.snapshot_id != snapshot.snapshot_id or candidate.source_revision != job.candidate_source_revision:
         _corrupt('candidate_revision_lineage_mismatch')
+    if job.settings_revision_id:
+        if (
+            candidate.settings_revision_id != job.settings_revision_id
+            or chunk.settings_revision_id != job.settings_revision_id
+            or chunk.prompt_hash != job.frozen_prompt_hash
+            or chunk.prompt_revision != job.frozen_prompt_revision
+            or chunk.persona_revision != job.frozen_persona_revision
+        ):
+            _corrupt('settings_provenance_mismatch')
 
     sealing_job = load_job(conn, str(candidate_row[0]))
     if sealing_job is None:
@@ -1433,6 +1643,12 @@ def publish_chunk_atomic(
     provider: str,
     model_identity: str,
     actual_executor: str,
+    settings_revision_id: str | None = None,
+    prompt_hash: str | None = None,
+    prompt_revision: str | None = None,
+    persona_revision: str | None = None,
+    usage: Mapping[str, object] | None = None,
+    usage_fields: Mapping[str, object] | None = None,
     now: str | None = None,
 ) -> ContinuityChunk:
     """Insert an immutable ready chunk and mark its job ready atomically."""
@@ -1440,6 +1656,24 @@ def publish_chunk_atomic(
         raise ContinuityStoreConflict('generation job is not generating')
     if job.frozen_provider != provider or job.frozen_model_identity != model_identity:
         raise ContinuityStoreConflict('chunk provenance does not match frozen authority')
+    if job.settings_revision_id and (
+        candidate.settings_revision_id != job.settings_revision_id
+        or settings_revision_id != job.settings_revision_id
+        or prompt_hash != job.frozen_prompt_hash
+        or prompt_revision != job.frozen_prompt_revision
+        or persona_revision != job.frozen_persona_revision
+    ):
+        raise ContinuityStoreConflict('chunk settings provenance does not match frozen job')
+    raw_usage = dict(usage) if isinstance(usage, Mapping) else None
+    normalized_usage = dict(usage_fields) if isinstance(usage_fields, Mapping) else {}
+    usage_json = _canonical(raw_usage) if raw_usage is not None else None
+    input_tokens = normalized_usage.get('input_tokens')
+    provider_output_tokens = normalized_usage.get('output_tokens')
+    cache_creation = normalized_usage.get('cache_creation_input_tokens')
+    cache_read = normalized_usage.get('cache_read_input_tokens')
+    cache_hit = normalized_usage.get('cache_hit')
+    cache_prefix_identity = normalized_usage.get('cache_prefix_identity')
+    cache_usage_status = normalized_usage.get('cache_usage_status')
     stamp = str(now or _stamp())
     artifact_revision = _artifact_revision(
         generation_id=job.generation_id,
@@ -1455,7 +1689,9 @@ def publish_chunk_atomic(
             'SELECT chunk_id, generation_job_id, candidate_id, snapshot_id, artifact_revision, '
             'body, body_hash, source_token_estimate, output_token_estimate, '
             'generator_policy_version, prompt_policy_version, provider, model_identity, '
-            'actual_executor, generation_id, status, created_at '
+            'actual_executor, generation_id, status, created_at, settings_revision_id, prompt_hash, '
+            'prompt_revision, persona_revision, usage_json, input_tokens, provider_output_tokens, '
+            'cache_creation_input_tokens, cache_read_input_tokens, cache_hit, cache_prefix_identity, cache_usage_status '
             'FROM continuity_chunks WHERE candidate_id=? AND artifact_revision=?',
             (candidate.candidate_id, artifact_revision),
         ).fetchone()
@@ -1465,12 +1701,16 @@ def publish_chunk_atomic(
                 str(existing[1]), str(existing[2]), str(existing[3]), str(existing[4]),
                 str(existing[5]), str(existing[6]), int(existing[7]), int(existing[8]),
                 str(existing[11]), str(existing[12]), str(existing[13]), str(existing[14]),
+                existing[17], existing[18], existing[19], existing[20], existing[21],
+                existing[22], existing[23], existing[24], existing[25], existing[26], existing[27], existing[28],
             )
             requested = (
                 job.generation_job_id, candidate.candidate_id, candidate.snapshot_id,
                 artifact_revision, body, body_hash, int(source_token_estimate),
                 int(output_token_estimate), provider, model_identity, actual_executor,
-                job.generation_id,
+                job.generation_id, settings_revision_id, prompt_hash, prompt_revision,
+                persona_revision, usage_json, input_tokens, provider_output_tokens,
+                cache_creation, cache_read, cache_hit, cache_prefix_identity, cache_usage_status,
             )
             if stored is None or expected != requested:
                 raise ContinuityStoreConflict('immutable chunk identity conflict')
@@ -1487,13 +1727,18 @@ def publish_chunk_atomic(
             '(chunk_id, generation_job_id, candidate_id, snapshot_id, artifact_revision, body, '
             'body_hash, source_token_estimate, output_token_estimate, generator_policy_version, '
             'prompt_policy_version, provider, model_identity, actual_executor, generation_id, '
-            'status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,\'ready\',?)',
+            'status, created_at, settings_revision_id, prompt_hash, prompt_revision, persona_revision, '
+            'usage_json, input_tokens, provider_output_tokens, cache_creation_input_tokens, '
+            'cache_read_input_tokens, cache_hit, cache_prefix_identity, cache_usage_status) '
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ready',?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 chunk_id, job.generation_job_id, candidate.candidate_id, candidate.snapshot_id,
                 artifact_revision, body, body_hash, int(source_token_estimate),
                 int(output_token_estimate), job.generator_policy_version,
                 job.prompt_policy_version, provider, model_identity, actual_executor,
-                job.generation_id, stamp,
+                job.generation_id, stamp, settings_revision_id, prompt_hash, prompt_revision,
+                persona_revision, usage_json, input_tokens, provider_output_tokens,
+                cache_creation, cache_read, cache_hit, cache_prefix_identity, cache_usage_status,
             ),
         )
         conn.execute(

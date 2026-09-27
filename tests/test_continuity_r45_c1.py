@@ -204,13 +204,78 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(second.status, 'ready')
         self.assertEqual(third.status, 'ready')
         self.assertEqual(fourth.status, 'idle')
-        self.assertEqual(first.sealed_candidate_count, 3)
+        self.assertEqual(
+            [first.sealed_candidate_count, second.sealed_candidate_count, third.sealed_candidate_count],
+            [1, 1, 1],
+        )
+        self.assertEqual(
+            [first.queued_generation_job_count, second.queued_generation_job_count, third.queued_generation_job_count],
+            [1, 1, 1],
+        )
         self.assertEqual(self.model_calls, 3)
         conn = sqlite3.connect(str(self.store_path))
-        self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_source_snapshots').fetchone()[0], 1)
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_source_snapshots').fetchone()[0], 3)
         self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_candidate_blocks').fetchone()[0], 3)
         self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_generation_jobs').fetchone()[0], 3)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM continuity_generation_jobs WHERE status='ready'").fetchone()[0], 3)
+        conn.close()
+
+    def test_backlog_of_28_seals_one_candidate_and_job_per_run(self):
+        self._write_source(self._turns(28))
+        policy = SealingPolicy(target_logical_size=1, max_completed_turns=20)
+
+        first = self._run(policy=policy)
+        self.assertEqual(first.status, 'ready')
+        self.assertEqual(first.sealed_candidate_count, 1)
+        self.assertEqual(first.queued_generation_job_count, 1)
+        self.assertEqual(self.model_calls, 1)
+
+        second = self._run(policy=policy)
+        self.assertEqual(second.status, 'ready')
+        self.assertEqual(second.sealed_candidate_count, 1)
+        self.assertEqual(second.queued_generation_job_count, 1)
+        self.assertEqual(self.model_calls, 2)
+
+        conn = sqlite3.connect(str(self.store_path))
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_candidate_blocks').fetchone()[0], 2)
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_generation_jobs').fetchone()[0], 2)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM continuity_chunks WHERE status='ready'").fetchone()[0], 2)
+        refs = {
+            row[0]
+            for row in conn.execute(
+                'SELECT source_ref FROM continuity_candidate_members'
+            ).fetchall()
+        }
+        conn.close()
+        self.assertEqual(refs, {'turn:1:2', 'turn:3:4'})
+
+    def test_existing_pending_job_is_processed_without_sealing_another_candidate(self):
+        self._write_source(self._turns(1))
+        policy = SealingPolicy(target_logical_size=1, max_completed_turns=20)
+        failed = self._run(
+            policy=policy,
+            generate_fn=lambda _request, _authority: (_ for _ in ()).throw(RuntimeError('temporary failure')),
+        )
+        self.assertEqual(failed.status, 'failed')
+
+        conn = sqlite3.connect(str(self.store_path))
+        conn.execute(
+            "UPDATE continuity_generation_jobs SET status='pending', error_code=NULL"
+        )
+        conn.commit()
+        conn.close()
+
+        self._write_source(self._turns(3))
+        resumed = self._run(policy=policy)
+        self.assertEqual(resumed.status, 'ready')
+        self.assertEqual(resumed.sealed_candidate_count, 0)
+        self.assertEqual(resumed.queued_generation_job_count, 0)
+        self.assertEqual(self.model_calls, 1)
+
+        conn = sqlite3.connect(str(self.store_path))
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_candidate_blocks').fetchone()[0], 1)
+        self.assertEqual(conn.execute('SELECT COUNT(*) FROM continuity_generation_jobs').fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM continuity_generation_jobs WHERE status='ready'").fetchone()[0], 1)
         conn.close()
 
     def test_twenty_completed_turn_boundary_seals(self):
@@ -254,21 +319,24 @@ class ProducerTests(unittest.TestCase):
             (10, 8, 3, 1, 'user'), (11, 8, 3, 1, 'assistant'),
         ]
         self._write_source(rows, mappings=mappings)
-        result = self._run(
-            policy=SealingPolicy(target_logical_size=1, max_completed_turns=20)
-        )
-        self.assertEqual(result.source_member_count, 2)
-        self.assertEqual(result.status, 'ready')
+        policy = SealingPolicy(target_logical_size=1, max_completed_turns=20)
+        first = self._run(policy=policy)
+        second = self._run(policy=policy)
+        self.assertEqual(first.source_member_count, 2)
+        self.assertEqual(first.status, 'ready')
+        self.assertEqual(second.status, 'ready')
         conn = sqlite3.connect(str(self.store_path))
-        refs = conn.execute(
-            'SELECT source_ref FROM continuity_candidate_members ORDER BY source_seq'
-        ).fetchall()
-        snapshot_identity = conn.execute(
+        refs = sorted(
+            row[0] for row in conn.execute(
+                'SELECT source_ref FROM continuity_candidate_members'
+            ).fetchall()
+        )
+        snapshot_identities = conn.execute(
             'SELECT context_id, context_epoch FROM continuity_source_snapshots'
-        ).fetchone()
+        ).fetchall()
         conn.close()
-        self.assertEqual([row[0] for row in refs], ['turn:1:2', 'turn:3:4'])
-        self.assertEqual(snapshot_identity, (7, 3))
+        self.assertEqual(refs, ['turn:1:2', 'turn:3:4'])
+        self.assertEqual(snapshot_identities, [(7, 3), (7, 3)])
 
     def test_canonical_wake_is_included_and_foreign_wake_is_excluded(self):
         rows = [

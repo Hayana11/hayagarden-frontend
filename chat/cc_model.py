@@ -13,7 +13,6 @@ import re
 from copy import deepcopy
 from typing import Any
 
-import config_store
 
 CC_CHAT_MODEL_KEY = 'CC_CHAT_MODEL'
 CC_MODEL_NOT_ALLOWED = 'CC_MODEL_NOT_ALLOWED'
@@ -193,6 +192,7 @@ def get_cc_model_catalog(*, force: bool = False) -> dict[str, Any]:
 
 def get_cc_chat_model() -> str:
     """Return stripped CC_CHAT_MODEL, or '' for default."""
+    import config_store
     return str(config_store.get(CC_CHAT_MODEL_KEY, '') or '').strip()
 
 
@@ -299,6 +299,7 @@ def set_cc_chat_model(model: str | None) -> dict[str, Any]:
             state['rejected_model'] = value
             state['scope'] = 'cc_chat_model'
             return state
+    import config_store
     config_store.set(CC_CHAT_MODEL_KEY, value)
     state = describe_cc_model_state()
     state['ok'] = True

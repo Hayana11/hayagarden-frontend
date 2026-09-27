@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -104,8 +105,9 @@ def build_chunk_prompt(
     *,
     persona_reader: Callable[[], str] | None = None,
     persona_text: str | None = None,
+    prompt_body: str | None = None,
 ) -> tuple[str, str]:
-    """Return the frozen Persona-5 plus accepted prompt contract."""
+    """Assemble the stable system prefix and source-specific evidence tail."""
     if persona_reader is not None and persona_text is not None:
         raise ValueError('persona_reader and persona_text are mutually exclusive')
     reader = persona_reader
@@ -119,7 +121,10 @@ def build_chunk_prompt(
         raise
     except Exception as exc:
         raise PersonaContractError('persona_contract_error') from exc
-    system_text = f'{selected_persona}\n\n{ACCEPTED_PROMPT}'
+    frozen_prompt = ACCEPTED_PROMPT if prompt_body is None else str(prompt_body)
+    if not frozen_prompt.strip():
+        raise ValueError('frozen_prompt_empty')
+    system_text = f'{selected_persona}\n\n{frozen_prompt}'
     prompt_text = (
         'FROZEN EVIDENCE BEGIN\n'
         f'{source.body}\n'
@@ -140,6 +145,10 @@ def validate_output(
         raise ValueError('empty_generation_output')
     if body.strip() == '[static fallback]':
         raise ValueError('static_or_error_output')
+    if len(body) > 20_000 or any(ord(ch) < 32 and ch not in '\n\r\t' for ch in body):
+        raise ValueError('malformed_generation_output')
+    if re.match(r'(?is)^\s*(error|exception|timeout|unauthorized|invalid api key|provider unavailable|generation failed)\b', body):
+        raise ValueError('error_text_generation_output')
     provider = str(getattr(result, 'provider', '') or '')
     model_identity = str(getattr(result, 'model_identity', '') or '')
     actual_executor = str(getattr(result, 'actual_executor', '') or '')
@@ -160,12 +169,7 @@ def validate_output(
 def _authority_from_job(job: ContinuityGenerationJob) -> _FrozenAuthority:
     if not job.frozen_provider or not job.frozen_model_identity:
         raise ContinuityStoreConflict('generation job authority is not frozen')
-    try:
-        from chat.provider_router import GenerationAuthoritySnapshot
-
-        return GenerationAuthoritySnapshot(job.frozen_provider, job.frozen_model_identity)
-    except (ImportError, TypeError):
-        return _FrozenAuthority(job.frozen_provider, job.frozen_model_identity)
+    return _FrozenAuthority(job.frozen_provider, job.frozen_model_identity)
 
 
 def _default_capture() -> Any:
@@ -197,11 +201,13 @@ def _request(
     request_factory: Callable[..., Any] | None,
     persona_reader: Callable[[], str] | None = None,
     persona_text: str | None = None,
+    prompt_body: str | None = None,
 ) -> Any:
     system_text, prompt_text = build_chunk_prompt(
         source,
         persona_reader=persona_reader,
         persona_text=persona_text,
+        prompt_body=prompt_body,
     )
     max_tokens_hint = max(256, min(2048, max(256, source.source_token_estimate // 4)))
     factory = request_factory or _default_request_factory
@@ -232,6 +238,97 @@ def _load_generation_inputs(conn: Any, job: ContinuityGenerationJob) -> tuple[An
     return snapshot, candidate
 
 
+def _frozen_binding(conn: Any, job: ContinuityGenerationJob, candidate: Any) -> dict[str, Any] | None:
+    if not job.settings_revision_id:
+        return None
+    from continuity.settings import binding_for_revision
+
+    binding = binding_for_revision(conn, job.settings_revision_id)
+    expected = {
+        'provider': job.frozen_provider,
+        'model_identity': job.frozen_model_identity,
+        'prompt_body': job.frozen_prompt_body,
+        'prompt_hash': job.frozen_prompt_hash,
+        'prompt_revision': job.frozen_prompt_revision,
+        'prompt_policy_version': job.prompt_policy_version,
+        'persona_body': job.frozen_persona_body,
+        'persona_hash': job.frozen_persona_hash,
+        'persona_revision': job.frozen_persona_revision,
+        'persona_policy_version': job.persona_policy_version,
+        'measurement_semantics': job.measurement_semantics,
+        'settings_revision_id': job.settings_revision_id,
+    }
+    if any(binding.get(key) != value for key, value in expected.items()):
+        raise ContinuityStoreConflict('frozen_generation_binding_mismatch')
+    if candidate.settings_revision_id != job.settings_revision_id:
+        raise ContinuityStoreConflict('candidate_settings_revision_mismatch')
+    if (
+        candidate.sealing_policy_version != binding['sealing_policy_version']
+        or candidate.target_logical_size != int(binding['target_logical_size'])
+        or candidate.max_completed_turns != int(binding['max_completed_turns'])
+        or candidate.measurement_semantics != binding['measurement_semantics']
+    ):
+        raise ContinuityStoreConflict('candidate_sealing_binding_mismatch')
+    if hashlib.sha256(str(job.frozen_prompt_body or '').encode('utf-8')).hexdigest() != job.frozen_prompt_hash:
+        raise ContinuityStoreConflict('frozen_prompt_hash_mismatch')
+    if hashlib.sha256(str(job.frozen_persona_body or '').encode('utf-8')).hexdigest() != job.frozen_persona_hash:
+        raise ContinuityStoreConflict('frozen_persona_hash_mismatch')
+    return binding
+
+
+def _usage_diagnostics(result: Any, job: ContinuityGenerationJob, binding: dict[str, Any] | None) -> dict[str, Any]:
+    raw = getattr(result, 'usage', None) if result is not None else None
+    if not isinstance(raw, dict):
+        raw = None
+    normalized: dict[str, Any] = {
+        'input_tokens': None, 'output_tokens': None,
+        'cache_creation_input_tokens': None, 'cache_read_input_tokens': None,
+        'cache_hit': None, 'cache_prefix_identity': None,
+        'cache_usage_status': 'unavailable',
+    }
+    if raw is not None:
+        from tools.cc_jsonl_usage import _request_record
+        record = _request_record({
+            'type': 'assistant', 'requestId': 'continuity-generation',
+            'message': {'usage': raw, 'model': getattr(result, 'model_identity', None)},
+        }) or {}
+        fields = (
+            ('input_tokens', 'input_tokens'),
+            ('output_tokens', 'output_tokens'),
+            ('cache_creation_input_tokens', 'cache_creation'),
+            ('cache_read_input_tokens', 'cache_read'),
+        )
+        present = 0
+        for target, source in fields:
+            raw_key = {
+                'input_tokens': 'input_tokens', 'output_tokens': 'output_tokens',
+                'cache_creation_input_tokens': 'cache_creation_input_tokens',
+                'cache_read_input_tokens': 'cache_read_input_tokens',
+            }[target]
+            if raw_key in raw and raw.get(raw_key) is not None:
+                normalized[target] = record.get(source)
+                present += 1
+        read_tokens = normalized['cache_read_input_tokens']
+        if read_tokens is not None:
+            normalized['cache_hit'] = int(read_tokens) > 0
+        normalized['cache_usage_status'] = 'unavailable' if present == 0 else ('available' if present == len(fields) else 'partial')
+    if binding is not None:
+        prefix = {
+            'provider': job.frozen_provider,
+            'model_identity': job.frozen_model_identity,
+            'generator_policy_version': job.generator_policy_version,
+            'prompt_hash': binding['prompt_hash'],
+            'prompt_revision': binding['prompt_revision'],
+            'prompt_policy_version': binding['prompt_policy_version'],
+            'persona_revision': binding['persona_revision'],
+            'persona_hash': binding['persona_hash'],
+        }
+        normalized['cache_prefix_identity'] = hashlib.sha256(
+            json.dumps(prefix, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
+    return normalized
+
+
 def generate_continuity_chunk(
     conn: Any,
     generation_job_id: str,
@@ -250,6 +347,8 @@ def generate_continuity_chunk(
         raise ContinuityStoreError('continuity generation job not found')
     if job.prompt_policy_version != PROMPT_POLICY_VERSION:
         raise ContinuityStoreConflict('generation job prompt policy version mismatch')
+    if job.generator_policy_version != GENERATOR_POLICY_VERSION:
+        raise ContinuityStoreConflict('generation job generator policy version mismatch')
     if job.status == 'ready':
         from continuity.store import load_ready_chunk_for_job
 
@@ -259,6 +358,7 @@ def generate_continuity_chunk(
         return existing
 
     snapshot, candidate = _load_generation_inputs(conn, job)
+    binding = _frozen_binding(conn, job, candidate) if job.settings_revision_id else None
     try:
         source = materialize_candidate(snapshot, candidate, _rows(rows_provider))
     except UnsupportedSourceError:
@@ -269,6 +369,9 @@ def generate_continuity_chunk(
         raise
 
     authority = _authority_from_job(job) if job.frozen_provider else None
+    if job.settings_revision_id and authority is None:
+        mark_generation_failed(conn, generation_job_id, 'frozen_authority_missing', now=now)
+        raise ContinuityStoreConflict('frozen generation authority is missing')
     if authority is None:
         capture = capture_authority or _default_capture
         authority = capture()
@@ -301,7 +404,8 @@ def generate_continuity_chunk(
             source,
             request_factory=request_factory,
             persona_reader=persona_reader,
-            persona_text=persona_text,
+            persona_text=(str(binding['persona_body']) if binding is not None else persona_text),
+            prompt_body=(str(binding['prompt_body']) if binding is not None else None),
         )
     except PersonaContractError as exc:
         mark_generation_failed(conn, generation_job_id, exc.error_code, now=now)
@@ -343,6 +447,12 @@ def generate_continuity_chunk(
             provider=str(getattr(result, 'provider', '') or ''),
             model_identity=str(getattr(result, 'model_identity', '') or ''),
             actual_executor=str(getattr(result, 'actual_executor', '') or ''),
+            settings_revision_id=job.settings_revision_id,
+            prompt_hash=job.frozen_prompt_hash,
+            prompt_revision=job.frozen_prompt_revision,
+            persona_revision=job.frozen_persona_revision,
+            usage=getattr(result, 'usage', None),
+            usage_fields=_usage_diagnostics(result, job, binding),
             now=now,
         )
     except Exception:
