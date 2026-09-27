@@ -553,12 +553,13 @@ class ClaudeRuntimeLifecycleTests(unittest.TestCase):
 
     def test_opus_55_runtime_compatibility_and_config_write_gate(self):
         from chat import cc_model
+        import config_store
 
         opus = {'id': 'claude-opus-5-5', 'min_claude_code_version': '2.1.280'}
         catalog = {'models': [opus]}
         with mock.patch.object(cc_model, 'get_cc_model_catalog', return_value=catalog), \
              mock.patch.object(cc_model, '_active_runtime_version_for_catalog', return_value='2.1.220'), \
-             mock.patch.object(cc_model.config_store, 'set') as write:
+             mock.patch.object(config_store, 'set') as write:
             result = cc_model.set_cc_chat_model('claude-opus-5-5')
             self.assertEqual(result['error'], cc_model.CC_MODEL_RUNTIME_INCOMPATIBLE)
             write.assert_not_called()
