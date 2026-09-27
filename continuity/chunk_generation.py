@@ -1,11 +1,15 @@
 """R3 candidate-level shadow chunk generation orchestration."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
+import logging
 import re
+import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from continuity.contracts import ContinuityChunk, ContinuityGenerationJob
@@ -29,6 +33,8 @@ from continuity.store import (
 )
 from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
+
+_log = logging.getLogger('hayagarden.continuity.chunk_generation')
 
 GENERATOR_POLICY_VERSION = 'continuity_chunk_generator_v1'
 PROMPT_POLICY_VERSION = 'continuity_chunk_prompt_v2'
@@ -329,6 +335,88 @@ def _usage_diagnostics(result: Any, job: ContinuityGenerationJob, binding: dict[
     return normalized
 
 
+def _with_route_observability(result: Any, observability: dict[str, Any]) -> Any:
+    """Record which executor route ran (and why) in the raw usage payload."""
+    usage = dict(getattr(result, 'usage', None) or {})
+    usage.update(observability)
+    if dataclasses.is_dataclass(result):
+        return dataclasses.replace(result, usage=usage)
+    try:
+        result.usage = usage
+    except AttributeError:
+        pass
+    return result
+
+
+def _default_generate_with_native_fork(
+    job: ContinuityGenerationJob,
+    candidate: Any,
+    snapshot: Any,
+    *,
+    prompt_body: str,
+    source_db_path: str | None,
+    cwd: str | None,
+    on_provider_call: Callable[[], None],
+) -> Callable[[Any, Any], Any]:
+    """Default executor: native fork when proven eligible, else the one-shot.
+
+    Pre-provider native failures fall back to the existing isolated one-shot
+    and keep their reason. Once the native child's provider process has been
+    launched, any failure fails the job: a second model call is never issued.
+    """
+
+    def _generate(request: Any, authority: Any) -> Any:
+        from continuity.native_fork_eligibility import MODE_ONESHOT, resolve_continuity_native_fork
+        from continuity.native_fork_executor import (
+            NativeForkGenerationError,
+            execute_continuity_native_fork,
+        )
+
+        resolved_cwd = cwd
+        if resolved_cwd is None:
+            from chat.cc_runtime import repo_root
+            resolved_cwd = str(repo_root())
+        source_conn = None
+        try:
+            if source_db_path is not None:
+                resolved = Path(source_db_path).expanduser().resolve()
+                source_conn = sqlite3.connect(f'file:{resolved.as_posix()}?mode=ro', uri=True)
+                source_conn.row_factory = sqlite3.Row
+        except sqlite3.Error:
+            source_conn = None
+        try:
+            plan = resolve_continuity_native_fork(
+                source_conn, job=job, candidate=candidate, snapshot=snapshot, cwd=resolved_cwd,
+            )
+        finally:
+            if source_conn is not None:
+                source_conn.close()
+
+        observability = plan.observability()
+        if plan.eligible:
+            try:
+                return execute_continuity_native_fork(
+                    plan, prompt_body=prompt_body, authority=authority, cwd=resolved_cwd,
+                    on_provider_start=on_provider_call,
+                )
+            except NativeForkGenerationError as exc:
+                if exc.provider_started:
+                    raise
+                observability = {
+                    **observability,
+                    'continuity_generation_mode': MODE_ONESHOT,
+                    'continuity_generation_fallback_reason': exc.error_code,
+                }
+        _log.info(
+            'continuity generation %s via isolated one-shot: %s',
+            job.generation_job_id, observability.get('continuity_generation_fallback_reason'),
+        )
+        on_provider_call()
+        return _with_route_observability(_default_generate(request, authority), observability)
+
+    return _generate
+
+
 def generate_continuity_chunk(
     conn: Any,
     generation_job_id: str,
@@ -339,6 +427,9 @@ def generate_continuity_chunk(
     request_factory: Callable[..., Any] | None = None,
     persona_reader: Callable[[], str] | None = None,
     persona_text: str | None = None,
+    source_db_path: str | None = None,
+    cwd: str | None = None,
+    on_provider_call: Callable[[], None] | None = None,
     now: str | None = None,
 ) -> ContinuityChunk:
     """Generate one candidate-level shadow chunk with a frozen authority."""
@@ -399,22 +490,38 @@ def generate_continuity_chunk(
             raise ContinuityStoreConflict('ready generation job has no ready chunk')
         return existing
 
+    frozen_prompt_body = str(binding['prompt_body']) if binding is not None else ACCEPTED_PROMPT
     try:
         request = _request(
             source,
             request_factory=request_factory,
             persona_reader=persona_reader,
             persona_text=(str(binding['persona_body']) if binding is not None else persona_text),
-            prompt_body=(str(binding['prompt_body']) if binding is not None else None),
+            prompt_body=(frozen_prompt_body if binding is not None else None),
         )
     except PersonaContractError as exc:
         mark_generation_failed(conn, generation_job_id, exc.error_code, now=now)
         raise
-    generate = generate_fn or _default_generate
+    provider_call = on_provider_call or (lambda: None)
+    if generate_fn is not None:
+        def generate(request: Any, authority: Any) -> Any:
+            provider_call()
+            return generate_fn(request, authority)
+    else:
+        generate = _default_generate_with_native_fork(
+            job, candidate, snapshot,
+            prompt_body=frozen_prompt_body,
+            source_db_path=source_db_path,
+            cwd=cwd,
+            on_provider_call=provider_call,
+        )
     try:
         result = generate(request, authority)
-    except Exception:
-        mark_generation_failed(conn, generation_job_id, 'generation_error', now=now)
+    except Exception as exc:
+        from continuity.native_fork_executor import NativeForkGenerationError
+
+        error_code = exc.error_code if isinstance(exc, NativeForkGenerationError) else 'generation_error'
+        mark_generation_failed(conn, generation_job_id, error_code, now=now)
         raise
 
     try:
