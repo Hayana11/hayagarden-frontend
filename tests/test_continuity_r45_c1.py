@@ -620,5 +620,81 @@ class ProducerTests(unittest.TestCase):
             conn.close()
 
 
+    def test_settings_bound_producer_entry_uses_frozen_binding(self):
+        import continuity.store as store
+        from continuity.settings import binding_for_revision, load_authority
+
+        self._write_source(self._turns(21))
+        seen = []
+
+        def capture_authority():
+            self.authority_calls += 1
+            return SimpleNamespace(
+                provider='claude_code',
+                model_identity='explicit:claude-opus-5-5',
+            )
+
+        def fake_generate(request, authority):
+            seen.append((request, authority.provider, authority.model_identity))
+            return SimpleNamespace(
+                text='grounded generated chunk',
+                provider=authority.provider,
+                model_identity=authority.model_identity,
+                actual_executor='fake-producer-entry',
+                usage=None,
+            )
+
+        result = run_continuity_producer(
+            source_db_path=self.source_path,
+            continuity_store_path=self.store_path,
+            policy=None,
+            window_identity_reader=lambda _conn, _chat_id: self.identity,
+            capture_authority=capture_authority,
+            generate_fn=fake_generate,
+            request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+            persona_text=PERSONA,
+            now='2026-09-14T00:00:00+00:00',
+        )
+        self.assertEqual(result.status, 'ready', result)
+        self.assertEqual(result.model_call_count, 1)
+        self.assertEqual(result.queued_generation_job_count, 1)
+        self.assertEqual(len(seen), 1)
+
+        conn = sqlite3.connect(str(self.store_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            authority = load_authority(conn)
+            active = authority['active_revision']
+            binding = binding_for_revision(conn, active['revision_id'])
+            jobs = store.load_generation_jobs(conn)
+            self.assertEqual(len(jobs), 1)
+            job = jobs[0]
+            self.assertEqual(job.status, 'ready')
+
+            candidate = store.load_candidate(conn, job.candidate_id)
+            self.assertIsNotNone(candidate)
+            self.assertEqual(
+                candidate.policy_version,
+                f"{binding['sealing_policy_version']}@{binding['settings_revision_id']}",
+            )
+            self.assertIn(f"@{binding['settings_revision_id']}", candidate.policy_version)
+            self.assertNotIn('@', candidate.sealing_policy_version)
+            self.assertEqual(
+                candidate.sealing_policy_version,
+                binding['sealing_policy_version'],
+            )
+            self.assertEqual(candidate.settings_revision_id, binding['settings_revision_id'])
+            self.assertEqual(job.settings_revision_id, binding['settings_revision_id'])
+
+            chunk = store.load_ready_chunk_for_job(conn, job.generation_job_id)
+            self.assertIsNotNone(chunk)
+            self.assertEqual(chunk.status, 'ready')
+            self.assertEqual(chunk.settings_revision_id, binding['settings_revision_id'])
+            self.assertEqual(result.generated_generation_job_id, job.generation_job_id)
+            self.assertEqual(result.generated_chunk_id, chunk.chunk_id)
+        finally:
+            conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()
