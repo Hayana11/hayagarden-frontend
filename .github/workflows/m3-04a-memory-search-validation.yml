@@ -107,7 +107,6 @@ jobs:
           python - <<'PY'
           import tools.capability_manifest as manifest
           from tools.cc_capability_adapter import physical_surface_fingerprint
-          from wake.cc_tools import WAKE_TO_CC_MCP
 
           assert manifest.get_capability("memory.search")["provider_bindings"] == {
               "claude_code": "mcp__capability__memory_search",
@@ -115,7 +114,6 @@ jobs:
               "home_mcp": "mcp__home__search_memories",
           }
           assert manifest.get_capability("memory.search")["loading_policy"] == "always_load"
-          assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
           # Catch-up after #484 promoted health.read onto the physical
           # internal MCP surface. memory.search bindings are unchanged.
           fingerprint = physical_surface_fingerprint()

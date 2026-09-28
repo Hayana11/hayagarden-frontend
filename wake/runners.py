@@ -1,8 +1,9 @@
 """Wake model runners: same parser/executor, different thinking line.
 
 ApiRelayWakeRunner wraps the existing relay agent loop (behavior unchanged).
-ClaudeCode Wake uses the canonical shared chat resident through a gateway-owned
-adapter, preserving Wake's lease and transcript-isolation contracts.
+Legacy Claude Wake structured protocol and the independent CC Wake resident
+are retired: morning/nightwatch/ritual/self_trigger fail closed, and
+canonical normal Wake stays on the Unified/_CC_RESIDENT route.
 """
 from __future__ import annotations
 
@@ -10,37 +11,39 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
 from chat.provider_router import resolve_provider
-from wake.cc_tools import cc_wake_allowed_tools, filter_wake_tools_for_cc
 
 NL = chr(10)
 
 # Modes that stay on BACKGROUND_PROVIDER in B1 — api_relay only (scheme A).
 BACKGROUND_WAKE_MODES = frozenset(('summarize',))
-# First-cut CC Wake modes.
-CC_WAKE_MODES = frozenset(('normal', 'morning', 'nightwatch', 'ritual', 'self_trigger'))
+# Retired Claude Wake modes: no provider round, no Action, no runner fallback.
+DISABLED_CC_WAKE_MODES = frozenset((
+    'morning', 'nightwatch', 'ritual', 'self_trigger',
+))
+WAKE_MODE_DISABLED_REASON = 'WAKE_MODE_DISABLED'
 
 
 class UnsupportedWakeModeError(ValueError):
     """Legal config that this B1 cut does not implement (fail at route time)."""
     pass
 
-WAKE_CONTRACT = (
-    '【自主唤醒合同】\n'
-    '你正在做唤醒检查，不是日常聊天。不要混入值班机器人腔调到白天对话里——'
-    '这次输出只服务唤醒决策。\n'
-    '最终必须输出以下三行（可先用工具，再输出）：\n'
-    'THOUGHTS: <你看到了什么、为什么这么决定；选 none 也要有原因链>\n'
-    'ACTION: <从 none / message / diary / explore 中选一个>\n'
-    'CONTENT: <ACTION=message 时写消息（不超过80字）；explore 写调研摘要；其他留空>\n'
-    '禁止假装调用过不存在的工具。'
-)
 
-FORMAT_NUDGE = (
-    '现在请只输出以下三行，不要其他任何内容：\n'
-    'THOUGHTS: <写清楚你刚才看到了什么、为什么这么决定——即使选 none 也要有原因链>\n'
-    'ACTION: <从 none / message / diary / explore 中选一个>\n'
-    'CONTENT: <若 ACTION=message 则写消息内容（不超过80字）；explore 写调研摘要；其他留空>'
-)
+def wake_mode_disabled(mode: str) -> bool:
+    return str(mode or '').strip() in DISABLED_CC_WAKE_MODES
+
+
+def wake_mode_disabled_payload(mode: str) -> dict[str, Any] | None:
+    """Deterministic skip payload for retired Claude Wake modes."""
+    cleaned = str(mode or '').strip() or 'normal'
+    if not wake_mode_disabled(cleaned):
+        return None
+    return {
+        'ok': True,
+        'skipped': True,
+        'reason': WAKE_MODE_DISABLED_REASON,
+        'mode': cleaned,
+        'detail': 'mode=%s' % cleaned,
+    }
 
 
 @dataclass
@@ -53,7 +56,6 @@ class WakeRequest:
     wake_run_id: str = ''
     max_rounds: int = 6
     dry_run: bool = False
-    window_identity: Any = None
 
 
 @dataclass
@@ -62,8 +64,6 @@ class WakeResult:
     cache_info: dict
     provider: str
     model: str
-    # Shared Claude Wake owns a delivery fence until the gateway executor settles it.
-    shared_delivery_fence: Any = None
 
 
 class WakeRunner(Protocol):
@@ -75,11 +75,16 @@ def select_wake_provider(mode: str) -> str:
 
     Dream is surface-owned since Provider-A3 and must never reach a Wake
     runner. Summarize remains the sole BACKGROUND_PROVIDER legacy mode.
+    Retired Claude Wake modes fail closed with WAKE_MODE_DISABLED.
     """
     mode = str(mode or 'normal')
     if mode == 'dream':
         raise UnsupportedWakeModeError(
             'dream generation 已迁移到 surface-owned Background Generation Adapter'
+        )
+    if wake_mode_disabled(mode):
+        raise UnsupportedWakeModeError(
+            '%s mode=%s' % (WAKE_MODE_DISABLED_REASON, mode)
         )
     if mode in BACKGROUND_WAKE_MODES:
         provider = resolve_provider('background')
@@ -101,8 +106,6 @@ def prepare_tools_for_provider(
     if dry_run:
         # Safest dry_run contract: model may think, but no tool side effects.
         return []
-    if provider == 'claude_code' and mode in CC_WAKE_MODES:
-        return filter_wake_tools_for_cc(tools)
     return list(tools or [])
 
 
@@ -131,7 +134,7 @@ def should_prompt_readonly_tools(
 
 
 def split_wake_system(system: object) -> tuple[str, str]:
-    """Stable (cacheable) vs dynamic wake blocks for the CC resident system/prompt."""
+    """Stable (cacheable) vs dynamic wake blocks for inspect_only / relay."""
     if isinstance(system, list):
         stable_parts: list[str] = []
         dynamic_parts: list[str] = []
@@ -209,44 +212,19 @@ class ApiRelayWakeRunner:
         )
 
 
-class SharedWakeUnavailable(RuntimeError):
-    """Canonical shared resident is not ready; Wake must fail closed."""
-
-    pass
-
-
-class SharedResidentWakeRunner:
-    """Adapter for the canonical chat resident owned by gateway.py.
-
-    The callback performs the resident readiness, Wake lease, transcript
-    watermark, provider stream, and delivery-fence work. Keeping that
-    authority in gateway.py prevents this provider adapter from constructing
-    a second resident or silently falling back to a new context.
-    """
-
-    def __init__(self, invoke: Callable[[WakeRequest], WakeResult]):
-        self._invoke = invoke
-
-    def run(self, request: WakeRequest) -> WakeResult:
-        if request.mode not in CC_WAKE_MODES:
-            raise UnsupportedWakeModeError(
-                'claude_code Wake 暂不支持 mode=%s；'
-                'summarize 请保持 BACKGROUND_PROVIDER=api_relay'
-                % request.mode
-            )
-        return self._invoke(request)
-
-
 _RUNNER_FACTORY: dict[str, Callable[[], WakeRunner]] = {}
 
 
 def register_wake_runners(
     *,
     api_relay: WakeRunner,
-    claude_code: WakeRunner,
+    claude_code: WakeRunner | None = None,
 ) -> None:
     _RUNNER_FACTORY['api_relay'] = lambda: api_relay
-    _RUNNER_FACTORY['claude_code'] = lambda: claude_code
+    if claude_code is None:
+        _RUNNER_FACTORY.pop('claude_code', None)
+    else:
+        _RUNNER_FACTORY['claude_code'] = lambda: claude_code
 
 
 def get_wake_runner(provider: str) -> WakeRunner:
@@ -278,21 +256,11 @@ def inspect_wake_plan(
         't_hours': t_hours,
         'capability_profile': 'cc_wake' if provider == 'claude_code' else 'relay_wake',
         'tool_names': [t.get('name') for t in prepared if t.get('name')],
-        'relay_only_removed': (
-            sorted({
-                str(t.get('name')) for t in (tools or [])
-                if t.get('name') and t.get('name') not in {
-                    x.get('name') for x in prepared
-                }
-            }) if provider == 'claude_code' else []
-        ),
+        'relay_only_removed': [],
         'stable_chars': len(stable),
         'dynamic_chars': len(dynamic),
         'trigger': _messages_trigger(messages),
-        'cc_allowed_tools': (
-            cc_wake_allowed_tools(prepared).split(',')
-            if provider == 'claude_code' else []
-        ),
+        'cc_allowed_tools': [],
         # Sanity flags for reviewers / deploy checklist.
         # Use Relay-brochure-unique phrases (not the CC "不可用：…" denylist).
         'prompt_claims_relay_only_tools': any(

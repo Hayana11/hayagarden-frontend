@@ -8693,238 +8693,8 @@ def _wake_agent_loop(
     return NL.join(t for t in text_parts if t).strip(), cache_info
 
 
-def _run_shared_claude_wake(request):
-    """Run non-unified Claude Wake modes through the canonical chat resident.
-
-    The shared resident is used for provider execution, while a Wake turn
-    lease and transcript watermark keep this control round out of formal Chat
-    history. The executor remains the only owner of Wake delivery/settlement.
-    """
-    from chat.behavior_authority_b3 import _hot_chat_resident_ready
-    from chat.cc_history_rewrite import guard_cc_generation
-    from chat.unified_heartbeat_a1 import (
-        begin_shared_wake_delivery_fence,
-        commit_shared_transcript_watermark,
-        prepare_shared_transcript_watermark,
-    )
-    from chat.display_thinking import (
-        filter_display_thinking_events,
-        get_display_thinking_snapshot,
-    )
-    from tools.lease_signer import issue_turn_lease
-    from wake.cc_tools import cc_wake_nudge_text, cc_wake_tool_names
-    from wake.runners import (
-        SharedWakeUnavailable,
-        WAKE_CONTRACT,
-        WakeResult,
-        _messages_trigger,
-        split_wake_system,
-    )
-
-    resident = _CC_RESIDENT
-    trace_id = str(request.wake_run_id or '')
-    acquired = False
-    shared_started = False
-    delivery_fence = None
-    watermark = None
-    cleanup_reason = 'shared_claude_wake_failed'
-    display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
-    cache_info = {
-        'provider': 'claude_code',
-        'source': 'wake',
-        'wake_run_id': trace_id,
-        'mode': request.mode,
-        'shared_chat_resident': True,
-        'legacy_cc_wake_resident': False,
-    }
-
-    try:
-        ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
-        if not ready:
-            raise SharedWakeUnavailable(reason)
-
-        lock_mode, _ = _gen_acquire_or_wait(wait_timeout=0)
-        if lock_mode != 'own':
-            raise SharedWakeUnavailable('generation_lock_unavailable')
-        acquired = True
-
-        ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
-        if not ready:
-            raise SharedWakeUnavailable(reason)
-
-        watermark, reason = prepare_shared_transcript_watermark(
-            resident,
-            db_path=DB_PATH,
-        )
-        if watermark is None:
-            raise SharedWakeUnavailable(reason)
-
-        lease = issue_turn_lease(
-            turn_id='wake-shared:' + (trace_id or request.mode),
-            turn_mode='wake',
-            issued_from='default_policy',
-        )
-        stable, dynamic = split_wake_system(request.system)
-        nudge = cc_wake_nudge_text(
-            request.t_hours,
-            cc_wake_tool_names(request.tools),
-            dry_run=bool(request.dry_run),
-        )
-        trigger = _messages_trigger(request.messages)
-        content = (NL + NL).join(
-            part.strip() for part in (
-                WAKE_CONTRACT,
-                stable,
-                dynamic,
-                nudge,
-                trigger,
-            ) if str(part or '').strip()
-        )
-
-        def guarded_events():
-            nonlocal delivery_fence, shared_started
-            ready_now, reason_now = _hot_chat_resident_ready(
-                resident,
-                db_path=DB_PATH,
-            )
-            if not ready_now:
-                raise SharedWakeUnavailable(reason_now)
-            delivery_fence = begin_shared_wake_delivery_fence(
-                gateway=_sys.modules[__name__],
-                resident=resident,
-            )
-            shared_started = True
-            yield from _cc_resident_stream_gen(
-                [{'role': 'user', 'content': content}],
-                user_turn=False,
-                history_stats={},
-                is_cold=False,
-                display_thinking_mode=display_thinking_mode,
-                display_thinking_prompt=display_thinking_prompt,
-                turn_lease=lease,
-                jsonl_finality_profile='unified_normal_wake',
-                diagnostic_wake_run_id=trace_id,
-            )
-
-        text_acc = []
-        thinking_acc = []
-        tool_calls = []
-        tool_decisions = {}
-        usage = {}
-        saw_done = False
-        for evt, payload in filter_display_thinking_events(
-            guard_cc_generation(guarded_events()),
-            lambda: _resident_display_thinking_mode(display_thinking_mode),
-        ):
-            if evt == 'text':
-                text_acc.append(str(payload or ''))
-            elif evt == 'think':
-                thinking_acc.append(str(payload or ''))
-            elif evt == 'tool_use' and isinstance(payload, dict):
-                tool_decisions[payload.get('id')] = payload.get('lease_decision')
-                tool_calls.append({
-                    'id': payload.get('id'),
-                    'name': payload.get('name'),
-                    'args': payload.get('args'),
-                    'result': '',
-                    'success': True,
-                })
-            elif evt == 'tool_result' and isinstance(payload, dict):
-                index = next(
-                    (
-                        i for i in range(len(tool_calls) - 1, -1, -1)
-                        if tool_calls[i].get('id') == payload.get('tool_use_id')
-                    ),
-                    -1,
-                )
-                if index >= 0:
-                    tool_calls[index]['result'] = payload.get('result', '')
-                    tool_calls[index]['success'] = not payload.get('is_error')
-                    tool_decisions[payload.get('tool_use_id')] = tool_decisions.get(
-                        payload.get('tool_use_id')
-                    )
-            elif evt == 'done':
-                saw_done = True
-                if isinstance(payload, tuple) and len(payload) >= 3:
-                    usage = dict(payload[2] if isinstance(payload[2], dict) else {})
-                    text_acc = [str(payload[0] or '')]
-                    thinking_acc = [str(payload[1] or '')]
-        if not saw_done:
-            raise RuntimeError('shared_claude_wake_missing_done')
-
-        text = ''.join(text_acc).strip()
-        if not text:
-            raise RuntimeError('shared_claude_wake_empty_response')
-        respawn_reason = str(usage.get('respawn_reason') or '').strip()
-        if respawn_reason:
-            raise RuntimeError('shared_claude_wake_respawned:%s' % respawn_reason)
-
-        jsonl_finality = usage.get('jsonl_usage')
-        if not isinstance(jsonl_finality, dict):
-            raise RuntimeError('shared_claude_wake_jsonl_finality_missing')
-        if jsonl_finality.get('stream_totals_match') is not True:
-            cleanup_reason = 'shared_claude_wake_jsonl_not_final'
-            raise RuntimeError('shared_claude_wake_jsonl_not_final')
-
-        cache_info.update(usage)
-        cache_info['thinking'] = ''.join(thinking_acc)
-        cache_info['tool_calls'] = tool_calls
-        cache_info['transcript_finality'] = dict(jsonl_finality)
-        transcript_skip = commit_shared_transcript_watermark(
-            watermark,
-            resident,
-            db_path=DB_PATH,
-            jsonl_finality=jsonl_finality,
-        )
-        cache_info['transcript_skip'] = transcript_skip
-
-        cache_at = usage.get('_candidate_cache_refresh_at')
-        cache_monotonic = usage.get('_candidate_cache_refresh_monotonic')
-        if cache_at is not None and cache_monotonic is not None:
-            resident.commit_cache_freshness(
-                wall_at=cache_at,
-                monotonic_at=cache_monotonic,
-            )
-
-        raw_text = text
-        thinking = ''.join(thinking_acc).strip()
-        if thinking and 'THOUGHTS' not in raw_text.upper():
-            raw_text = (thinking + NL + raw_text).strip()
-        return WakeResult(
-            raw_text=raw_text,
-            cache_info=cache_info,
-            provider='claude_code',
-            model=str(
-                getattr(resident, '_model_identity', None)
-                or 'claude-code:shared-resident'
-            ),
-            shared_delivery_fence=delivery_fence,
-        )
-    except SharedWakeUnavailable:
-        if shared_started and delivery_fence is not None:
-            delivery_fence.finish(
-                False,
-                cache_info=cache_info,
-                window_identity=request.window_identity,
-                reason='shared_claude_wake_unavailable',
-            )
-        raise
-    except Exception:
-        if shared_started and delivery_fence is not None:
-            delivery_fence.finish(
-                False,
-                cache_info=cache_info,
-                window_identity=request.window_identity,
-                reason=cleanup_reason,
-            )
-        raise
-    finally:
-        if acquired and delivery_fence is None:
-            _gen_release(None)
-
-
 def _ensure_wake_runners():
-    """Register relay / CC wake runners once (lazy; needs _wake_agent_loop)."""
+    """Register the remaining live Wake runner (api_relay / summarize)."""
     from wake import runners as _wake_runners
     if getattr(_ensure_wake_runners, '_done', False):
         return _wake_runners
@@ -8932,10 +8702,7 @@ def _ensure_wake_runners():
         _wake_agent_loop,
         model_getter=lambda: __import__('relay.manager', fromlist=['relay']).relay.model,
     )
-    cc_runner = _wake_runners.SharedResidentWakeRunner(
-        _run_shared_claude_wake,
-    )
-    _wake_runners.register_wake_runners(api_relay=relay_runner, claude_code=cc_runner)
+    _wake_runners.register_wake_runners(api_relay=relay_runner)
     _ensure_wake_runners._done = True
     return _wake_runners
 
@@ -9119,7 +8886,7 @@ def _wake_inspect_only(data, mode, activity_desc, ritual_type):
     """Pure build path: no wake lock, no runtime guards, no model, no DB writes."""
     from chat.interaction_state import read_interaction_clock
     from chat.provider_router import ProviderConfigError
-    from wake.runners import SharedWakeUnavailable, UnsupportedWakeModeError
+    from wake.runners import UnsupportedWakeModeError
 
     wake_run_id = str(data.get('wake_run_id') or '').strip()
     try:
@@ -9184,6 +8951,11 @@ def wake_decide():
     activity_desc = data.get('activity_desc', '')
     ritual_type = data.get('ritual_type', '')
 
+    from wake.runners import wake_mode_disabled_payload
+    disabled = wake_mode_disabled_payload(mode)
+    if disabled:
+        return jsonify(disabled)
+
     # inspect_only: pure build — bypass wake lock and runtime busy/idle guards.
     if bool(data.get('inspect_only')):
         return _wake_inspect_only(data, mode, activity_desc, ritual_type)
@@ -9203,10 +8975,13 @@ def wake_decide():
 def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     from chat.interaction_state import read_interaction_clock, wake_guard_reason
     from chat.provider_router import ProviderConfigError
-    from wake.runners import SharedWakeUnavailable, UnsupportedWakeModeError
+    from wake.runners import UnsupportedWakeModeError, wake_mode_disabled_payload
 
     dry_run = bool(data.get('dry_run'))
     wake_run_id = str(data.get('wake_run_id') or '').strip()
+    disabled = wake_mode_disabled_payload(mode)
+    if disabled:
+        return jsonify(disabled)
     # Live path only: flush drive / calibrate / dream consume / mark run_id.
     live = not dry_run
 
@@ -9910,7 +9685,19 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'b3_authority': True,
         })
 
-    delivery_fence = None
+    if str(wake_provider or '') == 'claude_code':
+        _mark_production_attempt(
+            'failed', reason='WAKE_CLAUDE_RUNNER_RETIRED',
+        )
+        return jsonify({
+            'ok': True,
+            'skipped': True,
+            'reason': 'WAKE_CLAUDE_RUNNER_RETIRED',
+            'mode': mode,
+            'provider': wake_provider,
+            'wake_run_id': wake_run_id,
+        })
+
     try:
         runner = _wake_runners.get_wake_runner(wake_provider)
         result = runner.run(_wake_runners.WakeRequest(
@@ -9921,10 +9708,8 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             t_hours=t_hours,
             wake_run_id=wake_run_id,
             dry_run=dry_run,
-            window_identity=_wake_window_identity,
         ))
         raw_text = result.raw_text
-        delivery_fence = getattr(result, 'shared_delivery_fence', None)
         wake_cache_info = dict(result.cache_info or {})
         # Usage records the actual executor — never invent a fallback provider.
         wake_cache_info['provider'] = result.provider
@@ -9933,27 +9718,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             wake_cache_info['wake_run_id'] = wake_run_id
         if dry_run:
             wake_cache_info['dry_run'] = True
-    except SharedWakeUnavailable as e:
-        _mark_production_attempt(
-            'failed', reason=f'shared_wake_unavailable:{e}',
-        )
-        return jsonify({
-            'ok': True,
-            'skipped': True,
-            'reason': 'SHARED_WAKE_UNAVAILABLE_SKIP',
-            'detail': str(e),
-            'mode': mode,
-            'provider': wake_provider,
-            'wake_run_id': wake_run_id,
-        })
     except Exception as e:
-        if delivery_fence is not None:
-            delivery_fence.finish(
-                False,
-                cache_info=locals().get('wake_cache_info'),
-                window_identity=_wake_window_identity,
-                reason='wake_runner_failed',
-            )
         import traceback as _tb
         app.logger.error(
             f'[wake] mode={mode} provider={wake_provider} '
@@ -9974,13 +9739,6 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         thoughts = thought_fallback(raw_text)
 
     if dry_run:
-        if delivery_fence is not None:
-            delivery_fence.finish(
-                False,
-                cache_info=wake_cache_info,
-                window_identity=_wake_window_identity,
-                reason='dry_run_no_action_commit',
-            )
         # No executor / Action commit — not accepted comparison evidence.
         _mark_production_attempt(
             'failed', action=action, reason='dry_run_no_action_commit',
@@ -10030,13 +9788,6 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             settle_user_idle_hours=t2_hours,
         )
     except Exception as _exec_exc:
-        if delivery_fence is not None:
-            delivery_fence.finish(
-                False,
-                cache_info=wake_cache_info,
-                window_identity=_wake_window_identity,
-                reason='wake_executor_failed',
-            )
         _mark_production_attempt(
             'failed', action=action, reason=str(_exec_exc),
         )
@@ -10050,16 +9801,6 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     _mark_production_attempt(
         _prod_status, action=action, reason=_prod_reason or None,
     )
-    if delivery_fence is not None:
-        delivery_fence.finish(
-            _prod_status == 'success',
-            cache_info=wake_cache_info,
-            window_identity=_wake_window_identity,
-            reason=_prod_reason or (
-                'delivery_succeeded' if _prod_status == 'success'
-                else 'wake_delivery_failed'
-            ),
-        )
 
     return jsonify({
         'ok': True,

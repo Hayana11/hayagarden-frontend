@@ -72,7 +72,7 @@ def resolve_model_identity(provider: str) -> str:
 def _provider_content_policy(provider: str) -> str:
     """How the provider Wake contract treats ACTION CONTENT.
 
-    CC WAKE_CONTRACT: CONTENT only for message/explore; diary left empty
+    Claude Code: CONTENT only for message/explore; diary left empty
     (then executor rejects empty diary) ⇒ diary not executor-resolved.
     Relay: diary remains content-aligned executable capability (contract §3.2).
     """

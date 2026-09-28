@@ -12,35 +12,17 @@ if ROOT not in sys.path:
 
 from wake.cc_tools import (
     CC_WAKE_CAPABILITY_TEXT,
-    CC_WAKE_WRITE_MCP,
-    cc_wake_allowed_tools,
-    cc_wake_nudge_text,
 )
 
 
 class WakeLightAllowlistTests(unittest.TestCase):
-    def test_wake_allowlist_read_only_lights(self):
-        csv = cc_wake_allowed_tools(None)
-        parts = set(csv.split(','))
-        self.assertIn('mcp__home__get_light_status', parts)
-        self.assertNotIn('mcp__home__light_on', parts)
-        self.assertNotIn('mcp__home__light_off', parts)
-        self.assertNotIn('mcp__home__light_bedside_warm', parts)
-        self.assertNotIn('mcp__home__light_bedside_neutral', parts)
-        for mcp in ('mcp__home__light_on', 'mcp__home__light_off'):
-            self.assertNotIn(mcp, CC_WAKE_WRITE_MCP)
-
     def test_wake_capability_text_no_write_lights(self):
         self.assertIn('get_light_status', CC_WAKE_CAPABILITY_TEXT)
         self.assertNotIn('可写可用：light_on', CC_WAKE_CAPABILITY_TEXT)
         self.assertNotIn('light_bedside_warm', CC_WAKE_CAPABILITY_TEXT.split('可写')[0])
         self.assertIn('不得调用 light_on', CC_WAKE_CAPABILITY_TEXT)
-
-    def test_wake_nudge_no_write_lights(self):
-        text = cc_wake_nudge_text(0.5, ['get_light_status'])
-        self.assertIn('get_light_status', text)
-        self.assertIn('不可改灯', text)
-        self.assertNotIn('灯控（on/off', text)
+        self.assertNotIn('mcp__home__light_on', CC_WAKE_CAPABILITY_TEXT)
+        self.assertNotIn('mcp__home__light_off', CC_WAKE_CAPABILITY_TEXT)
 
 
 class RelayWakeToolsLightContractTests(unittest.TestCase):
