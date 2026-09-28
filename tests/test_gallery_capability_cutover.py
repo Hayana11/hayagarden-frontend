@@ -134,6 +134,10 @@ class GalleryCapabilityCutoverTests(unittest.TestCase):
         self.assertEqual(inspected["inspection_answer"], "原图小字")
 
     def test_screenshot_validates_viewpoint_and_registers_attachment(self):
+        import inspect
+        from chat.gallery_service import screenshot_chat as screenshot_impl
+        self.assertEqual(inspect.signature(screenshot_impl).parameters["timeout"].default, 42.0)
+        self.assertEqual(inspect.signature(screenshot_impl).parameters["lock_timeout"].default, 5.0)
         import attachment_store
         output = SimpleNamespace(stdout=json.dumps({"ok": True, "shot": str(self.root / "shot.png")}), stderr="", returncode=0)
         with mock.patch.object(attachment_store, "save", return_value="aid-1"):

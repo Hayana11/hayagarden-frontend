@@ -302,8 +302,8 @@ def screenshot_chat(
     *,
     repo_root: str | Path | None = None,
     attachments_root: str | Path | None = None,
-    timeout: float = 55.0,
-    lock_timeout: float = 70.0,
+    timeout: float = 42.0,
+    lock_timeout: float = 5.0,
     run_fn: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     view = str(viewpoint or "").strip().lower()

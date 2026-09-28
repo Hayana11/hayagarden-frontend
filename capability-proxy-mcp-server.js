@@ -38,6 +38,21 @@ const ADAPTER_MODULES = Object.freeze({
   gallery_screenshot: 'tools.gallery_capability_adapter',
 });
 
+const DEFAULT_ADAPTER_TIMEOUT_MS = 5000;
+const GALLERY_ADAPTER_TIMEOUTS_MS = Object.freeze({
+  gallery_save: 50000,
+  gallery_recall: 25000,
+  gallery_screenshot: 50000,
+});
+
+function adapterTimeoutMs(toolName) {
+  const timeout = GALLERY_ADAPTER_TIMEOUTS_MS[toolName] ?? DEFAULT_ADAPTER_TIMEOUT_MS;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new Error('invalid capability adapter timeout');
+  }
+  return timeout;
+}
+
 function adapterCommand() {
   return {
     python: process.env.PYTHON || 'python3',
@@ -116,7 +131,7 @@ function callAdapter(toolName, input, verifiedTurnId = null) {
     },
     input: JSON.stringify(payload),
     encoding: 'utf8',
-    timeout: 5000,
+    timeout: adapterTimeoutMs(toolName),
   });
   return JSON.parse(output || '{}');
 }
@@ -347,6 +362,7 @@ if (require.main === module) {
 module.exports = {
   ADAPTER_MODULES,
   CAPABILITY_PROXY_TOOL_NAMES,
+  adapterTimeoutMs,
   buildServer,
   callAdapter,
   runLightStatusProxy,
