@@ -98,4 +98,3 @@ try {
   await client.close();
   await fs.rm(tempRoot, { recursive: true, force: true });
 }
-

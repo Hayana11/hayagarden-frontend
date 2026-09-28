@@ -359,4 +359,3 @@ __all__ = [
     "save_gallery_image",
     "screenshot_chat",
 ]
-
