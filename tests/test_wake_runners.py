@@ -32,7 +32,8 @@ from wake.cc_tools import (
 )
 from wake.runners import (
     ApiRelayWakeRunner,
-    ClaudeCodeWakeRunner,
+    SharedResidentWakeRunner,
+    WakeResult,
     UnsupportedWakeModeError,
     WakeRequest,
     get_wake_runner,
@@ -208,53 +209,33 @@ class WakeRunnerContractTests(unittest.TestCase):
 
     def test_register_and_get_runners(self):
         a = ApiRelayWakeRunner(lambda *a, **k: ('', {'provider': 'api_relay'}))
-        class _FakeResident:
-            _allowed_tools = ''
-            def ensure_alive(self, *a, **k):
-                return True
-            def send_turn(self, content):
-                yield ('done', ('THOUGHTS: t\nACTION: none\nCONTENT: ', '', {
-                    'rounds': [{'index': 1, 'input_tokens': 1, 'output_tokens': 1,
-                                'cache_read': 0, 'cache_creation': 0, 'context_tokens': 1}],
-                    'resident_turn_count': 1,
-                    'respawn_reason': '',
-                }, {}))
+        seen = {}
 
-        c = ClaudeCodeWakeRunner(
-            _FakeResident(),
-            token='tok',
-            cwd=tempfile.mkdtemp(),
-            payload_builder=lambda **kw: dict(kw),
-        )
+        def invoke(request):
+            seen['mode'] = request.mode
+            seen['dry_run'] = request.dry_run
+            return WakeResult(
+                raw_text='THOUGHTS: t\nACTION: none\nCONTENT: ',
+                cache_info={'provider': 'claude_code', 'source': 'wake'},
+                provider='claude_code',
+                model='shared',
+            )
+
+        c = SharedResidentWakeRunner(invoke)
         register_wake_runners(api_relay=a, claude_code=c)
         self.assertIs(get_wake_runner('api_relay'), a)
         self.assertIs(get_wake_runner('claude_code'), c)
         result = c.run(WakeRequest(
-            mode='normal',
-            system=[{'type': 'text', 'text': 'persona', 'cache_control': {'type': 'ephemeral'}},
-                    {'type': 'text', 'text': 'dynamic a1'}],
+            mode='normal', system='s',
             messages=[{'role': 'user', 'content': '[唤醒检查]'}],
-            tools=[{'name': 'search_memories'}],
-            t_hours=2.0,
+            tools=[], t_hours=2.0, dry_run=True,
         ))
         self.assertEqual(result.provider, 'claude_code')
-        self.assertEqual(result.cache_info['provider'], 'claude_code')
-        self.assertEqual(result.cache_info['source'], 'wake')
-        self.assertEqual(result.cache_info['resident_turn_count'], 1)
+        self.assertEqual(result.model, 'shared')
+        self.assertEqual(seen, {'mode': 'normal', 'dry_run': True})
 
-    def test_cc_runner_rejects_dream_mode(self):
-        class _R:
-            _allowed_tools = ''
-            def ensure_alive(self, *a, **k):
-                return True
-            def send_turn(self, content):
-                if False:
-                    yield None
-
-        runner = ClaudeCodeWakeRunner(
-            _R(), token='t', cwd=tempfile.mkdtemp(),
-            payload_builder=lambda **kw: dict(kw),
-        )
+    def test_shared_runner_rejects_non_cc_modes(self):
+        runner = SharedResidentWakeRunner(lambda request: None)
         with self.assertRaises(UnsupportedWakeModeError):
             runner.run(WakeRequest(
                 mode='dream', system='s', messages=[], tools=[], t_hours=0,
@@ -271,37 +252,30 @@ class WakeRunnerContractTests(unittest.TestCase):
             [],
         )
 
-    def test_cc_dry_run_forces_empty_allowlist(self):
+    def test_shared_runner_forwards_dry_run_without_side_effects(self):
         seen = {}
 
-        class _R:
-            _allowed_tools = 'mcp__home__add_todo'
-            _system_text = 'old'
+        def invoke(request):
+            seen['tools'] = list(request.tools or [])
+            seen['dry_run'] = request.dry_run
+            return WakeResult(
+                raw_text='THOUGHTS: t\nACTION: none\nCONTENT: ',
+                cache_info={'provider': 'claude_code'},
+                provider='claude_code',
+                model='shared',
+            )
 
-            def ensure_alive(self, system, env):
-                seen['allowed'] = self._allowed_tools
-                return True
-
-            def send_turn(self, content):
-                seen['content'] = content
-                yield ('done', ('THOUGHTS: t\nACTION: none\nCONTENT: ', '', {
-                    'rounds': [], 'resident_turn_count': 1, 'respawn_reason': '',
-                }, {}))
-
-        runner = ClaudeCodeWakeRunner(
-            _R(), token='t', cwd=tempfile.mkdtemp(),
-            payload_builder=lambda **kw: dict(kw),
-        )
+        runner = SharedResidentWakeRunner(invoke)
         runner.run(WakeRequest(
             mode='normal',
-            system=[{'type': 'text', 'text': 'p', 'cache_control': {'type': 'ephemeral'}}],
+            system='s',
             messages=[{'role': 'user', 'content': '[唤醒检查]'}],
             tools=[],
             t_hours=1.0,
             dry_run=True,
         ))
-        self.assertEqual(seen['allowed'], '')
-        self.assertIn('dry_run', seen['content'])
+        self.assertEqual(seen['tools'], [])
+        self.assertTrue(seen['dry_run'])
 
     def test_split_system_keeps_cache_blocks_stable(self):
         stable, dynamic = split_wake_system([
@@ -363,42 +337,24 @@ class WakeUsageProviderTests(unittest.TestCase):
         self.assertEqual(payload['source'], 'wake')
 
 
-class WakeResidentSeparationTests(unittest.TestCase):
-    def test_gateway_defines_separate_cc_wake_resident(self):
+class WakeResidentRetirementTests(unittest.TestCase):
+    def test_gateway_routes_cc_wake_to_canonical_resident(self):
         src = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
-        self.assertIn('_CC_WAKE_RESIDENT', src)
-        # Chat resident may be wrapped in _SwappableResident for seamless handoff.
-        self.assertTrue(
-            '_CC_RESIDENT = _SwappableResident(' in src
-            or '_CC_RESIDENT = cc_resident.ResidentSession' in src,
-            'chat resident must be ResidentSession or _SwappableResident holder',
-        )
-        self.assertIn('_CC_WAKE_RESIDENT = cc_resident.ResidentSession', src)
-        # Two separate constructions — wake must not alias the chat resident.
-        self.assertNotIn('_CC_WAKE_RESIDENT = _CC_RESIDENT', src)
-        self.assertNotIn('_CC_WAKE_RESIDENT = _CC_RESIDENT.get()', src)
-        # Independent instances: chat and wake each construct ResidentSession.
-        chat_constructions = src.count(
-            'cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS'
-        )
-        wake_constructions = src.count(
-            '_CC_WAKE_RESIDENT = cc_resident.ResidentSession'
-        )
-        self.assertGreaterEqual(chat_constructions, 1)
-        self.assertEqual(wake_constructions, 1)
-        # Holder class must actually swap an inner ResidentSession, not wake.
-        if '_CC_RESIDENT = _SwappableResident(' in src:
-            self.assertIn('class _SwappableResident:', src)
-            self.assertIn('def swap(self, new_inner):', src)
+        self.assertNotIn('_CC_WAKE_RESIDENT', src)
+        self.assertNotIn('ClaudeCodeWakeRunner', src)
+        self.assertIn('_CC_RESIDENT = _SwappableResident(', src)
+        self.assertIn('SharedResidentWakeRunner', src)
+        self.assertIn('def _run_shared_claude_wake(request):', src)
+        self.assertIn("turn_mode='wake'", src)
+        self.assertIn('prepare_shared_transcript_watermark', src)
+        self.assertIn('begin_shared_wake_delivery_fence', src)
 
-    def test_two_resident_sessions_are_independent_objects(self):
-        import cc_resident
-        cwd = tempfile.mkdtemp()
-        a = cc_resident.ResidentSession(cwd, 'mcp__home__get_todos', cwd + '/cc-tools.json')
-        b = cc_resident.ResidentSession(cwd, 'mcp__home__search_memories', cwd + '/cc-tools.json')
-        self.assertIsNot(a, b)
-        self.assertNotEqual(a.allowed_tools, b.allowed_tools)
-
+    def test_runner_contains_no_resident_constructor(self):
+        src = (Path(ROOT) / 'wake' / 'runners.py').read_text(encoding='utf-8')
+        self.assertNotIn('ClaudeCodeWakeRunner', src)
+        self.assertNotIn('ResidentSession(', src)
+        self.assertIn('class SharedResidentWakeRunner:', src)
+        self.assertIn('shared_delivery_fence', src)
 
 class BuildSystemSideEffectTests(unittest.TestCase):
     def setUp(self):

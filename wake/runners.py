@@ -1,23 +1,16 @@
 """Wake model runners: same parser/executor, different thinking line.
 
 ApiRelayWakeRunner wraps the existing relay agent loop (behavior unchanged).
-ClaudeCodeWakeRunner uses an independent CC Wake resident — never the chat one.
+ClaudeCode Wake uses the canonical shared chat resident through a gateway-owned
+adapter, preserving Wake's lease and transcript-isolation contracts.
 """
 from __future__ import annotations
 
-import os
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
 from chat.provider_router import resolve_provider
-from wake.cc_tools import (
-    cc_wake_allowed_tools,
-    cc_wake_nudge_text,
-    cc_wake_tool_names,
-    filter_wake_tools_for_cc,
-)
-from wake.usage import build_wake_cache_info
+from wake.cc_tools import filter_wake_tools_for_cc
 
 NL = chr(10)
 
@@ -60,6 +53,7 @@ class WakeRequest:
     wake_run_id: str = ''
     max_rounds: int = 6
     dry_run: bool = False
+    window_identity: Any = None
 
 
 @dataclass
@@ -68,6 +62,8 @@ class WakeResult:
     cache_info: dict
     provider: str
     model: str
+    # Shared Claude Wake owns a delivery fence until the gateway executor settles it.
+    shared_delivery_fence: Any = None
 
 
 class WakeRunner(Protocol):
@@ -213,112 +209,32 @@ class ApiRelayWakeRunner:
         )
 
 
-class ClaudeCodeWakeRunner:
-    """Independent CC Wake resident — never reuses the solo-chat resident."""
+class SharedWakeUnavailable(RuntimeError):
+    """Canonical shared resident is not ready; Wake must fail closed."""
 
-    def __init__(
-        self,
-        resident,
-        *,
-        token: str,
-        cwd: str,
-        payload_builder: Callable[..., dict],
-        mcp_config_path: str = '',
-    ):
-        self._resident = resident
-        self._token = token
-        self._cwd = cwd
-        self._payload_builder = payload_builder
-        self._mcp_config_path = mcp_config_path or (cwd.rstrip('/') + '/cc-tools.json')
+    pass
+
+
+class SharedResidentWakeRunner:
+    """Adapter for the canonical chat resident owned by gateway.py.
+
+    The callback performs the resident readiness, Wake lease, transcript
+    watermark, provider stream, and delivery-fence work. Keeping that
+    authority in gateway.py prevents this provider adapter from constructing
+    a second resident or silently falling back to a new context.
+    """
+
+    def __init__(self, invoke: Callable[[WakeRequest], WakeResult]):
+        self._invoke = invoke
 
     def run(self, request: WakeRequest) -> WakeResult:
-        if not self._token:
-            raise RuntimeError('未配置订阅 token，无法使用 claude_code Wake')
         if request.mode not in CC_WAKE_MODES:
             raise UnsupportedWakeModeError(
                 'claude_code Wake 暂不支持 mode=%s；'
                 'summarize 请保持 BACKGROUND_PROVIDER=api_relay'
                 % request.mode
             )
-
-        started = time.monotonic()
-        stable, dynamic = split_wake_system(request.system)
-        full_system = stable.strip()
-        if WAKE_CONTRACT not in full_system:
-            full_system = (full_system + NL + NL + WAKE_CONTRACT).strip()
-
-        os.makedirs(self._cwd, exist_ok=True)
-        env = dict(os.environ)
-        env['CLAUDE_CODE_OAUTH_TOKEN'] = self._token
-        env.pop('ANTHROPIC_API_KEY', None)
-
-        # dry_run: empty allowlist. Otherwise match filtered tool table.
-        if request.dry_run or not request.tools:
-            allowed = ''
-        else:
-            allowed = cc_wake_allowed_tools(request.tools)
-        if getattr(self._resident, '_allowed_tools', None) != allowed:
-            # Tool allowlist change requires respawn (system_changed alone is not enough).
-            self._resident._allowed_tools = allowed
-            if getattr(self._resident, '_system_text', None) is not None:
-                self._resident._system_text = None  # force ensure_alive to respawn
-
-        self._resident.ensure_alive(full_system, env)
-
-        tool_names = cc_wake_tool_names(request.tools)
-        nudge = cc_wake_nudge_text(
-            request.t_hours, tool_names, dry_run=bool(request.dry_run),
-        )
-        trigger = _messages_trigger(request.messages)
-        pieces = [p for p in (dynamic.strip(), nudge, trigger) if p]
-        content = (NL + NL).join(pieces)
-
-        text_acc: list[str] = []
-        usage_rounds: list[dict] = []
-        last_usage: dict = {}
-        text_acc.append(self._drain_turn(content, usage_rounds, last_usage))
-
-        combined = NL.join(t for t in text_acc if t).strip()
-        if 'ACTION' not in combined.upper():
-            text_acc.append(self._drain_turn(FORMAT_NUDGE, usage_rounds, last_usage))
-            combined = NL.join(t for t in text_acc if t).strip()
-
-        model = 'claude-code'
-        cache_info = build_wake_cache_info(
-            usage_rounds,
-            elapsed_sec=time.monotonic() - started,
-            cache_supported=True,
-            mode=request.mode,
-            model=model,
-            payload_builder=self._payload_builder,
-            provider='claude_code',
-            resident_turn_count=last_usage.get('resident_turn_count'),
-            respawn_reason=last_usage.get('respawn_reason') or '',
-        )
-        return WakeResult(
-            raw_text=combined,
-            cache_info=cache_info,
-            provider='claude_code',
-            model=model,
-        )
-
-    def _drain_turn(self, content: str, usage_rounds: list, last_usage: dict) -> str:
-        text = ''
-        for evt, payload in self._resident.send_turn(content):
-            if evt != 'done':
-                continue
-            if isinstance(payload, tuple) and len(payload) >= 3:
-                text = str(payload[0] or '')
-                thinking = str(payload[1] or '')
-                usage = payload[2] if isinstance(payload[2], dict) else {}
-                last_usage.clear()
-                last_usage.update(usage)
-                for row in usage.get('rounds') or []:
-                    if isinstance(row, dict):
-                        usage_rounds.append(dict(row))
-                if thinking and 'THOUGHTS' not in text:
-                    text = (thinking.strip() + NL + text).strip()
-        return text
+        return self._invoke(request)
 
 
 _RUNNER_FACTORY: dict[str, Callable[[], WakeRunner]] = {}
