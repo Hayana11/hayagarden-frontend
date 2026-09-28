@@ -356,6 +356,38 @@ class WakeResidentRetirementTests(unittest.TestCase):
         self.assertIn('class SharedResidentWakeRunner:', src)
         self.assertIn('shared_delivery_fence', src)
 
+    def test_shared_mode_context_and_single_resident_invariants(self):
+        gateway = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
+        runners = (Path(ROOT) / 'wake' / 'runners.py').read_text(encoding='utf-8')
+
+        self.assertEqual(
+            gateway.count(
+                'cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS'
+            ),
+            1,
+        )
+        self.assertEqual(gateway.count('_CC_WAKE_RESIDENT'), 0)
+        self.assertEqual(gateway.count('SharedResidentWakeRunner('), 1)
+        for mode in ('normal', 'morning', 'nightwatch', 'ritual', 'self_trigger'):
+            self.assertIn(repr(mode), runners)
+        self.assertIn('mode=mode,', gateway)
+        self.assertIn('_wake_trigger_message(mode, ritual_type)', gateway)
+        self.assertIn(
+            "'self_trigger_note': data.get('self_trigger_note', '')",
+            gateway,
+        )
+        self.assertIn("turn_mode='chat'", gateway)
+        self.assertIn("turn_mode='wake'", gateway)
+        for marker in (
+            'guard_cc_generation(guarded_events())',
+            'prepare_shared_transcript_watermark',
+            'commit_shared_transcript_watermark',
+            'begin_shared_wake_delivery_fence',
+            "jsonl_finality_profile='unified_normal_wake'",
+        ):
+            self.assertIn(marker, gateway)
+
+
 class BuildSystemSideEffectTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
