@@ -84,11 +84,21 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _scope_instruction(prompt_body: str, scope_completed_turns: int) -> str:
+def _scope_instruction(
+    prompt_body: str,
+    scope_completed_turns: int,
+    scope_wake_count: int = 0,
+) -> str:
     n = max(0, int(scope_completed_turns or 0))
+    wakes = max(0, int(scope_wake_count or 0))
     if n <= 0:
         scope_note = (
             '只总结当前对话末尾这一段已经完成的对话；更早的历史仅用于理解指代，不要展开复述。'
+        )
+    elif wakes:
+        scope_note = (
+            f'只总结当前对话末尾最近 {n} 个已经完成的对话轮次，并包含这些轮次之间夹着的 '
+            f'{wakes} 个 canonical Wake / autonomous Wake event；更早的历史仅用于理解指代，不要展开复述。'
         )
     else:
         scope_note = (
@@ -198,7 +208,9 @@ def execute_continuity_native_fork(
     except Exception as exc:
         raise NativeForkGenerationError('runtime_unavailable') from exc
 
-    user_message = _scope_instruction(prompt_body, plan.scope_completed_turns)
+    user_message = _scope_instruction(
+        prompt_body, plan.scope_completed_turns, plan.scope_wake_count,
+    )
     stdin_payload = json.dumps(
         {'type': 'user', 'message': {'role': 'user', 'content': user_message}},
         ensure_ascii=False,
@@ -275,6 +287,7 @@ def execute_continuity_native_fork(
     usage['continuity_native_fork_boundary_event_hash'] = _redact(plan.fork_event_uuid)
     usage['continuity_native_fork_child_session_hash'] = _redact(child_sid)
     usage['continuity_native_fork_scope_completed_turns'] = int(plan.scope_completed_turns or 0)
+    usage['continuity_native_fork_scope_wake_count'] = int(plan.scope_wake_count or 0)
 
     return BackgroundGenerationResult(
         text=text,
