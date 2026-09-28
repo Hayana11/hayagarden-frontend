@@ -2457,36 +2457,15 @@ def _read_webpage(url):
 
 
 def _screenshot_chat(viewpoint='fyodor'):
-    """给我们的聊天拍一张截图。viewpoint=fyodor 时带 ?as=me → 我的消息在右边（我的视角）；
-    viewpoint=hayana 时是哈娅平时看到的样子。复用 browser.js 的 shot 模式和同一把单飞锁。"""
-    import subprocess as _sp
-    url = 'http://127.0.0.1:5050/chat?shot=1'
-    if viewpoint == 'fyodor':
-        url += '&as=me'
-    if not _BROWSER_LOCK.acquire(timeout=70):
-        return '浏览器正忙（同一时刻只能开一个），稍等再试。'
+    """Legacy name backed by the cross-process single-flight screenshot service."""
+    from chat.gallery_service import screenshot_chat
     try:
-        p = _sp.run(['node', '/opt/frontend/tools/browser.js', 'shot', url],
-                    capture_output=True, text=True, timeout=55)
-        out = (p.stdout or '').strip()
-        if not out:
-            return '截图失败：' + ((p.stderr or '')[:200] or '浏览器无输出')
-        d = json.loads(out.splitlines()[-1])
-    except _sp.TimeoutExpired:
-        return '截图超时（>55秒）。'
-    except Exception as e:
-        return f'截图失败：{e}'
-    finally:
-        _BROWSER_LOCK.release()
-    if not d.get('ok'):
-        return '截图失败：' + str(d.get('error', ''))[:200]
-    who = '费佳的视角' if viewpoint == 'fyodor' else '哈娅的视角'
-    ref = _register_shot(d.get('shot'))
-    if not ref:
-        return '截图存档失败（文件没能纳入 attachment）。'
-    return '📸 聊天截图 · %s\n🖼 %s' % (who, ref)
-
-
+        result = screenshot_chat(viewpoint, repo_root='/opt/frontend',
+                                 attachments_root='/opt/frontend')
+    except Exception as exc:
+        return '截图失败：%s' % str(exc)[:240]
+    who = '费佳的视角' if result['viewpoint'] == 'fyodor' else '哈娅的视角'
+    return '📸 聊天截图 · %s\n🖼 %s' % (who, result['attachment'])
 def _shop_daemon_call(endpoint, payload, timeout_s=120):
     """调用本机常驻 shop daemon（127.0.0.1:8787）。返回 JSON 字典；异常抛出。"""
     import urllib.request as _rq
@@ -2743,124 +2722,58 @@ def _gen_photo_meaning(note='', first_impression='', visual_description='', sour
 
 
 def _save_to_gallery(attachment='', note='', album=None, image_index=None, first_impression=''):
-    """Save an explicit legacy attachment or one image from the bound current user message."""
-    import gallery_store
-    note = str(note or '')[:500]
-    first_impression = str(first_impression or '').strip()[:800]
-    album = str(album or '').strip()[:80] or None
+    """Legacy name backed by the provider-neutral Gallery service."""
+    from chat.gallery_provenance import TrustedGalleryTurn
+    from chat.gallery_service import save_gallery_image
     source_msg_id = getattr(_tool_ctx, 'user_message_id', None)
     source_chat_id = getattr(_tool_ctx, 'conversation_id', '') or ''
+    turn = TrustedGalleryTurn(
+        turn_id='legacy-gateway',
+        request_message_id=source_msg_id,
+        context_id=0,
+        context_epoch=0,
+        resident_generation=0,
+        chat_id=source_chat_id,
+    )
     try:
-        if attachment:
-            if image_index is not None:
-                return '收藏失败：attachment 与 image_index 不能同时指定。'
-            result = gallery_store.save_attachment(
-                attachment, note=note, album_name=album, source_type='chat',
-                source_msg_id=source_msg_id, source_chat_id=source_chat_id,
-                first_impression=first_impression,
-            )
-        else:
-            from chat.gallery_context import resolve_current_turn_image
-            from chat.cc_vision_bridge import resolve_image_bytes
-            selected = resolve_current_turn_image(
-                source_msg_id, source_chat_id, get_db_fn=get_db, image_index=image_index,
-            )
-            image_bytes, mime = resolve_image_bytes(selected['ref'])
-            source_msg_id = selected['source_msg_id']
-            source_chat_id = selected['source_chat_id']
-            result = gallery_store.save_image_bytes(
-                image_bytes, mime, note=note, album_name=album, source_type='chat',
-                source_msg_id=source_msg_id, source_chat_id=source_chat_id,
-                first_impression=first_impression,
-            )
+        result = save_gallery_image(
+            turn,
+            db_path=DB_PATH,
+            attachment=attachment,
+            image_index=image_index,
+            note=note,
+            album=album,
+            first_impression=first_impression,
+            describe_fn=lambda pid: _gen_gallery_visual_description(pid),
+            meaning_fn=lambda **kwargs: _gen_photo_meaning(
+                note=kwargs.get('note', ''),
+                first_impression=kwargs.get('first_impression', ''),
+                visual_description=kwargs.get('visual_description', ''),
+                source_msg_id=kwargs.get('source_msg_id'),
+            ),
+        )
     except Exception as exc:
         return '收藏失败：%s' % str(exc)[:240]
-    if not result:
-        return '收藏失败：来源图片不存在、已过期或无法安全读取。'
-
-    pid = result['pid']
-    existing = gallery_store.get(pid) or {}
-    if result.get('reused_existing'):
-        current_album = next((a.get('name') for a in gallery_store.list_albums()
-                              if a.get('id') == existing.get('album_id')), None)
-        return json.dumps({
-            'ok': True, 'pid': pid, 'gallery_ref': 'gallery://%s' % pid,
-            'reused_existing': True, 'metadata_overwritten': False,
-            'album_preserved': current_album, 'source_msg_id': existing.get('source_msg_id'),
-            'visual_description_available': bool(existing.get('visual_description')),
-        }, ensure_ascii=False)
-
-    visual_description = _gen_gallery_visual_description(pid)
-    if visual_description:
-        try:
-            gallery_store.set_meaning(pid, visual_description=visual_description)
-        except Exception:
-            visual_description = None
-    meaning = _gen_photo_meaning(
-        note=note, first_impression=first_impression,
-        visual_description=visual_description or '', source_msg_id=source_msg_id,
-    )
-    summary = ''
-    if meaning and meaning.get('summary'):
-        try:
-            import memory_tool
-            tag_str = ('gallery:%s ' % pid) + ' '.join(meaning.get('keywords', []))
-            if meaning.get('emotion'):
-                tag_str += ' ' + meaning['emotion']
-            mem_id = memory_tool.save_memory(
-                content=meaning['summary'], type='PHOTO', author='fyodor',
-                layer='long-term', tags=tag_str.strip(),
-                importance=meaning.get('importance', 50))
-            gallery_store.set_meaning(
-                pid, summary=meaning['summary'], emotion=meaning.get('emotion', ''),
-                keywords=meaning.get('keywords', []), importance=meaning.get('importance', 50),
-                mem_id=mem_id)
-            summary = meaning['summary']
-        except Exception:
-            pass
-    return json.dumps({
-        'ok': True, 'pid': pid, 'gallery_ref': 'gallery://%s' % pid,
-        'reused_existing': False, 'source_msg_id': source_msg_id,
-        'visual_description_available': bool(visual_description),
-        'first_impression_saved': bool(first_impression), 'summary_available': bool(summary),
-    }, ensure_ascii=False)
-
-
+    return json.dumps(result, ensure_ascii=False)
 def _recall_photo(keyword=None, emotion=None, pid=None, inspect_question=None):
-    """Return lossy Gallery memory, optionally re-reading the permanent original."""
-    import gallery_store
-    p = gallery_store.get(str(pid).strip()) if pid else gallery_store.pick_for_recall(
-        keyword=keyword, emotion=emotion,
-    )
-    if not p:
-        return '相册里还没有值得突然想起的画面——先收藏几张带记忆的吧。'
-    # Keep the current pre-delivery marker behavior. Terminal-success accounting is a follow-up.
-    gallery_store.mark_sent(p['pid'])
-    if p.get('mem_id'):
-        try:
-            import memory_tool
-            memory_tool.touch_memories([p['mem_id']])
-        except Exception:
-            pass
+    """Legacy name backed by the provider-neutral Gallery service."""
+    from chat.gallery_service import recall_gallery_photo
     try:
-        kws = json.loads(p.get('keywords') or '[]')
-    except Exception:
-        kws = []
-    question = str(inspect_question or '').strip()[:500]
-    inspected = _gen_gallery_visual_description(p['pid'], question=question) if question else None
-    return json.dumps({
-        'pid': p['pid'], 'summary': p.get('summary') or '',
-        'visual_description': p.get('visual_description') or '',
-        'first_impression': p.get('first_impression') or '',
-        'emotion': p.get('emotion') or '', 'keywords': kws,
-        'source_msg_id': p.get('source_msg_id'),
-        'semantic_memory_only': not bool(inspected),
-        'original_reloaded': bool(inspected),
-        'inspection_answer': inspected or None,
-        'delivery_marker': '[[gallery:%s]]' % p['pid'],
-    }, ensure_ascii=False)
-
-
+        result = recall_gallery_photo(
+            keyword=keyword,
+            emotion=emotion,
+            pid=pid,
+            inspect_question=inspect_question,
+            record_selection=True,
+            touch_memory=True,
+            strict=False,
+            describe_fn=_gen_gallery_visual_description,
+        )
+    except Exception as exc:
+        return '相册读取失败：%s' % str(exc)[:240]
+    if not result:
+        return '相册里还没有值得突然想起的画面——先收藏几张带记忆的吧。'
+    return json.dumps(result, ensure_ascii=False)
 def _issue_command(title, countdown_seconds=None, caller='fyodor'):
     """给哈娅下一个带倒计时的任务，浮窗会跳出来。"""
     import command_store

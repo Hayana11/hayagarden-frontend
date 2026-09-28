@@ -34,7 +34,7 @@ class ToolCompanionHintsTest(unittest.TestCase):
     def test_catalog_is_exactly_the_enabled_manifest(self):
         grouped = [cid for _, _, ids in hints._EXPECTED_GROUPS for cid in ids]
         self.assertEqual(set(grouped), set(P1_ENABLED_CAPABILITY_IDS))
-        self.assertEqual(len(grouped), 17)
+        self.assertEqual(len(grouped), 20)
         self.assertEqual(len(grouped), len(set(grouped)))
         self.assertEqual(set(hints._DEFAULTS), set(P1_ENABLED_CAPABILITY_IDS))
 
@@ -62,6 +62,18 @@ class ToolCompanionHintsTest(unittest.TestCase):
         )
         self.assertNotIn("Xiaomi", copy)
         self.assertNotIn("Smart Band 11", copy)
+
+    def test_gallery_group_and_boundaries_are_exact(self):
+        group = next(row for row in hints.payload()["groups"] if row["id"] == "gallery")
+        self.assertEqual(group["label"], "相册")
+        self.assertEqual(
+            [tool["capability_id"] for tool in group["tools"]],
+            ["gallery.save", "gallery.recall", "gallery.screenshot"],
+        )
+        rows = {tool["capability_id"]: tool for tool in group["tools"]}
+        self.assertIn("模型不能自行指定 source_msg_id / source_chat_id", rows["gallery.save"]["physical_boundary"])
+        self.assertIn("original reload 成功", rows["gallery.recall"]["physical_boundary"])
+        self.assertIn("不会截整个设备屏幕", rows["gallery.screenshot"]["physical_boundary"])
 
     def test_validate_catalog_rejects_duplicate_and_drift(self):
         duplicate_groups = hints._EXPECTED_GROUPS + (

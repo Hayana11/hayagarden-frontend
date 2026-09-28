@@ -18,6 +18,9 @@ const CAPABILITY_PROXY_TOOL_NAMES = Object.freeze([
   'ledger_read',
   'ledger_budget_read',
   'ledger_write',
+  'gallery_save',
+  'gallery_recall',
+  'gallery_screenshot',
 ]);
 
 const ADAPTER_MODULES = Object.freeze({
@@ -30,7 +33,25 @@ const ADAPTER_MODULES = Object.freeze({
   ledger_read: 'tools.ledger_internal_adapter',
   ledger_budget_read: 'tools.ledger_internal_adapter',
   ledger_write: 'tools.ledger_internal_adapter',
+  gallery_save: 'tools.gallery_capability_adapter',
+  gallery_recall: 'tools.gallery_capability_adapter',
+  gallery_screenshot: 'tools.gallery_capability_adapter',
 });
+
+const DEFAULT_ADAPTER_TIMEOUT_MS = 5000;
+const GALLERY_ADAPTER_TIMEOUTS_MS = Object.freeze({
+  gallery_save: 50000,
+  gallery_recall: 25000,
+  gallery_screenshot: 50000,
+});
+
+function adapterTimeoutMs(toolName) {
+  const timeout = GALLERY_ADAPTER_TIMEOUTS_MS[toolName] ?? DEFAULT_ADAPTER_TIMEOUT_MS;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new Error('invalid capability adapter timeout');
+  }
+  return timeout;
+}
 
 function adapterCommand() {
   return {
@@ -59,12 +80,15 @@ function verifyCapabilityAction(toolName, toolInput) {
   }
 }
 
-function callAdapter(toolName, input) {
+function callAdapter(toolName, input, verifiedTurnId = null) {
   const moduleName = ADAPTER_MODULES[toolName];
   if (!moduleName) {
     throw new Error('unknown capability proxy tool');
   }
-  const dbEnvName = toolName === 'task_timer_start'
+  const isGallery = toolName.startsWith('gallery_');
+  const dbEnvName = isGallery
+    ? 'HAYA_DB_PATH'
+    : toolName === 'task_timer_start'
     ? 'TASK_TIMER_COMMANDS_DB_PATH'
     : 'TODO_INTERNAL_DB_PATH';
   const dbPath = String(process.env[dbEnvName] || '').trim();
@@ -72,7 +96,12 @@ function callAdapter(toolName, input) {
     throw new Error(dbEnvName + ' is required');
   }
   const command = adapterCommand();
-  const payload = {
+  const payload = isGallery ? {
+    operation: toolName,
+    tool_input: input,
+    verified_turn_id: verifiedTurnId,
+    db_path: dbPath,
+  } : {
     operation: toolName === 'memory_search'
       ? 'search_memories'
       : toolName === 'memory_write'
@@ -95,10 +124,14 @@ function callAdapter(toolName, input) {
   };
   const output = execFileSync(command.python, ['-m', moduleName], {
     cwd: command.cwd,
-    env: { ...process.env, TODO_INTERNAL_DB_PATH: dbPath },
+    env: {
+      ...process.env,
+      TODO_INTERNAL_DB_PATH: dbPath,
+      HAYA_DB_PATH: isGallery ? dbPath : process.env.HAYA_DB_PATH,
+    },
     input: JSON.stringify(payload),
     encoding: 'utf8',
-    timeout: 5000,
+    timeout: adapterTimeoutMs(toolName),
   });
   return JSON.parse(output || '{}');
 }
@@ -151,7 +184,11 @@ function runProxy(toolName, input) {
     return {
       content: [{
         type: 'text',
-        text: resultText(toolName, callAdapter(toolName, input)),
+        text: resultText(toolName, callAdapter(
+          toolName,
+          input,
+          decision.verified_turn_id ?? null,
+        )),
       }],
     };
   } catch (error) {
@@ -261,6 +298,52 @@ function buildServer() {
     }),
   );
 
+  server.tool(
+    'gallery_save',
+    {
+      attachment: z.string().optional(),
+      image_index: z.number().int().min(0).max(3).optional(),
+      note: z.string().optional(),
+      album: z.string().optional(),
+      first_impression: z.string().max(800).optional(),
+    },
+    async ({ attachment, image_index, note, album, first_impression }) => runProxy(
+      'gallery_save',
+      {
+        attachment: attachment ?? null,
+        image_index: image_index ?? null,
+        note: note ?? null,
+        album: album ?? null,
+        first_impression: first_impression ?? null,
+      },
+    ),
+  );
+  server.tool(
+    'gallery_recall',
+    {
+      keyword: z.string().optional(),
+      emotion: z.string().optional(),
+      pid: z.string().optional(),
+      inspect_question: z.string().max(500).optional(),
+    },
+    async ({ keyword, emotion, pid, inspect_question }) => runProxy(
+      'gallery_recall',
+      {
+        keyword: keyword ?? null,
+        emotion: emotion ?? null,
+        pid: pid ?? null,
+        inspect_question: inspect_question ?? null,
+      },
+    ),
+  );
+  server.tool(
+    'gallery_screenshot',
+    { viewpoint: z.enum(['fyodor', 'hayana']).optional() },
+    async ({ viewpoint }) => runProxy('gallery_screenshot', {
+      viewpoint: viewpoint ?? 'fyodor',
+    }),
+  );
+
   return server;
 }
 
@@ -279,6 +362,7 @@ if (require.main === module) {
 module.exports = {
   ADAPTER_MODULES,
   CAPABILITY_PROXY_TOOL_NAMES,
+  adapterTimeoutMs,
   buildServer,
   callAdapter,
   runLightStatusProxy,

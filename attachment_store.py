@@ -11,8 +11,9 @@ import time
 import sqlite3
 import secrets
 
-DB_PATH    = '/opt/frontend/attachments.db'
-ATTACH_DIR = '/opt/frontend/attachments'
+_ATTACHMENTS_ROOT = os.environ.get('HAYAGARDEN_ATTACHMENTS_ROOT', '/opt/frontend').strip() or '/opt/frontend'
+DB_PATH    = os.path.join(_ATTACHMENTS_ROOT, 'attachments.db')
+ATTACH_DIR = os.path.join(_ATTACHMENTS_ROOT, 'attachments')
 KEEP_N     = 30      # 最多保留最近 30 张
 KEEP_DAYS  = 7       # 且不超过 7 天
 
@@ -94,3 +95,4 @@ def prune():
         return len(doomed)
     except Exception:
         return 0
+

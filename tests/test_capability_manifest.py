@@ -51,6 +51,9 @@ class CapabilityManifestContractTests(unittest.TestCase):
                 "code.search",
                 "web.search",
                 "web.read",
+                "gallery.save",
+                "gallery.recall",
+                "gallery.screenshot",
             },
         )
         self.assertEqual(
@@ -166,6 +169,9 @@ class CapabilityManifestContractTests(unittest.TestCase):
             "web.search": "WebSearch",
             "web.read": "WebFetch",
             "health.read": "mcp__internal__get.health",
+            "gallery.save": "mcp__capability__gallery_save",
+            "gallery.recall": "mcp__capability__gallery_recall",
+            "gallery.screenshot": "mcp__capability__gallery_screenshot",
         }
         for capability_id, binding in expected_cc_bindings.items():
             self.assertEqual(

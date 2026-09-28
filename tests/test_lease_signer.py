@@ -35,6 +35,9 @@ CHAT_DEFAULTS = (
     "ledger.budget.read",
     "ledger.write",
     "health.read",
+    "gallery.save",
+    "gallery.recall",
+    "gallery.screenshot",
 )
 WAKE_DEFAULTS = (
     "memory.search",
@@ -362,3 +365,4 @@ class LeaseSignerContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

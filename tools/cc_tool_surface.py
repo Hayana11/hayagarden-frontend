@@ -188,6 +188,29 @@ _CAPABILITY_PROXY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "required": ["amount"],
     },
+    "mcp__capability__gallery_save": {
+        "type": "object",
+        "properties": {
+            "attachment": {"type": "string"},
+            "image_index": {"type": "integer", "minimum": 0, "maximum": 3},
+            "note": {"type": "string"},
+            "album": {"type": "string"},
+            "first_impression": {"type": "string", "maxLength": 800},
+        },
+    },
+    "mcp__capability__gallery_recall": {
+        "type": "object",
+        "properties": {
+            "keyword": {"type": "string"},
+            "emotion": {"type": "string"},
+            "pid": {"type": "string"},
+            "inspect_question": {"type": "string", "maxLength": 500},
+        },
+    },
+    "mcp__capability__gallery_screenshot": {
+        "type": "object",
+        "properties": {"viewpoint": {"type": "string", "enum": ["fyodor", "hayana"]}},
+    },
 }
 
 
@@ -430,3 +453,4 @@ def capture_tool_surface_snapshot(
             item["name"]: item["surface_kind"] for item in surface
         },
     }
+

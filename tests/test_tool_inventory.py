@@ -33,7 +33,7 @@ class ToolInventoryTest(unittest.TestCase):
 
     def test_current_groups_derive_from_companion_catalog(self):
         expected_ids = [group_id for group_id, _, _ in tool_companion_hints._EXPECTED_GROUPS]
-        self.assertEqual(expected_ids, ["memory", "home", "plans", "health", "ledger", "files", "external_read"])
+        self.assertEqual(expected_ids, ["memory", "home", "plans", "health", "gallery", "ledger", "files", "external_read"])
         self.assertEqual([group["id"] for group in self.p["groups"][:len(tool_companion_hints._EXPECTED_GROUPS)]], expected_ids)
         self.assertEqual(self.groups["plans"]["label"], "计划")
         self.assertEqual(
@@ -51,6 +51,16 @@ class ToolInventoryTest(unittest.TestCase):
         self.assertTrue(self.t["task.timer.start"]["available"])
         self.assertEqual(self.t["task.timer.start"]["display_label"], "开始行动计时")
         self.assertFalse(hasattr(tool_inventory, "_ACTIVE"))
+        gallery = self.groups["gallery"]
+        self.assertEqual(gallery["label"], "相册")
+        self.assertEqual(gallery["total"], 3)
+        self.assertEqual(gallery["available"], 3)
+        self.assertEqual(
+            [tool["tool_name"] for tool in gallery["tools"]],
+            ["gallery.save", "gallery.recall", "gallery.screenshot"],
+        )
+        self.assertTrue(all(tool["reason_code"] == "active" for tool in gallery["tools"]))
+        self.assertNotIn("legacy:gallery", self.groups)
 
     def test_health_inventory_tracks_only_the_physical_surface(self):
         actual_surface = tuple(current_physical_surface_names())
@@ -171,3 +181,4 @@ class ToolInventoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
