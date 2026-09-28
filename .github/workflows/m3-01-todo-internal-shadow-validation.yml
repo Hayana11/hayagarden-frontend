@@ -12,7 +12,7 @@ on:
       - ".github/workflows/m3-01-todo-internal-shadow-validation.yml"
 
 concurrency:
-  group: \${{ github.workflow }}-\${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   base-head:
-    name: \${{ matrix.label }} M3-01 validation
+    name: ${{ matrix.label }} M3-01 validation
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -28,15 +28,15 @@ jobs:
       matrix:
         include:
           - label: base
-            ref: \${{ github.event.pull_request.base.sha }}
+            ref: ${{ github.event.pull_request.base.sha }}
           - label: head
-            ref: \${{ github.event.pull_request.head.sha }}
+            ref: ${{ github.event.pull_request.head.sha }}
 
     steps:
-      - name: Checkout exact \${{ matrix.label }} SHA
+      - name: Checkout exact ${{ matrix.label }} SHA
         uses: actions/checkout@v4
         with:
-          ref: \${{ matrix.ref }}
+          ref: ${{ matrix.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -122,7 +122,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          actual="$(git diff --name-only "\${{ github.event.pull_request.base.sha }}" "\${{ github.event.pull_request.head.sha }}")"
+          actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
           ci_policy_file=".github/workflows/m3-01-todo-internal-shadow-validation.yml"
           forbidden_regex='^(wake/|app.py$|tools/product_handlers.py$|tools/cc_capability_adapter.py$|tools/cc_tool_surface.py$|cc_resident.py$|chat/daily_runtime.py)'
 
