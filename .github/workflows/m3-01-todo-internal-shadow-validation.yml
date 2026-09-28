@@ -123,16 +123,6 @@ jobs:
           set -euo pipefail
 
           actual="$(git diff --name-only "\${{ github.event.pull_request.base.sha }}" "\${{ github.event.pull_request.head.sha }}")"
-          m3_product_owned="$(printf '%s\n' "$actual" | awk '
-            $0 == "tools/todo_internal_adapter.py" ||
-            $0 == "internal-mcp-server.js" ||
-            $0 == "tests/test_m3_01_todo_internal.py" ||
-            $0 == "tests/test-m3-01-todo-internal.mjs"
-          ')"
-          shared_control_plane="$(printf '%s\n' "$actual" | awk '
-            $0 == "tools/capability_manifest.py" ||
-            $0 == "tools/execution_fence.py"
-          ')"
           ci_policy_file=".github/workflows/m3-01-todo-internal-shadow-validation.yml"
           forbidden_regex='^(wake/|app.py$|tools/product_handlers.py$|tools/cc_capability_adapter.py$|tools/cc_tool_surface.py$|cc_resident.py$|chat/daily_runtime.py)'
 
@@ -148,11 +138,11 @@ jobs:
             ')"
             workflow_only="$(printf '%s\n' "$diff" | awk -v workflow="$ci_policy_file" '
               NF && $0 != workflow { found=1 }
-              END { exit(found ? 1 : 0) }
+              END { print(found ? "false" : "true") }
             ')"
             if [ -n "$owned" ]; then
               printf '%s\n' "OWNED_CHANGE"
-            elif [ "$workflow_only" -eq 0 ]; then
+            elif [ "$workflow_only" = "true" ]; then
               printf '%s\n' "CI_POLICY_ONLY"
             else
               printf '%s\n' "REGRESSION_ONLY"
@@ -164,6 +154,7 @@ jobs:
             if printf '%s\n' "$diff" | grep -E "$forbidden_regex"; then
               return 1
             fi
+            return 0
           }
 
           assert_case() {
