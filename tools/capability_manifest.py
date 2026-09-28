@@ -1,10 +1,10 @@
-"""UH-A0 v1.0 provider-neutral capability manifest.
+"""UH-A0 v1.1 provider-neutral capability manifest.
 
 This module is the P1 product-semantics source of truth for tool capabilities.
 It intentionally does *not* issue leases, expose tools to Claude Code, enforce
 permissions, or implement provider adapters.  Those are later UH-A0 slices.
 
-Frozen contract (2026-08-12):
+Frozen field contract (2026-08-12), membership extended in v1.1:
 - capability / intent live together in one manifest entry;
 - capability_id is provider-neutral;
 - loading_policy is visibility metadata, never authorization;
@@ -265,6 +265,45 @@ CAPABILITY_MANIFEST: tuple[dict[str, Any], ...] = (
         },
     },
     {
+        "capability_id": "gallery.save",
+        "display_name": "保存到相册",
+        "kind": "write",
+        "side_effect": "external_state",
+        "autonomy_mode": "self_write_auto",
+        "trigger": "当前对话出现值得长期留下的图片，或用户明确要求收藏当前图片时。",
+        "purpose": "把当前轮真实图片或可信 attachment 永久写入 Gallery，并保留精确来源与视觉记忆。",
+        "deny_when": "当前轮没有可验证图片；多图情况下无法唯一确定目标；attachment 不合法；来源 provenance 无法验证。",
+        "failure_behavior": "明确返回未收藏，不得猜测图片、猜 source message、扫描最近一条图片代替当前轮。",
+        "loading_policy": "deferred",
+        "provider_bindings": {"claude_code": "mcp__capability__gallery_save"},
+    },
+    {
+        "capability_id": "gallery.recall",
+        "display_name": "查找相册照片",
+        "kind": "read",
+        "side_effect": "none",
+        "autonomy_mode": "read_auto",
+        "trigger": "回答需要回忆已收藏画面、用户要求找以前图片、或需要重新查看指定 Gallery pid 时。",
+        "purpose": "从永久 Gallery 查找照片；普通回忆读取有损语义记忆，精确视觉问题按需重新读取原图。",
+        "deny_when": "没有匹配结果；pid 无效；精确视觉检查失败时不得编造。",
+        "failure_behavior": "说明未找到或未能重新读取；不得把语义描述冒充像素复查结果。",
+        "loading_policy": "deferred",
+        "provider_bindings": {"claude_code": "mcp__capability__gallery_recall"},
+    },
+    {
+        "capability_id": "gallery.screenshot",
+        "display_name": "截取聊天画面",
+        "kind": "execute",
+        "side_effect": "code_or_process",
+        "autonomy_mode": "self_write_auto",
+        "trigger": "当前对话值得截成聊天画面，或用户明确要求查看或保存聊天截图时。",
+        "purpose": "调用现有聊天截图实现生成 attachment:// 图片，以 fyodor 或 hayana viewpoint 输出。",
+        "deny_when": "viewpoint 非法；browser worker/lock 不可用；截图结果未成功进入 attachment store。",
+        "failure_behavior": "明确说明截图失败，不得伪造 attachment。",
+        "loading_policy": "deferred",
+        "provider_bindings": {"claude_code": "mcp__capability__gallery_screenshot"},
+    },
+    {
         "capability_id": "github.read",
         "display_name": "读取 GitHub",
         "kind": "read",
@@ -338,6 +377,9 @@ P1_ENABLED_CAPABILITY_IDS = frozenset(
         "web.search",
         "web.read",
         "health.read",
+        "gallery.save",
+        "gallery.recall",
+        "gallery.screenshot",
     }
 )
 

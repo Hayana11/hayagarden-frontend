@@ -131,6 +131,9 @@ _LEGACY_CAPABILITY_ALIASES = {
   "files.read": "codebase_read_file",
   "files.find": "codebase_list_directory",
   "code.search": "codebase_search_code",
+  "gallery.save": "save_to_gallery",
+  "gallery.recall": "recall_photo",
+  "gallery.screenshot": "screenshot_chat",
 }
 _LEGACY_CURRENT_NAMES = frozenset(_LEGACY_CAPABILITY_ALIASES.values())
 
@@ -179,6 +182,8 @@ def _legacy_groups() -> list[dict[str, Any]]:
     for group_id, label, names in GROUP_DEFS:
         historical_names = [name for name in names if name not in _LEGACY_CURRENT_NAMES]
         tools = [_legacy_row(name) for name in historical_names]
+        if not tools:
+            continue
         groups.append({
             "id": "legacy:" + group_id,
             "label": "历史 · " + label,
@@ -247,3 +252,4 @@ def inventory_names() -> list[str]:
         for group in _current_capability_groups() + _legacy_groups() + _external_groups()
         for tool in group["tools"]
     ]
+

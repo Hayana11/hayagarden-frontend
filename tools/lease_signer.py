@@ -62,6 +62,9 @@ DEFAULT_ALLOWED_CAPABILITIES: dict[str, tuple[str, ...]] = {
         "ledger.budget.read",
         "ledger.write",
         "health.read",
+        "gallery.save",
+        "gallery.recall",
+        "gallery.screenshot",
     ),
     "wake": (
         "memory.search",
@@ -278,3 +281,4 @@ def _iter_module_export_names() -> Iterable[str]:
         "default_allowed_capabilities",
         "issue_turn_lease",
     )
+

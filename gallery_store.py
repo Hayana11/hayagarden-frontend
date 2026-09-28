@@ -451,7 +451,7 @@ def count_photos():
         return 0
 
 
-def pick_for_recall(keyword=None, emotion=None):
+def pick_for_recall(keyword=None, emotion=None, strict=False):
     """第3步·主动回忆：挑一张"值得突然想起"的照片。
     偏好：有意义(summary)、importance 高、最近没发过；可按关键词/情绪过滤。
     在前几名里加权随机，避免每次都是同一张。返回 dict 或 None。"""
@@ -465,9 +465,15 @@ def pick_for_recall(keyword=None, emotion=None):
     kw = (keyword or '').strip()
     emo = (emotion or '').strip()
     if kw:
-        cands = [p for p in cands if kw in (p.get('summary') or '') or kw in (p.get('keywords') or '') or kw in (p.get('note') or '')] or cands
+        matched = [p for p in cands if kw in (p.get('summary') or '') or kw in (p.get('keywords') or '') or kw in (p.get('note') or '')]
+        if strict and not matched:
+            return None
+        cands = matched or cands
     if emo:
-        cands = [p for p in cands if emo in (p.get('emotion') or '')] or cands
+        matched = [p for p in cands if emo in (p.get('emotion') or '')]
+        if strict and not matched:
+            return None
+        cands = matched or cands
 
     def score(p):
         s = (p.get('importance') or 0)
@@ -518,3 +524,4 @@ def search_photos(q, limit=60):
 
 
 _init()
+

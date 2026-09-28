@@ -76,6 +76,9 @@ CAPABILITY_PROXY_CAPABILITY_IDS: tuple[str, ...] = (
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
+    "gallery.save",
+    "gallery.recall",
+    "gallery.screenshot",
 )
 
 INTERNAL_MCP_LEGACY_CAPABILITY_IDS: tuple[str, ...] = (
@@ -243,6 +246,16 @@ def _resolve_task_timer_commands_db_path(
     return resolve_task_timer_commands_db_path(env=environ)
 
 
+def _resolve_gallery_root(env: Mapping[str, str] | None = None) -> str:
+    environ = env or os.environ
+    return str(environ.get("HAYAGARDEN_GALLERY_ROOT") or "/opt/frontend").strip() or "/opt/frontend"
+
+
+def _resolve_attachments_root(env: Mapping[str, str] | None = None) -> str:
+    environ = env or os.environ
+    return str(environ.get("HAYAGARDEN_ATTACHMENTS_ROOT") or "/opt/frontend").strip() or "/opt/frontend"
+
+
 def build_uh_a0_mcp_config(
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
@@ -270,6 +283,9 @@ def build_uh_a0_mcp_config(
                     "UH_A0_REPO_ROOT": str(root),
                     "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
                     "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
+                    "HAYA_DB_PATH": _resolve_capability_proxy_db_path(env),
+                    "HAYAGARDEN_GALLERY_ROOT": _resolve_gallery_root(env),
+                    "HAYAGARDEN_ATTACHMENTS_ROOT": _resolve_attachments_root(env),
                     "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
                 },
             },

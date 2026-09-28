@@ -177,6 +177,33 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertEqual(result["lease_decision"], "ALLOW")
                 self.assertNotIn("approval_id", result)
 
+    def test_d_gallery_capabilities_are_chat_only_and_fail_closed(self):
+        actions = (
+            ("mcp__capability__gallery_save", "gallery.save", {"image_index": 0}),
+            ("mcp__capability__gallery_recall", "gallery.recall", {"keyword": "海边"}),
+            ("mcp__capability__gallery_screenshot", "gallery.screenshot", {"viewpoint": "fyodor"}),
+        )
+        for tool_name, capability_id, action in actions:
+            with self.subTest(capability_id=capability_id):
+                allowed = evaluate_tool_call(tool_name, action, self.lease(turn_id="gallery-turn"))
+                self.assertEqual(allowed["capability_id"], capability_id)
+                self.assertEqual(allowed["lease_decision"], "ALLOW")
+                self.assertEqual(allowed["verified_turn_id"], "gallery-turn")
+                for mode in ("wake", "task"):
+                    self.assertEqual(
+                        evaluate_tool_call(tool_name, action, self.lease(mode=mode))["lease_decision"],
+                        "DENIED_CAPABILITY",
+                    )
+                with patch(
+                    "tools.execution_fence.read_capability_state",
+                    return_value=capability_state.RUNTIME_STATE_OFF,
+                ):
+                    self.assertEqual(
+                        evaluate_tool_call(tool_name, action, self.lease())["lease_decision"],
+                        "DENIED_CAPABILITY",
+                    )
+                self.assertEqual(evaluate_tool_call(tool_name, action, None)["lease_decision"], "LEASE_MISMATCH")
+
     def test_default_chat_autonomous_writes_deny_when_runtime_off(self):
         actions = (
             ("mcp__capability__memory_write", "memory.write", {"content": "x"}),
@@ -406,6 +433,9 @@ class ExecutionFenceTests(unittest.TestCase):
                 "mcp__capability__todo_read",
                 "mcp__capability__todo_write", "mcp__capability__ledger_read",
                 "mcp__capability__ledger_write",
+                "mcp__capability__gallery_save",
+                "mcp__capability__gallery_recall",
+                "mcp__capability__gallery_screenshot",
                 "mcp__internal__get.health",
             },
         )

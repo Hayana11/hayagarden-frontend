@@ -92,7 +92,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(
             CAPABILITY_PROXY_CAPABILITY_IDS,
-            ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write"),
+            ("memory.search", "memory.write", "diary.write", "task.timer.start", "home.light.status", "todo.read", "todo.write", "ledger.read", "ledger.budget.read", "ledger.write", "gallery.save", "gallery.recall", "gallery.screenshot"),
         )
         self.assertEqual(
             uh_a0_internal_mcp_tools(),
@@ -202,6 +202,9 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         self.assertEqual(capability_cfg["type"], "stdio")
         self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"])
         self.assertTrue(capability_cfg["env"]["TODO_INTERNAL_DB_PATH"].endswith("memories.db"))
+        self.assertTrue(capability_cfg["env"]["HAYA_DB_PATH"].endswith("memories.db"))
+        self.assertEqual(capability_cfg["env"]["HAYAGARDEN_GALLERY_ROOT"], "/opt/frontend")
+        self.assertEqual(capability_cfg["env"]["HAYAGARDEN_ATTACHMENTS_ROOT"], "/opt/frontend")
         self.assertEqual(
             cfg["mcpServers"]["home"]["headers"],
             {"X-UH-A0-Profile": "uh_a0"},
@@ -262,6 +265,23 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         for schema in (old_schema, new_schema):
             self.assertEqual(set(schema["properties"]), {"content"})
             self.assertEqual(schema["required"], ["content"])
+
+    def test_c_gallery_surface_schemas_hide_provenance(self):
+        save = _CAPABILITY_PROXY_TOOL_SCHEMAS["mcp__capability__gallery_save"]
+        self.assertEqual(
+            set(save["properties"]),
+            {"attachment", "image_index", "note", "album", "first_impression"},
+        )
+        self.assertEqual(save["properties"]["image_index"]["minimum"], 0)
+        self.assertEqual(save["properties"]["image_index"]["maximum"], 3)
+        self.assertEqual(save["properties"]["first_impression"]["maxLength"], 800)
+        self.assertTrue({
+            "mcp__capability__gallery_save",
+            "mcp__capability__gallery_recall",
+            "mcp__capability__gallery_screenshot",
+        }.issubset(set(physical_surface_names())))
+        for forbidden in ("source_msg_id", "source_chat_id", "conversation_id", "message_id"):
+            self.assertNotIn(forbidden, save["properties"])
 
     def test_d_reserved_fail_closed(self):
         surface = physical_surface_names()

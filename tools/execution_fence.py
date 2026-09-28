@@ -254,6 +254,7 @@ def evaluate_tool_call(
             capability_id=capability_id,
             turn_mode=turn_mode,
             lease_decision="ALLOW",
+            verified_turn_id=str(turn_lease["turn_id"]),
         )
         if is_write and turn_lease["issued_from"] == "user_confirmation":
             action_id = build_approval_id(capability_id, tool_name, tool_input)

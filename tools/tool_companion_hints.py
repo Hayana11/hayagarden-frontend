@@ -15,7 +15,7 @@ from tools.capability_manifest import P1_ENABLED_CAPABILITY_IDS, get_capability
 
 
 CONFIG_KEY = "TOOL_COMPANION_HINTS_V2"
-VERSION = "0.2"
+VERSION = "0.3"
 
 _STATUS_LABELS = {
     "read_auto": "只读 · 可主动查",
@@ -28,6 +28,7 @@ _EXPECTED_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("home", "家", ("home.light.status",)),
     ("plans", "计划", ("todo.read", "todo.write", "countdown.read", "task.timer.start")),
     ("health", "健康", ("health.read",)),
+    ("gallery", "相册", ("gallery.save", "gallery.recall", "gallery.screenshot")),
     ("ledger", "账本", ("ledger.read", "ledger.budget.read", "ledger.write")),
     ("files", "文件与代码", ("files.read", "files.find", "code.search")),
     ("external_read", "联网", ("web.search", "web.read")),
@@ -78,6 +79,21 @@ _DEFAULTS: dict[str, dict[str, str]] = {
         "display_label": "查看健康数据",
         "companion_hint": "当她问起近期步数、睡眠或心率时，可以从当前连接的健康数据源读取真实记录；如果数据不可用或为空，就说明无法确认，不要猜测。",
         "physical_boundary": "只读取当前连接的健康数据源提供的真实记录；不写入或修改健康记录。数据不可用时不得推测，不声明未经验证的设备型号。",
+    },
+    "gallery.save": {
+        "display_label": "保存到相册",
+        "companion_hint": "看到真正值得留下的画面，或者她明确叫你收藏时，可以把当前图片收进永久相册。多图时要明确选中目标；无法确认来源时不要保存。",
+        "physical_boundary": "图片来源必须来自当前可信聊天轮或已有 attachment；模型不能自行指定 source_msg_id / source_chat_id，也不能扫描其它消息猜目标。",
+    },
+    "gallery.recall": {
+        "display_label": "查找相册照片",
+        "companion_hint": "想起过去收藏的画面时，可以先读相册记忆；需要核实小字、精确颜色、数量或角落细节时，再重新看永久原图。",
+        "physical_boundary": "普通 recall 是有损语义记忆；只有 original reload 成功时才能声称重新检查了像素。",
+    },
+    "gallery.screenshot": {
+        "display_label": "截取聊天画面",
+        "companion_hint": "想把一段聊天保存成画面时，可以从费佳或哈娅视角截取聊天页；截图生成后会得到 attachment。",
+        "physical_boundary": "只截本地聊天页面；不会截整个设备屏幕，也不会读取其它应用。",
     },
     "ledger.read": {
         "display_label": "查看账本",
