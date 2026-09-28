@@ -9921,6 +9921,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             t_hours=t_hours,
             wake_run_id=wake_run_id,
             dry_run=dry_run,
+            window_identity=_wake_window_identity,
         ))
         raw_text = result.raw_text
         delivery_fence = getattr(result, 'shared_delivery_fence', None)
