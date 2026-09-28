@@ -168,17 +168,26 @@ jobs:
               echo "$label: expected mode $expected_mode, got $mode"
               return 1
             fi
-            if [ "$expected_result" = "PASS" ]; then
-              if ! enforce_forbidden_boundary "$diff"; then
-                echo "$label: unexpected forbidden-boundary failure"
+            case "$expected_result:$expected_mode" in
+              PASS:OWNED_CHANGE)
+                if ! enforce_forbidden_boundary "$diff"; then
+                  echo "$label: unexpected forbidden-boundary failure"
+                  return 1
+                fi
+                ;;
+              PASS:*)
+                ;;
+              FAIL:OWNED_CHANGE)
+                if enforce_forbidden_boundary "$diff"; then
+                  echo "$label: expected forbidden-boundary failure"
+                  return 1
+                fi
+                ;;
+              *)
+                echo "$label: invalid synthetic expectation"
                 return 1
-              fi
-            else
-              if enforce_forbidden_boundary "$diff"; then
-                echo "$label: expected forbidden-boundary failure"
-                return 1
-              fi
-            fi
+                ;;
+            esac
           }
 
           gallery_case=$'tools/capability_manifest.py\ntools/execution_fence.py\ntools/cc_capability_adapter.py\ntools/cc_tool_surface.py'
