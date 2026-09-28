@@ -44,6 +44,7 @@ from typing import Any, Optional
 
 from continuity.contracts import ContinuityGenerationJob, SourceSnapshot
 from continuity.sealing import CandidateBlock
+from continuity.sources import _canonical_normal_wake, row_revision
 from tools.cc_jsonl_usage import _request_record, session_jsonl_path
 
 FLAG_KEY = 'CC_CONTINUITY_NATIVE_FORK_ENABLED'
@@ -91,6 +92,7 @@ class ContinuityForkPlan:
     parent_model: str = ''
     parent_last_use_age_seconds: Optional[float] = None
     scope_completed_turns: int = 0
+    scope_wake_count: int = 0
     context_id: int = 0
     context_epoch: int = 0
     resident_generation: int = 0
@@ -122,25 +124,123 @@ def flag_enabled() -> bool:
         return False
 
 
-def _last_completed_turn_boundary(candidate: CandidateBlock) -> Optional[int]:
-    """Assistant ``chat_messages.id`` of the last member, or ``None``.
+def _turn_assistant_id(source_ref: Any) -> Optional[int]:
+    parts = str(source_ref or '').split(':')
+    if len(parts) != 3 or parts[0] != 'turn':
+        return None
+    try:
+        user_id, assistant_id = int(parts[1]), int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    if user_id <= 0 or assistant_id <= 0:
+        return None
+    return assistant_id
 
-    Only candidates built purely from ``turn:<user>:<assistant>`` members are
-    supported; a Wake tail or malformed ref is refused.
+
+def _wake_id(source_ref: Any) -> Optional[int]:
+    parts = str(source_ref or '').split(':')
+    if len(parts) != 2 or parts[0] != 'wake':
+        return None
+    try:
+        wake_id = int(parts[1])
+    except (TypeError, ValueError):
+        return None
+    return wake_id if wake_id > 0 else None
+
+
+def _candidate_scope(
+    source_conn: sqlite3.Connection,
+    candidate: CandidateBlock,
+    snapshot: SourceSnapshot,
+) -> Optional[tuple[int, int, int]]:
+    """Validate mixed source membership and return boundary/turn/wake counts.
+
+    Canonical Wake truth stays in ``continuity.sources._canonical_normal_wake``;
+    this resolver only binds that existing predicate to the frozen snapshot
+    member revision.  No Wake generation is compared with the final boundary
+    generation: reconstruction already treats a delivered canonical Wake as
+    durable conversation material across a resident respawn.
     """
     refs = tuple(candidate.source_refs or ())
-    if not refs:
+    seqs = tuple(candidate.source_seqs or ())
+    revisions = tuple(candidate.source_revisions or ())
+    members = tuple(snapshot.members or ())
+    if (
+        candidate.snapshot_id != snapshot.snapshot_id
+        or not refs
+        or len(refs) != len(seqs)
+        or len(refs) != len(revisions)
+        or not members
+    ):
         return None
-    last: Optional[int] = None
-    for ref in refs:
-        parts = str(ref).split(':')
-        if len(parts) != 3 or parts[0] != 'turn':
+    try:
+        by_seq = {int(member.seq): member for member in members}
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if (
+        len(by_seq) != len(members)
+        or len(set(seqs)) != len(seqs)
+        or tuple(seqs) != tuple(sorted(seqs))
+    ):
+        return None
+
+    selected = []
+    for seq, ref, revision in zip(seqs, refs, revisions):
+        member = by_seq.get(int(seq))
+        if (
+            member is None
+            or str(member.source_ref) != str(ref)
+            or str(member.source_revision) != str(revision)
+            or str(member.branch_id or snapshot.branch_id) != str(snapshot.branch_id)
+        ):
+            return None
+        selected.append(member)
+
+    first_kind = str(selected[0].source_kind or '')
+    last_kind = str(selected[-1].source_kind or '')
+    if first_kind != 'completed_turn' or last_kind != 'completed_turn':
+        return None
+    boundary = _turn_assistant_id(refs[-1])
+    if boundary is None:
+        return None
+
+    turn_count = 0
+    wake_count = 0
+    for member, ref in zip(selected, refs):
+        kind = str(member.source_kind or '')
+        if kind == 'completed_turn':
+            if _turn_assistant_id(ref) is None:
+                return None
+            turn_count += 1
+            continue
+        if kind != 'autonomous_event' or str(member.role or '') != 'assistant':
+            return None
+        wake_id = _wake_id(ref)
+        if wake_id is None:
             return None
         try:
-            last = int(parts[2])
-        except (TypeError, ValueError):
+            row = source_conn.execute(
+                'SELECT * FROM chat_messages WHERE id=?', (wake_id,),
+            ).fetchone()
+        except (sqlite3.Error, TypeError, ValueError):
             return None
-    return last
+        if row is None or not _canonical_normal_wake(row):
+            return None
+        try:
+            revision = row_revision(row)
+        except Exception:
+            return None
+        if revision != str(member.source_revision):
+            return None
+        wake_count += 1
+
+    try:
+        candidate_turn_count = int(candidate.completed_turn_count or 0)
+    except (TypeError, ValueError):
+        return None
+    if candidate_turn_count != turn_count:
+        return None
+    return boundary, turn_count, wake_count
 
 
 def _assistant_mapping_rows(conn: sqlite3.Connection, message_id: int) -> list[dict[str, Any]]:
@@ -281,9 +381,10 @@ def resolve_continuity_native_fork(
         context_id = int(snapshot.context_id)
         context_epoch = int(snapshot.context_epoch)
 
-        boundary_message_id = _last_completed_turn_boundary(candidate)
-        if boundary_message_id is None:
+        scope = _candidate_scope(source_conn, candidate, snapshot)
+        if scope is None:
             return _reject(REASON_SCOPE_UNSUPPORTED)
+        boundary_message_id, turn_count, wake_count = scope
 
         from chat.window_identity import WindowIdentityUnavailable, read_current_window_identity_conn
 
@@ -369,7 +470,8 @@ def resolve_continuity_native_fork(
             parent_cwd=parent_cwd,
             parent_model=expected_model,
             parent_last_use_age_seconds=max(0.0, age),
-            scope_completed_turns=int(candidate.completed_turn_count or 0),
+            scope_completed_turns=turn_count,
+            scope_wake_count=wake_count,
             context_id=context_id,
             context_epoch=context_epoch,
             resident_generation=resident_generation,

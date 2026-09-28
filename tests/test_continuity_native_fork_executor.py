@@ -64,6 +64,7 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
             parent_transcript_path=str(self.parent_path),
             parent_cwd=self.parent_cwd,
             scope_completed_turns=3,
+            scope_wake_count=1,
             context_id=1,
             context_epoch=1,
             resident_generation=1,
@@ -148,6 +149,7 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.assertEqual(recorded['cwd'], self.parent_cwd)
         self.assertIn('continuity_native_fork_parent_session_hash', result.usage)
         self.assertEqual(result.usage['continuity_native_fork_scope_completed_turns'], 3)
+        self.assertEqual(result.usage['continuity_native_fork_scope_wake_count'], 1)
 
     def test_resume_call_disables_tools_and_omits_system_prompt_and_persona(self):
         patch, recorded = self._run_subprocess_patch()
@@ -172,6 +174,9 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.assertEqual(payload['type'], 'user')
         self.assertIn('SUMMARIZE-ONLY', payload['message']['content'])
         self.assertIn('3', payload['message']['content'])
+        self.assertIn('canonical Wake', payload['message']['content'])
+        self.assertIn('autonomous Wake', payload['message']['content'])
+        self.assertNotIn('parent.jsonl', payload['message']['content'])
 
     def test_missing_attested_parent_cwd_fails_before_fork(self):
         plan = replace(self.plan, parent_cwd='')

@@ -149,6 +149,31 @@ class GenerateContinuityChunkRoutingTest(unittest.TestCase):
         oneshot_mock.assert_not_called()
         self.assertEqual(self.provider_calls, 1)
 
+    def test_mixed_turn_wake_turn_plan_uses_native_once(self):
+        native = SimpleNamespace(
+            text='native mixed summary', provider='claude_code', model_identity='model-A',
+            actual_executor=NATIVE_FORK_EXECUTOR, usage={'cache_read_input_tokens': 12345},
+        )
+
+        def fake_execute(plan, **kwargs):
+            self.assertEqual(plan.scope_completed_turns, 2)
+            self.assertEqual(plan.scope_wake_count, 1)
+            kwargs['on_provider_start']()
+            return native
+
+        stack, execute_mock, oneshot_mock = self._patched(
+            plan=ContinuityForkPlan(
+                eligible=True, reason='', scope_completed_turns=2, scope_wake_count=1,
+            ),
+            execute={'side_effect': fake_execute},
+        )
+        with stack:
+            chunk = self._run()
+        self.assertEqual(chunk.actual_executor, NATIVE_FORK_EXECUTOR)
+        execute_mock.assert_called_once()
+        oneshot_mock.assert_not_called()
+        self.assertEqual(self.provider_calls, 1)
+
     def test_ineligible_plan_runs_oneshot_and_records_reason(self):
         stack, execute_mock, oneshot_mock = self._patched(
             plan=ContinuityForkPlan(eligible=False, reason='parent_model_mismatch'),
