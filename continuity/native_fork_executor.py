@@ -14,9 +14,10 @@ Reuses primitives already validated elsewhere in this codebase rather than
 inventing new ones:
   * ``claude_agent_sdk.fork_session`` — the same official primitive staged
     rewrite already uses (``chat/rewrite_native_fork.py``).
-  * ``-p`` + ``--resume`` + ``--input-format stream-json`` — the exact
-    invocation shape the nightly Forge canary proved works for a tool-isolated
-    resumed one-shot (``chat/context_window_nightly_forge.py``).
+  * Main-chat ``ResidentSession`` spawn surface — ``compose_spawn_argv`` plus
+    UH-A0 ``_build_spawn_tool_flags`` — so the child's provider-visible prefix
+    (system, tools, MCP, allowed/disallowed, model, effort, dynamic-system)
+    matches the parent instead of wiping tools for a compression-only argv.
   * ``tools/claude_forge_live_gate.py``'s stdout/JSONL-prefix helpers for the
     parent-transcript-unchanged guard.
   * ``chat/background_generation.py``'s own stream terminal parser for
@@ -94,6 +95,7 @@ def _scope_instruction(
     scope_note = (
         f'只总结这个 candidate 中最近 {n} 个 completed turns 和 {wakes} 个 canonical Wake；'
         'Wake 可以位于候选范围首尾或中间。更早的历史仅用于理解指代，不要展开复述。'
+        '不要调用任何工具，只根据当前已继承的对话内容完成压缩。'
     )
     return f'{prompt_body}\n\n{scope_note}'
 
@@ -167,14 +169,22 @@ def execute_continuity_native_fork(
     if child_path is None or not child_path.is_file():
         raise NativeForkGenerationError('child_transcript_missing')
 
+    from chat.cc_effort import cc_effort_snapshot
     from chat.cc_model import cc_model_args_from_identity, cc_model_from_identity
-    from chat.cc_runtime import claude_cmd_for_version, repo_root, require_managed_claude_runtime
+    from chat.cc_runtime import require_managed_claude_runtime
+    from chat.system_builder import build_cc_static_parts
+    from cc_resident import ResidentSession, TOOL_PROFILE_UH_A0, compose_spawn_argv
 
     try:
         expected_model = cc_model_from_identity(authority.model_identity)
         model_args = cc_model_args_from_identity(authority.model_identity)
-    except ValueError as exc:
-        raise NativeForkGenerationError('invalid_model_identity') from exc
+    except ValueError as cexc:
+        raise NativeForkGenerationError('invalid_model_identity') from cexc
+
+    try:
+        _effort, _effort_identity, effort_args = cc_effort_snapshot()
+    except ValueError as cexc:
+        raise NativeForkGenerationError('invalid_effort') from cexc
 
     getter = token_getter
     if getter is None:
@@ -187,17 +197,21 @@ def execute_continuity_native_fork(
     if not token:
         raise NativeForkGenerationError('token_unavailable')
 
-    root = repo_root()
     env = dict(os.environ)
     env['CLAUDE_CODE_OAUTH_TOKEN'] = token
     env.pop('ANTHROPIC_API_KEY', None)
 
     try:
         runtime_version = require_managed_claude_runtime(
-            env=env, cwd=str(root), timeout=min(float(timeout_sec), 60.0),
+            env=env, cwd=parent_cwd, timeout=min(float(timeout_sec), 60.0),
         )
     except Exception as exc:
         raise NativeForkGenerationError('runtime_unavailable') from exc
+
+    try:
+        system_text = build_cc_static_parts()['full_system']
+    except Exception as exc:
+        raise NativeForkGenerationError('system_surface_unavailable') from exc
 
     user_message = _scope_instruction(
         prompt_body, plan.scope_completed_turns, plan.scope_wake_count,
@@ -207,19 +221,32 @@ def execute_continuity_native_fork(
         ensure_ascii=False,
     ) + '\n'
 
-    cmd = claude_cmd_for_version(
+    # Same constructor/profile as main chat; argv only — no child resident.
+    # Do not persist MCP/settings files: parent already wrote the surface.
+    surface = ResidentSession(
+        parent_cwd,
+        '',
+        str(Path(parent_cwd) / 'cc-tools.json'),
+    )
+    surface._tool_profile = TOOL_PROFILE_UH_A0
+    env = surface._prepare_spawn_env(env)
+    try:
+        tool_flags = surface._build_spawn_tool_flags(
+            env=env, write_mcp_config=False, write_settings=False,
+        )
+        surface._require_spawn_surface_fingerprint(tool_flags)
+    except Exception as exc:
+        raise NativeForkGenerationError('tool_surface_unavailable') from exc
+
+    cmd = compose_spawn_argv(
         runtime_version,
-        '-p',
-        '--resume', child_sid,
-        '--input-format', 'stream-json',
-        '--output-format', 'stream-json',
-        '--verbose',
-        '--max-turns', '1',
-        '--tools', '',
-        '--allowedTools', '',
-        '--safe-mode',
-        env=env,
-    ) + model_args
+        system_text=system_text,
+        tool_flags=tool_flags,
+        model_args=model_args,
+        effort_args=effort_args,
+        session_args=('--resume', child_sid),
+        max_turns='1',
+    )
 
     # From here on a model request may be in flight: every failure is
     # post-provider and must never be followed by a second model call.

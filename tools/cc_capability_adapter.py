@@ -548,6 +548,7 @@ def build_uh_a0_spawn_plan(
     env: Mapping[str, str] | None = None,
     actual_version: str | None = None,
     write_mcp_config: bool = True,
+    write_settings: bool = True,
 ) -> dict[str, Any]:
     """Build a generation-stable UH-A0 plan with runtime-state HIDE.
 
@@ -583,7 +584,13 @@ def build_uh_a0_spawn_plan(
             legacy_mcp_config_path=legacy_mcp_config_path,
             env=env,
         )
-    settings_path = write_uh_a0_settings(target_cwd)
+    else:
+        existing_mcp = target_cwd / UH_A0_MCP_CONFIG_FILENAME
+        if existing_mcp.is_file():
+            mcp_path = str(existing_mcp)
+    settings_path = str(target_cwd / UH_A0_SETTINGS_FILENAME)
+    if write_settings:
+        settings_path = write_uh_a0_settings(target_cwd)
     turn_lease_path = resolve_uh_a0_turn_lease_path(target_cwd, env=env)
 
     built_in_tools = tuple(surface["built_in_tools"])

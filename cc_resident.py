@@ -723,6 +723,40 @@ def normalize_cache_info(raw):
     )
 
 
+def compose_spawn_argv(
+    runtime_version,
+    *,
+    system_text,
+    tool_flags,
+    model_args=(),
+    effort_args=(),
+    session_args=(),
+    max_turns='5',
+):
+    """Build the provider-visible Claude argv used by main-chat spawn paths.
+
+    ``_spawn``, ``spawn_resumable``, and ``spawn_fresh_named`` share this
+    helper so resume/fork callers cannot drift onto a second prompt surface.
+    ``session_args`` is ``()``, ``('--resume', sid)``, or ``('--session-id', sid)``.
+    """
+    from chat.cc_runtime import claude_cmd_for_version
+    extra_session = [str(part) for part in session_args]
+    return claude_cmd_for_version(
+        runtime_version,
+        '-p',
+        '--input-format', 'stream-json',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--include-partial-messages',
+        '--system-prompt', system_text,
+        '--max-turns', str(max_turns),
+        '--tools', tool_flags['tools'],
+        '--thinking-display', 'summarized',
+        '--exclude-dynamic-system-prompt-sections',
+        *extra_session,
+    ) + list(model_args) + list(effort_args) + list(tool_flags.get('extra') or ())
+
+
 class ResidentSession:
     """One persistent `claude` subprocess. Not safe for concurrent turns —
     caller must serialize (gateway.py already does via _gen_acquire_or_wait)."""
@@ -838,7 +872,7 @@ class ResidentSession:
                                 error_code='claude_runtime_invalid') from exc
         return 'claude-code:%s' % version
 
-    def _build_spawn_tool_flags(self, *, env=None):
+    def _build_spawn_tool_flags(self, *, env=None, write_mcp_config=True, write_settings=True):
         """Split built-in availability (--tools) from MCP permission args.
 
         UH-A0 uses a fixed physical surface from ``cc_capability_adapter``.
@@ -860,6 +894,8 @@ class ResidentSession:
                 cwd=self._cwd,
                 legacy_mcp_config_path=self._mcp_config_path,
                 env=spawn_env,
+                write_mcp_config=write_mcp_config,
+                write_settings=write_settings,
             )
             return {
                 'tools': plan['built_in_tools_csv'],
@@ -905,7 +941,7 @@ class ResidentSession:
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot
         from chat.cc_effort import cc_effort_snapshot
-        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, require_managed_claude_runtime
+        from chat.cc_runtime import ClaudeRuntimeError, require_managed_claude_runtime
         with self._turn_state_lock:
             if self._turn_active:
                 raise ResidentError('resident_turn_in_progress')
@@ -934,19 +970,13 @@ class ResidentSession:
         tool_flags = self._build_spawn_tool_flags(env=env)
         surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
         self._kill(quiet=True)
-        base_args = claude_cmd_for_version(runtime_version,
-            '-p',
-            '--input-format', 'stream-json',
-            '--output-format', 'stream-json',
-            '--verbose',
-            '--include-partial-messages',
-            '--system-prompt', system_text,
-            '--max-turns', '5',
-            '--tools', tool_flags['tools'],
-            '--thinking-display', 'summarized',
-            '--exclude-dynamic-system-prompt-sections',
-        ) + model_args + effort_args
-        args = base_args + list(tool_flags['extra'])
+        args = compose_spawn_argv(
+            runtime_version,
+            system_text=system_text,
+            tool_flags=tool_flags,
+            model_args=model_args,
+            effort_args=effort_args,
+        )
         try:
             self._proc = subprocess.Popen(
                 args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1251,7 +1281,7 @@ class ResidentSession:
             raise ResidentError('resume_session_id required')
         from chat.cc_model import cc_model_snapshot
         from chat.cc_effort import cc_effort_snapshot
-        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, require_managed_claude_runtime
+        from chat.cc_runtime import ClaudeRuntimeError, require_managed_claude_runtime
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
@@ -1271,20 +1301,14 @@ class ResidentSession:
             effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
             surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
-            base_args = claude_cmd_for_version(runtime_version,
-                '-p',
-                '--input-format', 'stream-json',
-                '--output-format', 'stream-json',
-                '--verbose',
-                '--include-partial-messages',
-                '--system-prompt', system_text,
-                '--max-turns', '5',
-                '--tools', tool_flags['tools'],
-                '--thinking-display', 'summarized',
-                '--exclude-dynamic-system-prompt-sections',
-                '--resume', resume_session_id,
-            ) + model_args + effort_args
-            args = base_args + list(tool_flags['extra'])
+            args = compose_spawn_argv(
+                runtime_version,
+                system_text=system_text,
+                tool_flags=tool_flags,
+                model_args=model_args,
+                effort_args=effort_args,
+                session_args=('--resume', resume_session_id),
+            )
             try:
                 self._proc = subprocess.Popen(
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1481,7 +1505,7 @@ class ResidentSession:
             raise ResidentError('session_id must be uuid') from exc
         from chat.cc_model import cc_model_snapshot
         from chat.cc_effort import cc_effort_snapshot
-        from chat.cc_runtime import ClaudeRuntimeError, claude_cmd_for_version, require_managed_claude_runtime
+        from chat.cc_runtime import ClaudeRuntimeError, require_managed_claude_runtime
         with self._lock:
             if self._alive():
                 raise ResidentError('staged spawn on live session')
@@ -1501,22 +1525,14 @@ class ResidentSession:
             effort, effort_identity, effort_args = cc_effort_snapshot()
             tool_flags = self._build_spawn_tool_flags(env=env)
             surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
-            base_args = claude_cmd_for_version(runtime_version,
-                '-p',
-                '--input-format', 'stream-json',
-                '--output-format', 'stream-json',
-                '--verbose',
-                '--include-partial-messages',
-                '--system-prompt', system_text,
-                '--max-turns', '5',
-                '--tools', tool_flags['tools'],
-                '--thinking-display', 'summarized',
-                '--exclude-dynamic-system-prompt-sections',
-                '--session-id', session_id,
-            ) + model_args + effort_args
-            if '--resume' in base_args:
-                raise ResidentError('fresh_named must not carry --resume')
-            args = base_args + list(tool_flags['extra'])
+            args = compose_spawn_argv(
+                runtime_version,
+                system_text=system_text,
+                tool_flags=tool_flags,
+                model_args=model_args,
+                effort_args=effort_args,
+                session_args=('--session-id', session_id),
+            )
             if '--resume' in args:
                 raise ResidentError('fresh_named must not carry --resume')
             try:

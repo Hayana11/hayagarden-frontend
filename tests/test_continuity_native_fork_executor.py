@@ -4,8 +4,9 @@ All process boundaries (``fork_session``, the resumed CLI subprocess, the
 OAuth token getter) are injected/mocked. These tests never spawn a real
 process and never call a real model; they only assert the safety invariants
 R4 requires: parent transcript hash is checked before, right after fork, and
-again after generation; tool execution is always disabled on the child;
-persona/materialized evidence are never sent; any failure raises
+again after generation; the child resume keeps the main-chat spawn surface
+(system/tools/MCP/model/effort) instead of emptying tools; compression is a
+user-instruction delta that forbids tool calls; any failure raises
 ``NativeForkGenerationError`` and leaves the parent untouched.
 """
 from __future__ import annotations
@@ -27,7 +28,29 @@ from continuity.native_fork_executor import (
     NativeForkGenerationError,
     execute_continuity_native_fork,
 )
+from cc_resident import compose_spawn_argv
 from tools.claude_forge_subprocess import SubprocessRunResult
+
+MAIN_SYSTEM = 'MAIN-CHAT-SYSTEM'
+UH_A0_TOOLS = 'Read,Glob,Grep'
+UH_A0_ALLOWED = 'Read,Glob,Grep,mcp__home__get_countdowns'
+UH_A0_EXTRA = [
+    '--settings', '/parent/cc-settings-uh-a0.json',
+    '--mcp-config', '/parent/cc-tools-uh-a0.json',
+    '--strict-mcp-config',
+    '--allowedTools', UH_A0_ALLOWED,
+    '--disallowedTools', 'Bash,Edit,Write,Agent',
+]
+
+
+def _uh_a0_plan(**_kwargs):
+    return {
+        'built_in_tools_csv': UH_A0_TOOLS,
+        'spawn_extra_args': list(UH_A0_EXTRA),
+        'surface_allowlist_csv': UH_A0_ALLOWED,
+        'mcp_config_path': '/parent/cc-tools-uh-a0.json',
+        'physical_surface_fingerprint': 'surface-fp',
+    }
 
 
 def _cc_stream(*, model='claude-opus-5', text='summary text', usage=None):
@@ -70,6 +93,20 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
             resident_generation=1,
         )
         self.authority = GenerationAuthoritySnapshot('claude_code', 'default')
+        surface = ExitStack()
+        self.addCleanup(surface.close)
+        surface.enter_context(mock.patch(
+            'tools.cc_capability_adapter.build_uh_a0_spawn_plan',
+            side_effect=_uh_a0_plan,
+        ))
+        surface.enter_context(mock.patch(
+            'chat.system_builder.build_cc_static_parts',
+            return_value={'full_system': MAIN_SYSTEM, 'persona': 'PERSONA-TEXT'},
+        ))
+        surface.enter_context(mock.patch(
+            'chat.cc_effort.cc_effort_snapshot',
+            return_value=('', 'default', []),
+        ))
 
     def _fork_fn(self, *, child_sid='child-sid', mutate_parent=False, raise_error=None):
         def _fn(session_id, *, directory, up_to_message_id, title):
@@ -151,7 +188,7 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.assertEqual(result.usage['continuity_native_fork_scope_completed_turns'], 3)
         self.assertEqual(result.usage['continuity_native_fork_scope_wake_count'], 1)
 
-    def test_resume_call_disables_tools_and_omits_system_prompt_and_persona(self):
+    def test_child_resume_keeps_main_chat_prefix_parity(self):
         patch, recorded = self._run_subprocess_patch()
         with self._runtime(), patch, mock.patch(
             'continuity.native_fork_executor.session_jsonl_path',
@@ -162,22 +199,81 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
                 fork_session_fn=self._fork_fn(), token_getter=lambda: 'tok',
             )
         cmd = recorded['cmd']
-        self.assertIn('--resume', cmd)
+        expected = compose_spawn_argv(
+            '2.1.280',
+            system_text=MAIN_SYSTEM,
+            tool_flags={'tools': UH_A0_TOOLS, 'extra': list(UH_A0_EXTRA)},
+            model_args=[],
+            effort_args=[],
+            session_args=('--resume', 'child-sid'),
+            max_turns='1',
+        )
+        self.assertEqual(cmd, expected)
         self.assertEqual(cmd[cmd.index('--resume') + 1], 'child-sid')
-        self.assertEqual(cmd[cmd.index('--tools') + 1], '')
-        self.assertEqual(cmd[cmd.index('--allowedTools') + 1], '')
-        self.assertNotIn('--system-prompt', cmd)
-        self.assertNotIn('--no-session-persistence', cmd)
+        self.assertEqual(cmd[cmd.index('--tools') + 1], UH_A0_TOOLS)
+        self.assertEqual(cmd[cmd.index('--allowedTools') + 1], UH_A0_ALLOWED)
+        self.assertEqual(cmd[cmd.index('--system-prompt') + 1], MAIN_SYSTEM)
+        self.assertEqual(cmd[cmd.index('--max-turns') + 1], '1')
+        self.assertIn('--mcp-config', cmd)
+        self.assertIn('--disallowedTools', cmd)
+        self.assertIn('--exclude-dynamic-system-prompt-sections', cmd)
+        self.assertIn('--thinking-display', cmd)
+        self.assertNotIn('--safe-mode', cmd)
         self.assertEqual(self.fork_directory, self.parent_cwd)
         self.assertEqual(recorded['cwd'], self.parent_cwd)
         payload = json.loads(recorded['stdin_payload'].strip())
         self.assertEqual(payload['type'], 'user')
-        self.assertIn('SUMMARIZE-ONLY', payload['message']['content'])
-        self.assertIn('3', payload['message']['content'])
-        self.assertIn('canonical Wake', payload['message']['content'])
-        self.assertIn('Wake 可以位于候选范围首尾或中间', payload['message']['content'])
-        self.assertNotIn('autonomous Wake', payload['message']['content'])
-        self.assertNotIn('parent.jsonl', payload['message']['content'])
+        content = payload['message']['content']
+        self.assertIn('SUMMARIZE-ONLY', content)
+        self.assertIn('3', content)
+        self.assertIn('canonical Wake', content)
+        self.assertIn('Wake 可以位于候选范围首尾或中间', content)
+        self.assertIn('不要调用任何工具，只根据当前已继承的对话内容完成压缩。', content)
+        self.assertNotIn('autonomous Wake', content)
+        self.assertNotIn('parent.jsonl', content)
+        self.assertNotIn('PERSONA-TEXT', content)
+
+    def test_child_argv_uses_frozen_model_and_effort_snapshot(self):
+        authority = GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5-5')
+        patch, recorded = self._run_subprocess_patch()
+        with self._runtime(), patch, mock.patch(
+            'continuity.native_fork_executor.session_jsonl_path',
+            return_value=self.child_path,
+        ), mock.patch(
+            'chat.cc_effort.cc_effort_snapshot',
+            return_value=('high', 'explicit:high', ['--effort', 'high']),
+        ):
+            execute_continuity_native_fork(
+                self.plan, prompt_body='SUMMARIZE', authority=authority, cwd=self.cwd,
+                fork_session_fn=self._fork_fn(), token_getter=lambda: 'tok',
+            )
+        cmd = recorded['cmd']
+        self.assertEqual(cmd[cmd.index('--model') + 1], 'claude-opus-5-5')
+        self.assertEqual(cmd[cmd.index('--effort') + 1], 'high')
+        self.assertEqual(cmd[cmd.index('--system-prompt') + 1], MAIN_SYSTEM)
+        self.assertEqual(cmd[cmd.index('--tools') + 1], UH_A0_TOOLS)
+
+    def test_child_does_not_rewrite_parent_mcp_or_settings(self):
+        seen = {}
+
+        def capture(**kwargs):
+            seen.update(kwargs)
+            return _uh_a0_plan()
+
+        patch, _ = self._run_subprocess_patch()
+        with self._runtime(), patch, mock.patch(
+            'continuity.native_fork_executor.session_jsonl_path',
+            return_value=self.child_path,
+        ), mock.patch(
+            'tools.cc_capability_adapter.build_uh_a0_spawn_plan',
+            side_effect=capture,
+        ):
+            execute_continuity_native_fork(
+                self.plan, prompt_body='SUMMARIZE', authority=self.authority, cwd=self.cwd,
+                fork_session_fn=self._fork_fn(), token_getter=lambda: 'tok',
+            )
+        self.assertFalse(seen.get('write_mcp_config'))
+        self.assertFalse(seen.get('write_settings'))
 
     def test_missing_attested_parent_cwd_fails_before_fork(self):
         plan = replace(self.plan, parent_cwd='')
