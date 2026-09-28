@@ -91,19 +91,10 @@ def _scope_instruction(
 ) -> str:
     n = max(0, int(scope_completed_turns or 0))
     wakes = max(0, int(scope_wake_count or 0))
-    if n <= 0:
-        scope_note = (
-            '只总结当前对话末尾这一段已经完成的对话；更早的历史仅用于理解指代，不要展开复述。'
-        )
-    elif wakes:
-        scope_note = (
-            f'只总结当前对话末尾最近 {n} 个已经完成的对话轮次，并包含这些轮次之间夹着的 '
-            f'{wakes} 个 canonical Wake / autonomous Wake event；更早的历史仅用于理解指代，不要展开复述。'
-        )
-    else:
-        scope_note = (
-            f'只总结当前对话末尾最近 {n} 个已经完成的对话轮次；更早的历史仅用于理解指代，不要展开复述。'
-        )
+    scope_note = (
+        f'只总结这个 candidate 中最近 {n} 个 completed turns 和 {wakes} 个 canonical Wake；'
+        'Wake 可以位于候选范围首尾或中间。更早的历史仅用于理解指代，不要展开复述。'
+    )
     return f'{prompt_body}\n\n{scope_note}'
 
 

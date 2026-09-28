@@ -24,7 +24,9 @@ cross-process evidence that already exists:
     the resident's own stale-cache guard uses;
   * exact boundary — the candidate's last completed turn maps to exactly one
     assistant event of that session/generation in
-    ``chat_message_claude_events``.
+    ``chat_message_claude_events``; a trailing canonical Wake instead proves
+    its provider-only transcript range with the existing reader and terminal
+    round assertion, without creating a formal mapping.
 
 Provider configuration (the settings page) is never used as live-model proof.
 Anything not positively proven is a refusal; the caller then runs the
@@ -76,6 +78,12 @@ REASON_PARENT_MODEL_MISMATCH = 'parent_model_mismatch'
 REASON_PARENT_USAGE_MISSING = 'parent_usage_missing'
 REASON_PARENT_COLD = 'parent_cold'
 REASON_RESOLVER_ERROR = 'resolver_error'
+REASON_WAKE_PROVENANCE_MISSING = 'wake_provenance_missing'
+REASON_WAKE_PROVENANCE_MISMATCH = 'wake_provenance_mismatch'
+REASON_WAKE_TRANSCRIPT_RANGE_INVALID = 'wake_transcript_range_invalid'
+REASON_WAKE_TRANSCRIPT_SESSION_MISMATCH = 'wake_transcript_session_mismatch'
+REASON_WAKE_TRANSCRIPT_ROUND_INVALID = 'wake_transcript_round_invalid'
+REASON_WAKE_CONTEXT_MISMATCH = 'wake_context_mismatch'
 
 
 @dataclass(frozen=True)
@@ -148,18 +156,198 @@ def _wake_id(source_ref: Any) -> Optional[int]:
     return wake_id if wake_id > 0 else None
 
 
+class _CandidateScopeRejected(ValueError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class _WakeTranscriptProvenance:
+    wake_run_id: str
+    chat_id: str
+    context_id: int
+    context_epoch: int
+    resident_generation: int
+    claude_session_id: str
+    transcript_path: str
+    start_offset: int
+    end_offset: int
+    fork_event_uuid: str
+
+
+@dataclass(frozen=True)
+class _CandidateScope:
+    boundary_message_id: int
+    turn_count: int
+    wake_count: int
+    trailing_wake: Optional[_WakeTranscriptProvenance] = None
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        if hasattr(row, 'keys') and key in row.keys():
+            return row[key]
+    except Exception:
+        return default
+    return default
+
+
+def _strict_int(value: Any, *, minimum: int = 0) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= minimum else None
+
+
+def _json_object(value: Any) -> Optional[dict[str, Any]]:
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        parsed = json.loads(str(value or ''))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _trailing_wake_provenance(
+    source_conn: sqlite3.Connection,
+    wake_row: Any,
+    snapshot: SourceSnapshot,
+) -> _WakeTranscriptProvenance:
+    """Prove a trailing Wake's existing provider-only terminal boundary."""
+    cache = _json_object(_row_value(wake_row, 'cache_info'))
+    if cache is None:
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISSING)
+    wake_run_id = str(cache.get('wake_run_id') or '').strip()
+    skip = cache.get('transcript_skip')
+    if (
+        not wake_run_id
+        or not isinstance(skip, dict)
+        or skip.get('skipped_provider_round') is not True
+    ):
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISSING)
+
+    start_offset = _strict_int(skip.get('start_offset'), minimum=0)
+    end_offset = _strict_int(skip.get('end_offset'), minimum=0)
+    skip_context_id = _strict_int(skip.get('context_id'), minimum=1)
+    skip_generation = _strict_int(skip.get('resident_generation'), minimum=1)
+    if (
+        start_offset is None
+        or end_offset is None
+        or end_offset <= start_offset
+        or skip_context_id is None
+        or skip_generation is None
+    ):
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISMATCH)
+
+    try:
+        wake_rows = source_conn.execute(
+            """SELECT wake_run_id, chat_id, context_id, context_epoch,
+                      resident_generation
+               FROM wake_log WHERE wake_run_id=? ORDER BY id ASC""",
+            (wake_run_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISSING) from exc
+    if len(wake_rows) != 1:
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISMATCH)
+    wake_log = wake_rows[0]
+    chat_id = str(_row_value(wake_log, 'chat_id') or '').strip()
+    context_id = _strict_int(_row_value(wake_log, 'context_id'), minimum=1)
+    context_epoch = _strict_int(_row_value(wake_log, 'context_epoch'), minimum=1)
+    resident_generation = _strict_int(
+        _row_value(wake_log, 'resident_generation'), minimum=1,
+    )
+    if (
+        not chat_id
+        or context_id is None
+        or context_epoch is None
+        or resident_generation is None
+        or str(_row_value(wake_log, 'wake_run_id') or '').strip() != wake_run_id
+        or chat_id != str(snapshot.chat_id)
+        or context_id != int(snapshot.context_id)
+        or context_epoch != int(snapshot.context_epoch)
+        or skip_context_id != context_id
+        or skip_generation != resident_generation
+    ):
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISMATCH)
+
+    try:
+        registry_rows = source_conn.execute(
+            """SELECT context_id, context_epoch, resident_generation,
+                      chat_id, claude_session_id, transcript_path, scan_status
+               FROM context_claude_sessions
+               WHERE context_id=? AND resident_generation=?""",
+            (context_id, resident_generation),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISSING) from exc
+    if len(registry_rows) != 1:
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISMATCH)
+    registry = registry_rows[0]
+    claude_session_id = str(_row_value(registry, 'claude_session_id') or '').strip()
+    transcript_path = str(_row_value(registry, 'transcript_path') or '').strip()
+    if (
+        _strict_int(_row_value(registry, 'context_id'), minimum=1) != context_id
+        or _strict_int(_row_value(registry, 'context_epoch'), minimum=1) != context_epoch
+        or _strict_int(_row_value(registry, 'resident_generation'), minimum=1)
+        != resident_generation
+        or str(_row_value(registry, 'chat_id') or '').strip() != chat_id
+        or str(_row_value(registry, 'scan_status') or '') != 'READY'
+        or not claude_session_id
+        or not transcript_path
+    ):
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISMATCH)
+
+    try:
+        from chat.claude_event_mapping import _assert_complete_terminal_round
+        from chat.claude_transcript_reader import read_transcript_range
+
+        graph = read_transcript_range(transcript_path, start_offset, end_offset)
+    except Exception as exc:
+        raise _CandidateScopeRejected(REASON_WAKE_TRANSCRIPT_RANGE_INVALID) from exc
+
+    session_ids = {str(event.session_id or '').strip() for event in graph.events}
+    if session_ids != {claude_session_id} or graph.session_id != claude_session_id:
+        raise _CandidateScopeRejected(REASON_WAKE_TRANSCRIPT_SESSION_MISMATCH)
+    if len(graph.candidate_rounds) != 1:
+        raise _CandidateScopeRejected(REASON_WAKE_TRANSCRIPT_ROUND_INVALID)
+    try:
+        _assert_complete_terminal_round(graph, graph.candidate_rounds[0])
+    except Exception as exc:
+        raise _CandidateScopeRejected(REASON_WAKE_TRANSCRIPT_ROUND_INVALID) from exc
+
+    return _WakeTranscriptProvenance(
+        wake_run_id=wake_run_id,
+        chat_id=chat_id,
+        context_id=context_id,
+        context_epoch=context_epoch,
+        resident_generation=resident_generation,
+        claude_session_id=claude_session_id,
+        transcript_path=transcript_path,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        fork_event_uuid=graph.candidate_rounds[0].event_uuids[-1],
+    )
+
+
 def _candidate_scope(
     source_conn: sqlite3.Connection,
     candidate: CandidateBlock,
     snapshot: SourceSnapshot,
-) -> Optional[tuple[int, int, int]]:
+) -> Optional[_CandidateScope]:
     """Validate mixed source membership and return boundary/turn/wake counts.
 
     Canonical Wake truth stays in ``continuity.sources._canonical_normal_wake``;
     this resolver only binds that existing predicate to the frozen snapshot
     member revision.  No Wake generation is compared with the final boundary
-    generation: reconstruction already treats a delivered canonical Wake as
-    durable conversation material across a resident respawn.
+    generation: interior Wake generations remain durable conversation material
+    across a resident respawn; a trailing Wake is separately checked against
+    the current session/context/generation before it becomes the fork boundary.
     """
     refs = tuple(candidate.source_refs or ())
     seqs = tuple(candidate.source_seqs or ())
@@ -196,14 +384,7 @@ def _candidate_scope(
             return None
         selected.append(member)
 
-    first_kind = str(selected[0].source_kind or '')
     last_kind = str(selected[-1].source_kind or '')
-    if first_kind != 'completed_turn' or last_kind != 'completed_turn':
-        return None
-    boundary = _turn_assistant_id(refs[-1])
-    if boundary is None:
-        return None
-
     turn_count = 0
     wake_count = 0
     for member, ref in zip(selected, refs):
@@ -240,7 +421,36 @@ def _candidate_scope(
         return None
     if candidate_turn_count != turn_count:
         return None
-    return boundary, turn_count, wake_count
+
+    if last_kind == 'completed_turn':
+        boundary = _turn_assistant_id(refs[-1])
+        if boundary is None:
+            return None
+        return _CandidateScope(
+            boundary_message_id=boundary,
+            turn_count=turn_count,
+            wake_count=wake_count,
+        )
+    if last_kind != 'autonomous_event' or str(selected[-1].role or '') != 'assistant':
+        return None
+    trailing_wake_id = _wake_id(refs[-1])
+    if trailing_wake_id is None:
+        return None
+    try:
+        trailing_row = source_conn.execute(
+            'SELECT * FROM chat_messages WHERE id=?', (trailing_wake_id,),
+        ).fetchone()
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISSING) from exc
+    if trailing_row is None:
+        raise _CandidateScopeRejected(REASON_WAKE_PROVENANCE_MISSING)
+    trailing_wake = _trailing_wake_provenance(source_conn, trailing_row, snapshot)
+    return _CandidateScope(
+        boundary_message_id=0,
+        turn_count=turn_count,
+        wake_count=wake_count,
+        trailing_wake=trailing_wake,
+    )
 
 
 def _assistant_mapping_rows(conn: sqlite3.Connection, message_id: int) -> list[dict[str, Any]]:
@@ -381,10 +591,15 @@ def resolve_continuity_native_fork(
         context_id = int(snapshot.context_id)
         context_epoch = int(snapshot.context_epoch)
 
-        scope = _candidate_scope(source_conn, candidate, snapshot)
+        try:
+            scope = _candidate_scope(source_conn, candidate, snapshot)
+        except _CandidateScopeRejected as exc:
+            return _reject(exc.reason)
         if scope is None:
             return _reject(REASON_SCOPE_UNSUPPORTED)
-        boundary_message_id, turn_count, wake_count = scope
+        boundary_message_id = scope.boundary_message_id
+        turn_count = scope.turn_count
+        wake_count = scope.wake_count
 
         from chat.window_identity import WindowIdentityUnavailable, read_current_window_identity_conn
 
@@ -416,25 +631,42 @@ def resolve_continuity_native_fork(
         except OSError:
             return _reject(REASON_PARENT_TRANSCRIPT_MISSING)
 
-        a_maps = _assistant_mapping_rows(source_conn, boundary_message_id)
-        if not a_maps:
-            return _reject(REASON_MAPPING_MISSING)
-        for row in a_maps:
-            if str(row.get('claude_session_id') or '') != parent_sid:
-                return _reject(REASON_SESSION_MISMATCH)
+        trailing_wake = scope.trailing_wake
+        if trailing_wake is not None:
             if (
-                int(row.get('context_id') or -1) != context_id
-                or int(row.get('context_epoch') or -1) != context_epoch
-                or int(row.get('resident_generation') or -1) != resident_generation
+                trailing_wake.context_id != context_id
+                or trailing_wake.context_epoch != context_epoch
+                or trailing_wake.resident_generation != resident_generation
             ):
-                return _reject(REASON_SESSION_MISMATCH)
-        top = a_maps[0]
-        tied = [r for r in a_maps if r.get('jsonl_byte_offset') == top.get('jsonl_byte_offset')]
-        if len({str(r.get('event_uuid')) for r in tied}) > 1:
-            return _reject(REASON_MAPPING_AMBIGUOUS)
-        fork_uuid = str(top.get('event_uuid') or '').strip()
-        if not fork_uuid:
-            return _reject(REASON_MAPPING_MISSING)
+                return _reject(REASON_WAKE_CONTEXT_MISMATCH)
+            if (
+                trailing_wake.claude_session_id != parent_sid
+                or Path(trailing_wake.transcript_path) != registered_path
+            ):
+                return _reject(REASON_WAKE_TRANSCRIPT_SESSION_MISMATCH)
+            fork_uuid = str(trailing_wake.fork_event_uuid or '').strip()
+            if not fork_uuid:
+                return _reject(REASON_WAKE_TRANSCRIPT_ROUND_INVALID)
+        else:
+            a_maps = _assistant_mapping_rows(source_conn, boundary_message_id)
+            if not a_maps:
+                return _reject(REASON_MAPPING_MISSING)
+            for row in a_maps:
+                if str(row.get('claude_session_id') or '') != parent_sid:
+                    return _reject(REASON_SESSION_MISMATCH)
+                if (
+                    int(row.get('context_id') or -1) != context_id
+                    or int(row.get('context_epoch') or -1) != context_epoch
+                    or int(row.get('resident_generation') or -1) != resident_generation
+                ):
+                    return _reject(REASON_SESSION_MISMATCH)
+            top = a_maps[0]
+            tied = [r for r in a_maps if r.get('jsonl_byte_offset') == top.get('jsonl_byte_offset')]
+            if len({str(r.get('event_uuid')) for r in tied}) > 1:
+                return _reject(REASON_MAPPING_AMBIGUOUS)
+            fork_uuid = str(top.get('event_uuid') or '').strip()
+            if not fork_uuid:
+                return _reject(REASON_MAPPING_MISSING)
 
         boundary_model, latest, parent_cwd = _transcript_evidence(registered_path, fork_uuid)
         if parent_cwd is None:
@@ -476,6 +708,8 @@ def resolve_continuity_native_fork(
             context_epoch=context_epoch,
             resident_generation=resident_generation,
         )
+    except _CandidateScopeRejected as exc:
+        return _reject(exc.reason)
     except Exception:
         return _reject(REASON_RESOLVER_ERROR)
 

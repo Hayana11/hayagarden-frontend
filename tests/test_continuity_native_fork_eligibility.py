@@ -434,11 +434,36 @@ class CanonicalWakeScopeEligibilityTest(unittest.TestCase):
         ).fetchone()
 
     def _mixed_snapshot_candidate(self, *, canonical=True, refs=None):
-        row = self._wake(canonical=canonical)
-        wake_revision = nfe.row_revision(row)
+        self._ensure_messages()
         refs = tuple(refs or ('turn:1:2', 'wake:3', 'turn:4:5'))
-        kinds = ('completed_turn', 'autonomous_event', 'completed_turn')
-        revisions = ('rev-turn-1', wake_revision, 'rev-turn-2')
+        for ref in refs:
+            if not ref.startswith('wake:'):
+                continue
+            wake_id = int(ref.split(':', 1)[1])
+            existing = self.conn.execute(
+                'SELECT * FROM chat_messages WHERE id=?', (wake_id,)
+            ).fetchone()
+            if existing is None or not canonical:
+                self._wake(wake_id=wake_id, canonical=canonical)
+
+        kinds = tuple(
+            'autonomous_event' if ref.startswith('wake:') else
+            'completed_turn' if ref.startswith('turn:') else
+            'unknown'
+            for ref in refs
+        )
+        revisions = []
+        for index, (kind, ref) in enumerate(zip(kinds, refs)):
+            if kind == 'autonomous_event':
+                row = self.conn.execute(
+                    'SELECT * FROM chat_messages WHERE id=?',
+                    (int(ref.split(':', 1)[1]),),
+                ).fetchone()
+                revision = nfe.row_revision(row)
+            else:
+                revision = f'rev-turn-{index}'
+            revisions.append(revision)
+
         members = tuple(
             SourceMember(
                 seq=index, source_kind=kind, source_ref=ref,
@@ -451,18 +476,79 @@ class CanonicalWakeScopeEligibilityTest(unittest.TestCase):
         snapshot = SourceSnapshot(
             snapshot_id='snap:1', identity_id='fyodor', chat_id='default',
             branch_id='active-transcript', local_day='2026-09-27',
-            source_watermark=5, policy_version='continuity_source_v1',
+            source_watermark=len(refs), policy_version='continuity_source_v1',
             source_hash='hash', status='ready', created_at='2026-09-27 04:00:00',
             members=members, context_id=1, context_epoch=1,
         )
         candidate = _candidate(
             source_refs=refs,
-            source_seqs=(0, 1, 2),
-            source_revisions=revisions,
-            completed_turn_count=2,
-            source_end_seq=3,
+            source_seqs=tuple(range(len(refs))),
+            source_revisions=tuple(revisions),
+            completed_turn_count=sum(kind == 'completed_turn' for kind in kinds),
+            source_end_seq=len(refs),
         )
         return snapshot, candidate
+
+    def _trailing_wake_fixture(self, *, wake_ids=(3,)):
+        self._ensure_messages()
+        self.conn.execute(
+            '''CREATE TABLE IF NOT EXISTS wake_log (
+                id INTEGER PRIMARY KEY, wake_run_id TEXT, chat_id TEXT,
+                context_id INTEGER, context_epoch INTEGER,
+                resident_generation INTEGER
+            )'''
+        )
+        path = self._parent_path('s1')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                'type': 'user', 'uuid': 'wake-user', 'sessionId': 's1',
+                'message': {'role': 'user', 'content': 'provider-only Wake'},
+            },
+            {
+                'type': 'assistant', 'uuid': 'wake-terminal',
+                'parentUuid': 'wake-user', 'sessionId': 's1', 'cwd': self.cwd,
+                'requestId': 'wake-request', 'timestamp': _iso(60),
+                'message': {
+                    'role': 'assistant', 'model': MODEL,
+                    'content': 'complete provider-only Wake',
+                    'usage': {'input_tokens': 3, 'output_tokens': 5},
+                },
+            },
+        ]
+        path.write_text(
+            '\n'.join(json.dumps(row) for row in rows) + '\n',
+            encoding='utf-8',
+        )
+        end_offset = path.stat().st_size
+        for wake_id in wake_ids:
+            self._wake(wake_id=wake_id)
+            wake_run_id = f'wake-run-{wake_id}'
+            cache = json.loads(
+                self.conn.execute(
+                    'SELECT cache_info FROM chat_messages WHERE id=?', (wake_id,)
+                ).fetchone()['cache_info']
+            )
+            cache.update({
+                'wake_run_id': wake_run_id,
+                'transcript_skip': {
+                    'context_id': 1, 'resident_generation': 1,
+                    'start_offset': 0, 'end_offset': end_offset,
+                    'skipped_provider_round': True,
+                },
+            })
+            self.conn.execute(
+                'UPDATE chat_messages SET cache_info=? WHERE id=?',
+                (json.dumps(cache), wake_id),
+            )
+            self.conn.execute(
+                'INSERT INTO wake_log '
+                '(id, wake_run_id, chat_id, context_id, context_epoch, resident_generation) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (wake_id, wake_run_id, 'default', 1, 1, 1),
+            )
+        self.conn.commit()
+        self._registry(transcript_path=str(path))
 
     def _hot_boundary(self):
         self._write_parent('s1', [assistant_event('ev5')])
@@ -484,19 +570,92 @@ class CanonicalWakeScopeEligibilityTest(unittest.TestCase):
         snapshot, candidate = self._mixed_snapshot_candidate(canonical=False)
         self.assertRefused(self._resolve(snapshot=snapshot, candidate=candidate), nfe.REASON_SCOPE_UNSUPPORTED)
 
-    def test_leading_wake_is_unsupported(self):
+    def test_leading_wake_is_native_eligible(self):
         self._hot_boundary()
         snapshot, candidate = self._mixed_snapshot_candidate(
             refs=('wake:3', 'turn:1:2', 'turn:4:5'),
         )
-        self.assertRefused(self._resolve(snapshot=snapshot, candidate=candidate), nfe.REASON_SCOPE_UNSUPPORTED)
+        plan = self._resolve(snapshot=snapshot, candidate=candidate)
+        self.assertTrue(plan.eligible, plan.reason)
+        self.assertEqual(plan.boundary_message_id, 5)
+        self.assertEqual(plan.scope_wake_count, 1)
 
-    def test_trailing_wake_is_unsupported(self):
+    def test_leading_two_wakes_are_native_eligible(self):
         self._hot_boundary()
+        snapshot, candidate = self._mixed_snapshot_candidate(
+            refs=('wake:3', 'wake:4', 'turn:4:5'),
+        )
+        plan = self._resolve(snapshot=snapshot, candidate=candidate)
+        self.assertTrue(plan.eligible, plan.reason)
+        self.assertEqual(plan.boundary_message_id, 5)
+        self.assertEqual(plan.scope_wake_count, 2)
+
+    def test_trailing_wake_is_native_eligible_when_range_is_exact(self):
+        self._trailing_wake_fixture()
         snapshot, candidate = self._mixed_snapshot_candidate(
             refs=('turn:1:2', 'turn:4:5', 'wake:3'),
         )
-        self.assertRefused(self._resolve(snapshot=snapshot, candidate=candidate), nfe.REASON_SCOPE_UNSUPPORTED)
+        plan = self._resolve(snapshot=snapshot, candidate=candidate)
+        self.assertTrue(plan.eligible, plan.reason)
+        self.assertEqual(plan.boundary_message_id, 0)
+        self.assertEqual(plan.fork_event_uuid, 'wake-terminal')
+        self.assertEqual(plan.scope_completed_turns, 2)
+        self.assertEqual(plan.scope_wake_count, 1)
+
+    def test_trailing_two_wakes_use_last_exact_range_without_mapping(self):
+        self._trailing_wake_fixture(wake_ids=(3, 4))
+        snapshot, candidate = self._mixed_snapshot_candidate(
+            refs=('turn:1:2', 'wake:3', 'wake:4'),
+        )
+        plan = self._resolve(snapshot=snapshot, candidate=candidate)
+        self.assertTrue(plan.eligible, plan.reason)
+        self.assertEqual(plan.boundary_message_id, 0)
+        self.assertEqual(plan.fork_event_uuid, 'wake-terminal')
+        self.assertEqual(plan.scope_completed_turns, 1)
+        self.assertEqual(plan.scope_wake_count, 2)
+
+    def test_trailing_wake_range_mismatch_fails_with_real_reason(self):
+        self._trailing_wake_fixture()
+        row = self.conn.execute(
+            'SELECT cache_info FROM chat_messages WHERE id=3'
+        ).fetchone()
+        cache = json.loads(row['cache_info'])
+        cache['transcript_skip']['start_offset'] = 1
+        self.conn.execute(
+            'UPDATE chat_messages SET cache_info=? WHERE id=3',
+            (json.dumps(cache),),
+        )
+        self.conn.commit()
+        snapshot, candidate = self._mixed_snapshot_candidate(
+            refs=('turn:1:2', 'turn:4:5', 'wake:3'),
+        )
+        plan = self._resolve(snapshot=snapshot, candidate=candidate)
+        self.assertRefused(plan, nfe.REASON_WAKE_TRANSCRIPT_RANGE_INVALID)
+
+    def test_trailing_wake_session_mismatch_fails_closed(self):
+        self._trailing_wake_fixture()
+        self.conn.execute(
+            "UPDATE context_claude_sessions SET claude_session_id='other-session'"
+        )
+        self.conn.commit()
+        snapshot, candidate = self._mixed_snapshot_candidate(
+            refs=('turn:1:2', 'turn:4:5', 'wake:3'),
+        )
+        plan = self._resolve(snapshot=snapshot, candidate=candidate)
+        self.assertRefused(plan, nfe.REASON_WAKE_TRANSCRIPT_SESSION_MISMATCH)
+
+    def test_trailing_wake_context_mismatch_fails_closed(self):
+        self._trailing_wake_fixture()
+        self.conn.execute(
+            'UPDATE wake_log SET context_epoch=2 WHERE wake_run_id=?',
+            ('wake-run-3',),
+        )
+        self.conn.commit()
+        snapshot, candidate = self._mixed_snapshot_candidate(
+            refs=('turn:1:2', 'turn:4:5', 'wake:3'),
+        )
+        plan = self._resolve(snapshot=snapshot, candidate=candidate)
+        self.assertRefused(plan, nfe.REASON_WAKE_PROVENANCE_MISMATCH)
 
     def test_unknown_autonomous_ref_is_unsupported(self):
         self._hot_boundary()
