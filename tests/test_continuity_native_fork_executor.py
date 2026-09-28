@@ -198,16 +198,16 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
                 self.plan, prompt_body='SUMMARIZE-ONLY', authority=self.authority, cwd=self.cwd,
                 fork_session_fn=self._fork_fn(), token_getter=lambda: 'tok',
             )
+            expected = compose_spawn_argv(
+                '2.1.280',
+                system_text=MAIN_SYSTEM,
+                tool_flags={'tools': UH_A0_TOOLS, 'extra': list(UH_A0_EXTRA)},
+                model_args=[],
+                effort_args=[],
+                session_args=('--resume', 'child-sid'),
+                max_turns='1',
+            )
         cmd = recorded['cmd']
-        expected = compose_spawn_argv(
-            '2.1.280',
-            system_text=MAIN_SYSTEM,
-            tool_flags={'tools': UH_A0_TOOLS, 'extra': list(UH_A0_EXTRA)},
-            model_args=[],
-            effort_args=[],
-            session_args=('--resume', 'child-sid'),
-            max_turns='1',
-        )
         self.assertEqual(cmd, expected)
         self.assertEqual(cmd[cmd.index('--resume') + 1], 'child-sid')
         self.assertEqual(cmd[cmd.index('--tools') + 1], UH_A0_TOOLS)
@@ -235,7 +235,9 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
 
     def test_child_argv_uses_frozen_model_and_effort_snapshot(self):
         authority = GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5-5')
-        patch, recorded = self._run_subprocess_patch()
+        patch, recorded = self._run_subprocess_patch(
+            stdout=_cc_stream(model='claude-opus-5-5'),
+        )
         with self._runtime(), patch, mock.patch(
             'continuity.native_fork_executor.session_jsonl_path',
             return_value=self.child_path,
