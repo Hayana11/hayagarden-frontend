@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
 from chat.provider_router import resolve_provider
-from wake.cc_tools import filter_wake_tools_for_cc
+from wake.cc_tools import cc_wake_allowed_tools, filter_wake_tools_for_cc
 
 NL = chr(10)
 
