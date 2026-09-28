@@ -31,6 +31,7 @@ jobs:
             ref: ${{ github.event.pull_request.base.sha }}
           - label: head
             ref: ${{ github.event.pull_request.head.sha }}
+
     steps:
       - name: Checkout exact ${{ matrix.label }} SHA
         uses: actions/checkout@v4
@@ -119,17 +120,96 @@ jobs:
         if: matrix.label == 'head'
         shell: bash
         run: |
+          set -euo pipefail
+
           actual="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
-          owned="$(printf '%s\n' "$actual" | awk '
-            $0 == "tools/capability_manifest.py" ||
-            $0 == "tools/execution_fence.py" ||
-            $0 == "tools/todo_internal_adapter.py" ||
-            $0 == "internal-mcp-server.js" ||
-            $0 == "tests/test_m3_01_todo_internal.py" ||
-            $0 == "tests/test-m3-01-todo-internal.mjs" ||
-            $0 == ".github/workflows/m3-01-todo-internal-shadow-validation.yml"
-          ')"
-          test -n "$owned"
-          if printf '%s\n' "$actual" | grep -E '^(wake/|app.py$|tools/product_handlers.py$|tools/cc_capability_adapter.py$|tools/cc_tool_surface.py$|cc_resident.py$|chat/daily_runtime.py$)' ; then
-            exit 1
+          ci_policy_file=".github/workflows/m3-01-todo-internal-shadow-validation.yml"
+          forbidden_regex='^(wake/|app.py$|tools/product_handlers.py$|tools/cc_capability_adapter.py$|tools/cc_tool_surface.py$|cc_resident.py$|chat/daily_runtime.py)'
+
+          scope_mode() {
+            local diff="$1"
+            local owned
+            local workflow_only
+            owned="$(printf '%s\n' "$diff" | awk '
+              $0 == "tools/todo_internal_adapter.py" ||
+              $0 == "internal-mcp-server.js" ||
+              $0 == "tests/test_m3_01_todo_internal.py" ||
+              $0 == "tests/test-m3-01-todo-internal.mjs"
+            ')"
+            workflow_only="$(printf '%s\n' "$diff" | awk -v workflow="$ci_policy_file" '
+              NF && $0 != workflow { found=1 }
+              END { print(found ? "false" : "true") }
+            ')"
+            if [ -n "$owned" ]; then
+              printf '%s\n' "OWNED_CHANGE"
+            elif [ "$workflow_only" = "true" ]; then
+              printf '%s\n' "CI_POLICY_ONLY"
+            else
+              printf '%s\n' "REGRESSION_ONLY"
+            fi
+          }
+
+          enforce_forbidden_boundary() {
+            local diff="$1"
+            if printf '%s\n' "$diff" | grep -E "$forbidden_regex"; then
+              return 1
+            fi
+            return 0
+          }
+
+          assert_case() {
+            local label="$1"
+            local expected_mode="$2"
+            local expected_result="$3"
+            local diff="$4"
+            local mode
+            mode="$(scope_mode "$diff")"
+            if [ "$mode" != "$expected_mode" ]; then
+              echo "$label: expected mode $expected_mode, got $mode"
+              return 1
+            fi
+            case "$expected_result:$expected_mode" in
+              PASS:OWNED_CHANGE)
+                if ! enforce_forbidden_boundary "$diff"; then
+                  echo "$label: unexpected forbidden-boundary failure"
+                  return 1
+                fi
+                ;;
+              PASS:*)
+                ;;
+              FAIL:OWNED_CHANGE)
+                if enforce_forbidden_boundary "$diff"; then
+                  echo "$label: expected forbidden-boundary failure"
+                  return 1
+                fi
+                ;;
+              *)
+                echo "$label: invalid synthetic expectation"
+                return 1
+                ;;
+            esac
+          }
+
+          gallery_case=$'tools/capability_manifest.py\ntools/execution_fence.py\ntools/cc_capability_adapter.py\ntools/cc_tool_surface.py'
+          m3_normal_case=$'tools/todo_internal_adapter.py\ntools/capability_manifest.py'
+          m3_surface_violation_case=$'tools/todo_internal_adapter.py\ntools/cc_capability_adapter.py'
+          m3_daily_violation_case=$'tests/test_m3_01_todo_internal.py\nchat/daily_runtime.py'
+          policy_only_case="$ci_policy_file"
+
+          assert_case "GALLERY_CAPABILITY_CASE" "REGRESSION_ONLY" "PASS" "$gallery_case"
+          echo "GALLERY_CAPABILITY_CASE=PASS"
+          assert_case "M3_01_NORMAL_CASE" "OWNED_CHANGE" "PASS" "$m3_normal_case"
+          echo "M3_01_NORMAL_CASE=PASS"
+          assert_case "M3_01_CC_SURFACE_VIOLATION" "OWNED_CHANGE" "FAIL" "$m3_surface_violation_case"
+          echo "M3_01_CC_SURFACE_VIOLATION=PASS"
+          assert_case "M3_01_DAILY_RUNTIME_VIOLATION" "OWNED_CHANGE" "FAIL" "$m3_daily_violation_case"
+          echo "M3_01_DAILY_RUNTIME_VIOLATION=PASS"
+          assert_case "POLICY_ONLY_CASE" "CI_POLICY_ONLY" "PASS" "$policy_only_case"
+          echo "POLICY_ONLY_CASE=PASS"
+          echo "SYNTHETIC_CASES=5/5 PASS"
+
+          mode="$(scope_mode "$actual")"
+          echo "M3_01_SCOPE_MODE=$mode"
+          if [ "$mode" = "OWNED_CHANGE" ]; then
+            enforce_forbidden_boundary "$actual"
           fi
