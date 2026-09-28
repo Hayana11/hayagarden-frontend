@@ -9203,7 +9203,7 @@ def wake_decide():
 def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     from chat.interaction_state import read_interaction_clock, wake_guard_reason
     from chat.provider_router import ProviderConfigError
-    from wake.runners import UnsupportedWakeModeError
+    from wake.runners import SharedWakeUnavailable, UnsupportedWakeModeError
 
     dry_run = bool(data.get('dry_run'))
     wake_run_id = str(data.get('wake_run_id') or '').strip()
