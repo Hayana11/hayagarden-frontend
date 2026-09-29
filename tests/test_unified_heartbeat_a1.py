@@ -1296,6 +1296,19 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                     gateway, '_run_unified_normal_main_chat_turn',
                     return_value=main_turn,
                 ),
+                mock.patch(
+                    'chat.behavior_authority_b3.unified_normal_wake_enabled',
+                    return_value=True,
+                ),
+                mock.patch(
+                    'chat.wake_read_observation.collect_wake_read_observation',
+                    return_value={
+                        'status': 'unavailable',
+                        'started': False,
+                        'reason': 'test_skip',
+                        'bundle': {'observations': (), 'status': 'unavailable'},
+                    },
+                ),
                 mock.patch.object(
                     executor, 'execute', return_value={'delivered': True},
                 ),

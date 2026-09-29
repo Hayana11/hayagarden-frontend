@@ -9109,7 +9109,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         from wake.executor import execute as _wake_exec
         main_turn = None
         try:
-            observation = collect_wake_read_observation(wake_run_id=wake_run_id)
+            observation = collect_wake_read_observation(
+                wake_run_id=wake_run_id,
+                gateway_module=_sys.modules[__name__],
+            )
             if observation.get('started') and observation.get('status') != 'ok':
                 _wake_live_trace(
                     wake_run_id,

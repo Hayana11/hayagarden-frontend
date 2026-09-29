@@ -535,8 +535,8 @@ class WakeObservationPlannerAndContractTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            tuple(DISABLED_CC_WAKE_MODES),
-            ('morning', 'nightwatch', 'ritual', 'self_trigger'),
+            set(DISABLED_CC_WAKE_MODES),
+            {'morning', 'nightwatch', 'ritual', 'self_trigger'},
         )
         for mode in DISABLED_CC_WAKE_MODES:
             self.assertTrue(wake_mode_disabled(mode))
