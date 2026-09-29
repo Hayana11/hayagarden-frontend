@@ -175,7 +175,8 @@ class ContinuityNativeForkExecutorTest(unittest.TestCase):
         self.assertIn('SUMMARIZE-ONLY', payload['message']['content'])
         self.assertIn('3', payload['message']['content'])
         self.assertIn('canonical Wake', payload['message']['content'])
-        self.assertIn('autonomous Wake', payload['message']['content'])
+        self.assertIn('Wake 可以位于候选范围首尾或中间', payload['message']['content'])
+        self.assertNotIn('autonomous Wake', payload['message']['content'])
         self.assertNotIn('parent.jsonl', payload['message']['content'])
 
     def test_missing_attested_parent_cwd_fails_before_fork(self):
