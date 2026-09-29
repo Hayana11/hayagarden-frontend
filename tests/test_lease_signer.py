@@ -6,31 +6,35 @@ import unittest
 from pathlib import Path
 
 from tools.capability_manifest import (
+    AUTOMATION_CONFIRM_ONLY_CAPABILITIES,
     CAPABILITY_MANIFEST,
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
     get_capability,
+    ordinary_auto_capabilities,
 )
 from tools.lease_signer import (
     DEFAULT_ALLOWED_CAPABILITIES,
     ISSUED_FROM_VALUES,
     LEASE_VERSION,
+    TASK_DEFAULT_ALLOWED_CAPABILITIES,
     TURN_LEASE_FIELDS,
     LeaseSignError,
     default_allowed_capabilities,
+    default_chat_wake_auto_capabilities,
     issue_turn_lease,
 )
 
 
-CHAT_DEFAULTS = (
+CHAT_WAKE_DEFAULTS = (
     "memory.search",
     "memory.write",
     "diary.write",
     "home.light.status",
     "todo.read",
     "todo.write",
-    "countdown.read",
     "task.timer.start",
+    "countdown.read",
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
@@ -38,14 +42,6 @@ CHAT_DEFAULTS = (
     "gallery.save",
     "gallery.recall",
     "gallery.screenshot",
-)
-WAKE_DEFAULTS = (
-    "memory.search",
-    "home.light.status",
-    "todo.read",
-    "countdown.read",
-    "ledger.read",
-    "ledger.budget.read",
 )
 TASK_DEFAULTS = (
     "files.read",
@@ -115,14 +111,32 @@ class LeaseSignerContractTests(unittest.TestCase):
                 )
             self.assertEqual(ctx.exception.code, "DENIED_CAPABILITY")
 
-    def test_c_default_policy_matches_section_5_3(self):
-        self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["chat"], CHAT_DEFAULTS)
-        self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["wake"], WAKE_DEFAULTS)
+    def test_c_chat_and_wake_share_manifest_derived_defaults(self):
+        self.assertEqual(
+            default_allowed_capabilities("wake"),
+            default_allowed_capabilities("chat"),
+        )
+        self.assertEqual(
+            DEFAULT_ALLOWED_CAPABILITIES["wake"],
+            DEFAULT_ALLOWED_CAPABILITIES["chat"],
+        )
+        self.assertIs(
+            DEFAULT_ALLOWED_CAPABILITIES["wake"],
+            DEFAULT_ALLOWED_CAPABILITIES["chat"],
+        )
+        self.assertEqual(default_allowed_capabilities("chat"), CHAT_WAKE_DEFAULTS)
+        self.assertEqual(default_allowed_capabilities("wake"), CHAT_WAKE_DEFAULTS)
         self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["task"], TASK_DEFAULTS)
+        self.assertEqual(TASK_DEFAULT_ALLOWED_CAPABILITIES, TASK_DEFAULTS)
+        self.assertEqual(default_chat_wake_auto_capabilities(), CHAT_WAKE_DEFAULTS)
+        self.assertEqual(
+            AUTOMATION_CONFIRM_ONLY_CAPABILITIES,
+            ("web.search", "web.read"),
+        )
 
         for mode, expected in (
-            ("chat", CHAT_DEFAULTS),
-            ("wake", WAKE_DEFAULTS),
+            ("chat", CHAT_WAKE_DEFAULTS),
+            ("wake", CHAT_WAKE_DEFAULTS),
             ("task", TASK_DEFAULTS),
         ):
             lease = issue_turn_lease(
@@ -132,10 +146,13 @@ class LeaseSignerContractTests(unittest.TestCase):
             )
             self.assertEqual(lease["allowed_capabilities"], expected)
             self.assertEqual(default_allowed_capabilities(mode), expected)
-            if mode == "chat":
+            if mode in {"chat", "wake"}:
                 self.assertIn("todo.write", lease["allowed_capabilities"])
                 self.assertIn("ledger.write", lease["allowed_capabilities"])
                 self.assertIn("health.read", lease["allowed_capabilities"])
+                self.assertIn("diary.write", lease["allowed_capabilities"])
+                self.assertNotIn("web.search", lease["allowed_capabilities"])
+                self.assertNotIn("web.read", lease["allowed_capabilities"])
             else:
                 self.assertNotIn("todo.write", lease["allowed_capabilities"])
                 self.assertNotIn("ledger.write", lease["allowed_capabilities"])
@@ -165,7 +182,7 @@ class LeaseSignerContractTests(unittest.TestCase):
             issued_from="default_policy",
         )
         self.assertIn("todo.write", turn_n1["allowed_capabilities"])
-        self.assertEqual(turn_n1["allowed_capabilities"], CHAT_DEFAULTS)
+        self.assertEqual(turn_n1["allowed_capabilities"], CHAT_WAKE_DEFAULTS)
 
         with self.assertRaises(LeaseSignError) as ctx:
             issue_turn_lease(
@@ -181,8 +198,9 @@ class LeaseSignerContractTests(unittest.TestCase):
             turn_mode="wake",
             issued_from="default_policy",
         )
-        self.assertNotIn("todo.write", wake["allowed_capabilities"])
-        self.assertEqual(wake["allowed_capabilities"], WAKE_DEFAULTS)
+        self.assertIn("todo.write", wake["allowed_capabilities"])
+        self.assertEqual(wake["allowed_capabilities"], CHAT_WAKE_DEFAULTS)
+        self.assertEqual(wake["allowed_capabilities"], turn_n1["allowed_capabilities"])
 
     def test_e_explicit_user_intent_signs_write_without_ask(self):
         lease = issue_turn_lease(
@@ -193,7 +211,7 @@ class LeaseSignerContractTests(unittest.TestCase):
         )
         self.assertEqual(lease["issued_from"], "explicit_user_intent")
         self.assertIn("todo.write", lease["allowed_capabilities"])
-        for capability_id in CHAT_DEFAULTS:
+        for capability_id in CHAT_WAKE_DEFAULTS:
             self.assertIn(capability_id, lease["allowed_capabilities"])
         self.assertEqual(lease["approval_ids"], ())
         self.assertIsNone(lease["task_contract_id"])
@@ -358,9 +376,32 @@ class LeaseSignerContractTests(unittest.TestCase):
             self.assertNotIn("issue_turn_lease", blob)
 
         # Signer only consumes the shared capability dictionary.
-        for capability_id in CHAT_DEFAULTS + WAKE_DEFAULTS + TASK_DEFAULTS + ("todo.write",):
+        for capability_id in CHAT_WAKE_DEFAULTS + TASK_DEFAULTS + ("todo.write",):
             self.assertIsNotNone(get_capability(capability_id))
             self.assertIn(capability_id, P1_ENABLED_CAPABILITY_IDS)
+
+    def test_j_lease_signer_does_not_keep_two_hand_lists(self):
+        source = Path(__file__).resolve().parents[1] / "tools" / "lease_signer.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            keys = [
+                key.value
+                for key in node.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            ]
+            if "chat" in keys and "wake" in keys:
+                values = {
+                    key.value: value
+                    for key, value in zip(node.keys, node.values)
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                }
+                self.assertNotIsInstance(values["chat"], ast.Tuple)
+                self.assertNotIsInstance(values["wake"], ast.Tuple)
+                self.assertIsInstance(values["chat"], ast.Name)
+                self.assertIsInstance(values["wake"], ast.Name)
+                self.assertEqual(values["chat"].id, values["wake"].id)
 
 
 if __name__ == "__main__":

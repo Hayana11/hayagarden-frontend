@@ -233,9 +233,9 @@ def evaluate_tool_call(
     approvals = tuple(turn_lease["approval_ids"])
     is_write = entry.get("side_effect") == "external_state"
 
-    # Enabled External Read is part of an ordinary Chat turn's read surface.
-    # It is side-effect free, needs no approval id, and remains unavailable in
-    # Wake unless that turn explicitly grants it through the normal lease path.
+    # Enabled External Read stays off the shared Chat/Wake default auto lease
+    # (AUTOMATION_CONFIRM_ONLY_CAPABILITIES).  Chat still auto-allows it here
+    # without an approval id; Wake remains denied unless a later lease grants it.
     if (
         capability_id in EXTERNAL_READ_AUTO_CAPABILITY_IDS
         and turn_mode == "chat"

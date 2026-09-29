@@ -46,7 +46,7 @@ class MemoryWriteBridgeTests(unittest.TestCase):
         wake = issue_turn_lease(turn_id="wake-1", turn_mode="wake", issued_from="default_policy")
         for tool_name in ("mcp__internal__write_memory", "memory_write"):
             self.assertEqual(evaluate_tool_call(tool_name, {"content":"x"}, chat)["lease_decision"], "ALLOW")
-            self.assertEqual(evaluate_tool_call(tool_name, {"content":"x"}, wake)["lease_decision"], "DENIED_CAPABILITY")
+            self.assertEqual(evaluate_tool_call(tool_name, {"content":"x"}, wake)["lease_decision"], "ALLOW")
 
     def test_model_surface_has_no_legacy_save_memory(self):
         root = Path(__file__).resolve().parents[1]

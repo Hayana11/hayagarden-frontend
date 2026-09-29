@@ -394,6 +394,15 @@ P1_RESERVED_CAPABILITY_IDS = frozenset(
 
 _CAPABILITIES_BY_ID = {item["capability_id"]: item for item in CAPABILITY_MANIFEST}
 
+# External web reads stay off the shared Chat/Wake default auto lease.
+# They remain ordinary_auto-eligible, but default_policy does not inherit them.
+AUTOMATION_CONFIRM_ONLY_CAPABILITIES: tuple[str, ...] = (
+    "web.search",
+    "web.read",
+)
+
+_ORDINARY_AUTO_AUTONOMY_MODES = frozenset({"read_auto", "self_write_auto"})
+
 
 def get_capability(capability_id: str) -> dict[str, Any] | None:
     """Return one manifest entry by provider-neutral capability_id."""
@@ -406,4 +415,46 @@ def p1_enabled_capabilities() -> tuple[dict[str, Any], ...]:
         item for item in CAPABILITY_MANIFEST
         if item["capability_id"] in P1_ENABLED_CAPABILITY_IDS
     )
+
+
+def _claude_code_binding_values(binding: Any) -> tuple[str, ...]:
+    if isinstance(binding, str):
+        value = binding.strip()
+        return (value,) if value else ()
+    if isinstance(binding, (tuple, list)):
+        return tuple(str(item).strip() for item in binding if str(item).strip())
+    return ()
+
+
+def _has_valid_claude_code_binding(entry: dict[str, Any] | None) -> bool:
+    """True when the entry has a non-empty claude_code provider binding."""
+    if not entry:
+        return False
+    bindings = entry.get("provider_bindings") or {}
+    if not isinstance(bindings, dict):
+        return False
+    return bool(_claude_code_binding_values(bindings.get("claude_code")))
+
+
+def ordinary_auto_capabilities() -> tuple[str, ...]:
+    """P1-enabled Chat/Wake auto capabilities in manifest order.
+
+    A capability is included only when it is P1 enabled, not RESERVED, has a
+    valid claude_code binding, and uses read_auto or self_write_auto.  Task-only,
+    never-auto, reserved, and unbound capabilities are skipped.  Order follows
+    CAPABILITY_MANIFEST, not a sorted set.
+    """
+    out: list[str] = []
+    for item in CAPABILITY_MANIFEST:
+        capability_id = str(item.get("capability_id") or "")
+        if capability_id not in P1_ENABLED_CAPABILITY_IDS:
+            continue
+        if capability_id in P1_RESERVED_CAPABILITY_IDS:
+            continue
+        if item.get("autonomy_mode") not in _ORDINARY_AUTO_AUTONOMY_MODES:
+            continue
+        if not _has_valid_claude_code_binding(item):
+            continue
+        out.append(capability_id)
+    return tuple(out)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from tools.capability_manifest import (
+    AUTOMATION_CONFIRM_ONLY_CAPABILITIES,
     CAPABILITY_AUTONOMY_MODES,
     CAPABILITY_FIELDS,
     CAPABILITY_KINDS,
@@ -12,6 +13,7 @@ from tools.capability_manifest import (
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
     get_capability,
+    ordinary_auto_capabilities,
     p1_enabled_capabilities,
 )
 
@@ -228,6 +230,97 @@ class CapabilityManifestContractTests(unittest.TestCase):
         self.assertIn("github.read", P1_RESERVED_CAPABILITY_IDS)
         self.assertNotIn("github.read", P1_ENABLED_CAPABILITY_IDS)
         self.assertEqual(get_capability("github.read")["provider_bindings"], {})
+
+    def test_ordinary_auto_follows_manifest_order_and_exclusions(self):
+        derived = ordinary_auto_capabilities()
+        self.assertEqual(
+            derived,
+            (
+                "memory.search",
+                "memory.write",
+                "diary.write",
+                "home.light.status",
+                "todo.read",
+                "todo.write",
+                "task.timer.start",
+                "countdown.read",
+                "ledger.read",
+                "ledger.budget.read",
+                "ledger.write",
+                "web.search",
+                "web.read",
+                "health.read",
+                "gallery.save",
+                "gallery.recall",
+                "gallery.screenshot",
+            ),
+        )
+        self.assertEqual(
+            derived,
+            tuple(
+                item["capability_id"]
+                for item in CAPABILITY_MANIFEST
+                if item["capability_id"] in derived
+            ),
+        )
+        self.assertEqual(derived, tuple(sorted(derived, key=lambda cid: [
+            item["capability_id"] for item in CAPABILITY_MANIFEST
+        ].index(cid))))
+        self.assertNotEqual(derived, tuple(sorted(derived)))
+
+        for capability_id in (
+            "files.read",
+            "files.find",
+            "code.search",
+            "github.read",
+            "home.light.control",
+            "code.write",
+            "workspace.execute",
+        ):
+            self.assertNotIn(capability_id, derived)
+
+        self.assertEqual(
+            AUTOMATION_CONFIRM_ONLY_CAPABILITIES,
+            ("web.search", "web.read"),
+        )
+        for capability_id in AUTOMATION_CONFIRM_ONLY_CAPABILITIES:
+            self.assertIn(capability_id, derived)
+            self.assertTrue(
+                str(
+                    (get_capability(capability_id) or {})
+                    .get("provider_bindings", {})
+                    .get("claude_code")
+                    or ""
+                ).strip()
+            )
+
+        for item in CAPABILITY_MANIFEST:
+            capability_id = item["capability_id"]
+            binding = (item.get("provider_bindings") or {}).get("claude_code")
+            has_binding = bool(
+                (isinstance(binding, str) and binding.strip())
+                or (
+                    isinstance(binding, (tuple, list))
+                    and any(str(part).strip() for part in binding)
+                )
+            )
+            if capability_id in derived:
+                self.assertIn(capability_id, P1_ENABLED_CAPABILITY_IDS)
+                self.assertNotIn(capability_id, P1_RESERVED_CAPABILITY_IDS)
+                self.assertIn(item["autonomy_mode"], {"read_auto", "self_write_auto"})
+                self.assertTrue(has_binding)
+            else:
+                excluded_by_rule = (
+                    capability_id not in P1_ENABLED_CAPABILITY_IDS
+                    or capability_id in P1_RESERVED_CAPABILITY_IDS
+                    or item["autonomy_mode"] not in {"read_auto", "self_write_auto"}
+                    or not has_binding
+                )
+                self.assertTrue(excluded_by_rule, capability_id)
+
+        self.assertEqual(get_capability("github.read")["provider_bindings"], {})
+        self.assertEqual(get_capability("workspace.execute")["provider_bindings"], {})
+        self.assertEqual(get_capability("home.light.control")["provider_bindings"], {})
 
 
 if __name__ == "__main__":

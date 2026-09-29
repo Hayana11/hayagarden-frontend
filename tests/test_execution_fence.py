@@ -77,14 +77,18 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertNotIn("approval_id", result)
 
         wake = self.lease(mode="wake")
-        self.assertNotIn("health.read", wake["allowed_capabilities"])
+        self.assertIn("health.read", wake["allowed_capabilities"])
+        self.assertEqual(
+            wake["allowed_capabilities"],
+            lease["allowed_capabilities"],
+        )
         self.assertEqual(
             evaluate_tool_call(
                 "mcp__internal__get_health",
                 {"metric": "steps", "days": 2},
                 wake,
             )["lease_decision"],
-            "DENIED_CAPABILITY",
+            "ALLOW",
         )
 
     def test_a_ledger_read_is_allowed_for_chat_and_wake(self):
@@ -151,10 +155,10 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(
             evaluate_tool_call(
                 "mcp__capability__diary_write",
-                {"content": "Wake 不应写入"},
+                {"content": "Wake 继承 Chat 默认自动写入"},
                 self.lease(mode="wake"),
             )["lease_decision"],
-            "DENIED_CAPABILITY",
+            "ALLOW",
         )
 
     def test_c_chat_native_read_denied(self):
@@ -177,7 +181,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertEqual(result["lease_decision"], "ALLOW")
                 self.assertNotIn("approval_id", result)
 
-    def test_d_gallery_capabilities_are_chat_only_and_fail_closed(self):
+    def test_d_gallery_capabilities_are_inherited_by_wake_and_fail_closed_for_task(self):
         actions = (
             ("mcp__capability__gallery_save", "gallery.save", {"image_index": 0}),
             ("mcp__capability__gallery_recall", "gallery.recall", {"keyword": "海边"}),
@@ -189,11 +193,15 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertEqual(allowed["capability_id"], capability_id)
                 self.assertEqual(allowed["lease_decision"], "ALLOW")
                 self.assertEqual(allowed["verified_turn_id"], "gallery-turn")
-                for mode in ("wake", "task"):
-                    self.assertEqual(
-                        evaluate_tool_call(tool_name, action, self.lease(mode=mode))["lease_decision"],
-                        "DENIED_CAPABILITY",
-                    )
+                wake = evaluate_tool_call(
+                    tool_name, action, self.lease(mode="wake", turn_id="gallery-wake")
+                )
+                self.assertEqual(wake["capability_id"], capability_id)
+                self.assertEqual(wake["lease_decision"], "ALLOW")
+                self.assertEqual(
+                    evaluate_tool_call(tool_name, action, self.lease(mode="task"))["lease_decision"],
+                    "DENIED_CAPABILITY",
+                )
                 with patch(
                     "tools.execution_fence.read_capability_state",
                     return_value=capability_state.RUNTIME_STATE_OFF,

@@ -7,7 +7,8 @@ Chat/Wake residents, or persist leases.  Those are later UH-A0 slices.
 Frozen contract (2026-08-12):
 - turn_lease uses exactly eight frozen field names;
 - issued_from is one of four allowed sources (model is never an issuer);
-- Chat / Wake / Task default_policy sets come from §5.3;
+- Chat and Wake default_policy sets share one manifest-derived auto tuple;
+- Task default_policy remains the separate task-only file/code set;
 - every turn is signed independently — no lease inheritance;
 - capability IDs come only from capability_manifest;
 - P1 RESERVED capabilities fail closed.
@@ -18,9 +19,11 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
 from tools.capability_manifest import (
+    AUTOMATION_CONFIRM_ONLY_CAPABILITIES,
     P1_ENABLED_CAPABILITY_IDS,
     P1_RESERVED_CAPABILITY_IDS,
     get_capability,
+    ordinary_auto_capabilities,
 )
 
 LEASE_VERSION = 1
@@ -47,38 +50,33 @@ ISSUED_FROM_VALUES = frozenset(
 
 TURN_MODES = frozenset({"chat", "wake", "task"})
 
-# Frozen §5.3 P1 default lease policy (exact capability sets).
+TASK_DEFAULT_ALLOWED_CAPABILITIES: tuple[str, ...] = (
+    "files.read",
+    "files.find",
+    "code.search",
+)
+
+
+def default_chat_wake_auto_capabilities() -> tuple[str, ...]:
+    """Shared Chat/Wake default auto set, derived from the capability manifest.
+
+    CHAT_DEFAULT_AUTO = ordinary_auto_capabilities() minus
+    AUTOMATION_CONFIRM_ONLY_CAPABILITIES.  Wake uses that same result.
+    """
+    excluded = frozenset(AUTOMATION_CONFIRM_ONLY_CAPABILITIES)
+    return tuple(
+        capability_id
+        for capability_id in ordinary_auto_capabilities()
+        if capability_id not in excluded
+    )
+
+
+# Chat and Wake share one derived tuple.  Task remains a separate default set.
+_CHAT_WAKE_DEFAULT_AUTO = default_chat_wake_auto_capabilities()
 DEFAULT_ALLOWED_CAPABILITIES: dict[str, tuple[str, ...]] = {
-    "chat": (
-        "memory.search",
-        "memory.write",
-        "diary.write",
-        "home.light.status",
-        "todo.read",
-        "todo.write",
-        "countdown.read",
-        "task.timer.start",
-        "ledger.read",
-        "ledger.budget.read",
-        "ledger.write",
-        "health.read",
-        "gallery.save",
-        "gallery.recall",
-        "gallery.screenshot",
-    ),
-    "wake": (
-        "memory.search",
-        "home.light.status",
-        "todo.read",
-        "countdown.read",
-        "ledger.read",
-        "ledger.budget.read",
-    ),
-    "task": (
-        "files.read",
-        "files.find",
-        "code.search",
-    ),
+    "chat": _CHAT_WAKE_DEFAULT_AUTO,
+    "wake": _CHAT_WAKE_DEFAULT_AUTO,
+    "task": TASK_DEFAULT_ALLOWED_CAPABILITIES,
 }
 
 
@@ -91,8 +89,13 @@ class LeaseSignError(ValueError):
 
 
 def default_allowed_capabilities(turn_mode: str) -> tuple[str, ...]:
-    """Return the frozen §5.3 default capability tuple for a turn_mode."""
+    """Return the default capability tuple for a turn_mode.
+
+    Chat and Wake always share ``default_chat_wake_auto_capabilities()``.
+    """
     mode = str(turn_mode or "")
+    if mode in {"chat", "wake"}:
+        return default_chat_wake_auto_capabilities()
     if mode not in DEFAULT_ALLOWED_CAPABILITIES:
         raise LeaseSignError("DENIED_CAPABILITY", f"unknown turn_mode: {mode!r}")
     return DEFAULT_ALLOWED_CAPABILITIES[mode]
@@ -276,8 +279,10 @@ def _iter_module_export_names() -> Iterable[str]:
         "TURN_LEASE_FIELDS",
         "ISSUED_FROM_VALUES",
         "TURN_MODES",
+        "TASK_DEFAULT_ALLOWED_CAPABILITIES",
         "DEFAULT_ALLOWED_CAPABILITIES",
         "LeaseSignError",
+        "default_chat_wake_auto_capabilities",
         "default_allowed_capabilities",
         "issue_turn_lease",
     )
