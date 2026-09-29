@@ -274,6 +274,83 @@ class LegacyPostEnvelopeTests(unittest.TestCase):
         self.assertEqual(first.semantic_fingerprint(), same_semantics.semantic_fingerprint())
 
 
+class LegacyRequestContextGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.temp.name) / "legacy.db")
+        _make_legacy_db(self.db_path)
+        self.row = _row(self.db_path, 12)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_matching_legacy_adapter_context_still_works(self):
+        envelope = _envelope(self.row, request_context=_request_context())
+        self.assertEqual(LEGACY_POSTS_ADAPTER_ID, envelope.request_context.adapter_id)
+        self.assertEqual(("legacy.posts.12",), tuple(item.evidence_id for item in envelope.evidence))
+        bundle = retrieve_legacy_posts_context_bundle(
+            self.db_path,
+            keyword="needle",
+            request_context=_request_context(),
+            bundle_id="bundle-1",
+            generated_at=UTC_1,
+        )
+        self.assertEqual(
+            [f"legacy.posts.{post_id}" for post_id in NEEDLE_ORDER],
+            [item.item_id for item in bundle.items],
+        )
+        self.assertEqual("resolved needle", bundle.items[0].content)
+        self.assertEqual(("legacy://posts/60",), bundle.items[0].source_refs)
+
+    def test_submission_rejects_another_adapter_id_without_mutating(self):
+        before = _snapshot(self.db_path)
+        foreign = _request_context(adapter_id="adapter.example")
+        with self.assertRaisesRegex(ValueError, "adapter_id"):
+            _envelope(self.row, request_context=foreign)
+        self.assertEqual(before, _snapshot(self.db_path))
+
+    def test_retrieval_rejects_another_adapter_id_without_mutating(self):
+        before = _snapshot(self.db_path)
+        digest_before = _digest(self.db_path)
+        foreign = _request_context(adapter_id="adapter.example")
+        with self.assertRaisesRegex(ValueError, "adapter_id"):
+            retrieve_legacy_posts_context_bundle(
+                self.db_path,
+                keyword="needle",
+                request_context=foreign,
+                bundle_id="bundle-1",
+                generated_at=UTC_1,
+            )
+        with self.assertRaisesRegex(ValueError, "adapter_id"):
+            shadow_compare_legacy_search(
+                self.db_path,
+                keyword="needle",
+                request_context=foreign,
+                bundle_id="bundle-1",
+                generated_at=UTC_1,
+            )
+        self.assertEqual(before, _snapshot(self.db_path))
+        self.assertEqual(digest_before, _digest(self.db_path))
+        self.assertEqual(3, _row(self.db_path, 6)["recall_count"])
+
+    def test_guard_does_not_require_lease_or_capability_refs(self):
+        context = _request_context(capability_id=None, lease_ref=None)
+        bundle = retrieve_legacy_posts_context_bundle(
+            self.db_path,
+            keyword="needle",
+            request_context=context,
+            bundle_id="bundle-1",
+            generated_at=UTC_1,
+        )
+        self.assertEqual(
+            [f"legacy.posts.{post_id}" for post_id in NEEDLE_ORDER],
+            [item.item_id for item in bundle.items],
+        )
+        envelope = _envelope(self.row, request_context=context)
+        self.assertIsNone(envelope.request_context.lease_ref)
+        self.assertIsNone(envelope.request_context.capability_id)
+
+
 class LegacySearchContextBundleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -169,6 +169,15 @@ def legacy_post_to_evidence(
     )
 
 
+def _validate_legacy_request_context(request_context: InteropRequestContext) -> None:
+    """Require this adapter's identity.  Does not authorize UH-A0 leases."""
+
+    if type(request_context) is not InteropRequestContext:
+        raise TypeError("request_context must be InteropRequestContext")
+    if request_context.adapter_id != LEGACY_POSTS_ADAPTER_ID:
+        raise ValueError("request_context adapter_id does not match legacy adapter")
+
+
 def legacy_post_to_submission_envelope(
     row: Mapping[str, Any] | sqlite3.Row,
     *,
@@ -184,10 +193,7 @@ def legacy_post_to_submission_envelope(
     write of that row.  The envelope is never reviewed, accepted, or committed.
     """
 
-    if type(request_context) is not InteropRequestContext:
-        raise TypeError("request_context must be InteropRequestContext")
-    if request_context.adapter_id != LEGACY_POSTS_ADAPTER_ID:
-        raise ValueError("request_context adapter_id does not match legacy adapter")
+    _validate_legacy_request_context(request_context)
     mapping = _row_mapping(row)
     row_id = _text_id(mapping.get("id"), "legacy row id")
     evidence = legacy_post_to_evidence(mapping, observed_at=observed_at)
@@ -285,8 +291,7 @@ def retrieve_legacy_posts_context_bundle(
     This function does not rerank, filter further, or heat recall counters.
     """
 
-    if type(request_context) is not InteropRequestContext:
-        raise TypeError("request_context must be InteropRequestContext")
+    _validate_legacy_request_context(request_context)
     search = keyword if isinstance(keyword, str) else ""
     limit_n = min(int(limit), 1000)
     with legacy_posts_readonly(db_path) as conn:
@@ -334,6 +339,7 @@ def shadow_compare_legacy_search(
     adapter ContextBundle for the same explicit fixture database and query.
     """
 
+    _validate_legacy_request_context(request_context)
     search = keyword if isinstance(keyword, str) else ""
     limit_n = min(int(limit), 1000)
     with legacy_posts_readonly(db_path) as conn:
