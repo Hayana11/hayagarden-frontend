@@ -22,6 +22,7 @@ from tools.lease_signer import (
     LeaseSignError,
     default_allowed_capabilities,
     default_chat_wake_auto_capabilities,
+    issue_default_policy_subset_lease,
     issue_turn_lease,
 )
 
@@ -408,6 +409,32 @@ class LeaseSignerContractTests(unittest.TestCase):
                 self.assertIsInstance(values["chat"], ast.Name)
                 self.assertIsInstance(values["wake"], ast.Name)
                 self.assertEqual(values["chat"].id, values["wake"].id)
+
+    def test_k_default_policy_subset_lease_can_only_reduce(self):
+        subset = issue_default_policy_subset_lease(
+            turn_id="wake-read-obs:test",
+            turn_mode="wake",
+            allowed_capabilities=("memory.search", "web.search", "todo.write"),
+            issued_at="2026-09-29T00:00:00Z",
+        )
+        self.assertEqual(tuple(subset.keys()), TURN_LEASE_FIELDS)
+        self.assertEqual(subset["issued_from"], "default_policy")
+        self.assertEqual(subset["turn_mode"], "wake")
+        self.assertEqual(
+            subset["allowed_capabilities"],
+            ("memory.search", "todo.write", "web.search"),
+        )
+        defaults = default_allowed_capabilities("wake")
+        self.assertTrue(set(subset["allowed_capabilities"]).issubset(defaults))
+        self.assertNotEqual(subset["allowed_capabilities"], defaults)
+
+        with self.assertRaises(LeaseSignError) as ctx:
+            issue_default_policy_subset_lease(
+                turn_id="wake-read-obs:expand",
+                turn_mode="wake",
+                allowed_capabilities=("memory.search", "files.read"),
+            )
+        self.assertEqual(ctx.exception.code, "DENIED_CAPABILITY")
 
 
 if __name__ == "__main__":
