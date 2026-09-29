@@ -220,9 +220,10 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
     },
     async ({ keyword }) => {
       try {
+        const shadow_request_id = randomUUID();
         const result = callInternalAdapter(
           'search_memories',
-          { keyword, limit: 8 },
+          { keyword, limit: 8, shadow_request_id },
           { dbPath, python, cwd },
         );
         return {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -30,9 +31,14 @@ from tools.memory_interop_legacy import (
 from tools.memory_interop_shadow import (
     ADAPTER_ID,
     PROTOCOL_VERSION,
+    SHADOW_SLOT_FD_ENV,
+    is_allowed_search_surface,
+    is_allowed_write_surface,
     is_forbidden_shadow_path,
     sha256_text,
 )
+
+_HELD_SLOT = None
 
 RECEIPT_TABLE = "memory_interop_shadow_receipts"
 _RECEIPT_SCHEMA = f"""
@@ -102,9 +108,23 @@ def _bundle_fingerprint(bundle: Any) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def retain_inherited_slot_fd() -> None:
+    """Keep the advisory slot lock alive for this worker process."""
+
+    global _HELD_SLOT
+    raw = str(os.environ.get(SHADOW_SLOT_FD_ENV, "")).strip()
+    if not raw:
+        return
+    try:
+        _HELD_SLOT = os.fdopen(int(raw), "a+b", buffering=0)
+    except Exception:
+        _HELD_SLOT = None
+
+
 def _open_receipt_db(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=1.0)
     conn.row_factory = sqlite3.Row
+    conn.isolation_level = None
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_RECEIPT_SCHEMA)
     return conn
@@ -113,65 +133,76 @@ def _open_receipt_db(path: str) -> sqlite3.Connection:
 def _store_receipt(conn: sqlite3.Connection, receipt: Mapping[str, Any]) -> str:
     event_key = str(receipt["event_key"])
     fingerprint = str(receipt["payload_fingerprint"])
-    existing = conn.execute(
-        f"SELECT receipt_id, payload_fingerprint, status FROM {RECEIPT_TABLE} "
-        "WHERE event_key = ? ORDER BY finished_at ASC",
-        (event_key,),
-    ).fetchall()
-    matches = [row for row in existing if row["payload_fingerprint"] == fingerprint]
-    if matches:
-        receipt["status"] = "duplicate" if receipt.get("status") == "ok" else receipt.get("status")
-        return str(matches[0]["receipt_id"])
-    conflicts = [row for row in existing if row["payload_fingerprint"] != fingerprint]
-    status = str(receipt["status"])
-    if status not in _STATUSES:
-        status = "receipt_failed"
-        receipt["status"] = status
-    stored_key = event_key
-    error_code = receipt.get("error_code")
-    if conflicts:
-        status = "conflict"
-        error_code = "event_conflict"
-        stored_key = f"{event_key}|conflict|{fingerprint}"
-        receipt["status"] = status
-        receipt["error_code"] = error_code
-    receipt_id = str(receipt.get("receipt_id") or _receipt_id(stored_key, fingerprint))
-    conn.execute(
-        f"""
-        INSERT OR IGNORE INTO {RECEIPT_TABLE} (
-            receipt_id, event_key, payload_fingerprint, operation,
-            protocol_version, adapter_id, source_surface, request_id, turn_id,
-            capability_id, observed_at, finished_at, status,
-            authoritative_result_hash, interop_result_hash,
-            ordered_source_refs_json, result_count, error_code, elapsed_ms,
-            metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            receipt_id,
-            stored_key,
-            fingerprint,
-            receipt["operation"],
-            receipt["protocol_version"],
-            receipt["adapter_id"],
-            receipt["source_surface"],
-            receipt.get("request_id"),
-            receipt.get("turn_id"),
-            receipt.get("capability_id"),
-            receipt["observed_at"],
-            receipt["finished_at"],
-            status,
-            receipt.get("authoritative_result_hash"),
-            receipt.get("interop_result_hash"),
-            receipt.get("ordered_source_refs_json"),
-            receipt.get("result_count"),
-            error_code,
-            receipt.get("elapsed_ms"),
-            _canonical_json(receipt.get("metadata") or {}),
-        ),
-    )
-    conn.commit()
-    return receipt_id
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        existing = conn.execute(
+            f"SELECT receipt_id, payload_fingerprint, status FROM {RECEIPT_TABLE} "
+            "WHERE event_key = ? ORDER BY finished_at ASC",
+            (event_key,),
+        ).fetchall()
+        matches = [row for row in existing if row["payload_fingerprint"] == fingerprint]
+        if matches:
+            receipt["status"] = (
+                "duplicate" if receipt.get("status") == "ok" else receipt.get("status")
+            )
+            conn.execute("COMMIT")
+            return str(matches[0]["receipt_id"])
+        conflicts = [row for row in existing if row["payload_fingerprint"] != fingerprint]
+        status = str(receipt["status"])
+        if status not in _STATUSES:
+            status = "receipt_failed"
+            receipt["status"] = status
+        stored_key = event_key
+        error_code = receipt.get("error_code")
+        if conflicts:
+            status = "conflict"
+            error_code = "event_conflict"
+            stored_key = f"{event_key}|conflict|{fingerprint}"
+            receipt["status"] = status
+            receipt["error_code"] = error_code
+        receipt_id = str(receipt.get("receipt_id") or _receipt_id(stored_key, fingerprint))
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO {RECEIPT_TABLE} (
+                receipt_id, event_key, payload_fingerprint, operation,
+                protocol_version, adapter_id, source_surface, request_id, turn_id,
+                capability_id, observed_at, finished_at, status,
+                authoritative_result_hash, interop_result_hash,
+                ordered_source_refs_json, result_count, error_code, elapsed_ms,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt_id,
+                stored_key,
+                fingerprint,
+                receipt["operation"],
+                receipt["protocol_version"],
+                receipt["adapter_id"],
+                receipt["source_surface"],
+                receipt.get("request_id"),
+                receipt.get("turn_id"),
+                receipt.get("capability_id"),
+                receipt["observed_at"],
+                receipt["finished_at"],
+                status,
+                receipt.get("authoritative_result_hash"),
+                receipt.get("interop_result_hash"),
+                receipt.get("ordered_source_refs_json"),
+                receipt.get("result_count"),
+                error_code,
+                receipt.get("elapsed_ms"),
+                _canonical_json(receipt.get("metadata") or {}),
+            ),
+        )
+        conn.execute("COMMIT")
+        return receipt_id
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
 
 
 def _fetch_rows(posts_db_path: str, row_ids: list[str]) -> list[dict[str, Any] | None]:
@@ -286,7 +317,7 @@ def _base_receipt(event: Mapping[str, Any], *, started: float) -> dict[str, Any]
         "operation": event.get("operation"),
         "protocol_version": event.get("protocol_version") or MEMORY_INTEROP_PROTOCOL_VERSION,
         "adapter_id": event.get("adapter_id") or ADAPTER_ID,
-        "source_surface": event.get("source_surface") or "unknown",
+        "source_surface": event.get("source_surface"),
         "request_id": event.get("request_id"),
         "turn_id": event.get("turn_id"),
         "capability_id": event.get("capability_id"),
@@ -303,11 +334,25 @@ def _base_receipt(event: Mapping[str, Any], *, started: float) -> dict[str, Any]
     }
 
 
+def _surface_allowed(event: Mapping[str, Any]) -> bool:
+    operation = str(event.get("operation") or "")
+    surface = event.get("source_surface")
+    if operation == "write":
+        return is_allowed_write_surface(surface)
+    if operation == "search":
+        return is_allowed_search_surface(surface)
+    return False
+
+
 def process_event(event: Mapping[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
     receipt = _base_receipt(event, started=started)
     posts_db_path = str(event.get("posts_db_path") or "").strip()
     shadow_db_path = str(event.get("shadow_db_path") or "").strip()
+    if not _surface_allowed(event):
+        receipt["error_code"] = "surface_not_covered"
+        receipt["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return receipt
     if not shadow_db_path or is_forbidden_shadow_path(
         shadow_db_path,
         posts_db_path=posts_db_path,
@@ -397,6 +442,7 @@ def process_event(event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def main() -> int:
+    retain_inherited_slot_fd()
     try:
         raw = sys.stdin.read()
         event = json.loads(raw or "{}")

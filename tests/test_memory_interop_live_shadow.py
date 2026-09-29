@@ -1,12 +1,14 @@
 """R2A Live Shadow wiring: default-off, fail-open, observation-only."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -19,16 +21,22 @@ from tools.memory_interop_legacy import legacy_rows_to_context_bundle
 from tools.memory_interop_shadow import (
     ADAPTER_ID,
     PROTOCOL_VERSION,
+    SEARCH_SURFACES,
     SHADOW_DB_PATH_ENV,
     SHADOW_ENABLED_ENV,
+    SHADOW_MAX_INFLIGHT_WORKERS,
+    WRITE_SURFACES,
     build_search_event,
     build_write_event,
     dispatch_shadow_event,
     is_forbidden_shadow_path,
     is_shadow_enabled,
+    observe_memory_search,
     observe_memory_write,
     resolve_shadow_db_path,
     sha256_text,
+    slot_namespace_dir,
+    try_acquire_shadow_slot,
 )
 from tools.memory_interop_shadow_worker import RECEIPT_TABLE, process_event
 from tools.memory_write_adapter import write_memory
@@ -526,6 +534,8 @@ class SurfaceAndAuthorityTests(unittest.TestCase):
         self.assertIn("tools.memory_write_adapter", proxy)
         internal = (ROOT / "internal-mcp-server.js").read_text(encoding="utf-8")
         self.assertIn("payload.shadow_surface = payload.shadow_surface || 'internal_mcp'", internal)
+        self.assertIn("const shadow_request_id = randomUUID();", internal)
+        self.assertIn("shadow_request_id", internal)
         adapter = (ROOT / "tools" / "memory_internal_adapter.py").read_text(encoding="utf-8")
         self.assertNotRegex(adapter, r"TODO_INTERNAL_DB_PATH|os\.environ|/opt/frontend/memories\.db")
         self.assertNotRegex(adapter, r"memory_tool|memory_library|ombre_adapter")
@@ -645,6 +655,459 @@ class AsyncDispatchTests(unittest.TestCase):
             self.assertEqual("ok", receipts[0]["status"])
             self.assertEqual("write", receipts[0]["operation"])
             self.assertEqual(PROTOCOL_VERSION, receipts[0]["protocol_version"])
+
+
+class WorkerBoundTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            import fcntl  # noqa: F401
+        except ImportError:
+            self.skipTest("fcntl is required for the cross-process worker bound")
+        self.temp = tempfile.TemporaryDirectory()
+        self.posts = str(Path(self.temp.name) / "posts.db")
+        self.shadow = str(Path(self.temp.name) / "shadow-receipts.db")
+        _make_posts_db(self.posts)
+        self.env = _enabled_env(self.shadow)
+        self.event = build_write_event(
+            posts_db_path=self.posts,
+            result={"status": "CREATED", "id": 1},
+            content="alpha needle",
+            source_surface="claude_code",
+            observed_at=UTC,
+        )
+        self.slots: list = []
+
+    def tearDown(self):
+        for slot in self.slots:
+            if slot is not None:
+                slot.close()
+        self.temp.cleanup()
+
+    def _resolved_shadow(self) -> str:
+        return str(Path(self.shadow).expanduser().resolve())
+
+    def test_off_and_invalid_path_create_no_slots_or_popen(self):
+        namespace = slot_namespace_dir(self._resolved_shadow())
+        recorded = []
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: recorded.append(kwargs),
+        ):
+            dispatch_shadow_event(
+                self.event,
+                environ={SHADOW_ENABLED_ENV: "0", SHADOW_DB_PATH_ENV: self.shadow},
+            )
+            dispatch_shadow_event(
+                self.event,
+                environ={SHADOW_ENABLED_ENV: "1"},
+            )
+        self.assertEqual([], recorded)
+        self.assertFalse(namespace.exists())
+
+    def test_occupied_slots_drop_sample_then_release_allows_dispatch(self):
+        resolved = self._resolved_shadow()
+        self.assertEqual(2, SHADOW_MAX_INFLIGHT_WORKERS)
+        self.slots = [
+            try_acquire_shadow_slot(resolved),
+            try_acquire_shadow_slot(resolved),
+        ]
+        self.assertTrue(all(slot is not None for slot in self.slots))
+        recorded = []
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: recorded.append((args, kwargs)) or _FakeProc(),
+        ), mock.patch.dict(os.environ, self.env, clear=False):
+            started = time.monotonic()
+            dispatch_shadow_event(self.event)
+            self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual([], recorded)
+        self.slots.pop().close()
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: recorded.append((args, kwargs)) or _FakeProc(),
+        ), mock.patch.dict(os.environ, self.env, clear=False):
+            dispatch_shadow_event(self.event)
+        self.assertEqual(1, len(recorded))
+        kwargs = recorded[0][1]
+        self.assertTrue(kwargs.get("close_fds"))
+        self.assertEqual(False, kwargs.get("shell"))
+        self.assertIn("pass_fds", kwargs)
+
+    def test_spawn_failure_releases_slot(self):
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=OSError("spawn failed"),
+        ), mock.patch.dict(os.environ, self.env, clear=False):
+            dispatch_shadow_event(self.event)
+        resolved = self._resolved_shadow()
+        first = try_acquire_shadow_slot(resolved)
+        second = try_acquire_shadow_slot(resolved)
+        self.slots.extend([first, second])
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+
+    def test_child_copy_keeps_slot_after_parent_closes(self):
+        held = []
+
+        def fake_popen(*args, **kwargs):
+            fd = kwargs["pass_fds"][0]
+            held.append(os.dup(fd))
+            return _FakeProc()
+
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=fake_popen,
+        ), mock.patch.dict(os.environ, self.env, clear=False):
+            dispatch_shadow_event(self.event)
+            dispatch_shadow_event(self.event)
+        self.assertEqual(2, len(held))
+        recorded = []
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: recorded.append(1) or _FakeProc(),
+        ), mock.patch.dict(os.environ, self.env, clear=False):
+            dispatch_shadow_event(self.event)
+        self.assertEqual([], recorded)
+        for fd in held:
+            os.close(fd)
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: recorded.append(1) or _FakeProc(),
+        ), mock.patch.dict(os.environ, self.env, clear=False):
+            dispatch_shadow_event(self.event)
+        self.assertEqual([1], recorded)
+
+
+class _FakeProc:
+    def __init__(self):
+        self.stdin = io.BytesIO()
+
+
+class AtomicReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.posts = str(Path(self.temp.name) / "posts.db")
+        self.shadow = str(Path(self.temp.name) / "shadow-receipts.db")
+        _make_posts_db(self.posts)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _write_event(self, **changes):
+        event = build_write_event(
+            posts_db_path=self.posts,
+            result={"status": "CREATED", "id": 2},
+            content="beta needle",
+            source_surface="claude_code",
+            turn_id="turn-9",
+            request_id="req-9",
+            observed_at=UTC,
+        )
+        event.update(changes)
+        event["shadow_db_path"] = self.shadow
+        return event
+
+    def test_concurrent_exact_duplicate_is_one_canonical_receipt(self):
+        barrier = threading.Barrier(2)
+        results: list[dict] = []
+
+        def run() -> None:
+            barrier.wait(timeout=2)
+            results.append(process_event(self._write_event()))
+
+        first = threading.Thread(target=run)
+        second = threading.Thread(target=run)
+        first.start()
+        second.start()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        self.assertTrue(results)
+        self.assertEqual({row["receipt_id"] for row in results}, {results[0]["receipt_id"]})
+        rows = _receipts(self.shadow)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("ok", rows[0]["status"])
+        self.assertEqual(self._write_event()["event_key"], rows[0]["event_key"])
+
+    def test_concurrent_same_key_different_fingerprint_one_ok_one_conflict(self):
+        barrier = threading.Barrier(2)
+        results: list[dict] = []
+
+        def run(fingerprint: str) -> None:
+            event = self._write_event(payload_fingerprint=fingerprint)
+            barrier.wait(timeout=2)
+            results.append(process_event(event))
+
+        first = threading.Thread(target=run, args=("a" * 64,))
+        second = threading.Thread(target=run, args=("b" * 64,))
+        first.start()
+        second.start()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        rows = _receipts(self.shadow)
+        base_key = self._write_event()["event_key"]
+        base_rows = [row for row in rows if row["event_key"] == base_key]
+        self.assertEqual(1, len(base_rows))
+        statuses = {row["status"] for row in rows}
+        self.assertIn("ok", statuses)
+        self.assertIn("conflict", statuses)
+        self.assertEqual(1, sum(1 for row in rows if row["status"] == "ok"))
+
+    def test_transaction_not_held_during_translation(self):
+        from tools import memory_interop_shadow_worker as worker
+
+        order: list[str] = []
+        real_translate = worker._translate_write
+
+        def slow_translate(*args, **kwargs):
+            order.append("translate")
+            conn = sqlite3.connect(self.shadow, timeout=0.2)
+            try:
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("COMMIT")
+                order.append("receipt_free")
+            finally:
+                conn.close()
+            return real_translate(*args, **kwargs)
+
+        with mock.patch.object(worker, "_translate_write", side_effect=slow_translate):
+            receipt = process_event(self._write_event())
+        self.assertEqual("ok", receipt["status"])
+        self.assertEqual(["translate", "receipt_free"], order[:2])
+
+
+class SurfaceAndIdentityTests(unittest.TestCase):
+    def test_unknown_surfaces_do_not_dispatch_or_label_unknown(self):
+        recorded: list[dict] = []
+        environ = {SHADOW_ENABLED_ENV: "1", SHADOW_DB_PATH_ENV: "/tmp/shadow-receipts.db"}
+        observe_memory_write(
+            posts_db_path="/tmp/posts.db",
+            result={"status": "CREATED", "id": 9},
+            content="abc",
+            source_surface="home_mcp",
+            environ=environ,
+            dispatch=lambda event, **kwargs: recorded.append(event),
+        )
+        observe_memory_write(
+            posts_db_path="/tmp/posts.db",
+            result={"status": "CREATED", "id": 9},
+            content="abc",
+            source_surface=None,
+            environ=environ,
+            dispatch=lambda event, **kwargs: recorded.append(event),
+        )
+        observe_memory_search(
+            posts_db_path="/tmp/posts.db",
+            posts=[{"id": 1, "content": "x"}],
+            keyword="x",
+            source_surface="legacy_gateway",
+            environ=environ,
+            dispatch=lambda event, **kwargs: recorded.append(event),
+        )
+        self.assertEqual([], recorded)
+        self.assertIsNone(
+            build_write_event(
+                posts_db_path="/tmp/posts.db",
+                result={"status": "CREATED", "id": 1},
+                content="x",
+                source_surface="unknown",
+            )
+        )
+        self.assertIsNone(
+            build_search_event(
+                posts_db_path="/tmp/posts.db",
+                posts=[],
+                keyword="",
+                source_surface="api_relay",
+            )
+        )
+        self.assertEqual(WRITE_SURFACES, frozenset({"claude_code", "internal_mcp", "api_relay"}))
+        self.assertEqual(SEARCH_SURFACES, frozenset({"claude_code", "internal_mcp"}))
+
+    def test_valid_surfaces_still_dispatch_without_changing_results(self):
+        with tempfile.TemporaryDirectory() as folder:
+            posts = str(Path(folder) / "posts.db")
+            _make_posts_db(posts)
+            recorded: list[str] = []
+            environ = {SHADOW_ENABLED_ENV: "1", SHADOW_DB_PATH_ENV: str(Path(folder) / "shadow.db")}
+            off = search_memories(posts, keyword="needle")
+            with mock.patch.dict(os.environ, environ, clear=False):
+                for surface in ("claude_code", "internal_mcp"):
+                    observe_memory_search(
+                        posts_db_path=posts,
+                        posts=off["posts"],
+                        keyword="needle",
+                        source_surface=surface,
+                        environ=environ,
+                        dispatch=lambda event, **kwargs: recorded.append(event["source_surface"]),
+                    )
+                    observe_memory_write(
+                        posts_db_path=posts,
+                        result={"status": "CREATED", "id": 9},
+                        content="abc",
+                        source_surface=surface,
+                        environ=environ,
+                        dispatch=lambda event, **kwargs: recorded.append(event["source_surface"]),
+                    )
+                observe_memory_write(
+                    posts_db_path=posts,
+                    result={"status": "CREATED", "id": 10},
+                    content="abc",
+                    source_surface="api_relay",
+                    environ=environ,
+                    dispatch=lambda event, **kwargs: recorded.append(event["source_surface"]),
+                )
+                on = search_memories(
+                    posts,
+                    keyword="needle",
+                    shadow_surface="internal_mcp",
+                    shadow_request_id="req-a",
+                )
+            self.assertEqual(off, on)
+            self.assertEqual(
+                ["claude_code", "claude_code", "internal_mcp", "internal_mcp", "api_relay"],
+                recorded,
+            )
+
+    def test_internal_mcp_search_request_ids_are_distinct_and_output_stable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            posts = str(Path(folder) / "posts.db")
+            shadow = str(Path(folder) / "shadow.db")
+            _make_posts_db(posts)
+            first = search_memories(
+                posts,
+                keyword="needle",
+                shadow_surface="internal_mcp",
+                shadow_request_id="11111111-1111-1111-1111-111111111111",
+            )
+            second = search_memories(
+                posts,
+                keyword="needle",
+                shadow_surface="internal_mcp",
+                shadow_request_id="22222222-2222-2222-2222-222222222222",
+            )
+            self.assertEqual(first, second)
+            self.assertEqual(_format_memory_search(first), _format_memory_search(second))
+            events = [
+                build_search_event(
+                    posts_db_path=posts,
+                    posts=first["posts"],
+                    keyword="needle",
+                    source_surface="internal_mcp",
+                    request_id="11111111-1111-1111-1111-111111111111",
+                ),
+                build_search_event(
+                    posts_db_path=posts,
+                    posts=second["posts"],
+                    keyword="needle",
+                    source_surface="internal_mcp",
+                    request_id="22222222-2222-2222-2222-222222222222",
+                ),
+            ]
+            self.assertNotEqual(events[0]["event_key"], events[1]["event_key"])
+            self.assertNotEqual(events[0]["request_id"], events[1]["request_id"])
+            env = _enabled_env(shadow)
+            with mock.patch.dict(os.environ, env, clear=False):
+                again = search_memories(
+                    posts,
+                    keyword="needle",
+                    shadow_surface="internal_mcp",
+                    shadow_request_id="11111111-1111-1111-1111-111111111111",
+                )
+                search_memories(
+                    posts,
+                    keyword="needle",
+                    shadow_surface="internal_mcp",
+                    shadow_request_id="22222222-2222-2222-2222-222222222222",
+                )
+            self.assertEqual(first, again)
+            receipts = _wait_receipts(shadow, 2)
+            request_ids = {row["request_id"] for row in receipts}
+            self.assertEqual(
+                {
+                    "11111111-1111-1111-1111-111111111111",
+                    "22222222-2222-2222-2222-222222222222",
+                },
+                request_ids,
+            )
+
+    def test_unknown_surface_worker_does_not_create_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            posts = str(Path(folder) / "posts.db")
+            shadow = str(Path(folder) / "shadow.db")
+            _make_posts_db(posts)
+            event = build_write_event(
+                posts_db_path=posts,
+                result={"status": "CREATED", "id": 1},
+                content="alpha needle",
+                source_surface="claude_code",
+                observed_at=UTC,
+            )
+            event["source_surface"] = "home_mcp"
+            event["shadow_db_path"] = shadow
+            receipt = process_event(event)
+            self.assertEqual("surface_not_covered", receipt["error_code"])
+            self.assertFalse(Path(shadow).exists())
+            self.assertEqual([], _receipts(shadow))
+
+
+class FilesystemIdentityTests(unittest.TestCase):
+    def test_same_path_symlink_and_hardlink_are_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            posts = str(Path(folder) / "posts.db")
+            shadow = str(Path(folder) / "shadow-receipts.db")
+            _make_posts_db(posts)
+            self.assertTrue(is_forbidden_shadow_path(posts, posts_db_path=posts))
+            self.assertIsNone(
+                resolve_shadow_db_path(
+                    {SHADOW_DB_PATH_ENV: posts},
+                    posts_db_path=posts,
+                )
+            )
+            alias = str(Path(folder) / "posts-alias.db")
+            try:
+                os.symlink(posts, alias)
+            except OSError:
+                alias = None
+            if alias is not None:
+                self.assertTrue(is_forbidden_shadow_path(alias, posts_db_path=posts))
+            linked = str(Path(folder) / "posts-hardlink.db")
+            try:
+                os.link(posts, linked)
+            except OSError:
+                linked = None
+            if linked is None and sys.platform.startswith("linux"):
+                self.fail("expected os.link to work on Linux temp fixtures")
+            if linked is not None:
+                self.assertTrue(is_forbidden_shadow_path(linked, posts_db_path=posts))
+                event = build_write_event(
+                    posts_db_path=posts,
+                    result={"status": "CREATED", "id": 1},
+                    content="alpha needle",
+                    source_surface="claude_code",
+                    observed_at=UTC,
+                )
+                event["shadow_db_path"] = linked
+                receipt = process_event(event)
+                self.assertEqual("invalid_shadow_db", receipt["error_code"])
+                posts_conn = sqlite3.connect(posts)
+                post_tables = {
+                    row[0]
+                    for row in posts_conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                posts_conn.close()
+                self.assertIn("posts", post_tables)
+                self.assertNotIn(RECEIPT_TABLE, post_tables)
+            self.assertFalse(is_forbidden_shadow_path(shadow, posts_db_path=posts))
+            self.assertEqual(
+                str(Path(shadow).resolve()),
+                resolve_shadow_db_path(
+                    {SHADOW_DB_PATH_ENV: shadow},
+                    posts_db_path=posts,
+                ),
+            )
 
 
 if __name__ == "__main__":

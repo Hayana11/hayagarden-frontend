@@ -1,9 +1,9 @@
 """Fail-open MEMORY-INTEROP R2A Live Shadow observer.
 
-This module is observation-only.  It has no authority, opens no database,
-creates no files, and does not translate Interop payloads.  Production
-callers invoke it only after the authoritative memory operation has already
-produced a frozen result.  Any failure is swallowed.
+This module is observation-only.  It has no authority, opens no database
+on the authoritative path, and does not translate Interop payloads.
+Production callers invoke it only after the authoritative memory operation
+has already produced a frozen result.  Any failure is swallowed.
 """
 from __future__ import annotations
 
@@ -12,12 +12,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 SHADOW_ENABLED_ENV = "MEMORY_INTEROP_SHADOW_ENABLED"
 SHADOW_DB_PATH_ENV = "MEMORY_INTEROP_SHADOW_DB_PATH"
+SHADOW_SLOT_FD_ENV = "MEMORY_INTEROP_SHADOW_SLOT_FD"
+SHADOW_MAX_INFLIGHT_WORKERS = 2
 WORKER_MODULE = "tools.memory_interop_shadow_worker"
 ADAPTER_ID = "legacy.posts.v1"
 PROTOCOL_VERSION = "0.1"
@@ -35,6 +38,7 @@ _FORBIDDEN_NAME_TOKENS = (
     "contin" + "uity",
 )
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_SLOT_ROOT_NAME = "haya-memory-interop-shadow-slots"
 
 
 def utc_now() -> str:
@@ -49,6 +53,31 @@ def sha256_text(value: Any) -> str:
 def is_shadow_enabled(environ: Mapping[str, str] | None = None) -> bool:
     env = os.environ if environ is None else environ
     return str(env.get(SHADOW_ENABLED_ENV, "")).strip() == "1"
+
+
+def is_allowed_write_surface(surface: Any) -> bool:
+    return str(surface or "").strip() in WRITE_SURFACES
+
+
+def is_allowed_search_surface(surface: Any) -> bool:
+    return str(surface or "").strip() in SEARCH_SURFACES
+
+
+def _same_existing_file(left: str, right: str) -> bool | None:
+    """Return True if both paths name the same inode.
+
+    False means distinct (or one path does not exist yet).  None means the
+    comparison itself failed and Shadow must not proceed.
+    """
+
+    try:
+        if not (os.path.exists(left) and os.path.exists(right)):
+            return False
+        return os.path.samefile(left, right)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return None
 
 
 def is_forbidden_shadow_path(
@@ -72,9 +101,13 @@ def is_forbidden_shadow_path(
     posts = str(posts_db_path or "").strip()
     if posts:
         try:
-            if resolved == Path(posts).expanduser().resolve():
-                return True
+            posts_resolved = Path(posts).expanduser().resolve()
         except (OSError, RuntimeError, ValueError):
+            return True
+        if resolved == posts_resolved:
+            return True
+        same = _same_existing_file(str(resolved), str(posts_resolved))
+        if same is not False:
             return True
     return False
 
@@ -91,6 +124,59 @@ def resolve_shadow_db_path(
     try:
         return str(Path(raw).expanduser().resolve())
     except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def slot_namespace_dir(shadow_db_path: str) -> Path:
+    digest = hashlib.sha256(os.fsencode(str(shadow_db_path))).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / _SLOT_ROOT_NAME / digest
+
+
+class ShadowSlot:
+    """Cross-process advisory lock slot.  Closing the fd releases this copy."""
+
+    def __init__(self, fd: int, path: str):
+        self.fd = fd
+        self.path = path
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def try_acquire_shadow_slot(shadow_db_path: str) -> ShadowSlot | None:
+    """Non-blocking cross-process slot.  None means drop the sample."""
+
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    path = str(shadow_db_path or "").strip()
+    if not path:
+        return None
+    try:
+        directory = slot_namespace_dir(path)
+        directory.mkdir(parents=True, exist_ok=True)
+        for index in range(SHADOW_MAX_INFLIGHT_WORKERS):
+            slot_path = directory / f"slot-{index}.lock"
+            fd = os.open(str(slot_path), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                continue
+            except OSError:
+                os.close(fd)
+                return None
+            return ShadowSlot(fd, str(slot_path))
+        return None
+    except Exception:
         return None
 
 
@@ -170,7 +256,9 @@ def build_write_event(
     row_id = _stable_write_row_id(result)
     if row_id is None:
         return None
-    surface = str(source_surface or "").strip() or "unknown"
+    surface = str(source_surface or "").strip()
+    if surface not in WRITE_SURFACES:
+        return None
     content_hash = sha256_text(content)
     observed = observed_at or utc_now()
     request = str(request_id or "").strip() or f"write:{surface}:{row_id}"
@@ -216,8 +304,10 @@ def build_search_event(
     turn_id: str | None = None,
     request_id: str | None = None,
     observed_at: str | None = None,
-) -> dict[str, Any]:
-    surface = str(source_surface or "").strip() or "unknown"
+) -> dict[str, Any] | None:
+    surface = str(source_surface or "").strip()
+    if surface not in SEARCH_SURFACES:
+        return None
     ordered_ids, ordered_hashes = freeze_search_posts(posts)
     query_hash = sha256_text(keyword if isinstance(keyword, str) else "")
     observed = observed_at or utc_now()
@@ -260,17 +350,30 @@ def build_search_event(
     }
 
 
+def _surface_allowed_for_event(event: Mapping[str, Any]) -> bool:
+    operation = str(event.get("operation") or "")
+    surface = event.get("source_surface")
+    if operation == "write":
+        return is_allowed_write_surface(surface)
+    if operation == "search":
+        return is_allowed_search_surface(surface)
+    return False
+
+
 def dispatch_shadow_event(
     event: Mapping[str, Any],
     *,
     environ: Mapping[str, str] | None = None,
-    popen: Callable[..., Any] = subprocess.Popen,
+    popen: Callable[..., Any] | None = None,
 ) -> None:
     """Best-effort detached spawn.  Never waits.  Never raises to callers."""
 
+    slot: ShadowSlot | None = None
     try:
         env_map = os.environ if environ is None else environ
         if not is_shadow_enabled(env_map):
+            return
+        if not _surface_allowed_for_event(event):
             return
         posts_db_path = str(event.get("posts_db_path") or "").strip()
         shadow_db_path = resolve_shadow_db_path(
@@ -279,18 +382,24 @@ def dispatch_shadow_event(
         )
         if not shadow_db_path:
             return
+        slot = try_acquire_shadow_slot(shadow_db_path)
+        if slot is None:
+            return
         payload = dict(event)
         payload["shadow_db_path"] = shadow_db_path
         encoded = _canonical_json(payload).encode("utf-8")
         child_env = os.environ.copy()
         child_env[SHADOW_ENABLED_ENV] = "1"
         child_env[SHADOW_DB_PATH_ENV] = shadow_db_path
-        proc = popen(
+        child_env[SHADOW_SLOT_FD_ENV] = str(slot.fd)
+        spawn = popen if popen is not None else subprocess.Popen
+        proc = spawn(
             [sys.executable, "-B", "-m", WORKER_MODULE],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            pass_fds=(slot.fd,),
             start_new_session=True,
             cwd=str(_REPO_ROOT),
             env=child_env,
@@ -305,6 +414,9 @@ def dispatch_shadow_event(
             stdin.close()
     except Exception:
         return
+    finally:
+        if slot is not None:
+            slot.close()
 
 
 def observe_memory_write(
@@ -360,6 +472,8 @@ def observe_memory_search(
             turn_id=turn_id,
             request_id=request_id,
         )
+        if event is None:
+            return
         (dispatch or dispatch_shadow_event)(event, environ=env_map)
     except Exception:
         return
@@ -371,11 +485,16 @@ __all__ = [
     "SEARCH_SURFACES",
     "SHADOW_DB_PATH_ENV",
     "SHADOW_ENABLED_ENV",
+    "SHADOW_MAX_INFLIGHT_WORKERS",
+    "SHADOW_SLOT_FD_ENV",
     "WORKER_MODULE",
     "WRITE_SURFACES",
+    "ShadowSlot",
     "build_search_event",
     "build_write_event",
     "dispatch_shadow_event",
+    "is_allowed_search_surface",
+    "is_allowed_write_surface",
     "is_forbidden_shadow_path",
     "is_shadow_enabled",
     "observe_memory_search",
@@ -383,4 +502,6 @@ __all__ = [
     "payload_fingerprint",
     "resolve_shadow_db_path",
     "sha256_text",
+    "slot_namespace_dir",
+    "try_acquire_shadow_slot",
 ]

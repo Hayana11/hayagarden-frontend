@@ -43,6 +43,7 @@ When OFF:
 - no shadow process is spawned
 - no shadow DB is opened
 - no shadow file is created
+- no worker slot files are created
 - no Interop translation is attempted
 - no additional production DB read is performed
 - authoritative return shape and text stay unchanged
@@ -105,8 +106,13 @@ before returning.
 
 `tools/memory_interop_shadow.py` is a gate + event builder + `subprocess.Popen`
 dispatcher (`shell=False`, stdin pipe, stdout/stderr discarded, `close_fds`,
-`start_new_session`, no wait). It does not import Kernel or the R1 adapter and
-does not use SQLite.
+`pass_fds` for the slot lock, `start_new_session`, no wait). It does not import
+Kernel or the R1 adapter and does not use SQLite.
+
+In-flight workers are bounded across processes (`SHADOW_MAX_INFLIGHT_WORKERS`,
+currently 2) with non-blocking `fcntl.flock` slots derived from the resolved
+receipt DB path. If every slot is busy, the observation is dropped. Slot setup
+or spawn failure fails open and does not wait on the authoritative path.
 
 `tools/memory_interop_shadow_worker.py` runs out of band. It may:
 
@@ -116,6 +122,23 @@ does not use SQLite.
 
 It must not write posts, Kernel, or Ombre, call a provider, or change the
 caller-visible result.
+
+Receipt insert uses one `BEGIN IMMEDIATE` decision transaction so duplicate
+and conflict classification cannot race into two base `ok` rows.
+
+## Coverage surfaces
+
+WRITE observations accept only `claude_code`, `internal_mcp`, and `api_relay`.
+SEARCH observations accept only `claude_code` and `internal_mcp`.
+
+A missing or unknown `source_surface` is dropped: no spawn, no receipt. That is
+not UH-A0 authorization.
+
+Internal MCP `search_memories` assigns one observation-only `shadow_request_id`
+per tool invocation so identical queries do not collapse into one event.
+
+The receipt path is rejected when it resolves to the same filesystem object as
+the posts DB, including symlink and hardlink aliases.
 
 ## Write observation
 
