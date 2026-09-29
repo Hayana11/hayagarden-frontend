@@ -245,16 +245,45 @@ def inspect_wake_plan(
     wake_run_id: str = '',
 ) -> dict[str, Any]:
     """Build-only view for inspect_only — no model call."""
-    provider = select_wake_provider(mode)
-    prepared = prepare_tools_for_provider(provider, tools, mode, dry_run=False)
+    cleaned = str(mode or '').strip() or 'normal'
+    disabled = wake_mode_disabled_payload(cleaned)
+    if disabled:
+        return {
+            **disabled,
+            'inspect_only': True,
+            'capability_profile': 'wake_mode_disabled',
+            'canonical_route': 'disabled',
+            'resident': None,
+            'owned_actions': [],
+        }
+    provider = select_wake_provider(cleaned)
+    prepared = prepare_tools_for_provider(provider, tools, cleaned, dry_run=False)
     stable, dynamic = split_wake_system(system)
     flat = (stable + NL + dynamic).lower()
+    if provider == 'claude_code' and cleaned == 'normal':
+        profile = 'unified_hot_resident'
+        route = 'unified_b2_b3'
+        resident = '_CC_RESIDENT'
+        owned = ['none', 'message']
+    elif cleaned == 'summarize':
+        profile = 'relay_wake'
+        route = 'api_relay_background'
+        resident = None
+        owned = None
+    else:
+        profile = 'relay_wake'
+        route = 'api_relay'
+        resident = None
+        owned = None
     return {
         'provider': provider,
-        'mode': mode,
+        'mode': cleaned,
         'wake_run_id': wake_run_id,
         't_hours': t_hours,
-        'capability_profile': 'cc_wake' if provider == 'claude_code' else 'relay_wake',
+        'capability_profile': profile,
+        'canonical_route': route,
+        'resident': resident,
+        'owned_actions': owned,
         'tool_names': [t.get('name') for t in prepared if t.get('name')],
         'relay_only_removed': [],
         'stable_chars': len(stable),

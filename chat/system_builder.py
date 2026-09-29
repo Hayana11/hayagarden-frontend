@@ -73,7 +73,8 @@ def build_system(
 
     capability_profile:
       None / 'relay' / 'relay_wake' → generic Relay tool brochure (current text)
-      'cc_wake' → Wake·Claude Code tool surface only (see wake.cc_tools)
+      'cc_wake' → inspect brochure describing current Unified/hot resident route
+        (see wake.cc_tools; not a live Claude Wake runner contract)
       'wake_dry_run' / 'cc_wake_dry_run' / 'relay_wake_dry_run'
         → dry-run brochure: no tools at all (do not inject normal tool lists)
     """
@@ -531,7 +532,7 @@ def build_system(
             from wake.cc_tools import CC_WAKE_STABLE_NOTE
             stable_note = CC_WAKE_STABLE_NOTE
         except Exception:
-            stable_note = '\n## Wake 说明\n工具权限以 Wake·Claude Code 工具面为准。\n'
+            stable_note = '\n## Wake 说明\ncanonical normal 走 Unified 热 resident；disabled 模式为 disabled。\n'
     else:
         stable_note = (
             '\n## 你可以发文件和选择器\n'

@@ -19,7 +19,7 @@ class WakeLightAllowlistTests(unittest.TestCase):
     def test_wake_capability_text_no_write_lights(self):
         self.assertIn('get_light_status', CC_WAKE_CAPABILITY_TEXT)
         self.assertNotIn('可写可用：light_on', CC_WAKE_CAPABILITY_TEXT)
-        self.assertNotIn('light_bedside_warm', CC_WAKE_CAPABILITY_TEXT.split('可写')[0])
+        self.assertNotIn('light_bedside_warm', CC_WAKE_CAPABILITY_TEXT)
         self.assertIn('不得调用 light_on', CC_WAKE_CAPABILITY_TEXT)
         self.assertNotIn('mcp__home__light_on', CC_WAKE_CAPABILITY_TEXT)
         self.assertNotIn('mcp__home__light_off', CC_WAKE_CAPABILITY_TEXT)

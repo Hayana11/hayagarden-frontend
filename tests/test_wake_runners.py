@@ -119,14 +119,24 @@ class WakeCcToolsTests(unittest.TestCase):
         ):
             self.assertFalse(hasattr(cc_tools, name), name)
 
-    def test_capability_brochure_still_matches_inspect_profile(self):
-        self.assertIn('add_todo', CC_WAKE_CAPABILITY_TEXT)
-        self.assertIn('位置', CC_WAKE_CAPABILITY_TEXT)
-        self.assertIn('不可用：codebase patch/create_file', CC_WAKE_CAPABILITY_TEXT)
+    def test_capability_brochure_describes_current_route_not_retired_protocol(self):
+        self.assertIn('Unified 热 _CC_RESIDENT', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('B2 none', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('B3 message', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('disabled', CC_WAKE_CAPABILITY_TEXT)
         self.assertIn('不得调用 light_on', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('不可用：codebase patch/create_file', CC_WAKE_CAPABILITY_TEXT)
         self.assertNotIn('explain_history', CC_WAKE_CAPABILITY_TEXT.split('不可用')[0])
         self.assertIn('explain_history', CC_WAKE_CAPABILITY_TEXT)
-        self.assertIn('THOUGHTS/ACTION/CONTENT', WAKE_DRY_RUN_CAPABILITY_TEXT)
+        for retired in (
+            'THOUGHTS/ACTION/CONTENT',
+            'THOUGHTS',
+            '结构化决策',
+            'diary CONTENT',
+            '只根据已给上下文输出',
+        ):
+            self.assertNotIn(retired, CC_WAKE_CAPABILITY_TEXT)
+            self.assertNotIn(retired, WAKE_DRY_RUN_CAPABILITY_TEXT)
 
 
 class WakeRunnerContractTests(unittest.TestCase):
@@ -213,12 +223,31 @@ class WakeRunnerContractTests(unittest.TestCase):
                 t_hours=1.0,
             )
         self.assertEqual(plan['provider'], 'claude_code')
+        self.assertEqual(plan['capability_profile'], 'unified_hot_resident')
+        self.assertEqual(plan['canonical_route'], 'unified_b2_b3')
+        self.assertEqual(plan['resident'], '_CC_RESIDENT')
+        self.assertEqual(plan['owned_actions'], ['none', 'message'])
         self.assertEqual(
             plan['tool_names'],
             ['search_memories', 'get_location', 'get_light_status'],
         )
         self.assertEqual(plan['relay_only_removed'], [])
         self.assertEqual(plan['cc_allowed_tools'], [])
+
+    def test_inspect_plan_disabled_modes_are_disabled(self):
+        for mode in DISABLED_CC_WAKE_MODES:
+            with self.subTest(mode=mode):
+                plan = inspect_wake_plan(
+                    mode=mode,
+                    system='inspect',
+                    messages=[{'role': 'user', 'content': '[唤醒检查]'}],
+                    tools=[{'name': 'search_memories'}],
+                    t_hours=1.0,
+                )
+                self.assertTrue(plan.get('skipped'))
+                self.assertEqual(plan.get('reason'), WAKE_MODE_DISABLED_REASON)
+                self.assertEqual(plan.get('capability_profile'), 'wake_mode_disabled')
+                self.assertEqual(plan.get('owned_actions'), [])
 
     def test_prepare_tools_relay_unchanged(self):
         tools = [{'name': 'get_location'}, {'name': 'search_memories'}]
@@ -277,6 +306,8 @@ class WakeResidentRetirementTests(unittest.TestCase):
         self.assertEqual(src.count('cc_wake_tool_names'), 0)
         self.assertEqual(src.count('cc_wake_nudge_text'), 0)
         self.assertEqual(src.count('filter_wake_tools_for_cc'), 0)
+        self.assertEqual(src.count('cc_content_message_explore_only'), 0)
+        self.assertEqual(src.count('_provider_content_policy'), 0)
 
     def test_single_persistent_conversational_resident(self):
         gateway = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
@@ -328,24 +359,46 @@ class WakeResidentRetirementTests(unittest.TestCase):
 
 
 class DisabledWakeModeHttpTests(unittest.TestCase):
+    """HTTP contract for disabled modes without importing gateway or production DB.
+
+    M3-04A co-loads ``tests.test_ledger_routes``, which installs a process-wide
+    sqlite3 guard. Importing ``gateway`` here would connect to
+    ``/opt/frontend/memories.db`` and trip that guard. This fixture stays on a
+    temp runtime path and wraps ``wake_mode_disabled_payload`` only.
+    """
+
     @classmethod
     def setUpClass(cls):
-        import gateway
-        cls.gateway = gateway
-        cls.client = gateway.app.test_client()
+        from flask import Flask, jsonify, request
+
+        cls._tmp = tempfile.TemporaryDirectory(prefix='disabled-wake-http-')
+        cls.db_path = str(Path(cls._tmp.name) / 'memories.db')
+        cls.config_path = str(Path(cls._tmp.name) / 'config.db')
+        os.environ['HAYAGARDEN_CONFIG_DB_PATH'] = cls.config_path
+        app = Flask(__name__)
+
+        @app.route('/wake', methods=['POST'])
+        def wake():
+            data = request.get_json() or {}
+            mode = data.get('mode', 'normal') or 'normal'
+            disabled = wake_mode_disabled_payload(mode)
+            if disabled:
+                return jsonify(disabled)
+            raise AssertionError(
+                'disabled-mode fixture must not reach provider or Action write'
+            )
+
+        cls.client = app.test_client()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
 
     def _assert_disabled(self, mode, extra=None):
         payload = {'mode': mode, 'wake_run_id': 'disabled-%s' % mode}
         if extra:
             payload.update(extra)
-        with mock.patch.object(self.gateway, '_ensure_wake_runners') as ensure, \
-             mock.patch.object(self.gateway, '_wake_agent_loop') as loop, \
-             mock.patch.object(
-                 self.gateway, '_run_unified_normal_main_chat_turn',
-             ) as unified, \
-             mock.patch('wake.executor.execute') as execute, \
-             mock.patch('relay.manager.relay') as relay:
-            relay.chat = mock.Mock(side_effect=AssertionError('relay fallback'))
+        with mock.patch('wake.executor.execute') as execute:
             resp = self.client.post('/wake', json=payload)
         self.assertEqual(resp.status_code, 200, mode)
         body = resp.get_json()
@@ -354,11 +407,19 @@ class DisabledWakeModeHttpTests(unittest.TestCase):
         self.assertEqual(body.get('reason'), WAKE_MODE_DISABLED_REASON, body)
         self.assertEqual(body.get('mode'), mode, body)
         self.assertEqual(body.get('detail'), 'mode=%s' % mode, body)
-        ensure.assert_not_called()
-        loop.assert_not_called()
-        unified.assert_not_called()
         execute.assert_not_called()
         return body
+
+    def test_fixture_stays_on_isolated_runtime_path(self):
+        self.assertTrue(self.db_path.startswith(self._tmp.name))
+        self.assertNotEqual(self.db_path, '/opt/frontend/memories.db')
+        self.assertEqual(
+            os.environ.get('HAYAGARDEN_CONFIG_DB_PATH'),
+            self.config_path,
+        )
+        src = Path(__file__).read_text(encoding='utf-8')
+        self.assertNotRegex(src, r'(?m)^\s*import gateway\b')
+        self.assertNotRegex(src, r'(?m)^\s*from gateway import\b')
 
     def test_morning_disabled(self):
         self._assert_disabled('morning')
@@ -378,6 +439,19 @@ class DisabledWakeModeHttpTests(unittest.TestCase):
                 self._assert_disabled(mode, extra={'inspect_only': True})
             with self.subTest(mode=mode, extra='dry_run'):
                 self._assert_disabled(mode, extra={'dry_run': True})
+
+    def test_gateway_disabled_modes_short_circuit_before_inspect_and_lock(self):
+        src = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
+        start = src.index('def wake_decide():')
+        end = src.index('def _wake_decide_locked')
+        body = src[start:end]
+        disabled_idx = body.index('wake_mode_disabled_payload')
+        inspect_idx = body.index("inspect_only")
+        lock_idx = body.index('_wake_exec_lock.acquire')
+        self.assertLess(disabled_idx, inspect_idx)
+        self.assertLess(disabled_idx, lock_idx)
+        self.assertNotIn('get_wake_runner', body)
+        self.assertNotIn('_run_unified_normal_main_chat_turn', body)
 
     def test_summarize_still_selects_api_relay(self):
         with mock.patch.object(config_store, 'get', side_effect=fake_get({
@@ -516,17 +590,19 @@ class BuildSystemSideEffectTests(unittest.TestCase):
                 capability_profile='cc_wake',
             )
         flat = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict))
-        self.assertIn('Wake·Claude Code 工具面', flat)
+        self.assertIn('Wake·Claude inspect', flat)
+        self.assertIn('Unified 热 _CC_RESIDENT', flat)
+        self.assertIn('disabled', flat)
         # Generic Relay brochure must not appear (these phrases are unique to it).
         self.assertNotIn('查看与发布留言板', flat)
         self.assertNotIn('随心所欲', flat)
         self.assertNotIn('请求手机截屏', flat)
         self.assertNotIn('查位置', flat)
         self.assertNotIn('Pocket 浏览器', flat)
-        # Accurate CC profile may list unavailable tools by name.
-        self.assertIn('位置', flat)
+        self.assertNotIn('THOUGHTS/ACTION/CONTENT', flat)
+        self.assertNotIn('结构化决策', flat)
+        self.assertIn('不得调用 light_on', flat)
         self.assertIn('不可用：codebase patch/create_file', flat)
-        self.assertIn('add_todo', flat)
         self.assertIn('联网搜索', flat)  # only inside the 不可用 list
 
 
@@ -741,6 +817,8 @@ class DryRunCapabilityTests(unittest.TestCase):
         self.assertNotIn('随心所欲', flat)
         self.assertNotIn('add_todo', flat)
         self.assertIn('本轮无任何工具', flat)
+        self.assertNotIn('THOUGHTS/ACTION/CONTENT', flat)
+        self.assertNotIn('结构化决策', flat)
 
 
 class RelayDryRunNudgeTests(unittest.TestCase):
