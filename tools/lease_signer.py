@@ -101,6 +101,41 @@ def default_allowed_capabilities(turn_mode: str) -> tuple[str, ...]:
     return DEFAULT_ALLOWED_CAPABILITIES[mode]
 
 
+def issue_default_policy_subset_lease(
+    *,
+    turn_id: str,
+    turn_mode: str,
+    allowed_capabilities: Sequence[str],
+    issued_at: str | None = None,
+) -> dict[str, Any]:
+    """Sign a default_policy lease whose capability set is a subset of defaults.
+
+    The requested IDs must all already belong to
+    ``default_allowed_capabilities(turn_mode)``.  Order follows that default
+    tuple.  The output uses the same eight-field turn_lease schema.
+    """
+    requested = _normalize_ids(allowed_capabilities)
+    defaults = default_allowed_capabilities(turn_mode)
+    default_set = set(defaults)
+    extra = [cid for cid in requested if cid not in default_set]
+    if extra:
+        raise LeaseSignError(
+            "DENIED_CAPABILITY",
+            "default_policy subset cannot expand capabilities: "
+            + ",".join(extra),
+        )
+    keep = set(requested)
+    subset = tuple(cid for cid in defaults if cid in keep)
+    lease = issue_turn_lease(
+        turn_id=turn_id,
+        turn_mode=turn_mode,
+        issued_from="default_policy",
+        issued_at=issued_at,
+    )
+    lease["allowed_capabilities"] = subset
+    return lease
+
+
 def issue_turn_lease(
     *,
     turn_id: str,
@@ -284,6 +319,7 @@ def _iter_module_export_names() -> Iterable[str]:
         "LeaseSignError",
         "default_chat_wake_auto_capabilities",
         "default_allowed_capabilities",
+        "issue_default_policy_subset_lease",
         "issue_turn_lease",
     )
 

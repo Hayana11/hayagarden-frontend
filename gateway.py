@@ -4771,9 +4771,11 @@ def _cc_resident_stream_gen(
         yield evt, payload
 
 
-def _build_normal_wake_main_chat_trigger(*, now, t2_hours, t_hours) -> str:
+def _build_normal_wake_main_chat_trigger(
+    *, now, t2_hours, t_hours, observation_bundle=None,
+) -> str:
     """Build the provider-only trigger from the already-read reality clock."""
-    return (
+    text = (
         '【系统主动轮】这是主动唤醒。她没有刚刚发来消息，也不是上一句话的续写；'
         '现实已经过去了一段时间。\\n\\n'
         f'现在是 {now.strftime("%Y-%m-%d %H:%M:%S")}。距离她上次发消息约 '
@@ -4788,6 +4790,12 @@ def _build_normal_wake_main_chat_trigger(*, now, t2_hours, t_hours) -> str:
         '也可以不调用工具，直接自然地开口。\\n\\n'
         '这些时间只是现实背景，不是行动命令。'
     )
+    if observation_bundle:
+        from chat.wake_read_observation import format_observation_trigger_appendix
+        appendix = format_observation_trigger_appendix(observation_bundle)
+        if appendix:
+            return text + '\\n\\n' + appendix
+    return text
 
 
 def _run_unified_normal_main_chat_turn(
@@ -4797,6 +4805,7 @@ def _run_unified_normal_main_chat_turn(
     now: datetime.datetime,
     t2_hours: float,
     t_hours: float,
+    observation_bundle=None,
 ) -> dict:
     """Run one proactive round through the formal main Chat resident path.
 
@@ -4974,6 +4983,7 @@ def _run_unified_normal_main_chat_turn(
                         now=now,
                         t2_hours=t2_hours,
                         t_hours=t_hours,
+                        observation_bundle=observation_bundle,
                     ),
                 }],
                 user_turn=False,
@@ -9095,15 +9105,35 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
 
     if basic_normal:
         from chat.behavior_authority_b3 import UnifiedNormalWakeSharedUnavailable
+        from chat.wake_read_observation import collect_wake_read_observation
         from wake.executor import execute as _wake_exec
         main_turn = None
         try:
+            observation = collect_wake_read_observation(
+                wake_run_id=wake_run_id,
+                gateway_module=_sys.modules[__name__],
+            )
+            if observation.get('started') and observation.get('status') != 'ok':
+                _wake_live_trace(
+                    wake_run_id,
+                    'FAILED',
+                    error_code='WAKE_READ_OBSERVATION_FAILED',
+                    detail=str(observation.get('reason') or ''),
+                )
+                return jsonify({
+                    'ok': True,
+                    'skipped': True,
+                    'reason': 'WAKE_READ_OBSERVATION_FAILED',
+                    'wake_run_id': wake_run_id,
+                    'detail': str(observation.get('reason') or ''),
+                })
             main_turn = _run_unified_normal_main_chat_turn(
                 wake_run_id=wake_run_id,
                 window_identity=_wake_window_identity,
                 now=now,
                 t2_hours=t2_hours,
                 t_hours=t_hours,
+                observation_bundle=observation.get('bundle'),
             )
             main_cache_info = dict(main_turn.get('cache_info') or {})
             main_cache_info.update({

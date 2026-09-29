@@ -56,12 +56,16 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
 
     def test_basic_payload_has_no_internal_state_fields(self):
         payload = json.loads(self.input.build_user_payload())
-        self.assertEqual(payload['extra_context'], {})
+        self.assertEqual(
+            payload['extra_context']['ObservationBundle'],
+            {'observations': [], 'status': 'empty'},
+        )
         for forbidden in (
             'affect', 'drive', 'longing', 'internal_state', 'Internal State',
             'primary_drive', 'contributors', 'state_version',
         ):
             self.assertNotIn(forbidden, payload)
+            self.assertNotIn(forbidden, payload['extra_context'])
 
     def test_message_decision_keeps_b3_takeover(self):
         import datetime
@@ -254,6 +258,13 @@ class UhA1Step2BaseWakeTests(unittest.TestCase):
             gateway.index('    planner_view = None', gateway.index('if basic_normal:'))
         ]
         self.assertIn('_run_unified_normal_main_chat_turn', normal_route)
+        self.assertIn('collect_wake_read_observation', normal_route)
+        self.assertLess(
+            normal_route.index('collect_wake_read_observation'),
+            normal_route.index('_run_unified_normal_main_chat_turn'),
+        )
+        self.assertIn('WAKE_READ_OBSERVATION_FAILED', normal_route)
+        self.assertIn('observation_bundle=observation.get(\'bundle\')', normal_route)
         self.assertNotIn('plan_b2_wake_action', normal_route)
         self.assertNotIn('invoke_renderer', normal_route)
 

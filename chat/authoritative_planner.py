@@ -60,6 +60,11 @@ class BasicWakePlannerInput:
     extra_context: dict[str, Any] = field(default_factory=dict)
 
     def build_user_payload(self) -> str:
+        context = dict(self.extra_context or {})
+        context.setdefault(
+            'ObservationBundle',
+            {'observations': [], 'status': 'empty'},
+        )
         payload = {
             'wake_run_id': self.wake_run_id,
             'mode': self.mode,
@@ -67,7 +72,7 @@ class BasicWakePlannerInput:
             'user_idle_hours': round(float(self.user_idle_hours), 3),
             'effective_idle_hours': round(float(self.effective_idle_hours), 3),
             'allowed_actions': list(self.allowed_actions),
-            'extra_context': {},
+            'extra_context': context,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -79,6 +84,7 @@ def make_basic_wake_planner_input(
     user_idle_hours: float,
     effective_idle_hours: float,
     mode: str = 'normal',
+    extra_context: Optional[dict[str, Any]] = None,
 ) -> BasicWakePlannerInput:
     return BasicWakePlannerInput(
         wake_run_id=str(wake_run_id or ''),
@@ -86,6 +92,7 @@ def make_basic_wake_planner_input(
         observed_at=observed_at,
         user_idle_hours=float(user_idle_hours),
         effective_idle_hours=float(effective_idle_hours),
+        extra_context=dict(extra_context or {}),
     )
 
 
@@ -122,6 +129,7 @@ def _input_from_view(
             getattr(planner_input, 'effective_idle_hours', 0.0) or 0.0
         ),
         mode=str(getattr(planner_input, 'mode', 'normal') or 'normal'),
+        extra_context=dict(getattr(planner_input, 'extra_context', None) or {}),
     )
 
 
@@ -276,6 +284,7 @@ def run_authoritative_cc_planner(
     decision_attempt_id: str,
     timeout_sec: float = _PLANNER_TIMEOUT_SEC,
     invoke_fn: Optional[Callable] = None,
+    observation_bundle: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     del decision_attempt_id
     try:
@@ -284,6 +293,17 @@ def run_authoritative_cc_planner(
             if isinstance(planner_input, BasicWakePlannerInput)
             else _input_from_view(planner_input, wake_run_id=wake_run_id)
         )
+        if observation_bundle is not None:
+            extra = dict(basic_input.extra_context or {})
+            extra['ObservationBundle'] = observation_bundle
+            basic_input = make_basic_wake_planner_input(
+                wake_run_id=basic_input.wake_run_id,
+                observed_at=basic_input.observed_at,
+                user_idle_hours=basic_input.user_idle_hours,
+                effective_idle_hours=basic_input.effective_idle_hours,
+                mode=basic_input.mode,
+                extra_context=extra,
+            )
         payload = basic_input.build_user_payload()
         invoker = invoke_fn or invoke_cc_planner
         result = invoker(user_payload=payload, timeout_sec=timeout_sec)

@@ -77,6 +77,7 @@ _CLEANUP_REASON_ALLOWLIST = frozenset({
     'normal_wake_main_chat_jsonl_not_final',
     'normal_wake_main_chat_delivery_failed',
     'delivery_succeeded',
+    'wake_read_observation_failed',
 })
 
 
@@ -118,6 +119,18 @@ class SharedWakeDeliveryFence:
         self.token = object()
         self._finished = False
 
+    def release(self) -> None:
+        """Drop generation ownership without claiming a user-visible delivery."""
+        if self._finished:
+            return
+        try:
+            self.gateway._gen_release(
+                None,
+                expected_pending_token=self.token,
+            )
+        finally:
+            self._finished = True
+
     def finish(
         self,
         delivered: bool,
@@ -137,11 +150,7 @@ class SharedWakeDeliveryFence:
                     reason=reason,
                 )
         finally:
-            self.gateway._gen_release(
-                None,
-                expected_pending_token=self.token,
-            )
-            self._finished = True
+            self.release()
 
 
 def begin_shared_wake_delivery_fence(*, gateway: Any, resident: Any) -> SharedWakeDeliveryFence:
@@ -325,23 +334,16 @@ def _is_shared_b3_cache_info(cache_info: Any) -> bool:
     )
 
 
-def retire_shared_resident_after_failed_delivery(
+def _retire_shared_resident_for_window(
     *,
-    cache_info: Any,
     window_identity: Any,
     delivery_token: Any = None,
     reason: str = 'delivery_failed',
 ) -> bool:
-    """Retire only an idle, still-bound resident after undelivered B3 output."""
-    if not _is_shared_b3_cache_info(cache_info):
-        return False
-    try:
-        import config_store
-        if not config_store.get_bool('UNIFIED_NORMAL_WAKE_ENABLED', default=False):
-            return False
-    except Exception:
-        return False
+    """Retire the still-bound resident for one captured window identity.
 
+    This is the shared race-protected closer. Callers decide provenance.
+    """
     if not isinstance(window_identity, Mapping):
         return False
     try:
@@ -400,3 +402,40 @@ def retire_shared_resident_after_failed_delivery(
             return bool(close_return)
     except Exception:
         return False
+
+
+def retire_shared_resident_after_failed_delivery(
+    *,
+    cache_info: Any,
+    window_identity: Any,
+    delivery_token: Any = None,
+    reason: str = 'delivery_failed',
+) -> bool:
+    """Retire only an idle, still-bound resident after undelivered B3 output."""
+    if not _is_shared_b3_cache_info(cache_info):
+        return False
+    try:
+        import config_store
+        if not config_store.get_bool('UNIFIED_NORMAL_WAKE_ENABLED', default=False):
+            return False
+    except Exception:
+        return False
+    return _retire_shared_resident_for_window(
+        window_identity=window_identity,
+        delivery_token=delivery_token,
+        reason=reason,
+    )
+
+
+def retire_shared_resident_after_failed_internal_turn(
+    *,
+    window_identity: Any,
+    delivery_token: Any = None,
+    reason: str = 'wake_read_observation_failed',
+) -> bool:
+    """Retire a captured window after a started provider-only internal turn."""
+    return _retire_shared_resident_for_window(
+        window_identity=window_identity,
+        delivery_token=delivery_token,
+        reason=reason,
+    )

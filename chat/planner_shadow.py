@@ -236,11 +236,16 @@ def build_shadow_user_payload(
     planner_view: Any,
     skill_view: Any,
     wake_run_id: str,
+    observation_bundle: Any = None,
 ) -> str:
+    bundle = observation_bundle
+    if not isinstance(bundle, Mapping):
+        bundle = {'observations': [], 'status': 'empty'}
     payload = {
         'wake_run_id': wake_run_id,
         'PlannerStateView': _view_to_dict(planner_view),
         'CapabilitySkillView': _skill_to_dict(skill_view),
+        'ObservationBundle': bundle,
         'instructions': (
             '基于以上 V+K 形成一次 Shadow Decision JSON。'
             '不要输出用户可见正文。'
@@ -467,6 +472,7 @@ def run_shadow_attempt(
     legacy_provenance: Optional[Mapping[str, Any]] = None,
     timeout_sec: float = _SHADOW_TIMEOUT_SEC,
     invoke_fn=None,
+    observation_bundle: Any = None,
 ) -> dict:
     """Synchronous Shadow attempt → observation record (caller may thread it).
 
@@ -520,6 +526,7 @@ def run_shadow_attempt(
             planner_view=planner_view,
             skill_view=skill_view,
             wake_run_id=wake_run_id,
+            observation_bundle=observation_bundle,
         )
         invoker = invoke_fn or invoke_shadow_planner_relay
         text, shadow_provider, shadow_model = _coerce_invoke_result(
@@ -591,6 +598,7 @@ def run_authoritative_planner_decision(
     timeout_sec: Optional[float] = None,
     invoke_fn=None,
     mode: str = 'normal',
+    observation_bundle: Any = None,
 ) -> tuple[str, dict]:
     """Route production normal Wake to CC; retain legacy non-normal behavior."""
     if str(mode or 'normal').strip() == 'normal':
@@ -604,6 +612,7 @@ def run_authoritative_planner_decision(
                 if timeout_sec is None else timeout_sec
             ),
             invoke_fn=invoke_fn,
+            observation_bundle=observation_bundle,
         )
     return _run_legacy_authoritative_planner_decision(
         planner_view=planner_view,
@@ -614,6 +623,7 @@ def run_authoritative_planner_decision(
             _SHADOW_TIMEOUT_SEC if timeout_sec is None else timeout_sec
         ),
         invoke_fn=invoke_fn,
+        observation_bundle=observation_bundle,
     )
 
 
@@ -625,6 +635,7 @@ def _run_legacy_authoritative_planner_decision(
     decision_attempt_id: str,
     timeout_sec: float = _SHADOW_TIMEOUT_SEC,
     invoke_fn=None,
+    observation_bundle: Any = None,
 ) -> tuple[str, dict]:
     """Synchronous production Planner Decision for B2 consumer.
 
@@ -648,6 +659,7 @@ def _run_legacy_authoritative_planner_decision(
             planner_view=planner_view,
             skill_view=skill_view,
             wake_run_id=wake_run_id,
+            observation_bundle=observation_bundle,
         )
         invoker = invoke_fn or invoke_shadow_planner_relay
         text, _shadow_provider, _shadow_model = _coerce_invoke_result(

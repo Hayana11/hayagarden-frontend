@@ -665,6 +665,63 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         self.assertTrue(close.called)
         self.assertEqual(released, [None])
 
+    def test_b3_failed_delivery_still_requires_b3_authority(self):
+        with mock.patch('config_store.get_bool', return_value=True), \
+             mock.patch.object(uh.dr, 'close_local_resident_if_bound') as close:
+            missing = uh.retire_shared_resident_after_failed_delivery(
+                cache_info={
+                    'provider': 'claude_code',
+                    'source': 'wake',
+                },
+                window_identity={
+                    'context_id': 12,
+                    'context_epoch': 3,
+                    'resident_generation': 2,
+                },
+            )
+        self.assertFalse(missing)
+        close.assert_not_called()
+
+    def test_delivery_fence_release_is_idempotent_and_does_not_retire(self):
+        import threading
+
+        resident = _FakeResident()
+        released = []
+        fake_gateway = types.SimpleNamespace(
+            _CC_RESIDENT=resident,
+            _gen_busy=True,
+            _gen_pending_delivery=None,
+            _gen_cond=threading.Condition(),
+            _gen_release=lambda result, **kwargs: released.append(result),
+        )
+
+        def mark(token):
+            fake_gateway._gen_pending_delivery = token
+
+        fake_gateway._gen_mark_pending_delivery = mark
+        with mock.patch.object(uh.dr, 'close_local_resident_if_bound') as close:
+            fence = uh.begin_shared_wake_delivery_fence(
+                gateway=fake_gateway,
+                resident=resident,
+            )
+            fence.release()
+            fence.release()
+            fence.finish(
+                False,
+                cache_info={
+                    'provider': 'claude_code',
+                    'source': 'wake',
+                    'b3_authority': True,
+                },
+                window_identity={
+                    'context_id': 12,
+                    'context_epoch': 3,
+                    'resident_generation': 2,
+                },
+            )
+        close.assert_not_called()
+        self.assertEqual(released, [None])
+
     def test_executor_cleanup_wrapper_is_called_for_undelivered_shared_wake(self):
         from wake import executor
 
@@ -1295,6 +1352,19 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
                 mock.patch.object(
                     gateway, '_run_unified_normal_main_chat_turn',
                     return_value=main_turn,
+                ),
+                mock.patch(
+                    'chat.behavior_authority_b3.unified_normal_wake_enabled',
+                    return_value=True,
+                ),
+                mock.patch(
+                    'chat.wake_read_observation.collect_wake_read_observation',
+                    return_value={
+                        'status': 'unavailable',
+                        'started': False,
+                        'reason': 'test_skip',
+                        'bundle': {'observations': (), 'status': 'unavailable'},
+                    },
                 ),
                 mock.patch.object(
                     executor, 'execute', return_value={'delivered': True},
