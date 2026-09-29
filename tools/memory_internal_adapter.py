@@ -32,9 +32,26 @@ def search_memories(
     db_path: str,
     *,
     keyword: Any = "",
+    shadow_surface: str | None = None,
+    shadow_turn_id: str | None = None,
+    shadow_request_id: str | None = None,
 ) -> dict[str, Any]:
     with open_memory_db(db_path) as conn:
-        return {"posts": search_memory_posts(conn, keyword=keyword, limit=8)}
+        result = {"posts": search_memory_posts(conn, keyword=keyword, limit=8)}
+    try:
+        from tools.memory_interop_shadow import observe_memory_search
+
+        observe_memory_search(
+            posts_db_path=str(db_path or "").strip(),
+            posts=result["posts"],
+            keyword=keyword,
+            source_surface=shadow_surface,
+            turn_id=shadow_turn_id,
+            request_id=shadow_request_id,
+        )
+    except Exception:
+        pass
+    return result
 
 
 def _main() -> int:
@@ -44,6 +61,9 @@ def _main() -> int:
     result = search_memories(
         payload.get("db_path"),
         keyword=payload.get("keyword", ""),
+        shadow_surface=payload.get("shadow_surface"),
+        shadow_turn_id=payload.get("shadow_turn_id") or payload.get("verified_turn_id"),
+        shadow_request_id=payload.get("shadow_request_id"),
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

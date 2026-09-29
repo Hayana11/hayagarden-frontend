@@ -122,6 +122,10 @@ function callAdapter(toolName, input, verifiedTurnId = null) {
     ...input,
     db_path: dbPath,
   };
+  if (toolName === 'memory_search' || toolName === 'memory_write') {
+    payload.shadow_surface = 'claude_code';
+    if (verifiedTurnId) payload.shadow_turn_id = verifiedTurnId;
+  }
   const output = execFileSync(command.python, ['-m', moduleName], {
     cwd: command.cwd,
     env: {

@@ -48,6 +48,9 @@ function callInternalAdapter(operation, input, { dbPath, python, cwd } = {}) {
   const command = adapterCommand({ python, cwd });
   const payload = { operation, ...input };
   if (dbPath) payload.db_path = dbPath;
+  if (operation === 'search_memories' || operation === 'write_memory') {
+    payload.shadow_surface = payload.shadow_surface || 'internal_mcp';
+  }
   const output = execFileSync(command.python, ['-m', adapterModuleFor(operation)], {
     cwd: command.cwd,
     env: { ...process.env, ...(dbPath ? { TODO_INTERNAL_DB_PATH: dbPath } : {}) },
@@ -217,9 +220,10 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
     },
     async ({ keyword }) => {
       try {
+        const shadow_request_id = randomUUID();
         const result = callInternalAdapter(
           'search_memories',
-          { keyword, limit: 8 },
+          { keyword, limit: 8, shadow_request_id },
           { dbPath, python, cwd },
         );
         return {
@@ -250,7 +254,10 @@ function buildServer({ dbPath, verify = verifyCurrentInternalAction, python, cwd
       try {
         const result = callInternalAdapter(
           'write_memory',
-          toolInput,
+          {
+            ...toolInput,
+            shadow_turn_id: decision.verified_turn_id || undefined,
+          },
           { dbPath, python, cwd },
         );
         if (result.status === 'CREATED') {

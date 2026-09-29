@@ -6,10 +6,14 @@ R1 is an offline, read-only shadow adapter. It proves that the current
 legacy `posts` memory store can be translated losslessly into MEMORY-INTEROP
 v0.1 contracts without changing legacy behavior.
 
-It is not wired into production `memory.search` or `memory.write`.
+It is not itself a production write or search replacement.
 It does not dual-write. It does not deploy. It does not open or create a
-Memory Kernel database. No chat, Wake, agent, context-assembly, MCP, HTTP,
-cron, or startup path imports this module.
+Memory Kernel database.
+
+R2A may invoke this translator from a default-off Live Shadow worker after an
+authoritative legacy result is frozen. That worker is observation-only; see
+`docs/memory-interop-live-shadow-r2a.md`. The R1 module remains a read-only
+translator. No Kernel committer lives here.
 
 ## Translation shape
 

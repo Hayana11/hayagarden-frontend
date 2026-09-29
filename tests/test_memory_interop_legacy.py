@@ -21,6 +21,7 @@ from tools.memory_interop_legacy import (
     LEGACY_POSTS_SOURCE_TYPE,
     legacy_post_to_evidence,
     legacy_post_to_submission_envelope,
+    legacy_rows_to_context_bundle,
     open_legacy_posts_readonly,
     retrieve_legacy_posts_context_bundle,
     shadow_compare_legacy_search,
@@ -411,6 +412,7 @@ class LegacySearchContextBundleTests(unittest.TestCase):
         self.assertEqual({}, dict(first.permission_boundary))
         self.assertEqual("legacy memory.search shadow", first.retrieval_reason)
         self.assertEqual(0, first.selection_metadata["legacy_search"]["position"])
+        self.assertEqual("id DESC", first.selection_metadata["legacy_search"]["order"])
         self.assertEqual((LEGACY_POSTS_ADAPTER_ID,), bundle.contributor_adapter_ids)
         self.assertEqual("req-1", bundle.request_id)
         self.assertEqual("turn-1", bundle.turn_id)
@@ -429,6 +431,43 @@ class LegacySearchContextBundleTests(unittest.TestCase):
         self.assertTrue(result["same_content"])
         self.assertTrue(result["same_count"])
         self.assertTrue(result["same_source_refs"])
+
+    def test_explicit_rows_preserve_authoritative_order_without_search(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = [dict(row) for row in conn.execute(
+                "SELECT * FROM posts WHERE id IN (12, 1, 60) ORDER BY id ASC"
+            ).fetchall()]
+        finally:
+            conn.close()
+        bundle = legacy_rows_to_context_bundle(
+            rows,
+            request_context=_request_context(),
+            bundle_id="bundle-explicit",
+            generated_at=UTC_1,
+            order="authoritative",
+        )
+        self.assertEqual(
+            ["legacy.posts.1", "legacy.posts.12", "legacy.posts.60"],
+            [item.item_id for item in bundle.items],
+        )
+        self.assertEqual("old needle", bundle.items[0].content)
+        self.assertEqual("authoritative", bundle.items[0].selection_metadata["legacy_search"]["order"])
+        self.assertIsNone(bundle.items[0].confidence)
+        self.assertIsNone(bundle.items[0].epistemic_status)
+        reversed_rows = list(reversed(rows))
+        reversed_bundle = legacy_rows_to_context_bundle(
+            reversed_rows,
+            request_context=_request_context(),
+            bundle_id="bundle-reversed",
+            generated_at=UTC_1,
+            order="authoritative",
+        )
+        self.assertEqual(
+            ["legacy.posts.60", "legacy.posts.12", "legacy.posts.1"],
+            [item.item_id for item in reversed_bundle.items],
+        )
 
 
 class LegacyReadOnlyGuaranteeTests(unittest.TestCase):
@@ -589,6 +628,7 @@ print(json.dumps(loaded))
         skip = {
             "tools/memory_interop_legacy.py",
             "tools/memory_interop_legacy_shadow.py",
+            "tools/memory_interop_shadow_worker.py",
         }
         for path in paths:
             relative = path.relative_to(ROOT).as_posix()
