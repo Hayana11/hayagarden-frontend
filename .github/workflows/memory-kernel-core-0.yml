@@ -5,9 +5,12 @@ on:
     paths:
       - "tools/memory_kernel.py"
       - "tools/memory_kernel_schema.py"
+      - "tools/memory_interop.py"
       - "tests/test_memory_kernel.py"
       - "tests/test_memory_kernel_legacy_isolation.py"
+      - "tests/test_memory_interop.py"
       - "docs/memory-kernel-core-0.md"
+      - "docs/memory-interop-v0.1.md"
       - ".github/workflows/memory-kernel-core-0.yml"
   workflow_dispatch:
 
@@ -38,11 +41,14 @@ jobs:
       - name: Lint CORE-0
         run: >-
           python -m ruff check
-          tools/memory_kernel.py tools/memory_kernel_schema.py
+          tools/memory_kernel.py tools/memory_kernel_schema.py tools/memory_interop.py
           tests/test_memory_kernel.py tests/test_memory_kernel_legacy_isolation.py
+          tests/test_memory_interop.py
       - name: Semantic, migration, and legacy isolation contracts
         run: >-
           python -m unittest
-          tests.test_memory_kernel tests.test_memory_kernel_legacy_isolation -v
+          tests.test_memory_kernel tests.test_memory_kernel_legacy_isolation
+          tests.test_memory_interop -v
       - name: Whitespace check
         run: git diff --check
+

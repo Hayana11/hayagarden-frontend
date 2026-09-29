@@ -186,7 +186,13 @@ class LegacyIsolationTests(unittest.TestCase):
         for directory in ("tools", "chat", "wake"):
             paths.extend((ROOT / directory).rglob("*.py"))
         for path in paths:
-            if path.name in ("memory_kernel.py", "memory_kernel_schema.py"):
+            # These three files are the isolated semantic/contract layer itself;
+            # every actual production module remains subject to the importer scan.
+            if path.relative_to(ROOT).as_posix() in {
+                "tools/memory_kernel.py",
+                "tools/memory_kernel_schema.py",
+                "tools/memory_interop.py",
+            }:
                 continue
             with self.subTest(path=path.relative_to(ROOT)):
                 self.assertNotIn("memory_kernel", path.read_text(encoding="utf-8"))
@@ -213,3 +219,5 @@ assert not any(name in sys.modules for name in (
 
 if __name__ == "__main__":
     unittest.main()
+
+
