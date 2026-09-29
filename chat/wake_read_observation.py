@@ -181,6 +181,7 @@ def collect_wake_read_observation(
             begin_shared_wake_delivery_fence,
             commit_shared_transcript_watermark,
             prepare_shared_transcript_watermark,
+            retire_shared_resident_after_failed_internal_turn,
         )
     except Exception as exc:
         result['reason'] = 'observation_import_unavailable:' + type(exc).__name__
@@ -302,7 +303,7 @@ def collect_wake_read_observation(
             'status': 'ok',
         }
         if delivery_fence is not None:
-            delivery_fence.finish(True, cache_info=usage, reason='delivery_succeeded')
+            delivery_fence.release()
         return {
             'status': 'ok',
             'reason': '',
@@ -317,11 +318,19 @@ def collect_wake_read_observation(
             result['reason'] = 'generation_lock_busy'
             return result
         if started and delivery_fence is not None:
-            delivery_fence.finish(
-                False,
-                cache_info={'provider': 'claude_code', 'source': 'wake'},
-                reason='delivery_failed',
+            captured = None
+            if watermark is not None:
+                captured = {
+                    'context_id': int(watermark.context_id),
+                    'context_epoch': int(watermark.context_epoch),
+                    'resident_generation': int(watermark.resident_generation),
+                }
+            retire_shared_resident_after_failed_internal_turn(
+                window_identity=captured,
+                delivery_token=delivery_fence.token,
+                reason='wake_read_observation_failed',
             )
+            delivery_fence.release()
         return {
             'status': 'failed' if started else 'unavailable',
             'reason': str(exc)[:300],

@@ -102,9 +102,15 @@ class _FakeResident:
 class _FakeFence:
     def __init__(self):
         self.finished = []
+        self.released = 0
+        self.token = object()
 
     def finish(self, delivered, **kwargs):
         self.finished.append((bool(delivered), dict(kwargs)))
+        self.release()
+
+    def release(self):
+        self.released += 1
 
 
 def _synthetic_entry(capability_id, *, autonomy_mode, side_effect):
@@ -338,7 +344,8 @@ class WakeObservationHotPathTests(unittest.TestCase):
         )
         self.assertEqual(result['watermark_skip']['skipped'], True)
         self.assertEqual(len(commit_calls), 1)
-        self.assertEqual(fence.finished, [(True, mock.ANY)])
+        self.assertEqual(fence.finished, [])
+        self.assertEqual(fence.released, 1)
         self.assertEqual(released, [])
 
     def test_cold_unavailable_does_not_bootstrap(self):
@@ -408,8 +415,8 @@ class WakeObservationHotPathTests(unittest.TestCase):
         self.assertEqual(result['bundle']['status'], 'failed')
         self.assertIsNone(result['watermark_skip'])
         self.assertEqual(commit_calls, [])
-        self.assertEqual(len(fence.finished), 1)
-        self.assertFalse(fence.finished[0][0])
+        self.assertEqual(fence.finished, [])
+        self.assertEqual(fence.released, 1)
         self.assertEqual(released, [])
 
     def test_shared_transcript_watermark_exact_skip(self):
@@ -442,6 +449,178 @@ class WakeObservationHotPathTests(unittest.TestCase):
             'user_turn=True',
         ):
             self.assertNotIn(forbidden, src)
+
+    def _binding(self, *, generation=2):
+        return types.SimpleNamespace(
+            context_id=1,
+            context_epoch=1,
+            resident_generation=generation,
+            resident_key='chat:1:1:%s' % generation,
+        )
+
+    def _real_fence_gateway(self, resident):
+        import threading
+
+        released = []
+        fake_gateway = types.SimpleNamespace(
+            _CC_RESIDENT=resident,
+            DB_PATH='/tmp/obs.db',
+            _gen_busy=True,
+            _gen_pending_delivery=None,
+            _gen_cond=threading.Condition(),
+            _gen_acquire_or_wait=lambda wait_timeout=0: ('own', None),
+        )
+
+        def mark(token):
+            fake_gateway._gen_pending_delivery = token
+
+        def release(result, *, expected_pending_token=None):
+            if expected_pending_token is not None and (
+                fake_gateway._gen_pending_delivery is not expected_pending_token
+            ):
+                return False
+            fake_gateway._gen_pending_delivery = None
+            released.append(result)
+            return True
+
+        fake_gateway._gen_mark_pending_delivery = mark
+        fake_gateway._gen_release = release
+        return fake_gateway, released
+
+    def _collect_with_real_fence(
+        self,
+        resident,
+        *,
+        binding,
+        commit_error=None,
+        watermark=None,
+    ):
+        import sys
+
+        from chat import unified_heartbeat_a1 as uh
+
+        watermark = watermark or self._watermark()
+        gateway, released = self._real_fence_gateway(resident)
+        close_calls = []
+        state = {'binding': binding}
+
+        def close(_resident, *, expected_key):
+            close_calls.append(expected_key)
+            state['binding'] = None
+            return True
+
+        commit_kwargs = {}
+        if commit_error is None:
+            commit_kwargs['return_value'] = {
+                'skipped': True,
+                'start_offset': 40,
+                'end_offset': 80,
+            }
+        else:
+            commit_kwargs['side_effect'] = commit_error
+
+        with mock.patch(
+            'chat.behavior_authority_b3._hot_chat_resident_ready',
+            return_value=(True, 'ok'),
+        ), mock.patch(
+            'chat.unified_heartbeat_a1.prepare_shared_transcript_watermark',
+            return_value=(watermark, 'ok'),
+        ), mock.patch(
+            'chat.unified_heartbeat_a1.commit_shared_transcript_watermark',
+            **commit_kwargs,
+        ), mock.patch.object(
+            uh.dr, 'get_local_binding', side_effect=lambda: state['binding'],
+        ), mock.patch.object(
+            uh.dr, 'close_local_resident_if_bound', side_effect=close,
+        ), mock.patch.dict(sys.modules, {'gateway': gateway}):
+            result = collect_wake_read_observation(
+                wake_run_id='obs-retire',
+                resident=resident,
+                db_path='/tmp/obs.db',
+                gateway_module=gateway,
+            )
+        return result, gateway, released, close_calls, state
+
+    def test_started_observation_failure_retires_matching_resident(self):
+        resident = _FakeResident(error=RuntimeError('stream boom'))
+        result, gateway, released, close_calls, state = self._collect_with_real_fence(
+            resident,
+            binding=self._binding(),
+        )
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(result['started'])
+        self.assertEqual(close_calls, ['chat:1:1:2'])
+        self.assertIsNone(state['binding'])
+        self.assertEqual(released, [None])
+        self.assertIsNone(gateway._gen_pending_delivery)
+        obs_src = (ROOT / 'chat' / 'wake_read_observation.py').read_text(
+            encoding='utf-8',
+        )
+        self.assertNotIn('b3_authority', obs_src)
+        self.assertIn('retire_shared_resident_after_failed_internal_turn', obs_src)
+        self.assertIn('wake_read_observation_failed', obs_src)
+        self.assertIn('watermark.context_id', obs_src)
+        self.assertIn('watermark.context_epoch', obs_src)
+        self.assertIn('watermark.resident_generation', obs_src)
+        self.assertIn('delivery_fence.release()', obs_src)
+
+    def test_identity_mismatch_does_not_retire_newer_resident(self):
+        resident = _FakeResident(error=RuntimeError('jsonl boom'))
+        result, gateway, released, close_calls, state = self._collect_with_real_fence(
+            resident,
+            binding=self._binding(generation=9),
+        )
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(result['started'])
+        self.assertEqual(close_calls, [])
+        self.assertEqual(state['binding'].resident_generation, 9)
+        self.assertEqual(released, [None])
+        self.assertIsNone(gateway._gen_pending_delivery)
+
+    def test_pre_turn_failure_does_not_retire(self):
+        import sys
+
+        from chat import unified_heartbeat_a1 as uh
+
+        resident = _FakeResident()
+        gateway, released = self._real_fence_gateway(resident)
+        with mock.patch(
+            'chat.behavior_authority_b3._hot_chat_resident_ready',
+            return_value=(False, 'resident_not_hot'),
+        ), mock.patch.object(
+            uh.dr, 'close_local_resident_if_bound',
+        ) as close, mock.patch.dict(sys.modules, {'gateway': gateway}):
+            result = collect_wake_read_observation(
+                wake_run_id='obs-pre',
+                resident=resident,
+                db_path='/tmp/obs.db',
+                gateway_module=gateway,
+            )
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertFalse(result['started'])
+        close.assert_not_called()
+        self.assertEqual(released, [])
+        self.assertIsNone(gateway._gen_pending_delivery)
+
+    def test_successful_observation_does_not_retire(self):
+        resident = _FakeResident(events=[
+            ('done', (
+                '{"observations":[]}',
+                '',
+                {'jsonl_usage': {'stream_totals_match': True}},
+                {},
+            )),
+        ])
+        result, gateway, released, close_calls, state = self._collect_with_real_fence(
+            resident,
+            binding=self._binding(),
+        )
+        self.assertEqual(result['status'], 'ok')
+        self.assertTrue(result['started'])
+        self.assertEqual(close_calls, [])
+        self.assertEqual(state['binding'].resident_key, 'chat:1:1:2')
+        self.assertEqual(released, [None])
+        self.assertIsNone(gateway._gen_pending_delivery)
 
 
 class WakeObservationPlannerAndContractTests(unittest.TestCase):
