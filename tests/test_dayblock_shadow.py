@@ -8,9 +8,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import sys
-sys.path.insert(0, "/opt/frontend-preview/tools")
-sys.path.insert(0, "/opt/frontend-preview")
-sys.path.insert(0, "/opt/frontend")
+TEST_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TEST_ROOT / "tools"))
+sys.path.insert(0, str(TEST_ROOT))
 
 import dayblock_shadow as dbs
 from continuity.contracts import SourceMember, candidate_source_revision
@@ -113,10 +113,149 @@ class DayBlockShadowTests(unittest.TestCase):
         self.assertEqual([m.source_ref for m in members],
                          ["turn:1:2", "wake:7", "turn:3:4", "attachment:4:0"])
         self.assertEqual(materialized.source_refs, tuple(m.source_ref for m in members))
+        self.assertFalse(any(m.source_ref.startswith("dayblock_visible_turn:") for m in members))
         self.assertNotIn("today must not enter", materialized.body)
         self.assertNotIn("today reply must not enter", materialized.body)
         self.assertGreater(materialized.source_token_estimate, 0)
         self.assertTrue(snapshot.source_hash)
+
+    def _insert_messages(self, rows, scopes=None):
+        scopes = scopes or {int(row[0]): (31, 9) for row in rows}
+        conn = sqlite3.connect(self.source_db)
+        conn.executemany(
+            "INSERT INTO chat_messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows,
+        )
+        conn.executemany(
+            "INSERT INTO daily_message_contexts VALUES(?,?,?)",
+            [(int(row[0]), *scopes[int(row[0])]) for row in rows],
+        )
+        conn.commit()
+        conn.close()
+
+    def _partial_cache(self, **overrides):
+        value = {"partial_rescue": True, "turn_incomplete": True, "stream_interrupted": True}
+        value.update(overrides)
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    def test_partial_rescue_pair_is_dayblock_visible_projection(self):
+        self._insert_messages([
+            _chat_row(8, "hayana", "爸爸再查查灯💡", "2026-09-25 12:00:00",
+                      attachments='[{"type":"image","url":"/static/uploads/user.png"}]'),
+            _chat_row(9, "fyodor", "partial assistant evidence", "2026-09-25 12:01:00",
+                      cache_info=self._partial_cache(),
+                      attachments='[{"type":"image","url":"/static/uploads/assistant.png"}]'),
+        ])
+        rows = dbs.discover_natural_day_rows(self.source_db, "2026-09-25")
+        self.assertEqual(
+            [(row["id"], row["_dayblock_context_id"], row["_dayblock_context_epoch"])
+             for row in rows if int(row["id"]) in {8, 9}],
+            [(8, 31, 9), (9, 31, 9)],
+        )
+        snapshot, turns, events, members = dbs.derive_source_contract(
+            rows, "2026-09-25", "2026-09-26T12:00:00+08:00",
+        )
+        materialized = dbs.materialize_raw_evidence(members, rows)
+        visible = [member for member in members if member.source_ref == "dayblock_visible_turn:8:9"]
+        self.assertEqual(len(visible), 1)
+        self.assertEqual(visible[0].source_kind, "incomplete_user_turn")
+        self.assertEqual(len(turns), 2)
+        self.assertFalse(any(turn.turn_id == "turn:8:9" for turn in turns))
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+        self.assertIn("爸爸再查查灯💡", materialized.body)
+        self.assertIn("partial assistant evidence", materialized.body)
+        self.assertEqual(
+            {item["message_id"]: item["parent_source_ref"] for item in materialized.attachments
+             if item["message_id"] in {8, 9}},
+            {8: "dayblock_visible_turn:8:9", 9: "dayblock_visible_turn:8:9"},
+        )
+        assistant = next(row for row in rows if int(row["id"]) == 9)
+        self.assertEqual(
+            json.loads(assistant["cache_info"]),
+            {"partial_rescue": True, "turn_incomplete": True, "stream_interrupted": True},
+        )
+        self.assertEqual(snapshot.members[visible[0].seq].source_ref, "dayblock_visible_turn:8:9")
+
+    def test_partial_rescue_revision_binds_both_rows_and_finality_provenance(self):
+        self._insert_messages([
+            _chat_row(8, "hayana", "original user", "2026-09-25 12:00:00"),
+            _chat_row(9, "fyodor", "original assistant", "2026-09-25 12:01:00",
+                      cache_info=self._partial_cache()),
+        ])
+        rows = dbs.discover_natural_day_rows(self.source_db, "2026-09-25")
+        _, _, _, members = dbs.derive_source_contract(rows, "2026-09-25", "2026-09-26T12:00:00+08:00")
+        original = next(member for member in members if member.source_ref == "dayblock_visible_turn:8:9")
+        for message_id, changes in ((8, {"content": "changed user"}),
+                                    (9, {"content": "changed assistant"}),
+                                    (9, {"cache_info": self._partial_cache(stream_interrupted=False)})):
+            changed = tuple(
+                dict(row, **changes) if int(row["id"]) == message_id else row
+                for row in rows
+            )
+            _, _, _, changed_members = dbs.derive_source_contract(
+                changed, "2026-09-25", "2026-09-26T12:00:00+08:00",
+            )
+            revised = next(member for member in changed_members if member.source_ref == "dayblock_visible_turn:8:9")
+            self.assertNotEqual(original.source_revision, revised.source_revision)
+
+    def test_user_only_remains_incomplete_user_projection(self):
+        self._insert_messages([_chat_row(8, "hayana", "unfinished user", "2026-09-25 12:00:00")])
+        rows = dbs.discover_natural_day_rows(self.source_db, "2026-09-25")
+        _, _, _, members = dbs.derive_source_contract(rows, "2026-09-25", "2026-09-26T12:00:00+08:00")
+        self.assertEqual(
+            [member.source_ref for member in members if member.source_ref.startswith("incomplete_user:")],
+            ["incomplete_user:8"],
+        )
+        self.assertFalse(any(member.source_ref.startswith("dayblock_visible_turn:") for member in members))
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+
+    def test_empty_partial_rescue_assistant_is_not_visible_and_not_dropped(self):
+        self._insert_messages([
+            _chat_row(8, "hayana", "user before empty rescue", "2026-09-25 12:00:00"),
+            _chat_row(9, "fyodor", "", "2026-09-25 12:01:00", cache_info=self._partial_cache()),
+        ])
+        rows = dbs.discover_natural_day_rows(self.source_db, "2026-09-25")
+        _, _, _, members = dbs.derive_source_contract(rows, "2026-09-25", "2026-09-26T12:00:00+08:00")
+        self.assertFalse(any(member.source_ref.startswith("dayblock_visible_turn:") for member in members))
+        self.assertIn("incomplete_user:8", [member.source_ref for member in members])
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
+
+    def test_isolated_partial_rescue_assistant_remains_uncovered(self):
+        self._insert_messages([
+            _chat_row(8, "fyodor", "isolated partial", "2026-09-25 12:01:00",
+                      cache_info=self._partial_cache()),
+        ])
+        rows = dbs.discover_natural_day_rows(self.source_db, "2026-09-25")
+        _, _, _, members = dbs.derive_source_contract(rows, "2026-09-25", "2026-09-26T12:00:00+08:00")
+        self.assertFalse(any(member.source_ref.startswith("dayblock_visible_turn:") for member in members))
+        self.assertIn(8, [int(row["id"]) for row in dbs.uncovered_formal_source_rows(rows, members)])
+
+    def test_partial_rescue_pair_requires_same_context_and_epoch(self):
+        self._insert_messages(
+            [_chat_row(8, "hayana", "cross scope user", "2026-09-25 12:00:00"),
+             _chat_row(9, "fyodor", "cross scope assistant", "2026-09-25 12:01:00",
+                       cache_info=self._partial_cache())],
+            scopes={8: (31, 9), 9: (31, 10)},
+        )
+        rows = dbs.discover_natural_day_rows(self.source_db, "2026-09-25")
+        _, _, _, members = dbs.derive_source_contract(rows, "2026-09-25", "2026-09-26T12:00:00+08:00")
+        self.assertFalse(any(member.source_ref.startswith("dayblock_visible_turn:") for member in members))
+        self.assertEqual(
+            [int(row["id"]) for row in dbs.uncovered_formal_source_rows(rows, members)], [8, 9],
+        )
+
+    def test_user_user_partial_assistant_does_not_cross_first_user(self):
+        self._insert_messages([
+            _chat_row(8, "hayana", "first user", "2026-09-25 12:00:00"),
+            _chat_row(9, "hayana", "second user", "2026-09-25 12:01:00"),
+            _chat_row(10, "fyodor", "partial after second", "2026-09-25 12:02:00",
+                      cache_info=self._partial_cache()),
+        ])
+        rows = dbs.discover_natural_day_rows(self.source_db, "2026-09-25")
+        _, _, _, members = dbs.derive_source_contract(rows, "2026-09-25", "2026-09-26T12:00:00+08:00")
+        self.assertIn("incomplete_user:8", [member.source_ref for member in members])
+        self.assertIn("dayblock_visible_turn:9:10", [member.source_ref for member in members])
+        self.assertNotIn("dayblock_visible_turn:8:10", [member.source_ref for member in members])
+        self.assertEqual(dbs.uncovered_formal_source_rows(rows, members), ())
 
     def test_unpaired_formal_source_row_blocks_generation(self):
         conn = sqlite3.connect(self.source_db)
