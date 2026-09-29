@@ -46,7 +46,7 @@ class DailyMemoryCutoverTests(unittest.TestCase):
             },
         )
         self.assertEqual(HOME_MCP_CAPABILITY_IDS, ("countdown.read",))
-        self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ())
+        self.assertEqual(INTERNAL_MCP_CAPABILITY_IDS, ("health.read",))
         self.assertEqual(
             INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
             (
