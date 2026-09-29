@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 SHADOW_ENABLED_ENV = "MEMORY_INTEROP_SHADOW_ENABLED"
+SHADOW_SEARCH_ENABLED_ENV = "MEMORY_INTEROP_SHADOW_SEARCH_ENABLED"
+SHADOW_WRITE_ENABLED_ENV = "MEMORY_INTEROP_SHADOW_WRITE_ENABLED"
 SHADOW_DB_PATH_ENV = "MEMORY_INTEROP_SHADOW_DB_PATH"
 SHADOW_SLOT_FD_ENV = "MEMORY_INTEROP_SHADOW_SLOT_FD"
 SHADOW_MAX_INFLIGHT_WORKERS = 2
@@ -50,9 +52,21 @@ def sha256_text(value: Any) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def is_shadow_enabled(environ: Mapping[str, str] | None = None) -> bool:
+def _exact_one(environ: Mapping[str, str] | None, name: str) -> bool:
     env = os.environ if environ is None else environ
-    return str(env.get(SHADOW_ENABLED_ENV, "")).strip() == "1"
+    return str(env.get(name, "")).strip() == "1"
+
+
+def is_shadow_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    return _exact_one(environ, SHADOW_ENABLED_ENV)
+
+
+def is_shadow_search_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    return is_shadow_enabled(environ) and _exact_one(environ, SHADOW_SEARCH_ENABLED_ENV)
+
+
+def is_shadow_write_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    return is_shadow_enabled(environ) and _exact_one(environ, SHADOW_WRITE_ENABLED_ENV)
 
 
 def is_allowed_write_surface(surface: Any) -> bool:
@@ -360,6 +374,18 @@ def _surface_allowed_for_event(event: Mapping[str, Any]) -> bool:
     return False
 
 
+def _operation_enabled_for_event(
+    event: Mapping[str, Any],
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    operation = str(event.get("operation") or "")
+    if operation == "write":
+        return is_shadow_write_enabled(environ)
+    if operation == "search":
+        return is_shadow_search_enabled(environ)
+    return False
+
+
 def dispatch_shadow_event(
     event: Mapping[str, Any],
     *,
@@ -372,6 +398,8 @@ def dispatch_shadow_event(
     try:
         env_map = os.environ if environ is None else environ
         if not is_shadow_enabled(env_map):
+            return
+        if not _operation_enabled_for_event(event, env_map):
             return
         if not _surface_allowed_for_event(event):
             return
@@ -432,7 +460,7 @@ def observe_memory_write(
 ) -> None:
     try:
         env_map = os.environ if environ is None else environ
-        if not is_shadow_enabled(env_map):
+        if not is_shadow_write_enabled(env_map):
             return
         event = build_write_event(
             posts_db_path=posts_db_path,
@@ -462,7 +490,7 @@ def observe_memory_search(
 ) -> None:
     try:
         env_map = os.environ if environ is None else environ
-        if not is_shadow_enabled(env_map):
+        if not is_shadow_search_enabled(env_map):
             return
         event = build_search_event(
             posts_db_path=posts_db_path,
@@ -486,7 +514,9 @@ __all__ = [
     "SHADOW_DB_PATH_ENV",
     "SHADOW_ENABLED_ENV",
     "SHADOW_MAX_INFLIGHT_WORKERS",
+    "SHADOW_SEARCH_ENABLED_ENV",
     "SHADOW_SLOT_FD_ENV",
+    "SHADOW_WRITE_ENABLED_ENV",
     "WORKER_MODULE",
     "WRITE_SURFACES",
     "ShadowSlot",
@@ -497,6 +527,8 @@ __all__ = [
     "is_allowed_write_surface",
     "is_forbidden_shadow_path",
     "is_shadow_enabled",
+    "is_shadow_search_enabled",
+    "is_shadow_write_enabled",
     "observe_memory_search",
     "observe_memory_write",
     "payload_fingerprint",
