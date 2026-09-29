@@ -26,7 +26,6 @@ from tools.lease_signer import ISSUED_FROM_VALUES, TURN_LEASE_FIELDS, TURN_MODES
 LEASE_DECISIONS = frozenset(
     {"ALLOW", "DENIED_CAPABILITY", "LEASE_MISMATCH"}
 )
-EXTERNAL_READ_AUTO_CAPABILITY_IDS = frozenset({"web.search", "web.read"})
 DEFAULT_TURN_LEASE_FILENAME = ".uh-a0-current-turn-lease.json"
 DEFAULT_REPO_ROOT = "/opt/frontend"
 
@@ -232,20 +231,6 @@ def evaluate_tool_call(
     allowed = tuple(turn_lease["allowed_capabilities"])
     approvals = tuple(turn_lease["approval_ids"])
     is_write = entry.get("side_effect") == "external_state"
-
-    # Enabled External Read is part of an ordinary Chat turn's read surface.
-    # It is side-effect free, needs no approval id, and remains unavailable in
-    # Wake unless that turn explicitly grants it through the normal lease path.
-    if (
-        capability_id in EXTERNAL_READ_AUTO_CAPABILITY_IDS
-        and turn_mode == "chat"
-        and not is_write
-    ):
-        return _decision(
-            capability_id=capability_id,
-            turn_mode=turn_mode,
-            lease_decision="ALLOW",
-        )
 
     if capability_id in allowed:
         # Keep exact action identity checks only for legacy confirmation leases;

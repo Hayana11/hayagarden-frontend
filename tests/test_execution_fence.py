@@ -19,7 +19,7 @@ from tools.execution_fence import (
     approval_prompt,
     write_current_turn_lease,
 )
-from tools.lease_signer import issue_turn_lease
+from tools.lease_signer import TURN_LEASE_FIELDS, issue_turn_lease
 
 
 class ExecutionFenceTests(unittest.TestCase):
@@ -77,14 +77,18 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertNotIn("approval_id", result)
 
         wake = self.lease(mode="wake")
-        self.assertNotIn("health.read", wake["allowed_capabilities"])
+        self.assertIn("health.read", wake["allowed_capabilities"])
+        self.assertEqual(
+            wake["allowed_capabilities"],
+            lease["allowed_capabilities"],
+        )
         self.assertEqual(
             evaluate_tool_call(
                 "mcp__internal__get_health",
                 {"metric": "steps", "days": 2},
                 wake,
             )["lease_decision"],
-            "DENIED_CAPABILITY",
+            "ALLOW",
         )
 
     def test_a_ledger_read_is_allowed_for_chat_and_wake(self):
@@ -121,17 +125,54 @@ class ExecutionFenceTests(unittest.TestCase):
             self.assertEqual(result["capability_id"], capability)
             self.assertEqual(result["lease_decision"], "ALLOW")
 
-    def test_b_external_read_is_chat_auto_allowed_without_approval(self):
-        for tool, capability in (("WebSearch", "web.search"), ("WebFetch", "web.read")):
-            result = evaluate_tool_call(tool, {"query": "x"}, self.lease())
-            self.assertEqual(result["capability_id"], capability)
-            self.assertEqual(result["lease_decision"], "ALLOW")
-            self.assertNotIn("approval_id", result)
+    def test_b_external_read_follows_chat_and_wake_default_lease(self):
+        for mode in ("chat", "wake"):
+            lease = self.lease(mode=mode)
+            self.assertIn("web.search", lease["allowed_capabilities"])
+            self.assertIn("web.read", lease["allowed_capabilities"])
+            for tool, capability in (("WebSearch", "web.search"), ("WebFetch", "web.read")):
+                with self.subTest(mode=mode, tool=tool):
+                    result = evaluate_tool_call(tool, {"query": "x"}, lease)
+                    self.assertEqual(result["capability_id"], capability)
+                    self.assertEqual(result["lease_decision"], "ALLOW")
+                    self.assertNotIn("approval_id", result)
 
-    def test_b_external_read_is_not_auto_enabled_for_wake(self):
-        for tool in ("WebSearch", "WebFetch"):
-            result = evaluate_tool_call(tool, {"query": "x"}, self.lease(mode="wake"))
-            self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
+    def test_b_external_read_denies_when_missing_from_an_otherwise_legal_lease(self):
+        base = self.lease(mode="chat", turn_id="web-stripped")
+        self.assertEqual(set(base), set(TURN_LEASE_FIELDS))
+        stripped = dict(base)
+        stripped["allowed_capabilities"] = tuple(
+            capability_id
+            for capability_id in base["allowed_capabilities"]
+            if capability_id not in {"web.search", "web.read"}
+        )
+        self.assertEqual(stripped["turn_mode"], "chat")
+        self.assertNotIn("web.search", stripped["allowed_capabilities"])
+        self.assertNotIn("web.read", stripped["allowed_capabilities"])
+        for tool, capability in (("WebSearch", "web.search"), ("WebFetch", "web.read")):
+            with self.subTest(tool=tool):
+                result = evaluate_tool_call(tool, {"query": "x"}, stripped)
+                self.assertEqual(result["capability_id"], capability)
+                self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
+
+    def test_b_external_read_runtime_off_is_denied_on_chat_and_wake(self):
+        for mode in ("chat", "wake"):
+            lease = self.lease(mode=mode)
+            for tool in ("WebSearch", "WebFetch"):
+                with self.subTest(mode=mode, tool=tool):
+                    with patch(
+                        "tools.execution_fence.read_capability_state",
+                        return_value=capability_state.RUNTIME_STATE_OFF,
+                    ):
+                        result = evaluate_tool_call(tool, {"query": "x"}, lease)
+                    self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
+
+    def test_execution_fence_has_no_chat_only_web_bypass(self):
+        source = Path(__file__).resolve().parents[1] / "tools" / "execution_fence.py"
+        text = source.read_text(encoding="utf-8")
+        self.assertNotIn("EXTERNAL_READ_AUTO_CAPABILITY_IDS", text)
+        self.assertNotIn('turn_mode == "chat"', text)
+        self.assertNotIn("turn_mode == 'chat'", text)
 
     def test_c_diary_chat_auto_allows_without_approval(self):
         lease = self.lease()
@@ -151,10 +192,10 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(
             evaluate_tool_call(
                 "mcp__capability__diary_write",
-                {"content": "Wake 不应写入"},
+                {"content": "Wake 继承 Chat 默认自动写入"},
                 self.lease(mode="wake"),
             )["lease_decision"],
-            "DENIED_CAPABILITY",
+            "ALLOW",
         )
 
     def test_c_chat_native_read_denied(self):
@@ -177,7 +218,7 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertEqual(result["lease_decision"], "ALLOW")
                 self.assertNotIn("approval_id", result)
 
-    def test_d_gallery_capabilities_are_chat_only_and_fail_closed(self):
+    def test_d_gallery_capabilities_are_inherited_by_wake_and_fail_closed_for_task(self):
         actions = (
             ("mcp__capability__gallery_save", "gallery.save", {"image_index": 0}),
             ("mcp__capability__gallery_recall", "gallery.recall", {"keyword": "海边"}),
@@ -189,11 +230,15 @@ class ExecutionFenceTests(unittest.TestCase):
                 self.assertEqual(allowed["capability_id"], capability_id)
                 self.assertEqual(allowed["lease_decision"], "ALLOW")
                 self.assertEqual(allowed["verified_turn_id"], "gallery-turn")
-                for mode in ("wake", "task"):
-                    self.assertEqual(
-                        evaluate_tool_call(tool_name, action, self.lease(mode=mode))["lease_decision"],
-                        "DENIED_CAPABILITY",
-                    )
+                wake = evaluate_tool_call(
+                    tool_name, action, self.lease(mode="wake", turn_id="gallery-wake")
+                )
+                self.assertEqual(wake["capability_id"], capability_id)
+                self.assertEqual(wake["lease_decision"], "ALLOW")
+                self.assertEqual(
+                    evaluate_tool_call(tool_name, action, self.lease(mode="task"))["lease_decision"],
+                    "DENIED_CAPABILITY",
+                )
                 with patch(
                     "tools.execution_fence.read_capability_state",
                     return_value=capability_state.RUNTIME_STATE_OFF,
