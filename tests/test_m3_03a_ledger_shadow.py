@@ -16,7 +16,6 @@ from tools.cc_capability_adapter import (
     physical_surface_fingerprint,
 )
 from tools.capability_state import RUNTIME_STATE_INHERIT
-from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 INTERNAL_MEMORY_SHADOW_TOOLS = (
@@ -143,8 +142,6 @@ class LedgerInternalShadowTests(unittest.TestCase):
         self.assertIn("mcp__internal__get_todos", disallowed)
         self.assertIn("mcp__internal__add_ledger", disallowed)
         self.assertNotIn("mcp__home__get_todos", allowed)
-        self.assertEqual(WAKE_TO_CC_MCP["get_ledger"], "mcp__home__get_ledger")
-        self.assertEqual(WAKE_TO_CC_MCP["add_ledger"], "mcp__home__add_ledger")
 
     def test_adapter_is_handler_only_and_path_explicit(self):
         source = Path("tools/ledger_internal_adapter.py").read_text(encoding="utf-8")

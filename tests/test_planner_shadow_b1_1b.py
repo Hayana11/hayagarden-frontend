@@ -211,7 +211,9 @@ class PlannerShadowB11BTests(unittest.TestCase):
         self.assertLess(time.time() - t0, 0.5)
 
     def test_c1_capability_intersection_relay_vs_cc(self):
-        """C1: Relay advertises diary; CC must not under current content contract."""
+        """C1: Relay keeps parser diary; Claude normal is Unified B2/B3 none+message."""
+        from chat.capability_skill_view import route_capability_authority
+
         relay_caps = resolved_action_capability_for(
             provider='api_relay', mode='normal',
         )
@@ -219,9 +221,15 @@ class PlannerShadowB11BTests(unittest.TestCase):
             provider='claude_code', mode='normal',
         )
         self.assertIn('diary', relay_caps)
+        self.assertEqual(cc_caps, ('none', 'message'))
         self.assertNotIn('diary', cc_caps)
+        self.assertNotIn('explore', cc_caps)
         self.assertIn('message', relay_caps)
         self.assertIn('message', cc_caps)
+        self.assertEqual(
+            route_capability_authority('claude_code', 'normal'),
+            'unified_b2_b3_route',
+        )
         # Frozen views must reflect the same intersection truth.
         self.assertIn('diary', self.skill.resolved_action_capability)
         with mock.patch(
@@ -241,37 +249,51 @@ class PlannerShadowB11BTests(unittest.TestCase):
                 captured_at=T_OBS,
             )
         self.assertEqual(cc_skill.model_identity, 'explicit:claude-opus-4-6')
-        self.assertNotIn('diary', cc_skill.resolved_action_capability)
+        self.assertEqual(cc_skill.resolved_action_capability, ('none', 'message'))
         self.assertFalse(cc_skill.preconditions['diary_executor_resolved'])
         self.assertEqual(
-            cc_skill.mode_contract['provider_content_policy'],
+            cc_skill.mode_contract['route_capability_authority'],
+            'unified_b2_b3_route',
+        )
+        self.assertEqual(
+            cc_skill.mode_contract['capability_profile'],
+            'unified_hot_resident',
+        )
+        self.assertNotIn('provider_content_policy', cc_skill.mode_contract)
+        self.assertNotEqual(
+            cc_skill.mode_contract.get('route_capability_authority'),
             'cc_content_message_explore_only',
         )
 
     def test_c1_mode_intersection_nightwatch_and_ritual(self):
-        """C1: mode contract excludes explore for nightwatch; ritual_type matters."""
+        """C1: retired modes have no production Action; ritual_type cannot revive them."""
+        from chat.capability_skill_view import route_capability_authority
+
         nw_mode, nw_id = mode_action_contract('nightwatch')
-        self.assertEqual(nw_mode, ('none', 'message', 'diary'))
-        self.assertEqual(nw_id, 'nightwatch_decision')
+        self.assertEqual(nw_mode, ())
+        self.assertEqual(nw_id, 'wake_mode_disabled')
+        self.assertEqual(
+            route_capability_authority('claude_code', 'nightwatch'),
+            'wake_mode_disabled',
+        )
 
         nw_relay = resolved_action_capability_for(
             provider='api_relay', mode='nightwatch',
         )
-        self.assertEqual(nw_relay, ('none', 'message', 'diary'))
+        self.assertEqual(nw_relay, ())
         self.assertNotIn('explore', nw_relay)
 
         nw_cc = resolved_action_capability_for(
             provider='claude_code', mode='nightwatch',
         )
-        self.assertEqual(nw_cc, ('none', 'message'))
+        self.assertEqual(nw_cc, ())
         self.assertNotIn('diary', nw_cc)
         self.assertNotIn('explore', nw_cc)
 
         generic = resolved_action_capability_for(
             provider='api_relay', mode='ritual', ritual_type='',
         )
-        self.assertIn('explore', generic)
-        self.assertIn('diary', generic)
+        self.assertEqual(generic, ())
 
         solstice = resolved_action_capability_for(
             provider='api_relay', mode='ritual', ritual_type='solstice',
@@ -279,14 +301,13 @@ class PlannerShadowB11BTests(unittest.TestCase):
         birthday = resolved_action_capability_for(
             provider='api_relay', mode='ritual', ritual_type='birthday',
         )
-        self.assertEqual(solstice, ('message',))
-        self.assertEqual(birthday, ('message',))
+        self.assertEqual(solstice, ())
+        self.assertEqual(birthday, ())
 
-        # CC special ritual still message-only (provider diary cut is no-op).
         solstice_cc = resolved_action_capability_for(
             provider='claude_code', mode='ritual', ritual_type='solstice',
         )
-        self.assertEqual(solstice_cc, ('message',))
+        self.assertEqual(solstice_cc, ())
 
         frozen = freeze_capability_skill_view(
             wake_run_id='b11b-run-1',
@@ -298,10 +319,14 @@ class PlannerShadowB11BTests(unittest.TestCase):
             captured_at=T_OBS,
         )
         self.assertEqual(frozen.ritual_type, 'birthday')
-        self.assertEqual(frozen.resolved_action_capability, ('message',))
+        self.assertEqual(frozen.resolved_action_capability, ())
         self.assertEqual(
             frozen.mode_contract['mode_contract_id'],
-            'ritual_birthday_message_only',
+            'wake_mode_disabled',
+        )
+        self.assertEqual(
+            frozen.mode_contract['route_capability_authority'],
+            'wake_mode_disabled',
         )
 
     def test_c2_attempt_pairing_accepted_vs_orphan(self):

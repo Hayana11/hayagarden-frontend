@@ -20,7 +20,6 @@ from tools.cc_capability_adapter import (
 from tools.cc_tool_surface import _static_schema_registry
 from tools.capability_state import RUNTIME_STATE_INHERIT, RUNTIME_STATE_OFF
 from tools.lease_signer import issue_turn_lease
-from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 OLD_SURFACE = "fixture-old-surface"
@@ -364,11 +363,6 @@ class DailyLedgerCutoverTests(unittest.TestCase):
                 "tool_surface_changed",
             )
         self.assertEqual(resident.generation, before)
-
-    def test_wake_home_zero_diff_contract(self):
-        self.assertEqual(WAKE_TO_CC_MCP["get_ledger"], "mcp__home__get_ledger")
-        self.assertEqual(WAKE_TO_CC_MCP["get_ledger_budget"], "mcp__home__get_ledger_budget")
-        self.assertEqual(WAKE_TO_CC_MCP["add_ledger"], "mcp__home__add_ledger")
 
 
 if __name__ == "__main__":

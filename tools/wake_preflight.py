@@ -19,13 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from wake.cc_tools import (  # noqa: E402
-    WAKE_TO_CC_MCP,
-    cc_wake_allowed_tools,
-    is_cc_wake_tool,
-    relay_only_tool_names,
-)
-
 
 def _db_path(cli: str | None) -> str:
     return cli or os.environ.get('HAYAGARDEN_DB_PATH') or str(ROOT / 'memories.db')
@@ -221,16 +214,13 @@ def _prompt_sizes() -> dict:
 
 def _tool_report(names: list[str]) -> dict:
     clean = [n for n in names if n and not n.startswith('(')]
-    cc_open = sorted(n for n in clean if is_cc_wake_tool(n))
-    relay_only = relay_only_tool_names(clean)
     return {
         'wake_tools_total': len(clean),
-        'cc_mcp_open': cc_open,
-        'cc_mcp_map': {k: WAKE_TO_CC_MCP[k] for k in cc_open if k in WAKE_TO_CC_MCP},
-        'relay_only': relay_only,
-        'cc_allowed_tools_csv': cc_wake_allowed_tools(
-            [{'name': n} for n in cc_open]
-        ),
+        'cc_wake_tool_compat': 'retired',
+        'cc_mcp_open': [],
+        'cc_mcp_map': {},
+        'relay_only': sorted(clean),
+        'cc_allowed_tools_csv': '',
     }
 
 

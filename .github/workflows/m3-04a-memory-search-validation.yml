@@ -107,7 +107,6 @@ jobs:
           python - <<'PY'
           import tools.capability_manifest as manifest
           from tools.cc_capability_adapter import physical_surface_fingerprint
-          from wake.cc_tools import WAKE_TO_CC_MCP
 
           assert manifest.get_capability("memory.search")["provider_bindings"] == {
               "claude_code": "mcp__capability__memory_search",
@@ -115,12 +114,12 @@ jobs:
               "home_mcp": "mcp__home__search_memories",
           }
           assert manifest.get_capability("memory.search")["loading_policy"] == "always_load"
-          assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
-          # Catch-up after #484 promoted health.read onto the physical
-          # internal MCP surface. memory.search bindings are unchanged.
+          # Current inherit-state UH-A0 fingerprint. This retirement PR does not
+          # change the physical surface; the pin matches
+          # tests.test_cc_capability_adapter S4_PHYSICAL_SURFACE_FINGERPRINT.
           fingerprint = physical_surface_fingerprint()
           assert fingerprint == (
-              "9cc7fe0a421e341afd1b474de89d8d9989e91ff90fb9797687eec5c589c7f449"
+              "9bd1ed4e09a101673da66c5e99bae7732e94457df14c01798f70e0179a0e6815"
           ), fingerprint
           print("memory provider/loading/Wake/fingerprint PASS")
           PY

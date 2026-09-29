@@ -157,11 +157,79 @@ jobs:
             return 0
           }
 
+          retirement_compat_cleanup_applies() {
+            local diff="$1"
+            local stale_compat="$2"
+            local target_gone="$3"
+            local owned_files
+            local production_owned
+            [ "$stale_compat" = "true" ] || return 1
+            [ "$target_gone" = "true" ] || return 1
+            production_owned="$(printf '%s\n' "$diff" | awk '
+              $0 == "tools/todo_internal_adapter.py" ||
+              $0 == "internal-mcp-server.js"
+            ')"
+            [ -z "$production_owned" ] || return 1
+            owned_files="$(printf '%s\n' "$diff" | awk '
+              $0 == "tools/todo_internal_adapter.py" ||
+              $0 == "internal-mcp-server.js" ||
+              $0 == "tests/test_m3_01_todo_internal.py" ||
+              $0 == "tests/test-m3-01-todo-internal.mjs"
+            ' | awk 'NF' | sort -u)"
+            [ "$owned_files" = "tests/test_m3_01_todo_internal.py" ] || return 1
+            return 0
+          }
+
+          stale_compat_from_git() {
+            local base="$1"
+            local head="$2"
+            local file="tests/test_m3_01_todo_internal.py"
+            local patch
+            local deleted
+            local line
+            if ! git diff --name-only "$base" "$head" | grep -qx "$file"; then
+              printf '%s\n' "false"
+              return 0
+            fi
+            patch="$(git diff "$base" "$head" -- "$file")"
+            if printf '%s\n' "$patch" | grep -E '^\+[^+]' | grep -vE '^\+\s*$' >/dev/null; then
+              printf '%s\n' "false"
+              return 0
+            fi
+            deleted="$(printf '%s\n' "$patch" | grep -E '^\-[^-]' || true)"
+            if [ -z "$deleted" ]; then
+              printf '%s\n' "false"
+              return 0
+            fi
+            leftover="$(printf '%s\n' "$deleted" | grep -vE 'WAKE_TO_CC_MCP|cc_wake_allowed_tools|wake\.cc_tools' || true)"
+            if [ -n "$leftover" ]; then
+              printf '%s\n' "false"
+              return 0
+            fi
+            printf '%s\n' "true"
+          }
+
+          target_gone_on_tree() {
+            local hits
+            hits="$(grep -R -n -E 'WAKE_TO_CC_MCP|cc_wake_allowed_tools' \
+              --include='*.py' --include='*.js' \
+              --exclude-dir=tests --exclude-dir=node_modules --exclude-dir=app \
+              --exclude-dir=.git \
+              . || true)"
+            if [ -n "$hits" ]; then
+              printf '%s\n' "false"
+              return 0
+            fi
+            printf '%s\n' "true"
+          }
+
           assert_case() {
             local label="$1"
             local expected_mode="$2"
             local expected_result="$3"
             local diff="$4"
+            local stale_compat="${5:-false}"
+            local target_gone="${6:-false}"
             local mode
             mode="$(scope_mode "$diff")"
             if [ "$mode" != "$expected_mode" ]; then
@@ -170,7 +238,9 @@ jobs:
             fi
             case "$expected_result:$expected_mode" in
               PASS:OWNED_CHANGE)
-                if ! enforce_forbidden_boundary "$diff"; then
+                if retirement_compat_cleanup_applies "$diff" "$stale_compat" "$target_gone"; then
+                  echo "$label: retirement-compat cleanup exception applied"
+                elif ! enforce_forbidden_boundary "$diff"; then
                   echo "$label: unexpected forbidden-boundary failure"
                   return 1
                 fi
@@ -178,6 +248,10 @@ jobs:
               PASS:*)
                 ;;
               FAIL:OWNED_CHANGE)
+                if retirement_compat_cleanup_applies "$diff" "$stale_compat" "$target_gone"; then
+                  echo "$label: retirement-compat exception must not apply"
+                  return 1
+                fi
                 if enforce_forbidden_boundary "$diff"; then
                   echo "$label: expected forbidden-boundary failure"
                   return 1
@@ -194,6 +268,9 @@ jobs:
           m3_normal_case=$'tools/todo_internal_adapter.py\ntools/capability_manifest.py'
           m3_surface_violation_case=$'tools/todo_internal_adapter.py\ntools/cc_capability_adapter.py'
           m3_daily_violation_case=$'tests/test_m3_01_todo_internal.py\nchat/daily_runtime.py'
+          m3_production_plus_wake_case=$'tools/todo_internal_adapter.py\nwake/runners.py'
+          m3_test_plus_wake_unproven_case=$'tests/test_m3_01_todo_internal.py\nwake/runners.py'
+          m3_retirement_compat_case=$'tests/test_m3_01_todo_internal.py\nwake/cc_tools.py\nwake/runners.py'
           policy_only_case="$ci_policy_file"
 
           assert_case "GALLERY_CAPABILITY_CASE" "REGRESSION_ONLY" "PASS" "$gallery_case"
@@ -204,12 +281,26 @@ jobs:
           echo "M3_01_CC_SURFACE_VIOLATION=PASS"
           assert_case "M3_01_DAILY_RUNTIME_VIOLATION" "OWNED_CHANGE" "FAIL" "$m3_daily_violation_case"
           echo "M3_01_DAILY_RUNTIME_VIOLATION=PASS"
+          assert_case "M3_01_PRODUCTION_PLUS_WAKE" "OWNED_CHANGE" "FAIL" "$m3_production_plus_wake_case"
+          echo "M3_01_PRODUCTION_PLUS_WAKE=PASS"
+          assert_case "M3_01_TEST_PLUS_WAKE_UNPROVEN" "OWNED_CHANGE" "FAIL" "$m3_test_plus_wake_unproven_case" "false" "true"
+          echo "M3_01_TEST_PLUS_WAKE_UNPROVEN=PASS"
+          assert_case "M3_01_RETIREMENT_COMPAT_CLEANUP" "OWNED_CHANGE" "PASS" "$m3_retirement_compat_case" "true" "true"
+          echo "M3_01_RETIREMENT_COMPAT_CLEANUP=PASS"
           assert_case "POLICY_ONLY_CASE" "CI_POLICY_ONLY" "PASS" "$policy_only_case"
           echo "POLICY_ONLY_CASE=PASS"
-          echo "SYNTHETIC_CASES=5/5 PASS"
+          echo "SYNTHETIC_CASES=8/8 PASS"
 
+          stale_compat="$(stale_compat_from_git "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
+          target_gone="$(target_gone_on_tree)"
+          echo "M3_01_STALE_COMPAT=$stale_compat"
+          echo "M3_01_RETIREMENT_TARGET_GONE=$target_gone"
           mode="$(scope_mode "$actual")"
           echo "M3_01_SCOPE_MODE=$mode"
           if [ "$mode" = "OWNED_CHANGE" ]; then
-            enforce_forbidden_boundary "$actual"
+            if retirement_compat_cleanup_applies "$actual" "$stale_compat" "$target_gone"; then
+              echo "M3_01_RETIREMENT_COMPAT_CLEANUP=applied"
+            else
+              enforce_forbidden_boundary "$actual"
+            fi
           fi

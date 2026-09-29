@@ -13,7 +13,6 @@ from tools.cc_capability_adapter import build_uh_a0_spawn_plan
 from tools.lease_signer import issue_turn_lease
 from tools.product_handlers import create_todo, list_todos
 from tools.todo_internal_adapter import add_todo, read_todos
-from wake.cc_tools import WAKE_TO_CC_MCP, cc_wake_allowed_tools
 
 
 def make_db(path: Path) -> None:
@@ -254,8 +253,6 @@ class TodoInternalAdapterTests(unittest.TestCase):
             wake_plan["physical_surface_fingerprint"],
         )
         self.assertIn("mcp__capability__todo_read", chat_plan["surface_allowlist"])
-        self.assertNotIn("mcp__capability__todo_read", cc_wake_allowed_tools())
-        self.assertEqual(WAKE_TO_CC_MCP["get_todos"], "mcp__home__get_todos")
 
     def test_capability_proxy_todo_read_is_typed_and_reuses_read_adapter(self):
         root = Path(__file__).resolve().parents[1]

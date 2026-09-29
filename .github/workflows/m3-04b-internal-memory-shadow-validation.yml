@@ -90,7 +90,6 @@ jobs:
               INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS,
               build_uh_a0_spawn_plan,
           )
-          from wake.cc_tools import WAKE_TO_CC_MCP
 
           assert get_capability("memory.search")["provider_bindings"] == {
               "claude_code": "mcp__internal__search_memories",
@@ -105,7 +104,6 @@ jobs:
               "ledger.budget.read", "ledger.write", "memory.search"
           )
           assert INTERNAL_MCP_SHADOW_DISALLOWED_TOOLS == ()
-          assert WAKE_TO_CC_MCP["search_memories"] == "mcp__home__search_memories"
           with patch("tools.cc_capability_adapter.read_capability_state", return_value=RUNTIME_STATE_INHERIT):
               with tempfile.TemporaryDirectory() as root:
                   plan = build_uh_a0_spawn_plan(cwd=root, write_mcp_config=False, env={})

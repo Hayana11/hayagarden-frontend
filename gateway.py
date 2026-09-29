@@ -3995,17 +3995,6 @@ def invalidate_cc_resident_history_rewrite():
         'epoch': cc_history_rewrite.current_history_rewrite_epoch(),
     })
 
-# B1：独立 CC Wake resident——绝不复用上面的聊天 resident，避免半夜
-# ACTION/THOUGHTS/工具检查混进白天私聊上下文。
-try:
-    from wake.cc_tools import cc_wake_allowed_tools as _cc_wake_allowed_tools
-    _CC_WAKE_ALLOWED_TOOLS = _cc_wake_allowed_tools(None)
-except Exception:
-    _CC_WAKE_ALLOWED_TOOLS = CC_ALLOWED_TOOLS
-_CC_WAKE_RESIDENT = cc_resident.ResidentSession(
-    CC_CWD, _CC_WAKE_ALLOWED_TOOLS, CC_CWD + '/cc-tools.json',
-)
-
 # 跨窗口记忆：私聊(/chat)和群聊的暖色房间是"同一个人"，记忆该是通的，
 # 但要让模型自己知道此刻在哪个窗口说话（system prompt 里的窗口说明负责这个）。
 # 这里只做"最近发生了什么"的单向快照注入——不追加进对方那个窗口自己的正式历史，
@@ -8705,7 +8694,7 @@ def _wake_agent_loop(
 
 
 def _ensure_wake_runners():
-    """Register relay / CC wake runners once (lazy; needs _wake_agent_loop)."""
+    """Register the remaining live Wake runner (api_relay / summarize)."""
     from wake import runners as _wake_runners
     if getattr(_ensure_wake_runners, '_done', False):
         return _wake_runners
@@ -8713,14 +8702,7 @@ def _ensure_wake_runners():
         _wake_agent_loop,
         model_getter=lambda: __import__('relay.manager', fromlist=['relay']).relay.model,
     )
-    cc_runner = _wake_runners.ClaudeCodeWakeRunner(
-        _CC_WAKE_RESIDENT,
-        token=CC_TOKEN,
-        cwd=CC_CWD,
-        payload_builder=_build_cache_info_payload,
-        mcp_config_path=CC_CWD + '/cc-tools.json',
-    )
-    _wake_runners.register_wake_runners(api_relay=relay_runner, claude_code=cc_runner)
+    _wake_runners.register_wake_runners(api_relay=relay_runner)
     _ensure_wake_runners._done = True
     return _wake_runners
 
@@ -8969,6 +8951,11 @@ def wake_decide():
     activity_desc = data.get('activity_desc', '')
     ritual_type = data.get('ritual_type', '')
 
+    from wake.runners import wake_mode_disabled_payload
+    disabled = wake_mode_disabled_payload(mode)
+    if disabled:
+        return jsonify(disabled)
+
     # inspect_only: pure build — bypass wake lock and runtime busy/idle guards.
     if bool(data.get('inspect_only')):
         return _wake_inspect_only(data, mode, activity_desc, ritual_type)
@@ -8988,10 +8975,13 @@ def wake_decide():
 def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     from chat.interaction_state import read_interaction_clock, wake_guard_reason
     from chat.provider_router import ProviderConfigError
-    from wake.runners import UnsupportedWakeModeError
+    from wake.runners import UnsupportedWakeModeError, wake_mode_disabled_payload
 
     dry_run = bool(data.get('dry_run'))
     wake_run_id = str(data.get('wake_run_id') or '').strip()
+    disabled = wake_mode_disabled_payload(mode)
+    if disabled:
+        return jsonify(disabled)
     # Live path only: flush drive / calibrate / dream consume / mark run_id.
     live = not dry_run
 
@@ -9693,6 +9683,19 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'detail': 'normal_wake_unified_unowned',
             'wake_run_id': wake_run_id,
             'b3_authority': True,
+        })
+
+    if str(wake_provider or '') == 'claude_code':
+        _mark_production_attempt(
+            'failed', reason='WAKE_CLAUDE_RUNNER_RETIRED',
+        )
+        return jsonify({
+            'ok': True,
+            'skipped': True,
+            'reason': 'WAKE_CLAUDE_RUNNER_RETIRED',
+            'mode': mode,
+            'provider': wake_provider,
+            'wake_run_id': wake_run_id,
         })
 
     try:

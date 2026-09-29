@@ -21,7 +21,6 @@ from tools.cc_capability_adapter import (
 )
 from tools.cc_tool_surface import _static_schema_registry
 import cc_resident
-from wake.cc_tools import WAKE_TO_CC_MCP
 
 
 HOME_MEMORY = "mcp__home__search_memories"
@@ -84,7 +83,6 @@ class DailyMemoryCutoverTests(unittest.TestCase):
         self.assertEqual(execution_fence.capability_for_tool(INTERNAL_MEMORY), "memory.search")
         self.assertEqual(execution_fence.capability_for_tool(LEGACY_INTERNAL_MEMORY), "memory.search")
         self.assertEqual(execution_fence.capability_for_tool(HOME_MEMORY), "memory.search")
-        self.assertEqual(WAKE_TO_CC_MCP["search_memories"], HOME_MEMORY)
         registry = _static_schema_registry()
         self.assertEqual(registry[INTERNAL_MEMORY], registry[HOME_MEMORY])
         self.assertEqual(registry[INTERNAL_MEMORY], registry[LEGACY_INTERNAL_MEMORY])

@@ -20,19 +20,13 @@ os.environ.setdefault(
 
 import config_store
 from wake.cc_tools import (
-    CODEBASE_READ_MCP,
-    CODEBASE_WRITE_MCP,
     CC_WAKE_CAPABILITY_TEXT,
-    CC_WAKE_WRITE_MCP,
     WAKE_DRY_RUN_CAPABILITY_TEXT,
-    cc_wake_allowed_tools,
-    cc_wake_nudge_text,
-    filter_wake_tools_for_cc,
-    is_cc_wake_tool,
 )
 from wake.runners import (
     ApiRelayWakeRunner,
-    ClaudeCodeWakeRunner,
+    DISABLED_CC_WAKE_MODES,
+    WAKE_MODE_DISABLED_REASON,
     UnsupportedWakeModeError,
     WakeRequest,
     get_wake_runner,
@@ -41,6 +35,8 @@ from wake.runners import (
     register_wake_runners,
     select_wake_provider,
     split_wake_system,
+    wake_mode_disabled,
+    wake_mode_disabled_payload,
 )
 from wake.usage import build_wake_cache_info
 import sqlite3
@@ -62,10 +58,12 @@ class WakeProviderSelectTests(unittest.TestCase):
             'BACKGROUND_PROVIDER': 'api_relay',
         })):
             self.assertEqual(select_wake_provider('normal'), 'claude_code')
-            self.assertEqual(select_wake_provider('morning'), 'claude_code')
-            self.assertEqual(select_wake_provider('nightwatch'), 'claude_code')
-            self.assertEqual(select_wake_provider('ritual'), 'claude_code')
-            self.assertEqual(select_wake_provider('self_trigger'), 'claude_code')
+            for mode in DISABLED_CC_WAKE_MODES:
+                with self.subTest(mode=mode):
+                    with self.assertRaisesRegex(
+                        UnsupportedWakeModeError, WAKE_MODE_DISABLED_REASON,
+                    ):
+                        select_wake_provider(mode)
 
     def test_dream_is_surface_owned_and_summarize_stays_background(self):
         with mock.patch.object(config_store, 'get', side_effect=fake_get({
@@ -109,64 +107,36 @@ class WakeProviderSelectTests(unittest.TestCase):
 
 
 class WakeCcToolsTests(unittest.TestCase):
-    def test_filters_relay_only_tools(self):
-        tools = [
-            {'name': 'search_memories'},
-            {'name': 'get_location'},
-            {'name': 'get_light_status'},
-            {'name': 'recall_photo'},
-            {'name': 'codebase_read_file'},
-        ]
-        filtered = filter_wake_tools_for_cc(tools)
-        names = [t['name'] for t in filtered]
-        self.assertEqual(names, ['search_memories', 'get_light_status', 'codebase_read_file'])
-        self.assertFalse(is_cc_wake_tool('get_location'))
-        self.assertIn('mcp__home__search_memories', cc_wake_allowed_tools(filtered))
+    def test_legacy_tool_compat_symbols_are_gone(self):
+        import wake.cc_tools as cc_tools
+        for name in (
+            'WAKE_TO_CC_MCP',
+            'cc_wake_allowed_tools',
+            'cc_wake_tool_names',
+            'cc_wake_nudge_text',
+            'filter_wake_tools_for_cc',
+            'is_cc_wake_tool',
+        ):
+            self.assertFalse(hasattr(cc_tools, name), name)
 
-    def test_nudge_never_mentions_missing_tools(self):
-        text = cc_wake_nudge_text(2.0, ['search_memories', 'get_light_status'])
-        self.assertIn('search_memories', text)
-        self.assertNotIn('get_location', text)
-        self.assertNotIn('recall_photo', text)
-        self.assertIn('不要假装', text)
-        self.assertIn('可写', text)
-        self.assertIn('add_todo', text)
-
-    def test_dry_run_nudge_disables_tools(self):
-        text = cc_wake_nudge_text(2.0, ['search_memories'], dry_run=True)
-        self.assertIn('dry_run', text)
-        self.assertIn('无工具', text)
-
-    def test_allowlist_has_no_brain_and_matches_capability(self):
-        csv = cc_wake_allowed_tools(None)
-        self.assertNotIn('brain', csv)
-        self.assertIn('mcp__home__get_light_status', csv)
-        self.assertNotIn('mcp__home__light_on', csv)
-        self.assertNotIn('mcp__home__light_off', csv)
-        for mcp in CC_WAKE_WRITE_MCP:
-            self.assertIn(mcp, csv)
-        self.assertIn('add_todo', CC_WAKE_CAPABILITY_TEXT)
-        self.assertIn('位置', CC_WAKE_CAPABILITY_TEXT)
-        self.assertIn('不可用：codebase patch/create_file', CC_WAKE_CAPABILITY_TEXT)
+    def test_capability_brochure_describes_current_route_not_retired_protocol(self):
+        self.assertIn('Unified 热 _CC_RESIDENT', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('B2 none', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('B3 message', CC_WAKE_CAPABILITY_TEXT)
+        self.assertIn('disabled', CC_WAKE_CAPABILITY_TEXT)
         self.assertIn('不得调用 light_on', CC_WAKE_CAPABILITY_TEXT)
-
-    def test_codebase_allowlist_is_per_tool_readonly_not_bare_server(self):
-        parts = cc_wake_allowed_tools(None).split(',')
-        self.assertNotIn('mcp__codebase', parts)  # bare server opens patch/create_file
-        self.assertNotIn('mcp__codebase__patch', parts)
-        self.assertNotIn('mcp__codebase__create_file', parts)
-        # explain_history calls Relay _llm() — must stay off the CC Wake surface.
-        self.assertNotIn('mcp__codebase__explain_history', parts)
-        for mcp in CODEBASE_WRITE_MCP:
-            self.assertNotIn(mcp, parts)
-        for mcp in CODEBASE_READ_MCP:
-            self.assertIn(mcp, parts)
-        self.assertFalse(is_cc_wake_tool('codebase_patch'))
-        self.assertFalse(is_cc_wake_tool('codebase_create_file'))
-        self.assertFalse(is_cc_wake_tool('codebase_explain_history'))
-        self.assertTrue(is_cc_wake_tool('codebase_read_file'))
+        self.assertIn('不可用：codebase patch/create_file', CC_WAKE_CAPABILITY_TEXT)
         self.assertNotIn('explain_history', CC_WAKE_CAPABILITY_TEXT.split('不可用')[0])
-        self.assertIn('explain_history', CC_WAKE_CAPABILITY_TEXT)  # listed under 不可用
+        self.assertIn('explain_history', CC_WAKE_CAPABILITY_TEXT)
+        for retired in (
+            'THOUGHTS/ACTION/CONTENT',
+            'THOUGHTS',
+            '结构化决策',
+            'diary CONTENT',
+            '只根据已给上下文输出',
+        ):
+            self.assertNotIn(retired, CC_WAKE_CAPABILITY_TEXT)
+            self.assertNotIn(retired, WAKE_DRY_RUN_CAPABILITY_TEXT)
 
 
 class WakeRunnerContractTests(unittest.TestCase):
@@ -208,57 +178,10 @@ class WakeRunnerContractTests(unittest.TestCase):
 
     def test_register_and_get_runners(self):
         a = ApiRelayWakeRunner(lambda *a, **k: ('', {'provider': 'api_relay'}))
-        class _FakeResident:
-            _allowed_tools = ''
-            def ensure_alive(self, *a, **k):
-                return True
-            def send_turn(self, content):
-                yield ('done', ('THOUGHTS: t\nACTION: none\nCONTENT: ', '', {
-                    'rounds': [{'index': 1, 'input_tokens': 1, 'output_tokens': 1,
-                                'cache_read': 0, 'cache_creation': 0, 'context_tokens': 1}],
-                    'resident_turn_count': 1,
-                    'respawn_reason': '',
-                }, {}))
-
-        c = ClaudeCodeWakeRunner(
-            _FakeResident(),
-            token='tok',
-            cwd=tempfile.mkdtemp(),
-            payload_builder=lambda **kw: dict(kw),
-        )
-        register_wake_runners(api_relay=a, claude_code=c)
+        register_wake_runners(api_relay=a)
         self.assertIs(get_wake_runner('api_relay'), a)
-        self.assertIs(get_wake_runner('claude_code'), c)
-        result = c.run(WakeRequest(
-            mode='normal',
-            system=[{'type': 'text', 'text': 'persona', 'cache_control': {'type': 'ephemeral'}},
-                    {'type': 'text', 'text': 'dynamic a1'}],
-            messages=[{'role': 'user', 'content': '[唤醒检查]'}],
-            tools=[{'name': 'search_memories'}],
-            t_hours=2.0,
-        ))
-        self.assertEqual(result.provider, 'claude_code')
-        self.assertEqual(result.cache_info['provider'], 'claude_code')
-        self.assertEqual(result.cache_info['source'], 'wake')
-        self.assertEqual(result.cache_info['resident_turn_count'], 1)
-
-    def test_cc_runner_rejects_dream_mode(self):
-        class _R:
-            _allowed_tools = ''
-            def ensure_alive(self, *a, **k):
-                return True
-            def send_turn(self, content):
-                if False:
-                    yield None
-
-        runner = ClaudeCodeWakeRunner(
-            _R(), token='t', cwd=tempfile.mkdtemp(),
-            payload_builder=lambda **kw: dict(kw),
-        )
-        with self.assertRaises(UnsupportedWakeModeError):
-            runner.run(WakeRequest(
-                mode='dream', system='s', messages=[], tools=[], t_hours=0,
-            ))
+        with self.assertRaisesRegex(RuntimeError, '没有可用的 Wake runner: provider=claude_code'):
+            get_wake_runner('claude_code')
 
     def test_dry_run_prepare_tools_empties_table(self):
         tools = [{'name': 'search_memories'}, {'name': 'add_todo'}]
@@ -270,38 +193,6 @@ class WakeRunnerContractTests(unittest.TestCase):
             prepare_tools_for_provider('api_relay', tools, 'normal', dry_run=True),
             [],
         )
-
-    def test_cc_dry_run_forces_empty_allowlist(self):
-        seen = {}
-
-        class _R:
-            _allowed_tools = 'mcp__home__add_todo'
-            _system_text = 'old'
-
-            def ensure_alive(self, system, env):
-                seen['allowed'] = self._allowed_tools
-                return True
-
-            def send_turn(self, content):
-                seen['content'] = content
-                yield ('done', ('THOUGHTS: t\nACTION: none\nCONTENT: ', '', {
-                    'rounds': [], 'resident_turn_count': 1, 'respawn_reason': '',
-                }, {}))
-
-        runner = ClaudeCodeWakeRunner(
-            _R(), token='t', cwd=tempfile.mkdtemp(),
-            payload_builder=lambda **kw: dict(kw),
-        )
-        runner.run(WakeRequest(
-            mode='normal',
-            system=[{'type': 'text', 'text': 'p', 'cache_control': {'type': 'ephemeral'}}],
-            messages=[{'role': 'user', 'content': '[唤醒检查]'}],
-            tools=[],
-            t_hours=1.0,
-            dry_run=True,
-        ))
-        self.assertEqual(seen['allowed'], '')
-        self.assertIn('dry_run', seen['content'])
 
     def test_split_system_keeps_cache_blocks_stable(self):
         stable, dynamic = split_wake_system([
@@ -332,8 +223,31 @@ class WakeRunnerContractTests(unittest.TestCase):
                 t_hours=1.0,
             )
         self.assertEqual(plan['provider'], 'claude_code')
-        self.assertEqual(plan['tool_names'], ['search_memories', 'get_light_status'])
-        self.assertIn('get_location', plan['relay_only_removed'])
+        self.assertEqual(plan['capability_profile'], 'unified_hot_resident')
+        self.assertEqual(plan['canonical_route'], 'unified_b2_b3')
+        self.assertEqual(plan['resident'], '_CC_RESIDENT')
+        self.assertEqual(plan['owned_actions'], ['none', 'message'])
+        self.assertEqual(
+            plan['tool_names'],
+            ['search_memories', 'get_location', 'get_light_status'],
+        )
+        self.assertEqual(plan['relay_only_removed'], [])
+        self.assertEqual(plan['cc_allowed_tools'], [])
+
+    def test_inspect_plan_disabled_modes_are_disabled(self):
+        for mode in DISABLED_CC_WAKE_MODES:
+            with self.subTest(mode=mode):
+                plan = inspect_wake_plan(
+                    mode=mode,
+                    system='inspect',
+                    messages=[{'role': 'user', 'content': '[唤醒检查]'}],
+                    tools=[{'name': 'search_memories'}],
+                    t_hours=1.0,
+                )
+                self.assertTrue(plan.get('skipped'))
+                self.assertEqual(plan.get('reason'), WAKE_MODE_DISABLED_REASON)
+                self.assertEqual(plan.get('capability_profile'), 'wake_mode_disabled')
+                self.assertEqual(plan.get('owned_actions'), [])
 
     def test_prepare_tools_relay_unchanged(self):
         tools = [{'name': 'get_location'}, {'name': 'search_memories'}]
@@ -363,41 +277,196 @@ class WakeUsageProviderTests(unittest.TestCase):
         self.assertEqual(payload['source'], 'wake')
 
 
-class WakeResidentSeparationTests(unittest.TestCase):
-    def test_gateway_defines_separate_cc_wake_resident(self):
-        src = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
-        self.assertIn('_CC_WAKE_RESIDENT', src)
-        # Chat resident may be wrapped in _SwappableResident for seamless handoff.
-        self.assertTrue(
-            '_CC_RESIDENT = _SwappableResident(' in src
-            or '_CC_RESIDENT = cc_resident.ResidentSession' in src,
-            'chat resident must be ResidentSession or _SwappableResident holder',
-        )
-        self.assertIn('_CC_WAKE_RESIDENT = cc_resident.ResidentSession', src)
-        # Two separate constructions — wake must not alias the chat resident.
-        self.assertNotIn('_CC_WAKE_RESIDENT = _CC_RESIDENT', src)
-        self.assertNotIn('_CC_WAKE_RESIDENT = _CC_RESIDENT.get()', src)
-        # Independent instances: chat and wake each construct ResidentSession.
-        chat_constructions = src.count(
-            'cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS'
-        )
-        wake_constructions = src.count(
-            '_CC_WAKE_RESIDENT = cc_resident.ResidentSession'
-        )
-        self.assertGreaterEqual(chat_constructions, 1)
-        self.assertEqual(wake_constructions, 1)
-        # Holder class must actually swap an inner ResidentSession, not wake.
-        if '_CC_RESIDENT = _SwappableResident(' in src:
-            self.assertIn('class _SwappableResident:', src)
-            self.assertIn('def swap(self, new_inner):', src)
+class WakeResidentRetirementTests(unittest.TestCase):
+    def _production_py_files(self):
+        root = Path(ROOT)
+        skip_dirs = {'.git', 'tests', 'node_modules', 'app', '__pycache__'}
+        files = []
+        for path in root.rglob('*.py'):
+            if any(part in skip_dirs for part in path.parts):
+                continue
+            files.append(path)
+        return files
 
-    def test_two_resident_sessions_are_independent_objects(self):
-        import cc_resident
-        cwd = tempfile.mkdtemp()
-        a = cc_resident.ResidentSession(cwd, 'mcp__home__get_todos', cwd + '/cc-tools.json')
-        b = cc_resident.ResidentSession(cwd, 'mcp__home__search_memories', cwd + '/cc-tools.json')
-        self.assertIsNot(a, b)
-        self.assertNotEqual(a.allowed_tools, b.allowed_tools)
+    def _production_src(self):
+        return '\n'.join(
+            path.read_text(encoding='utf-8') for path in self._production_py_files()
+        )
+
+    def test_retired_symbols_have_zero_production_refs(self):
+        src = self._production_src()
+        self.assertEqual(src.count('_CC_WAKE_RESIDENT'), 0)
+        self.assertEqual(src.count('ClaudeCodeWakeRunner'), 0)
+        self.assertEqual(src.count('SharedResidentWakeRunner'), 0)
+        self.assertEqual(src.count('_run_shared_claude_wake'), 0)
+        self.assertEqual(src.count('WAKE_CONTRACT'), 0)
+        self.assertEqual(src.count('FORMAT_NUDGE'), 0)
+        self.assertEqual(src.count('WAKE_TO_CC_MCP'), 0)
+        self.assertEqual(src.count('cc_wake_allowed_tools'), 0)
+        self.assertEqual(src.count('cc_wake_tool_names'), 0)
+        self.assertEqual(src.count('cc_wake_nudge_text'), 0)
+        self.assertEqual(src.count('filter_wake_tools_for_cc'), 0)
+        self.assertEqual(src.count('cc_content_message_explore_only'), 0)
+        self.assertEqual(src.count('_provider_content_policy'), 0)
+
+    def test_single_persistent_conversational_resident(self):
+        gateway = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
+        self.assertEqual(
+            gateway.count(
+                'cc_resident.ResidentSession(CC_CWD, CC_ALLOWED_TOOLS'
+            ),
+            1,
+        )
+        self.assertIn('_CC_RESIDENT = _SwappableResident(', gateway)
+        self.assertEqual(gateway.count('_CC_WAKE_RESIDENT'), 0)
+
+    def test_canonical_normal_wake_keeps_unified_main_chat_route(self):
+        gateway = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
+        decision_start = gateway.index('def _wake_decide_locked')
+        basic_start = gateway.index('if basic_normal:', decision_start)
+        basic_end = gateway.index('    planner_view = None', basic_start)
+        normal_route = gateway[basic_start:basic_end]
+        self.assertIn('_run_unified_normal_main_chat_turn(', normal_route)
+        self.assertNotIn('SharedResidentWakeRunner', normal_route)
+        self.assertNotIn('_run_shared_claude_wake', normal_route)
+        unified = gateway[
+            gateway.index('def _run_unified_normal_main_chat_turn'):
+            gateway.index('def _cross_surface_recap_from_solo_chat')
+        ]
+        self.assertIn("turn_mode='wake'", unified)
+        self.assertIn('prepare_shared_transcript_watermark', unified)
+        self.assertIn('begin_shared_wake_delivery_fence', unified)
+        self.assertNotIn('WAKE_CONTRACT', unified)
+        self.assertNotIn('THOUGHTS:', unified)
+        self.assertIn("turn_mode='chat'", gateway)
+        runners = (Path(ROOT) / 'wake' / 'runners.py').read_text(encoding='utf-8')
+        self.assertNotIn('ClaudeCodeWakeRunner', runners)
+        self.assertNotIn('ResidentSession(', runners)
+        self.assertNotIn('shared_delivery_fence', runners)
+
+    def test_disabled_modes_are_fail_closed_in_runners(self):
+        for mode in ('morning', 'nightwatch', 'ritual', 'self_trigger'):
+            self.assertTrue(wake_mode_disabled(mode), mode)
+            payload = wake_mode_disabled_payload(mode)
+            self.assertEqual(payload['reason'], WAKE_MODE_DISABLED_REASON)
+            self.assertEqual(payload['mode'], mode)
+            self.assertEqual(payload['detail'], 'mode=%s' % mode)
+            self.assertTrue(payload['skipped'])
+        self.assertFalse(wake_mode_disabled('normal'))
+        self.assertFalse(wake_mode_disabled('summarize'))
+        self.assertFalse(wake_mode_disabled('dream'))
+        self.assertIsNone(wake_mode_disabled_payload('normal'))
+
+
+class DisabledWakeModeHttpTests(unittest.TestCase):
+    """HTTP contract for disabled modes without importing gateway or production DB.
+
+    M3-04A co-loads ``tests.test_ledger_routes``, which installs a process-wide
+    sqlite3 guard. Importing ``gateway`` here would connect to
+    ``/opt/frontend/memories.db`` and trip that guard. This fixture stays on a
+    temp runtime path and wraps ``wake_mode_disabled_payload`` only.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from flask import Flask, jsonify, request
+
+        cls._tmp = tempfile.TemporaryDirectory(prefix='disabled-wake-http-')
+        cls.db_path = str(Path(cls._tmp.name) / 'memories.db')
+        cls.config_path = str(Path(cls._tmp.name) / 'config.db')
+        os.environ['HAYAGARDEN_CONFIG_DB_PATH'] = cls.config_path
+        app = Flask(__name__)
+
+        @app.route('/wake', methods=['POST'])
+        def wake():
+            data = request.get_json() or {}
+            mode = data.get('mode', 'normal') or 'normal'
+            disabled = wake_mode_disabled_payload(mode)
+            if disabled:
+                return jsonify(disabled)
+            raise AssertionError(
+                'disabled-mode fixture must not reach provider or Action write'
+            )
+
+        cls.client = app.test_client()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _assert_disabled(self, mode, extra=None):
+        payload = {'mode': mode, 'wake_run_id': 'disabled-%s' % mode}
+        if extra:
+            payload.update(extra)
+        with mock.patch('wake.executor.execute') as execute:
+            resp = self.client.post('/wake', json=payload)
+        self.assertEqual(resp.status_code, 200, mode)
+        body = resp.get_json()
+        self.assertEqual(body.get('ok'), True, body)
+        self.assertEqual(body.get('skipped'), True, body)
+        self.assertEqual(body.get('reason'), WAKE_MODE_DISABLED_REASON, body)
+        self.assertEqual(body.get('mode'), mode, body)
+        self.assertEqual(body.get('detail'), 'mode=%s' % mode, body)
+        execute.assert_not_called()
+        return body
+
+    def test_fixture_stays_on_isolated_runtime_path(self):
+        self.assertTrue(self.db_path.startswith(self._tmp.name))
+        self.assertNotEqual(self.db_path, '/opt/frontend/memories.db')
+        self.assertEqual(
+            os.environ.get('HAYAGARDEN_CONFIG_DB_PATH'),
+            self.config_path,
+        )
+        src = Path(__file__).read_text(encoding='utf-8')
+        self.assertNotRegex(src, r'(?m)^\s*import gateway\b')
+        self.assertNotRegex(src, r'(?m)^\s*from gateway import\b')
+
+    def test_morning_disabled(self):
+        self._assert_disabled('morning')
+
+    def test_nightwatch_disabled(self):
+        self._assert_disabled('nightwatch')
+
+    def test_ritual_disabled(self):
+        self._assert_disabled('ritual')
+
+    def test_self_trigger_disabled(self):
+        self._assert_disabled('self_trigger')
+
+    def test_disabled_modes_ignore_inspect_dry_run_and_relay_provider(self):
+        for mode in DISABLED_CC_WAKE_MODES:
+            with self.subTest(mode=mode, extra='inspect_only'):
+                self._assert_disabled(mode, extra={'inspect_only': True})
+            with self.subTest(mode=mode, extra='dry_run'):
+                self._assert_disabled(mode, extra={'dry_run': True})
+
+    def test_gateway_disabled_modes_short_circuit_before_inspect_and_lock(self):
+        src = (Path(ROOT) / 'gateway.py').read_text(encoding='utf-8')
+        start = src.index('def wake_decide():')
+        end = src.index('def _wake_decide_locked')
+        body = src[start:end]
+        disabled_idx = body.index('wake_mode_disabled_payload')
+        inspect_idx = body.index("inspect_only")
+        lock_idx = body.index('_wake_exec_lock.acquire')
+        self.assertLess(disabled_idx, inspect_idx)
+        self.assertLess(disabled_idx, lock_idx)
+        self.assertNotIn('get_wake_runner', body)
+        self.assertNotIn('_run_unified_normal_main_chat_turn', body)
+
+    def test_summarize_still_selects_api_relay(self):
+        with mock.patch.object(config_store, 'get', side_effect=fake_get({
+            'CHAT_PROVIDER': 'claude_code',
+            'WAKE_PROVIDER': 'claude_code',
+            'BACKGROUND_PROVIDER': 'api_relay',
+        })):
+            self.assertEqual(select_wake_provider('summarize'), 'api_relay')
+
+    def test_dream_still_surface_owned(self):
+        with self.assertRaisesRegex(
+            UnsupportedWakeModeError,
+            'surface-owned Background Generation Adapter',
+        ):
+            select_wake_provider('dream')
 
 
 class BuildSystemSideEffectTests(unittest.TestCase):
@@ -521,17 +590,19 @@ class BuildSystemSideEffectTests(unittest.TestCase):
                 capability_profile='cc_wake',
             )
         flat = '\n'.join(b.get('text', '') for b in blocks if isinstance(b, dict))
-        self.assertIn('Wake·Claude Code 工具面', flat)
+        self.assertIn('Wake·Claude inspect', flat)
+        self.assertIn('Unified 热 _CC_RESIDENT', flat)
+        self.assertIn('disabled', flat)
         # Generic Relay brochure must not appear (these phrases are unique to it).
         self.assertNotIn('查看与发布留言板', flat)
         self.assertNotIn('随心所欲', flat)
         self.assertNotIn('请求手机截屏', flat)
         self.assertNotIn('查位置', flat)
         self.assertNotIn('Pocket 浏览器', flat)
-        # Accurate CC profile may list unavailable tools by name.
-        self.assertIn('位置', flat)
+        self.assertNotIn('THOUGHTS/ACTION/CONTENT', flat)
+        self.assertNotIn('结构化决策', flat)
+        self.assertIn('不得调用 light_on', flat)
         self.assertIn('不可用：codebase patch/create_file', flat)
-        self.assertIn('add_todo', flat)
         self.assertIn('联网搜索', flat)  # only inside the 不可用 list
 
 
@@ -746,6 +817,8 @@ class DryRunCapabilityTests(unittest.TestCase):
         self.assertNotIn('随心所欲', flat)
         self.assertNotIn('add_todo', flat)
         self.assertIn('本轮无任何工具', flat)
+        self.assertNotIn('THOUGHTS/ACTION/CONTENT', flat)
+        self.assertNotIn('结构化决策', flat)
 
 
 class RelayDryRunNudgeTests(unittest.TestCase):

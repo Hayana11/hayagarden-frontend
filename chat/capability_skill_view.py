@@ -3,7 +3,8 @@
 Freezes only after provider + tools are resolved for this Wake attempt.
 Answers ``现在能做什么？`` — never Drive→Action commands.
 
-resolved_action_capability = parser ∩ mode ∩ provider contract ∩ executor.
+resolved_action_capability comes from the current production route and
+executor ownership, not a retired Claude CONTENT contract.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ _PARSER_ACTIONS = ('none', 'message', 'diary', 'explore')
 _BEHAVIOR_MODES = frozenset({
     'normal', 'morning', 'nightwatch', 'ritual', 'self_trigger',
 })
-_SPECIAL_RITUAL_TYPES = frozenset({'solstice', 'birthday'})
+_UNIFIED_ACTION_ORDER = ('none', 'message')
 
 
 def _now_beijing() -> datetime.datetime:
@@ -69,51 +70,62 @@ def resolve_model_identity(provider: str) -> str:
     return f'unknown:{prov or "none"}'
 
 
-def _provider_content_policy(provider: str) -> str:
-    """How the provider Wake contract treats ACTION CONTENT.
+def _disabled_wake_mode(mode: str) -> bool:
+    from wake.runners import wake_mode_disabled
+    return wake_mode_disabled(mode)
 
-    CC WAKE_CONTRACT: CONTENT only for message/explore; diary left empty
-    (then executor rejects empty diary) ⇒ diary not executor-resolved.
-    Relay: diary remains content-aligned executable capability (contract §3.2).
-    """
-    if str(provider or '').strip() == 'claude_code':
-        return 'cc_content_message_explore_only'
-    return 'relay_content_aligned'
+
+def _unified_claude_normal_actions() -> tuple[str, ...]:
+    """Canonical Claude normal Wake: B2 owns none, B3 owns message."""
+    from chat.behavior_authority_b2 import owned_actions as b2_owned
+    from chat.behavior_authority_b3 import owned_actions as b3_owned
+    owned = set(b2_owned()) | set(b3_owned())
+    return tuple(action for action in _UNIFIED_ACTION_ORDER if action in owned)
+
+
+def route_capability_authority(provider: str, mode: str) -> str:
+    """Why resolved_action_capability is this set — current route, not CONTENT policy."""
+    prov = str(provider or '').strip()
+    wake_mode = str(mode or '').strip() or 'normal'
+    if _disabled_wake_mode(wake_mode):
+        return 'wake_mode_disabled'
+    if wake_mode == 'dream':
+        return 'surface_owned_background_generation'
+    if wake_mode == 'summarize':
+        return 'api_relay_background'
+    if prov == 'claude_code' and wake_mode == 'normal':
+        return 'unified_b2_b3_route'
+    if prov == 'api_relay':
+        return 'relay_parser_executor'
+    return 'unknown_route'
 
 
 def mode_action_contract(
     mode: str,
     ritual_type: str = '',
 ) -> tuple[tuple[str, ...], str]:
-    """Return (mode-allowed actions, contract_id) from real Wake prompt truth.
+    """Return (mode-allowed actions, contract_id) from current production route.
 
-    Mirrors ``wake.builder._load_template`` mode/ritual_type selection:
-    - nightwatch → NIGHTWATCH_DECISION_PROMPT (no explore)
-    - ritual solstice/birthday → message-only special ritual prompts
-    - ritual generic → WAKE_DECISION_PROMPT four-action set
-    - normal / morning / self_trigger → four-action Decision prompts
+    Retired Claude Wake modes have no production Action. Ritual type is ignored
+    because ritual itself is disabled. Diary/Web parity is not claimed here.
     """
+    del ritual_type
     wake_mode = str(mode or '').strip() or 'normal'
-    rtype = str(ritual_type or '').strip().lower()
+
+    if _disabled_wake_mode(wake_mode):
+        return (), 'wake_mode_disabled'
+
+    if wake_mode == 'dream':
+        return (), 'surface_owned'
+
+    if wake_mode == 'summarize':
+        return tuple(_PARSER_ACTIONS), 'api_relay_background'
 
     if wake_mode not in _BEHAVIOR_MODES:
         return ('none',), 'non_behavior_mode'
 
-    if wake_mode == 'nightwatch':
-        return ('none', 'message', 'diary'), 'nightwatch_decision'
-
-    if wake_mode == 'ritual':
-        if rtype in _SPECIAL_RITUAL_TYPES:
-            # RITUAL_SOLSTICE / RITUAL_BIRTHDAY: "只输出消息"
-            return ('message',), f'ritual_{rtype}_message_only'
-        # Generic ritual falls back to WAKE_DECISION_PROMPT.
-        return tuple(_PARSER_ACTIONS), 'ritual_generic_wake_decision'
-
-    if wake_mode == 'morning':
-        return tuple(_PARSER_ACTIONS), 'morning_decision'
-
-    # normal / self_trigger share WAKE_DECISION_PROMPT four-action set.
-    return tuple(_PARSER_ACTIONS), f'{wake_mode}_wake_decision'
+    # normal: parser vocabulary before provider/route intersection.
+    return tuple(_PARSER_ACTIONS), 'normal_wake_decision'
 
 
 def resolved_action_capability_for(
@@ -123,28 +135,40 @@ def resolved_action_capability_for(
     dry_run: bool = False,
     ritual_type: str = '',
 ) -> tuple[str, ...]:
-    """parser ∩ mode ∩ provider ∩ executor — not bare parser enum."""
+    """Route ∩ executor ownership — not a retired Claude CONTENT contract."""
     del dry_run  # tools emptiness is separate; action families still decidable
     prov = str(provider or '').strip()
     wake_mode = str(mode or '').strip() or 'normal'
 
+    if _disabled_wake_mode(wake_mode):
+        return ()
+
+    if wake_mode == 'dream':
+        return ()
+
+    if prov == 'claude_code' and wake_mode == 'normal':
+        return _unified_claude_normal_actions()
+
     mode_allowed, _contract_id = mode_action_contract(wake_mode, ritual_type)
-    if wake_mode not in _BEHAVIOR_MODES:
+    if wake_mode not in _BEHAVIOR_MODES and wake_mode != 'summarize':
         return ('none',)
 
-    # parser ∩ mode
     allowed = set(mode_allowed) & set(_PARSER_ACTIONS)
+    return tuple(action for action in _PARSER_ACTIONS if action in allowed)
 
-    # Executor preconditions: message/diary require non-empty CONTENT.
-    # An action family remains "resolved executable" only if the provider
-    # contract allows supplying that CONTENT.
-    policy = _provider_content_policy(prov)
-    if policy == 'cc_content_message_explore_only':
-        # CC contract tells model to leave diary CONTENT empty → executor reject.
-        allowed.discard('diary')
 
-    # Stable order matching parser enum.
-    return tuple(a for a in _PARSER_ACTIONS if a in allowed)
+def _capability_profile(provider: str, mode: str, *, dry_run: bool) -> str:
+    if dry_run:
+        return 'wake_dry_run'
+    wake_mode = str(mode or '').strip() or 'normal'
+    if _disabled_wake_mode(wake_mode):
+        return 'wake_mode_disabled'
+    prov = str(provider or '').strip()
+    if prov == 'claude_code' and wake_mode == 'normal':
+        return 'unified_hot_resident'
+    if wake_mode == 'summarize' or prov == 'api_relay':
+        return 'relay_wake'
+    return 'unknown'
 
 
 @dataclass(frozen=True)
@@ -198,7 +222,7 @@ def freeze_capability_skill_view(
     rtype = str(ritual_type or '').strip().lower()
     tools = _tool_names(prepared_tools)
     model_identity = resolve_model_identity(prov)
-    policy = _provider_content_policy(prov)
+    authority = route_capability_authority(prov, wake_mode)
     mode_allowed, mode_contract_id = mode_action_contract(wake_mode, rtype)
     actions = resolved_action_capability_for(
         provider=prov,
@@ -227,11 +251,10 @@ def freeze_capability_skill_view(
             'mode_contract_id': mode_contract_id,
             'mode_action_vocabulary': list(mode_allowed),
             'dry_run': bool(dry_run),
-            'capability_profile': (
-                'wake_dry_run' if dry_run
-                else ('cc_wake' if prov == 'claude_code' else 'relay_wake')
+            'capability_profile': _capability_profile(
+                prov, wake_mode, dry_run=bool(dry_run),
             ),
-            'provider_content_policy': policy,
+            'route_capability_authority': authority,
         }),
         preconditions=_proxy({
             'message_requires_non_empty_content': True,
