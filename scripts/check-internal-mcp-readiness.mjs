@@ -32,8 +32,8 @@ async function main() {
 
     assert.deepEqual(
       [...names].sort(),
-      ['add_ledger', 'add_todo', 'get_ledger', 'get_ledger_budget', 'get_todos', 'search_memories', 'write_memory'],
-      'Internal MCP catalog must contain the Todo, Ledger, and Memory tools',
+      ['add_ledger', 'add_todo', 'get.health', 'get_ledger', 'get_ledger_budget', 'get_todos', 'search_memories', 'write_memory'],
+      'Internal MCP catalog must contain the Todo, Ledger, Memory, and Health tools',
     );
 
     const addTodo = tools.find((tool) => tool?.name === 'add_todo');
@@ -90,6 +90,27 @@ async function main() {
     );
     assert.equal(writeSchema.properties?.content?.type, 'string');
     assert.equal(writeSchema.properties?.content?.maxLength, 4000);
+
+    const getHealth = tools.find((tool) => tool?.name === 'get.health');
+    assert.ok(getHealth, 'get.health must be listed');
+    const healthSchema = schemaFor(getHealth);
+    assert.deepEqual(healthSchema.required || [], []);
+    assert.deepEqual(
+      Object.keys(healthSchema.properties || {}).sort(),
+      ['days', 'metric'],
+    );
+    assert.equal(healthSchema.properties?.metric?.type, 'string');
+    assert.deepEqual(
+      healthSchema.properties?.metric?.enum,
+      ['all', 'status', 'steps', 'sleep', 'heart_rate', 'cycle'],
+    );
+    assert.equal(healthSchema.properties?.metric?.default, 'all');
+    assert.equal(healthSchema.properties?.days?.minimum, 1);
+    assert.equal(healthSchema.properties?.days?.maximum, 365);
+    assert.equal(healthSchema.properties?.days?.default, undefined);
+    assert.match(String(healthSchema.properties?.days?.description || ''), /1 到 30/);
+    assert.match(String(healthSchema.properties?.days?.description || ''), /1 到 365/);
+    assert.match(String(healthSchema.properties?.days?.description || ''), /180/);
 
     process.stdout.write(
       JSON.stringify({
