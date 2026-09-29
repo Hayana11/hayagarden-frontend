@@ -279,20 +279,11 @@ class CapabilityManifestContractTests(unittest.TestCase):
         ):
             self.assertNotIn(capability_id, derived)
 
-        self.assertEqual(
-            AUTOMATION_CONFIRM_ONLY_CAPABILITIES,
-            ("web.search", "web.read"),
-        )
-        for capability_id in AUTOMATION_CONFIRM_ONLY_CAPABILITIES:
-            self.assertIn(capability_id, derived)
-            self.assertTrue(
-                str(
-                    (get_capability(capability_id) or {})
-                    .get("provider_bindings", {})
-                    .get("claude_code")
-                    or ""
-                ).strip()
-            )
+        self.assertEqual(AUTOMATION_CONFIRM_ONLY_CAPABILITIES, ())
+        self.assertNotIn("web.search", AUTOMATION_CONFIRM_ONLY_CAPABILITIES)
+        self.assertNotIn("web.read", AUTOMATION_CONFIRM_ONLY_CAPABILITIES)
+        self.assertIn("web.search", derived)
+        self.assertIn("web.read", derived)
 
         for item in CAPABILITY_MANIFEST:
             capability_id = item["capability_id"]

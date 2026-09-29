@@ -38,6 +38,8 @@ CHAT_WAKE_DEFAULTS = (
     "ledger.read",
     "ledger.budget.read",
     "ledger.write",
+    "web.search",
+    "web.read",
     "health.read",
     "gallery.save",
     "gallery.recall",
@@ -129,10 +131,9 @@ class LeaseSignerContractTests(unittest.TestCase):
         self.assertEqual(DEFAULT_ALLOWED_CAPABILITIES["task"], TASK_DEFAULTS)
         self.assertEqual(TASK_DEFAULT_ALLOWED_CAPABILITIES, TASK_DEFAULTS)
         self.assertEqual(default_chat_wake_auto_capabilities(), CHAT_WAKE_DEFAULTS)
-        self.assertEqual(
-            AUTOMATION_CONFIRM_ONLY_CAPABILITIES,
-            ("web.search", "web.read"),
-        )
+        self.assertEqual(AUTOMATION_CONFIRM_ONLY_CAPABILITIES, ())
+        self.assertNotIn("web.search", AUTOMATION_CONFIRM_ONLY_CAPABILITIES)
+        self.assertNotIn("web.read", AUTOMATION_CONFIRM_ONLY_CAPABILITIES)
 
         for mode, expected in (
             ("chat", CHAT_WAKE_DEFAULTS),
@@ -151,8 +152,13 @@ class LeaseSignerContractTests(unittest.TestCase):
                 self.assertIn("ledger.write", lease["allowed_capabilities"])
                 self.assertIn("health.read", lease["allowed_capabilities"])
                 self.assertIn("diary.write", lease["allowed_capabilities"])
-                self.assertNotIn("web.search", lease["allowed_capabilities"])
-                self.assertNotIn("web.read", lease["allowed_capabilities"])
+                self.assertIn("web.search", lease["allowed_capabilities"])
+                self.assertIn("web.read", lease["allowed_capabilities"])
+                self.assertNotIn("files.read", lease["allowed_capabilities"])
+                self.assertNotIn("files.find", lease["allowed_capabilities"])
+                self.assertNotIn("code.search", lease["allowed_capabilities"])
+                self.assertNotIn("home.light.control", lease["allowed_capabilities"])
+                self.assertNotIn("github.read", lease["allowed_capabilities"])
             else:
                 self.assertNotIn("todo.write", lease["allowed_capabilities"])
                 self.assertNotIn("ledger.write", lease["allowed_capabilities"])

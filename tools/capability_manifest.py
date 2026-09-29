@@ -394,12 +394,9 @@ P1_RESERVED_CAPABILITY_IDS = frozenset(
 
 _CAPABILITIES_BY_ID = {item["capability_id"]: item for item in CAPABILITY_MANIFEST}
 
-# External web reads stay off the shared Chat/Wake default auto lease.
-# They remain ordinary_auto-eligible, but default_policy does not inherit them.
-AUTOMATION_CONFIRM_ONLY_CAPABILITIES: tuple[str, ...] = (
-    "web.search",
-    "web.read",
-)
+# Future high-risk exception slot.  Currently empty: every ordinary_auto
+# capability, including web.search / web.read, inherits to Chat and Wake.
+AUTOMATION_CONFIRM_ONLY_CAPABILITIES: tuple[str, ...] = ()
 
 _ORDINARY_AUTO_AUTONOMY_MODES = frozenset({"read_auto", "self_write_auto"})
 
