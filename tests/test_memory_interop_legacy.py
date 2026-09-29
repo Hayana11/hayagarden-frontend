@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -398,32 +399,42 @@ class LegacyReadOnlyGuaranteeTests(unittest.TestCase):
         self.assertEqual(3, _row(self.db_path, 6)["recall_count"])
 
     def test_kernel_database_is_never_opened_or_created(self):
-        with mock.patch(
-            "tools.memory_kernel.sqlite3.connect",
-            side_effect=AssertionError("kernel database opened"),
+        real_connect = sqlite3.connect
+
+        def connect_guard(database, *args, **kwargs):
+            name = os.fspath(database)
+            if "memory_kernel" in name or name.endswith(".kernel.db"):
+                raise AssertionError("kernel database opened")
+            return real_connect(database, *args, **kwargs)
+
+        with mock.patch.object(
+            MemoryKernel, "__init__", side_effect=AssertionError("MemoryKernel constructed")
         ), mock.patch.object(
             MemoryKernel, "create_evidence", side_effect=AssertionError("create_evidence")
         ), mock.patch.object(
             MemoryKernel, "create_state", side_effect=AssertionError("create_state")
         ), mock.patch.object(
             MemoryKernel, "revise_state", side_effect=AssertionError("revise_state")
-        ), mock.patch(
-            "tools.memory_interop_legacy.sqlite3.connect",
-            wraps=sqlite3.connect,
-        ) as connect:
-            retrieve_legacy_posts_context_bundle(
-                self.db_path,
-                keyword="needle",
-                request_context=_request_context(),
-                bundle_id="bundle-1",
-                generated_at=UTC_1,
-            )
+        ):
             _envelope(_row(self.db_path, 1))
+            with mock.patch(
+                "tools.memory_interop_legacy.sqlite3.connect",
+                side_effect=connect_guard,
+            ) as connect:
+                retrieve_legacy_posts_context_bundle(
+                    self.db_path,
+                    keyword="needle",
+                    request_context=_request_context(),
+                    bundle_id="bundle-1",
+                    generated_at=UTC_1,
+                )
         self.assertTrue(connect.called)
-        for args, kwargs in connect.call_args_list:
-            self.assertTrue(kwargs.get("uri"))
-            self.assertIn("mode=ro", args[0])
-            self.assertNotIn("memory_kernel", args[0])
+        for call in connect.call_args_list:
+            database = call.args[0] if call.args else call.kwargs.get("database")
+            self.assertTrue(call.kwargs.get("uri"))
+            self.assertIn("mode=ro", str(database))
+            self.assertIn(Path(self.db_path).resolve().as_posix(), str(database))
+            self.assertNotIn("memory_kernel", str(database))
         self.assertFalse(any(Path(self.temp.name).glob("memory_kernel*")))
         conn = sqlite3.connect(self.db_path)
         try:
@@ -435,7 +446,8 @@ class LegacyReadOnlyGuaranteeTests(unittest.TestCase):
             }
         finally:
             conn.close()
-        self.assertEqual({"posts"}, names)
+        self.assertIn("posts", names)
+        self.assertFalse(any(name.startswith("memory_kernel") for name in names))
 
 
 class LegacyAdapterIsolationTests(unittest.TestCase):

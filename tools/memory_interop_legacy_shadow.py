@@ -12,15 +12,6 @@ import json
 import sys
 from pathlib import Path
 
-from tools.memory_interop import (
-    MEMORY_INTEROP_PROTOCOL_VERSION,
-    InteropRequestContext,
-)
-from tools.memory_interop_legacy import (
-    LEGACY_POSTS_ADAPTER_ID,
-    shadow_compare_legacy_search,
-)
-
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -39,6 +30,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from tools.memory_interop import (
+        MEMORY_INTEROP_PROTOCOL_VERSION,
+        InteropRequestContext,
+    )
+    from tools.memory_interop_legacy import (
+        LEGACY_POSTS_ADAPTER_ID,
+        shadow_compare_legacy_search,
+    )
+
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     db_path = str(Path(args.db_path).expanduser().resolve())
     context = InteropRequestContext(
