@@ -22,7 +22,13 @@ sys.path.insert(0, str(ROOT))
 TZ = ZoneInfo("Asia/Shanghai")
 IDENTITY_ID = "fyodor"
 CHAT_ID = "default"
-DAYBLOCK_POLICY_VERSION = "dayblock_policy_r0"
+DAYBLOCK_POLICY_VERSION = "dayblock_policy_r1"
+# The Preview shadow schema already has a generic auxiliary member kind for
+# DayBlock-local source representations. Keep the new projection identifiable
+# by its source_ref without widening the Continuity SourceKind or adding a
+# second source schema.
+DAYBLOCK_VISIBLE_TURN_PREFIX = "dayblock_visible_turn:"
+DAYBLOCK_VISIBLE_TURN_STORAGE_KIND = "incomplete_user_turn"
 GENERATOR_POLICY_VERSION = "dayblock_generator_contract_r1"
 PROMPT_POLICY_VERSION = "dayblock_prompt_contract_r3"
 PERSONA_RUNTIME_PATH = Path("/var/lib/hayagarden/persona.md")
@@ -156,6 +162,8 @@ def discover_natural_day_rows(source_db: str | Path, source_day: str) -> tuple[d
                 message_id = int(row.get("id") or 0)
                 if not message_id:
                     raise RuntimeError("source_row_identity_invalid")
+                row["_dayblock_context_id"] = context_id
+                row["_dayblock_context_epoch"] = context_epoch
                 previous = rows_by_id.get(message_id)
                 if previous is not None and _canonical(previous) != _canonical(row):
                     raise RuntimeError("source_scope_row_conflict")
@@ -203,6 +211,91 @@ class DayBlockMaterialization:
     blockers: tuple[str, ...]
 
 
+def _dayblock_visible_turn_ids(source_ref: str) -> tuple[int, int] | None:
+    parts = str(source_ref).split(":")
+    if len(parts) != 3 or parts[0] != "dayblock_visible_turn":
+        return None
+    try:
+        user_id, assistant_id = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    if user_id <= 0 or assistant_id <= 0:
+        return None
+    return user_id, assistant_id
+
+
+def _is_dayblock_incomplete_user_member(member: Any) -> bool:
+    return (
+        member.source_kind == "incomplete_user_turn"
+        and str(member.source_ref).startswith("incomplete_user:")
+    )
+
+
+def _dayblock_visible_turn_member(user_row: dict[str, Any], assistant_row: dict[str, Any]):
+    from continuity.contracts import SourceMember
+    from continuity.sources import _active_branch_identity, _turn_revision, row_logical_size
+
+    user_id = int(user_row.get("id") or 0)
+    assistant_id = int(assistant_row.get("id") or 0)
+    revision = _turn_revision(user_row, assistant_row)
+    return SourceMember(
+        seq=0,
+        source_kind=DAYBLOCK_VISIBLE_TURN_STORAGE_KIND,
+        source_ref=f"{DAYBLOCK_VISIBLE_TURN_PREFIX}{user_id}:{assistant_id}",
+        source_revision=revision,
+        role="conversation",
+        content_hash=revision,
+        logical_size=row_logical_size(user_row) + row_logical_size(assistant_row),
+        created_at=str(user_row.get("created_at") or ""),
+        branch_id=_active_branch_identity(assistant_row),
+    )
+
+
+def _dayblock_visible_turn_pairs(
+    rows: tuple[dict[str, Any], ...],
+    covered_ids: set[int],
+) -> tuple[tuple[dict[str, Any], dict[str, Any]], ...]:
+    """Find only the first formal row after each uncovered user.
+
+    This is deliberately local to DayBlock. It never changes the canonical
+    completed-turn derivation, and it requires discovery's scope proof before
+    pairing rows from the source projection.
+    """
+    from chat.daily_context import is_formal_chat_message
+    from continuity.sources import _is_formal_assistant, _semantic_cache_info, _USER_AUTHORS
+
+    ordered = sorted(rows, key=lambda row: int(row.get("id") or 0))
+    formal = [row for row in ordered if is_formal_chat_message(row)]
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for index, user_row in enumerate(formal):
+        user_id = int(user_row.get("id") or 0)
+        if user_id in covered_ids:
+            continue
+        author = str(user_row.get("author") or "").strip().lower()
+        if author not in _USER_AUTHORS:
+            continue
+        if index + 1 >= len(formal):
+            continue
+        assistant_row = formal[index + 1]
+        assistant_id = int(assistant_row.get("id") or 0)
+        if assistant_id <= user_id or not _is_formal_assistant(assistant_row):
+            continue
+        if not str(assistant_row.get("content") or "").strip():
+            continue
+        if _semantic_cache_info(assistant_row).get("partial_rescue") is not True:
+            continue
+        user_scope = (user_row.get("_dayblock_context_id"), user_row.get("_dayblock_context_epoch"))
+        assistant_scope = (
+            assistant_row.get("_dayblock_context_id"),
+            assistant_row.get("_dayblock_context_epoch"),
+        )
+        if None in user_scope or None in assistant_scope or user_scope != assistant_scope:
+            continue
+        pairs.append((user_row, assistant_row))
+        covered_ids.update((user_id, assistant_id))
+    return tuple(pairs)
+
+
 def _dayblock_auxiliary_members(
     rows: tuple[dict[str, Any], ...],
     turns: tuple[Any, ...],
@@ -212,7 +305,9 @@ def _dayblock_auxiliary_members(
     static_dir: str | Path = ROOT / "static",
 ):
     from continuity.contracts import SourceMember
-    from continuity.sources import is_formal_user_source_row, row_revision
+    from continuity.sources import (
+        _semantic_cache_info, is_formal_user_source_row, row_revision,
+    )
     from chat.attachment_contract import (
         MAX_IMAGE_INPUT_BYTES, persisted_chat_attachments, read_text_attachment_body,
     )
@@ -234,6 +329,24 @@ def _dayblock_auxiliary_members(
             turn_by_message[int(parts[1])] = (
                 event.event_id, bool(str((row or {}).get("content") or "").strip()),
             )
+
+    covered_ids: set[int] = set()
+    for member in base_members:
+        parts = str(member.source_ref).split(":")
+        if member.source_kind == "completed_turn" and len(parts) == 3:
+            covered_ids.update((int(parts[1]), int(parts[2])))
+        elif member.source_kind == "autonomous_event" and len(parts) == 2:
+            covered_ids.add(int(parts[1]))
+
+    visible_pairs = _dayblock_visible_turn_pairs(rows, covered_ids)
+    visible_members = [
+        _dayblock_visible_turn_member(user_row, assistant_row)
+        for user_row, assistant_row in visible_pairs
+    ]
+    for user_row, assistant_row in visible_pairs:
+        visible_ref = f"{DAYBLOCK_VISIBLE_TURN_PREFIX}{int(user_row['id'])}:{int(assistant_row['id'])}"
+        turn_by_message[int(user_row["id"])] = (visible_ref, True)
+        turn_by_message[int(assistant_row["id"])] = (visible_ref, True)
 
     attachments: list[dict[str, Any]] = []
     attachment_members: list[Any] = []
@@ -295,13 +408,6 @@ def _dayblock_auxiliary_members(
                 created_at=str(row.get("created_at") or ""), branch_id="active-transcript",
             ))
 
-    covered_ids: set[int] = set()
-    for member in base_members:
-        parts = str(member.source_ref).split(":")
-        if member.source_kind == "completed_turn" and len(parts) == 3:
-            covered_ids.update((int(parts[1]), int(parts[2])))
-        elif member.source_kind == "autonomous_event" and len(parts) == 2:
-            covered_ids.add(int(parts[1]))
     from chat.daily_context import is_formal_chat_message
     unmatched = [
         row for row in rows
@@ -322,6 +428,14 @@ def _dayblock_auxiliary_members(
             if author in {"hayana", "haya", "user"}:
                 break
             if author in {"fyodor", "claude", "assistant"}:
+                # An empty partial rescue has no visible assistant evidence;
+                # keep the user as an incomplete projection and leave the
+                # assistant row uncovered rather than silently dropping it.
+                if (
+                    not str(candidate.get("content") or "").strip()
+                    and _semantic_cache_info(candidate).get("partial_rescue") is True
+                ):
+                    break
                 later_assistant = True
                 break
         if later_assistant:
@@ -342,7 +456,7 @@ def _dayblock_auxiliary_members(
         "dayblock_critical_attachment_content_unavailable"
         for item in attachments if item["critical_unavailable"]
     )
-    return tuple(incomplete + attachment_members), tuple(attachments), blockers
+    return tuple(visible_members + incomplete + attachment_members), tuple(attachments), blockers
 
 
 def derive_source_contract(
@@ -402,7 +516,9 @@ def uncovered_formal_source_rows(rows: tuple[dict[str, Any], ...], members: tupl
             covered.update((int(parts[1]), int(parts[2])))
         elif member.source_kind == "autonomous_event" and len(parts) == 2:
             covered.add(int(parts[1]))
-        elif member.source_kind == "incomplete_user_turn" and len(parts) == 2:
+        elif _dayblock_visible_turn_ids(member.source_ref) is not None:
+            covered.update(_dayblock_visible_turn_ids(member.source_ref) or ())
+        elif _is_dayblock_incomplete_user_member(member) and len(parts) == 2:
             covered.add(int(parts[1]))
     return tuple(row for row in rows
                  if is_formal_chat_message(row) and int(row.get("id") or 0) not in covered)
@@ -442,7 +558,13 @@ def materialize_raw_evidence(
         else:
             body_by_ref[member.source_ref] = _render_wake(member.source_ref, rows_by_id)
     for member in members:
-        if member.source_kind == "incomplete_user_turn":
+        visible_ids = _dayblock_visible_turn_ids(member.source_ref)
+        if visible_ids is not None:
+            user_id, assistant_id = visible_ids
+            body_by_ref[member.source_ref] = _render_turn(
+                f"turn:{user_id}:{assistant_id}", rows_by_id,
+            )
+        elif _is_dayblock_incomplete_user_member(member):
             mid = int(member.source_ref.split(":")[1])
             row = rows_by_id.get(mid)
             if row is None:
@@ -1195,7 +1317,7 @@ def build_shadow_plan(
                 for member in members
             ],
             "completed_turn_count": len(turns), "autonomous_event_count": len(events),
-            "incomplete_user_turn_count": sum(m.source_kind == "incomplete_user_turn" for m in members),
+            "incomplete_user_turn_count": sum(_is_dayblock_incomplete_user_member(m) for m in members),
             "attachment_reference_count": attachment_reference_count(rows),
             "logical_size": sum(int(member.logical_size) for member in members),
             "raw_token_estimate": materialized.source_token_estimate,
@@ -1272,9 +1394,9 @@ def build_shadow_plan(
             for member in members
         ],
         "completed_turn_count": len(turns), "autonomous_event_count": len(events),
-        "incomplete_user_turn_count": sum(m.source_kind == "incomplete_user_turn" for m in members),
+        "incomplete_user_turn_count": sum(_is_dayblock_incomplete_user_member(m) for m in members),
         "incomplete_user_turn_refs": [
-            member.source_ref for member in members if member.source_kind == "incomplete_user_turn"
+            member.source_ref for member in members if _is_dayblock_incomplete_user_member(member)
         ],
         "canonical_source_row_count": len(rows),
         "logical_size": sum(int(member.logical_size) for member in members),

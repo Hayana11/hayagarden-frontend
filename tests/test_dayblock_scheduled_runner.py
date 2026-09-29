@@ -10,10 +10,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
-sys.path.insert(0, '/opt/frontend-preview/tools')
-sys.path.insert(0, '/opt/frontend-preview/tests')
-sys.path.insert(0, '/opt/frontend-preview')
-sys.path.insert(0, '/opt/frontend')
+TEST_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TEST_ROOT / 'tools'))
+sys.path.insert(0, str(TEST_ROOT / 'tests'))
+sys.path.insert(0, str(TEST_ROOT))
 
 import dayblock_shadow as shadow
 import dayblock_scheduled_runner as runner
