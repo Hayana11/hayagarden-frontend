@@ -247,6 +247,7 @@ def _legacy_context_item(
     keyword: str,
     limit: int,
     result_count: int,
+    order: str = "id DESC",
 ) -> ContextItem:
     row_id = _text_id(row.get("id"), "legacy row id")
     content = row.get("content")
@@ -269,7 +270,7 @@ def _legacy_context_item(
                 "limit": limit,
                 "position": position,
                 "result_count": result_count,
-                "order": "id DESC",
+                "order": order,
             }
         },
     )
@@ -296,16 +297,63 @@ def retrieve_legacy_posts_context_bundle(
     limit_n = min(int(limit), 1000)
     with legacy_posts_readonly(db_path) as conn:
         rows = search_memory_posts(conn, keyword=search, limit=limit_n)
+    return legacy_rows_to_context_bundle(
+        rows,
+        request_context=request_context,
+        bundle_id=bundle_id,
+        generated_at=generated_at,
+        selection_query=search,
+        selection_limit=limit_n,
+        order="id DESC",
+        bundle_metadata={
+            "legacy_search": {
+                "keyword": search,
+                "limit": limit_n,
+                "handler": "tools.product_handlers.search_memory_posts",
+            }
+        },
+    )
+
+
+def legacy_rows_to_context_bundle(
+    rows: Any,
+    *,
+    request_context: InteropRequestContext,
+    bundle_id: str,
+    generated_at: str,
+    selection_query: str = "",
+    selection_limit: int | None = None,
+    order: str = "authoritative",
+    bundle_metadata: Mapping[str, Any] | None = None,
+) -> ContextBundle:
+    """Translate already-selected legacy rows into a ContextBundle.
+
+    Callers supply the authoritative order.  This helper does not search,
+    rank, open a writable DB, or invent confidence/epistemic status.
+    """
+
+    _validate_legacy_request_context(request_context)
+    mapping_rows = [_row_mapping(row) for row in rows]
+    count = len(mapping_rows)
+    limit_n = int(selection_limit) if selection_limit is not None else count
     items = tuple(
         _legacy_context_item(
             row,
             position=index,
-            keyword=search,
+            keyword=selection_query,
             limit=limit_n,
-            result_count=len(rows),
+            result_count=count,
+            order=order,
         )
-        for index, row in enumerate(rows)
+        for index, row in enumerate(mapping_rows)
     )
+    metadata: Mapping[str, Any] = bundle_metadata if bundle_metadata is not None else {
+        "legacy_search": {
+            "mode": "explicit_rows",
+            "limit": limit_n,
+            "order": order,
+        }
+    }
     return ContextBundle(
         bundle_id=bundle_id,
         protocol_version=MEMORY_INTEROP_PROTOCOL_VERSION,
@@ -314,13 +362,7 @@ def retrieve_legacy_posts_context_bundle(
         items=items,
         request_id=request_context.request_id,
         turn_id=request_context.turn_id,
-        metadata={
-            "legacy_search": {
-                "keyword": search,
-                "limit": limit_n,
-                "handler": "tools.product_handlers.search_memory_posts",
-            }
-        },
+        metadata=metadata,
     )
 
 
@@ -383,6 +425,7 @@ __all__ = [
     "legacy_post_to_evidence",
     "legacy_post_to_submission_envelope",
     "legacy_posts_readonly",
+    "legacy_rows_to_context_bundle",
     "open_legacy_posts_readonly",
     "retrieve_legacy_posts_context_bundle",
     "shadow_compare_legacy_search",

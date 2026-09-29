@@ -3193,7 +3193,12 @@ def _dispatch_api_chat_tool(name, args, turn_lease, tool_use_id=None):
                 f'（{name}；{diagnostic}）'
             )
         from tools.memory_write_adapter import write_memory
-        result = write_memory(DB_PATH, content=args.get('content'))
+        result = write_memory(
+            DB_PATH,
+            content=args.get('content'),
+            shadow_surface='api_relay',
+            shadow_turn_id=decision.get('verified_turn_id'),
+        )
         if result.get('status') == 'CREATED':
             return '已存入长期记忆'
         if result.get('status') == 'CONTENT_TOO_LONG':

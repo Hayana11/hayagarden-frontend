@@ -8,13 +8,19 @@ on:
       - "tools/memory_interop.py"
       - "tools/memory_interop_legacy.py"
       - "tools/memory_interop_legacy_shadow.py"
+      - "tools/memory_interop_shadow.py"
+      - "tools/memory_interop_shadow_worker.py"
+      - "tools/memory_write_adapter.py"
+      - "tools/memory_internal_adapter.py"
       - "tests/test_memory_kernel.py"
       - "tests/test_memory_kernel_legacy_isolation.py"
       - "tests/test_memory_interop.py"
       - "tests/test_memory_interop_legacy.py"
+      - "tests/test_memory_interop_live_shadow.py"
       - "docs/memory-kernel-core-0.md"
       - "docs/memory-interop-v0.1.md"
       - "docs/memory-interop-legacy-r1.md"
+      - "docs/memory-interop-live-shadow-r2a.md"
       - ".github/workflows/memory-kernel-core-0.yml"
   workflow_dispatch:
 
@@ -47,13 +53,16 @@ jobs:
           python -m ruff check
           tools/memory_kernel.py tools/memory_kernel_schema.py tools/memory_interop.py
           tools/memory_interop_legacy.py tools/memory_interop_legacy_shadow.py
+          tools/memory_interop_shadow.py tools/memory_interop_shadow_worker.py
           tests/test_memory_kernel.py tests/test_memory_kernel_legacy_isolation.py
           tests/test_memory_interop.py tests/test_memory_interop_legacy.py
+          tests/test_memory_interop_live_shadow.py
       - name: Semantic, migration, and legacy isolation contracts
         run: >-
           python -m unittest
           tests.test_memory_kernel tests.test_memory_kernel_legacy_isolation
-          tests.test_memory_interop tests.test_memory_interop_legacy -v
+          tests.test_memory_interop tests.test_memory_interop_legacy
+          tests.test_memory_interop_live_shadow -v
       - name: Whitespace check
         run: git diff --check
 
