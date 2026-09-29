@@ -312,6 +312,30 @@ class ProductionProducerEntryTest(unittest.TestCase):
             'chat.cc_runtime.claude_cmd_for_version',
             side_effect=lambda _version, *args, **kwargs: ['/managed/claude', *args],
         ))
+        stack.enter_context(mock.patch(
+            'tools.cc_capability_adapter.build_uh_a0_spawn_plan',
+            side_effect=lambda **_kwargs: {
+                'built_in_tools_csv': 'Read,Glob,Grep',
+                'spawn_extra_args': [
+                    '--settings', '/parent/cc-settings-uh-a0.json',
+                    '--mcp-config', '/parent/cc-tools-uh-a0.json',
+                    '--strict-mcp-config',
+                    '--allowedTools', 'Read,Glob,Grep',
+                    '--disallowedTools', 'Bash',
+                ],
+                'surface_allowlist_csv': 'Read,Glob,Grep',
+                'mcp_config_path': '/parent/cc-tools-uh-a0.json',
+                'physical_surface_fingerprint': 'surface-fp',
+            },
+        ))
+        stack.enter_context(mock.patch(
+            'chat.system_builder.build_cc_static_parts',
+            return_value={'full_system': 'MAIN-CHAT-SYSTEM', 'persona': 'PERSONA'},
+        ))
+        stack.enter_context(mock.patch(
+            'chat.cc_effort.cc_effort_snapshot',
+            return_value=('', 'default', []),
+        ))
         stack.enter_context(mock.patch('chat.cc_auth.read_cc_oauth_token', side_effect=lambda: self.token))
         stack.enter_context(mock.patch(
             'continuity.native_fork_executor.run_subprocess_with_timeout', side_effect=self._fake_subprocess,
@@ -397,6 +421,8 @@ class ProductionProducerEntryTest(unittest.TestCase):
     def _fake_subprocess(self, **kwargs):
         self.subprocess_calls += 1
         self.subprocess_cwd = kwargs['cwd']
+        self.subprocess_cmd = kwargs.get('cmd')
+        self.subprocess_stdin = kwargs.get('stdin_payload')
         if self.run_result is not None:
             return self.run_result
         lines = [
@@ -451,6 +477,12 @@ class ProductionProducerEntryTest(unittest.TestCase):
         self.assertEqual(self.fork_directory, self.parent_cwd)
         self.assertEqual(self.subprocess_cwd, self.parent_cwd)
         self.assertEqual(self.parent_path.read_bytes(), before)
+        cmd = self.subprocess_cmd
+        self.assertNotEqual(cmd[cmd.index('--tools') + 1], '')
+        self.assertNotEqual(cmd[cmd.index('--allowedTools') + 1], '')
+        self.assertEqual(cmd[cmd.index('--system-prompt') + 1], 'MAIN-CHAT-SYSTEM')
+        self.assertNotIn('--safe-mode', cmd)
+        self.assertIn('不要调用任何工具，只根据当前已继承的对话内容完成压缩。', self.subprocess_stdin)
 
     def test_default_producer_different_compression_model_uses_oneshot(self):
         self._write_parent()
