@@ -72,13 +72,13 @@ def create_health_blueprint(
 
     @blueprint.route("/api/health/mobile/ingest", methods=["POST"])
     def ingest():
-        if request.content_length and request.content_length > MAX_INGEST_BYTES:
-            return jsonify({"ok": False, "error": "request too large"}), 413
         device_id = (request.headers.get("X-Health-Device-ID") or "").strip()
         authorization = request.headers.get("Authorization", "")
         credential = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
         if not health_store.authenticate_device(db_path, device_id, credential):
             return _unauthorized()
+        if request.content_length and request.content_length > MAX_INGEST_BYTES:
+            return jsonify({"ok": False, "error": "request too large"}), 413
         payload, error = _json_body(MAX_INGEST_BYTES)
         if error is not None:
             return error
