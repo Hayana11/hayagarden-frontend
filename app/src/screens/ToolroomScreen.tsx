@@ -2,7 +2,7 @@ import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, us
 import { getActivitySemanticConfidence, lightSemanticLabel, orientationSemanticLabel, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
-import { http } from '../lib/http';
+import { HttpError, http } from '../lib/http';
 import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { realityStore } from '../lib/reality/realityRuntime';
@@ -21,6 +21,8 @@ type ElpisNativeBridge = {
 type ElpisHealthBridge = {
   getHealthState?: () => unknown;
   getHealthStatus?: () => unknown;
+  getInstallId?: () => unknown;
+  provisionDeviceCredential?: (jsonString: string) => unknown;
   syncNow?: () => unknown;
   requestHealthConnectPermission?: () => unknown;
 };
@@ -442,6 +444,8 @@ type HealthDiagnosticState = {
   permission: string;
   metricPermission: string;
   backgroundReadPermission: string;
+  enrollmentConfigured: boolean;
+  deviceId: string | null;
   providerStatus: string;
   backgroundSync: string;
   lastCollectedAt: string | null;
@@ -459,6 +463,8 @@ const DEFAULT_HEALTH_DIAGNOSTIC: HealthDiagnosticState = {
   permission: '未知',
   metricPermission: '未知',
   backgroundReadPermission: '未知',
+  enrollmentConfigured: false,
+  deviceId: null,
   providerStatus: 'UNAVAILABLE',
   backgroundSync: '未知',
   lastCollectedAt: null,
@@ -681,6 +687,11 @@ export function ToolroomScreen() {
         ? String((local.permissionState as Record<string, unknown>).metrics) : '未知',
       backgroundReadPermission: local.permissionState && typeof local.permissionState === 'object' && typeof (local.permissionState as Record<string, unknown>).backgroundRead === 'string'
         ? String((local.permissionState as Record<string, unknown>).backgroundRead) : '未知',
+      enrollmentConfigured: local.enrollment && typeof local.enrollment === 'object'
+        ? (local.enrollment as Record<string, unknown>).configured === true : false,
+      deviceId: local.enrollment && typeof local.enrollment === 'object'
+        && typeof (local.enrollment as Record<string, unknown>).deviceId === 'string'
+        ? String((local.enrollment as Record<string, unknown>).deviceId) : null,
       providerStatus: typeof local.providerStatus === 'string' ? local.providerStatus : 'UNAVAILABLE',
       backgroundSync: typeof local.backgroundSync === 'string' ? local.backgroundSync : '未知',
       lastCollectedAt: typeof local.lastCollectedAt === 'string' ? local.lastCollectedAt : null,
@@ -733,6 +744,68 @@ export function ToolroomScreen() {
       setHealthDiag((current) => ({ ...current, notice: '后台同步请求失败。' }));
     }
     window.setTimeout(() => { void refreshHealthDiagnostics(); }, 800);
+  };
+
+  const enrollHealthDevice = async () => {
+    const health = window.ElpisHealth;
+    const native = window.ElpisNative;
+    let enrollment: Record<string, unknown> | null = null;
+    let credential: string | null = null;
+    try {
+      if (!health?.getInstallId || !health.provisionDeviceCredential || !native?.getBuildInfo) {
+        setHealthDiag((current) => ({ ...current, notice: '当前 Canary 不支持设备绑定。' }));
+        return;
+      }
+      const installValue = await Promise.resolve(health.getInstallId());
+      const installId = typeof installValue === 'string'
+        ? installValue.trim()
+        : parseBridgeJson(installValue)?.installId;
+      const build = parseBridgeJson(await Promise.resolve(native.getBuildInfo()));
+      const packageName = typeof build?.applicationId === 'string' ? build.applicationId : '';
+      const buildSha = typeof build?.sourceSha === 'string' ? build.sourceSha : '';
+      const buildBranch = typeof build?.branch === 'string' ? build.branch : '';
+      if (typeof installId !== 'string' || !installId || !packageName) {
+        setHealthDiag((current) => ({ ...current, notice: '无法读取 Canary 安装身份。' }));
+        return;
+      }
+      enrollment = await http.post<Record<string, unknown>>('/api/health/mobile/enroll', {
+        schemaVersion: 1,
+        installId,
+        packageName,
+        buildSha,
+        buildBranch,
+        label: 'Elpis Canary',
+      });
+      const deviceId = typeof enrollment.deviceId === 'string' ? enrollment.deviceId : '';
+      credential = typeof enrollment.credential === 'string' ? enrollment.credential : null;
+      if (enrollment.schemaVersion !== 1 || !deviceId || !credential) {
+        throw new Error('malformed enrollment response');
+      }
+      const provisioned = parseBridgeJson(await Promise.resolve(
+        health.provisionDeviceCredential(JSON.stringify({ deviceId, credential })),
+      ));
+      if (provisioned?.ok !== true || provisioned.configured !== true) {
+        throw new Error('native credential provisioning failed');
+      }
+      setHealthDiag((current) => ({
+        ...current,
+        notice: '本机健康同步已绑定。',
+        enrollmentConfigured: true,
+        deviceId,
+      }));
+    } catch (error) {
+      const status = error instanceof HttpError ? error.status : 0;
+      const notice = status === 401
+        ? '需要主人身份验证'
+        : status === 403
+          ? '绑定请求被拒绝。'
+          : '本机健康同步绑定失败。';
+      setHealthDiag((current) => ({ ...current, notice }));
+    } finally {
+      credential = null;
+      enrollment = null;
+      window.setTimeout(() => { void refreshHealthDiagnostics(); }, 300);
+    }
   };
 
   const authorizeUsage = async () => {
@@ -1488,6 +1561,8 @@ export function ToolroomScreen() {
                 <div><dt>权限</dt><dd>{healthDiag.permission}</dd></div>
                 <div><dt>Metric read</dt><dd>{healthDiag.metricPermission}</dd></div>
                 <div><dt>Background read</dt><dd>{healthDiag.backgroundReadPermission}</dd></div>
+                <div><dt>设备绑定</dt><dd>{healthDiag.enrollmentConfigured ? '已绑定' : '未绑定'}</dd></div>
+                <div><dt>device id</dt><dd>{healthDiag.deviceId || '—'}</dd></div>
                 <div><dt>后台同步</dt><dd>{healthDiag.backgroundSync}</dd></div>
                 <div><dt>手机采集</dt><dd>{healthTime(healthDiag.lastCollectedAt)}</dd></div>
                 <div><dt>手机上传</dt><dd>{healthTime(healthDiag.lastUploadAt)}</dd></div>
@@ -1507,6 +1582,7 @@ export function ToolroomScreen() {
                 })}
               </div>
               <div className="toolroom-health-actions">
+                <button type="button" className="toolroom-native-action" disabled={!healthDiag.bridgeAvailable} onClick={() => void enrollHealthDevice()}>绑定本机健康同步</button>
                 <button type="button" className="toolroom-native-action" disabled={!healthDiag.bridgeAvailable} onClick={() => void requestHealthPermission()}>申请 Health Connect 权限</button>
                 <button type="button" className="toolroom-native-action" disabled={!healthDiag.bridgeAvailable} onClick={() => void syncHealthNow()}>请求后台同步</button>
               </div>
