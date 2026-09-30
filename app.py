@@ -7,10 +7,12 @@ import command_store
 import group_chat_store
 import codex_app_server
 import context_usage_store
+from tools import health_store
 import moments_store
 import moments_cover
 from moments_auth import OwnerAuthError, require_owner
 from context_usage_routes import create_context_usage_blueprint
+from health_ingest_routes import create_health_blueprint
 from moments_routes import create_moments_blueprint
 from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 from monopoly_rooms import MonopolyService
@@ -54,6 +56,7 @@ APP_DIST_DIR = '/opt/frontend/app/dist'
 
 BOARD_TOKEN_FYODOR = os.environ.get('BOARD_TOKEN_FYODOR', '')
 CONTEXT_USAGE_REPORT_TOKEN = os.environ.get('CONTEXT_USAGE_REPORT_TOKEN', '')
+HEALTH_DB_PATH = os.environ.get('HEALTH_DB_PATH', '/opt/frontend/health.db')
 TODO_INTERNAL_EXECUTION_TOKEN = os.environ.get('TODO_INTERNAL_EXECUTION_TOKEN', '')
 for line in open('/opt/frontend/.env'):
     k, _, v = line.partition('=')
@@ -115,6 +118,7 @@ _migrate_chat_columns()
 _register_continuity_schema()
 group_chat_store.ensure_schema(DB_PATH)
 context_usage_store.ensure_schema(DB_PATH)
+health_store.ensure_schema(HEALTH_DB_PATH)
 moments_store.ensure_schema(DB_PATH, gallery_store.DB_PATH)
 from chat.rewrite_staging import ensure_schema_for_path as _rewrite_staging_ensure_schema
 _rewrite_staging_ensure_schema(DB_PATH)
@@ -137,6 +141,9 @@ ensure_concern_closure_schema_for_path(DB_PATH)
 app.register_blueprint(create_context_usage_blueprint(
     db_path=DB_PATH,
     report_token_getter=lambda: CONTEXT_USAGE_REPORT_TOKEN,
+))
+app.register_blueprint(create_health_blueprint(
+    db_path=HEALTH_DB_PATH,
 ))
 from daily_context_routes import create_daily_context_blueprint
 app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))

@@ -224,3 +224,34 @@ const checkButtonPos = screen.indexOf('toolroom-mcp-check-button', headerStart);
 assert.ok(headerStart >= 0 && toggleClose >= 0 && checkButtonPos > toggleClose);
 
 console.log('test-toolroom-contract: ok');
+
+assert.match(screen, /ElpisHealth/);
+assert.match(screen, /getHealthStatus/);
+assert.match(screen, /getBuildInfo/);
+assert.match(screen, /health\.getBuildInfo/);
+assert.doesNotMatch(screen, /native\??\.getBuildInfo/);
+const nativeBridgeType = screen.match(
+  /type ElpisNativeBridge\s*=\s*\{[\s\S]*?\};/
+)?.[0] || '';
+const healthBridgeType = screen.match(
+  /type ElpisHealthBridge\s*=\s*\{[\s\S]*?\};/
+)?.[0] || '';
+assert.ok(nativeBridgeType);
+assert.ok(healthBridgeType);
+assert.doesNotMatch(nativeBridgeType, /getBuildInfo/);
+assert.match(healthBridgeType, /getBuildInfo/);
+assert.match(screen, /getInstallId/);
+assert.match(screen, /provisionDeviceCredential/);
+assert.match(screen, /backgroundReadPermission/);
+assert.match(screen, /permissionState/);
+assert.match(screen, /syncNow/);
+assert.match(screen, /requestHealthConnectPermission/);
+assert.match(screen, /\/api\/health\/mobile\/enroll/);
+assert.match(screen, /绑定本机健康同步/);
+assert.match(screen, /\/api\/health\/mobile\/status/);
+assert.match(screen, /ElpisCanary Health Bridge/);
+assert.match(screen, /Xiaomi fallback/);
+assert.match(screen, /heart_rate/);
+assert.match(screen, /steps/);
+assert.match(screen, /sleep/);
+assert.match(css, /\.toolroom-health-panel/);

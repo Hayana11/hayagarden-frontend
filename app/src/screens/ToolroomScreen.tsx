@@ -2,7 +2,7 @@ import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, us
 import { getActivitySemanticConfidence, lightSemanticLabel, orientationSemanticLabel, type RealityPromptSegment } from '../lib/reality/realityContextCompiler';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
-import { http } from '../lib/http';
+import { HttpError, http } from '../lib/http';
 import { fetchToolCompanionHints, patchToolCompanionHint, type ToolCompanionHints, type ToolCompanionTool } from '../lib/toolCompanionHints';
 import { realityPromptProjection } from '../lib/reality/realityPromptProjection';
 import { realityStore } from '../lib/reality/realityRuntime';
@@ -17,6 +17,16 @@ type ElpisNativeBridge = {
   requestIgnoreBatteryOptimizations?: () => unknown;
 };
 
+type ElpisHealthBridge = {
+  getHealthState?: () => unknown;
+  getHealthStatus?: () => unknown;
+  getBuildInfo?: () => unknown;
+  getInstallId?: () => unknown;
+  provisionDeviceCredential?: (jsonString: string) => unknown;
+  syncNow?: () => unknown;
+  requestHealthConnectPermission?: () => unknown;
+};
+
 type ElpisNotificationsBridge = {
   hasNotificationPermission?: () => unknown;
   requestNotificationPermission?: () => unknown;
@@ -26,6 +36,7 @@ type ElpisNotificationsBridge = {
 declare global {
   interface Window {
     ElpisNative?: ElpisNativeBridge;
+    ElpisHealth?: ElpisHealthBridge;
     ElpisNotifications?: ElpisNotificationsBridge;
   }
 }
@@ -418,6 +429,86 @@ const DEFAULT_NATIVE_DIAGNOSTIC: NativeDiagnosticState = {
   notice: '',
 };
 
+
+type HealthMetricDiagnostic = {
+  available: boolean;
+  source: string;
+  sampledAt: string | null;
+  stale: boolean;
+  status: string;
+};
+
+type HealthDiagnosticState = {
+  bridgeAvailable: boolean;
+  healthConnectAvailable: string;
+  permission: string;
+  metricPermission: string;
+  backgroundReadPermission: string;
+  enrollmentConfigured: boolean;
+  deviceId: string | null;
+  providerStatus: string;
+  backgroundSync: string;
+  lastCollectedAt: string | null;
+  lastUploadAt: string | null;
+  lastVpsIngestAt: string | null;
+  metrics: Record<string, HealthMetricDiagnostic>;
+  xiaomiFallback: string;
+  buildInfo: string;
+  notice: string;
+};
+
+const DEFAULT_HEALTH_DIAGNOSTIC: HealthDiagnosticState = {
+  bridgeAvailable: false,
+  healthConnectAvailable: '未知',
+  permission: '未知',
+  metricPermission: '未知',
+  backgroundReadPermission: '未知',
+  enrollmentConfigured: false,
+  deviceId: null,
+  providerStatus: 'UNAVAILABLE',
+  backgroundSync: '未知',
+  lastCollectedAt: null,
+  lastUploadAt: null,
+  lastVpsIngestAt: null,
+  metrics: {
+    heart_rate: { available: false, source: 'unknown', sampledAt: null, stale: true, status: 'UNAVAILABLE' },
+    steps: { available: false, source: 'unknown', sampledAt: null, stale: true, status: 'UNAVAILABLE' },
+    sleep: { available: false, source: 'unknown', sampledAt: null, stale: true, status: 'UNAVAILABLE' },
+  },
+  xiaomiFallback: '未知',
+  buildInfo: '未知',
+  notice: '',
+};
+
+function parseBridgeJson(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'string') return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function healthMetric(value: unknown): HealthMetricDiagnostic {
+  const item = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    available: item.available === true,
+    source: typeof item.source === 'string' ? item.source : 'unknown',
+    sampledAt: typeof item.sampledAt === 'string' ? item.sampledAt : null,
+    stale: item.stale === true,
+    status: typeof item.status === 'string' ? item.status : 'UNAVAILABLE',
+  };
+}
+
+function healthTime(value: string | null): string {
+  if (!value) return '—';
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? formatRelativeTime(time) : '时间未知';
+}
+
 function toolMatches(tool: InventoryTool, query: string): boolean {
   return [
     tool.tool_name,
@@ -452,6 +543,7 @@ export function ToolroomScreen() {
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptNotice, setPromptNotice] = useState('');
   const [nativeDiag, setNativeDiag] = useState<NativeDiagnosticState>(DEFAULT_NATIVE_DIAGNOSTIC);
+  const [healthDiag, setHealthDiag] = useState<HealthDiagnosticState>(DEFAULT_HEALTH_DIAGNOSTIC);
   const [rawJsonFrozen, setRawJsonFrozen] = useState(false);
   const [rawJsonSnapshot, setRawJsonSnapshot] = useState<string | null>(null);
   const [rawJsonNotice, setRawJsonNotice] = useState('');
@@ -553,16 +645,167 @@ export function ToolroomScreen() {
     setNativeDiag((current) => ({ ...current, bridgeConnected, usage, screenTime, doze, notifications: notificationState }));
   }, []);
 
+
+  const refreshHealthDiagnostics = useCallback(async () => {
+    const health = window.ElpisHealth;
+    const has = (value: unknown): value is (...args: never[]) => unknown => typeof value === 'function';
+    const bridgeAvailable = Boolean(health && (has(health.getHealthStatus) || has(health.getHealthState)));
+    let local: Record<string, unknown> = {};
+    let buildInfo = '未知';
+    if (health && has(health.getHealthStatus)) {
+      local = parseBridgeJson(await Promise.resolve(health.getHealthStatus())) || {};
+    }
+    if (health && has(health.getBuildInfo)) {
+      const build = parseBridgeJson(await Promise.resolve(health.getBuildInfo()));
+      if (build && typeof build.versionName === 'string') {
+        buildInfo = build.versionName + ' · ' + (typeof build.sourceSha === 'string' ? build.sourceSha.slice(0, 12) : 'unknown');
+      }
+    }
+    let remote: Record<string, unknown> = {};
+    try {
+      const result = await http.get<Record<string, unknown>>('/api/health/mobile/status');
+      if (result.ok) remote = result;
+    } catch {
+      remote = {};
+    }
+    const localMetrics = local.metrics && typeof local.metrics === 'object'
+      ? local.metrics as Record<string, unknown> : {};
+    const remoteMetrics = remote.metrics && typeof remote.metrics === 'object'
+      ? remote.metrics as Record<string, unknown> : {};
+    const metrics = Object.fromEntries(['heart_rate', 'steps', 'sleep'].map((metric) => {
+      const localMetric = healthMetric(localMetrics[metric]);
+      const remoteMetric = healthMetric(remoteMetrics[metric]);
+      return [metric, localMetric.source !== 'unknown' ? localMetric : remoteMetric];
+    }));
+    const cloud = remote.xiaomi_fitness_cloud && typeof remote.xiaomi_fitness_cloud === 'object'
+      ? remote.xiaomi_fitness_cloud as Record<string, unknown> : null;
+    setHealthDiag({
+      bridgeAvailable,
+      healthConnectAvailable: local.available === true ? '可用' : String(local.providerStatus || 'UNAVAILABLE'),
+      permission: typeof local.permission === 'string' ? local.permission : '未知',
+      metricPermission: local.permissionState && typeof local.permissionState === 'object' && typeof (local.permissionState as Record<string, unknown>).metrics === 'string'
+        ? String((local.permissionState as Record<string, unknown>).metrics) : '未知',
+      backgroundReadPermission: local.permissionState && typeof local.permissionState === 'object' && typeof (local.permissionState as Record<string, unknown>).backgroundRead === 'string'
+        ? String((local.permissionState as Record<string, unknown>).backgroundRead) : '未知',
+      enrollmentConfigured: local.enrollment && typeof local.enrollment === 'object'
+        ? (local.enrollment as Record<string, unknown>).configured === true : false,
+      deviceId: local.enrollment && typeof local.enrollment === 'object'
+        && typeof (local.enrollment as Record<string, unknown>).deviceId === 'string'
+        ? String((local.enrollment as Record<string, unknown>).deviceId) : null,
+      providerStatus: typeof local.providerStatus === 'string' ? local.providerStatus : 'UNAVAILABLE',
+      backgroundSync: typeof local.backgroundSync === 'string' ? local.backgroundSync : '未知',
+      lastCollectedAt: typeof local.lastCollectedAt === 'string' ? local.lastCollectedAt : null,
+      lastUploadAt: typeof local.lastUploadAt === 'string' ? local.lastUploadAt : null,
+      lastVpsIngestAt: typeof remote.lastIngestAt === 'string' ? remote.lastIngestAt : null,
+      metrics,
+      xiaomiFallback: cloud
+        ? String(cloud.auth_state || 'configured')
+        : remote.ok === true ? '未读取' : '未知',
+      buildInfo,
+      notice: local && Object.keys(local).length === 0 && bridgeAvailable ? '原生状态为空或格式无效。' : '',
+    });
+  }, []);
+
   useEffect(() => {
     void refreshNativeDiagnostics();
-    const handleRefresh = () => { void refreshNativeDiagnostics(); };
+    void refreshHealthDiagnostics();
+    const handleRefresh = () => {
+      void refreshNativeDiagnostics();
+      void refreshHealthDiagnostics();
+    };
     window.addEventListener('focus', handleRefresh);
     document.addEventListener('visibilitychange', handleRefresh);
     return () => {
       window.removeEventListener('focus', handleRefresh);
       document.removeEventListener('visibilitychange', handleRefresh);
     };
-  }, [refreshNativeDiagnostics]);
+  }, [refreshNativeDiagnostics, refreshHealthDiagnostics]);
+
+  const requestHealthPermission = async () => {
+    if (!window.ElpisHealth?.requestHealthConnectPermission) return;
+    try {
+      await Promise.resolve(window.ElpisHealth.requestHealthConnectPermission());
+      setHealthDiag((current) => ({ ...current, notice: '已请求 Health Connect 权限。' }));
+    } catch {
+      setHealthDiag((current) => ({ ...current, notice: 'Health Connect 权限请求失败。' }));
+    }
+    window.setTimeout(() => { void refreshHealthDiagnostics(); }, 500);
+  };
+
+  const syncHealthNow = async () => {
+    if (!window.ElpisHealth?.syncNow) return;
+    try {
+      const result = parseBridgeJson(await Promise.resolve(window.ElpisHealth.syncNow()));
+      setHealthDiag((current) => ({
+        ...current,
+        notice: result?.accepted === true ? '后台同步已接受。' : '后台同步未接受。',
+      }));
+    } catch {
+      setHealthDiag((current) => ({ ...current, notice: '后台同步请求失败。' }));
+    }
+    window.setTimeout(() => { void refreshHealthDiagnostics(); }, 800);
+  };
+
+  const enrollHealthDevice = async () => {
+    const health = window.ElpisHealth;
+    let enrollment: Record<string, unknown> | null = null;
+    let credential: string | null = null;
+    try {
+      if (!health?.getInstallId || !health.getBuildInfo || !health.provisionDeviceCredential) {
+        setHealthDiag((current) => ({ ...current, notice: '当前 Canary 不支持设备绑定。' }));
+        return;
+      }
+      const installValue = await Promise.resolve(health.getInstallId());
+      const installId = typeof installValue === 'string'
+        ? installValue.trim()
+        : parseBridgeJson(installValue)?.installId;
+      const build = parseBridgeJson(await Promise.resolve(health.getBuildInfo()));
+      const packageName = typeof build?.applicationId === 'string' ? build.applicationId : '';
+      const buildSha = typeof build?.sourceSha === 'string' ? build.sourceSha : '';
+      const buildBranch = typeof build?.branch === 'string' ? build.branch : '';
+      if (typeof installId !== 'string' || !installId || !packageName) {
+        setHealthDiag((current) => ({ ...current, notice: '无法读取 Canary 安装身份。' }));
+        return;
+      }
+      enrollment = await http.post<Record<string, unknown>>('/api/health/mobile/enroll', {
+        schemaVersion: 1,
+        installId,
+        packageName,
+        buildSha,
+        buildBranch,
+        label: 'Elpis Canary',
+      });
+      const deviceId = typeof enrollment.deviceId === 'string' ? enrollment.deviceId : '';
+      credential = typeof enrollment.credential === 'string' ? enrollment.credential : null;
+      if (enrollment.schemaVersion !== 1 || !deviceId || !credential) {
+        throw new Error('malformed enrollment response');
+      }
+      const provisioned = parseBridgeJson(await Promise.resolve(
+        health.provisionDeviceCredential(JSON.stringify({ deviceId, credential })),
+      ));
+      if (provisioned?.ok !== true || provisioned.configured !== true) {
+        throw new Error('native credential provisioning failed');
+      }
+      setHealthDiag((current) => ({
+        ...current,
+        notice: '本机健康同步已绑定。',
+        enrollmentConfigured: true,
+        deviceId,
+      }));
+    } catch (error) {
+      const status = error instanceof HttpError ? error.status : 0;
+      const notice = status === 401
+        ? '需要主人身份验证'
+        : status === 403
+          ? '绑定请求被拒绝。'
+          : '本机健康同步绑定失败。';
+      setHealthDiag((current) => ({ ...current, notice }));
+    } finally {
+      credential = null;
+      enrollment = null;
+      window.setTimeout(() => { void refreshHealthDiagnostics(); }, 300);
+    }
+  };
 
   const authorizeUsage = async () => {
     if (!window.ElpisNative?.openUsageAccessSettings) return;
@@ -1303,6 +1546,47 @@ export function ToolroomScreen() {
                   <small className="toolroom-native-hint">测试通知仅在本机显示，不访问消息服务器。</small>
                 </div>
               ) : null}
+            </article>
+            <article className="toolroom-native-panel toolroom-health-panel">
+              <div className="toolroom-health-heading">
+                <span><strong>ElpisCanary Health Bridge</strong><small>只读手机健康诊断</small></span>
+                <em className={healthDiag.bridgeAvailable ? 'is-live' : undefined}>
+                  {healthDiag.bridgeAvailable ? '已接入' : '仅 App 可用'}
+                </em>
+              </div>
+              <dl>
+                <div><dt>Canary bridge</dt><dd>{healthDiag.bridgeAvailable ? 'available' : 'absent'}</dd></div>
+                <div><dt>Health Connect</dt><dd>{healthDiag.healthConnectAvailable}</dd></div>
+                <div><dt>权限</dt><dd>{healthDiag.permission}</dd></div>
+                <div><dt>Metric read</dt><dd>{healthDiag.metricPermission}</dd></div>
+                <div><dt>Background read</dt><dd>{healthDiag.backgroundReadPermission}</dd></div>
+                <div><dt>设备绑定</dt><dd>{healthDiag.enrollmentConfigured ? '已绑定' : '未绑定'}</dd></div>
+                <div><dt>device id</dt><dd>{healthDiag.deviceId || '—'}</dd></div>
+                <div><dt>后台同步</dt><dd>{healthDiag.backgroundSync}</dd></div>
+                <div><dt>手机采集</dt><dd>{healthTime(healthDiag.lastCollectedAt)}</dd></div>
+                <div><dt>手机上传</dt><dd>{healthTime(healthDiag.lastUploadAt)}</dd></div>
+                <div><dt>VPS ingest</dt><dd>{healthTime(healthDiag.lastVpsIngestAt)}</dd></div>
+                <div><dt>Xiaomi fallback</dt><dd>{healthDiag.xiaomiFallback}</dd></div>
+              </dl>
+              <div className="toolroom-health-metrics">
+                {(['heart_rate', 'steps', 'sleep'] as const).map((metric) => {
+                  const item = healthDiag.metrics[metric];
+                  return (
+                    <div key={metric}>
+                      <span>{metric}</span>
+                      <strong>{item.source} · {item.stale ? 'stale' : 'fresh'}</strong>
+                      <small>{item.status} · {healthTime(item.sampledAt)}</small>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="toolroom-health-actions">
+                <button type="button" className="toolroom-native-action" disabled={!healthDiag.bridgeAvailable} onClick={() => void enrollHealthDevice()}>绑定本机健康同步</button>
+                <button type="button" className="toolroom-native-action" disabled={!healthDiag.bridgeAvailable} onClick={() => void requestHealthPermission()}>申请 Health Connect 权限</button>
+                <button type="button" className="toolroom-native-action" disabled={!healthDiag.bridgeAvailable} onClick={() => void syncHealthNow()}>请求后台同步</button>
+              </div>
+              <small className="toolroom-native-hint">{healthDiag.buildInfo} · 不在 JS 调用内发网络请求</small>
+              {healthDiag.notice ? <p className="toolroom-native-notice">{healthDiag.notice}</p> : null}
             </article>
             {nativePanels.map((panel) => {
               const key = 'native:' + panel.id;
