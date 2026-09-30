@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +10,7 @@ from pathlib import Path
 from tools import health_store
 from tools.xiaomi_health import internal_adapter
 from health_ingest_routes import create_health_blueprint
+from moments_auth import OwnerAuthError
 
 
 def payload(records=None, statuses=None):
@@ -39,26 +42,171 @@ class HealthBridgeR1Tests(unittest.TestCase):
     def test_ingest_requires_auth_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "health.db")
+
+            def owner_guard(request):
+                if request.cookies.get("moments_owner") != "owner-session":
+                    raise OwnerAuthError("unauthorized", 401)
+
             app = __import__("flask").Flask(__name__)
-            app.register_blueprint(create_health_blueprint(db_path=db, token_getter=lambda: "secret"))
+            app.register_blueprint(create_health_blueprint(db_path=db, owner_guard=owner_guard))
             client = app.test_client()
             body = payload()
             unauthorized = client.post("/api/health/mobile/ingest", json=body)
             self.assertEqual(unauthorized.status_code, 401)
+
+            metadata = {
+                "schemaVersion": 1,
+                "installId": "11111111-1111-4111-8111-111111111111",
+                "packageName": "xyz.lovestyle.home.canary",
+                "buildSha": "build-sha",
+                "buildBranch": "agent/elpis-canary-health-bridge-r1",
+                "label": "Elpis Canary",
+            }
+            cross_origin = client.post(
+                "/api/health/mobile/enroll",
+                json=metadata,
+                headers={
+                    "Cookie": "moments_owner=owner-session",
+                    "Origin": "https://evil.example",
+                },
+            )
+            self.assertEqual(cross_origin.status_code, 403)
+            enrollment = client.post(
+                "/api/health/mobile/enroll",
+                json=metadata,
+                headers={"Cookie": "moments_owner=owner-session"},
+            )
+            self.assertEqual(enrollment.status_code, 200)
+            device_id = enrollment.json["deviceId"]
+            credential = enrollment.json["credential"]
+            self.assertGreaterEqual(len(credential), 43)
+
             first = client.post(
                 "/api/health/mobile/ingest",
                 json=body,
-                headers={"Authorization": "Bearer secret"},
+                headers={
+                    "Authorization": "Bearer " + credential,
+                    "X-Health-Device-ID": device_id,
+                },
             )
             second = client.post(
                 "/api/health/mobile/ingest",
                 json=body,
-                headers={"Authorization": "Bearer secret"},
+                headers={
+                    "Authorization": "Bearer " + credential,
+                    "X-Health-Device-ID": device_id,
+                },
             )
             self.assertEqual(first.status_code, 200)
             self.assertEqual(first.json["accepted"], 1)
+            self.assertEqual(second.status_code, 200)
             self.assertEqual(second.json["accepted"], 0)
             self.assertEqual(second.json["duplicates"], 1)
+
+            devices = client.get(
+                "/api/health/mobile/devices",
+                headers={"Cookie": "moments_owner=owner-session"},
+            )
+            self.assertEqual(devices.status_code, 200)
+            serialized = json.dumps(devices.json)
+            self.assertNotIn(credential, serialized)
+            self.assertNotIn("credential_hash", serialized)
+
+    def test_device_rotation_old_credential_revocation_and_generic_401(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "health.db")
+
+            def owner_guard(request):
+                if request.cookies.get("moments_owner") != "owner-session":
+                    raise OwnerAuthError("unauthorized", 401)
+
+            app = __import__("flask").Flask(__name__)
+            app.register_blueprint(create_health_blueprint(db_path=db, owner_guard=owner_guard))
+            client = app.test_client()
+            metadata = {
+                "schemaVersion": 1,
+                "installId": "22222222-2222-4222-8222-222222222222",
+                "packageName": "xyz.lovestyle.home.canary",
+                "buildSha": "first",
+                "buildBranch": "first-branch",
+                "label": "Elpis Canary",
+            }
+            first = client.post(
+                "/api/health/mobile/enroll",
+                json=metadata,
+                headers={"Cookie": "moments_owner=owner-session"},
+            ).json
+            second = client.post(
+                "/api/health/mobile/enroll",
+                json={**metadata, "buildSha": "second"},
+                headers={"Cookie": "moments_owner=owner-session"},
+            ).json
+            self.assertEqual(first["deviceId"], second["deviceId"])
+            self.assertNotEqual(first["credential"], second["credential"])
+
+            old_attempt = client.post(
+                "/api/health/mobile/ingest",
+                json=payload(),
+                headers={
+                    "Authorization": "Bearer " + first["credential"],
+                    "X-Health-Device-ID": first["deviceId"],
+                },
+            )
+            wrong_device = client.post(
+                "/api/health/mobile/ingest",
+                json=payload(),
+                headers={
+                    "Authorization": "Bearer " + second["credential"],
+                    "X-Health-Device-ID": "33333333-3333-4333-8333-333333333333",
+                },
+            )
+            self.assertEqual(old_attempt.status_code, 401)
+            self.assertEqual(wrong_device.status_code, 401)
+            self.assertEqual(old_attempt.json, wrong_device.json)
+
+            accepted = client.post(
+                "/api/health/mobile/ingest",
+                json=payload(),
+                headers={
+                    "Authorization": "Bearer " + second["credential"],
+                    "X-Health-Device-ID": second["deviceId"],
+                },
+            )
+            self.assertEqual(accepted.status_code, 200)
+
+            revoked = client.post(
+                "/api/health/mobile/devices/" + second["deviceId"] + "/revoke",
+                headers={"Cookie": "moments_owner=owner-session"},
+            )
+            self.assertEqual(revoked.status_code, 200)
+            after_revoke = client.post(
+                "/api/health/mobile/ingest",
+                json=payload(),
+                headers={
+                    "Authorization": "Bearer " + second["credential"],
+                    "X-Health-Device-ID": second["deviceId"],
+                },
+            )
+            self.assertEqual(after_revoke.status_code, 401)
+
+            cross_origin_revoke = client.post(
+                "/api/health/mobile/devices/" + second["deviceId"] + "/revoke",
+                headers={
+                    "Cookie": "moments_owner=owner-session",
+                    "Origin": "https://evil.example",
+                },
+            )
+            self.assertEqual(cross_origin_revoke.status_code, 403)
+
+            with sqlite3.connect(db) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(health_devices)")}
+                raw = connection.execute(
+                    "SELECT credential_hash FROM health_devices WHERE device_id=?",
+                    (second["deviceId"],),
+                ).fetchone()[0]
+            self.assertIn("credential_hash", columns)
+            self.assertEqual(len(raw), 64)
+            self.assertNotIn(second["credential"].encode("utf-8"), Path(db).read_bytes())
 
     def test_validation_and_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
