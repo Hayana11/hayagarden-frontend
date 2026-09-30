@@ -230,7 +230,16 @@ assert.match(screen, /getHealthStatus/);
 assert.match(screen, /getBuildInfo/);
 assert.match(screen, /health\.getBuildInfo/);
 assert.doesNotMatch(screen, /native\??\.getBuildInfo/);
-assert.doesNotMatch(screen, /ElpisNativeBridge[\s\S]*getBuildInfo/);
+const nativeBridgeType = screen.match(
+  /type ElpisNativeBridge\s*=\s*\{[\s\S]*?\};/
+)?.[0] || '';
+const healthBridgeType = screen.match(
+  /type ElpisHealthBridge\s*=\s*\{[\s\S]*?\};/
+)?.[0] || '';
+assert.ok(nativeBridgeType);
+assert.ok(healthBridgeType);
+assert.doesNotMatch(nativeBridgeType, /getBuildInfo/);
+assert.match(healthBridgeType, /getBuildInfo/);
 assert.match(screen, /getInstallId/);
 assert.match(screen, /provisionDeviceCredential/);
 assert.match(screen, /backgroundReadPermission/);
