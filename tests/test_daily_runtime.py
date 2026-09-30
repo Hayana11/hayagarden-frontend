@@ -5437,6 +5437,29 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         self.assertEqual(bodies, {'c': 'body-c'})
 
+    def test_hot_plan_keeps_production_double_prefixed_chunk_id(self):
+        plan = self._hot_receipt_filter_plan()
+        plan.hot_receipt_frozen['members'] = (
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+            self._historical_receipt_member(
+                2, 'turn:abc',
+                representation_kind='chunk',
+                representation_id='chunk:chunk:abc',
+            ),
+        )
+        artifacts = (
+            self._ready_chunk('chunk:ab'),
+            self._ready_chunk('chunk:abc'),
+            self._ready_chunk('chunk:d'),
+        )
+        validated, bodies = self._capture_validated_ready_artifacts(plan, artifacts)
+        self.assertEqual(
+            [item['chunk_id'] for item in validated],
+            ['chunk:abc'],
+        )
+        self.assertEqual(bodies, {'chunk:abc': 'body-chunk:abc'})
+
     def test_multiple_hot_turns_keep_installed_chunk_visibility(self):
         plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
         first, _bodies = self._capture_validated_ready_artifacts(
