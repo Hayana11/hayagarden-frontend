@@ -145,11 +145,12 @@ class HealthBridgeR1Tests(unittest.TestCase):
     def test_permission_denied_is_not_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "health.db")
-            denied = payload(records=[], statuses={
+            denied = payload(statuses={
                 "heart_rate": {"status": "PERMISSION_DENIED", "source": "health_connect"},
                 "steps": {"status": "EMPTY", "source": "health_connect"},
                 "sleep": {"status": "UNAVAILABLE", "source": "health_connect"},
             })
+            denied["records"] = []
             health_store.ingest_payload(denied, db)
             result = health_store.get_local_metric(db, "heart_rate", 7)
             self.assertEqual(result["status"], "PERMISSION_DENIED")
