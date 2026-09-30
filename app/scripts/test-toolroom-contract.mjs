@@ -227,6 +227,10 @@ console.log('test-toolroom-contract: ok');
 
 assert.match(screen, /ElpisHealth/);
 assert.match(screen, /getHealthStatus/);
+assert.match(screen, /getBuildInfo/);
+assert.match(screen, /health\\.getBuildInfo/);
+assert.doesNotMatch(screen, /native\\??\\.getBuildInfo/);
+assert.doesNotMatch(screen, /ElpisNativeBridge[\\s\\S]*getBuildInfo/);
 assert.match(screen, /getInstallId/);
 assert.match(screen, /provisionDeviceCredential/);
 assert.match(screen, /backgroundReadPermission/);
