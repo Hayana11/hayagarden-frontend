@@ -75,6 +75,51 @@ def _member_key(member: SourceMember) -> tuple[Any, ...]:
     )
 
 
+def _stable_member_identity(member: SourceMember) -> tuple[Any, ...]:
+    """Cross-snapshot membership identity. Snapshot-local seq is excluded."""
+    return (
+        str(member.source_kind),
+        str(member.source_ref),
+        str(member.source_revision),
+        str(member.content_hash),
+        member.span_start,
+        member.span_end,
+        str(member.branch_id),
+        str(member.role),
+    )
+
+
+def _index_expected_by_stable_identity(
+    expected: Sequence[SourceMember],
+) -> dict[tuple[Any, ...], tuple[SourceMember, ...]]:
+    grouped: dict[tuple[Any, ...], list[SourceMember]] = {}
+    for member in expected:
+        grouped.setdefault(_stable_member_identity(member), []).append(member)
+    return {key: tuple(values) for key, values in grouped.items()}
+
+
+def _rebind_snapshot_members_to_expected(
+    snapshot_members: Sequence[SourceMember],
+    expected_by_stable: dict[tuple[Any, ...], tuple[SourceMember, ...]],
+) -> tuple[SourceMember, ...]:
+    """Replace snapshot-local members with the unique canonical expected members."""
+    rebound: list[SourceMember] = []
+    seen_canonical: set[tuple[Any, ...]] = set()
+    for member in snapshot_members:
+        matches = expected_by_stable.get(_stable_member_identity(member), ())
+        if not matches:
+            raise ValueError('chunk membership is outside expected source coverage')
+        if len(matches) != 1:
+            raise ValueError('chunk membership is ambiguous in expected source coverage')
+        canonical = matches[0]
+        canonical_key = _member_key(canonical)
+        if canonical_key in seen_canonical:
+            raise ValueError('chunk membership is ambiguous in expected source coverage')
+        seen_canonical.add(canonical_key)
+        rebound.append(canonical)
+    return tuple(rebound)
+
+
 def _member_identity(member: SourceMember) -> dict[str, Any]:
     """Stable plan identity fields; wall-clock creation time is excluded."""
     return {
@@ -649,6 +694,7 @@ def build_context_plan(
     budget_policy_version = str(budget_policy_version or '').strip()
     raw = _ordered(expected if raw_members is None else raw_members)
     expected_by_key = {_member_key(member): member for member in expected}
+    expected_by_stable = _index_expected_by_stable_identity(expected)
     exclusions: list[ContextPlanExclusion] = []
     raw_keys: set[tuple[Any, ...]] = set()
 
@@ -706,14 +752,18 @@ def build_context_plan(
                 if member.source_ref != ref or member.source_revision != revision:
                     raise ValueError(f'chunk source membership mismatch for {ref}')
                 members.append(member)
-            selected_members = tuple(members)
+            snapshot_members = tuple(members)
+            if candidate.source_revision != candidate_source_revision(snapshot_members):
+                raise ValueError('chunk candidate source revision is stale')
+            if any(member.branch_id != candidate.branch_id for member in snapshot_members):
+                raise ValueError('chunk branch identity mismatch')
+            selected_members = _rebind_snapshot_members_to_expected(
+                snapshot_members,
+                expected_by_stable,
+            )
             member_keys = {_member_key(member) for member in selected_members}
             if not member_keys.issubset(set(expected_by_key)):
                 raise ValueError('chunk membership is outside expected source coverage')
-            if candidate.source_revision != candidate_source_revision(selected_members):
-                raise ValueError('chunk candidate source revision is stale')
-            if any(member.branch_id != candidate.branch_id for member in selected_members):
-                raise ValueError('chunk branch identity mismatch')
             if not chunk.body.strip():
                 raise ValueError('chunk body is missing')
             if hashlib.sha256(chunk.body.encode('utf-8')).hexdigest() != chunk.body_hash:
