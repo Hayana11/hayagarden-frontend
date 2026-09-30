@@ -72,7 +72,9 @@ function sanitizeRecord(metric, row, fallbackSource = SOURCE) {
     if (sleepWindow) output.sleepWindow = sleepWindow;
   }
   return output;
-}\n\nfunction errorCode(result) {
+}
+
+function errorCode(result) {
   return SAFE_ERRORS.has(result?.error_code) ? result.error_code : 'unavailable';
 }
 
@@ -92,7 +94,9 @@ function safeStatus(result) {
     xiaomi_fitness_cloud: result?.xiaomi_fitness_cloud && typeof result.xiaomi_fitness_cloud === 'object'
       ? result.xiaomi_fitness_cloud : null,
   };
-}\n\nfunction safeSeries(metric, days, result, cache = {}) {
+}
+
+function safeSeries(metric, days, result, cache = {}) {
   const fallbackSource = safeSource(result?.provider || result?.source, SOURCE);
   const rows = Array.isArray(result?.records)
     ? result.records.map((row) => sanitizeRecord(metric, row, fallbackSource)).filter(Boolean) : [];
@@ -108,14 +112,18 @@ function safeStatus(result) {
     stale: cache.stale === true || result?.stale === true,
     ...(successful ? {} : { error_code: errorCode(result) }),
   };
-}\n\nfunction componentStatus(entry, fallback = 'EMPTY', fallbackSource = SOURCE) {
+}
+
+function componentStatus(entry, fallback = 'EMPTY', fallbackSource = SOURCE) {
   const allowed = new Set(['PASS', 'EMPTY', 'FAIL', 'PERMISSION_DENIED', 'UNAVAILABLE']);
   const source = safeSource(entry?.source, fallbackSource);
   const status = entry && typeof entry === 'object' && allowed.has(entry.status) ? entry.status : fallback;
   const output = { status, source, stale: entry?.stale === true };
   if (status === 'FAIL') output.error_code = SAFE_ERRORS.has(entry?.error_code) ? entry.error_code : 'unavailable';
   return output;
-}\n\nfunction cycleHasData(cycle) {
+}
+
+function cycleHasData(cycle) {
   return Boolean(cycle?.events?.length || cycle?.periods?.length || cycle?.symptoms?.length);
 }
 
@@ -167,7 +175,9 @@ function safeLatest(result, cache = {}, days = 7) {
     stale: cache.stale === true || source.stale === true,
     ...(status === 'FAIL' ? { error_code: errorCode(source) } : {}),
   };
-}\n\nfunction safeCycle(result, cache = {}, days = 180) {
+}
+
+function safeCycle(result, cache = {}, days = 180) {
   const successful = result?.status === 'PASS' || result?.status === 'EMPTY';
   const events = Array.isArray(result?.events) ? result.events.flatMap((event) => {
     if (!event || !CYCLE_EVENT_TYPES.has(event.type)) return [];
