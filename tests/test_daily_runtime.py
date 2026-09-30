@@ -5091,7 +5091,15 @@ class ContextPlanConsumerTests(unittest.TestCase):
             native_tail_member=tail,
         )
         self.assertFalse(compatible, reason)
-        self.assertEqual(reason, 'historical_source_members_changed')
+        self.assertEqual(reason, 'historical_representation_identity_changed'
+                         if any(
+                             left.representation_kind != right.representation_kind
+                             or (
+                                 left.representation_kind == 'chunk'
+                                 and left.representation_id != right.representation_id
+                             )
+                             for left, right in zip(installed, desired)
+                         ) else 'historical_source_members_changed')
 
     def _state_context_plan(self, snapshot):
         context_plan = self._fake_hot_context_plan()
@@ -5253,7 +5261,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             installed, desired, self._historical_source('turn:t'),
         )
 
-    def test_raw_to_chunk_is_deferred_until_cold(self):
+    def test_raw_to_chunk_respawns(self):
         installed = [
             self._historical_receipt_member(0, 'turn:a'),
             self._historical_receipt_member(1, 'turn:b'),
@@ -5271,14 +5279,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 2, 'turn:t', representation_id='raw:new',
             ),
         ]
-        compatible, reason = dr._hot_historical_compatibility(
-            receipt_members=tuple(installed),
-            desired_members=tuple(desired),
-            native_tail_member=self._historical_source('turn:t'),
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
         )
-        self.assertTrue(compatible, reason)
 
-    def test_chunk_to_raw_is_deferred_until_cold(self):
+    def test_chunk_to_raw_respawns(self):
         installed = [
             self._historical_receipt_member(
                 0, 'turn:a', representation_kind='chunk',
@@ -5294,14 +5299,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
             self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
             self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
         ]
-        compatible, reason = dr._hot_historical_compatibility(
-            receipt_members=tuple(installed),
-            desired_members=tuple(desired),
-            native_tail_member=self._historical_source('turn:t'),
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
         )
-        self.assertTrue(compatible, reason)
 
-    def test_chunk_canonical_representation_change_is_deferred_until_cold(self):
+    def test_chunk_canonical_representation_change_respawns(self):
         installed = [
             self._historical_receipt_member(
                 0, 'turn:a', representation_kind='chunk',
@@ -5323,12 +5325,9 @@ class ContextPlanConsumerTests(unittest.TestCase):
             ),
             self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
         ]
-        compatible, reason = dr._hot_historical_compatibility(
-            receipt_members=tuple(installed),
-            desired_members=tuple(desired),
-            native_tail_member=self._historical_source('turn:t'),
+        self._assert_hot_historical_respawn(
+            installed, desired, self._historical_source('turn:t'),
         )
-        self.assertTrue(compatible, reason)
 
     def test_historical_raw_source_change_respawns(self):
         installed = [
@@ -5346,167 +5345,151 @@ class ContextPlanConsumerTests(unittest.TestCase):
             installed, desired, self._historical_source('turn:t'),
         )
 
-    def _deferred_chunk_hot_plan(self, *, extra_chunk=False):
-        from chat.context_receipt import ContextReceipt
-
-        source_a = self._historical_source('turn:a')
-        source_b = self._historical_source('turn:b')
-        source_t = self._historical_source('turn:t')
-        chunk_id = 'chunk:two' if extra_chunk else 'chunk:one'
-        context_plan = self._fake_hot_context_plan()
-        context_plan.plan_id = 'plan:latest-chunk'
-        context_plan.plan_hash = 'latest-chunk-plan-hash'
-        context_plan.source_members = (source_a, source_b, source_t)
-        context_plan.representations = (
-            types.SimpleNamespace(
-                representation_id=chunk_id,
-                kind='chunk',
-                source_members=(source_a, source_b),
-                estimated_tokens=4,
-            ),
-            types.SimpleNamespace(
-                representation_id='raw:tail',
-                kind='raw',
-                source_members=(source_t,),
-                estimated_tokens=2,
-            ),
+    @staticmethod
+    def _ready_chunk(chunk_id):
+        return types.SimpleNamespace(
+            chunk_id=chunk_id,
+            artifact_revision='rev-' + chunk_id,
+            body_hash='hash-' + chunk_id,
+            body='body-' + chunk_id,
         )
-        plan = types.SimpleNamespace(
-            context_id=7,
-            context_epoch=3,
-            resident_generation=1,
-            resident_key='default:e3:g1',
-            chat_id='default',
-            worker_id=dr.WORKER_ID,
-            user_message_id=9,
-            manifest={
-                'provider': 'claude_code',
-                'model': 'model-1',
-                'context_plan_id': 'plan:latest-chunk',
-                'context_plan_hash': 'latest-chunk-plan-hash',
+
+    def _hot_receipt_filter_plan(self, *, installed_chunk_ids=()):
+        members = [
+            self._historical_receipt_member(0, 'turn:a'),
+            self._historical_receipt_member(1, 'turn:b'),
+        ]
+        for offset, chunk_id in enumerate(installed_chunk_ids, start=2):
+            members.append(self._historical_receipt_member(
+                offset, 'turn:' + chunk_id,
+                representation_kind='chunk',
+                representation_id='chunk:' + chunk_id,
+            ))
+        return types.SimpleNamespace(
+            db_path='production.db',
+            user_message_id=3,
+            assembly={'state': '', 'day_handoff_content': None},
+            hot_receipt_frozen={
+                'receipt': object(),
+                'members': tuple(members),
+                'receipt_missing': False,
+                'receipt_members_complete': True,
+                'membership_valid': True,
+                'receipt_read_error': None,
             },
-            hot_desired_plan=context_plan,
         )
-        desired_members = dr._context_receipt_members(plan)
-        installed_members = tuple(
-            dr._clone_receipt_member(member, installed_order=index)
-            for index, member in enumerate(
-                (
-                    self._historical_receipt_member(0, 'turn:a'),
-                    self._historical_receipt_member(1, 'turn:b'),
-                )
-                + tuple(
-                    member for member in desired_members
-                    if member.source_kind != 'completed_turn'
-                )
+
+    def _capture_validated_ready_artifacts(self, plan, artifacts, *, mode='hot'):
+        context_plan = types.SimpleNamespace(
+            plan_id='plan:' + ('a' * 32),
+            plan_hash='a' * 64,
+            source_hash='b' * 64,
+            valid=True,
+            representations=(),
+        )
+        with mock.patch.object(
+            dr,
+            '_context_plan_policy',
+            return_value=(types.SimpleNamespace(), 'policy-v1'),
+        ), mock.patch(
+            'continuity.store.read_ready_surface',
+            return_value=types.SimpleNamespace(
+                status='ready',
+                artifacts=tuple(artifacts),
+            ),
+        ), mock.patch.object(
+            dr,
+            '_build_continuity_shadow_fixed_sections',
+            return_value=(),
+        ), mock.patch(
+            'chat.daily_continuity_shadow.build_daily_continuity_shadow_plan',
+            return_value=types.SimpleNamespace(plan=context_plan),
+        ) as adapter:
+            _built, bodies = dr._build_production_context_plan(
+                plan,
+                resident=types.SimpleNamespace(),
+                static_system='STATIC',
+                mode=mode,
             )
-        )
-        receipt = ContextReceipt.build(
-            context_id=7,
-            context_epoch=3,
-            resident_generation=1,
-            resident_key='default:e3:g1',
-            provider='claude_code',
-            model_identity='model-1',
-            session_id='session-1',
-            process_generation=1,
-            plan_id='plan:installed-raw',
-            plan_hash='installed-raw-plan-hash',
-            budget_policy_version='continuity_context_budget_v1',
-            measurement_semantics='heuristic_cjk1_ascii4_v1',
-            installed_source_watermark=2,
-            members=installed_members,
-        )
-        plan.hot_receipt_frozen = {
-            'receipt': receipt,
-            'members': installed_members,
-            'receipt_missing': False,
-            'receipt_members_complete': True,
-            'membership_valid': True,
-            'expected_receipt_revision': 0,
-        }
-        return plan, context_plan, source_t, installed_members, desired_members
+        return adapter.call_args.kwargs['validated_ready_artifacts'], bodies
 
-    def test_new_ready_chunk_hot_turn_stays_no_op_and_keeps_installed_raw(self):
-        plan, _context_plan, tail, installed_members, _desired = (
-            self._deferred_chunk_hot_plan()
+    def test_hot_plan_hides_new_ready_chunks_not_in_receipt(self):
+        plan = self._hot_receipt_filter_plan()
+        artifacts = (
+            self._ready_chunk('ab'),
+            self._ready_chunk('d'),
         )
+        validated, bodies = self._capture_validated_ready_artifacts(plan, artifacts)
+        self.assertEqual(validated, ())
+        self.assertEqual(bodies, {})
+
+    def test_hot_plan_keeps_installed_chunk_and_hides_new_ones(self):
+        plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
+        artifacts = (
+            self._ready_chunk('ab'),
+            self._ready_chunk('c'),
+            self._ready_chunk('d'),
+        )
+        validated, bodies = self._capture_validated_ready_artifacts(plan, artifacts)
+        self.assertEqual(
+            [item['chunk_id'] for item in validated],
+            ['c'],
+        )
+        self.assertEqual(bodies, {'c': 'body-c'})
+
+    def test_multiple_hot_turns_keep_installed_chunk_visibility(self):
+        plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
+        first, _bodies = self._capture_validated_ready_artifacts(
+            plan,
+            (self._ready_chunk('c'), self._ready_chunk('ab')),
+        )
+        second, _bodies2 = self._capture_validated_ready_artifacts(
+            plan,
+            (self._ready_chunk('c'), self._ready_chunk('ab'), self._ready_chunk('d')),
+        )
+        self.assertEqual([item['chunk_id'] for item in first], ['c'])
+        self.assertEqual([item['chunk_id'] for item in second], ['c'])
+
+    def test_prepare_hot_freezes_receipt_before_building_plan(self):
+        plan, context_plan, _desired = self._fake_hot_reconcile_plan()
+        order = []
+
+        def _freeze(plan_arg, *, resident):
+            order.append('freeze')
+            return plan_arg.hot_receipt_frozen
+
+        def _build(plan_arg, *, resident, static_system, mode='hot'):
+            order.append('build')
+            self.assertIsNotNone(getattr(plan_arg, 'hot_receipt_frozen', None))
+            return context_plan, {}
+
         with mock.patch.object(
             dr,
-            '_hot_live_identity_decision',
-            return_value=('PASS', '', {}),
+            '_freeze_hot_receipt',
+            side_effect=_freeze,
         ), mock.patch.object(
             dr,
-            '_hot_native_tail_proof',
-            return_value={'status': 'pass', 'source_member': tail},
+            '_build_production_context_plan',
+            side_effect=_build,
+        ), mock.patch.object(
+            dr,
+            '_reconcile_hot_context_plan',
+            return_value='NO_OP',
         ):
-            decision = dr._reconcile_hot_context_plan(plan, resident=object())
+            decision = dr._prepare_hot_context_plan(
+                plan, resident=object(), static_system='STATIC',
+            )
+        self.assertEqual(order, ['freeze', 'build'])
         self.assertEqual(decision, 'NO_OP')
-        self.assertEqual(plan.hot_decision, 'NO_OP')
-        self.assertEqual(plan.resident_generation, 1)
-        self.assertEqual(plan.manifest['context_plan_chunk_availability'], 'deferred_until_cold')
-        self.assertEqual(plan.hot_installed_history_plan_id, 'plan:installed-raw')
-        self.assertEqual(plan.hot_installed_history_plan_hash, 'installed-raw-plan-hash')
-        historical = tuple(
-            member for member in plan.hot_installed_history_members
-            if member.source_kind == 'completed_turn' and member.source_ref != 'turn:t'
-        )
-        self.assertEqual(
-            [(member.source_ref, member.representation_kind, member.representation_id)
-             for member in historical],
-            [('turn:a', 'raw', 'raw:old'), ('turn:b', 'raw', 'raw:old')],
-        )
-        self.assertTrue(all(
-            member.representation_kind != 'chunk'
-            for member in historical
-        ))
-        self.assertEqual(
-            [member.source_ref for member in installed_members
-             if member.source_kind == 'completed_turn'],
-            ['turn:a', 'turn:b'],
-        )
+        self.assertEqual(plan.manifest['context_plan_id'], 'plan:one')
+        self.assertEqual(plan.manifest['context_plan_hash'], 'plan-hash-one')
 
-    def test_multiple_hot_turns_defer_new_ready_chunks(self):
-        first_plan, _first, tail, _installed, _desired = self._deferred_chunk_hot_plan()
-        second_plan, _second, second_tail, _installed2, _desired2 = (
-            self._deferred_chunk_hot_plan(extra_chunk=True)
-        )
-        with mock.patch.object(
-            dr,
-            '_hot_live_identity_decision',
-            return_value=('PASS', '', {}),
-        ), mock.patch.object(
-            dr,
-            '_hot_native_tail_proof',
-            side_effect=[
-                {'status': 'pass', 'source_member': tail},
-                {'status': 'pass', 'source_member': second_tail},
-            ],
-        ):
-            first = dr._reconcile_hot_context_plan(first_plan, resident=object())
-            second = dr._reconcile_hot_context_plan(second_plan, resident=object())
-        self.assertEqual(first, 'NO_OP')
-        self.assertEqual(second, 'NO_OP')
-        self.assertEqual(first_plan.resident_generation, second_plan.resident_generation)
-        self.assertEqual(
-            [member.representation_kind for member in first_plan.hot_installed_history_members
-             if member.source_ref in ('turn:a', 'turn:b')],
-            ['raw', 'raw'],
-        )
-        self.assertEqual(
-            [member.representation_kind for member in second_plan.hot_installed_history_members
-             if member.source_ref in ('turn:a', 'turn:b')],
-            ['raw', 'raw'],
-        )
-
-    def test_new_ready_chunk_hot_receipt_keeps_installed_plan_identity(self):
+    def test_hot_receipt_commit_uses_this_turn_plan_identity(self):
         from chat import context_receipt as receipt_store
 
         db = self._context_plan_runtime_db()
         try:
-            plan, _context_plan, tail, installed_members, _desired = (
-                self._deferred_chunk_hot_plan()
-            )
+            plan, context_plan, desired_members = self._fake_hot_reconcile_plan()
             plan.db_path = db
             plan.transcript_claude_session_id = 'session-1'
             plan.transcript_process_generation = 1
@@ -5523,9 +5506,12 @@ class ContextPlanConsumerTests(unittest.TestCase):
             conn = sqlite3.connect(db)
             receipt_store.ensure_context_receipt_schema(conn)
             receipt_store.create_receipt(
-                conn, plan.hot_receipt_frozen['receipt'], installed_members,
+                conn,
+                plan.hot_receipt_frozen['receipt'],
+                plan.hot_receipt_frozen['members'],
             )
             conn.close()
+            tail = context_plan.source_members[0]
             with mock.patch.object(
                 dr,
                 '_hot_live_identity_decision',
@@ -5563,29 +5549,15 @@ class ContextPlanConsumerTests(unittest.TestCase):
             committed = receipt_store.get_receipt(
                 conn, context_id=7, context_epoch=3, resident_generation=1,
             )
-            committed_members = receipt_store.get_receipt_members(
-                conn, context_id=7, context_epoch=3, resident_generation=1,
-            )
             conn.close()
-            self.assertEqual(committed.plan_id, 'plan:installed-raw')
-            self.assertEqual(committed.plan_hash, 'installed-raw-plan-hash')
-            historical = tuple(
-                member for member in committed_members
-                if member.source_kind == 'completed_turn' and member.source_ref != 'turn:t'
-            )
-            self.assertEqual(
-                [(member.source_ref, member.representation_kind)
-                 for member in historical],
-                [('turn:a', 'raw'), ('turn:b', 'raw')],
-            )
-            self.assertFalse(any(
-                member.representation_kind == 'chunk' for member in committed_members
-            ))
+            self.assertEqual(committed.plan_id, context_plan.plan_id)
+            self.assertEqual(committed.plan_hash, context_plan.plan_hash)
+            self.assertNotEqual(committed.plan_id, 'plan:previous')
         finally:
             os.unlink(db)
 
     def test_missing_receipt_still_respawns_when_latest_plan_has_chunks(self):
-        plan, _context_plan, _tail, _installed, _desired = self._deferred_chunk_hot_plan()
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
         plan.hot_receipt_frozen['receipt'] = None
         plan.hot_receipt_frozen['members'] = ()
         with mock.patch.object(
@@ -5596,10 +5568,9 @@ class ContextPlanConsumerTests(unittest.TestCase):
             decision = dr._reconcile_hot_context_plan(plan, resident=object())
         self.assertEqual(decision, 'RESPAWN')
         self.assertEqual(plan.hot_decision_reason, 'installed_receipt_missing')
-        self.assertIsNone(plan.hot_installed_history_members)
 
     def test_corrupt_receipt_still_respawns_when_latest_plan_has_chunks(self):
-        plan, _context_plan, _tail, _installed, _desired = self._deferred_chunk_hot_plan()
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
         plan.hot_receipt_frozen['membership_valid'] = False
         plan.hot_receipt_frozen['receipt_members_complete'] = False
         with mock.patch.object(
@@ -5610,7 +5581,18 @@ class ContextPlanConsumerTests(unittest.TestCase):
             decision = dr._reconcile_hot_context_plan(plan, resident=object())
         self.assertEqual(decision, 'RESPAWN')
         self.assertEqual(plan.hot_decision_reason, 'installed_receipt_proof_incomplete')
-        self.assertIsNone(plan.hot_installed_history_members)
+
+    def test_missing_receipt_hot_plan_does_not_filter_ready_chunks(self):
+        plan = self._hot_receipt_filter_plan()
+        plan.hot_receipt_frozen['receipt'] = None
+        plan.hot_receipt_frozen['members'] = ()
+        artifacts = (self._ready_chunk('ab'), self._ready_chunk('d'))
+        validated, bodies = self._capture_validated_ready_artifacts(plan, artifacts)
+        self.assertEqual(
+            [item['chunk_id'] for item in validated],
+            ['ab', 'd'],
+        )
+        self.assertEqual(bodies, {'ab': 'body-ab', 'd': 'body-d'})
 
     def test_source_revision_drift_still_respawns_despite_new_chunk(self):
         installed = [
@@ -5619,18 +5601,36 @@ class ContextPlanConsumerTests(unittest.TestCase):
         ]
         desired = [
             self._historical_receipt_member(
-                0, 'turn:a', representation_kind='chunk',
-                representation_id='chunk:one', revision='revision-a-new',
+                0, 'turn:a', representation_id='raw:new', revision='revision-a-new',
             ),
-            self._historical_receipt_member(
-                1, 'turn:b', representation_kind='chunk',
-                representation_id='chunk:one',
-            ),
+            self._historical_receipt_member(1, 'turn:b', representation_id='raw:new'),
             self._historical_receipt_member(2, 'turn:t', representation_id='raw:new'),
         ]
         self._assert_hot_historical_respawn(
             installed, desired, self._historical_source('turn:t'),
         )
+
+    def test_cold_and_capacity_see_all_ready_chunks_despite_installed_receipt(self):
+        plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
+        artifacts = (
+            self._ready_chunk('ab'),
+            self._ready_chunk('c'),
+            self._ready_chunk('d'),
+        )
+        for mode in ('cold', 'respawn', 'capacity'):
+            validated, bodies = self._capture_validated_ready_artifacts(
+                plan, artifacts, mode=mode,
+            )
+            self.assertEqual(
+                [item['chunk_id'] for item in validated],
+                ['ab', 'c', 'd'],
+                mode,
+            )
+            self.assertEqual(
+                bodies,
+                {'ab': 'body-ab', 'c': 'body-c', 'd': 'body-d'},
+                mode,
+            )
 
     def test_cold_rebuild_uses_latest_ready_chunk_plan(self):
         assembly = {'manifest': {}, 'current_day_history': []}

@@ -15,7 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional
 
 import cc_resident
 
@@ -202,11 +202,6 @@ class DailyTurnPlan:
     hot_receipt_frozen: Optional[dict[str, Any]] = field(default=None, repr=False)
     hot_decision: Optional[str] = field(default=None, repr=False)
     hot_decision_reason: Optional[str] = field(default=None, repr=False)
-    hot_installed_history_members: Optional[tuple[Any, ...]] = field(
-        default=None, repr=False,
-    )
-    hot_installed_history_plan_id: Optional[str] = field(default=None, repr=False)
-    hot_installed_history_plan_hash: Optional[str] = field(default=None, repr=False)
     capacity_context_plan: Any = field(default=None, repr=False)
     capacity_context_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
     capacity_context_bootstrap: Optional[dict[str, Any]] = field(default=None, repr=False)
@@ -1257,6 +1252,53 @@ def _production_continuity_store_path(plan: DailyTurnPlan) -> str:
     return path
 
 
+def _receipt_chunk_ids(members: Any) -> frozenset[str]:
+    """Installed chunk identifiers from a ContextReceipt member list."""
+    ids: set[str] = set()
+    for member in tuple(members or ()):
+        if str(getattr(member, 'representation_kind', '') or '') != 'chunk':
+            continue
+        representation_id = str(getattr(member, 'representation_id', '') or '').strip()
+        if not representation_id:
+            continue
+        ids.add(representation_id)
+        prefix = 'chunk:'
+        if representation_id.startswith(prefix):
+            bare = representation_id[len(prefix):].strip()
+            if bare:
+                ids.add(bare)
+        else:
+            ids.add(prefix + representation_id)
+    return frozenset(ids)
+
+
+def _hot_receipt_allows_chunk_filter(frozen: Any) -> bool:
+    if not isinstance(frozen, dict):
+        return False
+    if frozen.get('receipt_read_error'):
+        return False
+    if frozen.get('receipt') is None:
+        return False
+    if not bool(frozen.get('receipt_members_complete')):
+        return False
+    return bool(frozen.get('membership_valid'))
+
+
+def _visible_ready_artifacts(plan: DailyTurnPlan, artifacts: tuple[Any, ...], *, mode: str) -> tuple[Any, ...]:
+    """Hot turns only see chunks already installed on this resident generation."""
+    if str(mode or 'hot').strip().lower() != 'hot':
+        return artifacts
+    frozen = getattr(plan, 'hot_receipt_frozen', None)
+    if not _hot_receipt_allows_chunk_filter(frozen):
+        return artifacts
+    allowed = _receipt_chunk_ids((frozen or {}).get('members'))
+    return tuple(
+        chunk for chunk in artifacts
+        if str(getattr(chunk, 'chunk_id', '') or '') in allowed
+        or ('chunk:' + str(getattr(chunk, 'chunk_id', '') or '')) in allowed
+    )
+
+
 def _build_production_context_plan(
     plan: DailyTurnPlan,
     *,
@@ -1281,13 +1323,18 @@ def _build_production_context_plan(
             error_code='context_plan_store_corrupt',
             retryable=False,
         )
+    artifacts = _visible_ready_artifacts(
+        plan,
+        tuple(surface.artifacts or ()),
+        mode=mode,
+    )
     validated_ready_artifacts = tuple(
         {
             'chunk_id': str(chunk.chunk_id),
             'artifact_revision': str(chunk.artifact_revision),
             'body_hash': str(chunk.body_hash),
         }
-        for chunk in surface.artifacts
+        for chunk in artifacts
     )
     from chat.daily_continuity_shadow import build_daily_continuity_shadow_plan
     fixed_sections = _build_continuity_shadow_fixed_sections(
@@ -1331,7 +1378,7 @@ def _build_production_context_plan(
         )
     validated_by_id = {
         str(chunk.chunk_id): (str(chunk.artifact_revision), str(chunk.body_hash))
-        for chunk in surface.artifacts
+        for chunk in artifacts
     }
     for representation in result.plan.representations:
         if representation.kind != 'chunk':
@@ -1355,7 +1402,7 @@ def _build_production_context_plan(
             )
     bodies = {
         str(chunk.chunk_id): str(chunk.body)
-        for chunk in (surface.artifacts or ())
+        for chunk in artifacts
     }
     return result.plan, bodies
 
@@ -1734,70 +1781,6 @@ def _receipt_member_identity(member: Any) -> tuple[Any, ...]:
         str(getattr(member, 'representation_kind', '') or ''),
         *_receipt_member_source_identity(member),
     )
-
-
-def _hot_historical_representation_changed(installed: Any, desired: Any) -> bool:
-    """True when the same source would switch raw/chunk or chunk artifact."""
-    installed_kind = str(getattr(installed, 'representation_kind', '') or '')
-    desired_kind = str(getattr(desired, 'representation_kind', '') or '')
-    if installed_kind != desired_kind:
-        return True
-    if desired_kind == 'chunk' and (
-        str(getattr(installed, 'representation_id', '') or '')
-        != str(getattr(desired, 'representation_id', '') or '')
-    ):
-        return True
-    return False
-
-
-def _clone_receipt_member(member: Any, *, installed_order: int) -> Any:
-    from chat.context_receipt import ContextReceiptMember
-
-    return ContextReceiptMember(
-        installed_order=int(installed_order),
-        representation_id=str(getattr(member, 'representation_id', '') or ''),
-        representation_kind=str(getattr(member, 'representation_kind', '') or ''),
-        source_ref=str(getattr(member, 'source_ref', '') or ''),
-        source_revision=str(getattr(member, 'source_revision', '') or ''),
-        source_kind=str(getattr(member, 'source_kind', '') or ''),
-        content_hash=str(getattr(member, 'content_hash', '') or ''),
-        span_start=getattr(member, 'span_start', None),
-        span_end=getattr(member, 'span_end', None),
-        branch_id=str(getattr(member, 'branch_id', '') or ''),
-    )
-
-
-def _rebind_hot_receipt_to_installed_history(
-    *,
-    installed_members: Sequence[Any] | tuple[Any, ...],
-    desired_members: Sequence[Any] | tuple[Any, ...],
-) -> tuple[tuple[Any, ...], bool]:
-    """Keep installed historical representation identity for this generation.
-
-    New READY chunk coverage is deferred until the next cold rebuild. The
-    native tail and current/fixed sections still come from the desired plan.
-    """
-    installed_by_key = {
-        _receipt_member_source_identity(member): member
-        for member in tuple(installed_members)
-        if str(getattr(member, 'representation_kind', '') or '')
-            in _HOT_HISTORICAL_REPRESENTATION_KINDS
-    }
-    rebound: list[Any] = []
-    deferred = False
-    for index, desired in enumerate(tuple(desired_members)):
-        kind = str(getattr(desired, 'representation_kind', '') or '')
-        if kind in _HOT_HISTORICAL_REPRESENTATION_KINDS:
-            existing = installed_by_key.get(_receipt_member_source_identity(desired))
-            if existing is not None:
-                if _hot_historical_representation_changed(existing, desired):
-                    deferred = True
-                rebound.append(_clone_receipt_member(
-                    existing, installed_order=index,
-                ))
-                continue
-        rebound.append(_clone_receipt_member(desired, installed_order=index))
-    return tuple(rebound), deferred
 
 
 def _source_member_identity(member: Any) -> tuple[Any, ...]:
@@ -2377,6 +2360,20 @@ def _hot_historical_compatibility(
         paired_installed = installed + (None,)
     if len(paired_installed) != len(desired):
         return False, 'historical_source_members_changed'
+    for existing, desired_member in zip(paired_installed, desired):
+        if existing is None:
+            # The only member allowed to be newly proven is the native tail;
+            # it is raw native history, not a historical APPEND primitive.
+            continue
+        if str(getattr(existing, 'representation_kind', '') or '') != str(
+            getattr(desired_member, 'representation_kind', '') or ''
+        ):
+            return False, 'historical_representation_identity_changed'
+        if str(getattr(desired_member, 'representation_kind', '') or '') == 'chunk':
+            if str(getattr(existing, 'representation_id', '') or '') != str(
+                getattr(desired_member, 'representation_id', '') or ''
+            ):
+                return False, 'historical_representation_identity_changed'
     return True, ''
 
 def _reconcile_hot_context_plan(
@@ -2384,9 +2381,6 @@ def _reconcile_hot_context_plan(
     *,
     resident: Any,
 ) -> str:
-    plan.hot_installed_history_members = None
-    plan.hot_installed_history_plan_id = None
-    plan.hot_installed_history_plan_hash = None
     desired = getattr(plan, 'hot_desired_plan', None)
     frozen = getattr(plan, 'hot_receipt_frozen', None) or {}
     decision = 'BLOCKED'
@@ -2514,25 +2508,6 @@ def _reconcile_hot_context_plan(
         _set_hot_decision(plan, 'RESPAWN', compatibility_reason)
         return 'RESPAWN'
 
-    rebound_members, deferred = _rebind_hot_receipt_to_installed_history(
-        installed_members=installed_members,
-        desired_members=desired_members,
-    )
-    if deferred:
-        receipt_identity = frozen.get('receipt')
-        plan.hot_installed_history_members = rebound_members
-        plan.hot_installed_history_plan_id = str(
-            getattr(receipt_identity, 'plan_id', '') or ''
-        )
-        plan.hot_installed_history_plan_hash = str(
-            getattr(receipt_identity, 'plan_hash', '') or ''
-        )
-        plan.manifest.update({
-            'context_plan_id': plan.hot_installed_history_plan_id,
-            'context_plan_hash': plan.hot_installed_history_plan_hash,
-            'context_plan_chunk_availability': 'deferred_until_cold',
-        })
-
     plan.manifest.update({
         'context_plan_fixed_section_parity': 'PASS',
         'context_plan_representation_parity': 'PASS',
@@ -2559,6 +2534,7 @@ def _prepare_hot_context_plan(
     resident: Any,
     static_system: str,
 ) -> str:
+    _freeze_hot_receipt(plan, resident=resident)
     try:
         context_plan, chunk_bodies = _build_production_context_plan(
             plan,
@@ -2587,7 +2563,6 @@ def _prepare_hot_context_plan(
         'context_plan_budget_status': str(context_plan.budget_status),
         'context_plan_source_hash': str(context_plan.source_hash),
     })
-    _freeze_hot_receipt(plan, resident=resident)
     return _reconcile_hot_context_plan(plan, resident=resident)
 
 
@@ -2708,17 +2683,7 @@ def _commit_production_context_receipt(
             'error_code': 'context_receipt_last_good_unproven',
         })
         return False
-    members = getattr(plan, 'hot_installed_history_members', None)
-    if members is None:
-        members = _context_receipt_members(plan)
-    receipt_plan_id = (
-        getattr(plan, 'hot_installed_history_plan_id', None)
-        or str(context_plan.plan_id)
-    )
-    receipt_plan_hash = (
-        getattr(plan, 'hot_installed_history_plan_hash', None)
-        or str(context_plan.plan_hash)
-    )
+    members = _context_receipt_members(plan)
     try:
         receipt = receipt_store.ContextReceipt.build(
             context_id=int(plan.context_id),
@@ -2729,8 +2694,8 @@ def _commit_production_context_receipt(
             model_identity=str(plan.manifest.get('model') or 'unknown'),
             session_id=sid,
             process_generation=int(process_generation),
-            plan_id=str(receipt_plan_id),
-            plan_hash=str(receipt_plan_hash),
+            plan_id=str(context_plan.plan_id),
+            plan_hash=str(context_plan.plan_hash),
             budget_policy_version=str(
                 context_plan.budget_policy_version
                 or 'continuity_context_budget_v1'
