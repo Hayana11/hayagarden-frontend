@@ -372,7 +372,10 @@ def _credential_hash(credential: str) -> str:
 
 
 def enroll_device(payload: Any, path: str) -> dict[str, Any]:
-    if not isinstance(payload, dict) or payload.get("schemaVersion") != SCHEMA_VERSION:
+    allowed = {"schemaVersion", "installId", "packageName", "buildSha", "buildBranch", "label"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise ValueError("invalid enrollment fields")
+    if payload.get("schemaVersion") != SCHEMA_VERSION:
         raise ValueError("invalid schemaVersion")
     install_id = _device_uuid(payload.get("installId"), "installId")
     package_name = _device_text(payload.get("packageName"), "packageName", max_length=200)
