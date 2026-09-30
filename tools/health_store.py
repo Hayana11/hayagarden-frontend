@@ -6,10 +6,14 @@ accepts bounded, authenticated canonical samples and keeps source provenance.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import hmac
 import json
 import math
 import os
+import secrets
 import sqlite3
+import uuid
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -58,6 +62,21 @@ def ensure_schema(path: str) -> None:
               accepted_rows INTEGER NOT NULL DEFAULT 0
             );
             INSERT OR IGNORE INTO health_ingest_meta(id) VALUES (1);
+            CREATE TABLE IF NOT EXISTS health_devices (
+              device_id TEXT PRIMARY KEY,
+              install_id TEXT UNIQUE NOT NULL,
+              credential_hash TEXT NOT NULL,
+              package_name TEXT NOT NULL,
+              build_sha TEXT NOT NULL DEFAULT '',
+              build_branch TEXT NOT NULL DEFAULT '',
+              label TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              rotated_at TEXT,
+              last_seen_at TEXT,
+              revoked_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_health_devices_install_id
+              ON health_devices(install_id);
             """
         )
         conn.commit()
@@ -321,5 +340,165 @@ def get_status(path: str, *, now: str | None = None) -> dict[str, Any]:
             "acceptedRows": int(meta["accepted_rows"]) if meta else 0,
             "metrics": metrics,
         }
+    finally:
+        conn.close()
+
+
+def _device_now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _device_text(value: Any, field: str, *, max_length: int, required: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"invalid {field}")
+    value = value.strip()
+    if required and not value:
+        raise ValueError(f"invalid {field}")
+    if len(value) > max_length or any(ord(char) < 32 for char in value):
+        raise ValueError(f"invalid {field}")
+    return value
+
+
+def _device_uuid(value: Any, field: str) -> str:
+    text = _device_text(value, field, max_length=80)
+    try:
+        return str(uuid.UUID(text))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"invalid {field}") from exc
+
+
+def _credential_hash(credential: str) -> str:
+    return hashlib.sha256(credential.encode("utf-8")).hexdigest()
+
+
+def enroll_device(payload: Any, path: str) -> dict[str, str]:
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != SCHEMA_VERSION:
+        raise ValueError("invalid schemaVersion")
+    install_id = _device_uuid(payload.get("installId"), "installId")
+    package_name = _device_text(payload.get("packageName"), "packageName", max_length=200)
+    build_sha = _device_text(payload.get("buildSha", ""), "buildSha", max_length=200, required=False)
+    build_branch = _device_text(payload.get("buildBranch", ""), "buildBranch", max_length=200, required=False)
+    label = _device_text(payload.get("label"), "label", max_length=120)
+    credential = secrets.token_urlsafe(32)
+    issued_at = _device_now()
+    device_id = str(uuid.uuid4())
+    ensure_schema(path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("BEGIN")
+        existing = conn.execute(
+            "SELECT device_id, created_at FROM health_devices WHERE install_id=?",
+            (install_id,),
+        ).fetchone()
+        if existing:
+            device_id = str(existing[0])
+            conn.execute(
+                """
+                UPDATE health_devices
+                SET credential_hash=?, package_name=?, build_sha=?, build_branch=?,
+                    label=?, rotated_at=?, revoked_at=NULL
+                WHERE install_id=?
+                """,
+                (_credential_hash(credential), package_name, build_sha, build_branch, label, issued_at, install_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO health_devices
+                (device_id, install_id, credential_hash, package_name, build_sha, build_branch,
+                 label, created_at, rotated_at, last_seen_at, revoked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                """,
+                (device_id, install_id, _credential_hash(credential), package_name, build_sha,
+                 build_branch, label, issued_at),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {
+        "schemaVersion": str(SCHEMA_VERSION),
+        "deviceId": device_id,
+        "credential": credential,
+        "issuedAt": issued_at,
+    }
+
+
+def authenticate_device(path: str, device_id: Any, credential: Any) -> bool:
+    try:
+        normalized_device_id = _device_uuid(device_id, "device_id")
+        supplied = _device_text(credential, "credential", max_length=512)
+    except ValueError:
+        return False
+    ensure_schema(path)
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT credential_hash, revoked_at FROM health_devices WHERE device_id=?",
+            (normalized_device_id,),
+        ).fetchone()
+        if not row or row[1] is not None:
+            return False
+        if not hmac.compare_digest(str(row[0]), _credential_hash(supplied)):
+            return False
+        conn.execute(
+            "UPDATE health_devices SET last_seen_at=? WHERE device_id=?",
+            (_device_now(), normalized_device_id),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def list_devices(path: str) -> list[dict[str, Any]]:
+    ensure_schema(path)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT device_id, install_id, package_name, build_sha, build_branch, label,
+                   created_at, rotated_at, last_seen_at, revoked_at
+            FROM health_devices
+            ORDER BY created_at ASC, device_id ASC
+            """
+        ).fetchall()
+        return [
+            {
+                "deviceId": row["device_id"],
+                "installId": row["install_id"],
+                "packageName": row["package_name"],
+                "buildSha": row["build_sha"],
+                "buildBranch": row["build_branch"],
+                "label": row["label"],
+                "createdAt": row["created_at"],
+                "rotatedAt": row["rotated_at"],
+                "lastSeenAt": row["last_seen_at"],
+                "revokedAt": row["revoked_at"],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def revoke_device(path: str, device_id: Any) -> bool:
+    normalized_device_id = _device_uuid(device_id, "device_id")
+    ensure_schema(path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            UPDATE health_devices
+            SET revoked_at=COALESCE(revoked_at, ?)
+            WHERE device_id=?
+            """,
+            (_device_now(), normalized_device_id),
+        )
+        conn.commit()
+        return True
     finally:
         conn.close()
