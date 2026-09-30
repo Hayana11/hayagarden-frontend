@@ -7,7 +7,7 @@ from typing import Callable
 
 from flask import Blueprint, jsonify, request
 
-import health_store
+from tools import health_store
 from moments_auth import OwnerAuthError, require_owner
 
 
