@@ -62,6 +62,12 @@ class HealthBridgeR1Tests(unittest.TestCase):
                 "buildBranch": "agent/elpis-canary-health-bridge-r1",
                 "label": "Elpis Canary",
             }
+            unauthenticated_enroll = client.post(
+                "/api/health/mobile/enroll",
+                json=metadata,
+            )
+            self.assertEqual(unauthenticated_enroll.status_code, 401)
+
             cross_origin = client.post(
                 "/api/health/mobile/enroll",
                 json=metadata,
@@ -111,6 +117,14 @@ class HealthBridgeR1Tests(unittest.TestCase):
             serialized = json.dumps(devices.json)
             self.assertNotIn(credential, serialized)
             self.assertNotIn("credential_hash", serialized)
+            self.assertIsNotNone(devices.json["devices"][0]["lastSeenAt"])
+
+            status = client.get(
+                "/api/health/mobile/status",
+                headers={"Cookie": "moments_owner=owner-session"},
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertNotIn(credential, json.dumps(status.json))
 
     def test_device_rotation_old_credential_revocation_and_generic_401(self):
         with tempfile.TemporaryDirectory() as directory:
