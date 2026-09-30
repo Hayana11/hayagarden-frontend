@@ -176,16 +176,20 @@ class HealthBridgeR1Tests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "health.db")
-            health_store.ingest_payload(payload(), db, now="2026-09-30T12:00:00Z")
+            receipt = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).replace(microsecond=0)
+            receipt_text = receipt.isoformat().replace("+00:00", "Z")
+            health_store.ingest_payload(payload(), db, now=receipt_text)
             denied = payload(statuses={
                 "heart_rate": {"status": "PERMISSION_DENIED", "source": "health_connect"},
                 "steps": {"status": "EMPTY", "source": "health_connect"},
                 "sleep": {"status": "UNAVAILABLE", "source": "health_connect"},
             })
             denied["records"] = []
-            health_store.ingest_payload(denied, db, now="2026-09-30T12:01:00Z")
+            health_store.ingest_payload(
+                denied, db, now=(receipt + dt.timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            )
             local = health_store.get_local_metric(
-                db, "heart_rate", 7, now="2026-09-30T12:02:00Z"
+                db, "heart_rate", 7, now=(receipt + dt.timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
             )
             self.assertEqual(local["status"], "PERMISSION_DENIED")
             self.assertEqual(len(local["records"]), 1)
@@ -204,15 +208,20 @@ class HealthBridgeR1Tests(unittest.TestCase):
     def test_server_receipt_updates_last_upload_at(self):
         with tempfile.TemporaryDirectory() as directory:
             db = str(Path(directory) / "health.db")
-            health_store.ingest_payload(payload(), db, now="2026-09-30T12:00:00Z")
+            receipt = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).replace(microsecond=0)
+            receipt_text = receipt.isoformat().replace("+00:00", "Z")
+            health_store.ingest_payload(payload(), db, now=receipt_text)
             latest = health_store.get_local_metric(
-                db, "heart_rate", 7, now="2026-09-30T12:01:00Z"
+                db, "heart_rate", 7, now=(receipt + dt.timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
             )
-            self.assertEqual(latest["lastUploadAt"], "2026-09-30T12:00:00.000Z")
-            status = health_store.get_status(db, now="2026-09-30T12:01:00Z")
+            expected_receipt = receipt_text.replace("Z", ".000Z")
+            self.assertEqual(latest["lastUploadAt"], expected_receipt)
+            status = health_store.get_status(
+                db, now=(receipt + dt.timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            )
             self.assertEqual(
                 status["metrics"]["heart_rate"]["lastUploadAt"],
-                "2026-09-30T12:00:00.000Z",
+                expected_receipt,
             )
 
 
