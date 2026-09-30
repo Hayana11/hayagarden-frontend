@@ -227,6 +227,8 @@ console.log('test-toolroom-contract: ok');
 
 assert.match(screen, /ElpisHealth/);
 assert.match(screen, /getHealthStatus/);
+assert.match(screen, /backgroundReadPermission/);
+assert.match(screen, /permissionState/);
 assert.match(screen, /syncNow/);
 assert.match(screen, /requestHealthConnectPermission/);
 assert.match(screen, /\/api\/health\/mobile\/status/);

@@ -440,6 +440,8 @@ type HealthDiagnosticState = {
   bridgeAvailable: boolean;
   healthConnectAvailable: string;
   permission: string;
+  metricPermission: string;
+  backgroundReadPermission: string;
   providerStatus: string;
   backgroundSync: string;
   lastCollectedAt: string | null;
@@ -455,6 +457,8 @@ const DEFAULT_HEALTH_DIAGNOSTIC: HealthDiagnosticState = {
   bridgeAvailable: false,
   healthConnectAvailable: '未知',
   permission: '未知',
+  metricPermission: '未知',
+  backgroundReadPermission: '未知',
   providerStatus: 'UNAVAILABLE',
   backgroundSync: '未知',
   lastCollectedAt: null,
@@ -673,6 +677,10 @@ export function ToolroomScreen() {
       bridgeAvailable,
       healthConnectAvailable: local.available === true ? '可用' : String(local.providerStatus || 'UNAVAILABLE'),
       permission: typeof local.permission === 'string' ? local.permission : '未知',
+      metricPermission: local.permissionState && typeof local.permissionState === 'object' && typeof (local.permissionState as Record<string, unknown>).metrics === 'string'
+        ? String((local.permissionState as Record<string, unknown>).metrics) : '未知',
+      backgroundReadPermission: local.permissionState && typeof local.permissionState === 'object' && typeof (local.permissionState as Record<string, unknown>).backgroundRead === 'string'
+        ? String((local.permissionState as Record<string, unknown>).backgroundRead) : '未知',
       providerStatus: typeof local.providerStatus === 'string' ? local.providerStatus : 'UNAVAILABLE',
       backgroundSync: typeof local.backgroundSync === 'string' ? local.backgroundSync : '未知',
       lastCollectedAt: typeof local.lastCollectedAt === 'string' ? local.lastCollectedAt : null,
@@ -1478,6 +1486,8 @@ export function ToolroomScreen() {
                 <div><dt>Canary bridge</dt><dd>{healthDiag.bridgeAvailable ? 'available' : 'absent'}</dd></div>
                 <div><dt>Health Connect</dt><dd>{healthDiag.healthConnectAvailable}</dd></div>
                 <div><dt>权限</dt><dd>{healthDiag.permission}</dd></div>
+                <div><dt>Metric read</dt><dd>{healthDiag.metricPermission}</dd></div>
+                <div><dt>Background read</dt><dd>{healthDiag.backgroundReadPermission}</dd></div>
                 <div><dt>后台同步</dt><dd>{healthDiag.backgroundSync}</dd></div>
                 <div><dt>手机采集</dt><dd>{healthTime(healthDiag.lastCollectedAt)}</dd></div>
                 <div><dt>手机上传</dt><dd>{healthTime(healthDiag.lastUploadAt)}</dd></div>
