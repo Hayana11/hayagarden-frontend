@@ -227,10 +227,14 @@ console.log('test-toolroom-contract: ok');
 
 assert.match(screen, /ElpisHealth/);
 assert.match(screen, /getHealthStatus/);
+assert.match(screen, /getInstallId/);
+assert.match(screen, /provisionDeviceCredential/);
 assert.match(screen, /backgroundReadPermission/);
 assert.match(screen, /permissionState/);
 assert.match(screen, /syncNow/);
 assert.match(screen, /requestHealthConnectPermission/);
+assert.match(screen, /\/api\/health\/mobile\/enroll/);
+assert.match(screen, /绑定本机健康同步/);
 assert.match(screen, /\/api\/health\/mobile\/status/);
 assert.match(screen, /ElpisCanary Health Bridge/);
 assert.match(screen, /Xiaomi fallback/);
