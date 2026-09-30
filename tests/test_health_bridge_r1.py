@@ -132,6 +132,29 @@ class HealthBridgeR1Tests(unittest.TestCase):
             finally:
                 internal_adapter.LOCAL_DB_PATH = old
 
+    def test_external_health_contract_and_wake_binding_are_unchanged(self):
+        root = Path(__file__).resolve().parents[1]
+        manifest = (root / "tools" / "capability_manifest.py").read_text()
+        mcp = (root / "internal-mcp-server.js").read_text()
+        wake = (root / "tests" / "test_wake_read_observation.py").read_text()
+        self.assertIn("health.read", manifest)
+        self.assertIn("mcp__internal__get.health", manifest)
+        self.assertIn("get.health", mcp)
+        self.assertIn("health.read", wake)
+
+    def test_permission_denied_is_not_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "health.db")
+            denied = payload(records=[], statuses={
+                "heart_rate": {"status": "PERMISSION_DENIED", "source": "health_connect"},
+                "steps": {"status": "EMPTY", "source": "health_connect"},
+                "sleep": {"status": "UNAVAILABLE", "source": "health_connect"},
+            })
+            health_store.ingest_payload(denied, db)
+            result = health_store.get_local_metric(db, "heart_rate", 7)
+            self.assertEqual(result["status"], "PERMISSION_DENIED")
+            self.assertEqual(result["records"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
