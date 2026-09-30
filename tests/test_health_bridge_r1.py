@@ -68,19 +68,16 @@ class HealthBridgeR1Tests(unittest.TestCase):
             )
             self.assertEqual(unauthenticated_enroll.status_code, 401)
 
+            client.set_cookie("moments_owner", "owner-session")
             cross_origin = client.post(
                 "/api/health/mobile/enroll",
                 json=metadata,
-                headers={
-                    "Cookie": "moments_owner=owner-session",
-                    "Origin": "https://evil.example",
-                },
+                headers={"Origin": "https://evil.example"},
             )
             self.assertEqual(cross_origin.status_code, 403)
             enrollment = client.post(
                 "/api/health/mobile/enroll",
                 json=metadata,
-                headers={"Cookie": "moments_owner=owner-session"},
             )
             self.assertEqual(enrollment.status_code, 200)
             device_id = enrollment.json["deviceId"]
@@ -109,20 +106,14 @@ class HealthBridgeR1Tests(unittest.TestCase):
             self.assertEqual(second.json["accepted"], 0)
             self.assertEqual(second.json["duplicates"], 1)
 
-            devices = client.get(
-                "/api/health/mobile/devices",
-                headers={"Cookie": "moments_owner=owner-session"},
-            )
+            devices = client.get("/api/health/mobile/devices")
             self.assertEqual(devices.status_code, 200)
             serialized = json.dumps(devices.json)
             self.assertNotIn(credential, serialized)
             self.assertNotIn("credential_hash", serialized)
             self.assertIsNotNone(devices.json["devices"][0]["lastSeenAt"])
 
-            status = client.get(
-                "/api/health/mobile/status",
-                headers={"Cookie": "moments_owner=owner-session"},
-            )
+            status = client.get("/api/health/mobile/status")
             self.assertEqual(status.status_code, 200)
             self.assertNotIn(credential, json.dumps(status.json))
 
@@ -137,6 +128,7 @@ class HealthBridgeR1Tests(unittest.TestCase):
             app = __import__("flask").Flask(__name__)
             app.register_blueprint(create_health_blueprint(db_path=db, owner_guard=owner_guard))
             client = app.test_client()
+            client.set_cookie("moments_owner", "owner-session")
             metadata = {
                 "schemaVersion": 1,
                 "installId": "22222222-2222-4222-8222-222222222222",
@@ -148,7 +140,6 @@ class HealthBridgeR1Tests(unittest.TestCase):
             first = client.post(
                 "/api/health/mobile/enroll",
                 json=metadata,
-                headers={"Cookie": "moments_owner=owner-session"},
             ).json
             second = client.post(
                 "/api/health/mobile/enroll",
@@ -190,7 +181,6 @@ class HealthBridgeR1Tests(unittest.TestCase):
 
             revoked = client.post(
                 "/api/health/mobile/devices/" + second["deviceId"] + "/revoke",
-                headers={"Cookie": "moments_owner=owner-session"},
             )
             self.assertEqual(revoked.status_code, 200)
             after_revoke = client.post(
@@ -205,10 +195,7 @@ class HealthBridgeR1Tests(unittest.TestCase):
 
             cross_origin_revoke = client.post(
                 "/api/health/mobile/devices/" + second["deviceId"] + "/revoke",
-                headers={
-                    "Cookie": "moments_owner=owner-session",
-                    "Origin": "https://evil.example",
-                },
+                headers={"Origin": "https://evil.example"},
             )
             self.assertEqual(cross_origin_revoke.status_code, 403)
 
