@@ -29,16 +29,43 @@ R2A does **not** claim 100% `memory.search` coverage. Home MCP and the legacy
 gateway search tool remain on their current production paths with no Shadow
 dispatch.
 
-## Gate
+## Gates
 
-`MEMORY_INTEROP_SHADOW_ENABLED`
+Live Shadow uses a fail-closed hierarchy. Every flag is off unless its value
+is the exact string `1` after stripping surrounding whitespace. Values such as
+`true`, `yes`, `on`, `TRUE`, or `0` do not enable anything.
 
-- unset / `0` / `false` / any value other than exact `1` → completely disabled
-- exact `1` → enabled
+```text
+MEMORY_INTEROP_SHADOW_ENABLED          (master)
+        ↓
+SEARCH_ENABLED / WRITE_ENABLED         (per-operation)
+        ↓
+surface allowlist
+        ↓
+dispatch
+```
 
-Default is **OFF**.
+`MEMORY_INTEROP_SHADOW_ENABLED` remains the master gate. A per-operation gate
+never bypasses it.
 
-When OFF:
+| Master | Search | Write | Search observation | Write observation |
+|---|---|---|---|---|
+| unset / not `1` | `1` | `1` | off | off |
+| `1` | unset / not `1` | unset / not `1` | off | off |
+| `1` | `1` | unset / not `1` | allowed | off |
+| `1` | unset / not `1` | `1` | off | allowed |
+| `1` | `1` | `1` | allowed | allowed |
+
+Default is **OFF**. Setting only the master gate does **not** enable
+observations.
+
+Recommended staged rollout:
+
+- Stage A: `MEMORY_INTEROP_SHADOW_ENABLED=1` and
+  `MEMORY_INTEROP_SHADOW_SEARCH_ENABLED=1`, write gate unset/`0`
+- Stage B: keep Stage A and set `MEMORY_INTEROP_SHADOW_WRITE_ENABLED=1`
+
+When master or the matching operation gate is OFF:
 
 - no shadow process is spawned
 - no shadow DB is opened
@@ -49,7 +76,7 @@ When OFF:
 - authoritative return shape and text stay unchanged
 
 `MEMORY_INTEROP_SHADOW_DB_PATH` must point at a **separate** SQLite receipt
-file when the gate is on. It must never be:
+file when observation is allowed. It must never be:
 
 - `memories.db`
 - a Memory Kernel DB
@@ -57,8 +84,8 @@ file when the gate is on. It must never be:
 - a continuity DB
 - the same file as the authoritative posts DB
 
-If the gate is on but the path is missing or forbidden, Shadow fails open and
-the authoritative request is untouched.
+If observation is otherwise allowed but the path is missing or forbidden,
+Shadow fails open and the authoritative request is untouched.
 
 ## Code path
 
@@ -130,6 +157,9 @@ and conflict classification cannot race into two base `ok` rows.
 
 WRITE observations accept only `claude_code`, `internal_mcp`, and `api_relay`.
 SEARCH observations accept only `claude_code` and `internal_mcp`.
+
+Surface allowlists are additional boundaries. Dispatch requires master enabled,
+the matching operation gate enabled, and a covered surface.
 
 A missing or unknown `source_surface` is dropped: no spawn, no receipt. That is
 not UH-A0 authorization.

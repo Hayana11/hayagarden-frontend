@@ -25,12 +25,16 @@ from tools.memory_interop_shadow import (
     SHADOW_DB_PATH_ENV,
     SHADOW_ENABLED_ENV,
     SHADOW_MAX_INFLIGHT_WORKERS,
+    SHADOW_SEARCH_ENABLED_ENV,
+    SHADOW_WRITE_ENABLED_ENV,
     WRITE_SURFACES,
     build_search_event,
     build_write_event,
     dispatch_shadow_event,
     is_forbidden_shadow_path,
     is_shadow_enabled,
+    is_shadow_search_enabled,
+    is_shadow_write_enabled,
     observe_memory_search,
     observe_memory_write,
     resolve_shadow_db_path,
@@ -116,6 +120,8 @@ def _wait_receipts(path: str, count: int = 1, timeout: float = 8.0) -> list[dict
 def _enabled_env(shadow_db: str) -> dict[str, str]:
     env = os.environ.copy()
     env[SHADOW_ENABLED_ENV] = "1"
+    env[SHADOW_SEARCH_ENABLED_ENV] = "1"
+    env[SHADOW_WRITE_ENABLED_ENV] = "1"
     env[SHADOW_DB_PATH_ENV] = shadow_db
     return env
 
@@ -152,7 +158,11 @@ class GateTests(unittest.TestCase):
 
     def test_valid_one_enables_dispatch(self):
         recorded: list[dict] = []
-        environ = {SHADOW_ENABLED_ENV: "1", SHADOW_DB_PATH_ENV: "/tmp/shadow-receipts.db"}
+        environ = {
+            SHADOW_ENABLED_ENV: "1",
+            SHADOW_WRITE_ENABLED_ENV: "1",
+            SHADOW_DB_PATH_ENV: "/tmp/shadow-receipts.db",
+        }
         observe_memory_write(
             posts_db_path="/tmp/posts.db",
             result={"status": "CREATED", "id": 9},
@@ -172,20 +182,22 @@ class GateTests(unittest.TestCase):
             side_effect=lambda *args, **kwargs: recorded.append((args, kwargs)),
         ):
             dispatch_shadow_event(
-                {"posts_db_path": "/tmp/posts.db", "operation": "write"},
-                environ={SHADOW_ENABLED_ENV: "1"},
+                {"posts_db_path": "/tmp/posts.db", "operation": "write", "source_surface": "claude_code"},
+                environ={SHADOW_ENABLED_ENV: "1", SHADOW_WRITE_ENABLED_ENV: "1"},
             )
             dispatch_shadow_event(
-                {"posts_db_path": "/tmp/posts.db", "operation": "write"},
+                {"posts_db_path": "/tmp/posts.db", "operation": "write", "source_surface": "claude_code"},
                 environ={
                     SHADOW_ENABLED_ENV: "1",
+                    SHADOW_WRITE_ENABLED_ENV: "1",
                     SHADOW_DB_PATH_ENV: "/opt/frontend/memories.db",
                 },
             )
             dispatch_shadow_event(
-                {"posts_db_path": "/tmp/posts.db", "operation": "write"},
+                {"posts_db_path": "/tmp/posts.db", "operation": "write", "source_surface": "claude_code"},
                 environ={
                     SHADOW_ENABLED_ENV: "1",
+                    SHADOW_WRITE_ENABLED_ENV: "1",
                     SHADOW_DB_PATH_ENV: "/tmp/posts.db",
                 },
             )
@@ -195,6 +207,252 @@ class GateTests(unittest.TestCase):
         self.assertTrue(is_forbidden_shadow_path("/var/lib/ombre/store.db"))
         self.assertTrue(is_forbidden_shadow_path("/tmp/memory_kernel.db"))
         self.assertTrue(is_forbidden_shadow_path("/tmp/continuity.db"))
+
+
+class OperationGateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.posts = str(Path(self.temp.name) / "posts.db")
+        self.shadow = str(Path(self.temp.name) / "shadow-receipts.db")
+        _make_posts_db(self.posts)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _observe(self, environ: dict[str, str]) -> list[str]:
+        recorded: list[str] = []
+
+        def capture(event, **kwargs):
+            recorded.append(str(event.get("operation") or ""))
+
+        observe_memory_search(
+            posts_db_path=self.posts,
+            posts=[{"id": 1, "content": "x"}],
+            keyword="x",
+            source_surface="internal_mcp",
+            environ=environ,
+            dispatch=capture,
+        )
+        observe_memory_write(
+            posts_db_path=self.posts,
+            result={"status": "CREATED", "id": 9},
+            content="abc",
+            source_surface="internal_mcp",
+            environ=environ,
+            dispatch=capture,
+        )
+        return recorded
+
+    def test_operation_flags_require_exact_one_and_never_bypass_master(self):
+        self.assertFalse(is_shadow_search_enabled({SHADOW_SEARCH_ENABLED_ENV: "1"}))
+        self.assertFalse(is_shadow_write_enabled({SHADOW_WRITE_ENABLED_ENV: "1"}))
+        self.assertFalse(
+            is_shadow_search_enabled(
+                {SHADOW_ENABLED_ENV: "0", SHADOW_SEARCH_ENABLED_ENV: "1"}
+            )
+        )
+        self.assertFalse(
+            is_shadow_write_enabled(
+                {SHADOW_ENABLED_ENV: "0", SHADOW_WRITE_ENABLED_ENV: "1"}
+            )
+        )
+        for invalid in ("", "0", "false", "true", "yes", "on", "TRUE", "01", "1.0"):
+            env = {
+                SHADOW_ENABLED_ENV: "1",
+                SHADOW_SEARCH_ENABLED_ENV: invalid,
+                SHADOW_WRITE_ENABLED_ENV: invalid,
+            }
+            self.assertFalse(is_shadow_search_enabled(env), invalid)
+            self.assertFalse(is_shadow_write_enabled(env), invalid)
+        both = {
+            SHADOW_ENABLED_ENV: "1",
+            SHADOW_SEARCH_ENABLED_ENV: "1",
+            SHADOW_WRITE_ENABLED_ENV: "1",
+        }
+        self.assertTrue(is_shadow_search_enabled(both))
+        self.assertTrue(is_shadow_write_enabled(both))
+
+    def test_master_off_blocks_search_and_write_even_when_ops_on(self):
+        recorded = self._observe(
+            {
+                SHADOW_ENABLED_ENV: "0",
+                SHADOW_SEARCH_ENABLED_ENV: "1",
+                SHADOW_WRITE_ENABLED_ENV: "1",
+                SHADOW_DB_PATH_ENV: self.shadow,
+            }
+        )
+        self.assertEqual([], recorded)
+        recorded = self._observe(
+            {
+                SHADOW_SEARCH_ENABLED_ENV: "1",
+                SHADOW_WRITE_ENABLED_ENV: "1",
+                SHADOW_DB_PATH_ENV: self.shadow,
+            }
+        )
+        self.assertEqual([], recorded)
+
+    def test_master_on_ops_unset_dispatches_neither(self):
+        self.assertEqual(
+            [],
+            self._observe(
+                {SHADOW_ENABLED_ENV: "1", SHADOW_DB_PATH_ENV: self.shadow}
+            ),
+        )
+
+    def test_search_only_mode_dispatches_search_not_write(self):
+        recorded = self._observe(
+            {
+                SHADOW_ENABLED_ENV: "1",
+                SHADOW_SEARCH_ENABLED_ENV: "1",
+                SHADOW_DB_PATH_ENV: self.shadow,
+            }
+        )
+        self.assertEqual(["search"], recorded)
+
+    def test_write_only_mode_dispatches_write_not_search(self):
+        recorded = self._observe(
+            {
+                SHADOW_ENABLED_ENV: "1",
+                SHADOW_WRITE_ENABLED_ENV: "1",
+                SHADOW_DB_PATH_ENV: self.shadow,
+            }
+        )
+        self.assertEqual(["write"], recorded)
+
+    def test_both_mode_allows_existing_surface_lists(self):
+        recorded = self._observe(
+            {
+                SHADOW_ENABLED_ENV: "1",
+                SHADOW_SEARCH_ENABLED_ENV: "1",
+                SHADOW_WRITE_ENABLED_ENV: "1",
+                SHADOW_DB_PATH_ENV: self.shadow,
+            }
+        )
+        self.assertEqual(["search", "write"], recorded)
+
+    def test_search_only_authoritative_write_inserts_one_row_without_shadow(self):
+        env = {
+            SHADOW_ENABLED_ENV: "1",
+            SHADOW_SEARCH_ENABLED_ENV: "1",
+            SHADOW_WRITE_ENABLED_ENV: "0",
+            SHADOW_DB_PATH_ENV: self.shadow,
+        }
+        spawned = []
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: spawned.append(kwargs) or _FakeProc(),
+        ), mock.patch.dict(os.environ, env, clear=False):
+            wrote = write_memory(
+                self.posts,
+                content="search-only must not observe write",
+                shadow_surface="internal_mcp",
+            )
+            searched = search_memories(
+                self.posts,
+                keyword="needle",
+                shadow_surface="internal_mcp",
+            )
+        self.assertEqual("CREATED", wrote["status"])
+        conn = sqlite3.connect(self.posts)
+        rows = conn.execute("SELECT id, content FROM posts ORDER BY id").fetchall()
+        conn.close()
+        self.assertEqual(4, len(rows))
+        self.assertEqual((wrote["id"], "search-only must not observe write"), rows[-1])
+        self.assertEqual([2, 1], [row["id"] for row in searched["posts"]])
+        self.assertEqual(1, len(spawned))
+        self.assertFalse(Path(self.shadow).exists())
+        self.assertEqual([], _receipts(self.shadow))
+
+    def test_write_only_authoritative_search_output_unchanged_without_search_shadow(self):
+        off = search_memories(self.posts, keyword="needle")
+        env = {
+            SHADOW_ENABLED_ENV: "1",
+            SHADOW_SEARCH_ENABLED_ENV: "0",
+            SHADOW_WRITE_ENABLED_ENV: "1",
+            SHADOW_DB_PATH_ENV: self.shadow,
+        }
+        spawned = []
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: spawned.append(kwargs) or _FakeProc(),
+        ), mock.patch.dict(os.environ, env, clear=False):
+            on = search_memories(
+                self.posts,
+                keyword="needle",
+                shadow_surface="internal_mcp",
+            )
+            wrote = write_memory(
+                self.posts,
+                content="write-only observes write",
+                shadow_surface="internal_mcp",
+            )
+        self.assertEqual(off, on)
+        self.assertEqual(_format_memory_search(off), _format_memory_search(on))
+        self.assertEqual("CREATED", wrote["status"])
+        self.assertEqual(1, len(spawned))
+        self.assertFalse(Path(self.shadow).exists())
+
+    def test_master_off_creates_zero_slots_receipt_db_and_workers(self):
+        namespace = slot_namespace_dir(str(Path(self.shadow).resolve()))
+        spawned = []
+        env = {
+            SHADOW_ENABLED_ENV: "0",
+            SHADOW_SEARCH_ENABLED_ENV: "1",
+            SHADOW_WRITE_ENABLED_ENV: "1",
+            SHADOW_DB_PATH_ENV: self.shadow,
+        }
+        event = build_write_event(
+            posts_db_path=self.posts,
+            result={"status": "CREATED", "id": 1},
+            content="alpha needle",
+            source_surface="internal_mcp",
+        )
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: spawned.append(kwargs),
+        ), mock.patch.dict(os.environ, env, clear=False):
+            dispatch_shadow_event(event, environ=env)
+            write_memory(
+                self.posts,
+                content="off must not shadow",
+                shadow_surface="internal_mcp",
+            )
+            search_memories(
+                self.posts,
+                keyword="needle",
+                shadow_surface="internal_mcp",
+            )
+        self.assertEqual([], spawned)
+        self.assertFalse(namespace.exists())
+        self.assertFalse(Path(self.shadow).exists())
+        self.assertEqual([], _receipts(self.shadow))
+
+    def test_direct_dispatch_respects_operation_gates(self):
+        spawned = []
+        search_event = build_search_event(
+            posts_db_path=self.posts,
+            posts=[{"id": 1, "content": "x"}],
+            keyword="x",
+            source_surface="internal_mcp",
+        )
+        write_event = build_write_event(
+            posts_db_path=self.posts,
+            result={"status": "CREATED", "id": 1},
+            content="alpha needle",
+            source_surface="internal_mcp",
+        )
+        search_only = {
+            SHADOW_ENABLED_ENV: "1",
+            SHADOW_SEARCH_ENABLED_ENV: "1",
+            SHADOW_DB_PATH_ENV: self.shadow,
+        }
+        with mock.patch(
+            "tools.memory_interop_shadow.subprocess.Popen",
+            side_effect=lambda *args, **kwargs: spawned.append(kwargs) or _FakeProc(),
+        ):
+            dispatch_shadow_event(write_event, environ=search_only)
+            dispatch_shadow_event(search_event, environ=search_only)
+        self.assertEqual(1, len(spawned))
 
 
 class AuthoritativeParityTests(unittest.TestCase):
@@ -699,7 +957,7 @@ class WorkerBoundTests(unittest.TestCase):
             )
             dispatch_shadow_event(
                 self.event,
-                environ={SHADOW_ENABLED_ENV: "1"},
+                environ={SHADOW_ENABLED_ENV: "1", SHADOW_WRITE_ENABLED_ENV: "1"},
             )
         self.assertEqual([], recorded)
         self.assertFalse(namespace.exists())
@@ -879,7 +1137,12 @@ class AtomicReceiptTests(unittest.TestCase):
 class SurfaceAndIdentityTests(unittest.TestCase):
     def test_unknown_surfaces_do_not_dispatch_or_label_unknown(self):
         recorded: list[dict] = []
-        environ = {SHADOW_ENABLED_ENV: "1", SHADOW_DB_PATH_ENV: "/tmp/shadow-receipts.db"}
+        environ = {
+            SHADOW_ENABLED_ENV: "1",
+            SHADOW_SEARCH_ENABLED_ENV: "1",
+            SHADOW_WRITE_ENABLED_ENV: "1",
+            SHADOW_DB_PATH_ENV: "/tmp/shadow-receipts.db",
+        }
         observe_memory_write(
             posts_db_path="/tmp/posts.db",
             result={"status": "CREATED", "id": 9},
@@ -929,7 +1192,12 @@ class SurfaceAndIdentityTests(unittest.TestCase):
             posts = str(Path(folder) / "posts.db")
             _make_posts_db(posts)
             recorded: list[str] = []
-            environ = {SHADOW_ENABLED_ENV: "1", SHADOW_DB_PATH_ENV: str(Path(folder) / "shadow.db")}
+            environ = {
+                SHADOW_ENABLED_ENV: "1",
+                SHADOW_SEARCH_ENABLED_ENV: "1",
+                SHADOW_WRITE_ENABLED_ENV: "1",
+                SHADOW_DB_PATH_ENV: str(Path(folder) / "shadow.db"),
+            }
             off = search_memories(posts, keyword="needle")
             with mock.patch.dict(os.environ, environ, clear=False):
                 for surface in ("claude_code", "internal_mcp"):
