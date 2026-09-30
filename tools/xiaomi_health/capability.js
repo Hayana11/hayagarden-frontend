@@ -5,50 +5,34 @@ const HEALTH_SOURCES = new Set(['health_connect', 'gadgetbridge', 'xiaomi_fitnes
 function safeSource(value, fallback = SOURCE) {
   return HEALTH_SOURCES.has(value) ? value : fallback;
 }
-function safeDetails(value) {
+function safeDetails(metric, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  try {
-    const encoded = JSON.stringify(value);
-    return encoded.length <= 8192 ? value : null;
-  } catch {
-    return null;
+  const safe = {};
+  const allowed = new Set(METRICS[metric] || []);
+  if (metric === 'sleep') {
+    allowed.add('startAt');
+    allowed.add('endAt');
+    allowed.add('stages');
   }
+  for (const key of allowed) {
+    const candidate = value[key];
+    if (validNumber(candidate) !== null) {
+      safe[key] = candidate;
+    } else if ((key === 'startAt' || key === 'endAt') && validSample(candidate)) {
+      safe[key] = candidate;
+    } else if (key === 'stages' && Array.isArray(candidate) && candidate.length <= 64) {
+      const stages = candidate.flatMap((stage) => {
+        if (!stage || typeof stage !== 'object' || Array.isArray(stage)) return [];
+        const stageValue = Number.isInteger(stage.stage) ? stage.stage : null;
+        const startAt = validSample(stage.startAt);
+        const endAt = validSample(stage.endAt);
+        return stageValue !== null && startAt && endAt ? [{ stage: stageValue, startAt, endAt }] : [];
+      });
+      if (stages.length) safe.stages = stages;
+    }
+  }
+  return Object.keys(safe).length ? safe : null;
 }
-const METRICS = Object.freeze({
-  steps: Object.freeze(['steps', 'step', 'step_count', 'stepcount', 'total_steps', 'count', 'value']),
-  sleep: Object.freeze(['asleep_minutes', 'time_asleep_minutes', 'sleep_minutes', 'total_sleep_minutes', 'sleep_duration', 'total_sleep', 'total_sleep_time', 'duration_minutes', 'duration', 'deep_sleep', 'light_sleep', 'rem_sleep', 'awake_minutes', 'awake_duration', 'sleep_awake_duration', 'sleep_score', 'score']),
-  heart_rate: Object.freeze(['bpm', 'heart_rate', 'avg_hrm', 'avg_heart_rate', 'average_heart_rate', 'resting_heart_rate', 'min_heart_rate', 'max_heart_rate']),
-});
-const UNITS = Object.freeze({ steps: 'steps', sleep: 'minutes', heart_rate: 'bpm' });
-const SAFE_ERRORS = new Set(['auth_expired', 'timeout', 'api_error', 'malformed_response', 'unavailable']);
-const CYCLE_EVENT_TYPES = new Set(['period_start', 'period_end', 'period_start_end']);
-const HP_VALUES = new Set(['little', 'normal', 'much']);
-const MOOD_VALUES = new Set(['happy', 'normal', 'uncomfortable']);
-const PAIN_VALUES = new Set(['light', 'normal', 'heavy']);
-const SERIES_TTL_MS = 15 * 60 * 1000;
-const LATEST_TTL_MS = 60 * 1000;
-
-function validDate(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
-}
-
-function validSample(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) ? value : null;
-}
-
-function safeSleepWindow(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const bedtime = validSample(value.bedtime);
-  const wakeUpTime = validSample(value.wakeUpTime);
-  if (!bedtime || !wakeUpTime) return null;
-  const bedtimeMs = Date.parse(bedtime);
-  const wakeUpTimeMs = Date.parse(wakeUpTime);
-  if (!Number.isFinite(bedtimeMs) || !Number.isFinite(wakeUpTimeMs) || wakeUpTimeMs <= bedtimeMs) return null;
-  const canonical = (milliseconds) => new Date(milliseconds).toISOString().replace(/\.000Z$/, 'Z');
-  if (canonical(bedtimeMs) !== bedtime || canonical(wakeUpTimeMs) !== wakeUpTime) return null;
-  return { bedtime, wakeUpTime };
-}
-
 function validNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -65,7 +49,7 @@ function sanitizeRecord(metric, row, fallbackSource = SOURCE) {
       ? row.sourceRecordId : null,
     collectedAt: validSample(row.collectedAt),
   };
-  const details = safeDetails(row.details);
+  const details = safeDetails(metric, row.details);
   if (details) output.details = details;
   if (metric === 'sleep') {
     const sleepWindow = safeSleepWindow(row.sleepWindow);
