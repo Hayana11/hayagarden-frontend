@@ -1252,6 +1252,53 @@ def _production_continuity_store_path(plan: DailyTurnPlan) -> str:
     return path
 
 
+def _receipt_chunk_ids(members: Any) -> frozenset[str]:
+    """Installed chunk identifiers from a ContextReceipt member list."""
+    ids: set[str] = set()
+    for member in tuple(members or ()):
+        if str(getattr(member, 'representation_kind', '') or '') != 'chunk':
+            continue
+        representation_id = str(getattr(member, 'representation_id', '') or '').strip()
+        if not representation_id:
+            continue
+        ids.add(representation_id)
+        prefix = 'chunk:'
+        if representation_id.startswith(prefix):
+            bare = representation_id[len(prefix):].strip()
+            if bare:
+                ids.add(bare)
+        else:
+            ids.add(prefix + representation_id)
+    return frozenset(ids)
+
+
+def _hot_receipt_allows_chunk_filter(frozen: Any) -> bool:
+    if not isinstance(frozen, dict):
+        return False
+    if frozen.get('receipt_read_error'):
+        return False
+    if frozen.get('receipt') is None:
+        return False
+    if not bool(frozen.get('receipt_members_complete')):
+        return False
+    return bool(frozen.get('membership_valid'))
+
+
+def _visible_ready_artifacts(plan: DailyTurnPlan, artifacts: tuple[Any, ...], *, mode: str) -> tuple[Any, ...]:
+    """Hot turns only see chunks already installed on this resident generation."""
+    if str(mode or 'hot').strip().lower() != 'hot':
+        return artifacts
+    frozen = getattr(plan, 'hot_receipt_frozen', None)
+    if not _hot_receipt_allows_chunk_filter(frozen):
+        return artifacts
+    allowed = _receipt_chunk_ids((frozen or {}).get('members'))
+    return tuple(
+        chunk for chunk in artifacts
+        if str(getattr(chunk, 'chunk_id', '') or '') in allowed
+        or ('chunk:' + str(getattr(chunk, 'chunk_id', '') or '')) in allowed
+    )
+
+
 def _build_production_context_plan(
     plan: DailyTurnPlan,
     *,
@@ -1276,13 +1323,18 @@ def _build_production_context_plan(
             error_code='context_plan_store_corrupt',
             retryable=False,
         )
+    artifacts = _visible_ready_artifacts(
+        plan,
+        tuple(surface.artifacts or ()),
+        mode=mode,
+    )
     validated_ready_artifacts = tuple(
         {
             'chunk_id': str(chunk.chunk_id),
             'artifact_revision': str(chunk.artifact_revision),
             'body_hash': str(chunk.body_hash),
         }
-        for chunk in surface.artifacts
+        for chunk in artifacts
     )
     from chat.daily_continuity_shadow import build_daily_continuity_shadow_plan
     fixed_sections = _build_continuity_shadow_fixed_sections(
@@ -1326,7 +1378,7 @@ def _build_production_context_plan(
         )
     validated_by_id = {
         str(chunk.chunk_id): (str(chunk.artifact_revision), str(chunk.body_hash))
-        for chunk in surface.artifacts
+        for chunk in artifacts
     }
     for representation in result.plan.representations:
         if representation.kind != 'chunk':
@@ -1350,7 +1402,7 @@ def _build_production_context_plan(
             )
     bodies = {
         str(chunk.chunk_id): str(chunk.body)
-        for chunk in (surface.artifacts or ())
+        for chunk in artifacts
     }
     return result.plan, bodies
 
@@ -2482,6 +2534,7 @@ def _prepare_hot_context_plan(
     resident: Any,
     static_system: str,
 ) -> str:
+    _freeze_hot_receipt(plan, resident=resident)
     try:
         context_plan, chunk_bodies = _build_production_context_plan(
             plan,
@@ -2510,7 +2563,6 @@ def _prepare_hot_context_plan(
         'context_plan_budget_status': str(context_plan.budget_status),
         'context_plan_source_hash': str(context_plan.source_hash),
     })
-    _freeze_hot_receipt(plan, resident=resident)
     return _reconcile_hot_context_plan(plan, resident=resident)
 
 
