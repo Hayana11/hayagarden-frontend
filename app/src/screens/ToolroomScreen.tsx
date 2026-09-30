@@ -15,12 +15,12 @@ type ElpisNativeBridge = {
   getScreenTime?: () => unknown;
   isIgnoringBatteryOptimizations?: () => unknown;
   requestIgnoreBatteryOptimizations?: () => unknown;
-  getBuildInfo?: () => unknown;
 };
 
 type ElpisHealthBridge = {
   getHealthState?: () => unknown;
   getHealthStatus?: () => unknown;
+  getBuildInfo?: () => unknown;
   getInstallId?: () => unknown;
   provisionDeviceCredential?: (jsonString: string) => unknown;
   syncNow?: () => unknown;
@@ -655,8 +655,8 @@ export function ToolroomScreen() {
     if (health && has(health.getHealthStatus)) {
       local = parseBridgeJson(await Promise.resolve(health.getHealthStatus())) || {};
     }
-    if (window.ElpisNative && has(window.ElpisNative.getBuildInfo)) {
-      const build = parseBridgeJson(await Promise.resolve(window.ElpisNative.getBuildInfo()));
+    if (health && has(health.getBuildInfo)) {
+      const build = parseBridgeJson(await Promise.resolve(health.getBuildInfo()));
       if (build && typeof build.versionName === 'string') {
         buildInfo = build.versionName + ' · ' + (typeof build.sourceSha === 'string' ? build.sourceSha.slice(0, 12) : 'unknown');
       }
@@ -748,11 +748,10 @@ export function ToolroomScreen() {
 
   const enrollHealthDevice = async () => {
     const health = window.ElpisHealth;
-    const native = window.ElpisNative;
     let enrollment: Record<string, unknown> | null = null;
     let credential: string | null = null;
     try {
-      if (!health?.getInstallId || !health.provisionDeviceCredential || !native?.getBuildInfo) {
+      if (!health?.getInstallId || !health.getBuildInfo || !health.provisionDeviceCredential) {
         setHealthDiag((current) => ({ ...current, notice: '当前 Canary 不支持设备绑定。' }));
         return;
       }
@@ -760,7 +759,7 @@ export function ToolroomScreen() {
       const installId = typeof installValue === 'string'
         ? installValue.trim()
         : parseBridgeJson(installValue)?.installId;
-      const build = parseBridgeJson(await Promise.resolve(native.getBuildInfo()));
+      const build = parseBridgeJson(await Promise.resolve(health.getBuildInfo()));
       const packageName = typeof build?.applicationId === 'string' ? build.applicationId : '';
       const buildSha = typeof build?.sourceSha === 'string' ? build.sourceSha : '';
       const buildBranch = typeof build?.branch === 'string' ? build.branch : '';
