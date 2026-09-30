@@ -273,6 +273,12 @@ def query_samples(path: str, metric: str, days: int, *, now: str | None = None) 
 
 
 def get_local_metric(path: str, metric: str, days: int, *, now: str | None = None) -> dict[str, Any]:
+    if not os.path.exists(path):
+        return {
+            "status": "UNAVAILABLE", "provider": "health_connect", "source": "health_connect",
+            "metric": metric, "days": days, "records": [], "stale": True,
+            "lastCollectedAt": None, "lastUploadAt": None,
+        }
     try:
         return query_samples(path, metric, days, now=now)
     except (OSError, sqlite3.Error, ValueError):

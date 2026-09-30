@@ -224,3 +224,15 @@ const checkButtonPos = screen.indexOf('toolroom-mcp-check-button', headerStart);
 assert.ok(headerStart >= 0 && toggleClose >= 0 && checkButtonPos > toggleClose);
 
 console.log('test-toolroom-contract: ok');
+
+assert.match(screen, /ElpisHealth/);
+assert.match(screen, /getHealthStatus/);
+assert.match(screen, /syncNow/);
+assert.match(screen, /requestHealthConnectPermission/);
+assert.match(screen, /\/api\/health\/mobile\/status/);
+assert.match(screen, /ElpisCanary Health Bridge/);
+assert.match(screen, /Xiaomi fallback/);
+assert.match(screen, /heart_rate/);
+assert.match(screen, /steps/);
+assert.match(screen, /sleep/);
+assert.match(css, /\.toolroom-health-panel/);

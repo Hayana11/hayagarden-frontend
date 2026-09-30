@@ -131,6 +131,8 @@ def _cloud_metric_status(latest: dict[str, Any], metric: str) -> dict[str, Any]:
     raw = latest.get("metric_status")
     raw = raw.get(metric) if isinstance(raw, dict) else None
     status = raw.get("status") if isinstance(raw, dict) else "EMPTY"
+    if latest.get("status") == "FAIL" and status == "EMPTY":
+        status = "FAIL"
     if status not in {"PASS", "EMPTY", "FAIL"}:
         status = "FAIL"
     output = {"status": status, "source": SOURCE, "stale": False}
@@ -213,6 +215,10 @@ def _compose_status(store: XiaomiCredentialStore) -> dict[str, Any]:
         "status": "PASS" if local_available or cloud_valid else "EMPTY",
         "provider": provider,
         "source": provider,
+        "connected": cloud.get("connected") is True if isinstance(cloud, dict) else False,
+        "auth_state": cloud.get("auth_state", "unavailable") if isinstance(cloud, dict) else "unavailable",
+        "last_success_at": cloud.get("last_success_at") if isinstance(cloud, dict) else None,
+        "last_error": cloud.get("last_error") if isinstance(cloud, dict) else None,
         "mobile": local or {"available": False, "metrics": {}},
         "xiaomi_fitness_cloud": cloud,
     }
