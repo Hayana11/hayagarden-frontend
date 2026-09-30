@@ -1,6 +1,19 @@
 'use strict';
 
 const SOURCE = 'xiaomi_fitness_cloud';
+const HEALTH_SOURCES = new Set(['health_connect', 'gadgetbridge', 'xiaomi_fitness_cloud', 'mixed', 'none']);
+function safeSource(value, fallback = SOURCE) {
+  return HEALTH_SOURCES.has(value) ? value : fallback;
+}
+function safeDetails(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    const encoded = JSON.stringify(value);
+    return encoded.length <= 8192 ? value : null;
+  } catch {
+    return null;
+  }
+}
 const METRICS = Object.freeze({
   steps: Object.freeze(['steps', 'step', 'step_count', 'stepcount', 'total_steps', 'count', 'value']),
   sleep: Object.freeze(['asleep_minutes', 'time_asleep_minutes', 'sleep_minutes', 'total_sleep_minutes', 'sleep_duration', 'total_sleep', 'total_sleep_time', 'duration_minutes', 'duration', 'deep_sleep', 'light_sleep', 'rem_sleep', 'awake_minutes', 'awake_duration', 'sleep_awake_duration', 'sleep_score', 'score']),
@@ -40,30 +53,26 @@ function validNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function sanitizeRecord(metric, row) {
+function sanitizeRecord(metric, row, fallbackSource = SOURCE) {
   if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
   const output = {
     sampledAt: validSample(row.sampledAt),
     dataDate: validDate(row.dataDate),
     value: validNumber(row.value),
     unit: UNITS[metric],
+    source: safeSource(row.source, fallbackSource),
+    sourceRecordId: typeof row.sourceRecordId === 'string' && row.sourceRecordId.length <= 200
+      ? row.sourceRecordId : null,
+    collectedAt: validSample(row.collectedAt),
   };
-  if (metric !== 'steps' && row.details && typeof row.details === 'object' && !Array.isArray(row.details)) {
-    const safe = {};
-    for (const key of METRICS[metric]) {
-      const value = validNumber(row.details[key]);
-      if (value !== null) safe[key] = value;
-    }
-    if (Object.keys(safe).length) output.details = safe;
-  }
+  const details = safeDetails(row.details);
+  if (details) output.details = details;
   if (metric === 'sleep') {
     const sleepWindow = safeSleepWindow(row.sleepWindow);
     if (sleepWindow) output.sleepWindow = sleepWindow;
   }
   return output;
-}
-
-function errorCode(result) {
+}\n\nfunction errorCode(result) {
   return SAFE_ERRORS.has(result?.error_code) ? result.error_code : 'unavailable';
 }
 
@@ -71,47 +80,42 @@ function safeStatus(result) {
   const allowed = new Set(['missing', 'valid', 'auth_expired', 'unavailable']);
   const authState = allowed.has(result?.auth_state) ? result.auth_state : 'unavailable';
   const error = result?.last_error;
+  const provider = safeSource(result?.provider || result?.source, SOURCE);
   return {
     connected: result?.connected === true && authState === 'valid',
-    provider: SOURCE,
-    source: SOURCE,
+    provider,
+    source: provider,
     auth_state: authState,
     last_success_at: validSample(result?.last_success_at),
     last_error: SAFE_ERRORS.has(error) ? error : null,
+    mobile: result?.mobile && typeof result.mobile === 'object' ? result.mobile : null,
+    xiaomi_fitness_cloud: result?.xiaomi_fitness_cloud && typeof result.xiaomi_fitness_cloud === 'object'
+      ? result.xiaomi_fitness_cloud : null,
   };
-}
-
-function safeSeries(metric, days, result, cache = {}) {
-  const rows = Array.isArray(result?.records) ? result.records.map((row) => sanitizeRecord(metric, row)).filter(Boolean) : [];
+}\n\nfunction safeSeries(metric, days, result, cache = {}) {
+  const fallbackSource = safeSource(result?.provider || result?.source, SOURCE);
+  const rows = Array.isArray(result?.records)
+    ? result.records.map((row) => sanitizeRecord(metric, row, fallbackSource)).filter(Boolean) : [];
   const successful = result?.status === 'PASS' || result?.status === 'EMPTY';
   return {
     status: successful ? (rows.length ? 'PASS' : 'EMPTY') : 'FAIL',
-    provider: SOURCE,
-    source: SOURCE,
+    provider: fallbackSource,
+    source: fallbackSource,
     metric,
     days,
     records: rows,
     cached: cache.cached === true,
-    stale: cache.stale === true,
+    stale: cache.stale === true || result?.stale === true,
     ...(successful ? {} : { error_code: errorCode(result) }),
   };
-}
-
-function componentStatus(entry, fallback) {
-  const allowed = new Set(['PASS', 'EMPTY', 'FAIL']);
-  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
-    const status = allowed.has(entry.status) ? entry.status : 'FAIL';
-    const output = { status };
-    if (status === 'FAIL') output.error_code = SAFE_ERRORS.has(entry.error_code) ? entry.error_code : 'unavailable';
-    return output;
-  }
-  const status = allowed.has(fallback) ? fallback : 'FAIL';
-  const output = { status };
-  if (status === 'FAIL') output.error_code = 'unavailable';
+}\n\nfunction componentStatus(entry, fallback = 'EMPTY', fallbackSource = SOURCE) {
+  const allowed = new Set(['PASS', 'EMPTY', 'FAIL', 'PERMISSION_DENIED', 'UNAVAILABLE']);
+  const source = safeSource(entry?.source, fallbackSource);
+  const status = entry && typeof entry === 'object' && allowed.has(entry.status) ? entry.status : fallback;
+  const output = { status, source, stale: entry?.stale === true };
+  if (status === 'FAIL') output.error_code = SAFE_ERRORS.has(entry?.error_code) ? entry.error_code : 'unavailable';
   return output;
-}
-
-function cycleHasData(cycle) {
+}\n\nfunction cycleHasData(cycle) {
   return Boolean(cycle?.events?.length || cycle?.periods?.length || cycle?.symptoms?.length);
 }
 
@@ -122,17 +126,22 @@ function sanitizeMetricStatus(source, metrics, cycle) {
   const output = {};
   for (const metric of Object.keys(METRICS)) {
     const fallback = metrics[metric] ? 'PASS' : 'EMPTY';
-    output[metric] = componentStatus(raw[metric], fallback);
-    if (metrics[metric]) output[metric] = { status: 'PASS' };
+    output[metric] = componentStatus(raw[metric], fallback, safeSource(metrics[metric]?.source || source?.source, SOURCE));
+    if (metrics[metric]) {
+      output[metric] = { ...output[metric], status: 'PASS', source: safeSource(metrics[metric].source, SOURCE) };
+    }
   }
-  output.cycle = componentStatus(raw.cycle || { status: cycle.status, error_code: cycle.error_code }, cycle.status);
+  output.cycle = componentStatus(raw.cycle || { status: cycle.status, error_code: cycle.error_code, source: cycle.source }, cycle.status, safeSource(cycle.source, SOURCE));
   return output;
 }
 
 function safeLatest(result, cache = {}, days = 7) {
   const source = result && typeof result === 'object' ? result : {};
+  const provider = safeSource(source.provider || source.source, SOURCE);
   const metrics = {};
-  for (const metric of Object.keys(METRICS)) metrics[metric] = sanitizeRecord(metric, source[metric]);
+  for (const metric of Object.keys(METRICS)) {
+    metrics[metric] = sanitizeRecord(metric, source[metric], provider);
+  }
   const cycleDays = Number.isInteger(source.cycle?.days) ? source.cycle.days : 180;
   const cycle = safeCycle(source.cycle, cache, cycleDays);
   const metricStatus = sanitizeMetricStatus(source, metrics, cycle);
@@ -140,10 +149,13 @@ function safeLatest(result, cache = {}, days = 7) {
   const componentFailed = Object.values(metricStatus).some((item) => item.status === 'FAIL');
   const topFailed = source.status === 'FAIL' || Boolean(source.error_code);
   const status = hasData ? 'PASS' : ((componentFailed || topFailed) ? 'FAIL' : 'EMPTY');
+  const metricSources = Object.values(metrics).filter(Boolean).map((row) => row.source);
+  const resolvedSource = metricSources.length && new Set(metricSources).size > 1 ? 'mixed'
+    : (metricSources[0] || provider);
   return {
     status,
-    provider: SOURCE,
-    source: SOURCE,
+    provider: resolvedSource,
+    source: resolvedSource,
     days,
     sampledAt: validSample(source.sampledAt),
     dataDate: validDate(source.dataDate),
@@ -152,12 +164,10 @@ function safeLatest(result, cache = {}, days = 7) {
     partial: Boolean(hasData && componentFailed),
     metric_status: metricStatus,
     cached: cache.cached === true,
-    stale: cache.stale === true,
+    stale: cache.stale === true || source.stale === true,
     ...(status === 'FAIL' ? { error_code: errorCode(source) } : {}),
   };
-}
-
-function safeCycle(result, cache = {}, days = 180) {
+}\n\nfunction safeCycle(result, cache = {}, days = 180) {
   const successful = result?.status === 'PASS' || result?.status === 'EMPTY';
   const events = Array.isArray(result?.events) ? result.events.flatMap((event) => {
     if (!event || !CYCLE_EVENT_TYPES.has(event.type)) return [];
