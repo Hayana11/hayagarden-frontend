@@ -371,7 +371,7 @@ def _credential_hash(credential: str) -> str:
     return hashlib.sha256(credential.encode("utf-8")).hexdigest()
 
 
-def enroll_device(payload: Any, path: str) -> dict[str, str]:
+def enroll_device(payload: Any, path: str) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("schemaVersion") != SCHEMA_VERSION:
         raise ValueError("invalid schemaVersion")
     install_id = _device_uuid(payload.get("installId"), "installId")
@@ -419,7 +419,7 @@ def enroll_device(payload: Any, path: str) -> dict[str, str]:
     finally:
         conn.close()
     return {
-        "schemaVersion": str(SCHEMA_VERSION),
+        "schemaVersion": SCHEMA_VERSION,
         "deviceId": device_id,
         "credential": credential,
         "issuedAt": issued_at,
