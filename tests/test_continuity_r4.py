@@ -207,6 +207,120 @@ class ContextPlanTests(unittest.TestCase):
         self.assertEqual(plan.representations[0].kind, 'raw')
         self.assertTrue(any(item.code == 'chunk_rejected' for item in plan.exclusions))
 
+    def _local_seq_window(self, members: tuple[SourceMember, ...]) -> tuple[SourceMember, ...]:
+        return tuple(
+            SourceMember(
+                seq=index,
+                source_kind=member.source_kind,
+                source_ref=member.source_ref,
+                source_revision=member.source_revision,
+                role=member.role,
+                content_hash=member.content_hash,
+                span_start=member.span_start,
+                span_end=member.span_end,
+                logical_size=member.logical_size,
+                created_at=member.created_at,
+                branch_id=member.branch_id,
+            )
+            for index, member in enumerate(members)
+        )
+
+    def test_producer_unclaimed_window_rebinds_to_canonical_seq(self):
+        expected = tuple(_member(index, logical_size=8) for index in range(12))
+        window = expected[9:]
+        binding = _binding(self._local_seq_window(window), seqs=(0, 1, 2), chunk_id='chunk:tail')
+        plan = build_context_plan(
+            expected,
+            chunks=(binding,),
+            budget_policy=ContextBudgetPolicy(token_budget=500, recent_raw_target=0),
+        )
+        chunk_reps = [item for item in plan.representations if item.kind == 'chunk']
+        self.assertEqual(len(chunk_reps), 1)
+        self.assertEqual(chunk_reps[0].source_seqs, (9, 10, 11))
+        self.assertEqual(chunk_reps[0].source_refs, tuple(item.source_ref for item in window))
+        self.assertFalse(any(item.code == 'chunk_rejected' for item in plan.exclusions))
+        self.assertEqual(
+            {item.code for item in plan.exclusions},
+            {'covered_by_chunk'},
+        )
+
+    def test_rebind_rejects_stale_source_revision(self):
+        expected = tuple(_member(index) for index in range(8))
+        window = list(self._local_seq_window(expected[5:]))
+        stale = window[0]
+        window[0] = SourceMember(
+            seq=stale.seq,
+            source_kind=stale.source_kind,
+            source_ref=stale.source_ref,
+            source_revision='stale-revision',
+            role=stale.role,
+            content_hash=stale.content_hash,
+            span_start=stale.span_start,
+            span_end=stale.span_end,
+            logical_size=stale.logical_size,
+            created_at=stale.created_at,
+            branch_id=stale.branch_id,
+        )
+        binding = _binding(tuple(window), seqs=(0, 1, 2), chunk_id='chunk:stale-rev')
+        plan = build_context_plan(expected, chunks=(binding,))
+        self.assertEqual([item.kind for item in plan.representations], ['raw'])
+        rejected = [item for item in plan.exclusions if item.code == 'chunk_rejected']
+        self.assertTrue(rejected)
+        self.assertIn('outside expected source coverage', rejected[0].detail)
+
+    def test_rebind_fails_closed_when_stable_identity_is_ambiguous(self):
+        expected = (
+            _member(0, ref='turn:1:2', revision='same-rev', content_hash='same-hash'),
+            _member(1, ref='turn:1:2', revision='same-rev', content_hash='same-hash'),
+            _member(2),
+        )
+        window = self._local_seq_window((expected[0],))
+        binding = _binding(window, seqs=(0,), chunk_id='chunk:ambiguous')
+        plan = build_context_plan(expected, chunks=(binding,))
+        self.assertEqual([item.kind for item in plan.representations], ['raw'])
+        rejected = [item for item in plan.exclusions if item.code == 'chunk_rejected']
+        self.assertTrue(rejected)
+        self.assertIn('ambiguous', rejected[0].detail)
+
+    def test_rebind_preserves_overlap_recent_raw_and_excludes_unmatched_current(self):
+        expected = tuple(_member(index, logical_size=10) for index in range(6))
+        current_only = _member(99, ref='turn:current:user', revision='current-rev')
+        first = _binding(
+            self._local_seq_window(expected[0:3]),
+            seqs=(0, 1, 2),
+            chunk_id='chunk:older',
+        )
+        second = _binding(
+            self._local_seq_window(expected[2:5]),
+            seqs=(0, 1, 2),
+            chunk_id='chunk:overlap',
+        )
+        current_binding = _binding(
+            self._local_seq_window((current_only,)),
+            seqs=(0,),
+            chunk_id='chunk:current',
+        )
+        plan = build_context_plan(
+            expected,
+            chunks=(first, second, current_binding),
+            budget_policy=ContextBudgetPolicy(token_budget=200, recent_raw_target=15),
+        )
+        selected_refs = [
+            ref
+            for representation in plan.representations
+            for ref in representation.source_refs
+        ]
+        self.assertEqual(len(selected_refs), len(set(selected_refs)))
+        self.assertNotIn(current_only.source_ref, selected_refs)
+        self.assertEqual(plan.recent_raw_source_seqs, (4, 5))
+        self.assertTrue(any(item.code == 'chunk_overlap' for item in plan.exclusions))
+        self.assertTrue(any(
+            item.code == 'chunk_rejected' and 'outside expected source coverage' in item.detail
+            for item in plan.exclusions
+        ))
+        self.assertTrue(any(item.code == 'recent_raw_priority' for item in plan.exclusions)
+                        or plan.recent_raw_source_seqs == (4, 5))
+
     def test_gap_is_explicit_when_raw_is_unavailable(self):
         plan = build_context_plan(
             self.members,
