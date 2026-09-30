@@ -56,7 +56,6 @@ APP_DIST_DIR = '/opt/frontend/app/dist'
 
 BOARD_TOKEN_FYODOR = os.environ.get('BOARD_TOKEN_FYODOR', '')
 CONTEXT_USAGE_REPORT_TOKEN = os.environ.get('CONTEXT_USAGE_REPORT_TOKEN', '')
-HEALTH_INGEST_TOKEN = os.environ.get('HEALTH_INGEST_TOKEN', '')
 HEALTH_DB_PATH = os.environ.get('HEALTH_DB_PATH', '/opt/frontend/health.db')
 TODO_INTERNAL_EXECUTION_TOKEN = os.environ.get('TODO_INTERNAL_EXECUTION_TOKEN', '')
 for line in open('/opt/frontend/.env'):
@@ -64,10 +63,7 @@ for line in open('/opt/frontend/.env'):
     k = k.strip(); v = v.strip()
     if k == 'BOARD_TOKEN_FYODOR': BOARD_TOKEN_FYODOR = v
     if k == 'CONTEXT_USAGE_REPORT_TOKEN': CONTEXT_USAGE_REPORT_TOKEN = v
-    if k == 'HEALTH_INGEST_TOKEN': HEALTH_INGEST_TOKEN = v
     if k == 'TODO_INTERNAL_EXECUTION_TOKEN': TODO_INTERNAL_EXECUTION_TOKEN = v
-if not HEALTH_INGEST_TOKEN:
-    HEALTH_INGEST_TOKEN = CONTEXT_USAGE_REPORT_TOKEN
 # API_URL/API_KEY/MODEL 不再是这里的冻结常量：谁要发请求，
 # 就 new 一个 relay.manager.RelayManager()，永远拿实时值。
 
@@ -148,7 +144,6 @@ app.register_blueprint(create_context_usage_blueprint(
 ))
 app.register_blueprint(create_health_blueprint(
     db_path=HEALTH_DB_PATH,
-    token_getter=lambda: HEALTH_INGEST_TOKEN,
 ))
 from daily_context_routes import create_daily_context_blueprint
 app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))
