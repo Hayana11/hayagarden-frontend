@@ -18,7 +18,7 @@ SOURCES = frozenset({"health_connect", "gadgetbridge", "xiaomi_fitness_cloud"})
 STATUSES = frozenset({"PASS", "EMPTY", "PERMISSION_DENIED", "UNAVAILABLE", "FAIL"})
 MAX_ROWS = 500
 MAX_DETAILS_BYTES = 8 * 1024
-MAX_FUTURE_SKEW_SECONDS = 300
+MAX_FUTURE_SKEW_SECONDS = 0
 STALE_AFTER_HOURS = 48
 
 
@@ -180,15 +180,16 @@ def ingest_payload(payload: Any, path: str, *, now: str | None = None) -> dict[s
             conn.execute(
                 """
                 INSERT INTO health_metric_status
-                (metric, status, source, last_collected_at, last_error)
-                VALUES (?, ?, ?, ?, ?)
+                (metric, status, source, last_collected_at, last_upload_at, last_error)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(metric) DO UPDATE SET
                   status=excluded.status,
                   source=excluded.source,
                   last_collected_at=excluded.last_collected_at,
+                  last_upload_at=excluded.last_upload_at,
                   last_error=excluded.last_error
                 """,
-                (item["metric"], item["status"], item["source"], item["collected_at"], item["error"]),
+                (item["metric"], item["status"], item["source"], item["collected_at"], ingest_at, item["error"]),
             )
         conn.execute(
             """
@@ -257,8 +258,6 @@ def query_samples(path: str, metric: str, days: int, *, now: str | None = None) 
         })
     status = status_row["status"] if status_row else "UNAVAILABLE"
     source = status_row["source"] if status_row else "health_connect"
-    if records and status in {"EMPTY", "UNAVAILABLE", "PERMISSION_DENIED"}:
-        status = "PASS"
     return {
         "status": status if status in STATUSES else "UNAVAILABLE",
         "provider": source,

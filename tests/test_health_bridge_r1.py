@@ -157,5 +157,64 @@ class HealthBridgeR1Tests(unittest.TestCase):
             self.assertEqual(result["records"], [])
 
 
+    def test_last_good_records_keep_denied_status_and_cloud_fallback(self):
+        class Store:
+            def status(self):
+                return {"connected": True, "auth_state": "valid"}
+
+        class Client:
+            def get_series(self, metric, days):
+                return {
+                    "status": "PASS",
+                    "records": [{
+                        "sampledAt": "2026-09-30T00:00:00Z",
+                        "dataDate": "2026-09-30",
+                        "value": 99,
+                        "unit": "bpm",
+                    }],
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "health.db")
+            health_store.ingest_payload(payload(), db, now="2026-09-30T12:00:00Z")
+            denied = payload(statuses={
+                "heart_rate": {"status": "PERMISSION_DENIED", "source": "health_connect"},
+                "steps": {"status": "EMPTY", "source": "health_connect"},
+                "sleep": {"status": "UNAVAILABLE", "source": "health_connect"},
+            })
+            denied["records"] = []
+            health_store.ingest_payload(denied, db, now="2026-09-30T12:01:00Z")
+            local = health_store.get_local_metric(
+                db, "heart_rate", 7, now="2026-09-30T12:02:00Z"
+            )
+            self.assertEqual(local["status"], "PERMISSION_DENIED")
+            self.assertEqual(len(local["records"]), 1)
+            old = internal_adapter.LOCAL_DB_PATH
+            try:
+                internal_adapter.LOCAL_DB_PATH = db
+                resolved = internal_adapter.run(
+                    "get_health", metric="heart_rate", days=7,
+                    store=Store(), client=Client()
+                )
+                self.assertEqual(resolved["source"], "xiaomi_fitness_cloud")
+                self.assertEqual(resolved["records"][0]["value"], 99)
+            finally:
+                internal_adapter.LOCAL_DB_PATH = old
+
+    def test_server_receipt_updates_last_upload_at(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "health.db")
+            health_store.ingest_payload(payload(), db, now="2026-09-30T12:00:00Z")
+            latest = health_store.get_local_metric(
+                db, "heart_rate", 7, now="2026-09-30T12:01:00Z"
+            )
+            self.assertEqual(latest["lastUploadAt"], "2026-09-30T12:00:00.000Z")
+            status = health_store.get_status(db, now="2026-09-30T12:01:00Z")
+            self.assertEqual(
+                status["metrics"]["heart_rate"]["lastUploadAt"],
+                "2026-09-30T12:00:00.000Z",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
