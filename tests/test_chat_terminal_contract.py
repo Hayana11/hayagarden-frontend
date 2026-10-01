@@ -191,6 +191,45 @@ class ChatTerminalContractTests(unittest.TestCase):
                         claude_session_id='session-1',
                     )
 
+    def test_t11b_validated_result_wins_only_stale_stall_race(self):
+        receipt = cc_resident.ProviderTerminalReceipt.from_result_event(
+            {'type': 'result', 'is_error': False, 'stop_reason': 'end_turn'},
+            turn_identity='turn-race',
+            process_generation=7,
+            claude_session_id='session-race',
+        )
+        self.assertEqual(
+            (None, 'result', True),
+            cc_resident._reconcile_terminal_timeout(
+                'stall', 'stall',
+                terminal_receipt=receipt,
+                provider_error=None,
+            ),
+        )
+        self.assertEqual(
+            ('hard', 'hard', False),
+            cc_resident._reconcile_terminal_timeout(
+                'hard', 'hard',
+                terminal_receipt=receipt,
+                provider_error=None,
+            ),
+        )
+        self.assertEqual(
+            ('stall', 'stall', False),
+            cc_resident._reconcile_terminal_timeout(
+                'stall', 'stall',
+                terminal_receipt=None,
+                provider_error=None,
+            ),
+        )
+        self.assertEqual(
+            ('stall', 'stall', False),
+            cc_resident._reconcile_terminal_timeout(
+                'stall', 'stall',
+                terminal_receipt=receipt,
+                provider_error={'error_code': 'provider_error'},
+            ),
+        )
     def test_t12_daily_runtime_forwards_receipt_without_rederiving_terminal(self):
         source = pathlib.Path(__file__).resolve().parents[1] / 'chat' / 'daily_runtime.py'
         text = source.read_text(encoding='utf-8')
