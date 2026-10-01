@@ -1,0 +1,90 @@
+name: Better Mi Android Smoke TEMP
+
+on:
+  push:
+    branches:
+      - feature/better-mi-fitness-sync-15min
+
+permissions:
+  contents: read
+
+concurrency:
+  group: better-mi-android-smoke-temp
+  cancel-in-progress: true
+
+jobs:
+  android-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        working-directory: mobile/better-mi-fitness-sync
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android platform
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Show toolchain
+        run: |
+          java -version
+          ./gradlew --version
+          sdkmanager --list_installed | grep -E "android-37.0|build-tools;37.0.0" || true
+
+      - name: Detekt
+        run: |
+          ./gradlew detekt \
+            --stacktrace \
+            --build-cache \
+            --configuration-cache
+
+      - name: Miclient tests
+        run: |
+          ./gradlew :miclient:androidTest \
+            --stacktrace \
+            --build-cache \
+            --configuration-cache
+
+      - name: Build debug APK
+        run: |
+          ./gradlew :androidApp:assembleDebug \
+            --stacktrace \
+            --build-cache \
+            --configuration-cache
+
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+
+          APK="$(find androidApp/build/outputs/apk/debug -name '*.apk' -type f | head -1)"
+
+          test -n "$APK"
+          test -s "$APK"
+
+          echo "APK=$APK"
+          ls -lh "$APK"
+
+          "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | tee /tmp/better-mi-badging.txt
+
+          grep -q "package: name='com.bettermifitness.sync'" /tmp/better-mi-badging.txt
