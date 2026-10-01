@@ -341,7 +341,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         text, thinking, usage, claims = chunks[0][1]
         self.assertEqual('complete reply', text)
         self.assertEqual('', thinking)
-        self.assertEqual([], claims)
+        self.assertEqual({'feedback_ids': [], 'dream_id': None, 'wake_ids': []}, claims)
         self.assertIsInstance(
             usage.terminal_receipt,
             cc_resident.ProviderTerminalReceipt,
