@@ -6,6 +6,7 @@ const {
   LATEST_TTL_MS,
   SERIES_TTL_MS,
   createHealthCapabilities,
+  safeLatest,
 } = require('../tools/xiaomi_health/capability.js');
 
 const secrets = [
@@ -426,5 +427,39 @@ for (const invalidWindow of invalidSleepWindows) {
   const invalid = await readSleepWindow('sleep', invalidWindow);
   assert.equal(invalid.records[0].sleepWindow, undefined);
 }
+
+
+const healthConnect = safeLatest({
+  provider: 'health_connect',
+  source: 'health_connect',
+  steps: {
+    sampledAt: '2026-09-24T01:00:00Z',
+    dataDate: '2026-09-24',
+    value: 8432,
+    source: 'health_connect',
+    details: { steps: 8432, unknown_detail: 'remove-me', token: 'remove-me' },
+  },
+  sleep: {
+    sampledAt: '2026-09-24T01:00:00Z',
+    dataDate: '2026-09-24',
+    value: 420,
+    source: 'health_connect',
+    details: { sleep_minutes: 420, unknown_detail: 'remove-me' },
+  },
+  cycle: { status: 'EMPTY', events: [], periods: [], symptoms: [] },
+}, {}, 7);
+assert.equal(typeof createHealthCapabilities, 'function');
+assert.equal(healthConnect.provider, 'health_connect');
+assert.equal(healthConnect.source, 'health_connect');
+assert.equal(healthConnect.steps.value, 8432);
+assert.equal(healthConnect.steps.source, 'health_connect');
+assert.equal(healthConnect.steps.details.steps, 8432);
+assert.equal(healthConnect.steps.details.unknown_detail, undefined);
+assert.equal(healthConnect.sleep.value, 420);
+assert.equal(healthConnect.sleep.source, 'health_connect');
+assert.equal(healthConnect.sleep.details.sleep_minutes, 420);
+assert.equal(healthConnect.sleep.details.unknown_detail, undefined);
+assert.equal(Number.isFinite(LATEST_TTL_MS) && LATEST_TTL_MS > 0, true);
+assert.equal(Number.isFinite(SERIES_TTL_MS) && SERIES_TTL_MS > 0, true);
 
 console.log('test-xiaomi-health-capability: ok');
