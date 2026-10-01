@@ -47,6 +47,24 @@ def _backend() -> str:
     return os.environ.get("OMBRE_ADAPTER_BACKEND", "legacy_module").strip().lower()
 
 
+def _observe_read(
+    observer_name: str,
+    authoritative_result: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Best-effort R4A observation after an authoritative legacy read."""
+    if _backend() != "legacy_module":
+        return authoritative_result
+    try:
+        observer_module = importlib.import_module("tools.ombre_read_shadow")
+        observer = getattr(observer_module, observer_name)
+        observer(authoritative_result, *args, **kwargs)
+    except BaseException:
+        return authoritative_result
+    return authoritative_result
+
+
 def _http_base() -> str:
     return os.environ.get("OMBRE_HTTP_BASE_URL", "http://127.0.0.1:18001").rstrip("/")
 
@@ -458,10 +476,20 @@ def list_memory_records(
             _sort_records(enriched, sort)
             return enriched[: max(0, int(limit))] if limit is not None else enriched
 
-        return _run_sync(
+        result = _run_sync(
             worker,
             wall_timeout=wall_timeout or timeout + 2.0,
             default=[],
+        )
+        return _observe_read(
+            "observe_records",
+            result,
+            bucket_type=bucket_type,
+            domain=domain,
+            min_arousal=min_arousal,
+            include_content=include_content,
+            limit=limit,
+            sort=sort,
         )
 
     async def call() -> list[dict[str, Any]]:
@@ -472,11 +500,21 @@ def list_memory_records(
         buckets = await manager.list_all(include_archive=False)
         return select(list(buckets or []))
 
-    return _run_async(
+    result = _run_async(
         call,
         async_timeout=timeout,
         wall_timeout=wall_timeout or timeout + 1.0,
         default=[],
+    )
+    return _observe_read(
+        "observe_records",
+        result,
+        bucket_type=bucket_type,
+        domain=domain,
+        min_arousal=min_arousal,
+        include_content=include_content,
+        limit=limit,
+        sort=sort,
     )
 
 
@@ -502,11 +540,12 @@ def get_memory_record(
             record = _normalized_record(payload, include_content=True)
             return record if record["id"] == normalized_id else None
 
-        return _run_sync(
+        result = _run_sync(
             worker,
             wall_timeout=wall_timeout or timeout + 1.0,
             default=None,
         )
+        return _observe_read("observe_record", result, normalized_id)
 
     async def call() -> Optional[dict[str, Any]]:
         server = _load_server()
@@ -519,12 +558,13 @@ def get_memory_record(
         record = _normalized_record(item, include_content=True)
         return record if record["id"] == normalized_id else None
 
-    return _run_async(
+    result = _run_async(
         call,
         async_timeout=timeout,
         wall_timeout=wall_timeout or timeout + 1.0,
         default=None,
     )
+    return _observe_read("observe_record", result, normalized_id)
 
 
 def _clamp_bipolar(value: Any) -> float:
@@ -730,11 +770,12 @@ def get_handoff(*, timeout: float = 3.0, wall_timeout: float = 5.0) -> Optional[
     it automatically falls back to the safe builder.
     """
     if _backend() == "http":
-        return _run_sync(
+        result = _run_sync(
             lambda: _http_handoff(timeout=timeout, wall_timeout=wall_timeout),
             wall_timeout=wall_timeout,
             default=None,
         )
+        return _observe_read("observe_handoff", result)
 
     async def call() -> str:
         server = _load_server()
@@ -744,7 +785,8 @@ def get_handoff(*, timeout: float = 3.0, wall_timeout: float = 5.0) -> Optional[
             return await legacy()
         return await _safe_handoff_async(server)
 
-    return _run_async(call, async_timeout=timeout, wall_timeout=wall_timeout, default=None)
+    result = _run_async(call, async_timeout=timeout, wall_timeout=wall_timeout, default=None)
+    return _observe_read("observe_handoff", result)
 
 
 def search_memories(
@@ -795,11 +837,12 @@ def search_memories(
                 )
             return output
 
-        return _run_sync(
+        result = _run_sync(
             worker,
             wall_timeout=wall_timeout or timeout + 1.0,
             default=[],
         )
+        return _observe_read("observe_search", result, query, limit=limit, touch=touch)
 
     async def call() -> list[tuple[str, str]]:
         server = _load_server()
@@ -819,12 +862,13 @@ def search_memories(
                     pass
         return output
 
-    return _run_async(
+    result = _run_async(
         call,
         async_timeout=timeout,
         wall_timeout=wall_timeout or timeout + 1.0,
         default=[],
     )
+    return _observe_read("observe_search", result, query, limit=limit, touch=touch)
 
 
 def surface_memories(*, timeout: float = 6.0, wall_timeout: float = 7.0) -> Optional[str]:
@@ -969,14 +1013,16 @@ def get_emotion_snapshot(*, timeout: float = 3.0) -> dict[str, Any]:
                 candidates.append(item)
             chosen = candidates[:12]
             if not chosen:
-                return {"valence": None, "arousal": None, "count": 0}
-            return {
-                "valence": round(sum(float(x.get("valence", 0.5)) for x in chosen) / len(chosen), 3),
-                "arousal": round(sum(float(x.get("arousal", 0.3)) for x in chosen) / len(chosen), 3),
-                "count": len(chosen),
-            }
+                result = {"valence": None, "arousal": None, "count": 0}
+            else:
+                result = {
+                    "valence": round(sum(float(x.get("valence", 0.5)) for x in chosen) / len(chosen), 3),
+                    "arousal": round(sum(float(x.get("arousal", 0.3)) for x in chosen) / len(chosen), 3),
+                    "count": len(chosen),
+                }
+            return _observe_read("observe_emotion", result)
         except Exception:
-            return {"valence": None, "arousal": None, "count": 0}
+            return _observe_read("observe_emotion", {"valence": None, "arousal": None, "count": 0})
     if mode != "safe":
         url = os.environ.get("OMBRE_EMOTION_SNAPSHOT_URL", _DEFAULT_SNAPSHOT_URL)
         try:
@@ -986,20 +1032,21 @@ def get_emotion_snapshot(*, timeout: float = 3.0) -> dict[str, Any]:
             valence = payload.get("valence")
             arousal = payload.get("arousal")
             if valence is not None and arousal is not None:
-                return {
+                return _observe_read("observe_emotion", {
                     "valence": float(valence),
                     "arousal": float(arousal),
                     "count": int(payload.get("count") or 0),
-                }
+                })
         except Exception:
-            return {"valence": None, "arousal": None, "count": 0}
+            return _observe_read("observe_emotion", {"valence": None, "arousal": None, "count": 0})
 
     async def call() -> dict[str, Any]:
         return await _safe_emotion_snapshot_async(_load_server())
 
-    return _run_async(
+    result = _run_async(
         call,
         async_timeout=timeout,
         wall_timeout=timeout + 1.0,
         default={"valence": None, "arousal": None, "count": 0},
     )
+    return _observe_read("observe_emotion", result)
