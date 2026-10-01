@@ -485,7 +485,7 @@ class TurnTerminalAuthority:
 
     def begin_cleanup(self, reason):
         with self._lock:
-            if self._outcome == self.RUNNING or self._cleanup_count:
+            if self._outcome in (self.RUNNING, self.SUCCESS) or self._cleanup_count:
                 return False
             self._cleanup_count = 1
             self._cleanup_reason = str(reason or self._terminal_reason or '')
