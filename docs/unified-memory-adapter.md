@@ -1,7 +1,7 @@
 # Unified Memory Adapter
 
 This patch creates one stable integration boundary between Haya Garden and
-Ombre Brain. It does **not** switch production to Ombre Brain 2.8.10 and it does
+Ombre Brain. It does **not** switch production to Ombre Brain 3.6.14 and it does
 not modify the live vault.
 
 ## Backends
@@ -13,24 +13,30 @@ OMBRE_ADAPTER_BACKEND=legacy_module
 OMBRE_BRAIN_ROOT=/opt/ombre-brain
 ```
 
-A future Ombre Brain 2.8.10 sidecar uses HTTP for reads and MCP for writes:
+An isolated Ombre Brain 3.6.14 shadow uses HTTP for reads and MCP only for explicitly authorized operations:
 
 ```bash
 OMBRE_ADAPTER_BACKEND=http
-OMBRE_HTTP_BASE_URL=http://127.0.0.1:18001
-OMBRE_MCP_URL=http://127.0.0.1:18001/mcp
-OMBRE_DASHBOARD_PASSWORD=...
+OMBRE_HTTP_BASE_URL=http://127.0.0.1:<port>
+OMBRE_MCP_URL=http://127.0.0.1:<port>/mcp
+# Separate dashboard secret; never reuse the embedding/Gemini key:
+OMBRE_DASHBOARD_PASSWORD=<separate dashboard secret>
 # Set only when MCP token authentication is enabled:
 OMBRE_MCP_TOKEN=...
 ```
 
-Dashboard endpoints and MCP use separate authentication. The adapter logs into
-the Dashboard with a cookie for `/api/*`; MCP calls use the MCP token or the
-sidecar's configured localhost-only no-auth mode.
+Dashboard REST and MCP are separate authentication boundaries. `/api/*`
+requires an Ombre Dashboard session: the adapter POSTs the dashboard password
+to `/auth/login`, retains the `ombre_session` cookie, and retries the original
+request. `/mcp` follows Ombre's MCP authentication configuration and is not
+made anonymous by this adapter. The sidecar must remain localhost-only; do not
+expose it publicly merely to use the adapter.
 
-The optional `mcp` Python package is **not** installed from `requirements.txt`.
-Install it only in disposable shadow environments before enabling the HTTP
-backend.
+Modern HTTP retrieval is read-only. HayaGarden search does not call touch or
+reinforcement APIs; explicit reinforcement is a separate, deliberate action.
+The `mcp` package is listed in `requirements.txt` for the isolated shadow
+runtime, but must not be installed into the live production Python environment
+as part of R3B.
 
 ## Legacy scope (default `legacy_module`)
 
@@ -64,20 +70,26 @@ documented future change.
 - Frontend hot paths no longer import Ombre Brain's internal `server.py`.
 - `memory_unification_audit.py` opens SQLite read-only and never writes Markdown.
 
-## HTTP backend known gaps (dormant until shadow phase)
+## HTTP backend contract
 
-The HTTP path is intentionally incomplete and must not be treated as production
-parity merely because unit mocks pass:
+The HTTP backend is intended for an isolated Ombre 3.6.14 shadow only:
 
-- `/api/buckets` includes archive buckets but list payloads expose no archive
-  flag, so HTTP recent continuity cannot yet match
-  `list_all(include_archive=False)`.
-- Ombre 2.8.10 list payloads expose `pinned`, `resolved`, `digested`,
-  `dont_surface`, etc., but **not** legacy vault `protected` metadata.
-- HTTP explicit search currently ignores `touch=True`; activation / last_active
-  semantics differ from legacy recall until a touch API is chosen.
-- HTTP handoff/search now honour a total wall-clock deadline, but cutover still
-  requires real sidecar fixtures, not invented mock fields.
+- `/api/*` requires Dashboard session authentication; anonymous REST access is
+  not supported or enabled by this adapter.
+- `/mcp` is a separate MCP authentication boundary and may use the sidecar's
+  configured localhost-only mode or an MCP token.
+- `/api/search` is treated as an active-only server contract because pinned
+  Ombre 3.6.14 performs `list_all(include_archive=False)` and constrains
+  semantic search to active bucket IDs. The adapter preserves
+  `list[tuple[name, content]]`, `limit`, and 300-character clipping without
+  inferring lifecycle from directory paths.
+- `/api/buckets` may include terminal records; handoff excludes
+  `type=archived`, `deleted_at`, and `tombstone` records before fetching detail.
+- Explicit HTTP search keeps `touch=True` as a compatibility no-op. Modern
+  Ombre retrieval is separate from explicit reinforcement.
+- HayaGarden must not expose the sidecar publicly merely to use this adapter.
+- `OMBRE_DASHBOARD_PASSWORD` is a separate Dashboard secret and must never be
+  replaced with or copied from the embedding/Gemini secret.
 
 ## Read-only inventory
 
@@ -95,7 +107,7 @@ on only one side, pinned counts, hash titles and unclassified buckets.
 
 ## Important upstream sidecar caveat
 
-Ombre Brain 2.8.10 starts its decay engine during application startup and runs
+Ombre Brain 3.6.14 starts its decay engine during application startup and runs
 one cycle immediately. Increasing `check_interval_hours` only delays later
 cycles; it does not suppress the first one. The current upstream auto-resolve
 rule can therefore modify an attached vault at startup even when the sidecar is
@@ -114,7 +126,7 @@ requires, in order:
 2. A verified vault and SQLite backup.
 3. A reviewed unification report and ID mapping.
 4. A cleaned disposable vault for sidecar comparison.
-5. Read-only shadow evaluation with real Ombre 2.8.10 fixtures.
+5. Read-only shadow evaluation with real Ombre 3.6.14 fixtures.
 6. A separately approved cutover and rollback window.
 
 ## P0 security: Ombre `test_tools.py` (out of scope for deploy)

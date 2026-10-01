@@ -5,10 +5,13 @@ production vault, open the production SQLite database or call the network.
 """
 from __future__ import annotations
 
+import io
+import json
 import os
 import sys
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -379,12 +382,138 @@ class CleanerBatchTests(unittest.TestCase):
         self.assertFalse(received[0]["pinned"])
 
 
+class _FakeHTTPResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _SequencedHTTPOpener:
+    def __init__(self, actions):
+        self.actions = list(actions)
+        self.requests = []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request)
+        action = self.actions.pop(0)
+        if isinstance(action, BaseException):
+            raise action
+        return _FakeHTTPResponse(action)
+
+
+def _unauthorized():
+    return urllib.error.HTTPError(
+        "http://sidecar.test/api",
+        401,
+        "Unauthorized",
+        {},
+        io.BytesIO(),
+    )
+
+
 class HttpBackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import json
         fixture = Path(ROOT) / "tests/fixtures/ombre_http_buckets_v2810.json"
         cls.bucket_records = json.loads(fixture.read_text(encoding="utf-8"))
+
+    def test_dashboard_auth_retries_after_first_401_and_logs_in_once(self):
+        password = "r3b-dashboard-secret"
+        opener = _SequencedHTTPOpener([
+            _unauthorized(),
+            {"ok": True},
+            [{"id": "active-001"}],
+        ])
+        with mock.patch.dict(os.environ, {
+            "OMBRE_ADAPTER_BACKEND": "http",
+            "OMBRE_DASHBOARD_PASSWORD": password,
+            "OMBRE_HTTP_BASE_URL": "http://sidecar.test",
+        }, clear=False), mock.patch.object(ombre_adapter, "_HTTP_OPENER", opener), \
+             mock.patch.object(ombre_adapter, "_HTTP_LOGGED_IN", False):
+            result = ombre_adapter._http_json(
+                "/api/search", params={"q": "记忆系统"}, timeout=1,
+            )
+
+        self.assertEqual(result, [{"id": "active-001"}])
+        self.assertEqual(
+            [request.full_url.rsplit("/", 1)[-1] for request in opener.requests],
+            ["search?q=%E8%AE%B0%E5%BF%86%E7%B3%BB%E7%BB%9F", "login", "search?q=%E8%AE%B0%E5%BF%86%E7%B3%BB%E7%BB%9F"],
+        )
+        login_request = opener.requests[1]
+        self.assertEqual(json.loads(login_request.data.decode("utf-8"))["password"], password)
+
+    def test_dashboard_cookie_opener_is_reused_after_login(self):
+        password = "r3b-dashboard-secret"
+        opener = _SequencedHTTPOpener([
+            _unauthorized(),
+            {"ok": True},
+            {"value": 1},
+            {"value": 2},
+        ])
+        cookie_jar = ombre_adapter._HTTP_COOKIE_JAR
+        with mock.patch.dict(os.environ, {
+            "OMBRE_DASHBOARD_PASSWORD": password,
+            "OMBRE_HTTP_BASE_URL": "http://sidecar.test",
+        }, clear=False), mock.patch.object(ombre_adapter, "_HTTP_OPENER", opener), \
+             mock.patch.object(ombre_adapter, "_HTTP_LOGGED_IN", False):
+            self.assertEqual(ombre_adapter._http_json("/api/one", timeout=1), {"value": 1})
+            self.assertEqual(ombre_adapter._http_json("/api/two", timeout=1), {"value": 2})
+            self.assertIs(ombre_adapter._HTTP_COOKIE_JAR, cookie_jar)
+            self.assertIs(ombre_adapter._HTTP_OPENER, opener)
+            self.assertEqual(
+                sum(request.full_url.endswith("/auth/login") for request in opener.requests),
+                1,
+            )
+
+    def test_dashboard_stale_cookie_forces_one_fresh_relogin(self):
+        password = "r3b-dashboard-secret"
+        opener = _SequencedHTTPOpener([
+            _unauthorized(),
+            {"ok": True},
+            {"value": 1},
+            _unauthorized(),
+            {"ok": True},
+            {"value": 2},
+        ])
+        with mock.patch.dict(os.environ, {
+            "OMBRE_DASHBOARD_PASSWORD": password,
+            "OMBRE_HTTP_BASE_URL": "http://sidecar.test",
+        }, clear=False), mock.patch.object(ombre_adapter, "_HTTP_OPENER", opener), \
+             mock.patch.object(ombre_adapter, "_HTTP_LOGGED_IN", False):
+            self.assertEqual(ombre_adapter._http_json("/api/one", timeout=1), {"value": 1})
+            self.assertEqual(ombre_adapter._http_json("/api/two", timeout=1), {"value": 2})
+
+        self.assertEqual(
+            sum(request.full_url.endswith("/auth/login") for request in opener.requests),
+            2,
+        )
+
+    def test_dashboard_password_is_absent_from_login_errors_and_logs(self):
+        password = "r3b-dashboard-secret"
+        opener = _SequencedHTTPOpener([_unauthorized(), _unauthorized()])
+        with mock.patch.dict(os.environ, {
+            "OMBRE_DASHBOARD_PASSWORD": password,
+            "OMBRE_HTTP_BASE_URL": "http://sidecar.test",
+        }, clear=False), mock.patch.object(ombre_adapter, "_HTTP_OPENER", opener), \
+             mock.patch.object(ombre_adapter, "_HTTP_LOGGED_IN", False), \
+             mock.patch.object(ombre_adapter._LOG, "debug") as debug:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                ombre_adapter._http_json("/api/search", timeout=1)
+
+        self.assertNotIn(password, str(raised.exception))
+        debug_text = " ".join(
+            " ".join(str(arg) for arg in call.args) for call in debug.call_args_list
+        )
+        self.assertNotIn(password, debug_text)
 
     def test_http_handoff_reads_realistic_v2810_bucket_list(self):
         records = self.bucket_records
@@ -455,39 +584,100 @@ class HttpBackendTests(unittest.TestCase):
         self.assertEqual(result, [("alpha", "matched")])
         self.assertEqual(touched, [])
 
-    def test_http_handoff_may_surface_archive_bucket_without_list_flag(self):
-        records = list(self.bucket_records) + [{
-            "id": "archive-dynamic-001",
-            "type": "dynamic",
-            "domain": ["技术"],
-            "resolved": False,
-            "digested": False,
-            "dont_surface": False,
-            "pinned": False,
-            "importance": 8,
-            "last_active_epoch_ms": 100,
-        }]
+    def test_http_handoff_excludes_archive_and_terminal_records(self):
+        for terminal_marker in (
+            {"type": "archived"},
+            {"type": "dynamic", "deleted_at": "2026-09-30T00:00:00"},
+            {"type": "dynamic", "tombstone": True},
+        ):
+            with self.subTest(terminal_marker=terminal_marker):
+                terminal_id = "terminal-record-001"
+                records = [
+                    {
+                        "id": "self-anchor-001",
+                        "type": "permanent",
+                        "domain": ["self_anchor"],
+                        "resolved": False,
+                        "digested": False,
+                        "dont_surface": False,
+                    },
+                    {
+                        "id": terminal_id,
+                        "domain": ["技术"],
+                        "resolved": False,
+                        "digested": False,
+                        "dont_surface": False,
+                        "pinned": False,
+                        "importance": 9,
+                        "last_active_epoch_ms": 2000,
+                        **terminal_marker,
+                    },
+                    {
+                        "id": "active-recent-001",
+                        "type": "dynamic",
+                        "domain": ["技术"],
+                        "resolved": False,
+                        "digested": False,
+                        "dont_surface": False,
+                        "pinned": False,
+                        "importance": 7,
+                        "last_active_epoch_ms": 1000,
+                    },
+                ]
+                fetched = []
+
+                def fake_json(path, **kwargs):
+                    if path == "/api/buckets":
+                        return records
+                    if path == "/api/bucket/self-anchor-001":
+                        fetched.append(path)
+                        return {"content": "SELF"}
+                    if path == "/api/bucket/active-recent-001":
+                        fetched.append(path)
+                        return {"content": "ACTIVE RECENT"}
+                    if path == f"/api/bucket/{terminal_id}":
+                        self.fail("terminal/archive detail must never be fetched")
+                    raise AssertionError(path)
+
+                with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False), \
+                     mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
+                    result = ombre_adapter.get_handoff(timeout=1, wall_timeout=2)
+
+                self.assertIn("ACTIVE RECENT", result)
+                self.assertNotIn(terminal_id, result)
+                self.assertEqual(
+                    fetched,
+                    ["/api/bucket/self-anchor-001", "/api/bucket/active-recent-001"],
+                )
+
+    def test_http_search_preserves_server_active_only_result_contract(self):
+        calls = []
+        long_content = "x" * 400
 
         def fake_json(path, **kwargs):
-            if path == "/api/buckets":
-                return records
-            if path == "/api/bucket/self-anchor-001":
-                return {"content": "SELF"}
-            if path == "/api/bucket/archive-dynamic-001":
-                return {"content": "ARCHIVE LEAK"}
-            if path == "/api/bucket/recent-dynamic-001":
-                return {"content": "SAFE RECENT"}
+            calls.append(path)
+            if path == "/api/search":
+                return [{"id": "active-001", "name": "alpha", "content_preview": "preview"}]
+            if path == "/api/bucket/active-001":
+                return {"content": long_content}
             raise AssertionError(path)
 
+        # Ombre 3.6.14 owns active-only search selection; the adapter preserves
+        # its tuple/limit/clipping contract instead of inferring paths locally.
         with mock.patch.dict(os.environ, {"OMBRE_ADAPTER_BACKEND": "http"}, clear=False), \
              mock.patch.object(ombre_adapter, "_http_json", side_effect=fake_json):
-            text = ombre_adapter.get_handoff(timeout=1, wall_timeout=2)
-        self.assertIn("ARCHIVE LEAK", text)
+            result = ombre_adapter.search_memories(
+                "记忆系统", limit=1, timeout=1, wall_timeout=2, touch=True,
+            )
+
+        self.assertEqual(result, [("alpha", "x" * 300)])
+        self.assertEqual(calls, ["/api/search", "/api/bucket/active-001"])
 
     def test_http_emotion_filters_core_and_test_records(self):
         records = [
             {"id": "a", "type": "dynamic", "valence": 0.8, "arousal": 0.6},
             {"id": "b", "type": "dynamic", "valence": 0.4, "arousal": 0.2},
+            {"id": "archive", "type": "archived", "valence": 0.0, "arousal": 1.0},
             {"id": "p", "type": "permanent", "valence": 0.0, "arousal": 1.0},
             {"id": "pin", "type": "dynamic", "pinned": True, "valence": 0.0, "arousal": 1.0},
             {"id": "test", "type": "dynamic", "erasable_test_data": True, "valence": 0.0, "arousal": 1.0},
