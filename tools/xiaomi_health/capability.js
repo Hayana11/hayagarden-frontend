@@ -48,11 +48,11 @@ const SERIES_TTL_MS = 15 * 60 * 1000;
 const LATEST_TTL_MS = 60 * 1000;
 
 function validDate(value) {
-  return typeof value === 'string' && /^\\d{4}-\\d{2}-\\d{2}$/.test(value) ? value : null;
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
 }
 
 function validSample(value) {
-  return typeof value === 'string' && /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$/.test(value) ? value : null;
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) ? value : null;
 }
 
 function safeSleepWindow(value) {
@@ -63,7 +63,7 @@ function safeSleepWindow(value) {
   const bedtimeMs = Date.parse(bedtime);
   const wakeUpTimeMs = Date.parse(wakeUpTime);
   if (!Number.isFinite(bedtimeMs) || !Number.isFinite(wakeUpTimeMs) || wakeUpTimeMs <= bedtimeMs) return null;
-  const canonical = (milliseconds) => new Date(milliseconds).toISOString().replace(/\\.000Z$/, 'Z');
+  const canonical = (milliseconds) => new Date(milliseconds).toISOString().replace(/\.000Z$/, 'Z');
   if (canonical(bedtimeMs) !== bedtime || canonical(wakeUpTimeMs) !== wakeUpTime) return null;
   return { bedtime, wakeUpTime };
 }
