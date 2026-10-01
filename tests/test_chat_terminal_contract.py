@@ -441,7 +441,7 @@ class ChatTerminalContractTests(unittest.TestCase):
             )
         )
         self.assertEqual([('text', 'partial')], chunks)
-        self.assertEqual([], watchdogs[0].reason if watchdogs else [])
+        self.assertIsNone(watchdogs[0].reason)
         self.assertEqual([True], kill_calls)
 
     def _authority_receipt(self):
