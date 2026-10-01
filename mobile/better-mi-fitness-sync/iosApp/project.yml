@@ -1,0 +1,85 @@
+name: BetterMiFitnessSync
+options:
+  bundleIdPrefix: com.bettermifitness
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+
+settings:
+  base:
+    # Per-sdk + Debug/Release so we never link the wrong ComposeApp binary.
+    "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*][config=Debug]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosSimulatorArm64/debugFramework"
+    "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*][config=Release]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosSimulatorArm64/releaseFramework"
+    "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*][config=Debug]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosArm64/debugFramework"
+    "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*][config=Release]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosArm64/releaseFramework"
+
+targets:
+  BetterMiFitnessSync:
+    type: application
+    platform: iOS
+    sources:
+      - path: iosApp
+        type: group
+    settings:
+      base:
+        INFOPLIST_FILE: iosApp/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.bettermifitness.sync
+        PRODUCT_NAME: BetterMiFitnessSync
+        INFOPLIST_KEY_CFBundleDisplayName: Better Mi Fitness Sync
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: "YES"
+        ENABLE_ON_DEMAND_RESOURCES: "NO"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: "YES"
+        CODE_SIGNING_ALLOWED: "YES"
+        "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*][config=Debug]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosSimulatorArm64/debugFramework"
+        "FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*][config=Release]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosSimulatorArm64/releaseFramework"
+        "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*][config=Debug]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosArm64/debugFramework"
+        "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*][config=Release]": "$(inherited) $(SRCROOT)/../composeApp/build/bin/iosArm64/releaseFramework"
+        OTHER_LINKER_FLAGS: "$(inherited) -framework ComposeApp"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+        SWIFT_VERSION: "5.9"
+    dependencies: []
+    entitlements:
+      path: iosApp.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+    preBuildScripts:
+      - name: "Build Kotlin Framework"
+        script: |
+          if [ -z "${JAVA_HOME:-}" ] || [ ! -d "$JAVA_HOME" ]; then
+            export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+          fi
+          export PATH="$JAVA_HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          cd "$SRCROOT/.."
+          # Match Xcode configuration: Release IPA must use releaseFramework (not debug).
+          if [ "${PLATFORM_NAME:-}" = "iphoneos" ]; then
+            if [ "${CONFIGURATION:-}" = "Release" ]; then
+              ./gradlew :composeApp:linkReleaseFrameworkIosArm64
+            else
+              ./gradlew :composeApp:linkDebugFrameworkIosArm64
+            fi
+          else
+            if [ "${CONFIGURATION:-}" = "Release" ]; then
+              ./gradlew :composeApp:linkReleaseFrameworkIosSimulatorArm64
+            else
+              ./gradlew :composeApp:linkDebugFrameworkIosSimulatorArm64
+            fi
+          fi
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      # Static ComposeApp.framework cannot embed moko .bundle; copy into the app.
+      - name: "Copy moko resources into app"
+        script: |
+          if [ -z "${JAVA_HOME:-}" ] || [ ! -d "$JAVA_HOME" ]; then
+            export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+          fi
+          export PATH="$JAVA_HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          cd "$SRCROOT/.."
+          ./gradlew :composeApp:copyFrameworkResourcesToApp \
+            -Pmoko.resources.PLATFORM_NAME="$PLATFORM_NAME" \
+            -Pmoko.resources.CONFIGURATION="${KOTLIN_FRAMEWORK_BUILD_TYPE:-$CONFIGURATION}" \
+            -Pmoko.resources.ARCHS="$ARCHS" \
+            -Pmoko.resources.BUILT_PRODUCTS_DIR="$BUILT_PRODUCTS_DIR" \
+            -Pmoko.resources.CONTENTS_FOLDER_PATH="$CONTENTS_FOLDER_PATH"
+        basedOnDependencyAnalysis: false

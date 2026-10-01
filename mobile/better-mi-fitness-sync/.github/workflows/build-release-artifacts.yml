@@ -1,0 +1,571 @@
+# push main  -> detekt + unit tests only
+# PR / manual run / v* tags -> full APK + IPA (+ release on tags)
+# docs (md, LICENSE, docs/) are ignored on push and PR
+# note: reusable workflow keeps caller's event_name (tag push stays "push")
+
+name: Build APK and IPA
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - "LICENSE.*"
+      - "docs/**"
+  pull_request:
+    branches: [main, master]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - "LICENSE.*"
+      - "docs/**"
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: >-
+    build-artifacts-${{ github.workflow }}-${{
+      github.event.pull_request.number || github.ref
+    }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "17"
+  XCODE_VERSION: "26.2"
+  GRADLE_OPTS: >-
+    -Dorg.gradle.daemon=false
+    -Dorg.gradle.parallel=true
+    -Dorg.gradle.caching=true
+    -Dkotlin.daemon.jvm.options=-Xmx2g
+  KONAN_DATA_DIR: ${{ github.workspace }}/.konan-cache
+
+jobs:
+  # Warms the shared Gradle + Konan caches from trusted main pushes so
+  # read-only PR jobs restore instead of rebuilding the K/N toolchain.
+  ios-cache-warmup:
+    name: iOS cache warmup
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      GRADLE_OPTS: >-
+        -Dorg.gradle.daemon=false
+        -Dorg.gradle.parallel=true
+        -Dorg.gradle.caching=true
+        -Dorg.gradle.jvmargs=-Xmx6g
+        -Dkotlin.daemon.jvm.options=-Xmx6g
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Gradle (max cache)
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: false
+          cache-cleanup: on-success
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            jdks
+            wrapper
+          gradle-home-cache-excludes: |
+            caches/*/kotlin-dsl/
+            caches/*/scripts/
+
+      - name: Cache Kotlin/Native (Konan)
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.KONAN_DATA_DIR }}
+            ~/.konan
+          key: ${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-konan-${{ hashFiles('gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties') }}-v4
+          restore-keys: |
+            ${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-konan-v4-
+            ${{ runner.os }}-konan-v3-
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      # Compile-only: downloads the Konan toolchain and warms K/N task
+      # outputs without running the full Release link + xcodebuild.
+      - name: Warm iOS compile + test compile
+        run: ./gradlew :composeApp:compileKotlinIosSimulatorArm64 :composeApp:compileTestKotlinIosSimulatorArm64 --stacktrace --build-cache --configuration-cache
+
+  quick-check:
+    name: Quick check
+    # Branch pushes only — not version tags (those need full APK/IPA).
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: false
+          cache-cleanup: on-success
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      - name: Detekt
+        run: ./gradlew detekt --stacktrace --build-cache --configuration-cache
+
+      - name: Unit tests (miclient JVM)
+        run: ./gradlew :miclient:androidTest --stacktrace --build-cache --configuration-cache
+
+  android-apk:
+    name: Android APK
+    # Full build: PR, manual, reusable call, or v* tag (tag push keeps event_name=push).
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
+      version_code: ${{ steps.version.outputs.version_code }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    env:
+      # Stable path for SDK cache keys (matches setup-android on ubuntu-latest)
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/resolve-version.sh
+          source scripts/resolve-version.sh
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Resolved VERSION_NAME=$VERSION_NAME VERSION_CODE=$VERSION_CODE IS_RELEASE=$IS_RELEASE"
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # Keep PR caches read-only; trusted pushes/tags/manual runs may populate the shared cache.
+      - name: Setup Gradle (max cache)
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          cache-cleanup: on-success
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            jdks
+            wrapper
+          gradle-home-cache-excludes: |
+            caches/*/kotlin-dsl/
+            caches/*/scripts/
+          # Avoid noisy PR comments; checks still show on the PR
+          add-job-summary-as-pr-comment: never
+
+      - name: Cache Android SDK packages
+        id: cache-android-sdk
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms/android-37.0
+            ${{ env.ANDROID_HOME }}/build-tools/37.0.0
+            ${{ env.ANDROID_HOME }}/licenses
+          key: android-sdk-37.0-buildtools-37.0.0-v3
+          restore-keys: |
+            android-sdk-37.0-buildtools-37.0.0-v3
+            android-sdk-37.0-
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Accept licenses + install platform (if cache miss)
+        if: steps.cache-android-sdk.outputs.cache-hit != 'true'
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Accept licenses (cache hit)
+        if: steps.cache-android-sdk.outputs.cache-hit == 'true'
+        run: yes | sdkmanager --licenses >/dev/null || true
+
+      # Static analysis (source-only; fail fast before APK work).
+      - name: Detekt
+        run: ./gradlew detekt --stacktrace --build-cache --configuration-cache
+
+      # commonTest in composeApp runs on K/N iOS sim (macOS job); miclient has a JVM target.
+      - name: Unit tests (miclient JVM)
+        run: ./gradlew :miclient:androidTest --stacktrace --build-cache --configuration-cache
+
+      # PR/manual/dispatch builds stay on debug (fast, debuggable);
+      # v* tag builds ship assembleRelease (non-debuggable, debug-signed).
+      - name: Build APK (debug for PR, release for tags)
+        run: |
+          if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+            TASK=:androidApp:assembleRelease
+          else
+            TASK=:androidApp:assembleDebug
+          fi
+          ./gradlew "$TASK" \
+            -PversionName=${{ env.VERSION_NAME }} \
+            -PversionCode=${{ env.VERSION_CODE }} \
+            --stacktrace --build-cache --configuration-cache
+          # Sanity: PR artifacts must be debuggable, tag artifacts must not be.
+          APK=$(find androidApp/build/outputs/apk -name "*.apk" | head -1)
+          if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+            if "$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK" | grep -q "application-debuggable"; then
+              echo "ERROR: release APK is debuggable: $APK"
+              exit 1
+            fi
+          fi
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          APK=$(find androidApp/build/outputs/apk -name "*.apk" | head -1)
+          test -n "$APK"
+          # Stable name for releases/latest/download/BetterMiFitnessSync.apk
+          cp "$APK" "dist/BetterMiFitnessSync.apk"
+          if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+            cp "$APK" "dist/BetterMiFitnessSync-${{ steps.version.outputs.version_name }}.apk"
+          else
+            cp "$APK" "dist/BetterMiFitnessSync-${{ github.run_number }}-${{ github.sha }}.apk"
+          fi
+          ls -lh dist/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: BetterMiFitnessSync-android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  ios-ipa:
+    name: iOS IPA
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    timeout-minutes: 90
+    # Release K/N link needs more heap than debug (CI failed with "Java heap space").
+    env:
+      GRADLE_OPTS: >-
+        -Dorg.gradle.daemon=false
+        -Dorg.gradle.parallel=true
+        -Dorg.gradle.caching=true
+        -Dorg.gradle.jvmargs=-Xmx6g
+        -Dkotlin.daemon.jvm.options=-Xmx6g
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          source scripts/resolve-version.sh
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "is_release=$IS_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "Resolved VERSION_NAME=$VERSION_NAME VERSION_CODE=$VERSION_CODE IS_RELEASE=$IS_RELEASE"
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Gradle (max cache)
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          cache-cleanup: on-success
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            jdks
+            wrapper
+          gradle-home-cache-excludes: |
+            caches/*/kotlin-dsl/
+            caches/*/scripts/
+
+      # Kotlin/Native toolchains + dependencies (largest iOS compile win)
+      - name: Cache Kotlin/Native (Konan)
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.KONAN_DATA_DIR }}
+            ~/.konan
+          key: ${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-konan-${{ hashFiles('gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties') }}-v4
+          restore-keys: |
+            ${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-konan-v4-
+            ${{ runner.os }}-konan-v3-
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      - name: Show toolchain
+        run: |
+          java -version
+          xcodebuild -version
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "KONAN_DATA_DIR=$KONAN_DATA_DIR"
+
+      # Homebrew bottles (xcodegen)
+      - name: Cache Homebrew
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            /opt/homebrew/Cellar/xcodegen
+            /opt/homebrew/bin/xcodegen
+            /usr/local/Cellar/xcodegen
+            /usr/local/bin/xcodegen
+          key: ${{ runner.os }}-brew-xcodegen-v3
+          restore-keys: |
+            ${{ runner.os }}-brew-xcodegen-v3
+            ${{ runner.os }}-brew-xcodegen-
+            ${{ runner.os }}-brew-
+
+      - name: Install XcodeGen
+        run: |
+          if command -v xcodegen >/dev/null 2>&1; then
+            xcodegen --version
+          else
+            brew install xcodegen
+          fi
+
+      - name: Generate Xcode project
+        working-directory: iosApp
+        run: xcodegen generate
+
+      - name: Inject iOS marketing / build version
+        run: |
+          set -euo pipefail
+          PLIST="iosApp/iosApp/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION_NAME}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION_CODE}" "$PLIST"
+          echo "Info.plist version:"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST"
+
+      # composeApp commonTest on the K/N iOS simulator target only.
+      # miclient JVM tests already run on the Ubuntu job — skip redundant :miclient:allTests.
+      # :allTests also builds device-only test artifacts this job never runs.
+      - name: Unit tests (composeApp)
+        run: ./gradlew :composeApp:iosSimulatorArm64Test --stacktrace --build-cache --configuration-cache
+
+      - name: Link Kotlin iOS device framework (Release)
+        run: >
+          ./gradlew :composeApp:linkReleaseFrameworkIosArm64
+          -Dorg.gradle.jvmargs="-Xmx6g -Dkotlin.daemon.jvm.options=-Xmx6g"
+          --stacktrace --build-cache --configuration-cache
+
+      # Xcode DerivedData for Swift / link steps (secondary to Konan).
+      # Version inject rewrites Info.plist, so iosApp/** would bust the key
+      # every build; hash stable inputs plus the pinned Xcode version instead.
+      # PRs restore only — main/tags save, so PRs reuse the warm main cache.
+      - name: Restore Xcode DerivedData
+        uses: actions/cache/restore@v5
+        with:
+          path: iosApp/build/DerivedData
+          key: ${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-dd-rel-${{ hashFiles('iosApp/project.yml', 'iosApp/iosApp/**/*.swift', 'iosApp/iosApp/Assets.xcassets/**', 'composeApp/build.gradle.kts', 'gradle/libs.versions.toml') }}-v5
+          restore-keys: |
+            ${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-dd-rel-v5-
+            ${{ runner.os }}-dd-rel-v4-
+            ${{ runner.os }}-dd-
+
+      # Release only — Debug device builds ship .debug.dylib and crash when sideloaded.
+      - name: Build iOS app (unsigned Release, device arm64)
+        working-directory: iosApp
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project BetterMiFitnessSync.xcodeproj \
+            -scheme BetterMiFitnessSync \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedData \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            MARKETING_VERSION="${VERSION_NAME}" \
+            CURRENT_PROJECT_VERSION="${VERSION_CODE}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find iosApp/build/DerivedData/Build/Products -path "*Release-iphoneos*/BetterMiFitnessSync.app" -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "Release app not found under DerivedData"
+            find iosApp/build/DerivedData/Build/Products -name '*.app' -type d || true
+            exit 1
+          fi
+          echo "Using app: $APP"
+
+          # Guard against accidentally packaging a Debug app.
+          if [ -f "$APP/BetterMiFitnessSync.debug.dylib" ]; then
+            echo "Refusing to package Debug binary (BetterMiFitnessSync.debug.dylib present)"
+            exit 1
+          fi
+          case "$APP" in
+            *Debug*) echo "Refusing path that looks like Debug: $APP"; exit 1 ;;
+          esac
+
+          # Fail CI if home-screen icons are missing (sideload tools need these).
+          if [ ! -f "$APP/Assets.car" ] && ! ls "$APP"/AppIcon*.png >/dev/null 2>&1; then
+            echo "ERROR: app bundle has no Assets.car / AppIcon*.png (icon would be blank)"
+            ls -la "$APP" || true
+            exit 1
+          fi
+          ls -la "$APP"/AppIcon*.png "$APP/Assets.car" 2>/dev/null || true
+
+          mkdir -p Payload dist
+          rm -rf Payload/*
+          cp -R "$APP" Payload/
+          zip -qry "dist/BetterMiFitnessSync.ipa" Payload
+          if [ "${{ steps.version.outputs.is_release }}" = "true" ]; then
+            NAME="BetterMiFitnessSync-${{ steps.version.outputs.version_name }}.ipa"
+          else
+            NAME="BetterMiFitnessSync-${{ github.run_number }}-${{ github.sha }}.ipa"
+          fi
+          cp "dist/BetterMiFitnessSync.ipa" "dist/${NAME}"
+          ls -lh dist/
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v6
+        with:
+          name: BetterMiFitnessSync-ios-ipa
+          path: dist/*.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      # PRs restore the warm main cache above but never overwrite it.
+      - name: Save Xcode DerivedData (main/tags only)
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@v5
+        with:
+          path: iosApp/build/DerivedData
+          key: ${{ runner.os }}-xcode${{ env.XCODE_VERSION }}-dd-rel-${{ hashFiles('iosApp/project.yml', 'iosApp/iosApp/**/*.swift', 'iosApp/iosApp/Assets.xcassets/**', 'composeApp/build.gradle.kts', 'gradle/libs.versions.toml') }}-v5
+
+  # ─── GitHub Release (tags only) ───────────────────────────────────
+  publish-release:
+    name: Publish GitHub Release
+    needs: [android-apk, ios-ipa]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          source scripts/resolve-version.sh
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Download APK
+        uses: actions/download-artifact@v7
+        with:
+          name: BetterMiFitnessSync-android-apk
+          path: dist
+
+      - name: Download IPA
+        uses: actions/download-artifact@v7
+        with:
+          name: BetterMiFitnessSync-ios-ipa
+          path: dist
+
+      - name: Changelog since previous tag
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          {
+            echo "## Better Mi Fitness Sync ${{ steps.version.outputs.version_name }}"
+            echo ""
+            echo "### Install"
+            echo ""
+            echo "- **Android:** [BetterMiFitnessSync.apk](https://github.com/${{ github.repository }}/releases/latest/download/BetterMiFitnessSync.apk) — enable install from unknown sources, then install."
+            echo "- **iOS:** [BetterMiFitnessSync.ipa](https://github.com/${{ github.repository }}/releases/latest/download/BetterMiFitnessSync.ipa) — **unsigned**; re-sign with a **paid Apple Developer** team that includes the **HealthKit** entitlement (free Apple ID sideloading is **not** enough)."
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "### Changes since \`$PREV\`"
+              echo ""
+              # Skip merge commits ("Merge pull request #N …") — they only
+              # duplicate the feat/fix commits already listed below.
+              git log --pretty=format:'- %s (%h)' --no-merges "${PREV}..HEAD"
+              echo ""
+            else
+              echo "### Changes"
+              echo ""
+              echo "Initial tagged release."
+              echo ""
+            fi
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Better Mi Fitness Sync ${{ steps.version.outputs.version_name }}
+          body_path: release-notes.md
+          files: |
+            dist/*.apk
+            dist/*.ipa
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
