@@ -199,7 +199,7 @@
     <string name="settings_version">版本</string>
     <string name="settings_credit">致謝</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">背景同步使用 WorkManager（網路可用時約每小時一次，非精確時間）。</string>
+    <string name="background_android_status">背景同步使用 WorkManager（網路可用時約每 15 分鐘一次，非精確時間）。</string>
     <string name="background_simulator_status">模擬器：系統不會自動觸發 BGAppRefresh。請使用「測試 1 天重新整理」或 bettermifitness://debug/bg-refresh</string>
     <string name="background_on">背景 App 重新整理已開啟</string>
     <string name="background_off">背景 App 重新整理已關閉 — 請在設定 → 一般 → 背景 App 重新整理中啟用</string>

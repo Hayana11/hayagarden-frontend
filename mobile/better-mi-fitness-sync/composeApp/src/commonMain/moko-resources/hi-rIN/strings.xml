@@ -199,7 +199,7 @@
     <string name="settings_version">संस्करण</string>
     <string name="settings_credit">श्रेय</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">बैकग्राउंड सिंक WorkManager का उपयोग करता है (~हर घंटे जब नेटवर्क उपलब्ध हो; सटीक समय नहीं)।</string>
+    <string name="background_android_status">बैकग्राउंड सिंक WorkManager का उपयोग करता है (~नेटवर्क उपलब्ध होने पर लगभग हर 15 मिनट में; सटीक समय नहीं)।</string>
     <string name="background_simulator_status">Simulator: सिस्टम कभी स्वचालित रूप से BGAppRefresh नहीं चलाता। "Test 1-day refresh" या bettermifitness://debug/bg-refresh का उपयोग करें</string>
     <string name="background_on">Background App Refresh चालू है</string>
     <string name="background_off">Background App Refresh बंद है — Settings → General → Background App Refresh में सक्षम करें</string>

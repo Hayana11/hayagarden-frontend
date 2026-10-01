@@ -199,7 +199,7 @@
     <string name="settings_version">نسخه</string>
     <string name="settings_credit">اعتبار</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">همگام‌سازی پس‌زمینه از WorkManager استفاده می‌کند (~هر ساعت وقتی شبکه در دسترس است؛ زمان دقیق نیست).</string>
+    <string name="background_android_status">همگام‌سازی پس‌زمینه از WorkManager استفاده می‌کند (~هر ۱۵ دقیقه وقتی شبکه در دسترس است؛ زمان دقیق نیست).</string>
     <string name="background_simulator_status">Simulator: سیستم هرگز خودکار BGAppRefresh اجرا نمی‌کند. از "Test 1-day refresh" یا bettermifitness://debug/bg-refresh استفاده کنید</string>
     <string name="background_on">Background App Refresh روشن است</string>
     <string name="background_off">Background App Refresh خاموش است — در Settings → General → Background App Refresh فعال کنید</string>

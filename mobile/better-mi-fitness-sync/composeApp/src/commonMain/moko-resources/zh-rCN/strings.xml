@@ -199,7 +199,7 @@
     <string name="settings_version">版本</string>
     <string name="settings_credit">致谢</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">后台同步使用 WorkManager（网络可用时约每小时一次，非精确时间）。</string>
+    <string name="background_android_status">后台同步使用 WorkManager（网络可用时约每 15 分钟一次，非精确时间）。</string>
     <string name="background_simulator_status">模拟器：系统不会自动触发 BGAppRefresh。请使用"测试 1 天刷新"或 bettermifitness://debug/bg-refresh</string>
     <string name="background_on">后台 App 刷新已开启</string>
     <string name="background_off">后台 App 刷新已关闭 — 请在设置 → 通用 → 后台 App 刷新中启用</string>

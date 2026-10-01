@@ -199,7 +199,7 @@
     <string name="settings_version">Bersyon</string>
     <string name="settings_credit">Credit</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">Ang background sync ay gumagamit ng WorkManager (~bawat oras kapag may network; hindi eksakto ang oras).</string>
+    <string name="background_android_status">Ang background sync ay gumagamit ng WorkManager (~bawat 15 minuto kapag may network; hindi eksakto ang oras).</string>
     <string name="background_simulator_status">Simulator: hindi awtomatikong nagfa-fire ang system ng BGAppRefresh. Gamitin ang "Test 1-day refresh" o bettermifitness://debug/bg-refresh</string>
     <string name="background_on">Naka-on ang Background App Refresh</string>
     <string name="background_off">Naka-off ang Background App Refresh — i-enable ito sa Settings → General → Background App Refresh</string>

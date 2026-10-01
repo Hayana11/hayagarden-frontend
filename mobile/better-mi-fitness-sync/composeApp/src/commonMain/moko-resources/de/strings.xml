@@ -199,7 +199,7 @@
     <string name="settings_version">Version</string>
     <string name="settings_credit">Danksagung</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">Die Hintergrundsynchronisierung nutzt WorkManager (~stündlich bei verfügbarem Netzwerk; nicht zu exakten Zeiten).</string>
+    <string name="background_android_status">Die Hintergrundsynchronisierung nutzt WorkManager (~alle 15 Minuten bei verfügbarem Netzwerk; nicht zu exakten Zeiten).</string>
     <string name="background_simulator_status">Simulator: Das System löst BGAppRefresh nie automatisch aus. Nutze „Hintergrundaktualisierung testen" oder bettermifitness://debug/bg-refresh</string>
     <string name="background_on">Hintergrundaktualisierung ist aktiviert</string>
     <string name="background_off">Hintergrundaktualisierung ist deaktiviert — aktiviere sie unter Einstellungen → Allgemein → Hintergrundaktualisierung</string>

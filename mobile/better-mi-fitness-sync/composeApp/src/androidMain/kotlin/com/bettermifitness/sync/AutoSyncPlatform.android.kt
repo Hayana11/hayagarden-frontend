@@ -32,9 +32,9 @@ actual object AutoSyncPlatform {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
-        // OS minimum for periodic work is 15 minutes; 1 hour is a battery-friendly default
-        // (still not exact-time — Doze / app standby may delay).
-        val request = PeriodicWorkRequestBuilder<MiSyncWorker>(1, TimeUnit.HOURS)
+        // Android WorkManager minimum periodic interval is 15 minutes.
+        // Timing is opportunistic; Doze / app standby may delay execution.
+        val request = PeriodicWorkRequestBuilder<MiSyncWorker>(15, TimeUnit.MINUTES)
             .setConstraints(constraints)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
             .build()

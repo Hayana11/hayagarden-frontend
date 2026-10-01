@@ -199,7 +199,7 @@
     <string name="settings_version">Sürüm</string>
     <string name="settings_credit">Kredi</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">Arka plan senkronizasyonu WorkManager kullanır (ağ varken yaklaşık saatlik; kesin zamanlı değil).</string>
+    <string name="background_android_status">Arka plan senkronizasyonu WorkManager kullanır (ağ varken yaklaşık 15 dakikada bir; kesin zamanlı değil).</string>
     <string name="background_simulator_status">Simülatör: sistem BGAppRefresh\'i otomatik tetiklemez. "1 günlük yenilemeyi test et"i veya bettermifitness://debug/bg-refresh adresini kullanın</string>
     <string name="background_on">Arka Plan Uygulama Yenilemesi açık</string>
     <string name="background_off">Arka Plan Uygulama Yenilemesi kapalı — Ayarlar → Genel → Arka Plan Uygulama Yenilemesi\'nden etkinleştirin</string>

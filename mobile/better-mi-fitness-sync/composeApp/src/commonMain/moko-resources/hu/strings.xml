@@ -199,7 +199,7 @@
     <string name="settings_version">Verzió</string>
     <string name="settings_credit">Készítő</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">A háttérszinkronizálás a WorkManagert használja (~óránként, ha a hálózat elérhető; nem pontos idő szerint).</string>
+    <string name="background_android_status">A háttérszinkronizálás a WorkManagert használja (~15 percenként, ha a hálózat elérhető; nem pontos idő szerint).</string>
     <string name="background_simulator_status">Szimulátor: a rendszer soha nem indítja el automatikusan a BGAppRefresh parancsot. Használja a „Test 1-day refresh” parancsot, vagy a bettermifitness://debug/bg-refresh parancsot.</string>
     <string name="background_on">Az alkalmazás háttérfrissítése be van kapcsolva</string>
     <string name="background_off">A háttérben történő alkalmazásfrissítés ki van kapcsolva — kapcsolja be a Beállítások → Általános → Háttérben történő alkalmazásfrissítés menüpontban</string>

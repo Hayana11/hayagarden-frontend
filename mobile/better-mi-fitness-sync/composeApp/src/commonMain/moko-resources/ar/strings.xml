@@ -199,7 +199,7 @@
     <string name="settings_version">الإصدار</string>
     <string name="settings_credit">الإسهام</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">تستخدم المزامنة في الخلفية WorkManager (تقريباً كل ساعة عند توفّر الشبكة؛ ليست بتوقيت دقيق).</string>
+    <string name="background_android_status">تستخدم المزامنة في الخلفية WorkManager (تقريباً كل 15 دقيقة عند توفّر الشبكة؛ ليست بتوقيت دقيق).</string>
     <string name="background_simulator_status">المحاكي: لا يُشغّل النظام BGAppRefresh تلقائياً. استخدم "اختبار تحديث يوم واحد" أو bettermifitness://debug/bg-refresh</string>
     <string name="background_on">تحديث التطبيق في الخلفية مفعّل</string>
     <string name="background_off">تحديث التطبيق في الخلفية معطّل — فعّله من الإعدادات ← عام ← تحديث التطبيق في الخلفية</string>

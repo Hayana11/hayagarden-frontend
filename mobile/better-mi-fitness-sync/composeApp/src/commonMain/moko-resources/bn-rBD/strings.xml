@@ -199,7 +199,7 @@
     <string name="settings_version">সংস্করণ</string>
     <string name="settings_credit">কৃতিত্ব</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">ব্যাকগ্রাউন্ড সিংক WorkManager ব্যবহার করে (~প্রতি ঘণ্টায় যখন নেটওয়ার্ক থাকে; নির্দিষ্ট সময়ে নয়)।</string>
+    <string name="background_android_status">ব্যাকগ্রাউন্ড সিংক WorkManager ব্যবহার করে (~নেটওয়ার্ক থাকলে প্রায় প্রতি ১৫ মিনিটে; নির্দিষ্ট সময়ে নয়)।</string>
     <string name="background_simulator_status">Simulator: সিস্টেম কখনো স্বয়ংক্রিয়ভাবে BGAppRefresh চালায় না। "Test 1-day refresh" বা bettermifitness://debug/bg-refresh ব্যবহার করুন</string>
     <string name="background_on">Background App Refresh চালু আছে</string>
     <string name="background_off">Background App Refresh বন্ধ — Settings → General → Background App Refresh-এ সক্রিয় করুন</string>

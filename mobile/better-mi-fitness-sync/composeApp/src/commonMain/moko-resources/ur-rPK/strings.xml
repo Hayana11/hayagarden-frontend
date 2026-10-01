@@ -199,7 +199,7 @@
     <string name="settings_version">ورژن</string>
     <string name="settings_credit">کریڈٹ</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">بیک گراؤنڈ سنک WorkManager استعمال کرتا ہے (~ہر گھنٹے جب نیٹ ورک دستیاب ہو؛ عین وقت نہیں)۔</string>
+    <string name="background_android_status">بیک گراؤنڈ سنک WorkManager استعمال کرتا ہے (~ہر 15 منٹ جب نیٹ ورک دستیاب ہو؛ عین وقت نہیں)۔</string>
     <string name="background_simulator_status">Simulator: سسٹم کبھی خود بخود BGAppRefresh نہیں چلاتا۔ "Test 1-day refresh" یا bettermifitness://debug/bg-refresh استعمال کریں</string>
     <string name="background_on">Background App Refresh آن ہے</string>
     <string name="background_off">Background App Refresh آف ہے — Settings → General → Background App Refresh میں فعال کریں</string>

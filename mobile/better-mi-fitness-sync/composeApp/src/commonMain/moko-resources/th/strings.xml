@@ -199,7 +199,7 @@
     <string name="settings_version">เวอร์ชัน</string>
     <string name="settings_credit">เครดิต</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">การซิงค์พื้นหลังใช้ WorkManager (ประมาณทุกชั่วโมงเมื่อมีเครือข่าย; ไม่ใช่เวลาที่แน่นอน)</string>
+    <string name="background_android_status">การซิงค์พื้นหลังใช้ WorkManager (~ทุก 15 นาทีเมื่อมีเครือข่าย; ไม่ใช่เวลาที่แน่นอน)</string>
     <string name="background_simulator_status">Simulator: ระบบไม่เรียก BGAppRefresh อัตโนมัติ ใช้ "ทดสอบรีเฟรช 1 วัน" หรือ bettermifitness://debug/bg-refresh</string>
     <string name="background_on">การรีเฟรชแอปพื้นหลังเปิดอยู่</string>
     <string name="background_off">การรีเฟรชแอปพื้นหลังปิดอยู่ — เปิดได้ที่ การตั้งค่า → ทั่วไป → การรีเฟรชแอปพื้นหลัง</string>

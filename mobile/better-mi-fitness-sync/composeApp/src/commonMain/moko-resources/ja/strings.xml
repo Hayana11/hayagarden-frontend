@@ -199,7 +199,7 @@
     <string name="settings_version">バージョン</string>
     <string name="settings_credit">クレジット</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">バックグラウンド同期はWorkManagerを使用します（ネットワーク利用可能時に約1時間ごと、正確な時刻ではありません）。</string>
+    <string name="background_android_status">バックグラウンド同期はWorkManagerを使用します（ネットワーク利用可能時に約15分ごと、正確な時刻ではありません）。</string>
     <string name="background_simulator_status">シミュレーター：システムはBGAppRefreshを自動実行しません。「1日分更新をテスト」またはbettermifitness://debug/bg-refreshをお使いください</string>
     <string name="background_on">バックグラウンドApp更新がオンです</string>
     <string name="background_off">バックグラウンドApp更新がオフです — 設定 → 一般 → バックグラウンドApp更新で有効にしてください</string>

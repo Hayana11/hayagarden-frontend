@@ -199,7 +199,7 @@
     <string name="settings_version">Phiên bản</string>
     <string name="settings_credit">Tác giả</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">Đồng bộ nền sử dụng WorkManager (khoảng mỗi giờ khi có mạng; không chính xác về thời gian).</string>
+    <string name="background_android_status">Đồng bộ nền sử dụng WorkManager (~mỗi 15 phút khi có mạng; không phải thời gian chính xác).</string>
     <string name="background_simulator_status">Simulator: hệ thống không tự kích hoạt BGAppRefresh. Dùng "Kiểm tra làm mới 1 ngày" hoặc bettermifitness://debug/bg-refresh</string>
     <string name="background_on">Làm mới ứng dụng nền đang bật</string>
     <string name="background_off">Làm mới ứng dụng nền đang tắt — bật trong Cài đặt → Cài đặt chung → Làm mới ứng dụng nền</string>

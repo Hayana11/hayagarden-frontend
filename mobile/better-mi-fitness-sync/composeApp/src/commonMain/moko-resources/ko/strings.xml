@@ -199,7 +199,7 @@
     <string name="settings_version">버전</string>
     <string name="settings_credit">크레딧</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">백그라운드 동기화는 WorkManager를 사용합니다 (네트워크 사용 가능 시 약 1시간마다, 정확한 시간 아님).</string>
+    <string name="background_android_status">백그라운드 동기화는 WorkManager를 사용합니다 (네트워크 사용 가능 시 약 15분마다, 정확한 시간 아님).</string>
     <string name="background_simulator_status">시뮬레이터: 시스템이 BGAppRefresh를 자동 실행하지 않습니다. "1일 새로고침 테스트" 또는 bettermifitness://debug/bg-refresh를 사용하세요</string>
     <string name="background_on">백그라운드 앱 새로고침이 켜져 있습니다</string>
     <string name="background_off">백그라운드 앱 새로고침이 꺼져 있습니다 — 설정 → 일반 → 백그라운드 앱 새로고침에서 활성화하세요</string>

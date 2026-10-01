@@ -199,7 +199,7 @@
     <string name="settings_version">Version</string>
     <string name="settings_credit">Crédit</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">La synchronisation en arrière-plan utilise WorkManager (~toutes les heures lorsque le réseau est disponible ; pas à heure exacte).</string>
+    <string name="background_android_status">La synchronisation en arrière-plan utilise WorkManager (~toutes les 15 minutes lorsque le réseau est disponible ; pas à heure exacte).</string>
     <string name="background_simulator_status">Simulateur : le système ne déclenche jamais BGAppRefresh automatiquement. Utilisez « Tester l\'actualisation de 1 jour » ou bettermifitness://debug/bg-refresh</string>
     <string name="background_on">L\'actualisation en arrière-plan est activée</string>
     <string name="background_off">L\'actualisation en arrière-plan est désactivée — activez-la dans Réglages → Général → Actualiser en arrière-plan</string>

@@ -199,7 +199,7 @@
     <string name="settings_version">Versão</string>
     <string name="settings_credit">Crédito</string>
     <string name="settings_credit_name">Ilyasa Fathur Rahman (ilyasaftr)</string>
-    <string name="background_android_status">A sincronização em segundo plano usa WorkManager (~a cada hora quando há rede disponível; não em horário exato).</string>
+    <string name="background_android_status">A sincronização em segundo plano usa WorkManager (~a cada 15 minutos quando há rede disponível; não em horário exato).</string>
     <string name="background_simulator_status">Simulador: o sistema nunca executa BGAppRefresh automaticamente. Use "Testar atualização de 1 dia" ou bettermifitness://debug/bg-refresh</string>
     <string name="background_on">Atualização em segundo plano está ativada</string>
     <string name="background_off">Atualização em segundo plano está desativada — ative em Ajustes → Geral → Atualização em Segundo Plano</string>
