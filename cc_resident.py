@@ -363,13 +363,15 @@ def _reconcile_terminal_timeout(
     terminal_receipt,
     provider_error,
 ):
-    """Let an already validated provider result win only a stale stall race.
+    """Reconcile a watchdog stamp with a typed provider terminal receipt.
 
-    The watchdog can commit stall just before the reader consumes a
-    successful type=result that was already waiting on stdout. A typed
-    ProviderTerminalReceipt proves the live provider terminal was complete, so
-    that narrow race must continue through the normal durable-finality path.
-    Hard timeouts and provider errors remain authoritative failures.
+    terminal_reason is the terminal reason stamped by the watchdog/callback
+    and passed in by the caller; it is not
+    ProviderTerminalTracker.terminal_reason. Only a typed
+    ProviderTerminalReceipt constructed from the live
+    type=result, is_error=false, stop_reason=end_turn event is evidence for
+    this narrow stale-stall override. Hard timeouts and provider errors remain
+    authoritative failures.
     """
     if (
         timeout_reason == 'stall'
