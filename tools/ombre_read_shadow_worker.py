@@ -129,8 +129,12 @@ def _single_record_compare(event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _handoff_compare(event: Mapping[str, Any]) -> dict[str, Any]:
-    shadow = ombre_adapter.get_handoff(timeout=3.0, wall_timeout=4.0)
+    shadow = ombre_adapter.get_handoff(timeout=5.0, wall_timeout=8.0)
     result = compare_handoff(dict(event.get("authoritative") or {}), shadow)
+    metadata = dict(result.get("metadata") or {})
+    metadata["handoff_timeout_seconds"] = 5.0
+    metadata["handoff_wall_timeout_seconds"] = 8.0
+    result["metadata"] = metadata
     if shadow is None:
         return _unavailable(result, "shadow_unavailable")
     return result
