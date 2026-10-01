@@ -18,6 +18,9 @@ fi
 if [[ -f /opt/frontend/gallery.db ]]; then
   sqlite3 /opt/frontend/gallery.db ".backup '$TMP/gallery.db'"
 fi
+if [[ -f /opt/frontend/health.db ]]; then
+  sqlite3 /opt/frontend/health.db ".backup '$TMP/health.db'"
+fi
 
 cp /opt/frontend/.env            "$TMP/" 2>/dev/null || true
 cp /opt/frontend/.mijia_auth     "$TMP/" 2>/dev/null || true

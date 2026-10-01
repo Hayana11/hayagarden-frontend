@@ -66,15 +66,18 @@ Runtime state is not source code. The following paths are ignored and preserved
 outside Git during deployment:
 
 - `memories.db-shm` and `memories.db-wal`
+- `health.db`
+- `health.db-shm` and `health.db-wal`
 - `attachments.db` and `attachments/`
 - `client_errors.log`
 - `static/uploads/`
 - `memories.db.bak*`
 
-The SQLite WAL/SHM companions are transient runtime coordination files. They
-are ignored and excluded from source dirtiness, but are never copied or restored
-as independent backups. Database consistency still comes from SQLite's online
-`.backup` operation in `tools/backup.sh`.
+`health.db` is canonical runtime health state. It is ignored by Git and is
+backed up with SQLite's online `.backup` operation in `tools/backup.sh`.
+Its WAL/SHM companions are transient runtime coordination files and are not
+independently restored. The same rule applies to the other SQLite WAL/SHM
+companions listed above.
 
 Before switching commits, the deploy script runs the regular backup, copies
 these paths to a timestamped `/opt/backups/frontend/predeploy-runtime-*`

@@ -2,6 +2,9 @@
 /.xiaomi-health.env
 /.xiaomi-health.env.*.tmp
 memories.db
+/health.db
+/health.db-shm
+/health.db-wal
 backups/
 node_modules/
 __pycache__/
