@@ -75,3 +75,19 @@ The dedicated database is supplied by OMBRE_READ_SHADOW_DB_PATH, for example:
 
 It must not resolve to a production Ombre path, production memories database,
 or any Ombre embeddings database.
+## R4B adapter wiring
+
+The R4B adapter calls the R4A observer only after the authoritative legacy
+result has been fully produced for:
+
+- get_handoff
+- list_memory_records
+- get_memory_record
+- get_emotion_snapshot
+- search_memories
+
+The adapter returns that same authoritative value immediately. Observer import,
+dispatch, spawn, and observer exceptions are fail-open. HTTP backend reads do not
+import or recurse through the observer. Write and surface paths remain
+unobserved. The master and per-operation gates above remain the only dispatch
+authority, and search remains OFF by default.
