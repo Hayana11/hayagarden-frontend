@@ -451,7 +451,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertTrue(authority.submit_timeout_candidate('stall'))
         self.assertFalse(authority.accept_provider_result(self._authority_receipt()))
         self.assertTrue(authority.begin_cleanup('terminal_failure'))
-        self.assertFalse(authority.begin_cleanup())
+        self.assertFalse(authority.begin_cleanup('already_cleaned'))
         authority.record_resident_kill(
             process_present=True,
             reason='stall',
@@ -495,7 +495,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         )
         self.assertTrue(authority.accept_disconnected('generator_exit'))
         self.assertTrue(authority.begin_cleanup('terminal_failure'))
-        self.assertFalse(authority.begin_cleanup())
+        self.assertFalse(authority.begin_cleanup('already_cleaned'))
         authority.record_resident_kill(
             process_present=True,
             reason='generator_exit',
@@ -518,7 +518,7 @@ class ChatTerminalContractTests(unittest.TestCase):
             process_present=True,
             reason='stall',
         )
-        self.assertFalse(authority.begin_cleanup())
+        self.assertFalse(authority.begin_cleanup('already_cleaned'))
         snapshot = authority.snapshot()
         self.assertEqual('STALL', snapshot['terminal_outcome'])
         self.assertEqual(3, snapshot['duplicate_terminal_signal_count'])
