@@ -997,17 +997,17 @@ export function MomentsScreen() {
   }, [emotionHistory]);
 
   const saveMoodCorrection = useCallback(async () => {
-    if (!moodSel?.path || !moodDraft || savingMood) return;
+    if (!moodSel?.bucket_id || !moodDraft || savingMood) return;
     if (!ensureOwner()) return;
     setSavingMood(true);
     try {
-      const updated = await updateEmotionMemory(moodSel.path, moodDraft.valence, moodDraft.arousal);
+      const updated = await updateEmotionMemory(moodSel.bucket_id, moodDraft.valence, moodDraft.arousal);
       setData((prev) => (
         prev
           ? {
               ...prev,
               emotionMemories: prev.emotionMemories.map((point) => (
-                point.path === updated.path ? updated : point
+                point.bucket_id === updated.bucket_id ? updated : point
               )),
             }
           : prev
@@ -1415,7 +1415,7 @@ export function MomentsScreen() {
                         {moodDraft && (
                           <div className="vstack vstack-10" style={{ borderTop: '1px dashed var(--line)', marginTop: 2, paddingTop: 10, display: 'flex', flexDirection: 'column' }}>
                             <span style={{ fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1 }}>
-                              修正这一刻的情绪{moodSel.path ? '' : ' · 该点缺少可写回路径'}
+                              修正这一刻的情绪{moodSel.bucket_id ? '' : ' · 该点缺少可写回 ID'}
                             </span>
                             <div className="hstack hstack-10">
                               <span style={{ fontSize: 11.5, color: 'var(--mut)', width: 50, flexShrink: 0 }}>V 愉悦</span>
@@ -1425,8 +1425,8 @@ export function MomentsScreen() {
                                 max={1}
                                 step={0.01}
                                 value={moodDraft.valence}
-                                disabled={!moodSel.path || savingMood}
-                                style={{ flex: 1, accentColor: 'var(--rose)', opacity: moodSel.path ? 1 : 0.5, cursor: moodSel.path ? 'pointer' : 'not-allowed' }}
+                                disabled={!moodSel.bucket_id || savingMood}
+                                style={{ flex: 1, accentColor: 'var(--rose)', opacity: moodSel.bucket_id ? 1 : 0.5, cursor: moodSel.bucket_id ? 'pointer' : 'not-allowed' }}
                                 onChange={(e) => setMoodDraft((draft) => draft ? { ...draft, valence: Number(e.target.value) } : draft)}
                               />
                               <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11.5, color: 'var(--rose)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.valence >= 0 ? '+' : ''}{moodDraft.valence.toFixed(2)}</span>
@@ -1439,15 +1439,15 @@ export function MomentsScreen() {
                                 max={1}
                                 step={0.01}
                                 value={moodDraft.arousal}
-                                disabled={!moodSel.path || savingMood}
-                                style={{ flex: 1, accentColor: 'var(--gold)', opacity: moodSel.path ? 1 : 0.5, cursor: moodSel.path ? 'pointer' : 'not-allowed' }}
+                                disabled={!moodSel.bucket_id || savingMood}
+                                style={{ flex: 1, accentColor: 'var(--gold)', opacity: moodSel.bucket_id ? 1 : 0.5, cursor: moodSel.bucket_id ? 'pointer' : 'not-allowed' }}
                                 onChange={(e) => setMoodDraft((draft) => draft ? { ...draft, arousal: Number(e.target.value) } : draft)}
                               />
                               <span style={{ fontFamily: FONT_DISPLAY, fontSize: 11.5, color: 'var(--gold)', width: 40, textAlign: 'right', flexShrink: 0 }}>{moodDraft.arousal.toFixed(2)}</span>
                             </div>
                             <div className="hstack hstack-8" style={{ display: 'flex' }}>
-                              <div onClick={resetMoodDraft} style={{ cursor: moodSel.path ? 'pointer' : 'not-allowed', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: 'var(--card)', color: 'var(--mut)', fontSize: 12.5, letterSpacing: 1 }}>还原</div>
-                              <div onClick={() => void saveMoodCorrection()} style={{ cursor: moodSel.path && !savingMood ? 'pointer' : 'not-allowed', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: moodSel.path ? 'var(--rosebg)' : 'var(--card)', color: moodSel.path ? 'var(--deep)' : 'var(--ghost)', fontSize: 12.5, letterSpacing: 1 }}>{savingMood ? '保存中…' : '保存修正'}</div>
+                              <div onClick={resetMoodDraft} style={{ cursor: moodSel.bucket_id ? 'pointer' : 'not-allowed', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: 'var(--card)', color: 'var(--mut)', fontSize: 12.5, letterSpacing: 1 }}>还原</div>
+                              <div onClick={() => void saveMoodCorrection()} style={{ cursor: moodSel.bucket_id && !savingMood ? 'pointer' : 'not-allowed', flex: 1, textAlign: 'center', padding: '9px 0', borderRadius: 999, background: moodSel.bucket_id ? 'var(--rosebg)' : 'var(--card)', color: moodSel.bucket_id ? 'var(--deep)' : 'var(--ghost)', fontSize: 12.5, letterSpacing: 1 }}>{savingMood ? '保存中…' : '保存修正'}</div>
                             </div>
                           </div>
                         )}

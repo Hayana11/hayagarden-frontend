@@ -3103,9 +3103,17 @@ def brain_emotions_proxy():
                 resp.headers['WWW-Authenticate'] = 'Bearer'
             return resp
         payload = request.get_json() or {}
-        path = (payload.get('path') or '').strip()
-        if not path:
-            return jsonify({'ok': False, 'error': 'path required'}), 400
+        raw_bucket_id = payload.get('bucket_id')
+        bucket_id = raw_bucket_id.strip() if isinstance(raw_bucket_id, str) else ''
+        if not bucket_id:
+            legacy_path = payload.get('path')
+            if isinstance(legacy_path, str):
+                basename = re.split(r'[/\\]', legacy_path.strip())[-1]
+                match = re.fullmatch(r'(?:.+_)?([0-9a-fA-F]{12})\.md', basename)
+                if match:
+                    bucket_id = match.group(1).lower()
+        if not bucket_id:
+            return jsonify({'ok': False, 'error': 'bucket_id required'}), 400
         try:
             valence = float(payload.get('valence'))
             arousal = float(payload.get('arousal'))
@@ -3113,8 +3121,8 @@ def brain_emotions_proxy():
             return jsonify({'ok': False, 'error': 'invalid valence or arousal'}), 400
         try:
             import emotion_memories as _em
-            item = _em.update_memory_point(path, valence, arousal)
-            return jsonify({'ok': True, 'item': item})
+            item = _em.update_memory_point(bucket_id, valence, arousal)
+            return jsonify({'ok': True, 'item': item, 'bucket_id': item.get('bucket_id')})
         except ValueError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 400
         except RuntimeError as exc:

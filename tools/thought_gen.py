@@ -3,13 +3,12 @@
 深夜想法生成器 — 每天 22:00 由 cron 调用。
 收集当天白天残留的、未说出口的情绪素材，生成一段费奥多尔的深夜独白。
 """
-import sqlite3, datetime, subprocess, os, sys, glob
+import sqlite3, datetime, subprocess, os, sys
 
 if '/opt/frontend' not in sys.path:
     sys.path.insert(0, '/opt/frontend')
 
 DB_PATH     = '/opt/frontend/memories.db'
-BUCKET_DIR  = '/opt/ombre-brain/buckets/dynamic'
 CLAUDE_BIN  = '/usr/bin/claude'
 
 def _now():
@@ -48,22 +47,24 @@ def get_unsaid_thoughts():
     return [r['thoughts'][:150] for r in rows if r['thoughts']]
 
 def get_emotional_buckets():
-    """ombre-brain 里 arousal >= 0.6 的情绪记忆（高唤醒度残留）"""
+    """ombre records with arousal >= 0.6, through the normalized adapter."""
     try:
-        import frontmatter as _fm
-    except ImportError:
+        from tools import ombre_adapter
+        records = ombre_adapter.list_memory_records(
+            bucket_type="dynamic",
+            min_arousal=0.6,
+            include_content=True,
+            limit=4,
+            sort="last_active_desc",
+        )
+    except Exception:
         return []
-    items = []
-    for path in glob.glob(f'{BUCKET_DIR}/**/*.md', recursive=True):
-        try:
-            post = _fm.load(path)
-            meta = post.metadata
-            if float(meta.get('arousal', 0)) >= 0.6:
-                content = (post.content or '').replace('[[', '').replace(']]', '').strip()[:120]
-                items.append(content)
-        except Exception:
-            continue
-    return items[:4]
+    return [
+        str(record.get("content") or "").replace("[[", "").replace("]]", "").strip()[:120]
+        for record in records
+        if str(record.get("content") or "").strip()
+    ]
+
 
 def get_last_messages():
     """今天的最后 5 条对话"""

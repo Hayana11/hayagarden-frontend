@@ -1,106 +1,71 @@
-"""Read and update per-memory valence/arousal from ombre-brain markdown files."""
+"""Read and update per-memory valence/arousal through the Ombre adapter."""
 
 from __future__ import annotations
 
-import glob
-import os
-from typing import Callable
-
+from tools import ombre_adapter
 from valence_scale import normalize_arousal, normalize_valence
-
-BUCKET_DIR = os.environ.get('OMBRE_BRAIN_BUCKET', '/opt/ombre-brain/buckets/dynamic')
 
 
 def _emotion_label(v: float, a: float) -> str:
     if v >= 0.3 and a >= 0.60:
-        return '喜悦'
+        return "喜悦"
     if v >= 0.3 and a >= 0.40:
-        return '愉悦'
+        return "愉悦"
     if v >= 0.3:
-        return '平静'
+        return "平静"
     if v >= -0.1 and a >= 0.65:
-        return '兴奋'
+        return "兴奋"
     if v >= -0.1 and a < 0.35:
-        return '松弛'
+        return "松弛"
     if v < -0.3 and a >= 0.60:
-        return '焦虑'
+        return "焦虑"
     if v < -0.3 and a >= 0.35:
-        return '沉重'
+        return "沉重"
     if v < -0.3:
-        return '低落'
-    return '迷离'
+        return "低落"
+    return "迷离"
 
 
-def _safe_bucket_path(path: str) -> str:
-    clean = os.path.abspath((path or '').strip())
-    bucket = os.path.abspath(BUCKET_DIR)
-    if not clean.startswith(bucket + os.sep) and clean != bucket:
-        raise ValueError('path outside ombre-brain bucket')
-    return clean
-
-
-def list_memory_points(*, limit: int = 15, load_frontmatter: Callable | None = None) -> list[dict]:
-    try:
-        import frontmatter as fm
-    except ImportError as exc:
-        raise RuntimeError('frontmatter not installed') from exc
-
-    loader = load_frontmatter or fm.load
-    items: list[dict] = []
-    for path in glob.glob(f'{BUCKET_DIR}/**/*.md', recursive=True):
-        try:
-            post = loader(path)
-            meta = post.metadata
-            raw_v = meta.get('valence')
-            raw_a = meta.get('arousal')
-            if raw_v is None or raw_a is None:
-                continue
-            fv = normalize_valence(float(raw_v), scale=meta.get('valence_scale'))
-            fa = normalize_arousal(float(raw_a))
-            note = (post.content or '').replace('[[', '').replace(']]', '').strip()[:80]
-            items.append({
-                'path': path,
-                'time': (meta.get('last_active') or meta.get('created', ''))[:10],
-                'valence': round(fv, 2),
-                'arousal': round(fa, 2),
-                'emotion': _emotion_label(fv, fa),
-                'note': note,
-                'domain': '、'.join(meta.get('domain', [])),
-                'scale': 'bipolar',
-            })
-        except Exception:
-            continue
-    items.sort(key=lambda row: row['time'], reverse=True)
-    return items[:limit]
-
-
-def update_memory_point(path: str, valence: float, arousal: float) -> dict:
-    try:
-        import frontmatter as fm
-    except ImportError as exc:
-        raise RuntimeError('frontmatter not installed') from exc
-
-    safe_path = _safe_bucket_path(path)
-    bipolar_v = max(-1.0, min(1.0, float(valence)))
-    # ombre-brain still consumes bucket valence as unipolar [0, 1]. Keep its
-    # on-disk contract stable while exposing bipolar values through this API.
-    stored_v = (bipolar_v + 1.0) / 2.0
-    arousal_v = max(0.0, min(1.0, float(arousal)))
-
-    post = fm.load(safe_path)
-    post.metadata['valence'] = round(stored_v, 3)
-    post.metadata['arousal'] = round(arousal_v, 3)
-    post.metadata['valence_scale'] = 'unipolar'
-    with open(safe_path, 'w', encoding='utf-8') as handle:
-        handle.write(fm.dumps(post))
-
+def _record_to_point(record: dict) -> dict:
+    raw_v = record.get("valence", 0.5)
+    raw_a = record.get("arousal", 0.3)
+    valence = normalize_valence(float(raw_v), scale="unipolar")
+    arousal = normalize_arousal(float(raw_a))
+    domains = record.get("domain") or []
     return {
-        'path': safe_path,
-        'time': (post.metadata.get('last_active') or post.metadata.get('created', ''))[:10],
-        'valence': round(bipolar_v, 2),
-        'arousal': round(arousal_v, 2),
-        'emotion': _emotion_label(bipolar_v, arousal_v),
-        'note': (post.content or '').replace('[[', '').replace(']]', '').strip()[:80],
-        'domain': '、'.join(post.metadata.get('domain', [])),
-        'scale': 'bipolar',
+        "bucket_id": str(record.get("id") or ""),
+        "time": str(record.get("last_active") or record.get("created") or "")[:10],
+        "valence": round(valence, 2),
+        "arousal": round(arousal, 2),
+        "emotion": _emotion_label(valence, arousal),
+        "note": str(record.get("content") or "").replace("[[", "").replace("]]", "").strip()[:80],
+        "domain": "、".join(str(item) for item in domains),
+        "scale": "bipolar",
     }
+
+
+def list_memory_points(*, limit: int = 15) -> list[dict]:
+    records = ombre_adapter.list_memory_records(
+        bucket_type="dynamic",
+        include_content=True,
+        limit=limit,
+        sort="last_active_desc",
+    )
+    return [_record_to_point(record) for record in records if record.get("id")]
+
+
+def update_memory_point(bucket_id: str, valence: float, arousal: float) -> dict:
+    normalized_id = str(bucket_id or "").strip()
+    if not normalized_id or "/" in normalized_id or "\\" in normalized_id:
+        raise ValueError("valid bucket_id required")
+    result = ombre_adapter.update_memory_emotion(
+        normalized_id,
+        float(valence),
+        float(arousal),
+    )
+    if result is False:
+        raise RuntimeError("emotion update failed")
+    record = ombre_adapter.get_memory_record(normalized_id)
+    if not record:
+        raise RuntimeError("updated emotion record unavailable")
+    return _record_to_point(record)

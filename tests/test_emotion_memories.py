@@ -1,65 +1,73 @@
-import os
-import tempfile
+"""R3C emotion consumer tests for normalized adapter ownership."""
+
+from __future__ import annotations
+
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 
 import emotion_memories
 
 
+def record(bucket_id="abc123def456", *, valence=0.2, arousal=0.4, content="一段记忆。"):
+    return {
+        "id": bucket_id,
+        "name": "memory",
+        "type": "dynamic",
+        "domain": ["恋爱"],
+        "tags": ["情绪"],
+        "valence": valence,
+        "arousal": arousal,
+        "importance": 5.0,
+        "created": "2026-07-10T10:00:00",
+        "last_active": "2026-07-11T10:00:00",
+        "content": content,
+    }
+
+
 class EmotionMemoriesTests(unittest.TestCase):
-    def setUp(self):
-        self.bucket = tempfile.mkdtemp()
-        self.path = os.path.join(self.bucket, 'memory.md')
-        with open(self.path, 'w', encoding='utf-8') as handle:
-            handle.write('---\nvalence: 0.2\narousal: 0.4\ncreated: 2026-07-10\n---\n\n一段记忆。')
-
-    def tearDown(self):
-        os.remove(self.path)
-        os.rmdir(self.bucket)
-
-    def _loader(self, path):
-        with open(path, encoding='utf-8') as handle:
-            text = handle.read()
-        body = text.split('---', 2)[2].strip()
-        meta = {'valence': 0.2, 'arousal': 0.4, 'created': '2026-07-10'}
-        return SimpleNamespace(metadata=meta, content=body)
-
-    def test_list_memory_points_normalizes_unipolar(self):
-        with mock.patch.object(emotion_memories, 'BUCKET_DIR', self.bucket):
-            items = emotion_memories.list_memory_points(load_frontmatter=self._loader)
+    def test_list_uses_active_dynamic_adapter_records_and_normalizes(self):
+        with mock.patch.object(
+            emotion_memories.ombre_adapter,
+            "list_memory_records",
+            return_value=[record()],
+        ) as listed:
+            items = emotion_memories.list_memory_points(limit=15)
+        listed.assert_called_once_with(
+            bucket_type="dynamic",
+            include_content=True,
+            limit=15,
+            sort="last_active_desc",
+        )
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]['path'], self.path)
-        self.assertAlmostEqual(items[0]['valence'], -0.6, places=2)
+        self.assertEqual(items[0]["bucket_id"], "abc123def456")
+        self.assertAlmostEqual(items[0]["valence"], -0.6, places=2)
+        self.assertEqual(items[0]["scale"], "bipolar")
+        self.assertNotIn("path", items[0])
 
-    def test_update_memory_point_keeps_ombre_storage_unipolar(self):
-        dumps_calls = []
+    def test_update_delegates_by_id_then_reads_normalized_record(self):
+        updated = record(valence=0.2, arousal=0.55)
+        with mock.patch.object(
+            emotion_memories.ombre_adapter,
+            "update_memory_emotion",
+            return_value="trace ok",
+        ) as update, mock.patch.object(
+            emotion_memories.ombre_adapter,
+            "get_memory_record",
+            return_value=updated,
+        ) as get:
+            item = emotion_memories.update_memory_point("abc123def456", -0.6, 0.55)
+        update.assert_called_once_with("abc123def456", -0.6, 0.55)
+        get.assert_called_once_with("abc123def456")
+        self.assertEqual(item["bucket_id"], "abc123def456")
+        self.assertAlmostEqual(item["valence"], -0.6, places=2)
+        self.assertNotIn("path", item)
 
-        class FakeFM:
-            @staticmethod
-            def load(path):
-                return emotion_memories.list_memory_points(load_frontmatter=self._loader)[0] if False else SimpleNamespace(
-                    metadata={'valence': 0.2, 'arousal': 0.4, 'created': '2026-07-10'},
-                    content='一段记忆。',
-                )
-
-            @staticmethod
-            def dumps(post):
-                dumps_calls.append(post.metadata)
-                return 'written'
-
-        with mock.patch.object(emotion_memories, 'BUCKET_DIR', self.bucket):
-            with mock.patch.dict('sys.modules', {'frontmatter': FakeFM}):
-                updated = emotion_memories.update_memory_point(self.path, -0.6, 0.55)
-        self.assertEqual(updated['valence'], -0.6)
-        self.assertAlmostEqual(dumps_calls[0]['valence'], 0.2, places=3)
-        self.assertEqual(dumps_calls[0]['valence_scale'], 'unipolar')
-
-    def test_update_rejects_path_outside_bucket(self):
-        with mock.patch.object(emotion_memories, 'BUCKET_DIR', self.bucket):
+    def test_update_rejects_path_shaped_id_without_adapter_call(self):
+        with mock.patch.object(emotion_memories.ombre_adapter, "update_memory_emotion") as update:
             with self.assertRaises(ValueError):
-                emotion_memories.update_memory_point('/tmp/other.md', 0.1, 0.2)
+                emotion_memories.update_memory_point("/somewhere/memory.md", 0.1, 0.2)
+        update.assert_not_called()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -141,3 +141,39 @@ reading production config and deleting real buckets at test teardown.
 
 Track this as a **separate P0 security fix** — not bundled with #134 adapter
 merge/deploy.
+## R3C normalized consumer boundary
+
+R3C consumers use these read-only normalized adapter fields only:
+
+id, name, type, domain, tags, valence, arousal, importance, created, last_active, content
+
+`list_memory_records()` is active-only and supports `bucket_type`, `domain`,
+`min_arousal`, deterministic timestamp ordering, and optional content loading.
+`get_memory_record(bucket_id)` is an ID-based single-record read. Terminal
+records (`type=archived`, `deleted_at`, or `tombstone`) are rejected by both
+legacy and HTTP implementations.
+
+Emotion corrections use `update_memory_emotion(bucket_id, valence, arousal)`.
+Callers supply bipolar valence in `[-1, 1]`; the adapter stores the Ombre
+unipolar value and uses MCP `trace` without reinforcement. Legacy updates use
+the BucketManager ID update primitive. No consumer opens or writes Markdown.
+
+The relationship, thought, emotion, and Moments consumers use the normalized
+adapter boundary. The Discord integration was retired during R3C and is
+outside the Ombre migration surface. No Discord runtime, CLI bridge, or
+credential is required by the R3C deployment.
+
+### R3C1 relationship scope
+
+R3C preserves the historical relationship_context membership through the
+HayaGarden-owned stable bucket-ID baseline in
+chat/relationship_memory_scope.py:
+
+- 69507e2109ef
+- 9e77104ed029
+
+This is a frozen legacy membership compatibility scope for the Ombre backend
+migration, not a general memory taxonomy. Future policies such as
+primary_domain == 恋爱, any-domain matching, an explicit relationship tag, or
+dedicated relationship-anchor metadata are product-semantics changes and must
+be introduced separately after cutover.
