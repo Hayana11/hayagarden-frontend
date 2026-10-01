@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
 import os
-import runpy
-import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -185,34 +181,19 @@ class ConsumerTests(unittest.TestCase):
             sort="last_active_desc",
         )
 
-    def test_cli_returns_only_latest_adapter_content(self):
-        cli_path = str(Path(__file__).parents[1] / "tools" / "ombre_read_cli.py")
-        with mock.patch(
-            "tools.ombre_adapter.list_memory_records",
-            return_value=[{"content": "latest"}],
-        ) as listed, mock.patch.object(
-            sys, "argv",
-            [cli_path, "latest-domain", "--type", "permanent", "--domain", "呼吸间"],
-        ), contextlib.redirect_stdout(io.StringIO()) as output:
-            with self.assertRaises(SystemExit) as raised:
-                runpy.run_path(cli_path, run_name="__main__")
-        self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(output.getvalue(), "latest")
-        listed.assert_called_once_with(
-            bucket_type="permanent",
-            domain="呼吸间",
-            include_content=True,
-            limit=1,
-            sort="last_active_desc",
+    def test_discord_runtime_entrypoints_are_retired(self):
+        root = Path(__file__).parents[1]
+        retired = (
+            "discord-mcp.js",
+            "tools/discord_listener.js",
+            "tools/discord_push.mjs",
+            "tools/discord_push.py",
+            "tools/health-check.sh",
+            "tools/ombre_read_cli.py",
         )
+        for relative in retired:
+            self.assertFalse((root / relative).exists(), relative)
 
-    def test_discord_has_no_direct_breath_path_or_literal_token(self):
-        source = Path(__file__).parents[1].joinpath("tools", "discord_listener.js").read_text(encoding="utf-8")
-        self.assertNotIn("BREATH_DIR", source)
-        self.assertNotIn("XIAOKE_TOKEN", source)
-        self.assertIn("process.env.DISCORD_BOT_TOKEN", source)
-        self.assertIn("ombre_read_cli.py", source)
-        self.assertIn("await loadBreathMemory()", source)
 
 
 if __name__ == "__main__":

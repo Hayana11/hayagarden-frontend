@@ -158,10 +158,10 @@ Callers supply bipolar valence in `[-1, 1]`; the adapter stores the Ombre
 unipolar value and uses MCP `trace` without reinforcement. Legacy updates use
 the BucketManager ID update primitive. No consumer opens or writes Markdown.
 
-The relationship, thought, Discord, and Moments consumers are intentionally
-still dormant on this branch. Discord requires `DISCORD_BOT_TOKEN` from the
-environment and reads the latest `permanent/呼吸间` content through the
-read-only CLI; it has no embedded token fallback.
+The relationship, thought, emotion, and Moments consumers use the normalized
+adapter boundary. The Discord integration was retired during R3C and is
+outside the Ombre migration surface. No Discord runtime, CLI bridge, or
+credential is required by the R3C deployment.
 
 ### R3C1 relationship scope
 
