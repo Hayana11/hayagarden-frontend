@@ -2171,17 +2171,15 @@ class ResidentSession:
         except (BrokenPipeError, OSError) as e:
             if uh_a0_runtime is not None:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
-            self._kill(quiet=True)
             raise ResidentError('Claude Code stdin write failed', error_code='stdin_write_failed') from e
 
         if on_stdin_flushed is not None:
             try:
                 on_stdin_flushed()
             except BaseException:
-                # Message already entered the pipe; fail closed — kill and re-raise.
+                # Message already entered the pipe; outer turn cleanup owns the kill.
                 if uh_a0_runtime is not None:
                     uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
-                self._kill(quiet=True)
                 raise
 
         # 信已塞进门缝：立刻提交 resident 游标（即使后续流中断也不重复塞）
