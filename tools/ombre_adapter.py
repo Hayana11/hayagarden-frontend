@@ -283,7 +283,309 @@ def _timestamp(meta: dict) -> float:
 def _clip(text: Any, limit: int = 420) -> str:
     compact = " ".join(str(text or "").split())
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
+_NORMALIZED_RECORD_FIELDS = (
+    "id",
+    "name",
+    "type",
+    "domain",
+    "tags",
+    "valence",
+    "arousal",
+    "importance",
+    "created",
+    "last_active",
+    "content",
+)
 
+
+def _record_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    """Return one metadata view for legacy buckets and HTTP summaries/details."""
+    nested = item.get("metadata")
+    meta = dict(nested) if isinstance(nested, dict) else {}
+    for key in (
+        "id", "name", "type", "domain", "tags", "valence", "arousal",
+        "importance", "created", "last_active", "deleted_at", "tombstone",
+        "resolved", "digested", "dont_surface", "pinned", "protected",
+        "provenance",
+    ):
+        if key not in meta and key in item:
+            meta[key] = item[key]
+    return meta
+
+
+def _is_terminal_record(item: dict[str, Any]) -> bool:
+    meta = _record_metadata(item)
+    return (
+        str(meta.get("type") or "").strip().lower() == "archived"
+        or bool(meta.get("deleted_at"))
+        or bool(meta.get("tombstone"))
+    )
+
+
+def _as_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    return [str(item) for item in (value or [])]
+
+
+def _number(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalized_record(item: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
+    meta = _record_metadata(item)
+    record = {
+        "id": str(item.get("id") or meta.get("id") or ""),
+        "name": str(meta.get("name") or item.get("name") or item.get("id") or ""),
+        "type": str(meta.get("type") or item.get("type") or ""),
+        "domain": _as_list(meta.get("domain")),
+        "tags": _as_list(meta.get("tags")),
+        "valence": _number(meta.get("valence"), 0.5),
+        "arousal": _number(meta.get("arousal"), 0.3),
+        "importance": _number(meta.get("importance"), 0.0),
+        "created": str(meta.get("created") or ""),
+        "last_active": str(meta.get("last_active") or ""),
+        "content": str(item.get("content") or "") if include_content else "",
+    }
+    return {key: record[key] for key in _NORMALIZED_RECORD_FIELDS}
+
+
+def _record_matches(
+    record: dict[str, Any],
+    *,
+    bucket_type: Optional[str],
+    domain: Optional[str],
+    min_arousal: Optional[float],
+) -> bool:
+    if bucket_type and record["type"] != bucket_type:
+        return False
+    if domain and domain not in record["domain"]:
+        return False
+    if min_arousal is not None and record["arousal"] < float(min_arousal):
+        return False
+    return True
+
+
+def _record_sort_key(record: dict[str, Any]) -> tuple[float, float, str]:
+    return (
+        _timestamp({"last_active": record.get("last_active")}),
+        _timestamp({"created": record.get("created")}),
+        str(record.get("id") or ""),
+    )
+
+
+def _sort_records(records: list[dict[str, Any]], sort: str) -> None:
+    descending = str(sort or "last_active_desc").endswith("_desc")
+    records.sort(key=lambda record: str(record.get("id") or ""))
+    records.sort(
+        key=lambda record: _timestamp({"created": record.get("created")}),
+        reverse=descending,
+    )
+    records.sort(
+        key=lambda record: _timestamp({"last_active": record.get("last_active")}),
+        reverse=descending,
+    )
+
+
+def list_memory_records(
+    *,
+    bucket_type: Optional[str] = None,
+    domain: Optional[str] = None,
+    min_arousal: Optional[float] = None,
+    include_content: bool = False,
+    limit: Optional[int] = None,
+    sort: str = "last_active_desc",
+    timeout: float = 8.0,
+    wall_timeout: Optional[float] = None,
+) -> list[dict[str, Any]]:
+    """List active Ombre records through the selected backend only."""
+    requested_type = str(bucket_type or "").strip()
+
+    def select(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        records = []
+        for item in raw_items:
+            if not isinstance(item, dict) or _is_terminal_record(item):
+                continue
+            record = _normalized_record(item, include_content=include_content)
+            if not record["id"]:
+                continue
+            if _record_matches(
+                record,
+                bucket_type=requested_type or None,
+                domain=domain,
+                min_arousal=min_arousal,
+            ):
+                records.append(record)
+        _sort_records(records, sort)
+        if limit is not None:
+            return records[: max(0, int(limit))]
+        return records
+
+    if _backend() == "http":
+        def worker() -> list[dict[str, Any]]:
+            deadline = time.monotonic() + max(0.05, float(wall_timeout or timeout + 2.0))
+            summaries = _http_json(
+                "/api/buckets",
+                params={"sort": "created_desc"},
+                timeout=min(timeout, max(0.05, deadline - time.monotonic())),
+                deadline=deadline,
+            )
+            candidates = select(list(summaries or []) if isinstance(summaries, list) else [])
+            if not include_content:
+                return candidates
+            enriched: list[dict[str, Any]] = []
+            for candidate in candidates:
+                detail = _http_json(
+                    "/api/bucket/" + urllib.parse.quote(candidate["id"], safe=""),
+                    timeout=min(timeout, max(0.05, deadline - time.monotonic())),
+                    deadline=deadline,
+                )
+                if not isinstance(detail, dict) or _is_terminal_record(detail):
+                    continue
+                enriched_item = dict(detail)
+                enriched_item.setdefault("id", candidate["id"])
+                record = _normalized_record(enriched_item, include_content=True)
+                if _record_matches(
+                    record,
+                    bucket_type=requested_type or None,
+                    domain=domain,
+                    min_arousal=min_arousal,
+                ):
+                    enriched.append(record)
+            _sort_records(enriched, sort)
+            return enriched[: max(0, int(limit))] if limit is not None else enriched
+
+        return _run_sync(
+            worker,
+            wall_timeout=wall_timeout or timeout + 2.0,
+            default=[],
+        )
+
+    async def call() -> list[dict[str, Any]]:
+        server = _load_server()
+        manager = getattr(server, "bucket_mgr", None)
+        if manager is None:
+            return []
+        buckets = await manager.list_all(include_archive=False)
+        return select(list(buckets or []))
+
+    return _run_async(
+        call,
+        async_timeout=timeout,
+        wall_timeout=wall_timeout or timeout + 1.0,
+        default=[],
+    )
+
+
+def get_memory_record(
+    bucket_id: str,
+    *,
+    timeout: float = 8.0,
+    wall_timeout: Optional[float] = None,
+) -> Optional[dict[str, Any]]:
+    """Read one active record by Ombre ID; path-shaped input is not accepted."""
+    normalized_id = str(bucket_id or "").strip()
+    if not normalized_id or "/" in normalized_id or chr(92) in normalized_id:
+        return None
+
+    if _backend() == "http":
+        def worker() -> Optional[dict[str, Any]]:
+            payload = _http_json(
+                "/api/bucket/" + urllib.parse.quote(normalized_id, safe=""),
+                timeout=timeout,
+            )
+            if not isinstance(payload, dict) or _is_terminal_record(payload):
+                return None
+            record = _normalized_record(payload, include_content=True)
+            return record if record["id"] == normalized_id else None
+
+        return _run_sync(
+            worker,
+            wall_timeout=wall_timeout or timeout + 1.0,
+            default=None,
+        )
+
+    async def call() -> Optional[dict[str, Any]]:
+        server = _load_server()
+        manager = getattr(server, "bucket_mgr", None)
+        if manager is None:
+            return None
+        item = await manager.get(normalized_id)
+        if not isinstance(item, dict) or _is_terminal_record(item):
+            return None
+        record = _normalized_record(item, include_content=True)
+        return record if record["id"] == normalized_id else None
+
+    return _run_async(
+        call,
+        async_timeout=timeout,
+        wall_timeout=wall_timeout or timeout + 1.0,
+        default=None,
+    )
+
+
+def _clamp_bipolar(value: Any) -> float:
+    return max(-1.0, min(1.0, float(value)))
+
+
+def _clamp_unit(value: Any) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def update_memory_emotion(
+    bucket_id: str,
+    valence: float,
+    arousal: float,
+    *,
+    timeout: float = 30.0,
+    wall_timeout: Optional[float] = None,
+) -> Any:
+    """Update emotion by ID using the backend's explicit trace/update path."""
+    normalized_id = str(bucket_id or "").strip()
+    if not normalized_id or "/" in normalized_id or chr(92) in normalized_id:
+        raise ValueError("valid bucket_id required")
+    stored_valence = round((_clamp_bipolar(valence) + 1.0) / 2.0, 3)
+    stored_arousal = round(_clamp_unit(arousal), 3)
+
+    if _backend() == "http":
+        async def call() -> str:
+            return await _mcp_call(
+                "trace",
+                {
+                    "bucket_id": normalized_id,
+                    "valence": stored_valence,
+                    "arousal": stored_arousal,
+                },
+                timeout=timeout,
+            )
+
+        return _run_async(
+            call,
+            async_timeout=timeout,
+            wall_timeout=wall_timeout or timeout + 2.0,
+            default=None,
+        )
+
+    async def call_legacy() -> Any:
+        server = _load_server()
+        manager = getattr(server, "bucket_mgr", None)
+        if manager is None:
+            return False
+        return await manager.update(
+            normalized_id,
+            valence=stored_valence,
+            arousal=stored_arousal,
+        )
+
+    return _run_async(
+        call_legacy,
+        async_timeout=timeout,
+        wall_timeout=wall_timeout or timeout + 1.0,
+        default=False,
+    )
 
 async def _safe_handoff_async(server: Any) -> str:
     """Build handoff from buckets without LLM calls, permanent leakage or touch."""

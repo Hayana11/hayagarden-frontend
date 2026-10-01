@@ -30,7 +30,7 @@ interface DreamRow {
 }
 
 interface EmotionMemoryRow {
-  path?: string;
+  bucket_id: string;
   time: string;
   valence: number;
   arousal: number;
@@ -197,7 +197,7 @@ export interface MomentsFeedPage {
 }
 
 export interface EmotionMemoryPoint {
-  path?: string;
+  bucket_id: string;
   time: string;
   valence: number;
   arousal: number;
@@ -445,7 +445,7 @@ export async function fetchMomentsData(): Promise<MomentsData> {
 
   const emotionMemories: EmotionMemoryPoint[] = emoMemRes?.ok
     ? (emoMemRes.items || []).map((r) => ({
-        path: r.path,
+        bucket_id: r.bucket_id,
         time: r.time,
         valence: r.valence,
         arousal: r.arousal,
@@ -502,7 +502,7 @@ export async function fetchEmotionHistory(days: 7 | 30 = 7): Promise<EmotionHist
 }
 
 export async function updateEmotionMemory(
-  path: string,
+  bucketId: string,
   valence: number,
   arousal: number,
 ): Promise<EmotionMemoryPoint> {
@@ -510,13 +510,13 @@ export async function updateEmotionMemory(
     ok: boolean;
     item?: EmotionMemoryRow;
     error?: string;
-  }>('/api/brain/emotions', { path, valence, arousal });
+  }>('/api/brain/emotions', { bucket_id: bucketId, valence, arousal });
   if (!response.ok || !response.item) {
     throw new Error(response.error || 'emotion update failed');
   }
   const item = response.item;
   return {
-    path: item.path,
+    bucket_id: item.bucket_id,
     time: item.time,
     valence: item.valence,
     arousal: item.arousal,

@@ -2,13 +2,17 @@
 const { Client, GatewayIntentBits } = require('/root/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/discord/node_modules/discord.js');
 const { execFile }  = require('child_process');
 const fs            = require('fs');
-const path          = require('path');
 
-const XIAOKE_TOKEN  = 'MTUxNTY2MjIyODY1OTg5NjM0MA.GdtR3K.benAOK0NfDpH9ne0Hu_tW1dE53lpI3kel7dUjs';
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const PYTHON_BIN    = process.env.PYTHON_BIN || '/usr/bin/python3';
+const OMBRE_READ_CLI = '/opt/frontend/tools/ombre_read_cli.py';
+if (!DISCORD_BOT_TOKEN) {
+  console.error('[listener] DISCORD_BOT_TOKEN is required');
+  process.exit(1);
+}
 const CHANNEL_ID    = '1515664908489064530';
 const CLAUDE        = '/usr/bin/claude';
 const PERSONA_PATH  = '/var/lib/hayagarden/persona.md';
-const BREATH_DIR    = '/opt/ombre-brain/buckets/permanent/呼吸间';
 const SESSION_FILE  = '/opt/frontend/tools/.discord-session-id';
 
 function loadPersona() {
@@ -16,12 +20,14 @@ function loadPersona() {
 }
 
 function loadBreathMemory() {
-  try {
-    const files = fs.readdirSync(BREATH_DIR).filter(f => f.endsWith('.md'));
-    if (!files.length) return null;
-    files.sort();
-    return fs.readFileSync(path.join(BREATH_DIR, files[files.length - 1]), 'utf8');
-  } catch { return null; }
+  return new Promise(resolve => {
+    execFile(
+      PYTHON_BIN,
+      [OMBRE_READ_CLI, 'latest-domain', '--type', 'permanent', '--domain', '呼吸间'],
+      { env: { ...process.env }, cwd: '/opt/frontend', timeout: 5000, maxBuffer: 1024 * 1024 },
+      (err, stdout) => resolve(err ? null : (stdout || '').trim() || null),
+    );
+  });
 }
 
 function loadSessionId() {
@@ -70,7 +76,7 @@ client.on('messageCreate', async msg => {
 
   const sessionId = loadSessionId();
   const persona   = !sessionId ? loadPersona() : '';
-  const breath    = !sessionId ? loadBreathMemory() : null;
+  const breath    = !sessionId ? await loadBreathMemory() : null;
 
   let prompt;
   if (fromOther) {
@@ -159,6 +165,6 @@ client.on('messageCreate', async msg => {
   );
 });
 
-client.login(XIAOKE_TOKEN).catch(e => { console.error('[listener] login failed:', e.message); process.exit(1); });
+client.login(DISCORD_BOT_TOKEN).catch(e => { console.error('[listener] login failed:', e.message); process.exit(1); });
 process.on('SIGTERM', () => { client.destroy(); process.exit(0); });
 process.on('SIGINT',  () => { client.destroy(); process.exit(0); });

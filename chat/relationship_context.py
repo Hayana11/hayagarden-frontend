@@ -1,4 +1,4 @@
-"""Relationship continuity from Ombre bucket files and local SQLite.
+"""Relationship continuity from normalized Ombre records and local SQLite.
 
 Content rules (module contract — do not violate in sources or assembly):
 - Describe relationship facts, temperature, and recent continuity only.
@@ -13,15 +13,15 @@ this module only guarantees relationship_context itself does not depend on hando
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import glob
 import hashlib
 import logging
 import os
 import re
 from typing import Callable, Optional
 
+from tools import ombre_adapter
+
 MAX_CONTEXT_CHARS = 400
-RELATIONSHIP_BUCKET_DIR = '/opt/ombre-brain/buckets/permanent/恋爱'
 # 手写关系锚点：存在且非空时优先于桶截断。连贯散文,由哈娅维护;
 # 它同时是内容和语体示范,编辑后 mtime 变化即触发刷新。
 PROSE_ANCHOR_PATH = '/opt/frontend/prompts/relationship_anchor.md'
@@ -125,45 +125,42 @@ def _read_prose_anchor(
 
 
 def _read_relationship_anchor(
-    bucket_dir: str = RELATIONSHIP_BUCKET_DIR,
     *,
     total_limit: int = 250,
     prose_path: Optional[str] = None,
 ) -> tuple[str, Optional[str], str]:
-    """Read all permanent relationship bucket markdown files (sorted by name).
+    """Read the active permanent 恋爱 records through the normalized adapter.
 
-    Selection rule: every ``*.md`` under the directory is included.  Each file
-    gets a fair share of ``total_limit`` chars
-    (``max(30, total_limit // n)``) so a long first file cannot starve later
-    buckets.  Fingerprint is a hash of the cleaned merged body.
+    The prose anchor remains authoritative when present.  Adapter records are
+    cleaned and fairly shared so one long memory cannot starve the rest.
     """
     prose_text, prose_fp, prose_health = _read_prose_anchor(prose_path)
     if prose_health == SOURCE_OK:
         return prose_text, prose_fp, SOURCE_OK
     try:
-        if not os.path.isdir(bucket_dir):
-            _log(f'relationship anchor missing: bucket dir not found: {bucket_dir}')
-            return '', None, SOURCE_MISSING
-        files = sorted(glob.glob(os.path.join(bucket_dir, '*.md')))
-        if not files:
-            _log(f'relationship anchor missing: no .md files in {bucket_dir}')
-            return '', None, SOURCE_MISSING
-        per_file_limit = max(30, total_limit // len(files))
+        records = ombre_adapter.list_memory_records(
+            bucket_type="permanent",
+            domain="恋爱",
+            include_content=True,
+            sort="last_active_desc",
+        )
+        if not records:
+            _log("relationship anchor missing: adapter returned no active records")
+            return "", None, SOURCE_MISSING
+        per_record_limit = max(30, total_limit // len(records))
         snippets = []
-        for path in files:
-            with open(path, encoding='utf-8') as fh:
-                raw = _strip_frontmatter(fh.read())
-            snippet = _clean_text(raw, per_file_limit)
+        for record in records:
+            snippet = _clean_text(record.get("content", ""), per_record_limit)
             if snippet:
                 snippets.append(snippet)
-        body = _clean_text('\n'.join(snippets), total_limit)
+        body = _clean_text("\n".join(snippets), total_limit)
         if not body:
-            _log('relationship anchor missing: bucket files empty after clean')
-            return '', None, SOURCE_MISSING
+            _log("relationship anchor missing: adapter records empty after clean")
+            return "", None, SOURCE_MISSING
         return body, _content_hash(body), SOURCE_OK
     except Exception as exc:
-        _log(f'relationship anchor error: {exc}')
-        return '', None, SOURCE_ERROR
+        _log(f"relationship anchor error: {exc}")
+        return "", None, SOURCE_ERROR
 
 
 def _latest_daily_summary_head(
@@ -260,13 +257,10 @@ def _fingerprint(anchor_fp: Optional[str], recent: str, mood: str) -> str:
 def build_relationship_context(
     get_db_fn: Callable,
     *,
-    bucket_dir: str = RELATIONSHIP_BUCKET_DIR,
     prose_path: Optional[str] = None,
     previous_mood: Optional[str] = None,  # 兼容旧调用方,已不参与组装
 ) -> RelationshipContextResult:
-    anchor, anchor_fp, anchor_health = _read_relationship_anchor(
-        bucket_dir, prose_path=prose_path,
-    )
+    anchor, anchor_fp, anchor_health = _read_relationship_anchor(prose_path=prose_path)
     recent, daily_health = _latest_daily_summary_head(get_db_fn)
     # 教训:注入到用户消息附近的情绪遥测("当前基调:低唤醒")会被模型读作
     # 语体指令,arousal 基线偏低时形成持续的"收着写"压力。基调行不再进入
