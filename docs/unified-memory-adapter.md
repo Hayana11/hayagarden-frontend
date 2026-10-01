@@ -162,3 +162,18 @@ The relationship, thought, Discord, and Moments consumers are intentionally
 still dormant on this branch. Discord requires `DISCORD_BOT_TOKEN` from the
 environment and reads the latest `permanent/呼吸间` content through the
 read-only CLI; it has no embedded token fallback.
+
+### R3C1 relationship scope
+
+R3C preserves the historical relationship_context membership through the
+HayaGarden-owned stable bucket-ID baseline in
+chat/relationship_memory_scope.py:
+
+- 69507e2109ef
+- 9e77104ed029
+
+This is a frozen legacy membership compatibility scope for the Ombre backend
+migration, not a general memory taxonomy. Future policies such as
+primary_domain == 恋爱, any-domain matching, an explicit relationship tag, or
+dedicated relationship-anchor metadata are product-semantics changes and must
+be introduced separately after cutover.

@@ -19,6 +19,7 @@ import os
 import re
 from typing import Callable, Optional
 
+from chat.relationship_memory_scope import RELATIONSHIP_MEMORY_IDS
 from tools import ombre_adapter
 
 MAX_CONTEXT_CHARS = 400
@@ -129,21 +130,21 @@ def _read_relationship_anchor(
     total_limit: int = 250,
     prose_path: Optional[str] = None,
 ) -> tuple[str, Optional[str], str]:
-    """Read the active permanent 恋爱 records through the normalized adapter.
+    """Read the frozen legacy relationship membership through the adapter.
 
-    The prose anchor remains authoritative when present.  Adapter records are
-    cleaned and fairly shared so one long memory cannot starve the rest.
+    The prose anchor remains authoritative when present.  The configured bucket
+    IDs preserve the pre-migration relationship_context membership exactly;
+    this scope is not a general domain or tag taxonomy.
     """
     prose_text, prose_fp, prose_health = _read_prose_anchor(prose_path)
     if prose_health == SOURCE_OK:
         return prose_text, prose_fp, SOURCE_OK
     try:
-        records = ombre_adapter.list_memory_records(
-            bucket_type="permanent",
-            domain="恋爱",
-            include_content=True,
-            sort="last_active_desc",
-        )
+        records = []
+        for bucket_id in RELATIONSHIP_MEMORY_IDS:
+            record = ombre_adapter.get_memory_record(bucket_id)
+            if record is not None:
+                records.append(record)
         if not records:
             _log("relationship anchor missing: adapter returned no active records")
             return "", None, SOURCE_MISSING

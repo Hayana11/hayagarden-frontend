@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import sys
@@ -18,10 +19,12 @@ from chat.relationship_context import (
     SOURCE_ERROR,
     SOURCE_MISSING,
     SOURCE_OK,
+    _read_relationship_anchor,
     build_relationship_context,
     rel_context_status,
     should_send_relationship,
 )
+from chat.relationship_memory_scope import RELATIONSHIP_MEMORY_IDS
 
 
 class RelationshipContextTests(unittest.TestCase):
@@ -35,8 +38,8 @@ class RelationshipContextTests(unittest.TestCase):
         self.addCleanup(self.prose_patcher.stop)
         self.records = [
             {
-                "id": "relationship-a",
-                "name": "a",
+                "id": "69507e2109ef",
+                "name": "relationship-primary",
                 "type": "permanent",
                 "domain": ["恋爱"],
                 "tags": [],
@@ -47,10 +50,27 @@ class RelationshipContextTests(unittest.TestCase):
                 "last_active": "2026-07-18T10:00:00",
                 "content": "我们是长期伴侣，彼此信任。",
             },
+            {
+                "id": "9e77104ed029",
+                "name": "relationship-secondary",
+                "type": "permanent",
+                "domain": ["恋爱"],
+                "tags": [],
+                "valence": 0.6,
+                "arousal": 0.4,
+                "importance": 8.0,
+                "created": "2026-07-18T10:00:00",
+                "last_active": "2026-07-18T09:00:00",
+                "content": "我们共同维护长期关系的约定。",
+            },
         ]
+
+        def get_record(bucket_id):
+            return next((record for record in self.records if record["id"] == bucket_id), None)
+
         self.adapter = mock.patch(
-            "chat.relationship_context.ombre_adapter.list_memory_records",
-            side_effect=lambda **kwargs: list(self.records),
+            "chat.relationship_context.ombre_adapter.get_memory_record",
+            side_effect=get_record,
         )
         self.adapter_mock = self.adapter.start()
         self.addCleanup(self.adapter.stop)
@@ -85,26 +105,67 @@ class RelationshipContextTests(unittest.TestCase):
     def build(self):
         return build_relationship_context(self.get_db, prose_path=self.prose_path)
 
-    def test_adapter_selection_preserves_filters_and_fair_share(self):
+    def test_stable_scope_selection_preserves_order_and_fair_share(self):
         self.records = [
             {
                 **self.records[0],
-                "id": "long",
                 "content": "首文件独白。" + ("很长的前情提要内容" * 40),
             },
             {
-                **self.records[0],
-                "id": "later",
+                **self.records[1],
                 "content": "第二桶锚点：彼此信任的约定。",
             },
         ]
         result = self.build()
         self.assertIn("首文件独白", result.text)
         self.assertIn("第二桶锚点", result.text)
-        call = self.adapter_mock.call_args
-        self.assertEqual(call.kwargs["bucket_type"], "permanent")
-        self.assertEqual(call.kwargs["domain"], "恋爱")
-        self.assertTrue(call.kwargs["include_content"])
+        self.assertEqual(
+            [call.args[0] for call in self.adapter_mock.call_args_list],
+            list(RELATIONSHIP_MEMORY_IDS),
+        )
+
+    def test_scope_id_and_body_hash_parity(self):
+        body, fingerprint, health = _read_relationship_anchor(
+            prose_path=self.prose_path,
+        )
+        expected = "我们是长期伴侣，彼此信任。 我们共同维护长期关系的约定。"
+        self.assertEqual(list(RELATIONSHIP_MEMORY_IDS), [
+            "69507e2109ef",
+            "9e77104ed029",
+        ])
+        self.assertEqual(health, SOURCE_OK)
+        self.assertEqual(body, expected)
+        self.assertEqual(
+            fingerprint,
+            hashlib.sha256(expected.encode("utf-8")).hexdigest()[:16],
+        )
+
+    def test_secondary_domain_false_positive_is_excluded(self):
+        self.records.append({
+            **self.records[0],
+            "id": "23a485598daf",
+            "domain": ["记忆系统", "恋爱"],
+            "content": "不属于历史关系 scope 的跨域记录。",
+        })
+        result = self.build()
+        self.assertNotIn("不属于历史关系 scope", result.text)
+        self.assertEqual(
+            [call.args[0] for call in self.adapter_mock.call_args_list],
+            list(RELATIONSHIP_MEMORY_IDS),
+        )
+
+    def test_configured_scope_order_is_deterministic(self):
+        self.records = list(reversed(self.records))
+        body, _, health = _read_relationship_anchor(prose_path=self.prose_path)
+        self.assertEqual(health, SOURCE_OK)
+        self.assertLess(
+            body.index("长期伴侣"),
+            body.index("共同维护长期关系"),
+        )
+        self.assertEqual(
+            [call.args[0] for call in self.adapter_mock.call_args_list],
+            list(RELATIONSHIP_MEMORY_IDS),
+        )
 
     def test_wikilink_brackets_are_cleaned(self):
         self.records[0]["content"] = "[[哈娅]]和[[费奥多尔]]彼此信任。"
