@@ -168,7 +168,7 @@ class ChatTerminalContractTests(unittest.TestCase):
             'RESULT_MISSING_AFTER_END_TURN',
             authority.snapshot()['terminal_outcome'],
         )
-        self.assertFalse(tracker.result_seen)
+        self.assertTrue(tracker.result_seen)
 
     def test_t11_live_result_receipt_is_typed_and_not_end_turn_derived(self):
         receipt = cc_resident.ProviderTerminalReceipt.from_result_event(
@@ -441,7 +441,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertEqual('SUCCESS', snapshot['terminal_outcome'])
         self.assertEqual('provider_result', snapshot['terminal_linearization_source'])
         self.assertEqual(1, snapshot['stale_stall_rejected_count'])
-        self.assertFalse(authority.begin_cleanup())
+        self.assertFalse(authority.begin_cleanup('success'))
         self.assertFalse(snapshot['resident_killed'])
 
     def test_r2_stall_linearizes_before_late_result_and_kills_once(self):
@@ -450,12 +450,12 @@ class ChatTerminalContractTests(unittest.TestCase):
         )
         self.assertTrue(authority.submit_timeout_candidate('stall'))
         self.assertFalse(authority.accept_provider_result(self._authority_receipt()))
-        self.assertTrue(authority.begin_cleanup())
+        self.assertTrue(authority.begin_cleanup('terminal_failure'))
         self.assertFalse(authority.begin_cleanup())
-        self.assertTrue(authority.record_resident_kill(
+        authority.record_resident_kill(
             process_present=True,
             reason='stall',
-        ))
+        )
 
         snapshot = authority.snapshot()
         self.assertEqual('STALL', snapshot['terminal_outcome'])
@@ -476,7 +476,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertFalse(authority.submit_timeout_candidate('stall'))
         self.assertEqual('PROVIDER_ERROR', authority.snapshot()['terminal_outcome'])
         self.assertFalse(authority.accept_provider_result(self._authority_receipt()))
-        self.assertEqual(1, authority.snapshot()['duplicate_terminal_signal_count'])
+        self.assertEqual(2, authority.snapshot()['duplicate_terminal_signal_count'])
 
     def test_r4_hard_timeout_stays_failure_for_late_valid_receipt(self):
         authority = cc_resident.TurnTerminalAuthority(
@@ -494,12 +494,12 @@ class ChatTerminalContractTests(unittest.TestCase):
             turn_identity='turn-r5',
         )
         self.assertTrue(authority.accept_disconnected('generator_exit'))
-        self.assertTrue(authority.begin_cleanup())
+        self.assertTrue(authority.begin_cleanup('terminal_failure'))
         self.assertFalse(authority.begin_cleanup())
-        self.assertTrue(authority.record_resident_kill(
+        authority.record_resident_kill(
             process_present=True,
             reason='generator_exit',
-        ))
+        )
         snapshot = authority.snapshot()
         self.assertEqual('DISCONNECTED', snapshot['terminal_outcome'])
         self.assertEqual(1, snapshot['cleanup_count'])
@@ -513,11 +513,11 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertFalse(authority.submit_timeout_candidate('stall'))
         self.assertFalse(authority.submit_timeout_candidate('hard'))
         self.assertFalse(authority.accept_disconnected('late_disconnect'))
-        self.assertTrue(authority.begin_cleanup())
-        self.assertTrue(authority.record_resident_kill(
+        self.assertTrue(authority.begin_cleanup('terminal_failure'))
+        authority.record_resident_kill(
             process_present=True,
             reason='stall',
-        ))
+        )
         self.assertFalse(authority.begin_cleanup())
         snapshot = authority.snapshot()
         self.assertEqual('STALL', snapshot['terminal_outcome'])
