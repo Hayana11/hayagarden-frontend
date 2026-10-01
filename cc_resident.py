@@ -356,6 +356,29 @@ class ProviderTerminalTracker:
         }
 
 
+def _reconcile_terminal_timeout(
+    timeout_reason,
+    terminal_reason,
+    *,
+    terminal_receipt,
+    provider_error,
+):
+    """Let an already validated provider result win only a stale stall race.
+
+    The watchdog can commit stall just before the reader consumes a
+    successful type=result that was already waiting on stdout. A typed
+    ProviderTerminalReceipt proves the live provider terminal was complete, so
+    that narrow race must continue through the normal durable-finality path.
+    Hard timeouts and provider errors remain authoritative failures.
+    """
+    if (
+        timeout_reason == 'stall'
+        and terminal_receipt is not None
+        and provider_error is None
+    ):
+        return None, 'result', True
+    return timeout_reason, terminal_reason, False
+
 class StreamWatchdog:
     """Single-thread stall + hard deadline watchdog for one send_turn.
 
@@ -2381,6 +2404,17 @@ class ResidentSession:
             _close_round(current_round, 'loop_finalizer', complete=False)
             current_round = None
 
+        (
+            timeout_reason[0],
+            terminal_reason[0],
+            stall_result_race_recovered,
+        ) = _reconcile_terminal_timeout(
+            timeout_reason[0],
+            terminal_reason[0],
+            terminal_receipt=terminal_receipt,
+            provider_error=provider_error,
+        )
+
         usage = summarize_rounds(
             rounds,
             resident_turn_count=self._resident_turn_count + 1,
@@ -2399,6 +2433,7 @@ class ResidentSession:
         usage['_obs_end_turn_seen_at'] = terminal.end_turn_seen_at
         usage['_obs_result_seen'] = bool(terminal.result_seen)
         usage['_obs_terminal_reason'] = terminal_reason[0] or terminal.terminal_reason
+        usage['_obs_stall_result_race_recovered'] = bool(stall_result_race_recovered)
         usage['_obs_turn_identity'] = terminal.turn_identity
         usage['_obs_effort'] = getattr(self, '_effort_value', None)
         usage['_obs_keepwarm_lease_expires_at'] = self._keepwarm_lease_expires_at
