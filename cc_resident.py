@@ -2047,13 +2047,30 @@ class ResidentSession:
                         # session is not reusable and the same input is never replayed.
                         self._runtime_rollback_pending = None
                         self._next_spawn_reason = 'process_dead'
-                    self._kill(quiet=True)
+                    authority = getattr(
+                        self, '_active_terminal_authority', None,
+                    )
+                    if authority is None:
+                        self._kill(quiet=True)
+                    else:
+                        if not authority.is_terminal():
+                            authority.accept_disconnected('send_turn_exception')
+                        if authority.begin_cleanup('send_turn_exception'):
+                            process_present = self._proc is not None
+                            try:
+                                self._kill(quiet=True)
+                            finally:
+                                authority.record_resident_kill(
+                                    'send_turn_exception',
+                                    process_present=process_present,
+                                )
                 raise
             finally:
                 with self._turn_state_lock:
                     self._last_turn_stdin_write_started = bool(self._turn_write_started)
                     self._last_turn_stdin_flushed = bool(self._turn_stdin_flushed)
                     self._turn_active = False
+                self._active_terminal_authority = None
 
     def _send_turn_impl(
         self,
@@ -2082,6 +2099,15 @@ class ResidentSession:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
+
+        # Bind one authority before any turn-side effect. The outer
+        # send_turn exception path uses this same object for bounded cleanup.
+        stall_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
+        hard_timeout = _cfg_int('CC_STREAM_HARD_TIMEOUT', CC_STREAM_HARD_TIMEOUT)
+        result_grace = _cfg_int('CC_STREAM_RESULT_GRACE', CC_STREAM_RESULT_GRACE)
+        terminal = ProviderTerminalTracker(result_grace)
+        authority = TurnTerminalAuthority(turn_identity=terminal.turn_identity)
+        self._active_terminal_authority = authority
 
         uh_a0_runtime = None
         uh_a0_turn_id = None
@@ -2166,13 +2192,7 @@ class ResidentSession:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
             raise
 
-        # Stall = inactivity; hard = absolute ceiling. Defaults stay 360 / 1800.
-        stall_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
-        hard_timeout = _cfg_int('CC_STREAM_HARD_TIMEOUT', CC_STREAM_HARD_TIMEOUT)
-        result_grace = _cfg_int('CC_STREAM_RESULT_GRACE', CC_STREAM_RESULT_GRACE)
-        terminal = ProviderTerminalTracker(result_grace)
-        authority = TurnTerminalAuthority(turn_identity=terminal.turn_identity)
-
+        # Watchdog observes the same authority but only submits a candidate.
         def _submit_timeout_candidate(reason):
             authority.submit_timeout_candidate(reason)
 
