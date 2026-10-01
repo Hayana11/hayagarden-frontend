@@ -1,5 +1,7 @@
+import json
 import pathlib
 import unittest
+from unittest import mock
 
 import cc_resident
 
@@ -230,6 +232,161 @@ class ChatTerminalContractTests(unittest.TestCase):
                 provider_error={'error_code': 'provider_error'},
             ),
         )
+
+    def _run_deterministic_send_turn(self, events, watchdog_reason):
+        """Run the actual send_turn path with a deterministic watchdog signal."""
+        watchdogs = []
+        kill_calls = []
+
+        class FakeStream:
+            def __init__(self, rows):
+                self._rows = iter(json.dumps(row) + chr(10) for row in rows)
+
+            def readline(self):
+                return next(self._rows, '')
+
+            def close(self):
+                return None
+
+        class FakeStdin:
+            def write(self, payload):
+                self.payload = payload
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class FakeProc:
+            pid = 7001
+
+            def __init__(self, rows):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStream(rows)
+                self.stderr = FakeStream([])
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return None
+
+            def kill(self):
+                return None
+
+        class DeterministicWatchdog:
+            def __init__(self, *, on_timeout, **kwargs):
+                self._on_timeout = on_timeout
+                self.reason = watchdog_reason
+                self.committed = False
+                watchdogs.append(self)
+
+            def start(self):
+                self.committed = True
+                if self.reason is not None:
+                    self._on_timeout(self.reason)
+
+            def stop(self):
+                return None
+
+            def note_activity(self):
+                return None
+
+        session = cc_resident.ResidentSession(
+            '/tmp', '', '/tmp/mcp.json',
+        )
+        session._proc = FakeProc(events)
+        session._generation = 7
+        session._session_id = 'session-race'
+        session._attach_jsonl_usage_with_retry = (
+            lambda usage, cursor, **kwargs: usage
+        )
+        # Keep the fake pipe readable after the callback's kill request so the
+        # fixture models the exact ordering under test: watchdog commit first,
+        # reader consumes the already-complete provider result second.
+        session._kill = lambda quiet=False: kill_calls.append(bool(quiet))
+
+        with mock.patch.object(
+            cc_resident, 'StreamWatchdog', DeterministicWatchdog,
+        ):
+            chunks = list(session.send_turn('race', commit_meta=None))
+        return chunks, session, watchdogs, kill_calls
+
+    def test_t13_send_turn_stall_then_valid_result_completes_terminal_path(self):
+        events = [
+            {
+                'type': 'assistant',
+                'message': {
+                    'stop_reason': 'end_turn',
+                    'content': [{'type': 'text', 'text': 'complete reply'}],
+                },
+            },
+            {
+                'type': 'result',
+                'is_error': False,
+                'stop_reason': 'end_turn',
+                'usage': {},
+            },
+        ]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(events, 'stall')
+        )
+        self.assertEqual(['stall'], [watchdog.reason for watchdog in watchdogs])
+        self.assertTrue(watchdogs[0].committed)
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        text, thinking, usage, claims = chunks[0][1]
+        self.assertEqual('complete reply', text)
+        self.assertEqual('', thinking)
+        self.assertEqual([], claims)
+        self.assertIsInstance(
+            usage.terminal_receipt,
+            cc_resident.ProviderTerminalReceipt,
+        )
+        self.assertEqual('provider_result', usage.terminal_receipt.terminal_kind)
+        self.assertEqual('result', usage['_obs_terminal_reason'])
+        self.assertTrue(usage['_obs_stall_result_race_recovered'])
+        self.assertEqual(1, usage['resident_turn_count'])
+        self.assertFalse(session.is_cold())
+        self.assertTrue(kill_calls)  # Phase A preserves the existing kill semantics.
+
+    def test_t14_send_turn_failure_paths_remain_failures(self):
+        cases = (
+            (
+                'true_stall',
+                [],
+                'stall',
+                'provider_stall_timeout',
+            ),
+            (
+                'provider_error',
+                [{
+                    'type': 'result',
+                    'is_error': True,
+                    'stop_reason': 'end_turn',
+                    'result': 'provider failure',
+                }],
+                None,
+                'provider_error',
+            ),
+            (
+                'hard_timeout',
+                [],
+                'hard',
+                'provider_hard_timeout',
+            ),
+        )
+        for name, events, watchdog_reason, expected_code in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(cc_resident.ResidentError) as caught:
+                    self._run_deterministic_send_turn(
+                        events, watchdog_reason,
+                    )
+                self.assertEqual(expected_code, caught.exception.error_code)
+
     def test_t12_daily_runtime_forwards_receipt_without_rederiving_terminal(self):
         source = pathlib.Path(__file__).resolve().parents[1] / 'chat' / 'daily_runtime.py'
         text = source.read_text(encoding='utf-8')
