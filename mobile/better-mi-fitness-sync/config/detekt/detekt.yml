@@ -1,0 +1,85 @@
+config:
+  validation: true
+
+complexity:
+  LargeClass:
+    active: true
+    # HealthRepository is a metric orchestrator by design (one function per metric).
+    excludes:
+      - '**/data/repository/HealthRepository.kt'
+  LongMethod:
+    active: true
+    # Compose UI screens are naturally long declarative trees.
+    allowedLines: 220
+  LongParameterList:
+    active: true
+    allowedFunctionParameters: 10
+    allowedConstructorParameters: 10
+  TooManyFunctions:
+    active: false
+  ComplexCondition:
+    active: true
+    allowedConditions: 5
+  NestedBlockDepth:
+    active: true
+    allowedDepth: 5
+  CyclomaticComplexMethod:
+    active: true
+    # Large when-based mappers (sport types) are intentional.
+    allowedComplexity: 50
+
+style:
+  MagicNumber:
+    active: false
+  WildcardImport:
+    active: true
+    # moko-resources 0.27 generates 180+ string accessors as extension vals in
+    # one package; explicit imports there would be pure churn.
+    excludeImports:
+      - 'com.bettermifitness.sync.*'
+  MaxLineLength:
+    active: true
+    maxLineLength: 140
+  ReturnCount:
+    active: true
+    max: 8
+  ThrowsCount:
+    active: true
+    max: 8
+  ForbiddenComment:
+    active: false
+  UnusedPrivateProperty:
+    active: false
+  UnusedParameter:
+    active: false
+  UseCheckOrError:
+    active: false
+  LoopWithTooManyJumpStatements:
+    active: false
+
+naming:
+  FunctionNaming:
+    active: true
+    ignoreAnnotated: ['Composable', 'Preview', 'Test']
+    # Snake_case test names + K/N entry points.
+    excludes:
+      - '**/commonTest/**'
+      - '**/androidTest/**'
+      - '**/iosTest/**'
+      - '**/MainViewController.kt'
+  TopLevelPropertyNaming:
+    active: true
+    constantPattern: '[A-Z][_A-Za-z0-9]*'
+
+exceptions:
+  TooGenericExceptionCaught:
+    active: false
+  SwallowedException:
+    active: false
+  TooGenericExceptionThrown:
+    active: false
+
+empty-blocks: # was: empty-blocks in 1.x (kept); 2.0 renamed module empty -> empty-blocks
+  EmptyFunctionBlock:
+    active: true
+    ignoreOverridden: true

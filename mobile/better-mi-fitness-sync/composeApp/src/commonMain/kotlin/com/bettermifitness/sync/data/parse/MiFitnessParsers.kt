@@ -1,0 +1,574 @@
+package com.bettermifitness.sync.data.parse
+
+import com.bettermifitness.sync.data.api.ActiveCaloriesSample
+import com.bettermifitness.sync.data.api.BloodPressureSample
+import com.bettermifitness.sync.data.api.DistanceSample
+import com.bettermifitness.sync.data.api.HeartRateEntry
+import com.bettermifitness.sync.data.api.HeartRateSample
+// HeartRateSample used by heartRateInWindow
+import com.bettermifitness.sync.data.api.HrvSample
+import com.bettermifitness.sync.data.api.SleepEntry
+import com.bettermifitness.sync.data.api.SleepSession
+import com.bettermifitness.sync.data.api.SleepStage
+import com.bettermifitness.sync.data.api.SpO2Sample
+import com.bettermifitness.sync.data.api.SportRecordEntry
+import com.bettermifitness.sync.data.api.StepsRecord
+import com.bettermifitness.sync.data.api.TemperatureSample
+import com.bettermifitness.sync.data.api.Vo2MaxSample
+import com.bettermifitness.sync.data.api.WeightMeasurement
+import com.bettermifitness.sync.data.api.WorkoutSession
+import com.bettermifitness.sync.data.api.WorkoutTimedSample
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
+
+/**
+ * Normalized raw fitness row from Mi list/latest endpoints.
+ * Decouples parsers from DTO type aliases (HeartRateEntry / SleepEntry).
+ */
+data class RawFitnessEntry(
+    val key: String? = null,
+    val time: Long = 0,
+    val value: String = "",
+)
+
+fun HeartRateEntry.toRaw(): RawFitnessEntry = RawFitnessEntry(key, time, value)
+fun SleepEntry.toRaw(): RawFitnessEntry = RawFitnessEntry(key, time, value)
+
+/**
+ * Pure Mi API JSON → domain sample converters.
+ * No I/O, no platform APIs — safe for unit tests on both Android and iOS.
+ */
+object MiFitnessParsers {
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    /** Plausible overnight wrist HRV in milliseconds (Mi UI unit). */
+    private const val HRV_MS_MIN = 5
+    private const val HRV_MS_MAX = 300
+
+    /**
+     * Mi sleep persist keys from the official app (`FitnessPersistKey`):
+     * modern segments (`sleep`) plus legacy watch reports
+     * (`watch_night_sleep`, `watch_daytime_sleep`).
+     */
+    private val SLEEP_KEYS = setOf("sleep", "watch_night_sleep", "watch_daytime_sleep")
+
+    fun parseHeartRateSamples(entries: List<RawFitnessEntry>): List<HeartRateSample> =
+        entries.mapNotNull { entry ->
+            try {
+                val obj = json.parseToJsonElement(entry.value).jsonObject
+                HeartRateSample(
+                    timestamp = obj["time"]?.jsonPrimitive?.long ?: entry.time,
+                    // APK HrItem serializes as `bpm`; accept `hr` alias for robustness.
+                    bpm = obj["bpm"]?.jsonPrimitive?.int
+                        ?: obj["hr"]?.jsonPrimitive?.int
+                        ?: return@mapNotNull null,
+                    tzIn15Min = obj.miTimezoneOrNull(),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    /**
+     * Resting HR lives on the "latest" endpoint; payload uses `date_time` not `time`.
+     */
+    fun parseRestingHeartRateSamples(entries: List<RawFitnessEntry>): List<HeartRateSample> =
+        entries.mapNotNull { entry ->
+            try {
+                val obj = json.parseToJsonElement(entry.value).jsonObject
+                HeartRateSample(
+                    timestamp = obj["date_time"]?.jsonPrimitive?.long ?: entry.time,
+                    bpm = obj["bpm"]?.jsonPrimitive?.int ?: return@mapNotNull null,
+                    tzIn15Min = obj.miTimezoneOrNull(),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    fun parseSpO2Samples(entries: List<RawFitnessEntry>): List<SpO2Sample> =
+        entries.mapNotNull { entry ->
+            try {
+                val obj = json.parseToJsonElement(entry.value).jsonObject
+                SpO2Sample(
+                    // APK Spo2Item serializes as `time`; ReportSpo2Item carries both
+                    // `date_time` (day anchor, ITimeData.getTimestamp) and `time`
+                    // (point timestamp, toSpo2Item target). Prefer `time`.
+                    timestamp = obj["time"]?.jsonPrimitive?.longOrNull
+                        ?: obj["date_time"]?.jsonPrimitive?.longOrNull
+                        ?: entry.time,
+                    percentage = obj["spo2"]?.jsonPrimitive?.int ?: return@mapNotNull null,
+                    tzIn15Min = obj.miTimezoneOrNull(),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    /**
+     * Mi records per-minute step deltas; bucket into hourly samples to match Mi Fitness UI.
+     */
+    fun parseHourlySteps(entries: List<RawFitnessEntry>): List<StepsRecord> {
+        val byHour = HashMap<Long, Int>()
+        val tzByHour = HashMap<Long, Int>()
+        for (entry in entries) {
+            try {
+                val o = json.parseToJsonElement(entry.value).jsonObject
+                val t = o["time"]?.jsonPrimitive?.long ?: continue
+                val steps = o["steps"]?.jsonPrimitive?.int ?: continue
+                val hourStart = (t / 3600L) * 3600L
+                byHour[hourStart] = (byHour[hourStart] ?: 0) + steps
+                if (hourStart !in tzByHour) {
+                    o.miTimezoneOrNull()?.let { tzByHour[hourStart] = it }
+                }
+            } catch (_: Exception) {
+                /* skip bad entry */
+            }
+        }
+        return byHour.entries
+            .filter { it.value > 0 }
+            .map { (hour, steps) ->
+                StepsRecord(
+                    date = hour.toString(),
+                    steps = steps,
+                    tzIn15Min = tzByHour[hour],
+                )
+            }
+    }
+
+    /**
+     * Distance often rides on the same per-minute `steps` stream (`distance` field, meters).
+     * Bucket into hourly intervals for Health writes.
+     */
+    fun parseHourlyDistanceFromSteps(entries: List<RawFitnessEntry>): List<DistanceSample> {
+        val byHour = HashMap<Long, Double>()
+        val tzByHour = HashMap<Long, Int>()
+        for (entry in entries) {
+            try {
+                val o = json.parseToJsonElement(entry.value).jsonObject
+                val t = o["time"]?.jsonPrimitive?.long ?: continue
+                val meters = o.doubleField("distance") ?: continue
+                if (meters <= 0) continue
+                val hourStart = (t / 3600L) * 3600L
+                byHour[hourStart] = (byHour[hourStart] ?: 0.0) + meters
+                if (hourStart !in tzByHour) {
+                    o.miTimezoneOrNull()?.let { tzByHour[hourStart] = it }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return byHour.entries
+            .filter { it.value > 0 }
+            .map { (hour, meters) ->
+                DistanceSample(
+                    startTime = hour,
+                    endTime = hour + 3599,
+                    meters = meters,
+                    tzIn15Min = tzByHour[hour],
+                )
+            }
+    }
+
+    /** Active energy from the dedicated `calories` key (kcal). */
+    fun parseHourlyActiveCalories(entries: List<RawFitnessEntry>): List<ActiveCaloriesSample> {
+        val byHour = HashMap<Long, Double>()
+        val tzByHour = HashMap<Long, Int>()
+        for (entry in entries) {
+            try {
+                val o = json.parseToJsonElement(entry.value).jsonObject
+                val t = o["time"]?.jsonPrimitive?.long ?: entry.time
+                val kcal = o.doubleField("calories") ?: continue
+                if (kcal <= 0) continue
+                val hourStart = (t / 3600L) * 3600L
+                byHour[hourStart] = (byHour[hourStart] ?: 0.0) + kcal
+                if (hourStart !in tzByHour) {
+                    o.miTimezoneOrNull()?.let { tzByHour[hourStart] = it }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return byHour.entries
+            .filter { it.value > 0 }
+            .map { (hour, kcal) ->
+                ActiveCaloriesSample(
+                    startTime = hour,
+                    endTime = hour + 3599,
+                    kilocalories = kcal,
+                    tzIn15Min = tzByHour[hour],
+                )
+            }
+    }
+
+    fun parseWeightMeasurements(entries: List<RawFitnessEntry>): List<WeightMeasurement> =
+        entries.mapNotNull { entry ->
+            try {
+                val o = json.parseToJsonElement(entry.value).jsonObject
+                val kg = o.doubleField("weight") ?: return@mapNotNull null
+                if (kg <= 0 || kg > 500) return@mapNotNull null
+                WeightMeasurement(
+                    timestamp = entry.time.takeIf { it > 0 } ?: o["time"]?.jsonPrimitive?.long ?: 0L,
+                    weightKg = kg,
+                    bodyFatPercent = o.doubleField("body_fat_rate"),
+                    muscleMassKg = o.doubleField("muscle_rate")?.takeIf { it in 1.0..200.0 },
+                    boneMassKg = o.doubleField("bone_mass"),
+                    basalMetabolismKcal = o.doubleField("basal_metabolism"),
+                    tzIn15Min = o.miTimezoneOrNull(),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    /**
+     * Mi [BloodPressureItem]: systolic_pressure / diastolic_pressure (mmHg).
+     * Also accepts high_pressure/low_pressure aliases if present.
+     */
+    fun parseBloodPressureSamples(entries: List<RawFitnessEntry>): List<BloodPressureSample> =
+        entries.mapNotNull { entry ->
+            try {
+                val o = json.parseToJsonElement(entry.value).jsonObject
+                val systolic = o["systolic_pressure"]?.jsonPrimitive?.intOrNull
+                    ?: o["high_pressure"]?.jsonPrimitive?.intOrNull
+                    ?: return@mapNotNull null
+                val diastolic = o["diastolic_pressure"]?.jsonPrimitive?.intOrNull
+                    ?: o["low_pressure"]?.jsonPrimitive?.intOrNull
+                    ?: return@mapNotNull null
+                BloodPressureSample(
+                    timestamp = o["time"]?.jsonPrimitive?.longOrNull
+                        ?: entry.time.takeIf { it > 0 }
+                        ?: return@mapNotNull null,
+                    systolicMmhg = systolic,
+                    diastolicMmhg = diastolic,
+                    pulseBpm = o["pulse"]?.jsonPrimitive?.intOrNull,
+                    tzIn15Min = o.miTimezoneOrNull(),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    /**
+     * Mi [TemperatureItem]: body_temperature / skin_temperature (°C).
+     * At least one temperature field required.
+     */
+    fun parseTemperatureSamples(entries: List<RawFitnessEntry>): List<TemperatureSample> =
+        entries.mapNotNull { entry ->
+            try {
+                val o = json.parseToJsonElement(entry.value).jsonObject
+                val body = o.doubleField("body_temperature")
+                val skin = o.doubleField("skin_temperature")
+                if (body == null && skin == null) return@mapNotNull null
+                TemperatureSample(
+                    timestamp = o["time"]?.jsonPrimitive?.longOrNull
+                        ?: entry.time.takeIf { it > 0 }
+                        ?: return@mapNotNull null,
+                    bodyCelsius = body,
+                    skinCelsius = skin,
+                    tzIn15Min = o.miTimezoneOrNull(),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    /**
+     * Mi [Vo2MaxItem]: field `vo2_max` (integer mL·kg⁻¹·min⁻¹ in APK).
+     */
+    fun parseVo2MaxSamples(entries: List<RawFitnessEntry>): List<Vo2MaxSample> =
+        entries.mapNotNull { entry ->
+            try {
+                val o = json.parseToJsonElement(entry.value).jsonObject
+                val vo2 = o.doubleField("vo2_max")
+                    ?: o["vo2Max"]?.jsonPrimitive?.doubleOrNull
+                    ?: return@mapNotNull null
+                if (vo2 <= 0 || vo2 > 100) return@mapNotNull null
+                Vo2MaxSample(
+                    timestamp = o["time"]?.jsonPrimitive?.longOrNull
+                        ?: entry.time.takeIf { it > 0 }
+                        ?: return@mapNotNull null,
+                    mlPerKgMin = vo2,
+                    tzIn15Min = o.miTimezoneOrNull(),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+    fun parseWorkouts(entries: List<SportRecordEntry>): List<WorkoutSession> =
+        entries.mapNotNull { entry -> parseWorkout(entry) }
+
+    fun parseWorkout(entry: SportRecordEntry): WorkoutSession? {
+        return try {
+            val payload = json.parseToJsonElement(entry.value).jsonObject
+            val startTs = payload["start_time"]?.jsonPrimitive?.longOrNull
+                ?: entry.time.takeIf { it > 0 }
+                ?: return null
+            val durationSec = payload["duration"]?.jsonPrimitive?.longOrNull ?: 0L
+            val endTs = payload["end_time"]?.jsonPrimitive?.longOrNull
+                ?: (startTs + durationSec).takeIf { durationSec > 0 }
+                ?: return null
+            if (endTs <= startTs) return null
+            // Prefer string category / key from APK sport reports; sport_type may be int or string.
+            val sportTypeEl = payload["sport_type"]
+            val sportTypeStr = try {
+                sportTypeEl?.jsonPrimitive?.content?.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+            } catch (_: Exception) {
+                null
+            }
+            val activity = entry.category?.takeIf { it.isNotBlank() }
+                ?: entry.key?.takeIf { it.isNotBlank() && it != "sport" }
+                ?: sportTypeStr
+                ?: payload["type"]?.jsonPrimitive?.content
+                ?: payload["sport_name"]?.jsonPrimitive?.content
+                ?: "workout"
+            val version = payload["version"]?.jsonPrimitive?.intOrNull ?: 0
+            val protoType = payload["proto_type"]?.jsonPrimitive?.intOrNull
+                ?: payload["sport_type"]?.jsonPrimitive?.intOrNull
+            val did = payload["did"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+            val tz = payload.miTimezoneOrNull()
+            val gpsTime = payload["time"]?.jsonPrimitive?.longOrNull ?: startTs
+            // FDS files exist when report version > 0 (Mi FitnessFDSDataGetter).
+            val canFetchFds = version > 0 && !did.isNullOrBlank() && protoType != null && tz != null
+            val maxH = payload.doubleField("max_height")
+            val minH = payload.doubleField("min_height")
+            val avgH = payload.doubleField("avg_height")
+            WorkoutSession(
+                startTime = startTs,
+                endTime = endTs,
+                activityType = activity,
+                distanceMeters = payload.doubleField("distance")
+                    ?: payload.doubleField("corrected_distance"),
+                caloriesKcal = payload.doubleField("calories")
+                    ?: payload.doubleField("total_cal"),
+                avgHeartRateBpm = payload["avg_hrm"]?.jsonPrimitive?.intOrNull,
+                maxHeartRateBpm = payload["max_hrm"]?.jsonPrimitive?.intOrNull,
+                minHeartRateBpm = payload["min_hrm"]?.jsonPrimitive?.intOrNull,
+                totalSteps = payload["steps"]?.jsonPrimitive?.intOrNull
+                    ?: payload["total_steps"]?.jsonPrimitive?.intOrNull,
+                avgPaceSecPerKm = payload.doubleField("avg_pace"),
+                maxPaceSecPerKm = payload.doubleField("max_pace"),
+                minPaceSecPerKm = payload.doubleField("min_pace"),
+                avgCadenceSpm = payload.doubleField("avg_cadence"),
+                maxCadenceSpm = payload.doubleField("max_cadence"),
+                maxSpeedMps = payload.doubleField("max_speed"),
+                avgStrideCm = payload.doubleField("avg_stride"),
+                avgPowerWatts = payload.doubleField("avg_power")
+                    ?: payload.doubleField("running_power")
+                    ?: payload.doubleField("power"),
+                maxPowerWatts = payload.doubleField("max_power"),
+                avgGroundContactMs = payload.doubleField("avg_touchdown_time")
+                    ?: payload.doubleField("touchdown_time")
+                    ?: payload.doubleField("ground_contact_time"),
+                avgVerticalOscillationCm = payload.doubleField("avg_vertical_amplitude")
+                    ?: payload.doubleField("vertical_amplitude")
+                    ?: payload.doubleField("vertical_oscillation"),
+                maxElevationM = maxH?.takeIf { it != 0.0 },
+                minElevationM = minH?.takeIf { it != 0.0 },
+                avgElevationM = avgH?.takeIf { it != 0.0 },
+                elevationGainM = elevationGain(minH, maxH, avgH),
+                hrZoneWarmupSec = payload["hrm_warm_up_duration"]?.jsonPrimitive?.intOrNull,
+                hrZoneFatBurnSec = payload["hrm_fat_burning_duration"]?.jsonPrimitive?.intOrNull,
+                hrZoneAerobicSec = payload["hrm_aerobic_duration"]?.jsonPrimitive?.intOrNull,
+                hrZoneAnaerobicSec = payload["hrm_anaerobic_duration"]?.jsonPrimitive?.intOrNull,
+                hrZoneExtremeSec = payload["hrm_extreme_duration"]?.jsonPrimitive?.intOrNull,
+                trainEffect = payload.doubleField("train_effect"),
+                trainLoad = payload.doubleField("train_load"),
+                recoverMinutes = payload["recover_time"]?.jsonPrimitive?.intOrNull,
+                vo2Max = payload.doubleField("vo2_max")?.takeIf { it > 0 },
+                tzIn15Min = tz,
+                gpsDeviceSid = did.takeIf { canFetchFds },
+                gpsTimestampSec = gpsTime.takeIf { canFetchFds },
+                gpsTzIn15Min = tz.takeIf { canFetchFds },
+                gpsProtoType = protoType.takeIf { canFetchFds },
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun JsonObject.doubleField(name: String): Double? {
+        val el = this[name] ?: return null
+        return try {
+            el.jsonPrimitive.doubleOrNull
+                ?: el.jsonPrimitive.content.toDoubleOrNull()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun JsonObject.intField(name: String): Int? {
+        val el = this[name] ?: return null
+        return try {
+            el.jsonPrimitive.intOrNull
+                ?: el.jsonPrimitive.doubleOrNull?.toInt()
+                ?: el.jsonPrimitive.content.toIntOrNull()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun JsonObject.longField(name: String): Long? {
+        val el = this[name] ?: return null
+        return try {
+            el.jsonPrimitive.longOrNull
+                ?: el.jsonPrimitive.doubleOrNull?.toLong()
+                ?: el.jsonPrimitive.content.toLongOrNull()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Mi `timezone` field: offset in units of 15 minutes (28 → UTC+7). */
+    private fun JsonObject.miTimezoneOrNull(): Int? =
+        this["timezone"]?.jsonPrimitive?.intOrNull
+
+    /**
+     * Mirrors `DayNightSleepReport.isValidSleep`: bed/wake anchors plus a
+     * positive `duration` are required when no stage items are present.
+     */
+    private fun isValidSleepPayload(obj: JsonObject): Boolean {
+        val bedtime = obj["bedtime"]?.jsonPrimitive?.longOrNull ?: 0L
+        val wakeUp = obj["wake_up_time"]?.jsonPrimitive?.longOrNull ?: 0L
+        if (bedtime > 0 && wakeUp > 0 && wakeUp > bedtime) return true
+        val duration = obj["duration"]?.jsonPrimitive?.longOrNull ?: 0L
+        if (bedtime > 0 && wakeUp > 0 && duration > 0) return true
+        val items = try {
+            obj["items"]?.jsonArray
+        } catch (_: Exception) {
+            null
+        }
+        return !items.isNullOrEmpty()
+    }
+
+    /** Rough elevation gain from min/max when Mi does not send ascent explicitly. */
+    private fun elevationGain(minH: Double?, maxH: Double?, avgH: Double?): Double? {
+        if (minH != null && maxH != null && maxH > minH && maxH != 0.0) {
+            return maxH - minH
+        }
+        return null
+    }
+
+    /** Maps raw HR entries into timed samples for a workout window. */
+    fun heartRateInWindow(
+        entries: List<HeartRateSample>,
+        startSec: Long,
+        endSec: Long,
+    ): List<WorkoutTimedSample> =
+        entries
+            .filter { it.timestamp in startSec..endSec && it.bpm in 30..250 }
+            .sortedBy { it.timestamp }
+            .map { WorkoutTimedSample(it.timestamp, it.bpm.toDouble()) }
+            .distinctBy { it.timeSec }
+
+    fun parseSleepSessions(entries: List<RawFitnessEntry>): List<SleepSession> =
+        entries
+            .filter { it.key in SLEEP_KEYS }
+            .mapNotNull { entry -> parseSleepSession(entry) }
+
+    fun parseSleepSession(entry: RawFitnessEntry): SleepSession? {
+        return try {
+            val obj = json.parseToJsonElement(entry.value).jsonObject
+            if (!isValidSleepPayload(obj)) return null
+            val items = obj["items"]?.jsonArray
+            val rawStages = items?.map { item ->
+                val stageObj = item.jsonObject
+                SleepStage(
+                    startTime = stageObj["start_time"]?.jsonPrimitive?.long ?: 0L,
+                    endTime = stageObj["end_time"]?.jsonPrimitive?.long ?: 0L,
+                    stage = stageObj["state"]?.jsonPrimitive?.int ?: 0,
+                )
+            }?.sortedBy { it.startTime } ?: emptyList()
+
+            val stages = fillAwakeGaps(rawStages)
+            val awakeDuration = obj["sleep_awake_duration"]?.jsonPrimitive?.long ?: 0L
+            val hasAwake = stages.any { it.stage == 5 }
+            if (!hasAwake && awakeDuration > 0 && stages.isNotEmpty()) {
+                val wakeUp = obj["wake_up_time"]?.jsonPrimitive?.long ?: entry.time
+                stages.add(
+                    SleepStage(
+                        startTime = wakeUp - (awakeDuration * 60),
+                        endTime = wakeUp,
+                        stage = 5,
+                    ),
+                )
+            }
+
+            val endTime = obj["wake_up_time"]?.jsonPrimitive?.long ?: entry.time
+            val avgHrv = obj.intField("avg_hrv")
+                ?: obj.intField("avgHrv")
+            val minHrv = obj.intField("min_hrv")
+                ?: obj.intField("minHrv")
+            val maxHrv = obj.intField("max_hrv")
+                ?: obj.intField("maxHrv")
+            val hrvAnalysis = obj.longField("hrv_analysis_timestamp")
+                ?: obj.longField("hrvAnalysisTimestamp")
+
+            SleepSession(
+                startTime = obj["bedtime"]?.jsonPrimitive?.long ?: entry.time,
+                endTime = endTime,
+                inBedStart = obj["bed_timestamp"]?.jsonPrimitive?.long
+                    ?: obj["bedtime"]?.jsonPrimitive?.long ?: entry.time,
+                inBedEnd = obj["out_bed_timestamp"]?.jsonPrimitive?.long
+                    ?: obj["wake_up_time"]?.jsonPrimitive?.long ?: entry.time,
+                stages = stages,
+                avgHrvMs = avgHrv,
+                minHrvMs = minHrv,
+                maxHrvMs = maxHrv,
+                hrvAnalysisTimeSec = hrvAnalysis,
+                tzIn15Min = obj.miTimezoneOrNull(),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Overnight HRV samples from sleep payloads.
+     * Devices without HRV simply omit `avg_hrv` — returns empty (not an error).
+     */
+    fun parseHrvSamples(entries: List<RawFitnessEntry>): List<HrvSample> =
+        hrvSamplesFromSessions(parseSleepSessions(entries))
+
+    fun hrvSamplesFromSessions(sessions: List<SleepSession>): List<HrvSample> =
+        sessions.mapNotNull { session ->
+            val ms = session.avgHrvMs ?: return@mapNotNull null
+            if (ms !in HRV_MS_MIN..HRV_MS_MAX) return@mapNotNull null
+            val t = session.hrvAnalysisTimeSec
+                ?.takeIf { it > 0 }
+                ?: session.endTime.takeIf { it > 0 }
+                ?: return@mapNotNull null
+            HrvSample(timestamp = t, hrvMs = ms.toDouble(), tzIn15Min = session.tzIn15Min)
+        }
+
+    /**
+     * Insert explicit awake stages for gaps ≥ 60s between reported sleep stages.
+     */
+    internal fun fillAwakeGaps(rawStages: List<SleepStage>): MutableList<SleepStage> {
+        val stages = mutableListOf<SleepStage>()
+        for (i in rawStages.indices) {
+            if (i > 0) {
+                val gap = rawStages[i].startTime - rawStages[i - 1].endTime
+                if (gap >= 60) {
+                    stages.add(
+                        SleepStage(
+                            startTime = rawStages[i - 1].endTime,
+                            endTime = rawStages[i].startTime,
+                            stage = 5,
+                        ),
+                    )
+                }
+            }
+            stages.add(rawStages[i])
+        }
+        return stages
+    }
+}

@@ -1,0 +1,91 @@
+[versions]
+# Toolchain — Kotlin 2.4.20 + CMP 1.12.1 (stable) + AGP 9.3.3 + Gradle 9.7.1
+kotlin = "2.4.20"
+compose-multiplatform = "1.12.1"
+# Material3 multiplatform artifact line for CMP 1.12.x (see CMP 1.12.1 deps table)
+compose-material3 = "1.12.0-alpha03"
+agp = "9.3.3"
+jetbrains-navigation = "2.9.2"
+
+# Networking / kotlinx
+ktor = "3.6.0"
+kotlinx-serialization = "1.11.0"
+kotlinx-coroutines = "1.11.0"
+kotlinx-datetime = "0.8.0"
+
+# DI
+koin = "4.2.2"
+
+# Android / multiplatform UI libs
+health-connect = "1.1.0"
+coil3 = "3.6.3"
+datastore = "1.2.1"
+androidx-activityCompose = "1.13.0"
+# JetBrains multiplatform lifecycle + Android lifecycle-process
+# 2.11.0 pairs with CMP 1.12.x (see CMP 1.12.1 deps table).
+androidx-lifecycle = "2.11.0"
+work-manager = "2.11.2"
+
+# Shared i18n (Android + iOS native UI SSOT)
+moko-resources = "0.27.1"
+
+[libraries]
+# Compose Multiplatform — explicit coordinates (compose.* aliases deprecated since CMP 1.10)
+compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "compose-multiplatform" }
+compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "compose-multiplatform" }
+compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "compose-multiplatform" }
+compose-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "compose-material3" }
+compose-components-resources = { module = "org.jetbrains.compose.components:components-resources", version.ref = "compose-multiplatform" }
+jetbrains-navigation-compose = { module = "org.jetbrains.androidx.navigation:navigation-compose", version.ref = "jetbrains-navigation" }
+
+# Ktor
+ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
+ktor-client-darwin = { module = "io.ktor:ktor-client-darwin", version.ref = "ktor" }
+ktor-client-content-negotiation = { module = "io.ktor:ktor-client-content-negotiation", version.ref = "ktor" }
+ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
+ktor-client-logging = { module = "io.ktor:ktor-client-logging", version.ref = "ktor" }
+ktor-client-auth = { module = "io.ktor:ktor-client-auth", version.ref = "ktor" }
+
+# Kotlinx
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
+kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinx-datetime" }
+
+# Koin
+koin-core = { module = "io.insert-koin:koin-core", version.ref = "koin" }
+koin-compose = { module = "io.insert-koin:koin-compose", version.ref = "koin" }
+koin-compose-viewmodel = { module = "io.insert-koin:koin-compose-viewmodel", version.ref = "koin" }
+koin-compose-viewmodel-navigation = { module = "io.insert-koin:koin-compose-viewmodel-navigation", version.ref = "koin" }
+
+# Health Connect
+health-connect = { module = "androidx.health.connect:connect-client", version.ref = "health-connect" }
+
+# Coil 3 image loading (multiplatform Compose)
+coil-compose = { module = "io.coil-kt.coil3:coil-compose", version.ref = "coil3" }
+coil-network-ktor3 = { module = "io.coil-kt.coil3:coil-network-ktor3", version.ref = "coil3" }
+
+# DataStore
+datastore-preferences-core = { module = "androidx.datastore:datastore-preferences-core", version.ref = "datastore" }
+
+# AndroidX
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activityCompose" }
+androidx-lifecycle-viewmodel = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-runtime-compose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-process = { module = "androidx.lifecycle:lifecycle-process", version.ref = "androidx-lifecycle" }
+androidx-work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "work-manager" }
+
+# moko-resources — shared strings/plurals for Compose + SwiftUI
+moko-resources = { module = "dev.icerock.moko:resources", version.ref = "moko-resources" }
+moko-resources-compose = { module = "dev.icerock.moko:resources-compose", version.ref = "moko-resources" }
+
+[plugins]
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
+composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlinxSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+androidApplication = { id = "com.android.application", version.ref = "agp" }
+androidMultiplatformLibrary = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+detekt = { id = "dev.detekt", version = "2.0.0-alpha.6" }
+mokoResources = { id = "dev.icerock.mobile.multiplatform-resources", version.ref = "moko-resources" }
