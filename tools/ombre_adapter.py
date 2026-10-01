@@ -37,11 +37,10 @@ _HTTP_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_H
 _HTTP_LOGIN_LOCK = threading.Lock()
 _HTTP_LOGGED_IN = False
 
-# HTTP backend is dormant by default.  Known parity gaps vs legacy_module are
-# documented in docs/unified-memory-adapter.md and must be closed before cutover:
-# - /api/buckets includes archive buckets with no archive flag in list payload
-# - explicit search does not touch hits (activation / last_active semantics differ)
-# - MCP client dependency is not installed from requirements.txt until shadow phase
+# HTTP backend is opt-in.  Its dashboard REST and MCP authentication
+# boundaries are documented in docs/unified-memory-adapter.md.
+# - explicit search intentionally does not touch hits
+# - MCP calls require the disposable/runtime mcp dependency
 
 
 def _backend() -> str:
@@ -357,10 +356,10 @@ async def _safe_handoff_async(server: Any) -> str:
 def _http_handoff(*, timeout: float, wall_timeout: float) -> str:
     """HTTP handoff builder.
 
-    Ombre 2.8.10 ``/api/buckets`` calls ``list_all(include_archive=True)`` but
-    does not expose an archive flag in list payloads.  Until upstream adds an
-    active-only filter, HTTP recent continuity cannot be proven equivalent to
-    legacy ``list_all(include_archive=False)``.
+    Ombre 3.6.14 ``/api/buckets`` calls ``list_all(include_archive=True)``.
+    Migrated terminal buckets are marked ``metadata.type == "archived"``;
+    terminal markers are filtered here before any detail fetch.  Directory
+    paths are intentionally not used to infer lifecycle state.
     """
     deadline = time.monotonic() + max(0.05, float(wall_timeout))
 
@@ -376,11 +375,14 @@ def _http_handoff(*, timeout: float, wall_timeout: float) -> str:
     sections = {"self_anchor": [], "user_portrait": [], "relationship": []}
     recent = []
     for meta in buckets if isinstance(buckets, list) else []:
+        meta_type = str(meta.get("type") or "").strip().lower()
         if (
-            meta.get("resolved")
+            meta_type == "archived"
+            or meta.get("resolved")
             or meta.get("digested")
             or meta.get("dont_surface")
             or meta.get("deleted_at")
+            or meta.get("tombstone")
         ):
             continue
         domains = meta.get("domain") or []
@@ -451,7 +453,12 @@ def search_memories(
     wall_timeout: Optional[float] = None,
     touch: bool = True,
 ) -> list[tuple[str, str]]:
-    """Search Ombre directly; explicit search may opt into recall touch."""
+    """Search Ombre directly.
+
+    HTTP retrieval is intentionally read-only: ``touch=True`` remains a
+    backward-compatible no-op because Ombre >=3.6.0 separates retrieval from
+    explicit reinforcement.  Legacy-module touch behavior is unchanged.
+    """
     query = str(query or "").strip()
     if not query:
         return []
@@ -480,7 +487,9 @@ def search_memories(
                     output.append((str(item.get("name") or "记忆桶"), content[:300]))
             if touch:
                 _LOG.debug(
-                    "HTTP search ignores touch=True until shadow evaluation picks a touch API"
+                    "HTTP search keeps touch=%s as a read-only no-op; "
+                    "modern Ombre reinforcement is explicit",
+                    touch,
                 )
             return output
 
