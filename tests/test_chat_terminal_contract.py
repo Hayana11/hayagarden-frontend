@@ -425,18 +425,34 @@ class ChatTerminalContractTests(unittest.TestCase):
         authority = cc_resident.TurnTerminalAuthority(
             turn_identity='turn-r1',
         )
+        barrier = threading.Barrier(2)
         result_done = threading.Event()
+        result_accepted = []
+        stall_accepted = []
 
         def accept_result():
-            self.assertTrue(authority.accept_provider_result(self._authority_receipt()))
+            barrier.wait()
+            result_accepted.append(
+                authority.accept_provider_result(self._authority_receipt())
+            )
             result_done.set()
 
-        thread = threading.Thread(target=accept_result)
-        thread.start()
-        self.assertTrue(result_done.wait(1.0))
-        thread.join(1.0)
+        def submit_stall():
+            barrier.wait()
+            result_done.wait(1.0)
+            stall_accepted.append(authority.submit_timeout_candidate('stall'))
 
-        self.assertFalse(authority.submit_timeout_candidate('stall'))
+        threads = [
+            threading.Thread(target=accept_result),
+            threading.Thread(target=submit_stall),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertEqual([True], result_accepted)
+        self.assertEqual([False], stall_accepted)
         snapshot = authority.snapshot()
         self.assertEqual('SUCCESS', snapshot['terminal_outcome'])
         self.assertEqual('provider_result', snapshot['terminal_linearization_source'])
@@ -448,8 +464,34 @@ class ChatTerminalContractTests(unittest.TestCase):
         authority = cc_resident.TurnTerminalAuthority(
             turn_identity='turn-r2',
         )
-        self.assertTrue(authority.submit_timeout_candidate('stall'))
-        self.assertFalse(authority.accept_provider_result(self._authority_receipt()))
+        barrier = threading.Barrier(2)
+        stall_done = threading.Event()
+        stall_accepted = []
+        result_accepted = []
+
+        def accept_stall():
+            barrier.wait()
+            stall_accepted.append(authority.submit_timeout_candidate('stall'))
+            stall_done.set()
+
+        def accept_result():
+            barrier.wait()
+            stall_done.wait(1.0)
+            result_accepted.append(
+                authority.accept_provider_result(self._authority_receipt())
+            )
+
+        threads = [
+            threading.Thread(target=accept_stall),
+            threading.Thread(target=accept_result),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertEqual([True], stall_accepted)
+        self.assertEqual([False], result_accepted)
         self.assertTrue(authority.begin_cleanup('terminal_failure'))
         self.assertFalse(authority.begin_cleanup('already_cleaned'))
         authority.record_resident_kill(
@@ -468,12 +510,36 @@ class ChatTerminalContractTests(unittest.TestCase):
         authority = cc_resident.TurnTerminalAuthority(
             turn_identity='turn-r3',
         )
-        self.assertTrue(authority.accept_provider_error({
-            'error_code': 'provider_error',
-            'provider_error_category': 'provider_error',
-            'turn_failure_class': 'TURN_LEVEL',
-        }))
-        self.assertFalse(authority.submit_timeout_candidate('stall'))
+        barrier = threading.Barrier(2)
+        provider_done = threading.Event()
+        provider_accepted = []
+        stall_accepted = []
+
+        def accept_provider_error():
+            barrier.wait()
+            provider_accepted.append(authority.accept_provider_error({
+                'error_code': 'provider_error',
+                'provider_error_category': 'provider_error',
+                'turn_failure_class': 'TURN_LEVEL',
+            }))
+            provider_done.set()
+
+        def submit_stall():
+            barrier.wait()
+            provider_done.wait(1.0)
+            stall_accepted.append(authority.submit_timeout_candidate('stall'))
+
+        threads = [
+            threading.Thread(target=accept_provider_error),
+            threading.Thread(target=submit_stall),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertEqual([True], provider_accepted)
+        self.assertEqual([False], stall_accepted)
         self.assertEqual('PROVIDER_ERROR', authority.snapshot()['terminal_outcome'])
         self.assertFalse(authority.accept_provider_result(self._authority_receipt()))
         self.assertEqual(2, authority.snapshot()['duplicate_terminal_signal_count'])
