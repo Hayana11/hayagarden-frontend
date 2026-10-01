@@ -33,6 +33,41 @@ function safeDetails(metric, value) {
   }
   return Object.keys(safe).length ? safe : null;
 }
+const METRICS = Object.freeze({
+  steps: Object.freeze(['steps', 'step', 'step_count', 'stepcount', 'total_steps', 'count', 'value']),
+  sleep: Object.freeze(['asleep_minutes', 'time_asleep_minutes', 'sleep_minutes', 'total_sleep_minutes', 'sleep_duration', 'total_sleep', 'total_sleep_time', 'duration_minutes', 'duration', 'deep_sleep', 'light_sleep', 'rem_sleep', 'awake_minutes', 'awake_duration', 'sleep_awake_duration', 'sleep_score', 'score']),
+  heart_rate: Object.freeze(['bpm', 'heart_rate', 'avg_hrm', 'avg_heart_rate', 'average_heart_rate', 'resting_heart_rate', 'min_heart_rate', 'max_heart_rate']),
+});
+const UNITS = Object.freeze({ steps: 'steps', sleep: 'minutes', heart_rate: 'bpm' });
+const SAFE_ERRORS = new Set(['auth_expired', 'timeout', 'api_error', 'malformed_response', 'unavailable']);
+const CYCLE_EVENT_TYPES = new Set(['period_start', 'period_end', 'period_start_end']);
+const HP_VALUES = new Set(['little', 'normal', 'much']);
+const MOOD_VALUES = new Set(['happy', 'normal', 'uncomfortable']);
+const PAIN_VALUES = new Set(['light', 'normal', 'heavy']);
+const SERIES_TTL_MS = 15 * 60 * 1000;
+const LATEST_TTL_MS = 60 * 1000;
+
+function validDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+}
+
+function validSample(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) ? value : null;
+}
+
+function safeSleepWindow(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const bedtime = validSample(value.bedtime);
+  const wakeUpTime = validSample(value.wakeUpTime);
+  if (!bedtime || !wakeUpTime) return null;
+  const bedtimeMs = Date.parse(bedtime);
+  const wakeUpTimeMs = Date.parse(wakeUpTime);
+  if (!Number.isFinite(bedtimeMs) || !Number.isFinite(wakeUpTimeMs) || wakeUpTimeMs <= bedtimeMs) return null;
+  const canonical = (milliseconds) => new Date(milliseconds).toISOString().replace(/\.000Z$/, 'Z');
+  if (canonical(bedtimeMs) !== bedtime || canonical(wakeUpTimeMs) !== wakeUpTime) return null;
+  return { bedtime, wakeUpTime };
+}
+
 function validNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
