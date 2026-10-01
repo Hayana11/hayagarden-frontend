@@ -248,7 +248,14 @@ class ChatTerminalContractTests(unittest.TestCase):
             ),
         )
 
-    def _run_deterministic_send_turn(self, events, watchdog_reason, *, signal_after_read=False):
+    def _run_deterministic_send_turn(
+        self,
+        events,
+        watchdog_reason,
+        *,
+        signal_after_read=False,
+        close_after_first_chunk=False,
+    ):
         """Run the actual send_turn path with a deterministic watchdog signal."""
         watchdogs = []
         kill_calls = []
@@ -333,7 +340,12 @@ class ChatTerminalContractTests(unittest.TestCase):
         with mock.patch.object(
             cc_resident, 'StreamWatchdog', DeterministicWatchdog,
         ):
-            chunks = list(session.send_turn('race', commit_meta=None))
+            generator = session.send_turn('race', commit_meta=None)
+            if close_after_first_chunk:
+                chunks = [next(generator)]
+                generator.close()
+            else:
+                chunks = list(generator)
         return chunks, session, watchdogs, kill_calls
 
     def test_t13_send_turn_stall_then_valid_result_completes_terminal_path(self):
@@ -412,6 +424,25 @@ class ChatTerminalContractTests(unittest.TestCase):
                         events, watchdog_reason,
                     )
                 self.assertEqual(expected_code, caught.exception.error_code)
+
+    def test_t15_send_turn_generator_exit_kills_once_after_authority(self):
+        events = [{
+            'type': 'stream_event',
+            'event': {
+                'type': 'content_block_delta',
+                'delta': {'type': 'text_delta', 'text': 'partial'},
+            },
+        }]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                events,
+                None,
+                close_after_first_chunk=True,
+            )
+        )
+        self.assertEqual([('text', 'partial')], chunks)
+        self.assertEqual([], watchdogs[0].reason if watchdogs else [])
+        self.assertEqual([True], kill_calls)
 
     def _authority_receipt(self):
         return cc_resident.ProviderTerminalReceipt.from_result_event(
