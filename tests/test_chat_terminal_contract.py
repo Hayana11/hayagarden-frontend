@@ -336,6 +336,14 @@ class ChatTerminalContractTests(unittest.TestCase):
                     thread.join(2.0)
                 return None
 
+            def claim_recovery(self, probe_generation, claim_lifecycle):
+                if self.committed:
+                    return False
+                if not claim_lifecycle():
+                    return False
+                self.committed = True
+                return True
+
             def note_activity(self):
                 if signal_on_first_activity and not self.committed:
                     self.committed = True
@@ -702,7 +710,7 @@ class ChatTerminalContractTests(unittest.TestCase):
             on_timeout=on_timeout or (lambda reason: None),
             is_proc_alive=lambda: True,
             probe_timeout=20,
-            on_probe=on_probe,
+            on_probe=lambda generation: on_probe(generation),
         )
 
     def _age_watchdog_into_probe_epoch(self, watchdog):
@@ -713,7 +721,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         recovery_started = []
         durable_end_turn = [False]
 
-        def on_probe():
+        def on_probe(_generation):
             probe_results.append(bool(durable_end_turn[0]))
             if durable_end_turn[0]:
                 recovery_started.append('POST_COMPLETION_RECOVERY')
@@ -739,7 +747,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         probe_calls = []
         timeout_calls = []
         watchdog = self._watchdog_for_probe_lifecycle(
-            lambda: probe_calls.append(True) or False,
+            lambda _generation: probe_calls.append(True) or False,
             on_timeout=lambda reason: timeout_calls.append(reason),
         )
         self._age_watchdog_into_probe_epoch(watchdog)
@@ -753,7 +761,7 @@ class ChatTerminalContractTests(unittest.TestCase):
     def test_p_r3_activity_rearms_exactly_one_probe_per_epoch(self):
         probe_calls = []
         watchdog = self._watchdog_for_probe_lifecycle(
-            lambda: probe_calls.append(len(probe_calls)) or False,
+            lambda _generation: probe_calls.append(len(probe_calls)) or False,
         )
         for epoch in range(3):
             self._age_watchdog_into_probe_epoch(watchdog)
@@ -794,13 +802,187 @@ class ChatTerminalContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 probe_calls = []
                 watchdog = self._watchdog_for_probe_lifecycle(
-                    lambda: probe_calls.append(True) or True,
+                    lambda _generation: probe_calls.append(True) or True,
                 )
                 terminalize(watchdog)
                 watchdog.note_activity()
                 self._age_watchdog_into_probe_epoch(watchdog)
                 self.assertFalse(watchdog._try_probe())
                 self.assertLessEqual(len(probe_calls), 1)
+
+    def test_g_r1_success_wins_during_probe_rejects_recovery_side_effects(self):
+        authority = cc_resident.TurnTerminalAuthority(turn_identity='g-r1')
+        scan_started = threading.Event()
+        release_scan = threading.Event()
+        close_stdin_calls = []
+        sigterm_calls = []
+        watchdog_holder = []
+        start_lock = threading.Lock()
+
+        def on_probe(probe_generation):
+            scan_started.set()
+            release_scan.wait(1.0)
+            watchdog = watchdog_holder[0]
+            if not watchdog.claim_recovery(
+                probe_generation,
+                lambda: authority.claim_terminal_recovery(probe_generation),
+            ):
+                return False
+            with start_lock:
+                if authority.outcome != cc_resident.TurnTerminalAuthority.RUNNING:
+                    return True
+                close_stdin_calls.append(True)
+            return True
+
+        watchdog = cc_resident.StreamWatchdog(
+            stall_timeout=360,
+            hard_timeout=3600,
+            on_timeout=lambda reason: None,
+            is_proc_alive=lambda: True,
+            probe_timeout=20,
+            on_probe=on_probe,
+        )
+        watchdog_holder.append(watchdog)
+        self._age_watchdog_into_probe_epoch(watchdog)
+        probe_thread = threading.Thread(target=watchdog._try_probe)
+        probe_thread.start()
+        self.assertTrue(scan_started.wait(1.0))
+
+        self.assertTrue(authority.accept_provider_result(self._authority_receipt()))
+        watchdog.note_activity()
+        release_scan.set()
+        probe_thread.join(1.0)
+
+        snapshot = authority.snapshot()
+        self.assertEqual('SUCCESS', snapshot['terminal_outcome'])
+        self.assertFalse(snapshot['recovery_claimed'])
+        self.assertEqual([], close_stdin_calls)
+        self.assertEqual([], sigterm_calls)
+        self.assertEqual(0, snapshot['cleanup_count'])
+        self.assertFalse(watchdog._stopped)
+
+    def test_g_r2_activity_during_scan_stales_old_probe_and_next_epoch_can_claim(self):
+        authority = cc_resident.TurnTerminalAuthority(turn_identity='g-r2')
+        scan_started = threading.Event()
+        release_scan = threading.Event()
+        first_probe = [True]
+        close_stdin_calls = []
+        watchdog_holder = []
+
+        def on_probe(probe_generation):
+            if first_probe[0]:
+                first_probe[0] = False
+                scan_started.set()
+                release_scan.wait(1.0)
+            watchdog = watchdog_holder[0]
+            if not watchdog.claim_recovery(
+                probe_generation,
+                lambda: authority.claim_terminal_recovery(probe_generation),
+            ):
+                return False
+            close_stdin_calls.append(True)
+            return True
+
+        watchdog = cc_resident.StreamWatchdog(
+            stall_timeout=360,
+            hard_timeout=3600,
+            on_timeout=lambda reason: None,
+            is_proc_alive=lambda: True,
+            probe_timeout=20,
+            on_probe=on_probe,
+        )
+        watchdog_holder.append(watchdog)
+        self._age_watchdog_into_probe_epoch(watchdog)
+        first_thread = threading.Thread(target=watchdog._try_probe)
+        first_thread.start()
+        self.assertTrue(scan_started.wait(1.0))
+
+        # Proof is available, but the provider resumed while the old scan was
+        # in flight, so the old generation must be rejected.
+        watchdog.note_activity()
+        release_scan.set()
+        first_thread.join(1.0)
+        self.assertFalse(authority.recovery_claimed)
+        self.assertEqual([], close_stdin_calls)
+
+        # The next inactivity epoch is eligible and may now claim recovery.
+        self._age_watchdog_into_probe_epoch(watchdog)
+        self.assertTrue(watchdog._try_probe())
+        self.assertTrue(authority.recovery_claimed)
+        self.assertEqual([True], close_stdin_calls)
+
+    def test_g_r3_recovery_claim_wins_then_result_recovers_and_tears_down_once(self):
+        authority = cc_resident.TurnTerminalAuthority(turn_identity='g-r3')
+        close_stdin_calls = []
+        sigterm_calls = []
+        cleanup_calls = []
+        controller = cc_resident.TerminalRecoveryController(
+            eof_grace=1,
+            sigterm_grace=1,
+            hard_deadline=time.monotonic() + 10,
+            close_stdin=lambda: close_stdin_calls.append(True),
+            send_sigterm=lambda: sigterm_calls.append(True),
+            submit_hard_timeout=lambda: None,
+            submit_result_missing=lambda: None,
+        )
+        self.assertTrue(authority.claim_terminal_recovery(3))
+        self.assertTrue(controller.start({
+            'detected_at': time.time(),
+            'provider_last_activity_at': time.time(),
+        }))
+        self.assertTrue(authority.accept_provider_result(self._authority_receipt()))
+        controller.mark_terminal(cc_resident.TurnTerminalAuthority.SUCCESS)
+        controller.wait_for_final()
+        self.assertTrue(authority.begin_cleanup(
+            'terminal_recovery_nonreusable', allow_success=True,
+        ))
+        cleanup_calls.append(True)
+
+        snapshot = authority.snapshot()
+        self.assertEqual('SUCCESS', snapshot['terminal_outcome'])
+        self.assertEqual(1, snapshot['cleanup_count'])
+        self.assertEqual([True], close_stdin_calls)
+        self.assertEqual([], sigterm_calls)
+        self.assertEqual([True], cleanup_calls)
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF',
+            controller.snapshot()['recovery_stage'],
+        )
+
+    def test_g_r4_duplicate_recovery_claim_has_one_owner_and_one_teardown(self):
+        authority = cc_resident.TurnTerminalAuthority(turn_identity='g-r4')
+        barrier = threading.Barrier(2)
+        claims = []
+        controller_count = []
+        lock = threading.Lock()
+
+        def attempt_claim():
+            barrier.wait()
+            claimed = authority.claim_terminal_recovery(4)
+            with lock:
+                claims.append(claimed)
+                if claimed:
+                    controller_count.append(True)
+
+        threads = [
+            threading.Thread(target=attempt_claim),
+            threading.Thread(target=attempt_claim),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertEqual([False, True], sorted(claims))
+        self.assertEqual([True], controller_count)
+        self.assertTrue(authority.accept_provider_result(self._authority_receipt()))
+        self.assertTrue(authority.begin_cleanup(
+            'terminal_recovery_nonreusable', allow_success=True,
+        ))
+        self.assertFalse(authority.begin_cleanup(
+            'duplicate_recovery_cleanup', allow_success=True,
+        ))
+        self.assertEqual(1, authority.snapshot()['cleanup_count'])
 
     def test_c_r8_long_current_turn_tail_proof_recovers(self):
         long_rows = [

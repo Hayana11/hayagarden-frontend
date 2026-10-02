@@ -459,6 +459,12 @@ class TurnTerminalAuthority:
         self._duplicate_terminal_signal_count = 0
         self._provider_error = None
         self._timeout_diagnostics = None
+        # Lifecycle ownership is deliberately separate from the final
+        # outcome.  A recovery claim never commits or overwrites a terminal
+        # state; it only reserves the resident teardown path while RUNNING.
+        self._recovery_claimed = False
+        self._recovery_claimed_at = None
+        self._recovery_claim_generation = None
 
     @property
     def outcome(self):
@@ -550,6 +556,27 @@ class TurnTerminalAuthority:
             self._commit_locked(self.DEFERRED, 'tool_deferred', 'provider_result')
             return True
 
+    @property
+    def recovery_claimed(self):
+        with self._lock:
+            return bool(self._recovery_claimed)
+
+    def claim_terminal_recovery(self, probe_generation=None):
+        """Atomically reserve recovery lifecycle ownership while RUNNING.
+
+        This is not a terminal transition and cannot change the final
+        outcome.  The caller must perform all transcript scanning before this
+        method; the method only serializes the RUNNING check and lifecycle
+        claim under the authority lock.
+        """
+        with self._lock:
+            if self._outcome != self.RUNNING or self._recovery_claimed:
+                return False
+            self._recovery_claimed = True
+            self._recovery_claimed_at = time.time()
+            self._recovery_claim_generation = probe_generation
+            return True
+
     def begin_cleanup(self, reason, *, allow_success=False):
         """Claim the serialized resident teardown token exactly once.
 
@@ -606,6 +633,9 @@ class TurnTerminalAuthority:
                 'duplicate_terminal_signal_count': self._duplicate_terminal_signal_count,
                 'provider_error': dict(self._provider_error or {}),
                 'timeout_diagnostics': dict(self._timeout_diagnostics or {}),
+                'recovery_claimed': bool(self._recovery_claimed),
+                'recovery_claimed_at': self._recovery_claimed_at,
+                'recovery_claim_generation': self._recovery_claim_generation,
             }
 
 class StreamWatchdog:
@@ -668,6 +698,25 @@ class StreamWatchdog:
     def stop(self):
         with self._lock:
             self._stopped = True
+
+    def claim_recovery(self, probe_generation, claim_lifecycle):
+        """Revalidate probe state, then atomically claim lifecycle ownership.
+
+        The watchdog lock is held only for state validation and the short
+        authority claim callback.  Transcript scanning and recovery side
+        effects happen outside this lock.
+        """
+        with self._lock:
+            if self._stopped or self._fired_reason is not None:
+                return False
+            if self._activity_generation != probe_generation:
+                return False
+            if self._probed_generation != probe_generation:
+                return False
+            if not claim_lifecycle():
+                return False
+            self._stopped = True
+            return True
 
     def note_activity(self):
         with self._lock:
@@ -736,7 +785,7 @@ class StreamWatchdog:
             # the generation and arms a later epoch without probe storms.
             self._probed_generation = generation
         try:
-            consumed = bool(self._on_probe())
+            consumed = bool(self._on_probe(generation))
         except Exception:
             consumed = False
         if consumed:
@@ -2540,6 +2589,11 @@ class ResidentSession:
         terminal_receipt = None
         recovery = None
         recovery_success_nonreusable = False
+        # Serializes the short lifecycle handoff between an authority
+        # recovery claim, controller start, and a result that arrives in the
+        # same window.  It is not held while scanning JSONL or by watchdog
+        # lock code.
+        recovery_start_lock = threading.Lock()
 
         reader_state_lock = threading.Lock()
         reader_state_data = {
@@ -2846,27 +2900,59 @@ class ResidentSession:
         def _submit_recovery_hard_timeout():
             return _submit_timeout_candidate('hard')
 
-        def _start_terminal_recovery():
+        def _start_terminal_recovery(probe_generation=None):
             nonlocal recovery
             if recovery is not None and recovery.active:
                 return True
             proof = _durable_current_turn_end_turn_proof()
             if proof is None:
                 return False
-            recovery = TerminalRecoveryController(
-                eof_grace=recovery_eof_grace,
-                sigterm_grace=recovery_sigterm_grace,
-                hard_deadline=watchdog.hard_deadline,
-                close_stdin=_close_stdin_for_terminal_recovery,
-                send_sigterm=_terminate_after_terminal_recovery,
-                submit_hard_timeout=_submit_recovery_hard_timeout,
-                submit_result_missing=_submit_recovery_result_missing,
-            )
-            return recovery.start(proof)
+            # This revalidates watchdog state/generation and claims the
+            # non-terminal lifecycle gate atomically under the authority lock.
+            # No transcript scan or process side effect occurs in either lock.
+            if not watchdog.claim_recovery(
+                probe_generation,
+                lambda: authority.claim_terminal_recovery(probe_generation),
+            ):
+                return False
+            # A live result may win immediately after the lifecycle claim.
+            # Serialize that result's teardown decision against controller
+            # start so late recovery can never close stdin after a normal
+            # SUCCESS that won before the claim.
+            with recovery_start_lock:
+                if authority.outcome != TurnTerminalAuthority.RUNNING:
+                    return True
+                recovery = TerminalRecoveryController(
+                    eof_grace=recovery_eof_grace,
+                    sigterm_grace=recovery_sigterm_grace,
+                    hard_deadline=watchdog.hard_deadline,
+                    close_stdin=_close_stdin_for_terminal_recovery,
+                    send_sigterm=_terminate_after_terminal_recovery,
+                    submit_hard_timeout=_submit_recovery_hard_timeout,
+                    submit_result_missing=_submit_recovery_result_missing,
+                )
+                return recovery.start(proof)
 
-        def _on_recovery_probe():
+        def _finish_recovered_success():
+            """Serialize recovered SUCCESS teardown after the lifecycle claim."""
+            nonlocal recovery_success_nonreusable
+            if not authority.recovery_claimed:
+                return False
+            with recovery_start_lock:
+                if recovery is not None and recovery.active:
+                    recovery.mark_terminal(TurnTerminalAuthority.SUCCESS)
+                cleaned = _cleanup_after_terminal(
+                    'terminal_recovery_nonreusable',
+                    allow_success=True,
+                )
+                recovery_success_nonreusable = True
+                self._cold = True
+                self._next_spawn_reason = 'terminal_recovery'
+                return cleaned
+
+        def _on_recovery_probe(probe_generation=None):
             """Probe only; no durable proof means ordinary stall remains later."""
-            return _start_terminal_recovery()
+            return _start_terminal_recovery(probe_generation)
 
         # Watchdog timeout ownership is linearized by the same authority as
         # provider terminal events. Only the winner is allowed to capture
@@ -3245,15 +3331,7 @@ class ResidentSession:
                                 and claimed_terminal['accepted']
                             ):
                                 terminal_receipt = claimed_terminal['receipt']
-                                if recovery is not None and recovery.active:
-                                    recovery.mark_terminal(TurnTerminalAuthority.SUCCESS)
-                                    if _cleanup_after_terminal(
-                                        'terminal_recovery_nonreusable',
-                                        allow_success=True,
-                                    ):
-                                        recovery_success_nonreusable = True
-                                        self._cold = True
-                                        self._next_spawn_reason = 'terminal_recovery'
+                                _finish_recovered_success()
                         # result.usage is diagnostics only; it never updates
                         # or replaces the stream round totals.
                         if current_round is not None:
