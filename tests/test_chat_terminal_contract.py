@@ -1,5 +1,8 @@
+import json
 import pathlib
+import threading
 import unittest
+from unittest import mock
 
 import cc_resident
 
@@ -37,7 +40,14 @@ class ChatTerminalContractTests(unittest.TestCase):
             'content': [{'type': 'text', 'text': 'done'}],
         }})
         self.assertTrue(tracker.grace_expired(tracker.end_turn_seen_at + 30.1))
-        self.assertEqual(tracker.terminal_reason, 'result_missing_after_end_turn')
+        authority = cc_resident.TurnTerminalAuthority(turn_identity='turn-contract')
+        self.assertTrue(
+            authority.submit_timeout_candidate('result_missing_after_end_turn')
+        )
+        self.assertEqual(
+            'RESULT_MISSING_AFTER_END_TURN',
+            authority.snapshot()['terminal_outcome'],
+        )
         self.assertFalse(tracker.result_seen)
 
     def test_t5_partial_rescue_contract_remains_non_complete(self):
@@ -150,8 +160,15 @@ class ChatTerminalContractTests(unittest.TestCase):
         tracker.observe({'type': 'assistant', 'message': {'stop_reason': 'end_turn'}})
         self.assertTrue(tracker.grace_expired(tracker.end_turn_seen_at + 30.1))
         tracker.observe({'type': 'result'})
-        self.assertEqual(tracker.terminal_reason, 'result_missing_after_end_turn')
-        self.assertFalse(tracker.result_seen)
+        authority = cc_resident.TurnTerminalAuthority(turn_identity='turn-contract')
+        self.assertTrue(
+            authority.submit_timeout_candidate('result_missing_after_end_turn')
+        )
+        self.assertEqual(
+            'RESULT_MISSING_AFTER_END_TURN',
+            authority.snapshot()['terminal_outcome'],
+        )
+        self.assertTrue(tracker.result_seen)
 
     def test_t11_live_result_receipt_is_typed_and_not_end_turn_derived(self):
         receipt = cc_resident.ProviderTerminalReceipt.from_result_event(
@@ -190,6 +207,532 @@ class ChatTerminalContractTests(unittest.TestCase):
                         process_generation=3,
                         claude_session_id='session-1',
                     )
+
+    def test_t11b_no_second_terminal_reconciliation_helper_exists(self):
+        self.assertFalse(hasattr(cc_resident, '_reconcile_terminal_timeout'))
+
+    def _run_deterministic_send_turn(
+        self,
+        events,
+        watchdog_reason,
+        *,
+        signal_after_read=False,
+        signal_on_first_activity=False,
+        block_readline=False,
+        close_after_first_chunk=False,
+        capture_exception=False,
+    ):
+        """Run the actual send_turn path with a deterministic watchdog signal."""
+        watchdogs = []
+        kill_calls = []
+
+        class FakeStream:
+            def __init__(self, rows):
+                self._rows = iter(json.dumps(row) + chr(10) for row in rows)
+                self.readline_started = threading.Event()
+                self.readline_finished = threading.Event()
+                self.release_readline = threading.Event()
+
+            def readline(self):
+                if block_readline:
+                    self.readline_started.set()
+                    self.release_readline.wait(2.0)
+                    self.readline_finished.set()
+                    return ''
+                self.readline_finished.set()
+                return next(self._rows, '')
+
+            def close(self):
+                return None
+
+        class FakeStdin:
+            def write(self, payload):
+                self.payload = payload
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class FakeProc:
+            pid = 7001
+
+            def __init__(self, rows):
+                self.stdin = FakeStdin()
+                self.stdout = FakeStream(rows)
+                self.stderr = FakeStream([])
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return None
+
+            def kill(self):
+                return None
+
+        class DeterministicWatchdog:
+            def __init__(self, *, on_timeout, **kwargs):
+                self._on_timeout = on_timeout
+                self.reason = watchdog_reason
+                self.committed = False
+                watchdogs.append(self)
+
+            def start(self):
+                if block_readline:
+                    self._thread = threading.Thread(
+                        target=self._fire_after_reader_blocks,
+                        daemon=True,
+                    )
+                    self._thread.start()
+                elif not signal_after_read and not signal_on_first_activity:
+                    self.committed = True
+                    if self.reason is not None:
+                        self._on_timeout(self.reason)
+
+            def _fire_after_reader_blocks(self):
+                session._proc.stdout.readline_started.wait(2.0)
+                self.committed = True
+                if self.reason is not None:
+                    self._on_timeout(self.reason)
+
+            def stop(self):
+                if signal_after_read and not self.committed:
+                    self.committed = True
+                    if self.reason is not None:
+                        self._on_timeout(self.reason)
+                thread = getattr(self, '_thread', None)
+                if thread is not None:
+                    thread.join(2.0)
+                return None
+
+            def note_activity(self):
+                if signal_on_first_activity and not self.committed:
+                    self.committed = True
+                    if self.reason is not None:
+                        self._on_timeout(self.reason)
+
+        session = cc_resident.ResidentSession(
+            '/tmp', '', '/tmp/mcp.json',
+        )
+        session._proc = FakeProc(events)
+        session._generation = 7
+        session._session_id = 'session-race'
+        session._attach_jsonl_usage_with_retry = (
+            lambda usage, cursor, **kwargs: usage
+        )
+        # Keep the fake pipe readable after the callback's kill request so the
+        # fixture models the exact ordering under test: watchdog commit first,
+        # reader consumes the already-complete provider result second.
+        def fake_kill(quiet=False):
+            kill_calls.append(bool(quiet))
+            if block_readline:
+                session._proc.stdout.release_readline.set()
+
+        session._kill = fake_kill
+
+        with mock.patch.object(
+            cc_resident, 'StreamWatchdog', DeterministicWatchdog,
+        ):
+            generator = session.send_turn('race', commit_meta=None)
+            if close_after_first_chunk:
+                chunks = [next(generator)]
+                generator.close()
+            else:
+                try:
+                    chunks = list(generator)
+                except BaseException as exc:
+                    if not capture_exception:
+                        raise
+                    return exc, session, watchdogs, kill_calls
+        return chunks, session, watchdogs, kill_calls
+
+    def test_t13_send_turn_stall_then_valid_result_completes_terminal_path(self):
+        events = [
+            {
+                'type': 'assistant',
+                'message': {
+                    'stop_reason': 'end_turn',
+                    'content': [{'type': 'text', 'text': 'complete reply'}],
+                },
+            },
+            {
+                'type': 'result',
+                'is_error': False,
+                'stop_reason': 'end_turn',
+                'usage': {},
+            },
+        ]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                events, 'stall', signal_after_read=True,
+            )
+        )
+        self.assertEqual(['stall'], [watchdog.reason for watchdog in watchdogs])
+        self.assertTrue(watchdogs[0].committed)
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        text, thinking, usage, claims = chunks[0][1]
+        self.assertEqual('complete reply', text)
+        self.assertEqual('', thinking)
+        self.assertEqual({'feedback_ids': [], 'dream_id': None, 'wake_ids': []}, claims)
+        self.assertIsInstance(
+            usage.terminal_receipt,
+            cc_resident.ProviderTerminalReceipt,
+        )
+        self.assertEqual('provider_result', usage.terminal_receipt.terminal_kind)
+        self.assertEqual('result', usage['_obs_terminal_reason'])
+        self.assertFalse(usage['_obs_stall_result_race_recovered'])
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual('provider_result', usage['_obs_terminal_linearization_source'])
+        self.assertEqual(1, usage['_obs_stale_stall_rejected_count'])
+        self.assertEqual(0, usage['_obs_actual_stall_accepted_count'])
+        self.assertEqual(1, usage['resident_turn_count'])
+        self.assertFalse(session.is_cold())
+        self.assertEqual([], kill_calls)
+
+    def test_t13b_result_claim_precedes_first_activity_watchdog_stall(self):
+        """A result already read must beat a synchronous note_activity stall."""
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                [{
+                    'type': 'result',
+                    'is_error': False,
+                    'stop_reason': 'end_turn',
+                }],
+                'stall',
+                signal_on_first_activity=True,
+            )
+        )
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        usage = chunks[0][1][2]
+        self.assertIsInstance(
+            usage.terminal_receipt,
+            cc_resident.ProviderTerminalReceipt,
+        )
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual('provider_result', usage['_obs_terminal_linearization_source'])
+        self.assertEqual(1, usage['_obs_stale_stall_rejected_count'])
+        self.assertEqual(0, usage['_obs_actual_stall_accepted_count'])
+        self.assertEqual(0, usage['_obs_late_result_rejected_count'])
+        self.assertEqual(1, usage['_obs_duplicate_terminal_signal_count'])
+        self.assertEqual([], kill_calls)
+
+    def test_a1_r1_blocked_readline_timeout_kills_once_and_unblocks_reader(self):
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            block_readline=True,
+            capture_exception=True,
+        )
+        self.assertIsInstance(error, cc_resident.ResidentError)
+        self.assertEqual('provider_stall_timeout', error.error_code)
+        self.assertEqual(['stall'], [watchdog.reason for watchdog in watchdogs])
+        self.assertTrue(session._proc.stdout.readline_started.is_set())
+        self.assertTrue(session._proc.stdout.readline_finished.is_set())
+        self.assertEqual([True], kill_calls)
+        diagnostics = error.diagnostics
+        self.assertEqual('STALL', diagnostics['terminal_outcome'])
+        self.assertEqual(1, diagnostics['cleanup_count'])
+        self.assertTrue(diagnostics['resident_killed'])
+        timeout_diag = diagnostics['timeout_diagnostics']
+        self.assertEqual('READLINE', timeout_diag['reader_state'])
+        self.assertEqual('stall', timeout_diag['timeout_candidate'])
+        self.assertIn('thread_dump', timeout_diag)
+        self.assertIn('child_wchan', timeout_diag)
+        self.assertIn('child_stack', timeout_diag)
+        self.assertEqual(1, len([x for x in [timeout_diag] if x]))
+
+    def test_a1_r2_success_rejects_stall_without_cleanup_or_kill(self):
+        chunks, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [{
+                'type': 'result',
+                'is_error': False,
+                'stop_reason': 'end_turn',
+            }],
+            'stall',
+            signal_on_first_activity=True,
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(1, usage['_obs_stale_stall_rejected_count'])
+        self.assertEqual(0, usage['_obs_actual_stall_accepted_count'])
+        self.assertEqual(0, usage['_obs_cleanup_count'])
+        self.assertIsNone(usage['_obs_timeout_diagnostics'])
+        self.assertFalse(session.is_cold())
+        self.assertEqual([], kill_calls)
+
+    def test_a1_r3_hard_timeout_kills_once(self):
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'hard',
+            capture_exception=True,
+        )
+        self.assertIsInstance(error, cc_resident.ResidentError)
+        self.assertEqual('provider_hard_timeout', error.error_code)
+        self.assertEqual(['hard'], [watchdog.reason for watchdog in watchdogs])
+        self.assertEqual([True], kill_calls)
+        diagnostics = error.diagnostics
+        self.assertEqual('HARD_TIMEOUT', diagnostics['terminal_outcome'])
+        self.assertEqual(1, diagnostics['cleanup_count'])
+        self.assertTrue(diagnostics['resident_killed'])
+        self.assertEqual('hard', diagnostics['timeout_diagnostics']['timeout_candidate'])
+
+    def test_t14b_provider_error_claim_precedes_watchdog_stall_on_send_turn(self):
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [{
+                'type': 'result',
+                'is_error': True,
+                'stop_reason': 'end_turn',
+                'result': 'provider failure',
+            }],
+            'stall',
+            signal_on_first_activity=True,
+            capture_exception=True,
+        )
+        self.assertIsInstance(error, cc_resident.ResidentError)
+        self.assertEqual('provider_error', error.error_code)
+        diagnostics = error.diagnostics
+        self.assertEqual('PROVIDER_ERROR', diagnostics['terminal_outcome'])
+        self.assertEqual('provider_error', diagnostics['terminal_linearization_source'])
+        self.assertEqual(0, diagnostics['actual_stall_accepted_count'])
+        self.assertEqual(1, diagnostics['duplicate_terminal_signal_count'])
+        self.assertEqual(1, diagnostics['cleanup_count'])
+        self.assertEqual([True], kill_calls)
+
+    def test_t14_send_turn_failure_paths_remain_failures(self):
+        cases = (
+            (
+                'true_stall',
+                [],
+                'stall',
+                'provider_stall_timeout',
+            ),
+            (
+                'provider_error',
+                [{
+                    'type': 'result',
+                    'is_error': True,
+                    'stop_reason': 'end_turn',
+                    'result': 'provider failure',
+                }],
+                None,
+                'provider_error',
+            ),
+            (
+                'hard_timeout',
+                [],
+                'hard',
+                'provider_hard_timeout',
+            ),
+        )
+        for name, events, watchdog_reason, expected_code in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(cc_resident.ResidentError) as caught:
+                    self._run_deterministic_send_turn(
+                        events, watchdog_reason,
+                    )
+                self.assertEqual(expected_code, caught.exception.error_code)
+
+    def test_t15_send_turn_generator_exit_kills_once_after_authority(self):
+        events = [{
+            'type': 'stream_event',
+            'event': {
+                'type': 'content_block_delta',
+                'delta': {'type': 'text_delta', 'text': 'partial'},
+            },
+        }]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                events,
+                None,
+                close_after_first_chunk=True,
+            )
+        )
+        self.assertEqual([('text', 'partial')], chunks)
+        self.assertIsNone(watchdogs[0].reason)
+        self.assertEqual([True], kill_calls)
+
+    def _authority_receipt(self):
+        return cc_resident.ProviderTerminalReceipt.from_result_event(
+            {'type': 'result', 'is_error': False, 'stop_reason': 'end_turn'},
+            turn_identity='turn-authority',
+            process_generation=9,
+            claude_session_id='session-authority',
+        )
+
+    def test_r1_result_linearizes_before_stall_and_keeps_resident_hot(self):
+        authority = cc_resident.TurnTerminalAuthority(
+            turn_identity='turn-r1',
+        )
+        barrier = threading.Barrier(2)
+        result_done = threading.Event()
+        result_accepted = []
+        stall_accepted = []
+
+        def accept_result():
+            barrier.wait()
+            result_accepted.append(
+                authority.accept_provider_result(self._authority_receipt())
+            )
+            result_done.set()
+
+        def submit_stall():
+            barrier.wait()
+            result_done.wait(1.0)
+            stall_accepted.append(authority.submit_timeout_candidate('stall'))
+
+        threads = [
+            threading.Thread(target=accept_result),
+            threading.Thread(target=submit_stall),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertEqual([True], result_accepted)
+        self.assertEqual([False], stall_accepted)
+        snapshot = authority.snapshot()
+        self.assertEqual('SUCCESS', snapshot['terminal_outcome'])
+        self.assertEqual('provider_result', snapshot['terminal_linearization_source'])
+        self.assertEqual(1, snapshot['stale_stall_rejected_count'])
+        self.assertFalse(authority.begin_cleanup('success'))
+        self.assertFalse(snapshot['resident_killed'])
+
+    def test_r2_stall_linearizes_before_late_result_and_kills_once(self):
+        authority = cc_resident.TurnTerminalAuthority(
+            turn_identity='turn-r2',
+        )
+        barrier = threading.Barrier(2)
+        stall_done = threading.Event()
+        stall_accepted = []
+        result_accepted = []
+
+        def accept_stall():
+            barrier.wait()
+            stall_accepted.append(authority.submit_timeout_candidate('stall'))
+            stall_done.set()
+
+        def accept_result():
+            barrier.wait()
+            stall_done.wait(1.0)
+            result_accepted.append(
+                authority.accept_provider_result(self._authority_receipt())
+            )
+
+        threads = [
+            threading.Thread(target=accept_stall),
+            threading.Thread(target=accept_result),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertEqual([True], stall_accepted)
+        self.assertEqual([False], result_accepted)
+        self.assertTrue(authority.begin_cleanup('terminal_failure'))
+        self.assertFalse(authority.begin_cleanup('already_cleaned'))
+        authority.record_resident_kill(
+            process_present=True,
+            reason='stall',
+        )
+
+        snapshot = authority.snapshot()
+        self.assertEqual('STALL', snapshot['terminal_outcome'])
+        self.assertEqual(1, snapshot['actual_stall_accepted_count'])
+        self.assertEqual(1, snapshot['cleanup_count'])
+        self.assertTrue(snapshot['resident_killed'])
+        self.assertEqual(1, snapshot['late_result_rejected_count'])
+
+    def test_r3_provider_error_and_stall_have_one_failure_owner(self):
+        authority = cc_resident.TurnTerminalAuthority(
+            turn_identity='turn-r3',
+        )
+        barrier = threading.Barrier(2)
+        provider_done = threading.Event()
+        provider_accepted = []
+        stall_accepted = []
+
+        def accept_provider_error():
+            barrier.wait()
+            provider_accepted.append(authority.accept_provider_error({
+                'error_code': 'provider_error',
+                'provider_error_category': 'provider_error',
+                'turn_failure_class': 'TURN_LEVEL',
+            }))
+            provider_done.set()
+
+        def submit_stall():
+            barrier.wait()
+            provider_done.wait(1.0)
+            stall_accepted.append(authority.submit_timeout_candidate('stall'))
+
+        threads = [
+            threading.Thread(target=accept_provider_error),
+            threading.Thread(target=submit_stall),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+
+        self.assertEqual([True], provider_accepted)
+        self.assertEqual([False], stall_accepted)
+        self.assertEqual('PROVIDER_ERROR', authority.snapshot()['terminal_outcome'])
+        self.assertFalse(authority.accept_provider_result(self._authority_receipt()))
+        self.assertEqual(2, authority.snapshot()['duplicate_terminal_signal_count'])
+
+    def test_r4_hard_timeout_stays_failure_for_late_valid_receipt(self):
+        authority = cc_resident.TurnTerminalAuthority(
+            turn_identity='turn-r4',
+        )
+        self.assertTrue(authority.submit_timeout_candidate('hard'))
+        self.assertFalse(authority.accept_provider_result(self._authority_receipt()))
+        snapshot = authority.snapshot()
+        self.assertEqual('HARD_TIMEOUT', snapshot['terminal_outcome'])
+        self.assertEqual('hard_timeout', snapshot['terminal_reason'])
+        self.assertIsNone(snapshot['result_accepted_at'])
+
+    def test_r5_generator_exit_has_bounded_single_cleanup(self):
+        authority = cc_resident.TurnTerminalAuthority(
+            turn_identity='turn-r5',
+        )
+        self.assertTrue(authority.accept_disconnected('generator_exit'))
+        self.assertTrue(authority.begin_cleanup('terminal_failure'))
+        self.assertFalse(authority.begin_cleanup('already_cleaned'))
+        authority.record_resident_kill(
+            process_present=True,
+            reason='generator_exit',
+        )
+        snapshot = authority.snapshot()
+        self.assertEqual('DISCONNECTED', snapshot['terminal_outcome'])
+        self.assertEqual(1, snapshot['cleanup_count'])
+        self.assertTrue(snapshot['resident_killed'])
+
+    def test_r6_duplicate_terminal_signals_are_immutable(self):
+        authority = cc_resident.TurnTerminalAuthority(
+            turn_identity='turn-r6',
+        )
+        self.assertTrue(authority.submit_timeout_candidate('stall'))
+        self.assertFalse(authority.submit_timeout_candidate('stall'))
+        self.assertFalse(authority.submit_timeout_candidate('hard'))
+        self.assertFalse(authority.accept_disconnected('late_disconnect'))
+        self.assertTrue(authority.begin_cleanup('terminal_failure'))
+        authority.record_resident_kill(
+            process_present=True,
+            reason='stall',
+        )
+        self.assertFalse(authority.begin_cleanup('already_cleaned'))
+        snapshot = authority.snapshot()
+        self.assertEqual('STALL', snapshot['terminal_outcome'])
+        self.assertEqual(3, snapshot['duplicate_terminal_signal_count'])
+        self.assertEqual(1, snapshot['cleanup_count'])
+        self.assertTrue(snapshot['resident_killed'])
 
     def test_t12_daily_runtime_forwards_receipt_without_rederiving_terminal(self):
         source = pathlib.Path(__file__).resolve().parents[1] / 'chat' / 'daily_runtime.py'

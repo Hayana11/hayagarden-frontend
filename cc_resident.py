@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import math
 import os
 import select
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 
 import config_store
@@ -104,6 +107,61 @@ def _diagnostic_request_id(*events):
             if value:
                 return value[:200]
     return None
+
+
+_TIMEOUT_DIAGNOSTIC_MAX_CHARS = 8_000
+_TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES = 64 * 1024
+
+
+def _bounded_diagnostic_text(value, limit=_TIMEOUT_DIAGNOSTIC_MAX_CHARS):
+    """Return bounded diagnostic text without accepting arbitrary payloads."""
+    if value is None:
+        return None
+    return str(value)[:int(limit)]
+
+
+def _diagnostic_path_hash(path):
+    if not path:
+        return None
+    try:
+        return hashlib.sha256(os.fsencode(str(path))).hexdigest()
+    except Exception:
+        return None
+
+
+def _diagnostic_proc_read(pid, name, *, limit=4_000):
+    """Best-effort bounded /proc read; never expose a read failure to cleanup."""
+    try:
+        safe_pid = int(pid)
+        if safe_pid <= 0:
+            raise ValueError('invalid pid')
+        with open('/proc/%d/%s' % (safe_pid, name), 'r', encoding='utf-8', errors='replace') as handle:
+            return _bounded_diagnostic_text(handle.read(limit + 1), limit)
+    except Exception:
+        return 'unavailable'
+
+
+def _diagnostic_thread_dump(*, max_threads=12, max_stack_chars=1_200):
+    """Bounded stack-only dump; deliberately never serializes frame locals."""
+    try:
+        frames = sys._current_frames()
+        rows = []
+        for thread in threading.enumerate()[:max_threads]:
+            frame = frames.get(thread.ident)
+            if frame is None:
+                continue
+            try:
+                stack = ''.join(traceback.format_stack(frame, limit=16))
+            except Exception:
+                stack = 'unavailable'
+            rows.append({
+                'name': str(thread.name or '')[:120],
+                'ident': _diagnostic_int(thread.ident),
+                'stack': _bounded_diagnostic_text(stack, max_stack_chars),
+            })
+        return rows
+    except Exception:
+        return [{'name': 'unavailable', 'ident': None, 'stack': 'unavailable'}]
 
 
 def _log_wake_round_usage(
@@ -286,7 +344,6 @@ class ProviderTerminalTracker:
         self.end_turn_seen = False
         self.end_turn_seen_at = None
         self.result_seen = False
-        self.terminal_reason = None
 
     @staticmethod
     def _stop_reason(event):
@@ -309,7 +366,7 @@ class ProviderTerminalTracker:
         return None
 
     def observe(self, event):
-        if self.terminal_reason is not None or not isinstance(event, dict):
+        if not isinstance(event, dict):
             return
         event_type = event.get('type')
         if event_type == 'stream_event':
@@ -320,7 +377,6 @@ class ProviderTerminalTracker:
         self.last_provider_event_type = label
         if event_type == 'result':
             self.result_seen = True
-            self.terminal_reason = 'result'
             self.last_provider_activity_at = time.time()
             return
         if _claude_event_is_activity(event):
@@ -330,13 +386,10 @@ class ProviderTerminalTracker:
             self.end_turn_seen_at = time.monotonic()
 
     def grace_expired(self, now=None):
-        if self.terminal_reason is not None or not self.end_turn_seen:
+        if self.result_seen or not self.end_turn_seen:
             return False
         current = time.monotonic() if now is None else float(now)
-        if current - float(self.end_turn_seen_at) < self.grace_seconds:
-            return False
-        self.terminal_reason = 'result_missing_after_end_turn'
-        return True
+        return current - float(self.end_turn_seen_at) >= self.grace_seconds
 
     def snapshot(self, *, terminal_reason=None, partial_rescue_performed=False,
                  lock_released=None):
@@ -350,11 +403,191 @@ class ProviderTerminalTracker:
             'end_turn_seen': bool(self.end_turn_seen),
             'end_turn_seen_at': self.end_turn_seen_at,
             'result_seen': bool(self.result_seen),
-            'terminal_reason': terminal_reason or self.terminal_reason,
+            'terminal_reason': terminal_reason,
             'partial_rescue_performed': bool(partial_rescue_performed),
             'lock_released': lock_released,
         }
 
+class TurnTerminalAuthority:
+    """Single linearizer for one turn's provider terminal outcome."""
+
+    RUNNING = 'RUNNING'
+    SUCCESS = 'SUCCESS'
+    PROVIDER_ERROR = 'PROVIDER_ERROR'
+    STALL = 'STALL'
+    HARD_TIMEOUT = 'HARD_TIMEOUT'
+    RESULT_MISSING_AFTER_END_TURN = 'RESULT_MISSING_AFTER_END_TURN'
+    DISCONNECTED = 'DISCONNECTED'
+    DEFERRED = 'DEFERRED'
+
+    _TIMEOUT_OUTCOMES = {
+        'stall': (STALL, 'stall'),
+        'hard': (HARD_TIMEOUT, 'hard_timeout'),
+        'result_missing_after_end_turn': (
+            RESULT_MISSING_AFTER_END_TURN,
+            'result_missing_after_end_turn',
+        ),
+    }
+
+    def __init__(self, *, turn_identity):
+        self.turn_identity = str(turn_identity or '')
+        self._lock = threading.Lock()
+        self._outcome = self.RUNNING
+        self._terminal_reason = None
+        self._linearization_source = None
+        self._linearized_at = None
+        self._timeout_candidate_type = None
+        self._timeout_candidate_received_at = None
+        self._timeout_candidate_count = 0
+        self._result_accepted_at = None
+        self._resident_kill_requested = False
+        self._resident_killed = False
+        self._resident_kill_reason = None
+        self._cleanup_count = 0
+        self._cleanup_reason = None
+        self._stale_stall_rejected_count = 0
+        self._actual_stall_accepted_count = 0
+        self._late_result_rejected_count = 0
+        self._duplicate_terminal_signal_count = 0
+        self._provider_error = None
+        self._timeout_diagnostics = None
+
+    @property
+    def outcome(self):
+        with self._lock:
+            return self._outcome
+
+    @property
+    def reason(self):
+        with self._lock:
+            return self._terminal_reason
+
+    def is_terminal(self):
+        return self.outcome != self.RUNNING
+
+    def _commit_locked(self, outcome, reason, source):
+        self._outcome = outcome
+        self._terminal_reason = reason
+        self._linearization_source = source
+        self._linearized_at = time.time()
+
+    def _reject_locked(self, signal):
+        self._duplicate_terminal_signal_count += 1
+        if signal == 'stall' and self._outcome == self.SUCCESS:
+            self._stale_stall_rejected_count += 1
+        if signal == 'provider_result' and self._outcome != self.SUCCESS:
+            self._late_result_rejected_count += 1
+        return False
+
+    def submit_timeout_candidate(self, candidate_type):
+        candidate_type = str(candidate_type or '').strip()
+        mapped = self._TIMEOUT_OUTCOMES.get(candidate_type)
+        if mapped is None:
+            return False
+        with self._lock:
+            self._timeout_candidate_count += 1
+            if self._timeout_candidate_type is None:
+                self._timeout_candidate_type = candidate_type
+                self._timeout_candidate_received_at = time.time()
+            if self._outcome != self.RUNNING:
+                return self._reject_locked(candidate_type)
+            outcome, reason = mapped
+            self._commit_locked(outcome, reason, 'watchdog:%s' % candidate_type)
+            if candidate_type == 'stall':
+                self._actual_stall_accepted_count += 1
+            return True
+
+    def accept_provider_result(self, terminal_receipt):
+        if not isinstance(terminal_receipt, ProviderTerminalReceipt):
+            return False
+        with self._lock:
+            if self._outcome != self.RUNNING:
+                return self._reject_locked('provider_result')
+            self._result_accepted_at = time.time()
+            self._commit_locked(self.SUCCESS, 'result', 'provider_result')
+            return True
+
+    def accept_provider_error(self, provider_error):
+        if not isinstance(provider_error, dict):
+            provider_error = {}
+        with self._lock:
+            if self._outcome != self.RUNNING:
+                return self._reject_locked('provider_error')
+            self._provider_error = {
+                key: provider_error.get(key)
+                for key in (
+                    'error_code',
+                    'provider_error_type',
+                    'provider_error_category',
+                    'turn_failure_class',
+                    'retryable',
+                )
+            }
+            self._commit_locked(
+                self.PROVIDER_ERROR, 'provider_error', 'provider_error',
+            )
+            return True
+
+    def accept_disconnected(self, reason='disconnected'):
+        with self._lock:
+            if self._outcome != self.RUNNING:
+                return self._reject_locked('disconnected')
+            self._commit_locked(self.DISCONNECTED, reason, 'reader')
+            return True
+
+    def accept_deferred(self):
+        with self._lock:
+            if self._outcome != self.RUNNING:
+                return self._reject_locked('deferred')
+            self._commit_locked(self.DEFERRED, 'tool_deferred', 'provider_result')
+            return True
+
+    def begin_cleanup(self, reason):
+        with self._lock:
+            if self._outcome in (self.RUNNING, self.SUCCESS) or self._cleanup_count:
+                return False
+            self._cleanup_count = 1
+            self._cleanup_reason = str(reason or self._terminal_reason or '')
+            self._resident_kill_requested = True
+            return True
+
+    def record_resident_kill(self, reason, *, process_present):
+        with self._lock:
+            self._resident_killed = bool(process_present)
+            self._resident_kill_reason = str(reason or self._cleanup_reason or '')
+
+    def record_timeout_diagnostics(self, diagnostics):
+        """Keep one bounded diagnostic sample for the accepted timeout only."""
+        with self._lock:
+            if self._timeout_diagnostics is None:
+                self._timeout_diagnostics = dict(diagnostics or {})
+                return True
+            return False
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                'turn_identity': self.turn_identity,
+                'terminal_outcome': self._outcome,
+                'terminal_reason': self._terminal_reason,
+                'timeout_candidate_type': self._timeout_candidate_type,
+                'timeout_candidate_received_at': self._timeout_candidate_received_at,
+                'timeout_candidate_count': self._timeout_candidate_count,
+                'result_accepted_at': self._result_accepted_at,
+                'terminal_linearization_source': self._linearization_source,
+                'terminal_linearized_at': self._linearized_at,
+                'resident_kill_requested': self._resident_kill_requested,
+                'resident_killed': self._resident_killed,
+                'resident_kill_reason': self._resident_kill_reason,
+                'cleanup_count': self._cleanup_count,
+                'cleanup_reason': self._cleanup_reason,
+                'stale_stall_rejected_count': self._stale_stall_rejected_count,
+                'actual_stall_accepted_count': self._actual_stall_accepted_count,
+                'late_result_rejected_count': self._late_result_rejected_count,
+                'duplicate_terminal_signal_count': self._duplicate_terminal_signal_count,
+                'provider_error': dict(self._provider_error or {}),
+                'timeout_diagnostics': dict(self._timeout_diagnostics or {}),
+            }
 
 class StreamWatchdog:
     """Single-thread stall + hard deadline watchdog for one send_turn.
@@ -1856,13 +2089,30 @@ class ResidentSession:
                         # session is not reusable and the same input is never replayed.
                         self._runtime_rollback_pending = None
                         self._next_spawn_reason = 'process_dead'
-                    self._kill(quiet=True)
+                    authority = getattr(
+                        self, '_active_terminal_authority', None,
+                    )
+                    if authority is None:
+                        self._kill(quiet=True)
+                    else:
+                        if not authority.is_terminal():
+                            authority.accept_disconnected('send_turn_exception')
+                        if authority.begin_cleanup('send_turn_exception'):
+                            process_present = self._proc is not None
+                            try:
+                                self._kill(quiet=True)
+                            finally:
+                                authority.record_resident_kill(
+                                    'send_turn_exception',
+                                    process_present=process_present,
+                                )
                 raise
             finally:
                 with self._turn_state_lock:
                     self._last_turn_stdin_write_started = bool(self._turn_write_started)
                     self._last_turn_stdin_flushed = bool(self._turn_stdin_flushed)
                     self._turn_active = False
+                self._active_terminal_authority = None
 
     def _send_turn_impl(
         self,
@@ -1891,6 +2141,15 @@ class ResidentSession:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             raise ResidentError('resident 进程不存在，需要先 ensure_alive')
+
+        # Bind one authority before any turn-side effect. The outer
+        # send_turn exception path uses this same object for bounded cleanup.
+        stall_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
+        hard_timeout = _cfg_int('CC_STREAM_HARD_TIMEOUT', CC_STREAM_HARD_TIMEOUT)
+        result_grace = _cfg_int('CC_STREAM_RESULT_GRACE', CC_STREAM_RESULT_GRACE)
+        terminal = ProviderTerminalTracker(result_grace)
+        authority = TurnTerminalAuthority(turn_identity=terminal.turn_identity)
+        self._active_terminal_authority = authority
 
         uh_a0_runtime = None
         uh_a0_turn_id = None
@@ -1954,17 +2213,15 @@ class ResidentSession:
         except (BrokenPipeError, OSError) as e:
             if uh_a0_runtime is not None:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
-            self._kill(quiet=True)
             raise ResidentError('Claude Code stdin write failed', error_code='stdin_write_failed') from e
 
         if on_stdin_flushed is not None:
             try:
                 on_stdin_flushed()
             except BaseException:
-                # Message already entered the pipe; fail closed — kill and re-raise.
+                # Message already entered the pipe; outer turn cleanup owns the kill.
                 if uh_a0_runtime is not None:
                     uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
-                self._kill(quiet=True)
                 raise
 
         # 信已塞进门缝：立刻提交 resident 游标（即使后续流中断也不重复塞）
@@ -1974,27 +2231,6 @@ class ResidentSession:
             if uh_a0_runtime is not None:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
             raise
-
-        timeout_reason = [None]  # 'stall' | 'hard'
-        terminal_reason = [None]
-        # Stall = inactivity; hard = absolute ceiling. Defaults stay 360 / 1800.
-        stall_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
-        hard_timeout = _cfg_int('CC_STREAM_HARD_TIMEOUT', CC_STREAM_HARD_TIMEOUT)
-        result_grace = _cfg_int('CC_STREAM_RESULT_GRACE', CC_STREAM_RESULT_GRACE)
-        terminal = ProviderTerminalTracker(result_grace)
-
-        def _kill_on_timeout(reason):
-            timeout_reason[0] = reason
-            terminal_reason[0] = reason
-            self._kill(quiet=True)
-
-        watchdog = StreamWatchdog(
-            stall_timeout=stall_timeout,
-            hard_timeout=hard_timeout,
-            on_timeout=_kill_on_timeout,
-            is_proc_alive=lambda: proc.poll() is None,
-        )
-        watchdog.start()
 
         think_acc, text_acc = [], []
         # Claude's terminal assistant rows can contain the complete text even
@@ -2007,6 +2243,237 @@ class ResidentSession:
         provider_refusal_seen = False
         saw_result = False
         terminal_receipt = None
+
+        reader_state_lock = threading.Lock()
+        reader_state_data = {
+            'reader_state': 'IDLE/UNKNOWN',
+            'reader_state_entered_at': time.time(),
+        }
+        timeout_diagnostic_lock = threading.Lock()
+
+        def _set_reader_state(state):
+            now = time.time()
+            with reader_state_lock:
+                if reader_state_data['reader_state'] != state:
+                    reader_state_data['reader_state'] = str(state)
+                    reader_state_data['reader_state_entered_at'] = now
+
+        def _reader_state_snapshot():
+            now = time.time()
+            with reader_state_lock:
+                entered_at = float(reader_state_data['reader_state_entered_at'])
+                return {
+                    'reader_state': reader_state_data['reader_state'],
+                    'reader_state_entered_at': entered_at,
+                    'reader_state_duration_ms': max(
+                        0, int((now - entered_at) * 1000),
+                    ),
+                }
+
+        def _downstream_yield(value):
+            _set_reader_state('DOWNSTREAM_YIELD')
+            try:
+                yield value
+            finally:
+                _set_reader_state('PROCESS_EVENT')
+
+        def _transcript_timeout_snapshot():
+            """Inspect only bounded, current-cursor JSONL metadata."""
+            cursor = dict(jsonl_cursor or {})
+            path = str(cursor.get('path') or '')
+            start_offset = _diagnostic_int(cursor.get('offset'))
+            start_offset = max(0, start_offset or 0)
+            result = {
+                'transcript_path_sha256': _diagnostic_path_hash(path),
+                'current_turn_start_offset': start_offset if path else None,
+                'observed_end_offset': None,
+                'last_current_turn_event_type': None,
+                'last_current_turn_timestamp': None,
+                'last_current_turn_assistant_stop_reason': None,
+                'current_turn_durable_assistant_end_turn': False,
+                'transcript_scan_truncated': False,
+            }
+            if not path:
+                return result
+            try:
+                observed_end = int(os.path.getsize(path))
+                result['observed_end_offset'] = observed_end
+                if start_offset > observed_end:
+                    start_offset = observed_end
+                scan_start = max(
+                    start_offset,
+                    observed_end - _TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES,
+                )
+                result['transcript_scan_truncated'] = scan_start > start_offset
+                with open(path, 'rb') as handle:
+                    handle.seek(scan_start)
+                    raw = handle.read(_TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES)
+                for line in raw.splitlines():
+                    try:
+                        row = json.loads(line.decode('utf-8', errors='replace'))
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    event_type = str(row.get('type') or '').strip()[:80]
+                    subtype = str(row.get('subtype') or '').strip()[:80]
+                    if not event_type:
+                        continue
+                    label = event_type
+                    if subtype:
+                        label += ':' + subtype
+                    result['last_current_turn_event_type'] = label[:180]
+                    timestamp = row.get('timestamp')
+                    if timestamp is not None:
+                        result['last_current_turn_timestamp'] = str(timestamp)[:80]
+                    message = row.get('message')
+                    stop_reason = row.get('stop_reason')
+                    if isinstance(message, dict):
+                        stop_reason = message.get('stop_reason') or stop_reason
+                    if event_type == 'assistant' and stop_reason:
+                        result['last_current_turn_assistant_stop_reason'] = str(
+                            stop_reason,
+                        )[:80]
+                        if stop_reason == 'end_turn':
+                            result['current_turn_durable_assistant_end_turn'] = True
+                return result
+            except Exception:
+                result['transcript_scan_truncated'] = True
+                return result
+
+        def _capture_timeout_diagnostics(candidate_type):
+            """Capture one safe timeout sample before its cleanup/kill."""
+            if not timeout_diagnostic_lock.acquire(blocking=False):
+                return
+            try:
+                state = _reader_state_snapshot()
+                authority_snapshot = authority.snapshot()
+                pid = getattr(proc, 'pid', None)
+                try:
+                    proc_poll = proc.poll()
+                except Exception:
+                    proc_poll = 'unavailable'
+                diagnostics = {
+                    'terminal_outcome': authority_snapshot['terminal_outcome'],
+                    'timeout_candidate': str(candidate_type or '')[:80],
+                    'turn_identity': terminal.turn_identity,
+                    'claude_session_id': str(self._session_id or '')[:200] or None,
+                    'process_generation': int(self._generation),
+                    'resident_pid': _diagnostic_int(pid),
+                    'proc_poll': proc_poll,
+                    **state,
+                    'thread_dump': _diagnostic_thread_dump(),
+                    'child_wchan': _diagnostic_proc_read(pid, 'wchan'),
+                    'child_stack': _diagnostic_proc_read(pid, 'stack'),
+                }
+                diagnostics.update(_transcript_timeout_snapshot())
+                authority.record_timeout_diagnostics(diagnostics)
+            except Exception as exc:
+                # Diagnostics are strictly best effort and must never block kill.
+                authority.record_timeout_diagnostics({
+                    'terminal_outcome': authority.outcome,
+                    'timeout_candidate': str(candidate_type or '')[:80],
+                    'turn_identity': terminal.turn_identity,
+                    'claude_session_id': str(self._session_id or '')[:200] or None,
+                    'process_generation': int(self._generation),
+                    'diagnostics_error': type(exc).__name__,
+                })
+            finally:
+                timeout_diagnostic_lock.release()
+
+        def _claim_terminal_provider_event(event):
+            """Linearize a terminal provider event before observation refresh."""
+            nonlocal provider_refusal_seen
+            if not isinstance(event, dict):
+                return None
+            event_type = event.get('type')
+            if event_type == 'result':
+                if event.get('is_error'):
+                    provider_error_value = classify_provider_error_event(
+                        event,
+                        refusal_marker=provider_refusal_seen,
+                    )
+                    return {
+                        'kind': 'provider_error',
+                        'provider_error': provider_error_value,
+                        'accepted': authority.accept_provider_error(
+                            provider_error_value,
+                        ),
+                    }
+                if event.get('stop_reason') == 'end_turn':
+                    receipt = ProviderTerminalReceipt.from_result_event(
+                        event,
+                        turn_identity=terminal.turn_identity,
+                        process_generation=self._generation,
+                        claude_session_id=self._session_id,
+                    )
+                    return {
+                        'kind': 'provider_result',
+                        'receipt': receipt,
+                        'accepted': authority.accept_provider_result(receipt),
+                    }
+                return None
+            if (
+                event_type == 'system'
+                and event.get('subtype') == 'model_refusal_no_fallback'
+            ):
+                provider_refusal_seen = True
+                provider_error_value = classify_provider_error_event(
+                    event,
+                    refusal_marker=True,
+                )
+                return {
+                    'kind': 'provider_error',
+                    'provider_error': provider_error_value,
+                    'accepted': authority.accept_provider_error(
+                        provider_error_value,
+                    ),
+                }
+            if event_type == 'assistant' and event.get('isApiErrorMessage') is True:
+                provider_error_value = classify_provider_error_event(
+                    event,
+                    refusal_marker=provider_refusal_seen,
+                )
+                return {
+                    'kind': 'provider_error',
+                    'provider_error': provider_error_value,
+                    'accepted': authority.accept_provider_error(
+                        provider_error_value,
+                    ),
+                }
+            return None
+
+        def _cleanup_after_terminal(reason):
+            if not authority.begin_cleanup(reason):
+                return False
+            process_present = self._proc is not None
+            try:
+                self._kill(quiet=True)
+            finally:
+                authority.record_resident_kill(
+                    reason,
+                    process_present=process_present,
+                )
+            return True
+
+        # Watchdog timeout ownership is linearized by the same authority as
+        # provider terminal events. Only the winner is allowed to capture
+        # diagnostics and kill; outer exception/finalizer paths can only
+        # observe the already-consumed cleanup token.
+        def _submit_timeout_candidate(reason):
+            if not authority.submit_timeout_candidate(reason):
+                return False
+            _capture_timeout_diagnostics(reason)
+            _cleanup_after_terminal('watchdog:%s' % str(reason or 'timeout'))
+            return True
+
+        watchdog = StreamWatchdog(
+            stall_timeout=stall_timeout,
+            hard_timeout=hard_timeout,
+            on_timeout=_submit_timeout_candidate,
+            is_proc_alive=lambda: proc.poll() is None,
+        )
+        watchdog.start()
 
         def _record_round_usage(
             event_source,
@@ -2062,41 +2529,41 @@ class ResidentSession:
         try:
             try:
                 while True:
-                    # A provider end_turn is not a successful terminal event. Give
-                    # Claude a bounded chance to emit the authoritative result.
-                    if terminal.grace_expired():
-                        terminal_reason[0] = 'result_missing_after_end_turn'
-                        self._kill(quiet=True)
+                    if authority.is_terminal():
                         break
-                    # Keep the established blocking readline contract for
-                    # ordinary turns. Poll only when a timer must wake us for
-                    # synthetic heartbeats or the post-end_turn result grace.
-                    polling_required = use_idle_heartbeat or terminal.end_turn_seen
+                    if terminal.grace_expired():
+                        authority.submit_timeout_candidate(
+                            'result_missing_after_end_turn',
+                        )
+                        break
                     ready = True
-                    if polling_required:
+                    _set_reader_state('WAIT_SELECT')
+                    try:
                         poll_interval = heartbeat_interval if use_idle_heartbeat else 0.2
-                        try:
-                            ready, _, _ = select.select(
-                                [proc.stdout], [], [], poll_interval,
-                            )
-                        except (AttributeError, OSError, TypeError, ValueError):
-                            # In-memory StringIO fixtures have no file descriptor.
-                            # They remain on direct readline semantics; real pipes
-                            # take the polling path above.
-                            ready = True
+                        ready, _, _ = select.select(
+                            [proc.stdout], [], [], poll_interval,
+                        )
+                    except (AttributeError, OSError, TypeError, ValueError):
+                        ready = True
                     if not ready:
                         if proc.poll() is not None:
+                            authority.accept_disconnected('process_exit')
+                            break
+                        if authority.is_terminal():
                             break
                         if terminal.grace_expired():
-                            terminal_reason[0] = 'result_missing_after_end_turn'
-                            self._kill(quiet=True)
+                            authority.submit_timeout_candidate(
+                                'result_missing_after_end_turn',
+                            )
                             break
                         if use_idle_heartbeat:
-                            # Synthetic SSE heartbeat — not Claude activity.
-                            yield ('heartbeat', None)
+                            yield from _downstream_yield(('heartbeat', None))
                         continue
+                    _set_reader_state('READLINE')
                     raw_line = proc.stdout.readline()
                     if raw_line == '':
+                        _set_reader_state('TERMINAL_DRAIN')
+                        authority.accept_disconnected('stdout_eof')
                         break
                     line = raw_line.strip()
                     if not line:
@@ -2105,20 +2572,34 @@ class ResidentSession:
                         d = json.loads(line)
                     except Exception:
                         continue
-                    # Refresh stall deadline before heavier event handling so a
-                    # concurrent watchdog knock observes the new activity.
+                    _set_reader_state('PROCESS_EVENT')
+                    # A terminal provider event must claim the sole authority
+                    # before observation bookkeeping or watchdog refresh. This
+                    # closes the deterministic result-vs-stall window without
+                    # holding a lock across the yielding stream paths below.
+                    claimed_terminal = _claim_terminal_provider_event(d)
                     terminal.observe(d)
                     if _claude_event_is_activity(d):
                         watchdog.note_activity()
                     self._maybe_set_session_id(d)
+                    if jsonl_cursor is None and self._session_id:
+                        try:
+                            from tools.cc_jsonl_usage import snapshot_session_jsonl
+                            jsonl_cursor = snapshot_session_jsonl(
+                                self._cwd, self._session_id,
+                            )
+                            if jsonl_cursor is not None and self._cold:
+                                jsonl_cursor = dict(jsonl_cursor)
+                                jsonl_cursor['offset'] = 0
+                        except Exception:
+                            pass
                     t = d.get('type')
                     if t == 'system' and d.get('subtype') == 'init':
                         self._session_id = d.get('session_id') or self._session_id
                     elif t == 'system' and d.get('subtype') == 'model_refusal_no_fallback':
                         provider_refusal_seen = True
-                        provider_error = classify_provider_error_event(
-                            d, refusal_marker=True,
-                        )
+                        provider_error = claimed_terminal['provider_error']
+                        break
                     elif t == 'stream_event':
                         ev = d.get('event') or {}
                         ev_type = ev.get('type')
@@ -2195,26 +2676,16 @@ class ResidentSession:
                                 chunk = delta.get('text', '')
                                 if chunk:
                                     text_acc.append(chunk)
-                                    yield ('text', chunk)
+                                    yield from _downstream_yield(('text', chunk))
                             elif delta.get('type') == 'thinking_delta':
                                 chunk = delta.get('thinking', '')
                                 if chunk:
                                     think_acc.append(chunk)
-                                    yield ('think', chunk)
+                                    yield from _downstream_yield(('think', chunk))
                     elif t == 'assistant':
                         if d.get('isApiErrorMessage') is True:
-                            provider_error = classify_provider_error_event(
-                                d, refusal_marker=provider_refusal_seen,
-                            )
-                            raise ResidentError(
-                                provider_error['public_message'],
-                                usage=empty_usage(),
-                                error_code=provider_error['error_code'],
-                                provider_error_type=provider_error['provider_error_type'],
-                                provider_error_category=provider_error['provider_error_category'],
-                                turn_failure_class=provider_error['turn_failure_class'],
-                                retryable=provider_error['retryable'],
-                            )
+                            provider_error = claimed_terminal['provider_error']
+                            break
                         before_round = _diagnostic_round_snapshot(current_round)
                         created_round = current_round is None
                         msg = d.get('message') or {}
@@ -2279,18 +2750,18 @@ class ResidentSession:
                                     })
                                     if fence.get('approval_id'):
                                         tool_payload['approval_id'] = fence['approval_id']
-                                yield ('tool_use', tool_payload)
+                                yield from _downstream_yield(('tool_use', tool_payload))
                     elif t == 'user':
                         for b in ((d.get('message') or {}).get('content') or []):
                             if isinstance(b, dict) and b.get('type') == 'tool_result':
                                 rc = b.get('content')
                                 if isinstance(rc, list):
                                     rc = ''.join(x.get('text', '') for x in rc if isinstance(x, dict))
-                                yield ('tool_result', {
+                                yield from _downstream_yield(('tool_result', {
                                     'tool_use_id': b.get('tool_use_id'),
                                     'result': str(rc or ''),
                                     'is_error': bool(b.get('is_error')),
-                                })
+                                }))
                     elif t == 'result':
                         saw_result = True
                         result_usage = d.get('usage')
@@ -2337,19 +2808,19 @@ class ResidentSession:
                             )
                             if prompt is not None:
                                 deferred_payload['approval_prompt'] = prompt
-                            self._kill(quiet=True)
-                            yield ('tool_use', deferred_payload)
+                            authority.accept_deferred()
+                            _cleanup_after_terminal('provider_tool_deferred')
+                            yield from _downstream_yield(('tool_use', deferred_payload))
+                            break
                         if d.get('is_error'):
-                            provider_error = classify_provider_error_event(
-                                d, refusal_marker=provider_refusal_seen,
-                            )
+                            provider_error = claimed_terminal['provider_error']
                         elif d.get('stop_reason') == 'end_turn':
-                            terminal_receipt = ProviderTerminalReceipt.from_result_event(
-                                d,
-                                turn_identity=terminal.turn_identity,
-                                process_generation=self._generation,
-                                claude_session_id=self._session_id,
-                            )
+                            if (
+                                claimed_terminal is not None
+                                and claimed_terminal['kind'] == 'provider_result'
+                                and claimed_terminal['accepted']
+                            ):
+                                terminal_receipt = claimed_terminal['receipt']
                         # result.usage is diagnostics only; it never updates
                         # or replaces the stream round totals.
                         if current_round is not None:
@@ -2361,17 +2832,14 @@ class ResidentSession:
                             current_round = None
                         break
             except GeneratorExit:
-                # 客户端断开 SSE：必须 kill，否则残留 stdout 会污染下一轮
-                self._kill(quiet=True)
+                authority.accept_disconnected('generator_exit')
+                _cleanup_after_terminal('client_disconnect')
                 raise
             except BaseException:
-                # Watchdog may close pipes mid-read; prefer typed timeout errors.
-                if timeout_reason[0] is not None:
-                    pass
-                else:
-                    if self._proc is not None:
-                        self._kill(quiet=True)
-                    raise
+                if not authority.is_terminal():
+                    authority.accept_disconnected('stream_exception')
+                _cleanup_after_terminal('stream_exception')
+                raise
         finally:
             watchdog.stop()
             if uh_a0_runtime is not None:
@@ -2380,6 +2848,13 @@ class ResidentSession:
         if current_round is not None:
             _close_round(current_round, 'loop_finalizer', complete=False)
             current_round = None
+
+        if not authority.is_terminal():
+            authority.accept_disconnected('stdout_eof')
+        outcome = authority.outcome
+        if outcome != TurnTerminalAuthority.SUCCESS:
+            _cleanup_after_terminal(authority.reason or 'terminal_failure')
+        authority_obs = authority.snapshot()
 
         usage = summarize_rounds(
             rounds,
@@ -2398,7 +2873,40 @@ class ResidentSession:
         usage['_obs_end_turn_seen'] = bool(terminal.end_turn_seen)
         usage['_obs_end_turn_seen_at'] = terminal.end_turn_seen_at
         usage['_obs_result_seen'] = bool(terminal.result_seen)
-        usage['_obs_terminal_reason'] = terminal_reason[0] or terminal.terminal_reason
+        usage['_obs_terminal_outcome'] = authority_obs['terminal_outcome']
+        usage['_obs_terminal_reason'] = authority_obs['terminal_reason']
+        usage['_obs_timeout_candidate_type'] = authority_obs['timeout_candidate_type']
+        usage['_obs_timeout_candidate_received_at'] = authority_obs[
+            'timeout_candidate_received_at'
+        ]
+        usage['_obs_result_accepted_at'] = authority_obs['result_accepted_at']
+        usage['_obs_terminal_linearization_source'] = authority_obs[
+            'terminal_linearization_source'
+        ]
+        usage['_obs_resident_killed'] = authority_obs['resident_killed']
+        usage['_obs_resident_kill_reason'] = authority_obs[
+            'resident_kill_reason'
+        ]
+        usage['_obs_stale_stall_rejected_count'] = authority_obs[
+            'stale_stall_rejected_count'
+        ]
+        usage['_obs_actual_stall_accepted_count'] = authority_obs[
+            'actual_stall_accepted_count'
+        ]
+        usage['_obs_late_result_rejected_count'] = authority_obs[
+            'late_result_rejected_count'
+        ]
+        usage['_obs_duplicate_terminal_signal_count'] = authority_obs[
+            'duplicate_terminal_signal_count'
+        ]
+        usage['_obs_timeout_diagnostics'] = authority_obs.get(
+            'timeout_diagnostics',
+        ) or None
+        usage['_obs_cleanup_count'] = authority_obs['cleanup_count']
+        # Compatibility telemetry from Phase A remains, while root-path
+        # stale-stall rejection is measured separately above. This is legacy
+        # compatibility output only; no terminal reconciliation reads it.
+        usage['_obs_stall_result_race_recovered'] = False
         usage['_obs_turn_identity'] = terminal.turn_identity
         usage['_obs_effort'] = getattr(self, '_effort_value', None)
         usage['_obs_keepwarm_lease_expires_at'] = self._keepwarm_lease_expires_at
@@ -2411,59 +2919,61 @@ class ResidentSession:
         )
         usage['_obs_tool_count'] = surface.get('tool_count')
 
-        if provider_error is not None:
-            self._kill(quiet=True)
+        if outcome == TurnTerminalAuthority.DEFERRED:
+            return
+        if outcome == TurnTerminalAuthority.PROVIDER_ERROR:
+            if provider_error is None:
+                provider_error = {
+                    'public_message': 'Claude provider 请求失败；本轮未自动重试。',
+                    'error_code': 'provider_error',
+                    'provider_error_type': 'provider_api_error',
+                    'provider_error_category': 'provider_request_failure',
+                    'turn_failure_class': 'TURN_LEVEL',
+                    'retryable': False,
+                }
             raise ResidentError(
                 provider_error['public_message'],
                 usage=usage,
+                diagnostics=authority_obs,
                 error_code=provider_error['error_code'],
                 provider_error_type=provider_error['provider_error_type'],
                 provider_error_category=provider_error['provider_error_category'],
                 turn_failure_class=provider_error['turn_failure_class'],
                 retryable=provider_error['retryable'],
             )
-        if timeout_reason[0] == 'stall':
+        if outcome == TurnTerminalAuthority.STALL:
             raise ResidentError(
                 'claude code 长时间无活动 (%ds)，resident 进程已重启' % stall_timeout,
                 usage=usage,
-                diagnostics=terminal.snapshot(terminal_reason='stall'),
+                diagnostics=authority_obs,
                 error_code='provider_stall_timeout',
             )
-        if timeout_reason[0] == 'hard':
+        if outcome == TurnTerminalAuthority.HARD_TIMEOUT:
             raise ResidentError(
                 'claude code 单轮超过绝对上限 (%ds)，resident 进程已重启' % hard_timeout,
                 usage=usage,
-                diagnostics=terminal.snapshot(terminal_reason='hard_timeout'),
+                diagnostics=authority_obs,
                 error_code='provider_hard_timeout',
             )
-        if terminal_reason[0] == 'result_missing_after_end_turn':
-            self._kill(quiet=True)
-            diagnostics = terminal.snapshot(
-                terminal_reason='result_missing_after_end_turn',
-            )
-            diagnostics.update({
-                'resident_generation': self._generation,
-                'resident_pid': getattr(proc, 'pid', None),
-                'claude_session_id': self._session_id,
-            })
+        if outcome == TurnTerminalAuthority.RESULT_MISSING_AFTER_END_TURN:
             raise ResidentError(
                 '回复收尾异常：provider 已报告 end_turn，但 result 未到达',
                 usage=usage,
-                diagnostics=diagnostics,
+                diagnostics=authority_obs,
                 error_code='result_missing_after_end_turn',
             )
-        if not saw_result:
-            self._kill(quiet=True)
-            diagnostics = terminal.snapshot(terminal_reason='result_missing_before_terminal')
-            diagnostics.update({
-                'resident_generation': self._generation,
-                'resident_pid': getattr(proc, 'pid', None),
-                'claude_session_id': self._session_id,
-            })
+        if outcome == TurnTerminalAuthority.DISCONNECTED:
             raise ResidentError(
                 'resident 进程在本轮回复完成前退出',
                 usage=usage,
-                diagnostics=diagnostics,
+                diagnostics=authority_obs,
+                error_code='result_missing_before_terminal',
+            )
+        if outcome != TurnTerminalAuthority.SUCCESS or terminal_receipt is None:
+            raise ResidentError(
+                'resident 进程在本轮回复完成前退出',
+                usage=usage,
+                diagnostics=authority_obs,
                 error_code='result_missing_before_terminal',
             )
         # Only a successful authoritative provider terminal may enter JSONL
