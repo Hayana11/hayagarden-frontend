@@ -101,6 +101,8 @@ def _chat_stream_failure_event(exc, *, partial_rescue=False):
             message = 'Claude Code 未能接收本轮输入；本轮不会自动重试。'
         elif code in ('provider_stall_timeout', 'provider_hard_timeout'):
             message = 'Claude Code 本轮生成超时，当前生成已停止。'
+        elif code == 'cli_terminal_result_missing':
+            message = '回复已完整生成，收尾时连接异常；已保留已收到的内容。'
         elif code in ('result_missing_after_end_turn', 'result_missing_before_terminal'):
             message = 'Claude Code 本轮未能完成收尾；已停止当前生成。'
         elif getattr(exc, 'provider_error_type', None):
