@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from unittest import mock
 
 import cc_resident
+import gateway
 
 
 class ChatTerminalContractTests(unittest.TestCase):
@@ -68,6 +69,37 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertIn('cleanup = _rescue_and_abort(error_code, respawn=True)', daily)
         self.assertIn('yield _sse_json(_chat_stream_failure_event(', daily)
         self.assertNotIn("'t': 'done', 'ok': False", daily)
+
+
+    def test_gmsg_r1_cli_terminal_result_missing_uses_completion_message(self):
+        error = cc_resident.ResidentError(
+            'provider stderr secret',
+            error_code='cli_terminal_result_missing',
+        )
+        event = gateway._chat_stream_failure_event(error)
+        expected = '回复已完整生成，收尾时连接异常；已保留已收到的内容。'
+        self.assertEqual('err', event['t'])
+        self.assertEqual('cli_terminal_result_missing', event['code'])
+        self.assertEqual('cli_terminal_result_missing', event['error_code'])
+        self.assertEqual(expected, event['d'])
+        self.assertEqual(expected, event['message'])
+        self.assertNotIn('provider stderr secret', event['d'])
+        self.assertNotIn(
+            'Claude Code 本轮未能完成收尾；已停止当前生成。',
+            event['d'],
+        )
+
+    def test_gmsg_r2_cli_terminal_result_missing_preserves_partial_rescue(self):
+        error = cc_resident.ResidentError(
+            'provider stderr secret',
+            error_code='cli_terminal_result_missing',
+        )
+        event = gateway._chat_stream_failure_event(error, partial_rescue=True)
+        self.assertEqual(
+            '回复已完整生成，收尾时连接异常；已保留已收到的内容。',
+            event['message'],
+        )
+        self.assertTrue(event['partial_rescue'])
 
     def test_t6b_terminal_wrapper_releases_lock_and_stops_at_first_terminal(self):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
@@ -260,6 +292,9 @@ class ChatTerminalContractTests(unittest.TestCase):
                 return None
 
         class FakeStdin:
+            def __init__(self):
+                self.closed = False
+
             def write(self, payload):
                 self.payload = payload
 
@@ -267,7 +302,7 @@ class ChatTerminalContractTests(unittest.TestCase):
                 return None
 
             def close(self):
-                return None
+                self.closed = True
 
         class FakeProc:
             pid = 7001
@@ -726,6 +761,165 @@ class ChatTerminalContractTests(unittest.TestCase):
         )
         self.assertEqual('provider_stall_timeout', error.error_code)
         self.assertEqual('STALL', error.diagnostics['terminal_outcome'])
+        self.assertEqual([True], kill_calls)
+
+
+    def test_s_r1_sidechain_end_turn_does_not_start_recovery(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': None, 'content': [
+                    {'type': 'tool_use', 'name': 'Task'},
+                ]},
+            },
+            {
+                'type': 'assistant',
+                'isSidechain': True,
+                'message': {'stop_reason': 'end_turn'},
+            },
+        ]
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=rows,
+            capture_exception=True,
+        )
+        self.assertEqual('provider_stall_timeout', error.error_code)
+        self.assertFalse(watchdogs[0].probe_consumed)
+        self.assertFalse(session._proc.stdin.closed)
+        self.assertEqual([True], kill_calls)
+        timeout_diag = error.diagnostics['timeout_diagnostics']
+        self.assertIsNone(
+            timeout_diag['last_current_turn_assistant_stop_reason'],
+        )
+        self.assertFalse(
+            timeout_diag['current_turn_durable_assistant_end_turn'],
+        )
+
+    def test_s_r2_first_main_end_turn_is_not_final_proof(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'end_turn'},
+            },
+            {
+                'type': 'assistant',
+                'message': {
+                    'stop_reason': 'tool_use',
+                    'content': [{'type': 'tool_use', 'name': 'Task'}],
+                },
+            },
+        ]
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=rows,
+            capture_exception=True,
+        )
+        self.assertEqual('provider_stall_timeout', error.error_code)
+        self.assertFalse(watchdogs[0].probe_consumed)
+        self.assertFalse(session._proc.stdin.closed)
+        self.assertEqual([True], kill_calls)
+        timeout_diag = error.diagnostics['timeout_diagnostics']
+        self.assertEqual(
+            'tool_use',
+            timeout_diag['last_current_turn_assistant_stop_reason'],
+        )
+        self.assertFalse(
+            timeout_diag['current_turn_durable_assistant_end_turn'],
+        )
+
+    def test_s_r3_last_main_chain_end_turn_can_start_recovery(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'tool_use'},
+            },
+            {
+                'type': 'assistant',
+                'isSidechain': True,
+                'message': {'stop_reason': 'end_turn'},
+            },
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'end_turn'},
+            },
+        ]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                [self._terminal_result_event()],
+                'stall',
+                signal_on_probe=True,
+                transcript_rows=rows,
+            )
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF',
+            usage['_obs_terminal_recovery']['recovery_stage'],
+        )
+        self.assertTrue(watchdogs[0].probe_consumed)
+        self.assertEqual([True], kill_calls)
+
+    def test_s_r4_sidechain_after_main_end_turn_does_not_break_proof(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'end_turn'},
+            },
+            {
+                'type': 'assistant',
+                'isSidechain': True,
+                'message': {'stop_reason': 'end_turn'},
+            },
+        ]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                [self._terminal_result_event()],
+                'stall',
+                signal_on_probe=True,
+                transcript_rows=rows,
+            )
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF',
+            usage['_obs_terminal_recovery']['recovery_stage'],
+        )
+        self.assertTrue(watchdogs[0].probe_consumed)
+        self.assertEqual([True], kill_calls)
+
+    def test_s_r5_metadata_after_main_end_turn_does_not_break_proof(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'end_turn'},
+            },
+            {'type': 'attachment', 'id': 'attachment-1'},
+            {'type': 'system', 'subtype': 'meta'},
+        ]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                [self._terminal_result_event()],
+                'stall',
+                signal_on_probe=True,
+                transcript_rows=rows,
+            )
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF',
+            usage['_obs_terminal_recovery']['recovery_stage'],
+        )
+        self.assertTrue(watchdogs[0].probe_consumed)
         self.assertEqual([True], kill_calls)
 
     def test_c_r6_normal_result_before_probe_does_not_touch_recovery(self):
