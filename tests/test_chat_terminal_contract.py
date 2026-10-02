@@ -693,7 +693,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertIsNotNone(recovery['total_recovery_latency_ms'])
 
         self.assertTrue(watchdogs[0].probe_consumed)
-        self.assertFalse(watchdogs[0].committed)
+        self.assertTrue(watchdogs[0].committed)
         self.assertEqual(
             0,
             error.diagnostics['actual_stall_accepted_count'],
