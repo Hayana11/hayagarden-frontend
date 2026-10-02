@@ -767,6 +767,11 @@ class ChatTerminalContractTests(unittest.TestCase):
     def test_s_r1_sidechain_end_turn_does_not_start_recovery(self):
         rows = [
             {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-race',
+            },
+            {
                 'type': 'assistant',
                 'message': {'stop_reason': None, 'content': [
                     {'type': 'tool_use', 'name': 'Task'},
@@ -799,6 +804,11 @@ class ChatTerminalContractTests(unittest.TestCase):
 
     def test_s_r2_first_main_end_turn_is_not_final_proof(self):
         rows = [
+            {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-race',
+            },
             {
                 'type': 'assistant',
                 'message': {'stop_reason': 'end_turn'},
@@ -833,6 +843,11 @@ class ChatTerminalContractTests(unittest.TestCase):
 
     def test_s_r3_last_main_chain_end_turn_can_start_recovery(self):
         rows = [
+            {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-race',
+            },
             {
                 'type': 'assistant',
                 'message': {'stop_reason': 'tool_use'},
@@ -931,6 +946,132 @@ class ChatTerminalContractTests(unittest.TestCase):
         )
         self.assertTrue(watchdogs[0].probe_consumed)
         self.assertEqual([True], kill_calls)
+
+
+    def test_offset_r1_cursor_zero_includes_first_current_turn_event(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'end_turn'},
+            },
+        ]
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                [self._terminal_result_event()],
+                'stall',
+                signal_on_probe=True,
+                transcript_rows=rows,
+                transcript_cursor_offset=0,
+            )
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF',
+            usage['_obs_terminal_recovery']['recovery_stage'],
+        )
+        self.assertEqual(
+            0,
+            usage['_obs_terminal_recovery']['proof']['event_offset'],
+        )
+        self.assertTrue(watchdogs[0].probe_consumed)
+        self.assertEqual([True], kill_calls)
+
+    def test_offset_r2_current_first_event_starts_at_captured_offset(self):
+        previous = {
+            'type': 'assistant',
+            'message': {'stop_reason': 'tool_use'},
+        }
+        current = {
+            'type': 'assistant',
+            'message': {'stop_reason': 'end_turn'},
+        }
+        previous_bytes = json.dumps(previous) + chr(10)
+        start_offset = len(previous_bytes)
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                [self._terminal_result_event()],
+                'stall',
+                signal_on_probe=True,
+                transcript_rows=[previous, current],
+                transcript_cursor_offset=start_offset,
+            )
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            start_offset,
+            usage['_obs_terminal_recovery']['proof']['event_offset'],
+        )
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF',
+            usage['_obs_terminal_recovery']['recovery_stage'],
+        )
+        self.assertTrue(watchdogs[0].probe_consumed)
+        self.assertEqual([True], kill_calls)
+
+    def test_offset_r3_first_current_end_turn_then_nonterminal_rejects(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'end_turn'},
+            },
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'tool_use'},
+            },
+        ]
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=rows,
+            transcript_cursor_offset=0,
+            capture_exception=True,
+        )
+        self.assertEqual('provider_stall_timeout', error.error_code)
+        self.assertFalse(watchdogs[0].probe_consumed)
+        self.assertEqual([True], kill_calls)
+        timeout_diag = error.diagnostics['timeout_diagnostics']
+        self.assertEqual(
+            'tool_use',
+            timeout_diag['last_current_turn_assistant_stop_reason'],
+        )
+        self.assertFalse(
+            timeout_diag['current_turn_durable_assistant_end_turn'],
+        )
+
+    def test_offset_r4_first_current_nonterminal_then_sidechain_end_turn(self):
+        rows = [
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'tool_use'},
+            },
+            {
+                'type': 'assistant',
+                'isSidechain': True,
+                'message': {'stop_reason': 'end_turn'},
+            },
+        ]
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=rows,
+            transcript_cursor_offset=0,
+            capture_exception=True,
+        )
+        self.assertEqual('provider_stall_timeout', error.error_code)
+        self.assertFalse(watchdogs[0].probe_consumed)
+        self.assertEqual([True], kill_calls)
+        timeout_diag = error.diagnostics['timeout_diagnostics']
+        self.assertEqual(
+            'tool_use',
+            timeout_diag['last_current_turn_assistant_stop_reason'],
+        )
+        self.assertFalse(
+            timeout_diag['current_turn_durable_assistant_end_turn'],
+        )
 
     def test_c_r6_normal_result_before_probe_does_not_touch_recovery(self):
         chunks, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
