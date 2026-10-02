@@ -254,7 +254,9 @@ class ChatTerminalContractTests(unittest.TestCase):
         watchdog_reason,
         *,
         signal_after_read=False,
+        signal_on_first_activity=False,
         close_after_first_chunk=False,
+        capture_exception=False,
     ):
         """Run the actual send_turn path with a deterministic watchdog signal."""
         watchdogs = []
@@ -308,7 +310,7 @@ class ChatTerminalContractTests(unittest.TestCase):
                 watchdogs.append(self)
 
             def start(self):
-                if not signal_after_read:
+                if not signal_after_read and not signal_on_first_activity:
                     self.committed = True
                     if self.reason is not None:
                         self._on_timeout(self.reason)
@@ -321,7 +323,10 @@ class ChatTerminalContractTests(unittest.TestCase):
                 return None
 
             def note_activity(self):
-                return None
+                if signal_on_first_activity and not self.committed:
+                    self.committed = True
+                    if self.reason is not None:
+                        self._on_timeout(self.reason)
 
         session = cc_resident.ResidentSession(
             '/tmp', '', '/tmp/mcp.json',
@@ -345,7 +350,12 @@ class ChatTerminalContractTests(unittest.TestCase):
                 chunks = [next(generator)]
                 generator.close()
             else:
-                chunks = list(generator)
+                try:
+                    chunks = list(generator)
+                except BaseException as exc:
+                    if not capture_exception:
+                        raise
+                    return exc, session, watchdogs, kill_calls
         return chunks, session, watchdogs, kill_calls
 
     def test_t13_send_turn_stall_then_valid_result_completes_terminal_path(self):
@@ -390,6 +400,55 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertEqual(1, usage['resident_turn_count'])
         self.assertFalse(session.is_cold())
         self.assertEqual([], kill_calls)
+
+    def test_t13b_result_claim_precedes_first_activity_watchdog_stall(self):
+        """A result already read must beat a synchronous note_activity stall."""
+        chunks, session, watchdogs, kill_calls = (
+            self._run_deterministic_send_turn(
+                [{
+                    'type': 'result',
+                    'is_error': False,
+                    'stop_reason': 'end_turn',
+                }],
+                'stall',
+                signal_on_first_activity=True,
+            )
+        )
+        self.assertEqual(['done'], [kind for kind, _ in chunks])
+        usage = chunks[0][1][2]
+        self.assertIsInstance(
+            usage.terminal_receipt,
+            cc_resident.ProviderTerminalReceipt,
+        )
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual('provider_result', usage['_obs_terminal_linearization_source'])
+        self.assertEqual(1, usage['_obs_stale_stall_rejected_count'])
+        self.assertEqual(0, usage['_obs_actual_stall_accepted_count'])
+        self.assertEqual(0, usage['_obs_late_result_rejected_count'])
+        self.assertEqual(1, usage['_obs_duplicate_terminal_signal_count'])
+        self.assertEqual([], kill_calls)
+
+    def test_t14b_provider_error_claim_precedes_watchdog_stall_on_send_turn(self):
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [{
+                'type': 'result',
+                'is_error': True,
+                'stop_reason': 'end_turn',
+                'result': 'provider failure',
+            }],
+            'stall',
+            signal_on_first_activity=True,
+            capture_exception=True,
+        )
+        self.assertIsInstance(error, cc_resident.ResidentError)
+        self.assertEqual('provider_error', error.error_code)
+        diagnostics = error.diagnostics
+        self.assertEqual('PROVIDER_ERROR', diagnostics['terminal_outcome'])
+        self.assertEqual('provider_error', diagnostics['terminal_linearization_source'])
+        self.assertEqual(0, diagnostics['actual_stall_accepted_count'])
+        self.assertEqual(1, diagnostics['duplicate_terminal_signal_count'])
+        self.assertEqual(1, diagnostics['cleanup_count'])
+        self.assertEqual([True], kill_calls)
 
     def test_t14_send_turn_failure_paths_remain_failures(self):
         cases = (

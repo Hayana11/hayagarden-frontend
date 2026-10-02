@@ -2214,6 +2214,68 @@ class ResidentSession:
         saw_result = False
         terminal_receipt = None
 
+        def _claim_terminal_provider_event(event):
+            """Linearize a terminal provider event before observation refresh."""
+            nonlocal provider_refusal_seen
+            if not isinstance(event, dict):
+                return None
+            event_type = event.get('type')
+            if event_type == 'result':
+                if event.get('is_error'):
+                    provider_error_value = classify_provider_error_event(
+                        event,
+                        refusal_marker=provider_refusal_seen,
+                    )
+                    return {
+                        'kind': 'provider_error',
+                        'provider_error': provider_error_value,
+                        'accepted': authority.accept_provider_error(
+                            provider_error_value,
+                        ),
+                    }
+                if event.get('stop_reason') == 'end_turn':
+                    receipt = ProviderTerminalReceipt.from_result_event(
+                        event,
+                        turn_identity=terminal.turn_identity,
+                        process_generation=self._generation,
+                        claude_session_id=self._session_id,
+                    )
+                    return {
+                        'kind': 'provider_result',
+                        'receipt': receipt,
+                        'accepted': authority.accept_provider_result(receipt),
+                    }
+                return None
+            if (
+                event_type == 'system'
+                and event.get('subtype') == 'model_refusal_no_fallback'
+            ):
+                provider_refusal_seen = True
+                provider_error_value = classify_provider_error_event(
+                    event,
+                    refusal_marker=True,
+                )
+                return {
+                    'kind': 'provider_error',
+                    'provider_error': provider_error_value,
+                    'accepted': authority.accept_provider_error(
+                        provider_error_value,
+                    ),
+                }
+            if event_type == 'assistant' and event.get('isApiErrorMessage') is True:
+                provider_error_value = classify_provider_error_event(
+                    event,
+                    refusal_marker=provider_refusal_seen,
+                )
+                return {
+                    'kind': 'provider_error',
+                    'provider_error': provider_error_value,
+                    'accepted': authority.accept_provider_error(
+                        provider_error_value,
+                    ),
+                }
+            return None
+
         def _cleanup_after_terminal(reason):
             if not authority.begin_cleanup(reason):
                 return False
@@ -2321,8 +2383,11 @@ class ResidentSession:
                         d = json.loads(line)
                     except Exception:
                         continue
-                    # Refresh stall deadline before heavier event handling so a
-                    # concurrent watchdog knock observes the new activity.
+                    # A terminal provider event must claim the sole authority
+                    # before observation bookkeeping or watchdog refresh. This
+                    # closes the deterministic result-vs-stall window without
+                    # holding a lock across the yielding stream paths below.
+                    claimed_terminal = _claim_terminal_provider_event(d)
                     terminal.observe(d)
                     if _claude_event_is_activity(d):
                         watchdog.note_activity()
@@ -2332,10 +2397,7 @@ class ResidentSession:
                         self._session_id = d.get('session_id') or self._session_id
                     elif t == 'system' and d.get('subtype') == 'model_refusal_no_fallback':
                         provider_refusal_seen = True
-                        provider_error = classify_provider_error_event(
-                            d, refusal_marker=True,
-                        )
-                        authority.accept_provider_error(provider_error)
+                        provider_error = claimed_terminal['provider_error']
                         break
                     elif t == 'stream_event':
                         ev = d.get('event') or {}
@@ -2421,10 +2483,7 @@ class ResidentSession:
                                     yield ('think', chunk)
                     elif t == 'assistant':
                         if d.get('isApiErrorMessage') is True:
-                            provider_error = classify_provider_error_event(
-                                d, refusal_marker=provider_refusal_seen,
-                            )
-                            authority.accept_provider_error(provider_error)
+                            provider_error = claimed_terminal['provider_error']
                             break
                         before_round = _diagnostic_round_snapshot(current_round)
                         created_round = current_round is None
@@ -2553,19 +2612,14 @@ class ResidentSession:
                             yield ('tool_use', deferred_payload)
                             break
                         if d.get('is_error'):
-                            provider_error = classify_provider_error_event(
-                                d, refusal_marker=provider_refusal_seen,
-                            )
-                            authority.accept_provider_error(provider_error)
+                            provider_error = claimed_terminal['provider_error']
                         elif d.get('stop_reason') == 'end_turn':
-                            candidate_receipt = ProviderTerminalReceipt.from_result_event(
-                                d,
-                                turn_identity=terminal.turn_identity,
-                                process_generation=self._generation,
-                                claude_session_id=self._session_id,
-                            )
-                            if authority.accept_provider_result(candidate_receipt):
-                                terminal_receipt = candidate_receipt
+                            if (
+                                claimed_terminal is not None
+                                and claimed_terminal['kind'] == 'provider_result'
+                                and claimed_terminal['accepted']
+                            ):
+                                terminal_receipt = claimed_terminal['receipt']
                         # result.usage is diagnostics only; it never updates
                         # or replaces the stream round totals.
                         if current_round is not None:
@@ -2637,6 +2691,12 @@ class ResidentSession:
         ]
         usage['_obs_actual_stall_accepted_count'] = authority_obs[
             'actual_stall_accepted_count'
+        ]
+        usage['_obs_late_result_rejected_count'] = authority_obs[
+            'late_result_rejected_count'
+        ]
+        usage['_obs_duplicate_terminal_signal_count'] = authority_obs[
+            'duplicate_terminal_signal_count'
         ]
         usage['_obs_cleanup_count'] = authority_obs['cleanup_count']
         # Compatibility telemetry from Phase A remains, while root-path
