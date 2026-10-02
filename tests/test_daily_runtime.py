@@ -5004,7 +5004,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         return context_plan
 
-    def _fake_hot_reconcile_plan(self, *, receipt_members=None):
+    def _fake_hot_reconcile_plan(self, *, receipt_members=None, receipt_model='model-1'):
         from chat.context_receipt import ContextReceipt
 
         context_plan = self._fake_hot_context_plan()
@@ -5016,6 +5016,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             chat_id='default',
             worker_id=dr.WORKER_ID,
             manifest={'provider': 'claude_code', 'model': 'model-1'},
+            transcript_model_identity='model-1',
             hot_desired_plan=context_plan,
         )
         desired_members = dr._context_receipt_members(plan)
@@ -5026,7 +5027,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             resident_generation=1,
             resident_key='default:e3:g1',
             provider='claude_code',
-            model_identity='model-1',
+            model_identity=receipt_model,
             session_id='session-1',
             process_generation=1,
             plan_id='plan:previous',
@@ -5043,9 +5044,221 @@ class ContextPlanConsumerTests(unittest.TestCase):
             'receipt_members_complete': True,
             'membership_valid': True,
             'expected_receipt_revision': 0,
+            'provider': 'claude_code',
+            'model_identity': receipt_model,
+            'session_id': 'session-1',
+            'process_generation': 1,
+            'receipt_read_error': None,
         }
         return plan, context_plan, desired_members
 
+
+    def _run_identity_reconcile(self, plan, resident):
+        binding = dr.LocalResidentBinding(
+            resident_key=plan.resident_key,
+            context_id=plan.context_id,
+            context_epoch=plan.context_epoch,
+            resident_generation=plan.resident_generation,
+            bound_cursor_message_id=2,
+            process_generation=1,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+            claude_session_id='session-1',
+        )
+        registry = {
+            'context_id': plan.context_id,
+            'resident_generation': plan.resident_generation,
+            'context_epoch': plan.context_epoch,
+            'chat_id': plan.chat_id,
+            'claude_session_id': 'session-1',
+            'process_generation': 1,
+        }
+        owner = {
+            'context_id': plan.context_id,
+            'resident_generation': plan.resident_generation,
+            'worker_id': plan.worker_id,
+            'resident_key': plan.resident_key,
+            'process_generation': 1,
+            'bound_cursor_message_id': 2,
+        }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(dr, 'is_epoch_token_current', return_value=True))
+            stack.enter_context(mock.patch.object(dr, 'get_local_binding', return_value=binding))
+            stack.enter_context(mock.patch.object(dr, '_resident_is_alive', return_value=True))
+            stack.enter_context(mock.patch.object(dr, 'get_context_claude_session', return_value=registry))
+            stack.enter_context(mock.patch.object(dr.dc, 'get_resident_owner', return_value=owner))
+            stack.enter_context(mock.patch.object(dr.dc, 'get_resident_history_cursor', return_value=2))
+            stack.enter_context(mock.patch.object(
+                dr,
+                '_hot_native_tail_proof',
+                return_value={
+                    'status': 'pass',
+                    'source_member': plan.hot_desired_plan.source_members[0],
+                },
+            ))
+            return dr._reconcile_hot_context_plan(plan, resident=resident)
+
+    def test_hot_same_canonical_identity_is_no_op_when_display_label_differs(self):
+        canonical = 'explicit:claude-opus-5-5'
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan(
+            receipt_model=canonical,
+        )
+        plan.db_path = 'identity-test.db'
+        plan.user_message_id = 3
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        plan.manifest['model'] = '[display-only] claude-opus-4-6-thinking'
+        plan.hot_receipt_frozen['model_identity'] = canonical
+        resident = types.SimpleNamespace(
+            session_id='session-1',
+            generation=1,
+            model_identity=canonical,
+            provider='claude_code',
+            bound_tool_surface_fingerprint='surface',
+        )
+        self.assertEqual(self._run_identity_reconcile(plan, resident), 'NO_OP')
+        self.assertEqual(plan.hot_decision_reason, '')
+
+    def test_hot_canonical_identity_change_respawns_with_identity_reason(self):
+        canonical = 'explicit:claude-opus-5-5'
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan(
+            receipt_model=canonical,
+        )
+        plan.db_path = 'identity-test.db'
+        plan.user_message_id = 3
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        plan.hot_receipt_frozen['model_identity'] = canonical
+        resident = types.SimpleNamespace(
+            session_id='session-1',
+            generation=1,
+            model_identity='explicit:claude-opus-5-6',
+            provider='claude_code',
+            bound_tool_surface_fingerprint='surface',
+        )
+        self.assertEqual(self._run_identity_reconcile(plan, resident), 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'live_model_identity_mismatch')
+
+    def test_legacy_display_label_receipt_fails_closed_once(self):
+        canonical = 'explicit:claude-opus-5-5'
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan(
+            receipt_model='[display-only] claude-opus-4-6-thinking',
+        )
+        plan.db_path = 'identity-test.db'
+        plan.user_message_id = 3
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        plan.hot_receipt_frozen['model_identity'] = canonical
+        resident = types.SimpleNamespace(
+            session_id='session-1',
+            generation=1,
+            model_identity=canonical,
+            provider='claude_code',
+            bound_tool_surface_fingerprint='surface',
+        )
+        self.assertEqual(self._run_identity_reconcile(plan, resident), 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'receipt_model_mismatch')
+
+    def test_hot_freeze_uses_live_canonical_identity_not_display_label(self):
+        from chat import context_receipt as receipt_store
+
+        db = self._context_plan_runtime_db()
+        try:
+            canonical = 'explicit:claude-opus-5-5'
+            plan, _context_plan, desired_members = self._fake_hot_reconcile_plan(
+                receipt_model=canonical,
+            )
+            plan.db_path = db
+            plan.manifest['model'] = '[display-only] claude-opus-4-6-thinking'
+            resident = types.SimpleNamespace(
+                session_id='session-1',
+                generation=1,
+                model_identity=canonical,
+            )
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            receipt_store.create_receipt(
+                conn,
+                plan.hot_receipt_frozen['receipt'],
+                desired_members,
+            )
+            conn.close()
+            frozen = dr._freeze_hot_receipt(plan, resident=resident)
+            self.assertEqual(frozen['model_identity'], canonical)
+            self.assertEqual(frozen['receipt'].model_identity, canonical)
+        finally:
+            os.unlink(db)
+
+    def test_reprepared_plan_preserves_hot_decision_reason(self):
+        def plan(manifest):
+            return dr.DailyTurnPlan(
+                request_id='request-1',
+                chat_id='default',
+                local_day='2026-07-27',
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                user_message_id=3,
+                epoch_token={},
+                lease_owner='lease-1',
+                is_cold=False,
+                is_respawn=False,
+                cursor_before=2,
+                assembly={},
+                manifest=manifest,
+            )
+
+        current = plan({
+            'context_plan_hot_decision': 'RESPAWN',
+            'context_plan_hot_decision_reason': 'live_model_identity_mismatch',
+        })
+        current.hot_decision = 'RESPAWN'
+        current.hot_decision_reason = 'live_model_identity_mismatch'
+        replacement = plan({'turn_kind': 'respawn'})
+        dr._adopt_reprepared_plan_in_place(current, replacement, resident=None)
+        self.assertEqual(current.hot_decision, 'RESPAWN')
+        self.assertEqual(current.hot_decision_reason, 'live_model_identity_mismatch')
+        self.assertEqual(
+            current.manifest['context_plan_hot_decision'],
+            'RESPAWN',
+        )
+        self.assertEqual(
+            current.manifest['context_plan_hot_decision_reason'],
+            'live_model_identity_mismatch',
+        )
+
+    def test_normal_hot_respawn_uses_existing_reason_plumbing(self):
+        plan = types.SimpleNamespace(
+            context_id=7,
+            resident_key='default:e3:g1',
+            db_path='identity-test.db',
+            user_message_id=3,
+            chat_id='default',
+            request_id='request-1',
+            user_created_at=None,
+            origin_local_day='2026-07-27',
+            lease_owner='lease-1',
+            turn_lease={},
+            feedback_lines=(),
+            feedback_ids=(),
+        )
+        resident = types.SimpleNamespace()
+        replacement = object()
+        with mock.patch.object(dr, '_release_lease'), \
+             mock.patch.object(dr, 'close_local_resident_if_bound'), \
+             mock.patch.object(dr, 'is_epoch_token_current', return_value=False), \
+             mock.patch.object(dr, 'prepare_daily_turn', return_value=replacement) as prepare:
+            result = dr.reprepare_after_registered_session_change(
+                plan,
+                resident=resident,
+                static_system='STATIC',
+                provider='claude_code',
+                model='[display-only] claude-opus-4-6-thinking',
+                respawn_reason='live_model_identity_mismatch',
+            )
+        self.assertIs(result, replacement)
+        self.assertEqual(
+            resident._next_spawn_reason,
+            'live_model_identity_mismatch',
+        )
+        self.assertEqual(prepare.call_args.kwargs['model'], '[display-only] claude-opus-4-6-thinking')
 
     @staticmethod
     def _historical_source(ref, revision=None):
@@ -5516,6 +5729,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             plan.db_path = db
             plan.transcript_claude_session_id = 'session-1'
             plan.transcript_process_generation = 1
+            plan.transcript_model_identity = 'model-1'
             plan.transcript_start_offset = 1
             plan.transcript_end_offset = 10
             plan._same_context_last_good_proven = True
@@ -5993,6 +6207,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             plan.db_path = db
             plan.transcript_claude_session_id = 'session-1'
             plan.transcript_process_generation = 1
+            plan.transcript_model_identity = 'model-1'
             plan.transcript_start_offset = 1
             plan.transcript_end_offset = 10
             plan._same_context_last_good_proven = True
@@ -6768,10 +6983,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 user_message_id=3,
                 transcript_claude_session_id='session-1',
                 transcript_process_generation=1,
+                transcript_model_identity='explicit:claude-opus-5-5',
                 manifest={
                     'transcript_mapping_status': 'MAPPED',
                     'provider': 'claude_code',
-                    'model': 'model-1',
+                    'model': '[display-only] claude-opus-4-6-thinking',
                     'assistant_message_id': 4,
                     'cursor_after': 4,
                     'cursor_cas_success': True,
@@ -6815,6 +7031,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             self.assertIsNotNone(receipt)
             self.assertEqual(receipt.plan_hash, 'plan-hash-one')
             self.assertEqual(receipt.installed_source_watermark, 4)
+            self.assertEqual(receipt.model_identity, 'explicit:claude-opus-5-5')
         finally:
             os.unlink(db)
 
@@ -6895,6 +7112,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
             user_message_id=3,
             transcript_claude_session_id='session-1',
             transcript_process_generation=1,
+            transcript_model_identity='model-1',
             transcript_start_offset=10,
             transcript_end_offset=100,
             manifest=manifest,

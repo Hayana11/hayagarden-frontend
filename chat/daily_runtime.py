@@ -191,6 +191,7 @@ class DailyTurnPlan:
     transcript_end_offset: Optional[int] = None
     transcript_claude_session_id: Optional[str] = None
     transcript_process_generation: Optional[int] = None
+    transcript_model_identity: Optional[str] = None
     transcript_observation_error_code: Optional[str] = None
     terminal_receipt: Optional[cc_resident.ProviderTerminalReceipt] = field(
         default=None, repr=False,
@@ -1868,13 +1869,18 @@ def _freeze_hot_receipt(
     live_process_generation = int(
         getattr(resident, 'generation', 0) or 0
     )
+    live_model_identity = str(
+        getattr(resident, 'model_identity', None)
+        or getattr(resident, '_model_identity', None)
+        or ''
+    ).strip()
     frozen = {
         'context_id': int(plan.context_id),
         'context_epoch': int(plan.context_epoch),
         'resident_generation': int(plan.resident_generation),
         'resident_key': str(plan.resident_key),
         'provider': str(plan.manifest.get('provider') or 'claude_code'),
-        'model_identity': str(plan.manifest.get('model') or 'unknown'),
+        'model_identity': live_model_identity or 'unknown',
         'session_id': live_sid,
         'process_generation': live_process_generation,
         'receipt': receipt,
@@ -2683,6 +2689,17 @@ def _commit_production_context_receipt(
             'error_code': 'context_receipt_last_good_unproven',
         })
         return False
+    model_identity = str(
+        getattr(plan, 'transcript_model_identity', None) or ''
+    ).strip()
+    if not model_identity:
+        plan.manifest.update({
+            'context_receipt_status': 'REPAIR_REQUIRED',
+            'context_receipt_repair_required': True,
+            'context_receipt_error_code': 'context_receipt_identity_unavailable',
+            'error_code': 'context_receipt_identity_unavailable',
+        })
+        return False
     members = _context_receipt_members(plan)
     try:
         receipt = receipt_store.ContextReceipt.build(
@@ -2691,7 +2708,7 @@ def _commit_production_context_receipt(
             resident_generation=int(plan.resident_generation),
             resident_key=str(plan.resident_key),
             provider=str(plan.manifest.get('provider') or 'claude_code'),
-            model_identity=str(plan.manifest.get('model') or 'unknown'),
+            model_identity=model_identity,
             session_id=sid,
             process_generation=int(process_generation),
             plan_id=str(context_plan.plan_id),
@@ -4248,12 +4265,21 @@ def _adopt_reprepared_plan_in_place(
     )
     provider_suffix = getattr(current, 'provider_display_thinking_suffix', '')
     provider_prompt = getattr(current, 'provider_display_thinking_prompt', '')
+    hot_decision = getattr(current, 'hot_decision', None)
+    hot_decision_reason = getattr(current, 'hot_decision_reason', None)
     for f in fields(DailyTurnPlan):
         setattr(current, f.name, getattr(replacement, f.name))
     current.provider_display_thinking_mode = provider_mode
     current.provider_display_thinking_effective_mode = effective_provider_mode
     current.provider_display_thinking_suffix = provider_suffix
     current.provider_display_thinking_prompt = provider_prompt
+    if hot_decision is not None:
+        current.hot_decision = hot_decision
+        current.hot_decision_reason = str(hot_decision_reason or '')
+        current.manifest.update({
+            'context_plan_hot_decision': str(hot_decision),
+            'context_plan_hot_decision_reason': str(hot_decision_reason or ''),
+        })
     if resident is not None:
         key = current.resident_key
         current._resident_close_fn = (
@@ -4272,6 +4298,11 @@ def _capture_transcript_start(plan: DailyTurnPlan, resident: Any) -> None:
     try:
         plan.transcript_cwd = str(getattr(resident, 'cwd', '') or '')
         plan.transcript_process_generation = int(getattr(resident, 'generation', 0) or 0)
+        plan.transcript_model_identity = str(
+            getattr(resident, 'model_identity', None)
+            or getattr(resident, '_model_identity', None)
+            or ''
+        ).strip() or None
         sid = str(getattr(resident, 'session_id', None) or '').strip() or None
         plan.transcript_claude_session_id = sid
         if sid:
@@ -6483,6 +6514,9 @@ def ensure_resident_and_stream(
                     persona_sha256=plan.manifest.get('persona_sha256') or '',
                     provider=str(plan.manifest.get('provider') or 'claude_code'),
                     model=str(plan.manifest.get('model') or ''),
+                    respawn_reason=(
+                        str(plan.hot_decision_reason or '').strip() or None
+                    ),
                 )
                 _adopt_reprepared_plan_in_place(plan, replacement, resident=resident)
                 yield from ensure_resident_and_stream(
