@@ -2805,7 +2805,7 @@ class ResidentSession:
                     if (
                         not isinstance(row, dict)
                         or row.get('type') != 'assistant'
-                        or event_offset <= int(start_offset)
+                        or event_offset < int(start_offset)
                         or row.get('isSidechain') is True
                     ):
                         continue
