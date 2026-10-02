@@ -551,6 +551,13 @@ class TurnTerminalAuthority:
             return True
 
     def begin_cleanup(self, reason, *, allow_success=False):
+        """Claim the serialized resident teardown token exactly once.
+
+        Cleanup is a teardown/serialization token, not a second terminal
+        outcome.  ``allow_success`` is used only when a recovered SUCCESS
+        turn must make its resident non-reusable; the TurnTerminalAuthority
+        still owns the final outcome in every case.
+        """
         with self._lock:
             if (
                 self._outcome == self.RUNNING
@@ -635,7 +642,11 @@ class StreamWatchdog:
         self._last_activity_at = now
         self._stopped = False
         self._fired_reason = None  # 'stall' | 'hard'
-        self._probe_fired = False
+        # Probe eligibility belongs to a provider-inactivity epoch.  A failed
+        # probe is consumed for this generation only; later real activity
+        # creates a new generation and arms the next probe opportunity.
+        self._activity_generation = 0
+        self._probed_generation = None
         self._thread = None
 
     @property
@@ -663,6 +674,7 @@ class StreamWatchdog:
             if self._stopped or self._fired_reason is not None:
                 return
             self._last_activity_at = time.monotonic()
+            self._activity_generation += 1
 
     def _try_fire(self, reason):
         """Knock-window check then fire. Returns True if timeout committed.
@@ -711,11 +723,18 @@ class StreamWatchdog:
         if self._probe_timeout is None or self._on_probe is None:
             return False
         with self._lock:
-            if self._stopped or self._fired_reason is not None or self._probe_fired:
+            if self._stopped or self._fired_reason is not None:
                 return False
             if time.monotonic() - self._last_activity_at < self._probe_timeout:
                 return False
-            self._probe_fired = True
+            generation = self._activity_generation
+            if self._probed_generation == generation:
+                return False
+            # Consume this inactivity epoch before invoking user code.  The
+            # callback is unlocked so provider activity can arrive while the
+            # bounded transcript probe is running; that activity increments
+            # the generation and arms a later epoch without probe storms.
+            self._probed_generation = generation
         try:
             consumed = bool(self._on_probe())
         except Exception:
@@ -2678,12 +2697,26 @@ class ResidentSession:
                 if observed_end <= int(start_offset):
                     return None
                 span = observed_end - int(start_offset)
+                scan_start = int(start_offset)
                 if span > _TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES:
-                    return None
+                    # Keep the proof bounded for long thinking/tool turns.
+                    # The bounded window may begin in the middle of a JSONL
+                    # record, so discard that partial first line rather than
+                    # interpreting it as current-turn evidence.
+                    scan_start = max(
+                        int(start_offset),
+                        observed_end - _TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES,
+                    )
                 with open(path, 'rb') as handle:
-                    handle.seek(int(start_offset))
-                    raw = handle.read(span)
-                offset = int(start_offset)
+                    handle.seek(scan_start)
+                    raw = handle.read(observed_end - scan_start)
+                if scan_start > int(start_offset):
+                    first_newline = raw.find(b'\n')
+                    if first_newline < 0:
+                        return None
+                    scan_start += first_newline + 1
+                    raw = raw[first_newline + 1:]
+                offset = scan_start
                 for line in raw.splitlines(keepends=True):
                     event_offset = offset
                     offset += len(line)

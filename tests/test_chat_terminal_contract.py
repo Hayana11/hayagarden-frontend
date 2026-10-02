@@ -3,6 +3,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import ExitStack
 from unittest import mock
@@ -693,6 +694,146 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertEqual([True], hard_calls)
         self.assertEqual([], missing_calls)
         self.assertEqual('HARD_TIMEOUT', controller.snapshot()['recovery_stage'])
+
+    def _watchdog_for_probe_lifecycle(self, on_probe, on_timeout=None):
+        return cc_resident.StreamWatchdog(
+            stall_timeout=360,
+            hard_timeout=3600,
+            on_timeout=on_timeout or (lambda reason: None),
+            is_proc_alive=lambda: True,
+            probe_timeout=20,
+            on_probe=on_probe,
+        )
+
+    def _age_watchdog_into_probe_epoch(self, watchdog):
+        watchdog._last_activity_at = time.monotonic() - 21
+
+    def test_p_r1_missed_probe_rearms_after_activity_and_hits_second_epoch(self):
+        probe_results = []
+        recovery_started = []
+        durable_end_turn = [False]
+
+        def on_probe():
+            probe_results.append(bool(durable_end_turn[0]))
+            if durable_end_turn[0]:
+                recovery_started.append('POST_COMPLETION_RECOVERY')
+                return True
+            return False
+
+        watchdog = self._watchdog_for_probe_lifecycle(on_probe)
+        self._age_watchdog_into_probe_epoch(watchdog)
+        self.assertFalse(watchdog._try_probe())
+        self.assertEqual([False], probe_results)
+
+        # A real provider event ends epoch 1 and re-arms the next probe.  The
+        # durable current-turn end_turn is written after that activity.
+        watchdog.note_activity()
+        durable_end_turn[0] = True
+        self._age_watchdog_into_probe_epoch(watchdog)
+        self.assertTrue(watchdog._try_probe())
+        self.assertEqual([False, True], probe_results)
+        self.assertEqual(['POST_COMPLETION_RECOVERY'], recovery_started)
+        self.assertIsNone(watchdog.fired_reason)
+
+    def test_p_r2_same_inactivity_epoch_probes_once(self):
+        probe_calls = []
+        timeout_calls = []
+        watchdog = self._watchdog_for_probe_lifecycle(
+            lambda: probe_calls.append(True) or False,
+            on_timeout=lambda reason: timeout_calls.append(reason),
+        )
+        self._age_watchdog_into_probe_epoch(watchdog)
+        self.assertFalse(watchdog._try_probe())
+        for _ in range(4):
+            self.assertFalse(watchdog._try_probe())
+        self.assertEqual([True], probe_calls)
+        self.assertEqual([], timeout_calls)
+        self.assertIsNone(watchdog.fired_reason)
+
+    def test_p_r3_activity_rearms_exactly_one_probe_per_epoch(self):
+        probe_calls = []
+        watchdog = self._watchdog_for_probe_lifecycle(
+            lambda: probe_calls.append(len(probe_calls)) or False,
+        )
+        for epoch in range(3):
+            self._age_watchdog_into_probe_epoch(watchdog)
+            self.assertFalse(watchdog._try_probe())
+            self.assertEqual(epoch + 1, len(probe_calls))
+            self.assertFalse(watchdog._try_probe())
+            self.assertEqual(epoch + 1, len(probe_calls))
+            watchdog.note_activity()
+            if epoch == 1:
+                watchdog.note_activity()
+        self.assertEqual(3, len(probe_calls))
+
+    def test_p_r4_terminal_or_active_recovery_cannot_rearm_probe(self):
+        cases = (
+            ('SUCCESS', lambda watchdog: watchdog.stop()),
+            ('STALL', lambda watchdog: (
+                setattr(
+                    watchdog,
+                    '_last_activity_at',
+                    time.monotonic() - 361,
+                ),
+                watchdog._try_fire('stall'),
+            )),
+            ('HARD_TIMEOUT', lambda watchdog: (
+                setattr(
+                    watchdog,
+                    '_started_at',
+                    time.monotonic() - 3601,
+                ),
+                watchdog._try_fire('hard'),
+            )),
+            ('POST_COMPLETION_RECOVERY', lambda watchdog: (
+                self._age_watchdog_into_probe_epoch(watchdog),
+                watchdog._try_probe(),
+            )),
+        )
+        for name, terminalize in cases:
+            with self.subTest(name=name):
+                probe_calls = []
+                watchdog = self._watchdog_for_probe_lifecycle(
+                    lambda: probe_calls.append(True) or True,
+                )
+                terminalize(watchdog)
+                watchdog.note_activity()
+                self._age_watchdog_into_probe_epoch(watchdog)
+                self.assertFalse(watchdog._try_probe())
+                self.assertLessEqual(len(probe_calls), 1)
+
+    def test_c_r8_long_current_turn_tail_proof_recovers(self):
+        long_rows = [
+            {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-race',
+            },
+            {
+                'type': 'assistant',
+                'message': {
+                    'stop_reason': None,
+                    'content': [{'type': 'text', 'text': 'x' * 70000}],
+                },
+            },
+            {
+                'type': 'assistant',
+                'message': {'stop_reason': 'end_turn'},
+            },
+        ]
+        chunks, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [self._terminal_result_event()],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=long_rows,
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF',
+            usage['_obs_terminal_recovery']['recovery_stage'],
+        )
+        self.assertEqual([True], kill_calls)
 
     def test_t14b_provider_error_claim_precedes_watchdog_stall_on_send_turn(self):
         error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
