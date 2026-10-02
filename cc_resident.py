@@ -2642,7 +2642,7 @@ class ResidentSession:
                 _set_reader_state('PROCESS_EVENT')
 
         def _transcript_timeout_snapshot():
-            """Inspect only bounded, current-cursor JSONL metadata."""
+            """Inspect bounded current-cursor metadata without sidechain finality."""
             cursor = dict(jsonl_cursor or {})
             path = str(cursor.get('path') or '')
             start_offset = _diagnostic_int(cursor.get('offset'))
@@ -2672,6 +2672,12 @@ class ResidentSession:
                 with open(path, 'rb') as handle:
                     handle.seek(scan_start)
                     raw = handle.read(_TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES)
+                if scan_start > start_offset:
+                    first_newline = raw.find(b'\n')
+                    if first_newline < 0:
+                        return result
+                    raw = raw[first_newline + 1:]
+                last_main_chain_assistant_stop_reason = None
                 for line in raw.splitlines():
                     try:
                         row = json.loads(line.decode('utf-8', errors='replace'))
@@ -2694,12 +2700,16 @@ class ResidentSession:
                     stop_reason = row.get('stop_reason')
                     if isinstance(message, dict):
                         stop_reason = message.get('stop_reason') or stop_reason
-                    if event_type == 'assistant' and stop_reason:
-                        result['last_current_turn_assistant_stop_reason'] = str(
-                            stop_reason,
-                        )[:80]
-                        if stop_reason == 'end_turn':
-                            result['current_turn_durable_assistant_end_turn'] = True
+                    if event_type == 'assistant' and row.get('isSidechain') is not True:
+                        last_main_chain_assistant_stop_reason = (
+                            None if stop_reason is None else str(stop_reason)[:80]
+                        )
+                result['last_current_turn_assistant_stop_reason'] = (
+                    last_main_chain_assistant_stop_reason
+                )
+                result['current_turn_durable_assistant_end_turn'] = (
+                    last_main_chain_assistant_stop_reason == 'end_turn'
+                )
                 return result
             except Exception:
                 result['transcript_scan_truncated'] = True
@@ -2746,7 +2756,7 @@ class ResidentSession:
                 timeout_diagnostic_lock.release()
 
         def _durable_current_turn_end_turn_proof():
-            """Fail closed unless the current session/cursor proves this turn."""
+            """Fail closed unless the last main-chain assistant proves this turn."""
             session_id = str(turn_session_id or self._session_id or '').strip()
             if not session_id or int(self._generation) != turn_process_generation:
                 return None
@@ -2784,6 +2794,7 @@ class ResidentSession:
                     scan_start += first_newline + 1
                     raw = raw[first_newline + 1:]
                 offset = scan_start
+                last_main_chain_assistant = None
                 for line in raw.splitlines(keepends=True):
                     event_offset = offset
                     offset += len(line)
@@ -2791,26 +2802,40 @@ class ResidentSession:
                         row = json.loads(line.decode('utf-8', errors='replace'))
                     except Exception:
                         continue
-                    if not isinstance(row, dict) or row.get('type') != 'assistant':
+                    if (
+                        not isinstance(row, dict)
+                        or row.get('type') != 'assistant'
+                        or event_offset <= int(start_offset)
+                        or row.get('isSidechain') is True
+                    ):
                         continue
                     message = row.get('message')
                     stop_reason = row.get('stop_reason')
                     if isinstance(message, dict):
                         stop_reason = message.get('stop_reason') or stop_reason
-                    if stop_reason != 'end_turn' or event_offset <= int(start_offset):
-                        continue
-                    return {
-                        'current_session_id': session_id[:200],
-                        'process_generation': turn_process_generation,
-                        'turn_identity': terminal.turn_identity,
-                        'transcript_path_sha256': _diagnostic_path_hash(path),
-                        'current_turn_start_offset': int(start_offset),
-                        'event_offset': int(event_offset),
-                        'observed_end_offset': observed_end,
-                        'assistant_stop_reason': 'end_turn',
-                        'detected_at': time.time(),
-                        'provider_last_activity_at': terminal.last_provider_activity_at,
+                    last_main_chain_assistant = {
+                        'event_offset': event_offset,
+                        'stop_reason': (
+                            None if stop_reason is None else str(stop_reason)[:80]
+                        ),
                     }
+                if (
+                    last_main_chain_assistant is None
+                    or last_main_chain_assistant['stop_reason'] != 'end_turn'
+                ):
+                    return None
+                return {
+                    'current_session_id': session_id[:200],
+                    'process_generation': turn_process_generation,
+                    'turn_identity': terminal.turn_identity,
+                    'transcript_path_sha256': _diagnostic_path_hash(path),
+                    'current_turn_start_offset': int(start_offset),
+                    'event_offset': last_main_chain_assistant['event_offset'],
+                    'observed_end_offset': observed_end,
+                    'assistant_stop_reason': 'end_turn',
+                    'detected_at': time.time(),
+                    'provider_last_activity_at': terminal.last_provider_activity_at,
+                }
             except Exception:
                 return None
             return None
