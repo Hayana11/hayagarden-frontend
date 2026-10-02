@@ -231,6 +231,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         recovery_grace=0.1,
         close_after_first_chunk=False,
         capture_exception=False,
+        mark_killed_nonreusable=False,
     ):
         """Run the actual send_turn path with a deterministic watchdog signal."""
         watchdogs = []
@@ -364,6 +365,10 @@ class ChatTerminalContractTests(unittest.TestCase):
         # reader consumes the already-complete provider result second.
         def fake_kill(quiet=False):
             kill_calls.append(bool(quiet))
+            if mark_killed_nonreusable:
+                session._proc = None
+                session._cold = True
+                session._next_spawn_reason = 'process_dead'
             if block_readline:
                 session._proc.stdout.release_readline.set()
 
@@ -640,6 +645,58 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertEqual(
             'CLI_TERMINAL_RESULT_MISSING',
             error.diagnostics['timeout_diagnostics']['terminal_outcome'],
+        )
+
+    def test_h_r1_recovery_controller_start_failure_is_bounded(self):
+        with mock.patch.object(
+            cc_resident.threading.Thread,
+            'start',
+            side_effect=RuntimeError('synthetic recovery controller start failure'),
+        ):
+            error, session, watchdogs, kill_calls = (
+                self._run_deterministic_send_turn(
+                    [],
+                    'stall',
+                    signal_on_probe=True,
+                    transcript_rows=self._current_turn_end_turn_rows(),
+                    capture_exception=True,
+                    mark_killed_nonreusable=True,
+                )
+            )
+
+        self.assertIsInstance(error, cc_resident.ResidentError)
+        self.assertEqual('cli_terminal_result_missing', error.error_code)
+        self.assertEqual(
+            'CLI_TERMINAL_RESULT_MISSING',
+            error.diagnostics['terminal_outcome'],
+        )
+        self.assertEqual(1, error.diagnostics['cleanup_count'])
+        self.assertEqual(
+            'cli_terminal_result_missing',
+            error.diagnostics['timeout_candidate_type'],
+        )
+        self.assertEqual([True], kill_calls)
+        self.assertIsNone(session._proc)
+        self.assertTrue(session.is_cold())
+        self.assertEqual('process_dead', session._next_spawn_reason)
+
+        recovery = error.usage['_obs_terminal_recovery']
+        self.assertIsNotNone(recovery)
+        self.assertEqual(
+            'CLI_TERMINAL_RESULT_MISSING',
+            recovery['recovery_stage'],
+        )
+        self.assertEqual(
+            'CLI_TERMINAL_RESULT_MISSING',
+            recovery['final_outcome'],
+        )
+        self.assertIsNotNone(recovery['total_recovery_latency_ms'])
+
+        self.assertTrue(watchdogs[0].probe_consumed)
+        self.assertFalse(watchdogs[0].committed)
+        self.assertEqual(
+            0,
+            error.diagnostics['actual_stall_accepted_count'],
         )
 
     def test_c_r4_previous_turn_end_turn_does_not_start_recovery(self):
