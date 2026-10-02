@@ -902,7 +902,20 @@ class TerminalRecoveryController:
             name='cc-terminal-recovery',
             daemon=True,
         )
-        self._thread.start()
+        try:
+            self._thread.start()
+        except RuntimeError:
+            # Thread.start() can fail after stdin has already been closed.
+            # Fail closed through the existing recovery terminal path and
+            # always release wait_for_final(), so the generator cannot hang.
+            with self._lock:
+                self._stage = self.RESULT_MISSING
+                self._terminal_outcome = self.RESULT_MISSING
+            try:
+                self._submit_result_missing()
+            finally:
+                self._done.set()
+            return True
         return True
 
     @staticmethod
