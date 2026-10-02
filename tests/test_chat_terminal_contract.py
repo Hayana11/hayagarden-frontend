@@ -868,6 +868,11 @@ class ChatTerminalContractTests(unittest.TestCase):
     def test_s_r4_sidechain_after_main_end_turn_does_not_break_proof(self):
         rows = [
             {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-race',
+            },
+            {
                 'type': 'assistant',
                 'message': {'stop_reason': 'end_turn'},
             },
@@ -897,6 +902,11 @@ class ChatTerminalContractTests(unittest.TestCase):
 
     def test_s_r5_metadata_after_main_end_turn_does_not_break_proof(self):
         rows = [
+            {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-race',
+            },
             {
                 'type': 'assistant',
                 'message': {'stop_reason': 'end_turn'},
