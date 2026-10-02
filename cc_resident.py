@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import math
 import os
 import select
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 
 import config_store
@@ -104,6 +107,61 @@ def _diagnostic_request_id(*events):
             if value:
                 return value[:200]
     return None
+
+
+_TIMEOUT_DIAGNOSTIC_MAX_CHARS = 8_000
+_TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES = 64 * 1024
+
+
+def _bounded_diagnostic_text(value, limit=_TIMEOUT_DIAGNOSTIC_MAX_CHARS):
+    """Return bounded diagnostic text without accepting arbitrary payloads."""
+    if value is None:
+        return None
+    return str(value)[:int(limit)]
+
+
+def _diagnostic_path_hash(path):
+    if not path:
+        return None
+    try:
+        return hashlib.sha256(os.fsencode(str(path))).hexdigest()
+    except Exception:
+        return None
+
+
+def _diagnostic_proc_read(pid, name, *, limit=4_000):
+    """Best-effort bounded /proc read; never expose a read failure to cleanup."""
+    try:
+        safe_pid = int(pid)
+        if safe_pid <= 0:
+            raise ValueError('invalid pid')
+        with open('/proc/%d/%s' % (safe_pid, name), 'r', encoding='utf-8', errors='replace') as handle:
+            return _bounded_diagnostic_text(handle.read(limit + 1), limit)
+    except Exception:
+        return 'unavailable'
+
+
+def _diagnostic_thread_dump(*, max_threads=12, max_stack_chars=1_200):
+    """Bounded stack-only dump; deliberately never serializes frame locals."""
+    try:
+        frames = sys._current_frames()
+        rows = []
+        for thread in threading.enumerate()[:max_threads]:
+            frame = frames.get(thread.ident)
+            if frame is None:
+                continue
+            try:
+                stack = ''.join(traceback.format_stack(frame, limit=16))
+            except Exception:
+                stack = 'unavailable'
+            rows.append({
+                'name': str(thread.name or '')[:120],
+                'ident': _diagnostic_int(thread.ident),
+                'stack': _bounded_diagnostic_text(stack, max_stack_chars),
+            })
+        return rows
+    except Exception:
+        return [{'name': 'unavailable', 'ident': None, 'stack': 'unavailable'}]
 
 
 def _log_wake_round_usage(
@@ -392,6 +450,7 @@ class TurnTerminalAuthority:
         self._late_result_rejected_count = 0
         self._duplicate_terminal_signal_count = 0
         self._provider_error = None
+        self._timeout_diagnostics = None
 
     @property
     def outcome(self):
@@ -497,6 +556,14 @@ class TurnTerminalAuthority:
             self._resident_killed = bool(process_present)
             self._resident_kill_reason = str(reason or self._cleanup_reason or '')
 
+    def record_timeout_diagnostics(self, diagnostics):
+        """Keep one bounded diagnostic sample for the accepted timeout only."""
+        with self._lock:
+            if self._timeout_diagnostics is None:
+                self._timeout_diagnostics = dict(diagnostics or {})
+                return True
+            return False
+
     def snapshot(self):
         with self._lock:
             return {
@@ -519,33 +586,8 @@ class TurnTerminalAuthority:
                 'late_result_rejected_count': self._late_result_rejected_count,
                 'duplicate_terminal_signal_count': self._duplicate_terminal_signal_count,
                 'provider_error': dict(self._provider_error or {}),
+                'timeout_diagnostics': dict(self._timeout_diagnostics or {}),
             }
-
-
-def _reconcile_terminal_timeout(
-    timeout_reason,
-    terminal_reason,
-    *,
-    terminal_receipt,
-    provider_error,
-):
-    """Reconcile a watchdog stamp with a typed provider terminal receipt.
-
-    terminal_reason is the terminal reason stamped by the watchdog/callback
-    and passed in by the caller; it is not
-    ProviderTerminalTracker.terminal_reason. Only a typed
-    ProviderTerminalReceipt constructed from the live
-    type=result, is_error=false, stop_reason=end_turn event is evidence for
-    this narrow stale-stall override. Hard timeouts and provider errors remain
-    authoritative failures.
-    """
-    if (
-        timeout_reason == 'stall'
-        and terminal_receipt is not None
-        and provider_error is None
-    ):
-        return None, 'result', True
-    return timeout_reason, terminal_reason, False
 
 class StreamWatchdog:
     """Single-thread stall + hard deadline watchdog for one send_turn.
@@ -2190,18 +2232,6 @@ class ResidentSession:
                 uh_a0_runtime.abort_turn(turn_id=uh_a0_turn_id)
             raise
 
-        # Watchdog observes the same authority but only submits a candidate.
-        def _submit_timeout_candidate(reason):
-            authority.submit_timeout_candidate(reason)
-
-        watchdog = StreamWatchdog(
-            stall_timeout=stall_timeout,
-            hard_timeout=hard_timeout,
-            on_timeout=_submit_timeout_candidate,
-            is_proc_alive=lambda: proc.poll() is None,
-        )
-        watchdog.start()
-
         think_acc, text_acc = [], []
         # Claude's terminal assistant rows can contain the complete text even
         # when one or more stream deltas were lost. Keep this separate from
@@ -2213,6 +2243,143 @@ class ResidentSession:
         provider_refusal_seen = False
         saw_result = False
         terminal_receipt = None
+
+        reader_state_lock = threading.Lock()
+        reader_state_data = {
+            'reader_state': 'IDLE/UNKNOWN',
+            'reader_state_entered_at': time.time(),
+        }
+        timeout_diagnostic_lock = threading.Lock()
+
+        def _set_reader_state(state):
+            now = time.time()
+            with reader_state_lock:
+                if reader_state_data['reader_state'] != state:
+                    reader_state_data['reader_state'] = str(state)
+                    reader_state_data['reader_state_entered_at'] = now
+
+        def _reader_state_snapshot():
+            now = time.time()
+            with reader_state_lock:
+                entered_at = float(reader_state_data['reader_state_entered_at'])
+                return {
+                    'reader_state': reader_state_data['reader_state'],
+                    'reader_state_entered_at': entered_at,
+                    'reader_state_duration_ms': max(
+                        0, int((now - entered_at) * 1000),
+                    ),
+                }
+
+        def _downstream_yield(value):
+            _set_reader_state('DOWNSTREAM_YIELD')
+            try:
+                yield value
+            finally:
+                _set_reader_state('PROCESS_EVENT')
+
+        def _transcript_timeout_snapshot():
+            """Inspect only bounded, current-cursor JSONL metadata."""
+            cursor = dict(jsonl_cursor or {})
+            path = str(cursor.get('path') or '')
+            start_offset = _diagnostic_int(cursor.get('offset'))
+            start_offset = max(0, start_offset or 0)
+            result = {
+                'transcript_path_sha256': _diagnostic_path_hash(path),
+                'current_turn_start_offset': start_offset if path else None,
+                'observed_end_offset': None,
+                'last_current_turn_event_type': None,
+                'last_current_turn_timestamp': None,
+                'last_current_turn_assistant_stop_reason': None,
+                'current_turn_durable_assistant_end_turn': False,
+                'transcript_scan_truncated': False,
+            }
+            if not path:
+                return result
+            try:
+                observed_end = int(os.path.getsize(path))
+                result['observed_end_offset'] = observed_end
+                if start_offset > observed_end:
+                    start_offset = observed_end
+                scan_start = max(
+                    start_offset,
+                    observed_end - _TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES,
+                )
+                result['transcript_scan_truncated'] = scan_start > start_offset
+                with open(path, 'rb') as handle:
+                    handle.seek(scan_start)
+                    raw = handle.read(_TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES)
+                for line in raw.splitlines():
+                    try:
+                        row = json.loads(line.decode('utf-8', errors='replace'))
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    event_type = str(row.get('type') or '').strip()[:80]
+                    subtype = str(row.get('subtype') or '').strip()[:80]
+                    if not event_type:
+                        continue
+                    label = event_type
+                    if subtype:
+                        label += ':' + subtype
+                    result['last_current_turn_event_type'] = label[:180]
+                    timestamp = row.get('timestamp')
+                    if timestamp is not None:
+                        result['last_current_turn_timestamp'] = str(timestamp)[:80]
+                    message = row.get('message')
+                    stop_reason = row.get('stop_reason')
+                    if isinstance(message, dict):
+                        stop_reason = message.get('stop_reason') or stop_reason
+                    if event_type == 'assistant' and stop_reason:
+                        result['last_current_turn_assistant_stop_reason'] = str(
+                            stop_reason,
+                        )[:80]
+                        if stop_reason == 'end_turn':
+                            result['current_turn_durable_assistant_end_turn'] = True
+                return result
+            except Exception:
+                result['transcript_scan_truncated'] = True
+                return result
+
+        def _capture_timeout_diagnostics(candidate_type):
+            """Capture one safe timeout sample before its cleanup/kill."""
+            if not timeout_diagnostic_lock.acquire(blocking=False):
+                return
+            try:
+                state = _reader_state_snapshot()
+                authority_snapshot = authority.snapshot()
+                pid = getattr(proc, 'pid', None)
+                try:
+                    proc_poll = proc.poll()
+                except Exception:
+                    proc_poll = 'unavailable'
+                diagnostics = {
+                    'terminal_outcome': authority_snapshot['terminal_outcome'],
+                    'timeout_candidate': str(candidate_type or '')[:80],
+                    'turn_identity': terminal.turn_identity,
+                    'claude_session_id': str(self._session_id or '')[:200] or None,
+                    'process_generation': int(self._generation),
+                    'resident_pid': _diagnostic_int(pid),
+                    'proc_poll': proc_poll,
+                    **state,
+                    'thread_dump': _diagnostic_thread_dump(),
+                    'child_wchan': _diagnostic_proc_read(pid, 'wchan'),
+                    'child_stack': _diagnostic_proc_read(pid, 'stack'),
+                }
+                diagnostics.update(_transcript_timeout_snapshot())
+                authority.record_timeout_diagnostics(diagnostics)
+            except Exception as exc:
+                # Diagnostics are strictly best effort and must never block kill.
+                authority.record_timeout_diagnostics({
+                    'terminal_outcome': authority.outcome,
+                    'timeout_candidate': str(candidate_type or '')[:80],
+                    'turn_identity': terminal.turn_identity,
+                    'claude_session_id': str(self._session_id or '')[:200] or None,
+                    'process_generation': int(self._generation),
+                    'diagnostics_error': type(exc).__name__,
+                })
+            finally:
+                timeout_diagnostic_lock.release()
 
         def _claim_terminal_provider_event(event):
             """Linearize a terminal provider event before observation refresh."""
@@ -2289,6 +2456,25 @@ class ResidentSession:
                 )
             return True
 
+        # Watchdog timeout ownership is linearized by the same authority as
+        # provider terminal events. Only the winner is allowed to capture
+        # diagnostics and kill; outer exception/finalizer paths can only
+        # observe the already-consumed cleanup token.
+        def _submit_timeout_candidate(reason):
+            if not authority.submit_timeout_candidate(reason):
+                return False
+            _capture_timeout_diagnostics(reason)
+            _cleanup_after_terminal('watchdog:%s' % str(reason or 'timeout'))
+            return True
+
+        watchdog = StreamWatchdog(
+            stall_timeout=stall_timeout,
+            hard_timeout=hard_timeout,
+            on_timeout=_submit_timeout_candidate,
+            is_proc_alive=lambda: proc.poll() is None,
+        )
+        watchdog.start()
+
         def _record_round_usage(
             event_source,
             event_usage,
@@ -2351,6 +2537,7 @@ class ResidentSession:
                         )
                         break
                     ready = True
+                    _set_reader_state('WAIT_SELECT')
                     try:
                         poll_interval = heartbeat_interval if use_idle_heartbeat else 0.2
                         ready, _, _ = select.select(
@@ -2370,10 +2557,12 @@ class ResidentSession:
                             )
                             break
                         if use_idle_heartbeat:
-                            yield ('heartbeat', None)
+                            yield from _downstream_yield(('heartbeat', None))
                         continue
+                    _set_reader_state('READLINE')
                     raw_line = proc.stdout.readline()
                     if raw_line == '':
+                        _set_reader_state('TERMINAL_DRAIN')
                         authority.accept_disconnected('stdout_eof')
                         break
                     line = raw_line.strip()
@@ -2383,6 +2572,7 @@ class ResidentSession:
                         d = json.loads(line)
                     except Exception:
                         continue
+                    _set_reader_state('PROCESS_EVENT')
                     # A terminal provider event must claim the sole authority
                     # before observation bookkeeping or watchdog refresh. This
                     # closes the deterministic result-vs-stall window without
@@ -2392,6 +2582,17 @@ class ResidentSession:
                     if _claude_event_is_activity(d):
                         watchdog.note_activity()
                     self._maybe_set_session_id(d)
+                    if jsonl_cursor is None and self._session_id:
+                        try:
+                            from tools.cc_jsonl_usage import snapshot_session_jsonl
+                            jsonl_cursor = snapshot_session_jsonl(
+                                self._cwd, self._session_id,
+                            )
+                            if jsonl_cursor is not None and self._cold:
+                                jsonl_cursor = dict(jsonl_cursor)
+                                jsonl_cursor['offset'] = 0
+                        except Exception:
+                            pass
                     t = d.get('type')
                     if t == 'system' and d.get('subtype') == 'init':
                         self._session_id = d.get('session_id') or self._session_id
@@ -2475,12 +2676,12 @@ class ResidentSession:
                                 chunk = delta.get('text', '')
                                 if chunk:
                                     text_acc.append(chunk)
-                                    yield ('text', chunk)
+                                    yield from _downstream_yield(('text', chunk))
                             elif delta.get('type') == 'thinking_delta':
                                 chunk = delta.get('thinking', '')
                                 if chunk:
                                     think_acc.append(chunk)
-                                    yield ('think', chunk)
+                                    yield from _downstream_yield(('think', chunk))
                     elif t == 'assistant':
                         if d.get('isApiErrorMessage') is True:
                             provider_error = claimed_terminal['provider_error']
@@ -2549,18 +2750,18 @@ class ResidentSession:
                                     })
                                     if fence.get('approval_id'):
                                         tool_payload['approval_id'] = fence['approval_id']
-                                yield ('tool_use', tool_payload)
+                                yield from _downstream_yield(('tool_use', tool_payload))
                     elif t == 'user':
                         for b in ((d.get('message') or {}).get('content') or []):
                             if isinstance(b, dict) and b.get('type') == 'tool_result':
                                 rc = b.get('content')
                                 if isinstance(rc, list):
                                     rc = ''.join(x.get('text', '') for x in rc if isinstance(x, dict))
-                                yield ('tool_result', {
+                                yield from _downstream_yield(('tool_result', {
                                     'tool_use_id': b.get('tool_use_id'),
                                     'result': str(rc or ''),
                                     'is_error': bool(b.get('is_error')),
-                                })
+                                }))
                     elif t == 'result':
                         saw_result = True
                         result_usage = d.get('usage')
@@ -2609,7 +2810,7 @@ class ResidentSession:
                                 deferred_payload['approval_prompt'] = prompt
                             authority.accept_deferred()
                             _cleanup_after_terminal('provider_tool_deferred')
-                            yield ('tool_use', deferred_payload)
+                            yield from _downstream_yield(('tool_use', deferred_payload))
                             break
                         if d.get('is_error'):
                             provider_error = claimed_terminal['provider_error']
@@ -2698,9 +2899,13 @@ class ResidentSession:
         usage['_obs_duplicate_terminal_signal_count'] = authority_obs[
             'duplicate_terminal_signal_count'
         ]
+        usage['_obs_timeout_diagnostics'] = authority_obs.get(
+            'timeout_diagnostics',
+        ) or None
         usage['_obs_cleanup_count'] = authority_obs['cleanup_count']
         # Compatibility telemetry from Phase A remains, while root-path
-        # stale-stall rejection is measured separately above.
+        # stale-stall rejection is measured separately above. This is legacy
+        # compatibility output only; no terminal reconciliation reads it.
         usage['_obs_stall_result_race_recovered'] = False
         usage['_obs_turn_identity'] = terminal.turn_identity
         usage['_obs_effort'] = getattr(self, '_effort_value', None)
