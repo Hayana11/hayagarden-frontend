@@ -30,6 +30,9 @@ NL = chr(10)
 CC_STREAM_TIMEOUT = 360  # stall / inactivity seconds (runtime-tunable)
 CC_STREAM_HARD_TIMEOUT = 1800  # absolute per-turn ceiling (runtime-tunable)
 CC_STREAM_RESULT_GRACE = 30  # wait for result after provider end_turn (runtime-tunable)
+CC_TERMINAL_RECOVERY_PROBE = 20  # durable-completion probe before ordinary stall
+CC_TERMINAL_RECOVERY_EOF_GRACE = 4
+CC_TERMINAL_RECOVERY_SIGTERM_GRACE = 4
 IDLE_REAP_SECONDS = 3 * 60 * 60
 STALE_CACHE_CONTEXT_THRESHOLD = 70_000
 STALE_CACHE_MAX_AGE_SECONDS = 3_300
@@ -417,6 +420,7 @@ class TurnTerminalAuthority:
     STALL = 'STALL'
     HARD_TIMEOUT = 'HARD_TIMEOUT'
     RESULT_MISSING_AFTER_END_TURN = 'RESULT_MISSING_AFTER_END_TURN'
+    CLI_TERMINAL_RESULT_MISSING = 'CLI_TERMINAL_RESULT_MISSING'
     DISCONNECTED = 'DISCONNECTED'
     DEFERRED = 'DEFERRED'
 
@@ -426,6 +430,10 @@ class TurnTerminalAuthority:
         'result_missing_after_end_turn': (
             RESULT_MISSING_AFTER_END_TURN,
             'result_missing_after_end_turn',
+        ),
+        'cli_terminal_result_missing': (
+            CLI_TERMINAL_RESULT_MISSING,
+            'cli_terminal_result_missing',
         ),
     }
 
@@ -542,9 +550,13 @@ class TurnTerminalAuthority:
             self._commit_locked(self.DEFERRED, 'tool_deferred', 'provider_result')
             return True
 
-    def begin_cleanup(self, reason):
+    def begin_cleanup(self, reason, *, allow_success=False):
         with self._lock:
-            if self._outcome in (self.RUNNING, self.SUCCESS) or self._cleanup_count:
+            if (
+                self._outcome == self.RUNNING
+                or (self._outcome == self.SUCCESS and not allow_success)
+                or self._cleanup_count
+            ):
                 return False
             self._cleanup_count = 1
             self._cleanup_reason = str(reason or self._terminal_reason or '')
@@ -605,24 +617,36 @@ class StreamWatchdog:
         on_timeout,
         is_proc_alive,
         poll_cap_sec=0.2,
+        probe_timeout=None,
+        on_probe=None,
     ):
         self.stall_timeout = float(stall_timeout)
         self.hard_timeout = float(hard_timeout)
         self._on_timeout = on_timeout
+        self._on_probe = on_probe
         self._is_proc_alive = is_proc_alive
         self._poll_cap_sec = float(poll_cap_sec)
+        self._probe_timeout = (
+            None if probe_timeout is None else max(0.1, float(probe_timeout))
+        )
         self._lock = threading.Lock()
         now = time.monotonic()
         self._started_at = now
         self._last_activity_at = now
         self._stopped = False
         self._fired_reason = None  # 'stall' | 'hard'
+        self._probe_fired = False
         self._thread = None
 
     @property
     def fired_reason(self):
         with self._lock:
             return self._fired_reason
+
+    @property
+    def hard_deadline(self):
+        with self._lock:
+            return self._started_at + self.hard_timeout
 
     def start(self):
         self._thread = threading.Thread(
@@ -683,6 +707,24 @@ class StreamWatchdog:
             pass
         return True
 
+    def _try_probe(self):
+        if self._probe_timeout is None or self._on_probe is None:
+            return False
+        with self._lock:
+            if self._stopped or self._fired_reason is not None or self._probe_fired:
+                return False
+            if time.monotonic() - self._last_activity_at < self._probe_timeout:
+                return False
+            self._probe_fired = True
+        try:
+            consumed = bool(self._on_probe())
+        except Exception:
+            consumed = False
+        if consumed:
+            with self._lock:
+                self._stopped = True
+        return consumed
+
     def _loop(self):
         while True:
             with self._lock:
@@ -691,8 +733,15 @@ class StreamWatchdog:
                 now = time.monotonic()
                 stall_left = self.stall_timeout - (now - self._last_activity_at)
                 hard_left = self.hard_timeout - (now - self._started_at)
+                probe_left = (
+                    float('inf') if self._probe_timeout is None
+                    else self._probe_timeout - (now - self._last_activity_at)
+                )
             if hard_left <= 0:
                 if self._try_fire('hard'):
+                    return
+            elif probe_left <= 0:
+                if self._try_probe():
                     return
             elif stall_left <= 0:
                 if self._try_fire('stall'):
@@ -702,7 +751,221 @@ class StreamWatchdog:
                 wait = min(wait, hard_left)
             if stall_left > 0:
                 wait = min(wait, stall_left)
+            if probe_left > 0:
+                wait = min(wait, probe_left)
             time.sleep(max(0.01, wait))
+
+
+class TerminalRecoveryController:
+    """Intermediate post-completion recovery; it never chooses terminal state."""
+
+    POST_COMPLETION_RECOVERY = 'POST_COMPLETION_RECOVERY'
+    EOF_DRAIN = 'EOF_DRAIN'
+    SIGTERM_DRAIN = 'SIGTERM_DRAIN'
+    RECOVERED_AFTER_STDIN_EOF = 'RECOVERED_AFTER_STDIN_EOF'
+    RECOVERED_AFTER_SIGTERM = 'RECOVERED_AFTER_SIGTERM'
+    RESULT_MISSING = 'CLI_TERMINAL_RESULT_MISSING'
+    HARD_TIMEOUT = 'HARD_TIMEOUT'
+
+    def __init__(
+        self,
+        *,
+        eof_grace,
+        sigterm_grace,
+        hard_deadline,
+        close_stdin,
+        send_sigterm,
+        submit_hard_timeout,
+        submit_result_missing,
+    ):
+        self.eof_grace = max(0.1, float(eof_grace))
+        self.sigterm_grace = max(0.1, float(sigterm_grace))
+        self.hard_deadline = float(hard_deadline)
+        self._close_stdin = close_stdin
+        self._send_sigterm = send_sigterm
+        self._submit_hard_timeout = submit_hard_timeout
+        self._submit_result_missing = submit_result_missing
+        self._lock = threading.Lock()
+        self._active = False
+        self._stage = None
+        self._started_at = None
+        self._stdin_closed_at = None
+        self._sigterm_sent_at = None
+        self._first_post_eof_event_at = None
+        self._first_post_sigterm_event_at = None
+        self._recovered_result_at = None
+        self._terminal_outcome = None
+        self._events_after_eof = []
+        self._events_after_sigterm = []
+        self._proof = {}
+        self._terminal_event = threading.Event()
+        self._done = threading.Event()
+        self._thread = None
+
+    @property
+    def active(self):
+        with self._lock:
+            return bool(self._active)
+
+    @property
+    def stage(self):
+        with self._lock:
+            return self._stage
+
+    def start(self, proof):
+        with self._lock:
+            if self._active:
+                return False
+            self._active = True
+            self._stage = self.POST_COMPLETION_RECOVERY
+            self._started_at = time.time()
+            self._proof = dict(proof or {})
+        # Stage 1 is synchronous with the accepted probe: close only stdin
+        # before returning to the reader. The process object and stdout stay
+        # intact for the bounded drain.
+        try:
+            self._close_stdin()
+        finally:
+            with self._lock:
+                self._stdin_closed_at = time.time()
+                self._stage = self.EOF_DRAIN
+        self._thread = threading.Thread(
+            target=self._run,
+            name='cc-terminal-recovery',
+            daemon=True,
+        )
+        self._thread.start()
+        return True
+
+    @staticmethod
+    def _safe_event(event):
+        if not isinstance(event, dict):
+            return None
+        event_type = str(event.get('type') or '').strip()[:80]
+        subtype = str(event.get('subtype') or '').strip()[:80]
+        stop_reason = str(event.get('stop_reason') or '').strip()[:80]
+        if event_type == 'assistant':
+            message = event.get('message')
+            if isinstance(message, dict):
+                stop_reason = str(
+                    message.get('stop_reason') or stop_reason or '',
+                )[:80]
+        if not event_type:
+            return None
+        return {
+            'event_type': event_type,
+            'subtype': subtype or None,
+            'stop_reason': stop_reason or None,
+        }
+
+    def note_event(self, event):
+        safe = self._safe_event(event)
+        if safe is None:
+            return
+        now = time.time()
+        with self._lock:
+            if not self._active:
+                return
+            if self._stage == self.EOF_DRAIN:
+                if self._first_post_eof_event_at is None:
+                    self._first_post_eof_event_at = now
+                if len(self._events_after_eof) < 32:
+                    self._events_after_eof.append(safe)
+            elif self._stage == self.SIGTERM_DRAIN:
+                if self._first_post_sigterm_event_at is None:
+                    self._first_post_sigterm_event_at = now
+                if len(self._events_after_sigterm) < 32:
+                    self._events_after_sigterm.append(safe)
+
+    def mark_terminal(self, outcome):
+        now = time.time()
+        with self._lock:
+            if not self._active:
+                return
+            self._terminal_outcome = str(outcome or '')[:80]
+            if outcome == TurnTerminalAuthority.SUCCESS:
+                self._recovered_result_at = now
+                if self._stage == self.EOF_DRAIN:
+                    self._stage = self.RECOVERED_AFTER_STDIN_EOF
+                elif self._stage == self.SIGTERM_DRAIN:
+                    self._stage = self.RECOVERED_AFTER_SIGTERM
+            self._terminal_event.set()
+
+    def wait_for_final(self):
+        self._done.wait()
+
+    def _remaining_hard_time(self):
+        return self.hard_deadline - time.monotonic()
+
+    def _wait_stage(self, grace):
+        remaining = min(float(grace), self._remaining_hard_time())
+        if remaining <= 0:
+            return False
+        self._terminal_event.wait(remaining)
+        return self._terminal_event.is_set()
+
+    def _run(self):
+        try:
+            if self._wait_stage(self.eof_grace):
+                return
+            if self._remaining_hard_time() <= 0:
+                with self._lock:
+                    self._stage = self.HARD_TIMEOUT
+                self._submit_hard_timeout()
+                return
+
+            with self._lock:
+                self._stage = self.SIGTERM_DRAIN
+            self._send_sigterm()
+            with self._lock:
+                self._sigterm_sent_at = time.time()
+            if self._wait_stage(self.sigterm_grace):
+                return
+            if self._remaining_hard_time() <= 0:
+                with self._lock:
+                    self._stage = self.HARD_TIMEOUT
+                self._submit_hard_timeout()
+                return
+
+            with self._lock:
+                self._stage = self.RESULT_MISSING
+            self._submit_result_missing()
+        finally:
+            with self._lock:
+                if self._terminal_outcome is None:
+                    self._terminal_outcome = 'RUNNING'
+            self._done.set()
+
+    def snapshot(self, *, final_outcome=None):
+        with self._lock:
+            started_at = self._started_at
+            finished_at = time.time() if self._done.is_set() else None
+            return {
+                'active': bool(self._active),
+                'recovery_stage': self._stage,
+                'durable_end_turn_detected_at': self._proof.get(
+                    'detected_at',
+                ),
+                'provider_last_activity_at': self._proof.get(
+                    'provider_last_activity_at',
+                ),
+                'recovery_started_at': started_at,
+                'stdin_closed_at': self._stdin_closed_at,
+                'first_post_eof_event_at': self._first_post_eof_event_at,
+                'sigterm_sent_at': self._sigterm_sent_at,
+                'first_post_sigterm_event_at': self._first_post_sigterm_event_at,
+                'recovered_result_at': self._recovered_result_at,
+                'events_after_eof': list(self._events_after_eof),
+                'events_after_sigterm': list(self._events_after_sigterm),
+                'total_recovery_latency_ms': (
+                    max(0, int((finished_at - started_at) * 1000))
+                    if started_at is not None and finished_at is not None else None
+                ),
+                'final_outcome': str(
+                    final_outcome or self._terminal_outcome or '',
+                )[:80] or None,
+                'proof': dict(self._proof),
+            }
 
 
 _PROCESS_FAILURE_CODES = frozenset({
@@ -710,6 +973,7 @@ _PROCESS_FAILURE_CODES = frozenset({
     'provider_stall_timeout',
     'provider_hard_timeout',
     'result_missing_after_end_turn',
+    'cli_terminal_result_missing',
     'result_missing_before_terminal',
     'claude_runtime_post_send_failure',
 })
@@ -2147,9 +2411,21 @@ class ResidentSession:
         stall_timeout = _cfg_int('CC_STREAM_TIMEOUT', CC_STREAM_TIMEOUT)
         hard_timeout = _cfg_int('CC_STREAM_HARD_TIMEOUT', CC_STREAM_HARD_TIMEOUT)
         result_grace = _cfg_int('CC_STREAM_RESULT_GRACE', CC_STREAM_RESULT_GRACE)
+        recovery_probe = _cfg_int(
+            'CC_TERMINAL_RECOVERY_PROBE', CC_TERMINAL_RECOVERY_PROBE,
+        )
+        recovery_eof_grace = _cfg_int(
+            'CC_TERMINAL_RECOVERY_EOF_GRACE', CC_TERMINAL_RECOVERY_EOF_GRACE,
+        )
+        recovery_sigterm_grace = _cfg_int(
+            'CC_TERMINAL_RECOVERY_SIGTERM_GRACE',
+            CC_TERMINAL_RECOVERY_SIGTERM_GRACE,
+        )
         terminal = ProviderTerminalTracker(result_grace)
         authority = TurnTerminalAuthority(turn_identity=terminal.turn_identity)
         self._active_terminal_authority = authority
+        turn_process_generation = int(self._generation)
+        turn_session_id = self._session_id
 
         uh_a0_runtime = None
         uh_a0_turn_id = None
@@ -2243,6 +2519,8 @@ class ResidentSession:
         provider_refusal_seen = False
         saw_result = False
         terminal_receipt = None
+        recovery = None
+        recovery_success_nonreusable = False
 
         reader_state_lock = threading.Lock()
         reader_state_data = {
@@ -2381,6 +2659,75 @@ class ResidentSession:
             finally:
                 timeout_diagnostic_lock.release()
 
+        def _durable_current_turn_end_turn_proof():
+            """Fail closed unless the current session/cursor proves this turn."""
+            session_id = str(turn_session_id or self._session_id or '').strip()
+            if not session_id or int(self._generation) != turn_process_generation:
+                return None
+            cursor = dict(jsonl_cursor or {})
+            path = str(cursor.get('path') or '')
+            start_offset = _diagnostic_int(cursor.get('offset'))
+            if not path or start_offset is None or start_offset < 0:
+                return None
+            try:
+                from tools.cc_jsonl_usage import session_jsonl_path
+                expected_path = session_jsonl_path(self._cwd, session_id)
+                if expected_path is None or os.path.abspath(str(expected_path)) != os.path.abspath(path):
+                    return None
+                observed_end = int(os.path.getsize(path))
+                if observed_end <= int(start_offset):
+                    return None
+                span = observed_end - int(start_offset)
+                if span > _TIMEOUT_DIAGNOSTIC_TRANSCRIPT_SCAN_BYTES:
+                    return None
+                with open(path, 'rb') as handle:
+                    handle.seek(int(start_offset))
+                    raw = handle.read(span)
+                offset = int(start_offset)
+                for line in raw.splitlines(keepends=True):
+                    event_offset = offset
+                    offset += len(line)
+                    try:
+                        row = json.loads(line.decode('utf-8', errors='replace'))
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict) or row.get('type') != 'assistant':
+                        continue
+                    message = row.get('message')
+                    stop_reason = row.get('stop_reason')
+                    if isinstance(message, dict):
+                        stop_reason = message.get('stop_reason') or stop_reason
+                    if stop_reason != 'end_turn' or event_offset <= int(start_offset):
+                        continue
+                    return {
+                        'current_session_id': session_id[:200],
+                        'process_generation': turn_process_generation,
+                        'turn_identity': terminal.turn_identity,
+                        'transcript_path_sha256': _diagnostic_path_hash(path),
+                        'current_turn_start_offset': int(start_offset),
+                        'event_offset': int(event_offset),
+                        'observed_end_offset': observed_end,
+                        'assistant_stop_reason': 'end_turn',
+                        'detected_at': time.time(),
+                        'provider_last_activity_at': terminal.last_provider_activity_at,
+                    }
+            except Exception:
+                return None
+            return None
+
+        def _close_stdin_for_terminal_recovery():
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+
+        def _terminate_after_terminal_recovery():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
         def _claim_terminal_provider_event(event):
             """Linearize a terminal provider event before observation refresh."""
             nonlocal provider_refusal_seen
@@ -2443,8 +2790,8 @@ class ResidentSession:
                 }
             return None
 
-        def _cleanup_after_terminal(reason):
-            if not authority.begin_cleanup(reason):
+        def _cleanup_after_terminal(reason, *, allow_success=False):
+            if not authority.begin_cleanup(reason, allow_success=allow_success):
                 return False
             process_present = self._proc is not None
             try:
@@ -2455,6 +2802,38 @@ class ResidentSession:
                     process_present=process_present,
                 )
             return True
+
+        def _submit_recovery_result_missing():
+            if not authority.submit_timeout_candidate('cli_terminal_result_missing'):
+                return False
+            _capture_timeout_diagnostics('cli_terminal_result_missing')
+            _cleanup_after_terminal('cli_terminal_result_missing')
+            return True
+
+        def _submit_recovery_hard_timeout():
+            return _submit_timeout_candidate('hard')
+
+        def _start_terminal_recovery():
+            nonlocal recovery
+            if recovery is not None and recovery.active:
+                return True
+            proof = _durable_current_turn_end_turn_proof()
+            if proof is None:
+                return False
+            recovery = TerminalRecoveryController(
+                eof_grace=recovery_eof_grace,
+                sigterm_grace=recovery_sigterm_grace,
+                hard_deadline=watchdog.hard_deadline,
+                close_stdin=_close_stdin_for_terminal_recovery,
+                send_sigterm=_terminate_after_terminal_recovery,
+                submit_hard_timeout=_submit_recovery_hard_timeout,
+                submit_result_missing=_submit_recovery_result_missing,
+            )
+            return recovery.start(proof)
+
+        def _on_recovery_probe():
+            """Probe only; no durable proof means ordinary stall remains later."""
+            return _start_terminal_recovery()
 
         # Watchdog timeout ownership is linearized by the same authority as
         # provider terminal events. Only the winner is allowed to capture
@@ -2472,6 +2851,8 @@ class ResidentSession:
             hard_timeout=hard_timeout,
             on_timeout=_submit_timeout_candidate,
             is_proc_alive=lambda: proc.poll() is None,
+            probe_timeout=recovery_probe,
+            on_probe=_on_recovery_probe,
         )
         watchdog.start()
 
@@ -2563,6 +2944,10 @@ class ResidentSession:
                     raw_line = proc.stdout.readline()
                     if raw_line == '':
                         _set_reader_state('TERMINAL_DRAIN')
+                        if recovery is not None and recovery.active:
+                            recovery.wait_for_final()
+                            if authority.is_terminal():
+                                break
                         authority.accept_disconnected('stdout_eof')
                         break
                     line = raw_line.strip()
@@ -2578,10 +2963,16 @@ class ResidentSession:
                     # closes the deterministic result-vs-stall window without
                     # holding a lock across the yielding stream paths below.
                     claimed_terminal = _claim_terminal_provider_event(d)
+                    if recovery is not None and recovery.active:
+                        recovery.note_event(d)
+                        if claimed_terminal is not None and claimed_terminal.get('accepted'):
+                            recovery.mark_terminal(authority.outcome)
                     terminal.observe(d)
                     if _claude_event_is_activity(d):
                         watchdog.note_activity()
                     self._maybe_set_session_id(d)
+                    if turn_session_id is None and self._session_id:
+                        turn_session_id = self._session_id
                     if jsonl_cursor is None and self._session_id:
                         try:
                             from tools.cc_jsonl_usage import snapshot_session_jsonl
@@ -2821,6 +3212,15 @@ class ResidentSession:
                                 and claimed_terminal['accepted']
                             ):
                                 terminal_receipt = claimed_terminal['receipt']
+                                if recovery is not None and recovery.active:
+                                    recovery.mark_terminal(TurnTerminalAuthority.SUCCESS)
+                                    if _cleanup_after_terminal(
+                                        'terminal_recovery_nonreusable',
+                                        allow_success=True,
+                                    ):
+                                        recovery_success_nonreusable = True
+                                        self._cold = True
+                                        self._next_spawn_reason = 'terminal_recovery'
                         # result.usage is diagnostics only; it never updates
                         # or replaces the stream round totals.
                         if current_round is not None:
@@ -2833,17 +3233,23 @@ class ResidentSession:
                         break
             except GeneratorExit:
                 authority.accept_disconnected('generator_exit')
+                if recovery is not None and recovery.active:
+                    recovery.mark_terminal(authority.outcome)
                 _cleanup_after_terminal('client_disconnect')
                 raise
             except BaseException:
                 if not authority.is_terminal():
                     authority.accept_disconnected('stream_exception')
+                if recovery is not None and recovery.active:
+                    recovery.mark_terminal(authority.outcome)
                 _cleanup_after_terminal('stream_exception')
                 raise
         finally:
             watchdog.stop()
             if uh_a0_runtime is not None:
                 uh_a0_runtime.end_turn(turn_id=uh_a0_turn_id)
+            if recovery is not None and recovery.active:
+                recovery.wait_for_final()
 
         if current_round is not None:
             _close_round(current_round, 'loop_finalizer', complete=False)
@@ -2855,6 +3261,10 @@ class ResidentSession:
         if outcome != TurnTerminalAuthority.SUCCESS:
             _cleanup_after_terminal(authority.reason or 'terminal_failure')
         authority_obs = authority.snapshot()
+        recovery_obs = (
+            recovery.snapshot(final_outcome=authority_obs['terminal_outcome'])
+            if recovery is not None and recovery.active else None
+        )
 
         usage = summarize_rounds(
             rounds,
@@ -2902,6 +3312,7 @@ class ResidentSession:
         usage['_obs_timeout_diagnostics'] = authority_obs.get(
             'timeout_diagnostics',
         ) or None
+        usage['_obs_terminal_recovery'] = recovery_obs
         usage['_obs_cleanup_count'] = authority_obs['cleanup_count']
         # Compatibility telemetry from Phase A remains, while root-path
         # stale-stall rejection is measured separately above. This is legacy
@@ -2962,6 +3373,13 @@ class ResidentSession:
                 diagnostics=authority_obs,
                 error_code='result_missing_after_end_turn',
             )
+        if outcome == TurnTerminalAuthority.CLI_TERMINAL_RESULT_MISSING:
+            raise ResidentError(
+                'Claude Code 已持久化完成回复，但 live terminal/result 未到达',
+                usage=usage,
+                diagnostics=authority_obs,
+                error_code='cli_terminal_result_missing',
+            )
         if outcome == TurnTerminalAuthority.DISCONNECTED:
             raise ResidentError(
                 'resident 进程在本轮回复完成前退出',
@@ -2999,6 +3417,8 @@ class ResidentSession:
         )
 
         self._cold = False
+        if recovery_success_nonreusable:
+            self._cold = True
         self._last_used = time.time()
         self._resident_turn_count += 1
         self._turns_since_respawn += 1

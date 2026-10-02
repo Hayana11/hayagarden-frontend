@@ -1,7 +1,10 @@
 import json
+import os
 import pathlib
+import tempfile
 import threading
 import unittest
+from contextlib import ExitStack
 from unittest import mock
 
 import cc_resident
@@ -218,7 +221,13 @@ class ChatTerminalContractTests(unittest.TestCase):
         *,
         signal_after_read=False,
         signal_on_first_activity=False,
+        signal_on_probe=False,
         block_readline=False,
+        release_result_after_sigterm=False,
+        transcript_rows=None,
+        transcript_cursor_offset=0,
+        transcript_path_mismatch=False,
+        recovery_grace=0.1,
         close_after_first_chunk=False,
         capture_exception=False,
     ):
@@ -232,6 +241,7 @@ class ChatTerminalContractTests(unittest.TestCase):
                 self.readline_started = threading.Event()
                 self.readline_finished = threading.Event()
                 self.release_readline = threading.Event()
+                self.sigterm_sent = threading.Event()
 
             def readline(self):
                 if block_readline:
@@ -239,6 +249,8 @@ class ChatTerminalContractTests(unittest.TestCase):
                     self.release_readline.wait(2.0)
                     self.readline_finished.set()
                     return ''
+                if release_result_after_sigterm:
+                    self.sigterm_sent.wait(2.0)
                 self.readline_finished.set()
                 return next(self._rows, '')
 
@@ -267,6 +279,7 @@ class ChatTerminalContractTests(unittest.TestCase):
                 return None
 
             def terminate(self):
+                self.stdout.sigterm_sent.set()
                 return None
 
             def wait(self, timeout=None):
@@ -278,12 +291,24 @@ class ChatTerminalContractTests(unittest.TestCase):
         class DeterministicWatchdog:
             def __init__(self, *, on_timeout, **kwargs):
                 self._on_timeout = on_timeout
+                self._on_probe = kwargs.get('on_probe')
                 self.reason = watchdog_reason
                 self.committed = False
+                self.probe_consumed = False
+                self._hard_deadline = __import__('time').monotonic() + 60
                 watchdogs.append(self)
 
+            @property
+            def hard_deadline(self):
+                return self._hard_deadline
+
             def start(self):
-                if block_readline:
+                if signal_on_probe:
+                    self.probe_consumed = bool(self._on_probe())
+                    if not self.probe_consumed and self.reason is not None:
+                        self.committed = True
+                        self._on_timeout(self.reason)
+                elif block_readline:
                     self._thread = threading.Thread(
                         target=self._fire_after_reader_blocks,
                         daemon=True,
@@ -335,20 +360,69 @@ class ChatTerminalContractTests(unittest.TestCase):
 
         session._kill = fake_kill
 
-        with mock.patch.object(
-            cc_resident, 'StreamWatchdog', DeterministicWatchdog,
-        ):
-            generator = session.send_turn('race', commit_meta=None)
-            if close_after_first_chunk:
-                chunks = [next(generator)]
-                generator.close()
-            else:
+        transcript_temp = None
+        patchers = []
+        if signal_on_probe:
+            original_cfg_int = cc_resident._cfg_int
+            patchers.append(mock.patch.object(
+                cc_resident,
+                '_cfg_int',
+                side_effect=lambda key, default: (
+                    recovery_grace
+                    if key in (
+                        'CC_TERMINAL_RECOVERY_EOF_GRACE',
+                        'CC_TERMINAL_RECOVERY_SIGTERM_GRACE',
+                    )
+                    else original_cfg_int(key, default)
+                ),
+            ))
+        if transcript_rows is not None:
+            transcript_temp = tempfile.NamedTemporaryFile(
+                mode='w', encoding='utf-8', delete=False,
+            )
+            for row in transcript_rows:
+                transcript_temp.write(json.dumps(row) + chr(10))
+            transcript_temp.close()
+            cursor = {
+                'path': transcript_temp.name,
+                'offset': int(transcript_cursor_offset),
+            }
+            expected_path = transcript_temp.name
+            if transcript_path_mismatch:
+                expected_path = transcript_temp.name + '.other'
+            import tools.cc_jsonl_usage as jsonl_usage
+            patchers.extend([
+                mock.patch.object(
+                    jsonl_usage, 'snapshot_session_jsonl', return_value=cursor,
+                ),
+                mock.patch.object(
+                    jsonl_usage, 'session_jsonl_path', return_value=expected_path,
+                ),
+            ])
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(
+                    cc_resident, 'StreamWatchdog', DeterministicWatchdog,
+                ))
+                for patcher in patchers:
+                    stack.enter_context(patcher)
+                generator = session.send_turn('race', commit_meta=None)
+                if close_after_first_chunk:
+                    chunks = [next(generator)]
+                    generator.close()
+                else:
+                    try:
+                        chunks = list(generator)
+                    except BaseException as exc:
+                        if not capture_exception:
+                            raise
+                        return exc, session, watchdogs, kill_calls
+        finally:
+            if transcript_temp is not None:
                 try:
-                    chunks = list(generator)
-                except BaseException as exc:
-                    if not capture_exception:
-                        raise
-                    return exc, session, watchdogs, kill_calls
+                    os.unlink(transcript_temp.name)
+                except OSError:
+                    pass
         return chunks, session, watchdogs, kill_calls
 
     def test_t13_send_turn_stall_then_valid_result_completes_terminal_path(self):
@@ -480,6 +554,145 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertEqual(1, diagnostics['cleanup_count'])
         self.assertTrue(diagnostics['resident_killed'])
         self.assertEqual('hard', diagnostics['timeout_diagnostics']['timeout_candidate'])
+
+    def _current_turn_end_turn_rows(self):
+        return [
+            {
+                'type': 'system',
+                'subtype': 'init',
+                'session_id': 'session-race',
+            },
+            {
+                'type': 'assistant',
+                'timestamp': '2026-10-02T00:00:00.000Z',
+                'message': {'stop_reason': 'end_turn'},
+            },
+        ]
+
+    def _terminal_result_event(self):
+        return {
+            'type': 'result',
+            'is_error': False,
+            'stop_reason': 'end_turn',
+        }
+
+    def test_c_r1_current_turn_end_turn_recovers_after_stdin_eof(self):
+        chunks, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [self._terminal_result_event()],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=self._current_turn_end_turn_rows(),
+        )
+        usage = chunks[0][1][2]
+        recovery = usage['_obs_terminal_recovery']
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            'RECOVERED_AFTER_STDIN_EOF', recovery['recovery_stage'],
+        )
+        self.assertEqual('SUCCESS', recovery['final_outcome'])
+        self.assertEqual(1, usage['_obs_cleanup_count'])
+        self.assertEqual([True], kill_calls)
+        self.assertTrue(session.is_cold())
+        self.assertEqual('terminal_recovery', session._next_spawn_reason)
+        self.assertEqual(0, usage['_obs_actual_stall_accepted_count'])
+
+    def test_c_r2_sigterm_flush_recovers_and_forces_next_respawn(self):
+        chunks, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [self._terminal_result_event()],
+            'stall',
+            signal_on_probe=True,
+            release_result_after_sigterm=True,
+            transcript_rows=self._current_turn_end_turn_rows(),
+        )
+        usage = chunks[0][1][2]
+        recovery = usage['_obs_terminal_recovery']
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertEqual(
+            'RECOVERED_AFTER_SIGTERM', recovery['recovery_stage'],
+        )
+        self.assertIsNotNone(recovery['sigterm_sent_at'])
+        self.assertEqual(1, usage['_obs_cleanup_count'])
+        self.assertEqual([True], kill_calls)
+        self.assertTrue(session.is_cold())
+
+    def test_c_r3_missing_result_after_bounded_recovery_is_failure(self):
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=self._current_turn_end_turn_rows(),
+            capture_exception=True,
+        )
+        self.assertIsInstance(error, cc_resident.ResidentError)
+        self.assertEqual('cli_terminal_result_missing', error.error_code)
+        self.assertEqual('CLI_TERMINAL_RESULT_MISSING', error.diagnostics['terminal_outcome'])
+        self.assertEqual(1, error.diagnostics['cleanup_count'])
+        self.assertEqual([True], kill_calls)
+        self.assertEqual(
+            'CLI_TERMINAL_RESULT_MISSING',
+            error.diagnostics['timeout_diagnostics']['terminal_outcome'],
+        )
+
+    def test_c_r4_previous_turn_end_turn_does_not_start_recovery(self):
+        previous = self._current_turn_end_turn_rows()[0]
+        offset = len(json.dumps(previous) + chr(10))
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=[previous],
+            transcript_cursor_offset=offset,
+            capture_exception=True,
+        )
+        self.assertEqual('provider_stall_timeout', error.error_code)
+        self.assertEqual('STALL', error.diagnostics['terminal_outcome'])
+        self.assertEqual(1, error.diagnostics['cleanup_count'])
+        self.assertEqual([True], kill_calls)
+
+    def test_c_r5_transcript_identity_mismatch_does_not_start_recovery(self):
+        error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [],
+            'stall',
+            signal_on_probe=True,
+            transcript_rows=self._current_turn_end_turn_rows(),
+            transcript_path_mismatch=True,
+            capture_exception=True,
+        )
+        self.assertEqual('provider_stall_timeout', error.error_code)
+        self.assertEqual('STALL', error.diagnostics['terminal_outcome'])
+        self.assertEqual([True], kill_calls)
+
+    def test_c_r6_normal_result_before_probe_does_not_touch_recovery(self):
+        chunks, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
+            [self._terminal_result_event()],
+            'stall',
+            signal_on_first_activity=True,
+        )
+        usage = chunks[0][1][2]
+        self.assertEqual('SUCCESS', usage['_obs_terminal_outcome'])
+        self.assertIsNone(usage['_obs_terminal_recovery'])
+        self.assertEqual([], kill_calls)
+
+    def test_c_r7_recovery_hard_deadline_remains_authoritative(self):
+        hard_calls = []
+        missing_calls = []
+        controller = cc_resident.TerminalRecoveryController(
+            eof_grace=10,
+            sigterm_grace=10,
+            hard_deadline=__import__('time').monotonic() - 1,
+            close_stdin=lambda: None,
+            send_sigterm=lambda: None,
+            submit_hard_timeout=lambda: hard_calls.append(True),
+            submit_result_missing=lambda: missing_calls.append(True),
+        )
+        self.assertTrue(controller.start({
+            'detected_at': 1,
+            'provider_last_activity_at': 1,
+        }))
+        controller.wait_for_final()
+        self.assertEqual([True], hard_calls)
+        self.assertEqual([], missing_calls)
+        self.assertEqual('HARD_TIMEOUT', controller.snapshot()['recovery_stage'])
 
     def test_t14b_provider_error_claim_precedes_watchdog_stall_on_send_turn(self):
         error, session, watchdogs, kill_calls = self._run_deterministic_send_turn(
