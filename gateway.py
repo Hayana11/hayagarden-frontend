@@ -1,4 +1,4 @@
-import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging
+import os, re, sqlite3, json, base64, mimetypes, datetime, threading, time, sys as _sys, random, shutil, hmac, copy, logging, hashlib
 # Repo root must outrank tools/: tools/internal_state_shadow.py is a CLI stub and
 # must never shadow the authoritative root internal_state_shadow module (Stage C).
 if '/opt/frontend' not in _sys.path:
@@ -439,6 +439,46 @@ def _discard_staged_resident(reason: str = 'staged_rewrite_end') -> None:
         pass
 
 
+
+def _snapshot_rewrite_parent_runtime_identity() -> dict[str, str]:
+    """Capture the live parent identity before staged rewrite invalidation."""
+    system_text = str(getattr(_CC_RESIDENT, '_system_text', '') or '')
+    return {
+        'provider': 'claude_code',
+        'model': str(
+            getattr(_CC_RESIDENT, '_model_identity', None)
+            or config_store.get('CC_CHAT_MODEL')
+            or config_store.get('MODEL')
+            or ''
+        ).strip(),
+        'parent_model': str(
+            getattr(_CC_RESIDENT, '_model_identity', None)
+            or config_store.get('CC_CHAT_MODEL')
+            or config_store.get('MODEL')
+            or ''
+        ).strip(),
+        'effort': str(
+            getattr(_CC_RESIDENT, '_effort_identity', None)
+            or getattr(_CC_RESIDENT, '_effort_value', None)
+            or config_store.get('CC_CHAT_EFFORT')
+            or ''
+        ).strip(),
+        'parent_effort': str(
+            getattr(_CC_RESIDENT, '_effort_identity', None)
+            or getattr(_CC_RESIDENT, '_effort_value', None)
+            or config_store.get('CC_CHAT_EFFORT')
+            or ''
+        ).strip(),
+        'tool_profile': str(getattr(_CC_RESIDENT, '_tool_profile', '') or '').strip(),
+        'session_id': str(getattr(_CC_RESIDENT, 'session_id', '') or '').strip(),
+        'resident_generation': str(getattr(_CC_RESIDENT, 'generation', 0) or 0),
+        'static_system_sha256': hashlib.sha256(
+            system_text.encode('utf-8')
+        ).hexdigest() if system_text else '',
+        'chat_id': 'hayana-chat',
+    }
+
+
 def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
     """Mark staging generating and prepare trial resident for overlay history.
 
@@ -482,6 +522,11 @@ def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
         raise
     else:
         conn.close()
+    # Capture lineage before invalidate_for_history_rewrite clears it. This is
+    # evidence for the optional ContextPlan/native-fork proof only.
+    turn_data['_rewrite_parent_runtime_identity'] = (
+        _snapshot_rewrite_parent_runtime_identity()
+    )
     # Local trial-brain only — do not note durable epoch yet.
     _discard_staged_resident('staged_rewrite_begin')
     if turn_data.get('user_message_id') is None and staging.get('user_message_id') is not None:
@@ -494,6 +539,70 @@ def _begin_staged_rewrite_generation(turn_data: dict) -> dict | None:
     }
     turn_data['_rewrite_native_fork_ready'] = False
     return staging
+
+
+
+def _prepare_staged_rewrite_context_plan(
+    turn_data: dict,
+    *,
+    static_system: str,
+) -> None:
+    """Install the canonical rewrite ContextPlan view when its gate is on."""
+    from chat import daily_runtime as _daily_rt
+
+    if not _daily_rt._context_plan_consumer_enabled():
+        return
+    staging = turn_data.get('_rewrite_staging') or {}
+    rewrite_id = str(turn_data.get('rewrite_id') or '').strip()
+    user_message_id = int(
+        staging.get('user_message_id')
+        or turn_data.get('user_message_id')
+        or 0
+    )
+    if staging.get('operation') == rewrite_staging.OP_EDIT:
+        rewrite_content = str(staging.get('edited_content') or '')
+    else:
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT content FROM chat_messages WHERE id=?',
+                (user_message_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        rewrite_content = str((row['content'] if row is not None else '') or '')
+    plan = _daily_rt.prepare_rewrite_context_plan(
+        user_message_id=user_message_id,
+        chat_id='hayana-chat',
+        request_id=str(turn_data.get('request_id') or ''),
+        rewrite_id=rewrite_id,
+        db_path=DB_PATH,
+        static_system=str(static_system or ''),
+        static_system_sha256=hashlib.sha256(
+            str(static_system or '').encode('utf-8')
+        ).hexdigest(),
+        provider='claude_code',
+        model=str(
+            (turn_data.get('_rewrite_parent_runtime_identity') or {}).get('model')
+            or config_store.get('CC_CHAT_MODEL')
+            or config_store.get('MODEL')
+            or ''
+        ),
+        user_content=rewrite_content,
+    )
+    runtime_identity = dict(
+        turn_data.get('_rewrite_parent_runtime_identity') or {}
+    )
+    runtime_identity.update({
+        'context_id': str(plan.context_id),
+        'context_epoch': str(plan.context_epoch),
+        'resident_generation': str(plan.resident_generation),
+    })
+    turn_data['_rewrite_parent_runtime_identity'] = runtime_identity
+    turn_data['_rewrite_context_plan'] = plan.continuity_plan
+    turn_data['_rewrite_context_assembly'] = dict(plan.assembly)
+    turn_data['_rewrite_context_user_content'] = rewrite_content
+    turn_data['_rewrite_context_static_system'] = str(static_system or '')
 
 
 def _try_staged_rewrite_native_fork(turn_data: dict, *, system_text: str, env: dict) -> bool:
@@ -516,6 +625,11 @@ def _try_staged_rewrite_native_fork(turn_data: dict, *, system_text: str, env: d
                 resident=_CC_RESIDENT,
                 claude_home=str(
                     __import__('pathlib').Path(os.environ.get('HOME', '/root')) / '.claude'
+                ),
+                context_plan=turn_data.get('_rewrite_context_plan'),
+                runtime_identity=turn_data.get('_rewrite_parent_runtime_identity'),
+                require_context_plan=bool(
+                    turn_data.get('_rewrite_context_plan') is not None
                 ),
             )
         finally:
@@ -4177,6 +4291,8 @@ def _cc_resident_stream_gen(
     messages, *, user_turn=True, history_stats=None, is_cold=None,
     rebuild_messages_fn=None, pending_respawn_reason=None,
     display_thinking_mode='off', display_thinking_prompt=None,
+    rewrite_context_plan_assembly=None,
+    rewrite_context_user_content=None,
     turn_lease=None, reality_context='',
     jsonl_finality_profile='default', on_stdin_begin=None,
     on_stdin_flushed=None, on_provider_done=None,
@@ -4208,6 +4324,7 @@ def _cc_resident_stream_gen(
         build_cc_cold_once,
         build_cc_one_shot,
         build_cc_state,
+        build_cc_daily_static_parts,
         build_cc_static_parts,
         finalize_cc_wake_one_shot,
         format_cold_once,
@@ -4232,7 +4349,11 @@ def _cc_resident_stream_gen(
     os.makedirs(CC_CWD, exist_ok=True)
 
     # 1) ensure_alive 前只构建 static：唯一权威 helper，观测分项与 spawn 同批字符串
-    _static_parts = build_cc_static_parts()
+    _static_parts = (
+        build_cc_daily_static_parts()
+        if rewrite_context_plan_assembly is not None
+        else build_cc_static_parts()
+    )
     persona_text = _static_parts['persona']
     stable_note_text = _static_parts['stable_note']
     save_instr_text = _static_parts['save_instr']
@@ -4241,6 +4362,15 @@ def _cc_resident_stream_gen(
     last_content = messages[-1].get('content')
     last_text = last_content if isinstance(last_content, str) else ' '.join(
         b.get('text', '') for b in last_content if isinstance(b, dict))
+    rewrite_canonical_content = None
+    if is_cold and rewrite_context_plan_assembly is not None:
+        from chat.daily_runtime import format_resident_turn_content
+        rewrite_canonical_content = format_resident_turn_content(
+            assembly=rewrite_context_plan_assembly,
+            user_content=str(rewrite_context_user_content or last_text or ''),
+            is_cold=True,
+            is_respawn=False,
+        )
     recall_blk, _ = _recall_memories(last_text) if last_text else ('', [])
 
     def _messages_with_display_instruction(source_messages):
@@ -4305,6 +4435,9 @@ def _cc_resident_stream_gen(
         resident=_CC_RESIDENT,
     )
     state_text = state_ctx.state_text
+    if rewrite_context_plan_assembly is not None:
+        # ContextPlan already carries fixed state/open-loop sections.
+        state_text = ''
     state_mode = state_ctx.state_mode
     send_payload = state_ctx.send_payload
     needs_state_reanchor = bool(state_ctx.reanchor_reason)
@@ -4358,6 +4491,13 @@ def _cc_resident_stream_gen(
 
         def _assemble_cold_content(msgs):
             # Cold content assembly: one messages_to_text per message plan version.
+            if rewrite_canonical_content is not None:
+                canonical = rewrite_canonical_content
+                if relationship_text:
+                    canonical = relationship_text + NL + NL + canonical
+                if wake_reply_bridge:
+                    canonical = wake_reply_bridge + NL + NL + canonical
+                return prefix + canonical, canonical, canonical, ''
             prepared_msgs = _messages_with_display_instruction(msgs)
             convo = messages_to_text(prepared_msgs)
             display_suffix_text = ''
@@ -7449,7 +7589,20 @@ def chat_stream():
                     phase = 'resident_setup'
                     # 先确定 resident cold/hot，再按当前 generation 的已知文件集合构建 history
                     from chat.system_builder import build_cc_static_parts
+                    from chat import daily_runtime as _daily_rt
                     _static_parts = build_cc_static_parts()
+                    _rewrite_context_enabled = bool(
+                        _rewrite_id and _daily_rt._context_plan_consumer_enabled()
+                    )
+                    _resident_static_system = _static_parts['full_system']
+                    if _rewrite_context_enabled:
+                        from chat.system_builder import build_cc_daily_static_parts
+                        _rewrite_static_parts = build_cc_daily_static_parts()
+                        _resident_static_system = _rewrite_static_parts['full_system']
+                        _prepare_staged_rewrite_context_plan(
+                            _turn_data,
+                            static_system=_resident_static_system,
+                        )
                     _cc_env = dict(os.environ)
                     _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
                     _cc_env.pop('ANTHROPIC_API_KEY', None)
@@ -7458,13 +7611,13 @@ def chat_stream():
                     _cc_pending_respawn_reason = None
                     if _rewrite_id and _try_staged_rewrite_native_fork(
                         _turn_data,
-                        system_text=_static_parts['full_system'],
+                        system_text=_resident_static_system,
                         env=_cc_env,
                     ):
                         _cc_is_cold = False
                     else:
                         if _cc_stale_guard_before_resident_reuse(
-                            _static_parts['full_system'], _cc_env,
+                            _resident_static_system, _cc_env,
                         ):
                             _cc_is_cold = True
                             _cc_pending_respawn_reason = getattr(
@@ -7472,7 +7625,7 @@ def chat_stream():
                             )
                         else:
                             _cc_is_cold = _CC_RESIDENT.ensure_alive(
-                                _static_parts['full_system'], _cc_env,
+                                _resident_static_system, _cc_env,
                             )
                             if _cc_is_cold:
                                 _cc_pending_respawn_reason = getattr(
@@ -7484,14 +7637,47 @@ def chat_stream():
                         set(getattr(_CC_RESIDENT, 'committed_file_hashes', set()) or set())
                     )
                     _history_stats = {}
-                    messages = build_messages(
-                        resident_file_hashes=_resident_files,
-                        history_stats_out=_history_stats,
-                        for_cc=True,
-                        rewrite_id=_rewrite_id or None,
-                        cold_safe=_cc_is_cold,
-                        commit_history_boundary=not _cc_is_cold,
-                    )
+                    _rewrite_context_assembly = _turn_data.get(
+                        '_rewrite_context_assembly'
+                    ) if _rewrite_context_enabled else None
+                    if _rewrite_context_assembly is not None:
+                        _rewrite_context_history = list(
+                            _rewrite_context_assembly.get('current_day_history') or []
+                        )
+                        messages = [
+                            {
+                                'role': str(item.get('role') or 'user'),
+                                'content': item.get('content') or '',
+                            }
+                            for item in _rewrite_context_history
+                            if isinstance(item, dict)
+                        ]
+                        messages.append({
+                            'role': 'user',
+                            'content': _turn_data.get(
+                                '_rewrite_context_user_content',
+                            ) or '',
+                        })
+                        _history_stats.update({
+                            'context_plan_consumer': 'canonical_rewrite',
+                            'context_plan_id': str(
+                                getattr(_turn_data.get('_rewrite_context_plan'), 'plan_id', '')
+                                or ''
+                            ),
+                            'context_plan_hash': str(
+                                getattr(_turn_data.get('_rewrite_context_plan'), 'plan_hash', '')
+                                or ''
+                            ),
+                        })
+                    else:
+                        messages = build_messages(
+                            resident_file_hashes=_resident_files,
+                            history_stats_out=_history_stats,
+                            for_cc=True,
+                            rewrite_id=_rewrite_id or None,
+                            cold_safe=_cc_is_cold,
+                            commit_history_boundary=not _cc_is_cold,
+                        )
 
                     def _rebuild_cc_messages(_new_history_budget, _rf=_resident_files, _rid=_rewrite_id):
                         _rebuilt_stats: dict = {}
@@ -7517,10 +7703,19 @@ def chat_stream():
                         user_turn=_is_user_turn,
                         history_stats=_history_stats,
                         is_cold=_cc_is_cold,
-                        rebuild_messages_fn=_rebuild_cc_messages if _cc_is_cold else None,
+                        rebuild_messages_fn=(
+                            _rebuild_cc_messages
+                            if _cc_is_cold and _rewrite_context_assembly is None
+                            else None
+                        ),
                         pending_respawn_reason=_cc_pending_respawn_reason,
                         display_thinking_mode=_display_thinking_mode,
                         display_thinking_prompt=_display_thinking_prompt,
+                        rewrite_context_plan_assembly=_rewrite_context_assembly,
+                        rewrite_context_user_content=(
+                            _turn_data.get('_rewrite_context_user_content')
+                            if _rewrite_context_assembly is not None else None
+                        ),
                         reality_context=request_reality_context,
                     )
                     for evt, payload in filter_display_thinking_events(
