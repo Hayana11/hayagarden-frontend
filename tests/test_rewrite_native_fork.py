@@ -874,5 +874,76 @@ class RewriteNativeForkTest(unittest.TestCase):
         self.assertNotIn('current_request', json.dumps(proof))
 
 
+    def test_context_receipt_proof_keeps_native_fork_reuse(self):
+        from chat import context_receipt as receipt_store
+
+        h, a0, u1, a1 = self._chain_h_a0_u1_a1()
+        plan, _unused_receipt, runtime = self._context_plan_fixture()
+        member = plan.representations[0].source_members[0]
+        member.source_ref = 'turn:%d:%d' % (h, a0)
+        plan.representations[0].source_refs = (member.source_ref,)
+        plan.ordered_sections = tuple(
+            SimpleNamespace(
+                kind=section.kind,
+                source_ref=(
+                    plan.representations[0].representation_id
+                    if section.kind == 'recent_raw'
+                    else section.source_ref
+                ),
+                content_hash=section.content_hash,
+                estimated_tokens=section.estimated_tokens,
+                representation_id=(
+                    plan.representations[0].representation_id
+                    if section.kind == 'recent_raw'
+                    else getattr(section, 'representation_id', None)
+                ),
+            )
+            for section in plan.ordered_sections
+        )
+        receipt = receipt_store.ContextReceipt.build(
+            context_id=1,
+            context_epoch=1,
+            resident_generation=1,
+            resident_key='default:e1:g1',
+            provider='claude_code',
+            model_identity='model-A',
+            session_id='sid-parent',
+            process_generation=1,
+            plan_id='installed-plan',
+            plan_hash='installed-plan-hash',
+            budget_policy_version='continuity_context_budget_v1',
+            measurement_semantics='heuristic_cjk1_ascii4_v1',
+            installed_source_watermark=a0,
+            members=(),
+            context_plan=plan,
+        )
+        receipt_store.ensure_context_receipt_schema(self.conn)
+        receipt_store.create_receipt(self.conn, receipt, ())
+        resolved = rnf.resolve_rewrite_native_fork(
+            self.conn,
+            {
+                'operation': 'regen',
+                'source_message_id': a1,
+                'user_message_id': u1,
+            },
+            cwd=self.cwd,
+            claude_home=self.claude_home,
+            context_plan=plan,
+            runtime_identity={
+                **runtime,
+                'context_id': '1',
+                'context_epoch': '1',
+                'resident_generation': '1',
+            },
+            require_context_plan=True,
+        )
+        self.assertTrue(resolved.eligible)
+        self.assertEqual(resolved.fork_event_uuid, 'ev-a0')
+        self.assertEqual(
+            resolved.context_receipt_proof.get('status'),
+            'SAFE_FORK_REUSE',
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
