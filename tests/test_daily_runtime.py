@@ -5058,6 +5058,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 content_hash='hash-turn',
                 span_start=None,
                 span_end=None,
+                logical_size=1,
                 branch_id='active-transcript',
             )
         representation = types.SimpleNamespace(
