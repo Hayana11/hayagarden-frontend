@@ -46,6 +46,13 @@ REASON_CHILD_RESUME_FAILED = 'child_resume_failed'
 REASON_CHILD_HEALTH_FAILED = 'child_health_failed'
 REASON_RESOLVER_ERROR = 'resolver_error'
 REASON_SOURCE_MISSING = 'source_missing'
+REASON_CONTEXT_PLAN_REQUIRED = 'context_plan_required'
+REASON_CONTEXT_PLAN_INVALID = 'context_plan_invalid'
+REASON_CONTEXT_PLAN_RECEIPT_MISSING = 'context_plan_receipt_missing'
+REASON_CONTEXT_PLAN_PREFIX_MISMATCH = 'context_plan_prefix_mismatch'
+REASON_CONTEXT_PLAN_REPRESENTATION_MISMATCH = 'context_plan_representation_mismatch'
+REASON_CONTEXT_PLAN_FIXED_SECTION_UNPROVEN = 'context_plan_fixed_section_unproven'
+REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH = 'context_plan_runtime_identity_mismatch'
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,7 @@ class NativeForkPlan:
     tool_profile: str = ''
     static_system_kind: str = ''
     mapping_provenance: dict[str, Any] = field(default_factory=dict)
+    context_plan_proof: dict[str, Any] = field(default_factory=dict)
 
     def observability(self) -> dict[str, Any]:
         mode = MODE_NATIVE if self.eligible else MODE_COLD
@@ -78,6 +86,14 @@ class NativeForkPlan:
             out['rewrite_cache_tool_profile'] = self.tool_profile
         if self.static_system_kind:
             out['rewrite_cache_static_system_kind'] = self.static_system_kind
+        for key in (
+            'context_plan_hash',
+            'context_plan_source_hash',
+            'context_plan_prefix_identity_hash',
+        ):
+            value = self.context_plan_proof.get(key)
+            if value:
+                out['rewrite_cache_' + key] = value
         return out
 
 
@@ -194,6 +210,239 @@ def _db_previous_assistant_id(conn, before_message_id: int) -> Optional[int]:
     return int(row[0])
 
 
+def _context_plan_member_identity(member: Any) -> dict[str, Any]:
+    """Use the ContextPlan's existing member identity, not text comparison."""
+    from continuity.context_plan import _member_identity
+    return dict(_member_identity(member))
+
+
+def _context_plan_representation_identity(representation: Any) -> tuple[Any, ...]:
+    return (
+        str(getattr(representation, 'representation_id', '') or ''),
+        str(getattr(representation, 'kind', '') or ''),
+        tuple(
+            _context_plan_member_identity(member)
+            for member in tuple(getattr(representation, 'source_members', ()) or ())
+        ),
+        str(getattr(representation, 'source_hash', '') or ''),
+        int(getattr(representation, 'estimated_tokens', 0) or 0),
+        str(getattr(representation, 'chunk_id', '') or ''),
+        str(getattr(representation, 'candidate_id', '') or ''),
+        str(getattr(representation, 'snapshot_id', '') or ''),
+        tuple(getattr(representation, 'provenance', ()) or ()),
+    )
+
+
+def _source_ref_turn_ids(source_ref: Any) -> Optional[tuple[int, int]]:
+    parts = str(source_ref or '').split(':')
+    if len(parts) != 3 or parts[0] != 'turn':
+        return None
+    try:
+        user_id, assistant_id = int(parts[1]), int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    if user_id <= 0 or assistant_id <= 0:
+        return None
+    return user_id, assistant_id
+
+
+def _receipt_representation_identities(
+    members: tuple[Any, ...],
+    *,
+    fork_boundary_message_id: int,
+) -> tuple[tuple[Any, ...], ...]:
+    """Group receipt members and retain only the prefix before the fork."""
+    groups: list[tuple[str, str, list[Any]]] = []
+    for member in members:
+        kind = str(getattr(member, 'representation_kind', '') or '')
+        if kind not in ('raw', 'chunk'):
+            continue
+        ref_ids = _source_ref_turn_ids(getattr(member, 'source_ref', ''))
+        if ref_ids is None:
+            continue
+        if int(ref_ids[1]) > int(fork_boundary_message_id):
+            continue
+        rep_id = str(getattr(member, 'representation_id', '') or '')
+        if not rep_id:
+            continue
+        if not groups or groups[-1][0] != rep_id or groups[-1][1] != kind:
+            groups.append((rep_id, kind, []))
+        groups[-1][2].append(member)
+    return tuple(
+        (
+            rep_id,
+            kind,
+            tuple(_context_plan_member_identity(member) for member in group_members),
+        )
+        for rep_id, kind, group_members in groups
+    )
+
+
+def _context_plan_prefix_proof(
+    conn,
+    *,
+    context_plan: Any,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    fork_boundary_message_id: int,
+    rewrite_user_message_id: int,
+    runtime_identity: Optional[Mapping[str, Any]],
+) -> tuple[bool, str, dict[str, Any]]:
+    """Prove that the existing parent already contains this plan prefix.
+
+    The proof deliberately accepts only raw ContextPlan representations. A
+    chunk body, accepted state, or open-loop carrier has no durable transcript
+    identity at the fork boundary in the rewrite resolver, so resuming that
+    child would be an unsafe semantic claim.
+    """
+    proof: dict[str, Any] = {}
+    if context_plan is None:
+        return False, REASON_CONTEXT_PLAN_REQUIRED, proof
+    if not bool(getattr(context_plan, 'valid', False)):
+        return False, REASON_CONTEXT_PLAN_INVALID, proof
+
+    runtime = dict(runtime_identity or {})
+    required_runtime = (
+        'provider', 'model', 'effort', 'tool_profile', 'session_id',
+        'static_system_sha256', 'context_id', 'context_epoch',
+        'resident_generation',
+    )
+    if any(not str(runtime.get(key) or '').strip() for key in required_runtime):
+        return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+    if (
+        runtime.get('parent_model')
+        and str(runtime.get('parent_model')) != str(runtime.get('model'))
+    ) or (
+        runtime.get('parent_effort')
+        and str(runtime.get('parent_effort')) != str(runtime.get('effort'))
+    ):
+        return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+    if str(runtime.get('provider')) != 'claude_code':
+        return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+    if str(runtime.get('tool_profile')) != _SOFT_WINDOW_TOOL_PROFILE:
+        return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+    if (
+        int(runtime.get('context_id')) != int(context_id)
+        or int(runtime.get('context_epoch')) != int(context_epoch)
+        or int(runtime.get('resident_generation')) != int(resident_generation)
+    ):
+        return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+
+    sections = tuple(getattr(context_plan, 'ordered_sections', ()) or ())
+    current_request = tuple(
+        section for section in sections
+        if str(getattr(section, 'kind', '') or '') == 'current_request'
+    )
+    if len(current_request) != 1:
+        return False, REASON_CONTEXT_PLAN_INVALID, proof
+    representations = tuple(getattr(context_plan, 'representations', ()) or ())
+    expected_groups: list[tuple[Any, ...]] = []
+    for representation in representations:
+        if str(getattr(representation, 'kind', '') or '') != 'raw':
+            return False, REASON_CONTEXT_PLAN_REPRESENTATION_MISMATCH, proof
+        members = tuple(getattr(representation, 'source_members', ()) or ())
+        if not members:
+            return False, REASON_CONTEXT_PLAN_REPRESENTATION_MISMATCH, proof
+        for member in members:
+            ids = _source_ref_turn_ids(getattr(member, 'source_ref', ''))
+            if ids is None or int(ids[1]) > int(fork_boundary_message_id):
+                return False, REASON_CONTEXT_PLAN_PREFIX_MISMATCH, proof
+            if int(ids[0]) >= int(rewrite_user_message_id):
+                return False, REASON_CONTEXT_PLAN_PREFIX_MISMATCH, proof
+        expected_groups.append(_context_plan_representation_identity(representation))
+
+    # Dynamic fixed sections are not represented by the durable message/event
+    # mapping. Do not resume a child while pretending those carriers are in its
+    # transcript. The invariant system is proven against the parent runtime.
+    dynamic_kinds = {'accepted_state', 'accepted_open_loops'}
+    if any(str(getattr(section, 'kind', '') or '') in dynamic_kinds for section in sections):
+        return False, REASON_CONTEXT_PLAN_FIXED_SECTION_UNPROVEN, proof
+    invariant_sections = tuple(
+        section for section in sections
+        if str(getattr(section, 'kind', '') or '') == 'invariant_system'
+    )
+    if len(invariant_sections) != 1:
+        return False, REASON_CONTEXT_PLAN_FIXED_SECTION_UNPROVEN, proof
+    if str(getattr(invariant_sections[0], 'content_hash', '') or '') != str(
+        runtime.get('static_system_sha256') or ''
+    ):
+        return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+
+    try:
+        from chat import context_receipt as receipt_store
+        receipt = receipt_store.get_receipt(
+            conn,
+            context_id=int(context_id),
+            context_epoch=int(context_epoch),
+            resident_generation=int(resident_generation),
+        )
+        receipt_members = receipt_store.get_receipt_members(
+            conn,
+            context_id=int(context_id),
+            context_epoch=int(context_epoch),
+            resident_generation=int(resident_generation),
+        )
+    except Exception:
+        return False, REASON_CONTEXT_PLAN_RECEIPT_MISSING, proof
+    if receipt is None:
+        return False, REASON_CONTEXT_PLAN_RECEIPT_MISSING, proof
+    if (
+        str(receipt.provider) != str(runtime.get('provider'))
+        or str(receipt.model_identity) != str(runtime.get('model'))
+        or str(receipt.session_id) != str(runtime.get('session_id'))
+    ):
+        return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+    if not receipt_members:
+        return False, REASON_CONTEXT_PLAN_RECEIPT_MISSING, proof
+
+    installed_groups = _receipt_representation_identities(
+        tuple(receipt_members),
+        fork_boundary_message_id=int(fork_boundary_message_id),
+    )
+    expected_simple = tuple(
+        (
+            identity[0],
+            identity[1],
+            identity[2],
+        )
+        for identity in expected_groups
+    )
+    if installed_groups != expected_simple:
+        return False, REASON_CONTEXT_PLAN_PREFIX_MISMATCH, proof
+
+    import json
+    prefix_payload = {
+        'representations': [
+            {
+                'representation_id': identity[0],
+                'kind': identity[1],
+                'source_members': [dict(member) for member in identity[2]],
+                'source_hash': identity[3],
+                'estimated_tokens': identity[4],
+                'chunk_id': identity[5],
+                'candidate_id': identity[6],
+                'snapshot_id': identity[7],
+                'provenance': [list(item) for item in identity[8]],
+            }
+            for identity in expected_groups
+        ],
+        'fork_boundary_message_id': int(fork_boundary_message_id),
+        'rewrite_user_message_id': int(rewrite_user_message_id),
+        'invariant_system': str(getattr(invariant_sections[0], 'content_hash')),
+    }
+    prefix_hash = hashlib.sha256(
+        json.dumps(prefix_payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    ).hexdigest()
+    proof.update({
+        'context_plan_hash': str(getattr(context_plan, 'plan_hash', '') or ''),
+        'context_plan_source_hash': str(getattr(context_plan, 'source_hash', '') or ''),
+        'context_plan_prefix_identity_hash': prefix_hash,
+        'receipt_plan_hash': str(receipt.plan_hash),
+    })
+    return True, '', proof
+
+
 def resolve_rewrite_native_fork(
     conn,
     staging: Mapping[str, Any],
@@ -201,18 +450,23 @@ def resolve_rewrite_native_fork(
     cwd: str,
     claude_home: Optional[str] = None,
     require_flag: bool = True,
+    context_plan: Any = None,
+    runtime_identity: Optional[Mapping[str, Any]] = None,
+    require_context_plan: bool = False,
 ) -> NativeForkPlan:
     """Fail-closed eligibility for opportunistic native fork."""
     op = str(staging.get('operation') or '').strip()
     source_message_id = int(staging.get('source_message_id') or 0)
 
     def _reject(reason: str, **extra: Any) -> NativeForkPlan:
+        proof = extra.pop('context_plan_proof', None) or {}
         return NativeForkPlan(
             eligible=False,
             reason=reason,
             operation=op,
             source_message_id=source_message_id,
             mapping_provenance=dict(extra),
+            context_plan_proof=dict(proof),
         )
 
     try:
@@ -341,6 +595,24 @@ def resolve_rewrite_native_fork(
         except OSError:
             return _reject(REASON_PARENT_TRANSCRIPT_MISSING, detail='stat_failed')
 
+        context_plan_proof: dict[str, Any] = {}
+        if require_context_plan or context_plan is not None:
+            safe, proof_reason, context_plan_proof = _context_plan_prefix_proof(
+                conn,
+                context_plan=context_plan,
+                context_id=int(context_id),
+                context_epoch=int(fork_row.get('context_epoch') or 0),
+                resident_generation=int(fork_row.get('resident_generation') or 0),
+                fork_boundary_message_id=int(a0_id),
+                rewrite_user_message_id=int(rewrite_user_id),
+                runtime_identity=runtime_identity,
+            )
+            if not safe:
+                return _reject(
+                    proof_reason,
+                    context_plan_proof=context_plan_proof,
+                )
+
         return NativeForkPlan(
             eligible=True,
             reason='',
@@ -361,6 +633,7 @@ def resolve_rewrite_native_fork(
                 'context_epoch': int(fork_row.get('context_epoch') or 0),
                 'resident_generation': int(fork_row.get('resident_generation') or 0),
             },
+            context_plan_proof=context_plan_proof,
         )
     except Exception as exc:
         log.exception('rewrite native fork resolve failed')
@@ -520,6 +793,9 @@ def try_prepare_native_trial_resident(
     claude_home: Optional[str] = None,
     fork_session_fn: Optional[Callable[..., Any]] = None,
     tool_profile: Optional[str] = None,
+    context_plan: Any = None,
+    runtime_identity: Optional[Mapping[str, Any]] = None,
+    require_context_plan: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Resolve+fork+spawn_resumable on trial resident. Never raises to caller.
 
@@ -535,7 +811,14 @@ def try_prepare_native_trial_resident(
             return False, meta
 
         plan = resolve_rewrite_native_fork(
-            conn, staging, cwd=cwd, claude_home=claude_home, require_flag=True,
+            conn,
+            staging,
+            cwd=cwd,
+            claude_home=claude_home,
+            require_flag=True,
+            context_plan=context_plan,
+            runtime_identity=runtime_identity,
+            require_context_plan=require_context_plan,
         )
         meta.update(plan.observability())
         if not plan.eligible:
@@ -618,3 +901,4 @@ def try_prepare_native_trial_resident(
             'rewrite_cache_fallback_reason': REASON_RESOLVER_ERROR,
             'detail': type(exc).__name__,
         }
+
