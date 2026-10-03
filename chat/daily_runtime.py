@@ -2122,28 +2122,82 @@ def _hot_native_tail_proof(
         )
     except Exception:
         return {'status': 'ambiguous', 'reason': 'native_tail_mapping_corrupt'}
-    if len(user_events) > 1 or len(assistant_events) > 1:
+    if len(user_events) > 1:
         return {'status': 'ambiguous', 'reason': 'native_tail_mapping_ambiguous'}
-    if len(user_events) != 1 or len(assistant_events) != 1:
+    if len(user_events) != 1 or not assistant_events:
         return {'status': 'missing', 'reason': 'native_tail_mapping_incomplete'}
     user_event = user_events[0]
-    assistant_event = assistant_events[0]
     expected_sid = str(registry.get('claude_session_id') or '')
     try:
-        sessions_match = (
-            str(user_event['claude_session_id']) == expected_sid
-            and str(assistant_event['claude_session_id']) == expected_sid
+        user_message_matches = (
+            int(user_event['message_id']) == user_message_id
+            and str(user_event['role']) == 'user'
         )
+        assistant_messages_match = all(
+            int(row['message_id']) == assistant_message_id
+            and str(row['role']) == 'assistant'
+            for row in assistant_events
+        )
+        event_uuids = tuple(
+            str(row['event_uuid'] or '').strip() for row in assistant_events
+        )
+        event_uuids_unique = (
+            all(event_uuids) and len(set(event_uuids)) == len(event_uuids)
+        )
+        if not expected_sid:
+            return {'status': 'missing', 'reason': 'native_tail_session_missing'}
+        sessions_match = (
+            user_message_matches
+            and assistant_messages_match
+            and str(user_event['claude_session_id']) == expected_sid
+            and all(
+                str(row['claude_session_id']) == expected_sid
+                for row in assistant_events
+            )
+        )
+        if not event_uuids_unique:
+            return {'status': 'ambiguous', 'reason': 'native_tail_mapping_duplicate'}
     except Exception:
         return {'status': 'ambiguous', 'reason': 'native_tail_mapping_corrupt'}
     if not sessions_match:
         return {'status': 'missing', 'reason': 'native_tail_session_mismatch'}
     try:
-        user_offset = int(user_event['jsonl_byte_offset'])
-        assistant_offset = int(assistant_event['jsonl_byte_offset'])
+        user_offset = user_event['jsonl_byte_offset']
+        assistant_offsets = tuple(
+            row['jsonl_byte_offset'] for row in assistant_events
+        )
+        if (
+            isinstance(user_offset, bool)
+            or not isinstance(user_offset, int)
+            or any(
+                isinstance(offset, bool) or not isinstance(offset, int)
+                for offset in assistant_offsets
+            )
+        ):
+            raise ValueError('mapping offset is not an integer')
     except Exception:
         return {'status': 'ambiguous', 'reason': 'native_tail_mapping_offset_corrupt'}
-    if not (0 <= user_offset < assistant_offset < last_good_end):
+    if len(set(assistant_offsets)) != len(assistant_offsets):
+        return {
+            'status': 'ambiguous',
+            'reason': 'native_tail_mapping_offset_ambiguous',
+        }
+    if tuple(sorted(assistant_offsets)) != assistant_offsets:
+        return {
+            'status': 'ambiguous',
+            'reason': 'native_tail_mapping_order_ambiguous',
+        }
+    # SQL orders by byte offset; after every-row validation this is the
+    # unique last assistant provider event used as the native-tail terminal.
+    terminal_offset = assistant_offsets[-1]
+    if (
+        user_offset < 0
+        or any(
+            offset <= user_offset or offset >= last_good_end
+            for offset in assistant_offsets
+        )
+        or not (user_offset < terminal_offset < last_good_end)
+    ):
         return {'status': 'missing', 'reason': 'native_tail_mapping_offset_invalid'}
 
     try:
