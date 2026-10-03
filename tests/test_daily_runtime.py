@@ -243,6 +243,16 @@ class _FakeResident:
         yield ('done', ('daily reply', '', {'input_tokens': 3, 'output_tokens': 5}, {}))
 
 
+class _SessionAppearsResident(_FakeResident):
+    def send_turn(self, content, commit_meta=None, turn_lease=None):
+        self.session_id = 'session-abc'
+        yield from super().send_turn(
+            content,
+            commit_meta=commit_meta,
+            turn_lease=turn_lease,
+        )
+
+
 class _ReadToolResident(_FakeResident):
     def send_turn(self, content, commit_meta=None, turn_lease=None):
         self.sent.append(str(content))
@@ -460,6 +470,47 @@ class DailyRuntimeTurnTests(unittest.TestCase):
             out = dr.complete_daily_turn(plan, assistant_message_id=aid)
             self.assertEqual(out['cursor_after'], aid)
             self.assertIsNotNone(dc.get_message_context(aid, db_path=db))
+        finally:
+            os.unlink(db)
+
+    def test_cold_first_turn_success_backfills_binding_session_identity(self):
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            uid = _insert(db, 'hayana', 'hello', '2026-07-27 10:00:00')
+            with mock.patch.object(
+                dr,
+                '_context_plan_consumer_enabled',
+                return_value=False,
+            ):
+                plan = self._prepare(db, uid)
+            resident = _SessionAppearsResident()
+            with mock.patch.object(
+                dr,
+                'snapshot_session_jsonl',
+                return_value={'path': '/tmp/session-abc.jsonl', 'offset': 1},
+            ):
+                list(dr.stream_daily_resident_turn(
+                    plan, resident=resident, env={}, static_system='STATIC',
+                ))
+            initial_binding = dr.get_local_binding()
+            self.assertIsNotNone(initial_binding)
+            self.assertIsNone(initial_binding.claude_session_id)
+            self.assertEqual(plan.transcript_claude_session_id, 'session-abc')
+            self.assertEqual(plan.transcript_process_generation, 1)
+
+            plan.manifest['transcript_mapping_status'] = 'MAPPED'
+            aid = dr.persist_daily_assistant_for_plan(
+                plan, content='reply', thinking='', tool_calls='',
+                cache_info='', choices='',
+            )
+            out = dr.complete_daily_turn(plan, assistant_message_id=aid)
+
+            binding = dr.get_local_binding()
+            self.assertEqual(out['cursor_after'], aid)
+            self.assertIsNotNone(binding)
+            self.assertEqual(binding.claude_session_id, 'session-abc')
+            self.assertEqual(binding.bound_cursor_message_id, aid)
         finally:
             os.unlink(db)
 
@@ -1501,11 +1552,68 @@ class DailyRuntimeBindingFailClosedTests(unittest.TestCase):
     def setUp(self):
         dr.reset_bindings_for_tests()
 
+    @staticmethod
+    def _session_backfill_plan(session_id):
+        return types.SimpleNamespace(
+            resident_key='default:e1:g1',
+            context_epoch=1,
+            resident_generation=1,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+            manifest={'transcript_mapping_status': 'MAPPED'},
+            transcript_claude_session_id=session_id,
+            transcript_process_generation=1,
+        )
+
+    @staticmethod
+    def _session_backfill_binding(session_id=None):
+        return dr.LocalResidentBinding(
+            resident_key='default:e1:g1',
+            context_id=7,
+            context_epoch=1,
+            resident_generation=1,
+            bound_cursor_message_id=3,
+            process_generation=1,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+            claude_session_id=session_id,
+        )
+
     def test_close_with_expected_key_and_no_binding_is_noop(self):
         resident = _FakeResident()
         resident._alive = True
         self.assertFalse(dr.close_local_resident_if_bound(resident, expected_key='daily:x:1:1'))
         self.assertEqual(resident.killed, 0)
+
+    def test_empty_binding_backfills_only_from_mapped_session_identity(self):
+        plan = self._session_backfill_plan('session-abc')
+        binding = self._session_backfill_binding()
+        self.assertTrue(
+            dr._backfill_local_binding_session_identity(plan, binding=binding)
+        )
+        self.assertEqual(binding.claude_session_id, 'session-abc')
+
+    def test_existing_same_session_is_preserved(self):
+        plan = self._session_backfill_plan('session-abc')
+        binding = self._session_backfill_binding('session-abc')
+        self.assertFalse(
+            dr._backfill_local_binding_session_identity(plan, binding=binding)
+        )
+        self.assertEqual(binding.claude_session_id, 'session-abc')
+
+    def test_session_mismatch_is_fail_closed_without_overwrite(self):
+        plan = self._session_backfill_plan('session-new')
+        binding = self._session_backfill_binding('session-old')
+        self.assertFalse(
+            dr._backfill_local_binding_session_identity(plan, binding=binding)
+        )
+        self.assertEqual(binding.claude_session_id, 'session-old')
+
+    def test_missing_session_proof_does_not_write_a_guess(self):
+        plan = self._session_backfill_plan(None)
+        binding = self._session_backfill_binding()
+        self.assertFalse(
+            dr._backfill_local_binding_session_identity(plan, binding=binding)
+        )
+        self.assertIsNone(binding.claude_session_id)
 
     def test_hot_requires_matching_process_generation(self):
         db = _tmp_db()
@@ -5053,17 +5161,18 @@ class ContextPlanConsumerTests(unittest.TestCase):
         return plan, context_plan, desired_members
 
 
-    def _run_identity_reconcile(self, plan, resident):
-        binding = dr.LocalResidentBinding(
-            resident_key=plan.resident_key,
-            context_id=plan.context_id,
-            context_epoch=plan.context_epoch,
-            resident_generation=plan.resident_generation,
-            bound_cursor_message_id=2,
-            process_generation=1,
-            tool_profile=dr.DAILY_TOOL_PROFILE,
-            claude_session_id='session-1',
-        )
+    def _run_identity_reconcile(self, plan, resident, *, binding=None):
+        if binding is None:
+            binding = dr.LocalResidentBinding(
+                resident_key=plan.resident_key,
+                context_id=plan.context_id,
+                context_epoch=plan.context_epoch,
+                resident_generation=plan.resident_generation,
+                bound_cursor_message_id=2,
+                process_generation=1,
+                tool_profile=dr.DAILY_TOOL_PROFILE,
+                claude_session_id='session-1',
+            )
         registry = {
             'context_id': plan.context_id,
             'resident_generation': plan.resident_generation,
@@ -5116,6 +5225,41 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         self.assertEqual(self._run_identity_reconcile(plan, resident), 'NO_OP')
         self.assertEqual(plan.hot_decision_reason, '')
+
+    def test_backfilled_session_identity_allows_next_hot_no_op(self):
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        plan.db_path = 'identity-test.db'
+        plan.user_message_id = 3
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        plan.manifest['transcript_mapping_status'] = 'MAPPED'
+        plan.transcript_claude_session_id = 'session-1'
+        plan.transcript_process_generation = 1
+        binding = dr.LocalResidentBinding(
+            resident_key=plan.resident_key,
+            context_id=plan.context_id,
+            context_epoch=plan.context_epoch,
+            resident_generation=plan.resident_generation,
+            bound_cursor_message_id=2,
+            process_generation=1,
+            tool_profile=dr.DAILY_TOOL_PROFILE,
+            claude_session_id=None,
+        )
+        self.assertTrue(
+            dr._backfill_local_binding_session_identity(plan, binding=binding)
+        )
+        resident = types.SimpleNamespace(
+            session_id='session-1',
+            generation=1,
+            model_identity='model-1',
+            provider='claude_code',
+            bound_tool_surface_fingerprint='surface',
+        )
+        self.assertEqual(
+            self._run_identity_reconcile(plan, resident, binding=binding),
+            'NO_OP',
+        )
+        self.assertEqual(binding.claude_session_id, 'session-1')
+        self.assertEqual(resident.generation, 1)
 
     def test_hot_canonical_identity_change_respawns_with_identity_reason(self):
         canonical = 'explicit:claude-opus-5-5'
