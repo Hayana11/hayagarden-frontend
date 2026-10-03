@@ -14,6 +14,12 @@ function safeDetails(metric, value) {
     allowed.add('endAt');
     allowed.add('stages');
   }
+  if (metric === 'heart_rate') {
+    allowed.add('min');
+    allowed.add('max');
+    allowed.add('avg');
+    allowed.add('samples');
+  }
   for (const key of allowed) {
     const candidate = value[key];
     if (validNumber(candidate) !== null) {
@@ -52,7 +58,21 @@ function validDate(value) {
 }
 
 function validSample(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) ? value : null;
+  if (typeof value !== 'string' || value.length > 40) return null;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value)) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const canon = new Date(parsed).toISOString();
+  const date = value.slice(0, 10);
+  const hms = value.slice(11, 19);
+  if (date !== canon.slice(0, 10) || hms !== canon.slice(11, 19)) return null;
+  const fraction = value.includes('.') ? value.slice(value.indexOf('.') + 1, -1) : '';
+  if (fraction.length > 3 && !/^0+$/.test(fraction.slice(3))) return null;
+  if (fraction) {
+    const normalized = `${fraction}000`.slice(0, 3);
+    if (normalized !== canon.slice(20, 23)) return null;
+  }
+  return value;
 }
 
 function safeSleepWindow(value) {
@@ -89,8 +109,113 @@ function sanitizeRecord(metric, row, fallbackSource = SOURCE) {
   if (metric === 'sleep') {
     const sleepWindow = safeSleepWindow(row.sleepWindow);
     if (sleepWindow) output.sleepWindow = sleepWindow;
+    const heartRate = sanitizeSleepHeartRate(row.heartRate);
+    if (heartRate) output.heartRate = heartRate;
   }
   return output;
+}
+
+function sanitizeLastHour(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const output = {};
+  for (const key of ['min', 'max', 'avg', 'samples']) {
+    if (validNumber(value[key]) !== null) output[key] = value[key];
+  }
+  return Object.keys(output).length ? output : null;
+}
+
+function sanitizeSleepHeartRate(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const output = {};
+  for (const key of ['avg', 'min', 'samples']) {
+    if (validNumber(value[key]) !== null) output[key] = value[key];
+  }
+  return Object.keys(output).length ? output : null;
+}
+
+function sanitizeHeartRateDailyRow(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const dataDate = validDate(row.dataDate);
+  if (!dataDate) return null;
+  const output = { dataDate };
+  for (const key of ['restingHeartRate', 'min', 'max', 'sampleCount']) {
+    if (validNumber(row[key]) !== null) output[key] = row[key];
+  }
+  return output;
+}
+
+function sanitizeHeartRateDailyRecords(records, limit = 30) {
+  if (!Array.isArray(records) || records.length > limit) return [];
+  return records.map(sanitizeHeartRateDailyRow).filter(Boolean).slice(0, limit);
+}
+
+function sanitizeHeartRateModel(row, fallbackSource = SOURCE) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  if (row.view === 'daily') {
+    const records = sanitizeHeartRateDailyRecords(row.records);
+    if (!records.length) return null;
+    return {
+      view: 'daily',
+      days: Number.isInteger(row.days) ? row.days : undefined,
+      records,
+      unit: UNITS.heart_rate,
+      source: safeSource(row.source, fallbackSource),
+    };
+  }
+  const output = sanitizeRecord('heart_rate', row, fallbackSource);
+  if (!output) return null;
+  if (validNumber(row.ageSeconds) !== null) output.ageSeconds = Math.trunc(row.ageSeconds);
+  if (typeof row.stale === 'boolean') output.stale = row.stale;
+  const lastHour = sanitizeLastHour(row.lastHour);
+  if (lastHour) output.lastHour = lastHour;
+  if (row.view === 'snapshot') output.view = 'snapshot';
+  return output;
+}
+
+function safeHeartRateSnapshot(result, cache = {}) {
+  const fallbackSource = safeSource(result?.provider || result?.source, SOURCE);
+  const snapshot = sanitizeHeartRateModel(
+    result?.view === 'snapshot' || result?.value != null || result?.lastHour
+      ? result
+      : null,
+    fallbackSource,
+  );
+  const successful = result?.status === 'PASS' || result?.status === 'EMPTY';
+  const hasValue = snapshot && snapshot.value != null;
+  return {
+    status: successful ? (hasValue ? 'PASS' : 'EMPTY') : 'FAIL',
+    provider: fallbackSource,
+    source: fallbackSource,
+    metric: 'heart_rate',
+    view: 'snapshot',
+    value: snapshot?.value ?? null,
+    unit: UNITS.heart_rate,
+    sampledAt: snapshot?.sampledAt ?? null,
+    dataDate: snapshot?.dataDate ?? null,
+    ageSeconds: snapshot?.ageSeconds,
+    lastHour: snapshot?.lastHour ?? null,
+    cached: cache.cached === true,
+    stale: cache.stale === true || result?.stale === true || snapshot?.stale === true,
+    ...(successful ? {} : { error_code: errorCode(result) }),
+  };
+}
+
+function safeHeartRateDaily(days, result, cache = {}) {
+  const fallbackSource = safeSource(result?.provider || result?.source, SOURCE);
+  const records = sanitizeHeartRateDailyRecords(result?.records, days);
+  const successful = result?.status === 'PASS' || result?.status === 'EMPTY';
+  return {
+    status: successful ? (records.length ? 'PASS' : 'EMPTY') : 'FAIL',
+    provider: fallbackSource,
+    source: fallbackSource,
+    metric: 'heart_rate',
+    view: 'daily',
+    days,
+    records,
+    cached: cache.cached === true,
+    stale: cache.stale === true || result?.stale === true,
+    ...(successful ? {} : { error_code: errorCode(result) }),
+  };
 }
 
 function errorCode(result) {
@@ -167,7 +292,9 @@ function safeLatest(result, cache = {}, days = 7) {
   const provider = safeSource(source.provider || source.source, SOURCE);
   const metrics = {};
   for (const metric of Object.keys(METRICS)) {
-    metrics[metric] = sanitizeRecord(metric, source[metric], provider);
+    metrics[metric] = metric === 'heart_rate'
+      ? sanitizeHeartRateModel(source[metric], provider)
+      : sanitizeRecord(metric, source[metric], provider);
   }
   const cycleDays = Number.isInteger(source.cycle?.days) ? source.cycle.days : 180;
   const cycle = safeCycle(source.cycle, cache, cycleDays);
@@ -266,25 +393,45 @@ function createHealthCapabilities({ runAdapter, now = Date.now } = {}) {
       if (!['all', 'status', ...Object.keys(METRICS), 'cycle'].includes(metric)) {
         throw new TypeError('unsupported health metric');
       }
-      const days = requestedDays === undefined ? (metric === 'cycle' ? 180 : 7) : requestedDays;
+      const daysOmitted = requestedDays === undefined;
+      const days = daysOmitted ? (metric === 'cycle' ? 180 : 7) : requestedDays;
       const maximumDays = metric === 'cycle' ? 365 : 30;
       if (!Number.isInteger(days) || days < 1 || days > maximumDays) {
         throw new RangeError(metric === 'cycle' ? 'cycle days must be between 1 and 365' : 'days must be between 1 and 30');
       }
+      const adapterInput = { metric };
+      if (!daysOmitted || (metric !== 'all' && metric !== 'heart_rate')) {
+        adapterInput.days = days;
+      }
       if (metric === 'status') {
         try {
-          return safeStatus(await runAdapter('get_health', { metric, days }));
+          return safeStatus(await runAdapter('get_health', adapterInput));
         } catch {
           return safeStatus({ auth_state: 'unavailable', last_error: 'unavailable' });
         }
       }
       if (metric === 'all') {
-        return read(`all:${days}`, 'get_health', { metric, days }, LATEST_TTL_MS, (result, cacheState) => safeLatest(result, cacheState, days));
+        const key = daysOmitted ? 'all:snapshot' : `all:${days}`;
+        return read(key, 'get_health', adapterInput, LATEST_TTL_MS, (result, cacheState) => safeLatest(result, cacheState, days));
       }
       if (metric === 'cycle') {
-        return read(`cycle:${days}`, 'get_health', { metric, days }, SERIES_TTL_MS, (result, cacheState) => safeCycle(result, cacheState, days));
+        return read(`cycle:${days}`, 'get_health', adapterInput, SERIES_TTL_MS, (result, cacheState) => safeCycle(result, cacheState, days));
       }
-      return read(`${metric}:${days}`, 'get_health', { metric, days }, SERIES_TTL_MS, (result, cacheState) => safeSeries(metric, days, result, cacheState));
+      if (metric === 'heart_rate') {
+        const key = daysOmitted ? 'heart_rate:snapshot' : `heart_rate:${days}`;
+        return read(
+          key,
+          'get_health',
+          adapterInput,
+          daysOmitted ? LATEST_TTL_MS : SERIES_TTL_MS,
+          (result, cacheState) => (
+            daysOmitted
+              ? safeHeartRateSnapshot(result, cacheState)
+              : safeHeartRateDaily(days, result, cacheState)
+          ),
+        );
+      }
+      return read(`${metric}:${days}`, 'get_health', adapterInput, SERIES_TTL_MS, (result, cacheState) => safeSeries(metric, days, result, cacheState));
     },
   });
 }
@@ -297,5 +444,8 @@ module.exports = {
   safeLatest,
   safeCycle,
   safeSeries,
+  safeHeartRateSnapshot,
+  safeHeartRateDaily,
   safeStatus,
+  validSample,
 };

@@ -284,10 +284,16 @@ class HealthBridgeR1Tests(unittest.TestCase):
                 internal_adapter.LOCAL_DB_PATH = db
                 local = internal_adapter.run("get_health", metric="heart_rate", days=7, store=Store(), client=Client())
                 self.assertEqual(local["source"], "health_connect")
-                self.assertEqual(local["records"][0]["value"], 72.0)
+                self.assertEqual(local["view"], "daily")
+                self.assertEqual(local["records"][0]["min"], 72.0)
+                self.assertEqual(local["records"][0]["max"], 72.0)
+                self.assertNotIn("value", local["records"][0])
+                self.assertLessEqual(len(local["records"]), 7)
                 internal_adapter.LOCAL_DB_PATH = str(Path(directory) / "missing.db")
                 fallback = internal_adapter.run("get_health", metric="heart_rate", days=7, store=Store(), client=Client())
                 self.assertEqual(fallback["source"], "xiaomi_fitness_cloud")
+                self.assertEqual(fallback["view"], "daily")
+                self.assertEqual(fallback["records"][0]["min"], 99)
             finally:
                 internal_adapter.LOCAL_DB_PATH = old
 
@@ -434,7 +440,9 @@ class HealthBridgeR1Tests(unittest.TestCase):
                     store=Store(), client=Client()
                 )
                 self.assertEqual(resolved["source"], "xiaomi_fitness_cloud")
-                self.assertEqual(resolved["records"][0]["value"], 99)
+                self.assertEqual(resolved["view"], "daily")
+                self.assertEqual(resolved["records"][0]["min"], 99)
+                self.assertNotIn("value", resolved["records"][0])
             finally:
                 internal_adapter.LOCAL_DB_PATH = old
 

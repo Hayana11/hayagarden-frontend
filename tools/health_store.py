@@ -17,13 +17,20 @@ import uuid
 from typing import Any
 
 SCHEMA_VERSION = 1
-METRICS = frozenset({"heart_rate", "steps", "sleep"})
+METRICS = frozenset({"heart_rate", "resting_heart_rate", "steps", "sleep"})
 SOURCES = frozenset({"health_connect", "gadgetbridge", "xiaomi_fitness_cloud"})
 STATUSES = frozenset({"PASS", "EMPTY", "PERMISSION_DENIED", "UNAVAILABLE", "FAIL"})
 MAX_ROWS = 500
 MAX_DETAILS_BYTES = 8 * 1024
 MAX_FUTURE_SKEW_SECONDS = 0
 STALE_AFTER_HOURS = 48
+HEART_RATE_STALE_AFTER_SECONDS = 2 * 3600
+UNITS = {
+    "heart_rate": "bpm",
+    "resting_heart_rate": "bpm",
+    "steps": "steps",
+    "sleep": "minutes",
+}
 
 
 def ensure_schema(path: str) -> None:
@@ -126,15 +133,14 @@ def _record(row: Any) -> dict[str, Any]:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
         raise ValueError("invalid value")
     value = float(value)
-    if metric == "heart_rate" and not 0 <= value <= 300:
-        raise ValueError("invalid heart_rate")
+    if metric in {"heart_rate", "resting_heart_rate"} and not 0 <= value <= 300:
+        raise ValueError(f"invalid {metric}")
     if metric == "steps" and not 0 <= value <= 10_000_000:
         raise ValueError("invalid steps")
     if metric == "sleep" and not 0 <= value <= 2880:
         raise ValueError("invalid sleep")
     unit = row.get("unit")
-    expected = {"heart_rate": "bpm", "steps": "steps", "sleep": "minutes"}[metric]
-    if unit != expected:
+    if unit != UNITS[metric]:
         raise ValueError("invalid unit")
     source_record_id = row.get("source_record_id", row.get("sourceRecordId"))
     if not isinstance(source_record_id, str) or not source_record_id.strip() or len(source_record_id) > 200:
@@ -287,6 +293,234 @@ def query_samples(path: str, metric: str, days: int, *, now: str | None = None) 
         "stale": _stale(records[0]["sampledAt"] if records else None, now=now_dt),
         "lastCollectedAt": status_row["last_collected_at"] if status_row else None,
         "lastUploadAt": status_row["last_upload_at"] if status_row else None,
+    }
+
+
+def _now_dt(now: str | None) -> _dt.datetime:
+    if now is None:
+        return _dt.datetime.now(_dt.timezone.utc)
+    parsed = _dt.datetime.fromisoformat(now.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _iso(value: _dt.datetime) -> str:
+    return value.astimezone(_dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _empty_heart_rate_snapshot(status: str = "UNAVAILABLE") -> dict[str, Any]:
+    return {
+        "status": status if status in STATUSES else "UNAVAILABLE",
+        "provider": "health_connect",
+        "source": "health_connect",
+        "metric": "heart_rate",
+        "view": "snapshot",
+        "value": None,
+        "unit": "bpm",
+        "sampledAt": None,
+        "dataDate": None,
+        "ageSeconds": None,
+        "stale": True,
+        "lastHour": {"min": None, "max": None, "avg": None, "samples": 0},
+        "lastCollectedAt": None,
+        "lastUploadAt": None,
+    }
+
+
+def _hour_summary(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"min": None, "max": None, "avg": None, "samples": 0}
+    return {
+        "min": min(values),
+        "max": max(values),
+        "avg": round(sum(values) / len(values), 1),
+        "samples": len(values),
+    }
+
+
+def get_heart_rate_snapshot(path: str, *, now: str | None = None) -> dict[str, Any]:
+    if not os.path.exists(path):
+        return _empty_heart_rate_snapshot("UNAVAILABLE")
+    try:
+        ensure_schema(path)
+        now_dt = _now_dt(now)
+        hour_start = _iso(now_dt - _dt.timedelta(hours=1))
+        now_iso = _iso(now_dt)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            status_row = conn.execute(
+                "SELECT * FROM health_metric_status WHERE metric='heart_rate'"
+            ).fetchone()
+            latest = conn.execute(
+                """
+                SELECT sampled_at, data_date, value, source
+                FROM health_samples WHERE metric='heart_rate'
+                ORDER BY sampled_at DESC LIMIT 1
+                """
+            ).fetchone()
+            hour_rows = conn.execute(
+                """
+                SELECT value FROM health_samples
+                WHERE metric='heart_rate' AND sampled_at>=? AND sampled_at<=?
+                """,
+                (hour_start, now_iso),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return _empty_heart_rate_snapshot("UNAVAILABLE")
+    status = status_row["status"] if status_row and status_row["status"] in STATUSES else "UNAVAILABLE"
+    source = status_row["source"] if status_row and status_row["source"] in SOURCES else "health_connect"
+    values = [float(row["value"]) for row in hour_rows]
+    age_seconds = None
+    stale = True
+    if latest:
+        sampled = _dt.datetime.fromisoformat(latest["sampled_at"].replace("Z", "+00:00"))
+        age_seconds = max(0, int((now_dt - sampled).total_seconds()))
+        stale = age_seconds > HEART_RATE_STALE_AFTER_SECONDS
+        if status == "UNAVAILABLE":
+            status = "PASS"
+    elif status == "PASS":
+        status = "EMPTY"
+    return {
+        "status": status,
+        "provider": source,
+        "source": source,
+        "metric": "heart_rate",
+        "view": "snapshot",
+        "value": float(latest["value"]) if latest else None,
+        "unit": "bpm",
+        "sampledAt": latest["sampled_at"] if latest else None,
+        "dataDate": latest["data_date"] if latest else None,
+        "ageSeconds": age_seconds,
+        "stale": stale,
+        "lastHour": _hour_summary(values),
+        "lastCollectedAt": status_row["last_collected_at"] if status_row else None,
+        "lastUploadAt": status_row["last_upload_at"] if status_row else None,
+    }
+
+
+def get_heart_rate_daily(path: str, days: int, *, now: str | None = None) -> dict[str, Any]:
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 30:
+        raise ValueError("invalid days")
+    empty = {
+        "status": "UNAVAILABLE",
+        "provider": "health_connect",
+        "source": "health_connect",
+        "metric": "heart_rate",
+        "view": "daily",
+        "days": days,
+        "records": [],
+        "stale": True,
+        "lastCollectedAt": None,
+        "lastUploadAt": None,
+    }
+    if not os.path.exists(path):
+        return empty
+    try:
+        ensure_schema(path)
+        now_dt = _now_dt(now)
+        lower_date = (now_dt.date() - _dt.timedelta(days=days - 1)).isoformat()
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            status_row = conn.execute(
+                "SELECT * FROM health_metric_status WHERE metric='heart_rate'"
+            ).fetchone()
+            hr_rows = conn.execute(
+                """
+                SELECT data_date, MIN(value) AS min_hr, MAX(value) AS max_hr, COUNT(*) AS sample_count
+                FROM health_samples
+                WHERE metric='heart_rate' AND data_date>=?
+                GROUP BY data_date
+                ORDER BY data_date DESC
+                LIMIT ?
+                """,
+                (lower_date, days),
+            ).fetchall()
+            resting_rows = conn.execute(
+                """
+                SELECT data_date, value, sampled_at
+                FROM health_samples
+                WHERE metric='resting_heart_rate' AND data_date>=?
+                ORDER BY sampled_at DESC
+                """,
+                (lower_date,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return empty
+    resting_by_date: dict[str, float] = {}
+    for row in resting_rows:
+        date = row["data_date"]
+        if date not in resting_by_date:
+            resting_by_date[date] = float(row["value"])
+    by_date: dict[str, dict[str, Any]] = {}
+    for row in hr_rows:
+        by_date[row["data_date"]] = {
+            "dataDate": row["data_date"],
+            "min": float(row["min_hr"]),
+            "max": float(row["max_hr"]),
+            "sampleCount": int(row["sample_count"]),
+        }
+    for date, value in resting_by_date.items():
+        item = by_date.setdefault(date, {"dataDate": date})
+        item["restingHeartRate"] = value
+    records = [by_date[date] for date in sorted(by_date, reverse=True)[:days]]
+    status = status_row["status"] if status_row and status_row["status"] in STATUSES else "UNAVAILABLE"
+    source = status_row["source"] if status_row and status_row["source"] in SOURCES else "health_connect"
+    if records and status in {"UNAVAILABLE", "EMPTY"}:
+        status = "PASS"
+    elif not records and status == "PASS":
+        status = "EMPTY"
+    return {
+        "status": status if status in STATUSES else "UNAVAILABLE",
+        "provider": source,
+        "source": source,
+        "metric": "heart_rate",
+        "view": "daily",
+        "days": days,
+        "records": records,
+        "stale": _stale(records[0]["dataDate"] + "T00:00:00Z" if records else None, now=now_dt)
+        if records else True,
+        "lastCollectedAt": status_row["last_collected_at"] if status_row else None,
+        "lastUploadAt": status_row["last_upload_at"] if status_row else None,
+    }
+
+
+def get_sleep_heart_rate(path: str, start_at: Any, end_at: Any) -> dict[str, Any] | None:
+    if not os.path.exists(path):
+        return None
+    try:
+        start = _parse_time(start_at, "start_at")
+        end = _parse_time(end_at, "end_at")
+        if start > end:
+            return None
+        ensure_schema(path)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT value FROM health_samples
+                WHERE metric='heart_rate' AND sampled_at>=? AND sampled_at<=?
+                """,
+                (start, end),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+    if not rows:
+        return None
+    values = [float(row["value"]) for row in rows]
+    return {
+        "avg": round(sum(values) / len(values), 1),
+        "min": min(values),
+        "samples": len(values),
     }
 
 
