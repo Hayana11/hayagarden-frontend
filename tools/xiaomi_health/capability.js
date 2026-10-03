@@ -174,7 +174,7 @@ function safeLatest(result, cache = {}, days = 7) {
   const metricStatus = sanitizeMetricStatus(source, metrics, cycle);
   const hasData = Object.values(metrics).some(Boolean) || cycleHasData(cycle);
   const componentFailed = Object.values(metricStatus).some((item) => item.status === 'FAIL');
-  const topFailed = source.status === 'FAIL' || Boolean(source.error_code);
+  const topFailed = source.status === 'FAIL';
   const status = hasData ? 'PASS' : ((componentFailed || topFailed) ? 'FAIL' : 'EMPTY');
   const metricSources = Object.values(metrics).filter(Boolean).map((row) => row.source);
   const resolvedSource = metricSources.length && new Set(metricSources).size > 1 ? 'mixed'
@@ -250,7 +250,7 @@ function createHealthCapabilities({ runAdapter, now = Date.now } = {}) {
     if (previous && previous.expiresAt > at) return shape(previous.value, { cached: true, stale: false });
     try {
       const result = await runAdapter(operation, args);
-      if (result?.status === 'FAIL' || result?.error_code) throw Object.assign(new Error('provider unavailable'), { safeCode: errorCode(result) });
+      if (result?.status === 'FAIL') throw Object.assign(new Error('provider unavailable'), { safeCode: errorCode(result) });
       const shaped = shape(result, { cached: false, stale: false });
       cache.set(key, { value: shaped, expiresAt: at + ttl });
       return shaped;

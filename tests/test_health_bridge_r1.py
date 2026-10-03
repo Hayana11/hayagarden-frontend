@@ -9,8 +9,45 @@ from pathlib import Path
 
 from tools import health_store
 from tools.xiaomi_health import internal_adapter
+from tools.xiaomi_health.client import XiaomiProviderError
 from health_ingest_routes import create_health_blueprint
 from moments_auth import OwnerAuthError
+
+
+def local_steps_sleep_payload(steps=779, sleep_minutes=375):
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    stamp = now.isoformat().replace("+00:00", "Z")
+    return {
+        "schemaVersion": 1,
+        "collectedAt": stamp,
+        "metricStatuses": {
+            "heart_rate": {"status": "EMPTY", "source": "health_connect"},
+            "steps": {"status": "PASS", "source": "health_connect"},
+            "sleep": {"status": "PASS", "source": "health_connect"},
+        },
+        "records": [
+            {
+                "metric": "steps",
+                "sampled_at": stamp,
+                "data_date": stamp[:10],
+                "value": steps,
+                "unit": "steps",
+                "source": "health_connect",
+                "source_record_id": "steps-r2",
+                "collected_at": stamp,
+            },
+            {
+                "metric": "sleep",
+                "sampled_at": stamp,
+                "data_date": stamp[:10],
+                "value": sleep_minutes,
+                "unit": "minutes",
+                "source": "health_connect",
+                "source_record_id": "sleep-r2",
+                "collected_at": stamp,
+            },
+        ],
+    }
 
 
 def payload(records=None, statuses=None):
@@ -253,6 +290,53 @@ class HealthBridgeR1Tests(unittest.TestCase):
                 self.assertEqual(fallback["source"], "xiaomi_fitness_cloud")
             finally:
                 internal_adapter.LOCAL_DB_PATH = old
+
+    def test_all_preserves_local_steps_sleep_when_cloud_auth_expired(self):
+        class Store:
+            def status(self):
+                return {"connected": False, "auth_state": "auth_expired"}
+
+        class Client:
+            def get_latest_partial(self, days, request_timeout=None):
+                raise XiaomiProviderError("auth_expired")
+
+            def get_cycle(self, days, request_timeout=None):
+                raise XiaomiProviderError("auth_expired")
+
+            def get_series(self, metric, days, request_timeout=None):
+                raise XiaomiProviderError("auth_expired")
+
+        with tempfile.TemporaryDirectory() as directory:
+            db = str(Path(directory) / "health.db")
+            health_store.ingest_payload(local_steps_sleep_payload(), db)
+            old = internal_adapter.LOCAL_DB_PATH
+            try:
+                internal_adapter.LOCAL_DB_PATH = db
+                result = internal_adapter.run(
+                    "get_health", metric="all", days=2, store=Store(), client=Client(),
+                )
+            finally:
+                internal_adapter.LOCAL_DB_PATH = old
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["partial"])
+        self.assertNotIn("error_code", result)
+        self.assertNotEqual(result["provider"], "xiaomi_fitness_cloud")
+        self.assertEqual(result["steps"]["value"], 779)
+        self.assertEqual(result["steps"]["source"], "health_connect")
+        self.assertEqual(result["sleep"]["value"], 375)
+        self.assertEqual(result["sleep"]["source"], "health_connect")
+        self.assertEqual(result["metric_status"]["steps"]["status"], "PASS")
+        self.assertEqual(result["metric_status"]["steps"]["source"], "health_connect")
+        self.assertEqual(result["metric_status"]["sleep"]["status"], "PASS")
+        self.assertEqual(result["metric_status"]["sleep"]["source"], "health_connect")
+        self.assertIn(result["metric_status"]["heart_rate"]["status"], {"FAIL", "EMPTY"})
+        self.assertIsNone(result.get("heart_rate"))
+        self.assertEqual(result["cycle"]["status"], "FAIL")
+        self.assertEqual(result["cycle"]["source"], "xiaomi_fitness_cloud")
+        self.assertEqual(result["cycle"]["error_code"], "auth_expired")
+        self.assertEqual(result["metric_status"]["cycle"]["status"], "FAIL")
+        self.assertEqual(result["metric_status"]["cycle"]["error_code"], "auth_expired")
 
     def test_all_mixed_source_and_cycle_remains_cloud(self):
         class Store:
