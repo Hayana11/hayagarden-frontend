@@ -7653,7 +7653,10 @@ def chat_stream():
                     _rewrite_context_assembly = _turn_data.get(
                         '_rewrite_context_assembly'
                     ) if _rewrite_context_enabled else None
-                    if _rewrite_context_assembly is not None:
+                    if (
+                        _rewrite_context_assembly is not None
+                        and not _turn_data.get('_rewrite_native_fork_ready')
+                    ):
                         _rewrite_context_history = list(
                             _rewrite_context_assembly.get('current_day_history') or []
                         )
@@ -7673,6 +7676,29 @@ def chat_stream():
                         })
                         _history_stats.update({
                             'context_plan_consumer': 'canonical_rewrite',
+                            'context_plan_id': str(
+                                getattr(_turn_data.get('_rewrite_context_plan'), 'plan_id', '')
+                                or ''
+                            ),
+                            'context_plan_hash': str(
+                                getattr(_turn_data.get('_rewrite_context_plan'), 'plan_hash', '')
+                                or ''
+                            ),
+                        })
+                    elif (
+                        _rewrite_context_enabled
+                        and _turn_data.get('_rewrite_native_fork_ready')
+                    ):
+                        # The child transcript already proves the canonical prefix.
+                        # Send only the rewrite overlay; never replay ContextPlan history.
+                        messages = [{
+                            'role': 'user',
+                            'content': _turn_data.get(
+                                '_rewrite_context_user_content',
+                            ) or '',
+                        }]
+                        _history_stats.update({
+                            'context_plan_consumer': 'canonical_rewrite_fork_reuse',
                             'context_plan_id': str(
                                 getattr(_turn_data.get('_rewrite_context_plan'), 'plan_id', '')
                                 or ''
