@@ -116,5 +116,84 @@ try {
   await new Promise((resolve) => listener.close(resolve));
 }
 
+const leakedCalls = [];
+const leakedHealthAdapter = async (operation, input) => {
+  leakedCalls.push({ operation, input });
+  return {
+    status: 'PASS',
+    partial: true,
+    error_code: 'auth_expired',
+    provider: 'mixed',
+    source: 'mixed',
+    steps: {
+      sampledAt: '2026-10-03T01:00:00Z',
+      dataDate: '2026-10-03',
+      value: 779,
+      unit: 'steps',
+      source: 'health_connect',
+      provider: 'health_connect',
+    },
+    sleep: {
+      sampledAt: '2026-10-03T01:00:00Z',
+      dataDate: '2026-10-03',
+      value: 375,
+      unit: 'minutes',
+      source: 'health_connect',
+      provider: 'health_connect',
+    },
+    heart_rate: null,
+    cycle: {
+      status: 'FAIL',
+      provider: 'xiaomi_fitness_cloud',
+      source: 'xiaomi_fitness_cloud',
+      metric: 'cycle',
+      days: 180,
+      events: [],
+      periods: [],
+      symptoms: [],
+      error_code: 'auth_expired',
+    },
+    metric_status: {
+      steps: { status: 'PASS', source: 'health_connect', stale: false },
+      sleep: { status: 'PASS', source: 'health_connect', stale: false },
+      heart_rate: { status: 'FAIL', source: 'xiaomi_fitness_cloud', stale: false, error_code: 'auth_expired' },
+      cycle: { status: 'FAIL', source: 'xiaomi_fitness_cloud', stale: false, error_code: 'auth_expired' },
+    },
+  };
+};
+
+const leakedServer = await internalServer.startInternalMcpServer({
+  host: '127.0.0.1', port: 0, healthAdapter: leakedHealthAdapter,
+});
+const leakedClient = new Client({ name: 'xiaomi-health-partial-fallback-r2', version: '1.0.0' });
+const leakedTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${leakedServer.port}/mcp`));
+try {
+  await leakedClient.connect(leakedTransport);
+  const leakedAll = JSON.parse(textOf(await leakedClient.callTool({
+    name: 'get.health',
+    arguments: { metric: 'all', days: 2 },
+  })));
+  assert.deepEqual(leakedCalls, [{ operation: 'get_health', input: { metric: 'all', days: 2 } }]);
+  assert.equal(leakedAll.status, 'PASS');
+  assert.equal(leakedAll.partial, true);
+  assert.equal(leakedAll.error_code, undefined);
+  assert.equal(leakedAll.provider, 'health_connect');
+  assert.equal(leakedAll.source, 'health_connect');
+  assert.equal(leakedAll.steps.value, 779);
+  assert.equal(leakedAll.steps.source, 'health_connect');
+  assert.equal(leakedAll.sleep.value, 375);
+  assert.equal(leakedAll.sleep.source, 'health_connect');
+  assert.equal(leakedAll.heart_rate, null);
+  assert.equal(leakedAll.metric_status.steps.status, 'PASS');
+  assert.equal(leakedAll.metric_status.sleep.status, 'PASS');
+  assert.equal(['FAIL', 'EMPTY'].includes(leakedAll.metric_status.heart_rate.status), true);
+  assert.equal(leakedAll.cycle.status, 'FAIL');
+  assert.equal(leakedAll.cycle.source, 'xiaomi_fitness_cloud');
+  assert.equal(leakedAll.cycle.error_code, 'auth_expired');
+} finally {
+  await leakedClient.close().catch(() => {});
+  await new Promise((resolve) => leakedServer.listener.close(resolve));
+}
+
 console.log('test-xiaomi-health-internal-mcp: ok');
 

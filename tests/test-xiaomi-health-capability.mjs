@@ -449,6 +449,90 @@ const healthConnect = safeLatest({
   cycle: { status: 'EMPTY', events: [], periods: [], symptoms: [] },
 }, {}, 7);
 assert.equal(typeof createHealthCapabilities, 'function');
+const leakedPartialHealth = createHealthCapabilities({
+  now: () => 12_000,
+  runAdapter: async (_operation, input) => {
+    assert.equal(input.metric, 'all');
+    assert.equal(input.days, 2);
+    return {
+      status: 'PASS',
+      partial: true,
+      error_code: 'auth_expired',
+      provider: 'mixed',
+      source: 'mixed',
+      steps: {
+        sampledAt: '2026-10-03T01:00:00Z',
+        dataDate: '2026-10-03',
+        value: 779,
+        unit: 'steps',
+        source: 'health_connect',
+        provider: 'health_connect',
+      },
+      sleep: {
+        sampledAt: '2026-10-03T01:00:00Z',
+        dataDate: '2026-10-03',
+        value: 375,
+        unit: 'minutes',
+        source: 'health_connect',
+        provider: 'health_connect',
+      },
+      heart_rate: null,
+      cycle: {
+        status: 'FAIL',
+        provider: 'xiaomi_fitness_cloud',
+        source: 'xiaomi_fitness_cloud',
+        metric: 'cycle',
+        days: 180,
+        events: [],
+        periods: [],
+        symptoms: [],
+        error_code: 'auth_expired',
+      },
+      metric_status: {
+        steps: { status: 'PASS', source: 'health_connect', stale: false },
+        sleep: { status: 'PASS', source: 'health_connect', stale: false },
+        heart_rate: { status: 'FAIL', source: 'xiaomi_fitness_cloud', stale: false, error_code: 'auth_expired' },
+        cycle: { status: 'FAIL', source: 'xiaomi_fitness_cloud', stale: false, error_code: 'auth_expired' },
+      },
+    };
+  },
+});
+const leakedPartial = await leakedPartialHealth.get({ metric: 'all', days: 2 });
+assert.equal(leakedPartial.status, 'PASS');
+assert.equal(leakedPartial.partial, true);
+assert.equal(leakedPartial.error_code, undefined);
+assert.equal(leakedPartial.provider, 'health_connect');
+assert.equal(leakedPartial.source, 'health_connect');
+assert.equal(leakedPartial.steps.value, 779);
+assert.equal(leakedPartial.steps.source, 'health_connect');
+assert.equal(leakedPartial.sleep.value, 375);
+assert.equal(leakedPartial.sleep.source, 'health_connect');
+assert.equal(leakedPartial.heart_rate, null);
+assert.equal(leakedPartial.metric_status.steps.status, 'PASS');
+assert.equal(leakedPartial.metric_status.steps.source, 'health_connect');
+assert.equal(leakedPartial.metric_status.sleep.status, 'PASS');
+assert.equal(leakedPartial.metric_status.sleep.source, 'health_connect');
+assert.equal(['FAIL', 'EMPTY'].includes(leakedPartial.metric_status.heart_rate.status), true);
+assert.equal(leakedPartial.cycle.status, 'FAIL');
+assert.equal(leakedPartial.cycle.source, 'xiaomi_fitness_cloud');
+assert.equal(leakedPartial.cycle.error_code, 'auth_expired');
+assert.equal(leakedPartial.metric_status.cycle.status, 'FAIL');
+assert.equal(leakedPartial.metric_status.cycle.error_code, 'auth_expired');
+
+const totalCloudFail = await createHealthCapabilities({
+  now: () => 13_000,
+  runAdapter: async () => ({
+    status: 'FAIL',
+    error_code: 'auth_expired',
+    provider: 'xiaomi_fitness_cloud',
+    source: 'xiaomi_fitness_cloud',
+  }),
+}).get({ metric: 'all', days: 2 });
+assert.equal(totalCloudFail.status, 'FAIL');
+assert.equal(totalCloudFail.error_code, 'auth_expired');
+assert.equal(totalCloudFail.steps, null);
+assert.equal(totalCloudFail.sleep, null);
+
 assert.equal(healthConnect.provider, 'health_connect');
 assert.equal(healthConnect.source, 'health_connect');
 assert.equal(healthConnect.steps.value, 8432);

@@ -173,7 +173,11 @@ def _run_all(client: XiaomiHealthClient, days: int) -> dict[str, Any]:
         "stale": cycle.get("stale") is True,
         **({"error_code": cycle["error_code"]} if cycle.get("error_code") else {}),
     }
-    payload = {key: value for key, value in (latest.items() if isinstance(latest, dict) else []) if key not in {"metric_status", "steps", "sleep", "heart_rate"}}
+    payload = {
+        key: value
+        for key, value in (latest.items() if isinstance(latest, dict) else [])
+        if key not in {"metric_status", "steps", "sleep", "heart_rate", "error_code"}
+    }
     payload.update(metrics)
     payload["cycle"] = cycle
     payload["metric_status"] = metric_status
@@ -185,6 +189,7 @@ def _run_all(client: XiaomiHealthClient, days: int) -> dict[str, Any]:
     provider = next(iter(sources)) if len(sources) == 1 else "mixed"
     payload["provider"] = provider
     payload["source"] = provider
+    payload.pop("error_code", None)
     if payload["status"] == "FAIL":
         payload["error_code"] = next(
             (item.get("error_code") for item in metric_status.values() if item.get("status") == "FAIL"),
