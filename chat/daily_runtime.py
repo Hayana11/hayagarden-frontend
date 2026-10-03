@@ -2816,6 +2816,7 @@ def _commit_production_context_receipt(
             measurement_semantics=str(context_plan.measurement_semantics),
             installed_source_watermark=cursor_after,
             members=members,
+            context_plan=context_plan,
         )
         conn = dc._connect(plan.db_path)
         try:
