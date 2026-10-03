@@ -561,6 +561,7 @@ def _validate_receipt(receipt: ContextReceipt) -> None:
         receipt.superseded_by_generation is not None
     ):
         raise ValueError('installed receipt cannot have superseded target')
+    _normalize_install_proof(receipt.install_proof)
 
 
 def _receipt_key(receipt: ContextReceipt) -> tuple[int, int, int]:
