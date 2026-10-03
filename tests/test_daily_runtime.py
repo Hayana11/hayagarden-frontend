@@ -6254,6 +6254,245 @@ class ContextPlanConsumerTests(unittest.TestCase):
             'legacy_receipt_fixed_proof_incomplete',
         )
 
+    def _native_tail_fixture(
+        self,
+        *,
+        assistant_offsets=(200,),
+        assistant_sessions=None,
+        user_offset=100,
+        last_good_end=400,
+        duplicate_user=False,
+    ):
+        from continuity.sources import evidence_ref
+
+        offsets = tuple(assistant_offsets)
+        sessions = tuple(
+            assistant_sessions
+            if assistant_sessions is not None
+            else ('session-1',) * len(offsets)
+        )
+        if len(sessions) != len(offsets):
+            raise AssertionError('assistant session fixture length mismatch')
+        db = self._context_plan_runtime_db()
+        conn = sqlite3.connect(db)
+        conn.execute(
+            'DROP INDEX IF EXISTS uq_chat_message_claude_events_user_msg'
+        )
+        user_id = int(conn.execute(
+            'INSERT INTO chat_messages '
+            '(author, content, source_kind, created_at) VALUES (?,?,?,?)',
+            ('hayana', 'native-tail-user', 'chat', '2026-07-27 10:00:00'),
+        ).lastrowid)
+        assistant_id = int(conn.execute(
+            'INSERT INTO chat_messages '
+            '(author, content, source_kind, created_at) VALUES (?,?,?,?)',
+            ('assistant', 'native-tail-assistant', 'chat', '2026-07-27 10:00:01'),
+        ).lastrowid)
+        for message_id, role in ((user_id, 'user'), (assistant_id, 'assistant')):
+            conn.execute(
+                'INSERT INTO daily_message_contexts '
+                '(message_id, context_id, context_epoch, resident_generation, role, created_at) '
+                'VALUES (?,?,?,?,?,?)',
+                (message_id, 7, 3, 1, role, '2026-07-27 10:00:00'),
+            )
+        mapping_rows = [
+            (
+                'u-native-tail',
+                user_id,
+                'user',
+                'session-1',
+                user_offset,
+            ),
+        ]
+        mapping_rows.extend(
+            (
+                'a-native-tail-%d' % index,
+                assistant_id,
+                'assistant',
+                sessions[index],
+                offset,
+            )
+            for index, offset in enumerate(offsets)
+        )
+        if duplicate_user:
+            mapping_rows.append(
+                (
+                    'u-native-tail-duplicate',
+                    user_id,
+                    'user',
+                    'session-1',
+                    120,
+                )
+            )
+        conn.executemany(
+            '''INSERT INTO chat_message_claude_events (
+                event_uuid, message_id, role, claude_session_id,
+                context_id, context_epoch, resident_generation,
+                jsonl_byte_offset
+            ) VALUES (?,?,?,?,?,?,?,?)''',
+            (
+                (
+                    event_uuid,
+                    message_id,
+                    role,
+                    session_id,
+                    7,
+                    3,
+                    1,
+                    offset,
+                )
+                for event_uuid, message_id, role, session_id, offset
+                in mapping_rows
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            'SELECT * FROM chat_messages WHERE id=?', (user_id,)
+        ).fetchone()
+        columns = tuple(column[1] for column in conn.execute(
+            'PRAGMA table_info(chat_messages)'
+        ).fetchall())
+        request_evidence = evidence_ref(
+            dict(zip(columns, row)),
+            prefix='message',
+        )
+        conn.close()
+        request_member = types.SimpleNamespace(
+            source_kind='current_request',
+            source_ref='message:%d' % user_id,
+            source_revision=request_evidence.source_revision,
+            content_hash=request_evidence.content_hash,
+        )
+        plan = types.SimpleNamespace(
+            db_path=db,
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            user_message_id=assistant_id + 1,
+        )
+        frozen = {
+            'receipt': types.SimpleNamespace(
+                installed_source_watermark=assistant_id,
+            ),
+            'members': (request_member,),
+        }
+        registry = {
+            'scan_status': 'READY',
+            'last_mapped_message_id': assistant_id,
+            'scan_offset': last_good_end,
+            'claude_session_id': 'session-1',
+        }
+        return db, plan, frozen, registry
+
+    def _native_tail_result(self, **kwargs):
+        db, plan, frozen, registry = self._native_tail_fixture(**kwargs)
+        try:
+            with mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': kwargs.get('last_good_end', 400),
+                },
+            ):
+                return dr._hot_native_tail_proof(
+                    plan,
+                    frozen=frozen,
+                    registry=registry,
+                )
+        finally:
+            os.unlink(db)
+
+    def test_native_tail_user_one_assistant_one_passes(self):
+        result = self._native_tail_result(assistant_offsets=(200,))
+        self.assertEqual(result['status'], 'pass')
+
+    def test_native_tail_user_one_assistant_two_passes_and_keeps_rows(self):
+        db, plan, frozen, registry = self._native_tail_fixture(
+            assistant_offsets=(200, 300),
+        )
+        try:
+            with mock.patch.object(
+                dr,
+                'get_same_context_last_good',
+                return_value={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'claude_session_id': 'session-1',
+                    'transcript_end_offset': 400,
+                },
+            ):
+                result = dr._hot_native_tail_proof(
+                    plan,
+                    frozen=frozen,
+                    registry=registry,
+                )
+            self.assertEqual(result['status'], 'pass')
+            conn = sqlite3.connect(db)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chat_message_claude_events "
+                    "WHERE role='assistant'"
+                ).fetchone()[0],
+                2,
+            )
+            conn.close()
+        finally:
+            os.unlink(db)
+
+    def test_native_tail_assistant_zero_is_incomplete(self):
+        result = self._native_tail_result(assistant_offsets=())
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_mapping_incomplete')
+
+    def test_native_tail_duplicate_user_mapping_is_ambiguous(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200,),
+            duplicate_user=True,
+        )
+        self.assertEqual(result['status'], 'ambiguous')
+        self.assertEqual(result['reason'], 'native_tail_mapping_ambiguous')
+
+    def test_native_tail_assistant_session_mismatch_fails_closed(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200, 300),
+            assistant_sessions=('session-other', 'session-1'),
+        )
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_session_mismatch')
+
+    def test_native_tail_assistant_offset_before_user_fails_closed(self):
+        result = self._native_tail_result(assistant_offsets=(90, 200))
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_mapping_offset_invalid')
+
+    def test_native_tail_assistant_offset_at_or_after_end_fails_closed(self):
+        result = self._native_tail_result(
+            assistant_offsets=(200, 400),
+            last_good_end=400,
+        )
+        self.assertEqual(result['status'], 'missing')
+        self.assertEqual(result['reason'], 'native_tail_mapping_offset_invalid')
+
+    def test_native_tail_corrupt_assistant_offset_fails_closed(self):
+        result = self._native_tail_result(assistant_offsets=('corrupt',))
+        self.assertEqual(result['status'], 'ambiguous')
+        self.assertEqual(result['reason'], 'native_tail_mapping_offset_corrupt')
+
+    def test_native_tail_legal_multi_assistant_is_not_ambiguous(self):
+        result = self._native_tail_result(assistant_offsets=(200, 300, 350))
+        self.assertEqual(result['status'], 'pass')
+        self.assertNotEqual(result.get('reason'), 'native_tail_mapping_ambiguous')
+
+    def test_native_tail_duplicate_assistant_offsets_are_ambiguous(self):
+        result = self._native_tail_result(assistant_offsets=(200, 200))
+        self.assertEqual(result['status'], 'ambiguous')
+        self.assertEqual(result['reason'], 'native_tail_mapping_offset_ambiguous')
+
     def test_compatible_hot_receipt_reconciles_to_no_op(self):
         plan, context_plan, _desired_members = self._fake_hot_reconcile_plan()
         with mock.patch.object(
