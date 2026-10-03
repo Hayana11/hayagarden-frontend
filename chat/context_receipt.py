@@ -25,6 +25,7 @@ INSTALL_PROOF_INVALID = 'context_receipt_install_proof_invalid'
 INSTALL_PROOF_BOUNDARY_MISMATCH = 'context_receipt_install_proof_boundary_mismatch'
 INSTALL_PROOF_PARTIAL_REPRESENTATION = 'context_receipt_install_proof_partial_representation'
 INSTALL_PROOF_MISMATCH = 'context_receipt_install_proof_mismatch'
+INSTALL_PROOF_RUNTIME_IDENTITY_MISMATCH = 'context_receipt_install_proof_runtime_identity_mismatch'
 RECEIPT_RESULT_INSTALLED = 'installed'
 RECEIPT_RESULT_SUPERSEDED = 'superseded'
 
@@ -391,6 +392,7 @@ def verify_install_proof(
     *,
     fork_boundary_message_id: int,
     rewrite_user_message_id: int,
+    runtime_identity: Optional[Mapping[str, Any]] = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Shared fail-closed proof verifier for native fork reuse."""
     proof_meta: dict[str, Any] = {}
@@ -425,6 +427,32 @@ def verify_install_proof(
             return False, installed_reason or INSTALL_PROOF_INVALID, proof_meta
         if _canonical(installed_prefix) != _canonical(expected_prefix):
             return False, INSTALL_PROOF_MISMATCH, proof_meta
+        runtime = dict(runtime_identity or {})
+        if runtime:
+            expected_static = str(runtime.get('static_system_sha256') or '')
+            invariant_sections = tuple(
+                section for section in (expected_prefix.get('ordered_sections') or ())
+                if str(section.get('kind') or '') == 'invariant_system'
+            )
+            if (
+                not expected_static
+                or len(invariant_sections) != 1
+                or str(invariant_sections[0].get('content_hash') or '')
+                    != expected_static
+                or str(getattr(receipt, 'provider', '') or '')
+                    != str(runtime.get('provider') or '')
+                or str(getattr(receipt, 'model_identity', '') or '')
+                    != str(runtime.get('model') or '')
+                or str(getattr(receipt, 'session_id', '') or '')
+                    != str(runtime.get('session_id') or '')
+                or int(getattr(receipt, 'context_id', -1))
+                    != int(runtime.get('context_id'))
+                or int(getattr(receipt, 'context_epoch', -1))
+                    != int(runtime.get('context_epoch'))
+                or int(getattr(receipt, 'resident_generation', -1))
+                    != int(runtime.get('resident_generation'))
+            ):
+                return False, INSTALL_PROOF_RUNTIME_IDENTITY_MISMATCH, proof_meta
     except (TypeError, ValueError, KeyError, json.JSONDecodeError):
         return False, INSTALL_PROOF_INVALID, proof_meta
 
@@ -1053,6 +1081,7 @@ __all__ = [
     'INSTALL_PROOF_BOUNDARY_MISMATCH',
     'INSTALL_PROOF_PARTIAL_REPRESENTATION',
     'INSTALL_PROOF_MISMATCH',
+    'INSTALL_PROOF_RUNTIME_IDENTITY_MISMATCH',
     'RECEIPT_RESULT_INSTALLED',
     'RECEIPT_RESULT_SUPERSEDED',
     'ContextReceipt',
