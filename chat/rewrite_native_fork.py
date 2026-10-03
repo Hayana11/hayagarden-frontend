@@ -310,12 +310,14 @@ def _context_plan_prefix_proof(
     )
     if any(not str(runtime.get(key) or '').strip() for key in required_runtime):
         return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
+    expected_model = str(runtime.get('expected_model') or runtime.get('model') or '')
+    expected_effort = str(runtime.get('expected_effort') or runtime.get('effort') or '')
     if (
         runtime.get('parent_model')
-        and str(runtime.get('parent_model')) != str(runtime.get('model'))
+        and str(runtime.get('parent_model')) != expected_model
     ) or (
         runtime.get('parent_effort')
-        and str(runtime.get('parent_effort')) != str(runtime.get('effort'))
+        and str(runtime.get('parent_effort')) != expected_effort
     ):
         return False, REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH, proof
     if str(runtime.get('provider')) != 'claude_code':
