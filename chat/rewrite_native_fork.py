@@ -903,4 +903,3 @@ def try_prepare_native_trial_resident(
             'rewrite_cache_fallback_reason': REASON_RESOLVER_ERROR,
             'detail': type(exc).__name__,
         }
-
