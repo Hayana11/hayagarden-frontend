@@ -5,6 +5,18 @@ site. Despite the `-frontend` name it contains both servers and the SPA. Authori
 are `README.md`, `ARCHITECTURE.md`, and `docs/`. The `CLAUDE.md` / `prompts/*` files are persona
 roleplay content, **not** technical docs — ignore them for engineering/setup work.
 
+## Frontend construction gate — mandatory
+
+Before modifying any UI/page code under `app/src/**`, `app/index.html`, or `static/**`,
+**MUST read `docs/FRONTEND_CONSTRUCTION_GUIDE.md` first.**
+
+The guide defines the frozen viewport/scale authority, Chrome 78 compatibility contract,
+React-vs-static page boundary, routing/nav authority, layout geometry, and required focused tests.
+Do not introduce page-level zoom/scale, a second shell/nav authority, or new browser runtime
+requirements without explicitly auditing and reporting them.
+
+If current code conflicts with the guide, **STOP and report the drift before editing either side.**
+
 ## Cursor Cloud specific instructions
 
 Dependencies are already installed by the environment update script (system Python packages via
