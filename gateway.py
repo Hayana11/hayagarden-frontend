@@ -593,6 +593,19 @@ def _prepare_staged_rewrite_context_plan(
     runtime_identity = dict(
         turn_data.get('_rewrite_parent_runtime_identity') or {}
     )
+    runtime_identity['expected_model'] = str(
+        config_store.get('CC_CHAT_MODEL')
+        or config_store.get('MODEL')
+        or runtime_identity.get('parent_model')
+        or ''
+    ).strip()
+    runtime_identity['expected_effort'] = str(
+        config_store.get('CC_CHAT_EFFORT')
+        or runtime_identity.get('parent_effort')
+        or ''
+    ).strip()
+    runtime_identity['model'] = runtime_identity['expected_model']
+    runtime_identity['effort'] = runtime_identity['expected_effort']
     runtime_identity.update({
         'context_id': str(plan.context_id),
         'context_epoch': str(plan.context_epoch),
