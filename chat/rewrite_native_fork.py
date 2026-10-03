@@ -246,6 +246,19 @@ def _source_ref_turn_ids(source_ref: Any) -> Optional[tuple[int, int]]:
     return user_id, assistant_id
 
 
+def _receipt_member_identity(member: Any) -> tuple[Any, ...]:
+    """Project a durable receipt member onto its canonical source fields."""
+    return (
+        str(getattr(member, 'source_ref', '') or ''),
+        str(getattr(member, 'source_revision', '') or ''),
+        str(getattr(member, 'source_kind', '') or ''),
+        str(getattr(member, 'content_hash', '') or ''),
+        getattr(member, 'span_start', None),
+        getattr(member, 'span_end', None),
+        str(getattr(member, 'branch_id', '') or ''),
+    )
+
+
 def _receipt_representation_identities(
     members: tuple[Any, ...],
     *,
@@ -272,7 +285,7 @@ def _receipt_representation_identities(
         (
             rep_id,
             kind,
-            tuple(_context_plan_member_identity(member) for member in group_members),
+            tuple(_receipt_member_identity(member) for member in group_members),
         )
         for rep_id, kind, group_members in groups
     )
@@ -404,11 +417,14 @@ def _context_plan_prefix_proof(
     )
     expected_simple = tuple(
         (
-            identity[0],
-            identity[1],
-            identity[2],
+            str(getattr(representation, 'representation_id') or ''),
+            str(getattr(representation, 'kind') or ''),
+            tuple(
+                _receipt_member_identity(member)
+                for member in tuple(getattr(representation, 'source_members', ()) or ())
+            ),
         )
-        for identity in expected_groups
+        for representation in representations
     )
     if installed_groups != expected_simple:
         return False, REASON_CONTEXT_PLAN_PREFIX_MISMATCH, proof
