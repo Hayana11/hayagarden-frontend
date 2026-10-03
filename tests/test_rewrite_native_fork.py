@@ -866,8 +866,11 @@ class RewriteNativeForkTest(unittest.TestCase):
         )
         proof = json.loads(receipt_store.canonical_install_proof(plan))
         self.assertEqual(len(proof['representations']), 1)
-        self.assertEqual(len(proof['ordered_sections']), 1)
-        self.assertEqual(proof['ordered_sections'][0]['kind'], 'invariant_system')
+        self.assertEqual(len(proof['ordered_sections']), 2)
+        self.assertEqual(
+            [item['kind'] for item in proof['ordered_sections']],
+            ['invariant_system', 'recent_raw'],
+        )
         self.assertNotIn('current_request', json.dumps(proof))
 
 
