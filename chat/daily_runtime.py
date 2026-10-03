@@ -604,6 +604,48 @@ def _binding_matches_plan(binding: Optional[LocalResidentBinding], plan: DailyTu
     )
 
 
+def _backfill_local_binding_session_identity(
+    plan: DailyTurnPlan,
+    *,
+    binding: Optional[LocalResidentBinding] = None,
+) -> bool:
+    """Backfill only an empty binding session id after a successful mapped turn."""
+    current = binding if binding is not None else get_local_binding()
+    if not _binding_matches_plan(current, plan):
+        return False
+    if str(plan.manifest.get('transcript_mapping_status') or '') != 'MAPPED':
+        return False
+    session_id = str(
+        getattr(plan, 'transcript_claude_session_id', None) or ''
+    ).strip()
+    if not session_id:
+        return False
+    try:
+        transcript_process_generation = int(
+            getattr(plan, 'transcript_process_generation', 0) or 0
+        )
+        if (
+            transcript_process_generation <= 0
+            or int(current.process_generation) != transcript_process_generation
+        ):
+            return False
+    except (TypeError, ValueError):
+        return False
+    existing = str(current.claude_session_id or '').strip()
+    if existing:
+        if existing != session_id:
+            logger.warning(
+                'preserving local resident binding session mismatch '
+                'resident_key=%s existing_session_id=%s observed_session_id=%s',
+                current.resident_key,
+                existing,
+                session_id,
+            )
+        return False
+    current.claude_session_id = session_id
+    return True
+
+
 def _resident_is_alive(resident: Any) -> bool:
     alive = getattr(resident, '_alive', None)
     if callable(alive):
@@ -6928,6 +6970,11 @@ def complete_daily_turn(
         binding.bound_cursor_message_id = int(
             plan.manifest['cursor_after']
         )
+        if cas_success:
+            _backfill_local_binding_session_identity(
+                plan,
+                binding=binding,
+            )
         set_local_binding(binding)
     return dict(plan.manifest)
 
