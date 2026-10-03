@@ -700,6 +700,30 @@ class RewriteNativeForkTest(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(reason, rnf.REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH)
 
+    def test_context_plan_static_and_tool_identity_rejects_fork(self):
+        plan, receipt, members, runtime = self._context_plan_fixture()
+
+        for key, value in (
+            ('tool_profile', 'different_tool_profile'),
+            ('static_system_sha256', 'different_static_system'),
+        ):
+            runtime[key] = value
+            with mock.patch('chat.context_receipt.get_receipt', return_value=receipt), \
+                    mock.patch('chat.context_receipt.get_receipt_members', return_value=members):
+                safe, reason, _proof = rnf._context_plan_prefix_proof(
+                    self.conn,
+                    context_plan=plan,
+                    context_id=1,
+                    context_epoch=1,
+                    resident_generation=1,
+                    fork_boundary_message_id=2,
+                    rewrite_user_message_id=3,
+                    runtime_identity=runtime,
+                )
+            self.assertFalse(safe)
+            self.assertEqual(reason, rnf.REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH)
+            runtime[key] = 'text_only' if key == 'tool_profile' else 'sys'
+
     def test_context_plan_post_boundary_tail_rejects_fork(self):
         plan, receipt, members, runtime = self._context_plan_fixture()
         post_boundary = SimpleNamespace(
