@@ -1,6 +1,7 @@
 """Provider-neutral adapter behind Internal MCP's unchanged health capability."""
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import sys
@@ -31,6 +32,7 @@ def run(
         return _failure("unavailable")
     if not isinstance(metric, str) or metric not in METRICS:
         return _failure("malformed_response")
+    days_omitted = days is None
     if days is None:
         days = 180 if metric == "cycle" else 7
     maximum_days = 365 if metric == "cycle" else 30
@@ -46,8 +48,12 @@ def run(
         return _cloud_call(lambda: client.get_cycle(days), metric="cycle")
 
     if metric == "all":
-        return _run_all(client, days)
+        return _run_all(client, days, days_omitted=days_omitted)
+    if metric == "heart_rate":
+        return _run_heart_rate(client, days, days_omitted=days_omitted)
     local = _local_metric(metric, days)
+    if metric == "sleep":
+        local = _with_latest_sleep_heart_rate(local)
     if _local_usable(local):
         return local
     cloud = _cloud_call(lambda: client.get_series(metric, days), metric=metric)
@@ -69,6 +75,170 @@ def _local_metric(metric: str, days: int) -> dict[str, Any]:
 
 def _local_usable(result: Any) -> bool:
     return isinstance(result, dict) and result.get("status") == "PASS" and bool(result.get("records"))
+
+
+def _local_hr_usable(result: Any) -> bool:
+    if not isinstance(result, dict) or result.get("status") != "PASS":
+        return False
+    if result.get("view") == "snapshot":
+        return result.get("value") is not None
+    if result.get("view") == "daily":
+        return bool(result.get("records"))
+    return bool(result.get("records"))
+
+
+def _compact_heart_rate(result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("view") == "snapshot":
+        return {
+            "sampledAt": result.get("sampledAt"),
+            "dataDate": result.get("dataDate"),
+            "value": result.get("value"),
+            "unit": "bpm",
+            "source": result.get("source") or "health_connect",
+            "provider": result.get("provider") or result.get("source") or "health_connect",
+            "stale": result.get("stale") is True,
+            "ageSeconds": result.get("ageSeconds"),
+            "lastHour": result.get("lastHour") or {"min": None, "max": None, "avg": None, "samples": 0},
+            "view": "snapshot",
+        }
+    return {
+        "view": "daily",
+        "days": result.get("days"),
+        "records": list(result.get("records") or []),
+        "source": result.get("source") or "health_connect",
+        "provider": result.get("provider") or result.get("source") or "health_connect",
+        "stale": result.get("stale") is True,
+        "unit": "bpm",
+    }
+
+
+def _attach_sleep_heart_rate(row: dict[str, Any]) -> dict[str, Any]:
+    details = row.get("details") if isinstance(row.get("details"), dict) else {}
+    start = details.get("startAt") or details.get("start_at")
+    end = details.get("endAt") or details.get("end_at")
+    if not start or not end:
+        return row
+    summary = health_store.get_sleep_heart_rate(LOCAL_DB_PATH, start, end)
+    if not summary:
+        return row
+    attached = dict(row)
+    attached["heartRate"] = summary
+    return attached
+
+
+def _with_latest_sleep_heart_rate(result: dict[str, Any]) -> dict[str, Any]:
+    records = result.get("records")
+    if not isinstance(records, list) or not records or not isinstance(records[0], dict):
+        return result
+    updated = dict(result)
+    updated["records"] = [_attach_sleep_heart_rate(records[0]), *records[1:]]
+    return updated
+
+
+def _local_heart_rate(days: int, *, days_omitted: bool) -> dict[str, Any]:
+    if not os.path.exists(LOCAL_DB_PATH):
+        return (
+            health_store.get_heart_rate_snapshot(LOCAL_DB_PATH)
+            if days_omitted
+            else {"status": "UNAVAILABLE", "view": "daily", "days": days, "records": [], "source": "health_connect"}
+        )
+    try:
+        if days_omitted:
+            return health_store.get_heart_rate_snapshot(LOCAL_DB_PATH)
+        return health_store.get_heart_rate_daily(LOCAL_DB_PATH, days)
+    except (OSError, ValueError):
+        return {
+            "status": "UNAVAILABLE",
+            "view": "snapshot" if days_omitted else "daily",
+            "days": None if days_omitted else days,
+            "records": [],
+            "source": "health_connect",
+        }
+
+
+def _cloud_heart_rate_snapshot(cloud: dict[str, Any]) -> dict[str, Any]:
+    records = cloud.get("records") if isinstance(cloud.get("records"), list) else []
+    latest = next((row for row in records if isinstance(row, dict) and row.get("value") is not None), None)
+    sampled_at = latest.get("sampledAt") if latest else cloud.get("sampledAt")
+    age_seconds = None
+    if isinstance(sampled_at, str):
+        try:
+            sampled = _dt.datetime.fromisoformat(sampled_at.replace("Z", "+00:00"))
+            now = _dt.datetime.now(_dt.timezone.utc)
+            if sampled.tzinfo is None:
+                sampled = sampled.replace(tzinfo=_dt.timezone.utc)
+            age_seconds = max(0, int((now - sampled).total_seconds()))
+        except ValueError:
+            age_seconds = None
+    stale = age_seconds is None or age_seconds > health_store.HEART_RATE_STALE_AFTER_SECONDS
+    source = cloud.get("source") or cloud.get("provider") or SOURCE
+    return {
+        "status": cloud.get("status") or ("PASS" if latest else "EMPTY"),
+        "provider": source,
+        "source": source,
+        "metric": "heart_rate",
+        "view": "snapshot",
+        "value": latest.get("value") if latest else cloud.get("value"),
+        "unit": "bpm",
+        "sampledAt": sampled_at,
+        "dataDate": (latest.get("dataDate") if latest else None) or cloud.get("dataDate"),
+        "ageSeconds": age_seconds,
+        "stale": stale,
+        "lastHour": {"min": None, "max": None, "avg": None, "samples": 0},
+        **({"error_code": cloud["error_code"]} if cloud.get("error_code") else {}),
+    }
+
+
+def _summarize_cloud_heart_rate_daily(cloud: dict[str, Any], days: int) -> dict[str, Any]:
+    rows = cloud.get("records") if isinstance(cloud.get("records"), list) else []
+    by_date: dict[str, list[float]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        date = row.get("dataDate") or row.get("data_date")
+        value = row.get("value")
+        if not isinstance(date, str) or not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        by_date.setdefault(date, []).append(float(value))
+    records = []
+    for date in sorted(by_date, reverse=True)[:days]:
+        values = by_date[date]
+        records.append({
+            "dataDate": date,
+            "min": min(values),
+            "max": max(values),
+            "sampleCount": len(values),
+        })
+    source = cloud.get("source") or cloud.get("provider") or SOURCE
+    status = cloud.get("status")
+    if records:
+        status = "PASS"
+    elif status not in {"PASS", "EMPTY", "FAIL"}:
+        status = "EMPTY"
+    return {
+        "status": status,
+        "provider": source,
+        "source": source,
+        "metric": "heart_rate",
+        "view": "daily",
+        "days": days,
+        "records": records,
+        "stale": cloud.get("stale") is True,
+        **({"error_code": cloud["error_code"]} if cloud.get("error_code") else {}),
+    }
+
+
+def _run_heart_rate(client: XiaomiHealthClient, days: int, *, days_omitted: bool) -> dict[str, Any]:
+    local = _local_heart_rate(days, days_omitted=days_omitted)
+    if _local_hr_usable(local):
+        return local
+    cloud = _cloud_call(lambda: client.get_series("heart_rate", days), metric="heart_rate")
+    if cloud.get("status") == "FAIL":
+        return cloud
+    if days_omitted:
+        snapshot = _cloud_heart_rate_snapshot(cloud)
+        return snapshot if snapshot.get("value") is not None else cloud
+    return _summarize_cloud_heart_rate_daily(cloud, days)
 
 
 def _cloud_call(call: Any, *, metric: str) -> dict[str, Any]:
@@ -141,17 +311,58 @@ def _cloud_metric_status(latest: dict[str, Any], metric: str) -> dict[str, Any]:
     return output
 
 
-def _run_all(client: XiaomiHealthClient, days: int) -> dict[str, Any]:
-    locals_by_metric = {metric: _local_metric(metric, days) for metric in HEALTH_METRICS}
-    needs_cloud = [metric for metric, value in locals_by_metric.items() if not _local_usable(value)]
+def _run_all(client: XiaomiHealthClient, days: int, *, days_omitted: bool) -> dict[str, Any]:
+    locals_by_metric = {
+        metric: (
+            _local_heart_rate(days, days_omitted=days_omitted)
+            if metric == "heart_rate"
+            else _local_metric(metric, days)
+        )
+        for metric in HEALTH_METRICS
+    }
+    needs_cloud = [
+        metric
+        for metric, value in locals_by_metric.items()
+        if not (_local_hr_usable(value) if metric == "heart_rate" else _local_usable(value))
+    ]
     latest = _cloud_latest(client, days) if needs_cloud else {"status": "EMPTY", "metric_status": {}}
 
     metrics: dict[str, Any] = {}
     metric_status: dict[str, Any] = {}
     sources: set[str] = set()
     for metric in HEALTH_METRICS:
+        if metric == "heart_rate":
+            local_hr = locals_by_metric[metric]
+            if _local_hr_usable(local_hr):
+                metrics[metric] = _compact_heart_rate(local_hr)
+                metric_status[metric] = {
+                    "status": "PASS",
+                    "source": "health_connect",
+                    "stale": local_hr.get("stale") is True,
+                }
+                sources.add("health_connect")
+                continue
+            cloud_value = latest.get(metric) if isinstance(latest, dict) else None
+            if isinstance(cloud_value, dict):
+                if days_omitted:
+                    metrics[metric] = {
+                        **_cloud_heart_rate_snapshot({"records": [cloud_value], **cloud_value}),
+                        "source": SOURCE,
+                        "provider": SOURCE,
+                    }
+                else:
+                    metrics[metric] = {
+                        **_summarize_cloud_heart_rate_daily({"records": [cloud_value], **cloud_value}, days),
+                        "source": SOURCE,
+                        "provider": SOURCE,
+                    }
+            metric_status[metric] = _cloud_metric_status(latest, metric)
+            sources.add(SOURCE)
+            continue
         local_value = _local_latest(metric, locals_by_metric[metric])
         if local_value is not None:
+            if metric == "sleep":
+                local_value = _attach_sleep_heart_rate(local_value)
             metrics[metric] = local_value
             metric_status[metric] = {
                 "status": "PASS",
@@ -162,7 +373,10 @@ def _run_all(client: XiaomiHealthClient, days: int) -> dict[str, Any]:
         else:
             cloud_value = latest.get(metric) if isinstance(latest, dict) else None
             if isinstance(cloud_value, dict):
-                metrics[metric] = {**cloud_value, "source": SOURCE, "provider": SOURCE, "stale": False}
+                attached = {**cloud_value, "source": SOURCE, "provider": SOURCE, "stale": False}
+                if metric == "sleep":
+                    attached = _attach_sleep_heart_rate(attached)
+                metrics[metric] = attached
             metric_status[metric] = _cloud_metric_status(latest, metric)
             sources.add(SOURCE)
 
