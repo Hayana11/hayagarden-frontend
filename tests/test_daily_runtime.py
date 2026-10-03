@@ -5080,7 +5080,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
             source_members=(member,),
             representations=(representation,),
             ordered_sections=(current_request,),
-            budget_policy=types.SimpleNamespace(recent_raw_target=1),
+            budget_policy=types.SimpleNamespace(
+                token_budget=100,
+                reserve_budget=2,
+                recent_raw_target=1,
+            ),
             budget_policy_version='continuity_context_budget_v1',
             measurement_semantics='heuristic_cjk1_ascii4_v1',
             budget_status='fit',
