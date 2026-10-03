@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from chat import daily_context as dc
@@ -545,6 +546,202 @@ class RewriteNativeForkTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(meta.get('rewrite_cache_fallback_reason'), rnf.REASON_PROFILE_UNSUPPORTED)
 
+    def _context_plan_fixture(self, *, representation_kind='raw', dynamic=False):
+        member = SimpleNamespace(
+            seq=1,
+            source_kind='completed_turn',
+            source_ref='turn:1:2',
+            source_revision='rev-1',
+            content_hash='content-1',
+            span_start=None,
+            span_end=None,
+            logical_size=1,
+            branch_id='active-transcript',
+        )
+        representation = SimpleNamespace(
+            representation_id='raw:representation-1',
+            kind=representation_kind,
+            source_members=(member,),
+            source_hash='source-1',
+            estimated_tokens=1,
+            chunk_id='chunk-1' if representation_kind == 'chunk' else None,
+            candidate_id='candidate-1' if representation_kind == 'chunk' else None,
+            snapshot_id='snapshot-1' if representation_kind == 'chunk' else None,
+            provenance=(),
+        )
+        sections = [
+            SimpleNamespace(
+                kind='invariant_system',
+                source_ref='system:sys',
+                content_hash='sys',
+                estimated_tokens=1,
+            ),
+        ]
+        if dynamic:
+            sections.append(SimpleNamespace(
+                kind='accepted_state',
+                source_ref='state:state',
+                content_hash='state',
+                estimated_tokens=1,
+            ))
+        sections.append(SimpleNamespace(
+            kind='current_request',
+            source_ref='message:3',
+            content_hash='request',
+            estimated_tokens=1,
+        ))
+        plan = SimpleNamespace(
+            valid=True,
+            plan_hash='plan-hash',
+            source_hash='source-hash',
+            representations=(representation,),
+            ordered_sections=tuple(sections),
+        )
+        receipt = SimpleNamespace(
+            provider='claude_code',
+            model_identity='model-A',
+            session_id='sid-parent',
+            plan_hash='installed-plan-hash',
+        )
+        receipt_member = SimpleNamespace(
+            installed_order=0,
+            representation_id=representation.representation_id,
+            representation_kind=representation_kind,
+            source_ref=member.source_ref,
+            source_revision=member.source_revision,
+            source_kind=member.source_kind,
+            content_hash=member.content_hash,
+            span_start=None,
+            span_end=None,
+            branch_id=member.branch_id,
+        )
+        runtime = {
+            'provider': 'claude_code',
+            'model': 'model-A',
+            'parent_model': 'model-A',
+            'effort': 'high',
+            'parent_effort': 'high',
+            'tool_profile': 'text_only',
+            'session_id': 'sid-parent',
+            'static_system_sha256': 'sys',
+            'context_id': '1',
+            'context_epoch': '1',
+            'resident_generation': '1',
+        }
+        return plan, receipt, (receipt_member,), runtime
+
+    def _prove_context_plan(self, **kwargs):
+        plan, receipt, members, runtime = self._context_plan_fixture(**kwargs.pop('fixture', {}))
+        with mock.patch('chat.context_receipt.get_receipt', return_value=receipt), \
+                mock.patch('chat.context_receipt.get_receipt_members', return_value=members):
+            return rnf._context_plan_prefix_proof(
+                self.conn,
+                context_plan=plan,
+                context_id=1,
+                context_epoch=1,
+                resident_generation=1,
+                fork_boundary_message_id=2,
+                rewrite_user_message_id=3,
+                runtime_identity=runtime,
+                **kwargs,
+            )
+
+    def test_context_plan_safe_fork_reuse_proof_is_prefix_only(self):
+        safe, reason, proof = self._prove_context_plan()
+        self.assertTrue(safe)
+        self.assertEqual(reason, '')
+        self.assertEqual(proof['context_plan_hash'], 'plan-hash')
+        self.assertTrue(proof['context_plan_prefix_identity_hash'])
+
+    def test_context_plan_chunk_representation_rejects_fork(self):
+        safe, reason, _proof = self._prove_context_plan(
+            fixture={'representation_kind': 'chunk'},
+        )
+        self.assertFalse(safe)
+        self.assertEqual(reason, rnf.REASON_CONTEXT_PLAN_REPRESENTATION_MISMATCH)
+
+    def test_context_plan_dynamic_fixed_section_rejects_fork(self):
+        safe, reason, _proof = self._prove_context_plan(
+            fixture={'dynamic': True},
+        )
+        self.assertFalse(safe)
+        self.assertEqual(reason, rnf.REASON_CONTEXT_PLAN_FIXED_SECTION_UNPROVEN)
+
+    def test_context_plan_runtime_identity_change_rejects_fork(self):
+        plan, receipt, members, runtime = self._context_plan_fixture()
+        runtime['effort'] = 'low'
+        with mock.patch('chat.context_receipt.get_receipt', return_value=receipt), \
+                mock.patch('chat.context_receipt.get_receipt_members', return_value=members):
+            safe, reason, _proof = rnf._context_plan_prefix_proof(
+                self.conn,
+                context_plan=plan,
+                context_id=1,
+                context_epoch=1,
+                resident_generation=1,
+                fork_boundary_message_id=2,
+                rewrite_user_message_id=3,
+                runtime_identity=runtime,
+            )
+        self.assertFalse(safe)
+        self.assertEqual(reason, rnf.REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH)
+        runtime['model'] = 'model-B'
+        with mock.patch('chat.context_receipt.get_receipt', return_value=receipt), \
+                mock.patch('chat.context_receipt.get_receipt_members', return_value=members):
+            safe, reason, _proof = rnf._context_plan_prefix_proof(
+                self.conn,
+                context_plan=plan,
+                context_id=1,
+                context_epoch=1,
+                resident_generation=1,
+                fork_boundary_message_id=2,
+                rewrite_user_message_id=3,
+                runtime_identity=runtime,
+            )
+        self.assertFalse(safe)
+        self.assertEqual(reason, rnf.REASON_CONTEXT_PLAN_RUNTIME_IDENTITY_MISMATCH)
+
+    def test_context_plan_post_boundary_tail_rejects_fork(self):
+        plan, receipt, members, runtime = self._context_plan_fixture()
+        post_boundary = SimpleNamespace(
+            seq=2,
+            source_kind='completed_turn',
+            source_ref='turn:3:5',
+            source_revision='rev-5',
+            content_hash='content-5',
+            span_start=None,
+            span_end=None,
+            logical_size=1,
+            branch_id='active-transcript',
+        )
+        plan.representations[0].source_members = (plan.representations[0].source_members[0], post_boundary)
+        members = tuple(members) + (SimpleNamespace(
+            installed_order=1,
+            representation_id=plan.representations[0].representation_id,
+            representation_kind='raw',
+            source_ref=post_boundary.source_ref,
+            source_revision=post_boundary.source_revision,
+            source_kind=post_boundary.source_kind,
+            content_hash=post_boundary.content_hash,
+            span_start=None,
+            span_end=None,
+            branch_id=post_boundary.branch_id,
+        ),)
+        with mock.patch('chat.context_receipt.get_receipt', return_value=receipt), \
+                mock.patch('chat.context_receipt.get_receipt_members', return_value=members):
+            safe, reason, _proof = rnf._context_plan_prefix_proof(
+                self.conn,
+                context_plan=plan,
+                context_id=1,
+                context_epoch=1,
+                resident_generation=1,
+                fork_boundary_message_id=2,
+                rewrite_user_message_id=3,
+                runtime_identity=runtime,
+            )
+        self.assertFalse(safe)
+        self.assertEqual(reason, rnf.REASON_CONTEXT_PLAN_PREFIX_MISMATCH)
+
 
 if __name__ == '__main__':
     unittest.main()
+
