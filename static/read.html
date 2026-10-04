@@ -607,72 +607,34 @@ class Component extends DCLogic {
         }
       }
       return {
-        id: remoteId,
-        source: 'weread',
-        wereadBookId: remoteId,
-        localBookId: local ? local.bookId : '',
-        localAvailable: !!local,
+        id: remoteId, source: 'weread', wereadBookId: remoteId,
+        localBookId: local ? local.bookId : '', localAvailable: !!local,
         matchSource: matchSource || 'none',
-        title: String(raw.title || ''),
-        short: String(raw.title || '').slice(0, 8),
-        orig: String(raw.title || ''),
-        author: String(raw.author || ''),
-        authorEn: '',
-        year: 0,
+        title: String(raw.title || ''), short: String(raw.title || '').slice(0, 8),
+        orig: String(raw.title || ''), author: String(raw.author || ''), authorEn: '', year: 0,
         tags: Array.isArray(raw.category) ? raw.category : [],
-        cover: raw.cover || '',
-        posterImage: raw.cover || '',
-        total: local ? local.total : 0,
-        read: local ? local.read : 0,
-        lastReadAt: raw.readUpdateTime || '',
-        readUpdateTime: raw.readUpdateTime || '',
-        finishReading: !!raw.finishReading,
-        isTop: !!raw.isTop,
-        secret: !!raw.secret,
-        deepLink: raw.deepLink || '',
-        status: 'queue',
-        page: 0,
-        section: '',
+        cover: raw.cover || '', posterImage: raw.cover || '',
+        total: local ? local.total : 0, read: local ? local.read : 0,
+        lastReadAt: raw.readUpdateTime || '', readUpdateTime: raw.readUpdateTime || '',
+        finishReading: !!raw.finishReading, isTop: !!raw.isTop, secret: !!raw.secret,
+        deepLink: raw.deepLink || '', status: 'queue', page: 0, section: '',
       };
     });
     if (!books.length) return [];
-    let unfinished = books.filter(x => !x.finishReading);
-    unfinished = unfinished.slice().sort((a, b) => this.timeValue(b.readUpdateTime) - this.timeValue(a.readUpdateTime));
+    const unfinished = books.filter(x => !x.finishReading).slice().sort((a, b) => this.timeValue(b.readUpdateTime) - this.timeValue(a.readUpdateTime));
     const currentId = unfinished.length ? unfinished[0].id : '';
-    return books.map(x => Object.assign({}, x, {
-      status: x.finishReading ? 'done' : (x.id === currentId ? 'now' : 'queue'),
-    }));
+    return books.map(x => Object.assign({}, x, { status: x.finishReading ? 'done' : (x.id === currentId ? 'now' : 'queue') }));
   }
   localFallback(localPayload) {
     const locals = ((localPayload && localPayload.books) || []).map(x => this.localBook(x)).filter(Boolean);
     if (!locals.length) return [];
     const books = locals.map(x => ({
-      id: x.bookId,
-      source: 'local',
-      wereadBookId: x.wereadBookId,
-      localBookId: x.bookId,
-      localAvailable: true,
-      matchSource: 'local-only',
-      title: x.title,
-      short: x.title.slice(0, 8),
-      orig: x.title,
-      author: x.author,
-      authorEn: '',
-      year: 0,
-      tags: [],
-      cover: '',
-      posterImage: '',
-      total: x.total,
-      read: x.read,
-      lastReadAt: x.lastReadAt,
-      readUpdateTime: x.lastReadAt,
-      finishReading: !!(x.total && x.read >= x.total),
-      isTop: false,
-      secret: false,
-      deepLink: '',
-      status: 'queue',
-      page: 0,
-      section: '',
+      id: x.bookId, source: 'local', wereadBookId: x.wereadBookId, localBookId: x.bookId,
+      localAvailable: true, matchSource: 'local-only', title: x.title, short: x.title.slice(0, 8),
+      orig: x.title, author: x.author, authorEn: '', year: 0, tags: [], cover: '', posterImage: '',
+      total: x.total, read: x.read, lastReadAt: x.lastReadAt, readUpdateTime: x.lastReadAt,
+      finishReading: !!(x.total && x.read >= x.total), isTop: false, secret: false, deepLink: '',
+      status: 'queue', page: 0, section: '',
     }));
     const unfinished = books.filter(x => !x.finishReading).slice().sort((a, b) => this.timeValue(b.lastReadAt) - this.timeValue(a.lastReadAt));
     const currentId = unfinished.length ? unfinished[0].id : '';
@@ -744,7 +706,7 @@ class Component extends DCLogic {
   componentWillUnmount() {
     clearInterval(this._t);
   }
-  fmtTs(  fmtTs(ts) {
+  fmtTs(ts) {
     const d = new Date(ts), n = new Date(), p = x => String(x).padStart(2, '0'), hm = p(d.getHours()) + ':' + p(d.getMinutes());
     const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
     const diff = Math.round((day(n) - day(d)) / 864e5);
@@ -752,22 +714,17 @@ class Component extends DCLogic {
   }
   liveNotes(id) {
     const base = (this.state.notesByBook[id] || []).map(n => ({
-      who: n.who === 'fy' ? 'fy' : 'haya',
-      text: n.text || '',
-      quote: n.quote || '',
+      who: n.who === 'fy' ? 'fy' : 'haya', text: n.text || '', quote: n.quote || '',
       pid: typeof n.range === 'number' ? n.range : null,
-      when: n.createdAt ? this.fmtTs(n.createdAt) : '',
-      ts: this.timeValue(n.createdAt),
+      when: n.createdAt ? this.fmtTs(n.createdAt) : '', ts: this.timeValue(n.createdAt),
     }));
     const localId = ((this.state.shelf || []).find(x => x.id === id) || {}).localBookId;
     const local = (localId ? this.state.localAnnotations[localId] : []) || [];
     const localNotes = local.filter(n => n.note || n.text).map(n => ({
       who: n.author === 'fy' || n.author === 'fyodor' ? 'fy' : 'haya',
-      text: n.note || n.text || '',
-      quote: n.quote || '',
+      text: n.note || n.text || '', quote: n.quote || '',
       pid: Number.isFinite(+n.paragraphIdx) ? +n.paragraphIdx : null,
-      when: n.createdAt ? this.fmtTs(n.createdAt) : '',
-      ts: this.timeValue(n.createdAt),
+      when: n.createdAt ? this.fmtTs(n.createdAt) : '', ts: this.timeValue(n.createdAt),
     }));
     return base.concat(localNotes).sort((a, b) => a.ts - b.ts);
   }
@@ -776,7 +733,6 @@ class Component extends DCLogic {
     const rows = item && item.localBookId ? (this.state.localAnnotations[item.localBookId] || []) : [];
     return rows.filter(v => (v.author === who || (who === 'haya' && !v.author))).length;
   }
-  componentDidUpdate() {
   componentDidUpdate() {
     const prev = this._prev || this.state; this._prev = this.state;
     const S = this.state;
@@ -828,7 +784,6 @@ class Component extends DCLogic {
     b.sub = b.sub || ''; b.epi = b.epi || ''; b.epiZh = b.epiZh || '';
     return b;
   }
-  setStatus(id, patch) {
   setStatus(id, patch) { this.setState(s => ({ ov: Object.assign({}, s.ov, { [id]: Object.assign({}, s.ov[id] || {}, patch) }) })); }
   rerun(id) {
     const b = this.book(id);
