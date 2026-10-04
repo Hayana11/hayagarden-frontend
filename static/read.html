@@ -496,7 +496,14 @@
     </div>
   </div>
 </div>
-  <div data-screen-label="共读放映厅空态" style="display:{{ emptyDisplay }};max-width:430px;min-height:100vh;margin:0 auto;background:#14100F;color:#F1E6DF;font-family:'Noto Serif SC',serif;align-items:center;justify-content:center;flex-direction:column;gap:14px;padding:40px;textclass Component extends DCLogic {
+  <div data-screen-label="共读放映厅空态" style="display:{{ emptyDisplay }};max-width:430px;min-height:100vh;margin:0 auto;background:#14100F;color:#F1E6DF;font-family:'Noto Serif SC',serif;align-items:center;justify-content:center;flex-direction:column;gap:14px;padding:40px;text-align:center">
+    <span style="font-size:19px;font-weight:600;letter-spacing:5px">共读放映厅</span>
+    <span style="font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:3px;color:#7D6E69">SCREEN 01 · PRIVATE</span>
+    <span style="font-size:14px;line-height:1.9;color:#A8968F">{{ emptyMessage }}</span>
+  </div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:412,&quot;height&quot;:915},&quot;projectorFlicker&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;氛围&quot;}}">
+class Component extends DCLogic {
   KEY = 'cinema-shelf-v1';
   AUTHOR = { author: '陀思妥耶夫斯基', authorEn: 'F. M. Dostoevsky' };
   // Runtime shelf data comes from the server; no demo titles live in this page.
