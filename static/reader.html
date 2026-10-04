@@ -16,9 +16,17 @@
     'react-dom.production.min.js',
     'support.js?v=20261004-raw-template-fix'
   ];
-  for (var i = 0; i < files.length; i++) {
-    document.write('<script src="' + base + files[i] + '"><\/script>');
+  function load(index) {
+    if (index >= files.length) return;
+    var script = document.createElement('script');
+    script.src = base + files[index];
+    script.onload = function () { load(index + 1); };
+    script.onerror = function () {
+      console.error('[dc] failed to load ' + script.src);
+    };
+    document.head.appendChild(script);
   }
+  load(0);
 })();
 </script>
 </head>
