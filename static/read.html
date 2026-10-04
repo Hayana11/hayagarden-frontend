@@ -3,32 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script>
-(function () {
-  var pathname = window.location.pathname || '';
-  var base = pathname.indexOf('/preview/') === 0
-    ? '/preview/'
-    : window.location.port === '5174'
-      ? './'
-      : '/static/';
-  var files = [
-    'react.production.min.js',
-    'react-dom.production.min.js',
-    'support.js?v=20261004-raw-template-fix'
-  ];
-  function load(index) {
-    if (index >= files.length) return;
-    var script = document.createElement('script');
-    script.src = base + files[index];
-    script.onload = function () { load(index + 1); };
-    script.onerror = function () {
-      console.error('[dc] failed to load ' + script.src);
-    };
-    document.head.appendChild(script);
-  }
-  load(0);
-})();
-</script>
+<script src="/static/react.production.min.js"></script>
+<script src="/static/react-dom.production.min.js"></script>
+<script src="/static/support.js?v=20261004-raw-template-fix"></script>
 </head>
 <body>
 <x-dc>
