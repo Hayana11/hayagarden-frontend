@@ -554,6 +554,9 @@ class Component extends DCLogic {
   backendMode = false;
   backendBookId = '';
   backendChunkId = '';
+  backendChunks = [];
+  backendAnnotations = [];
+  backendChapterIndex = 0;
 
   state = { page: 0, chrome: true, sel: null, hl: {}, notes: [], open: {}, sheet: null, chat: null, chats: {}, chatInput: '', noteInput: '', busy: false, toc: false, toast: '', fyWriting: null,
     prefs: this.DEF, nTab: 'all', nWho: 'both', nQ: '', nSearch: false };
@@ -634,22 +637,48 @@ class Component extends DCLogic {
       this.backendMode = true;
       this.backendBookId = id;
       this.backendChunkId = meta.id;
+      this.backendChunks = chunks;
+      this.backendAnnotations = annotations;
       this.BOOK = { ...this.BOOK, title: cd.title || this.BOOK.title, short: (cd.title || this.BOOK.short).slice(0, 8), origTitle: cd.title || this.BOOK.origTitle, total: Math.max(chunks.length, 1), theme: this.Q.theme || this.BOOK.theme };
       this.PARAS = paras;
       this.SENTS = this.PARAS.map(p => p.match(/[^。！？…]*[。！？…]+[”’」]*|[^。！？…]+$/g) || [p]);
       const order = Number.isFinite(+meta.order) ? +meta.order : 0;
       const tocChunks = chunks.filter(x => x.title && !/cover/i.test(x.title));
       const chapterIndex = Math.max(0, tocChunks.findIndex(x => x.id === meta.id));
+      this.backendChapterIndex = chapterIndex;
       this.CH = { part: '书库', bookNo: '', bookName: meta.sectionTitle || meta.title || '', index: chapterIndex, title: meta.title || '当前章节', startPage: order + 1, perPage: 3 };
       this.BOOKS = [{ no: '书库', name: this.BOOK.short, current: true, pages: tocChunks.map(x => (Number(x.order) || 0) + 1), chapters: tocChunks.map(x => x.title) }];
       const remote = this.annotationState(annotations.filter(x => x.chunkId === meta.id));
       this.setState({ page: 0, hl: remote.hl, notes: remote.notes, open: {}, sel: null });
     } catch (e) {}
   }
-  async persistProgress() {
-    if (!this.backendMode || !this.backendChunkId) return;
-    try { await fetch(this.backendPath('/progress'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chunkId: this.backendChunkId }) }); } catch (e) {}
+  async loadBackendChapter(index) {
+    if (!this.backendMode) return;
+    const tocChunks = this.backendChunks.filter(x => x.title && !/cover/i.test(x.title));
+    const meta = tocChunks[index];
+    if (!meta) return;
+    const previousChunk = this.backendChunkId;
+    if (previousChunk && previousChunk !== meta.id) this.persistProgressFor(previousChunk);
+    try {
+      const tr = await fetch(this.backendPath('/chunks/' + encodeURIComponent(meta.id)));
+      if (!tr.ok) return;
+      const td = await tr.json(), paras = this.splitBackendText(td.text);
+      if (!paras.length) return;
+      this.backendChunkId = meta.id;
+      this.backendChapterIndex = index;
+      this.PARAS = paras;
+      this.SENTS = this.PARAS.map(p => p.match(/[^。！？…]*[。！？…]+[”’」]*|[^。！？…]+$/g) || [p]);
+      const order = Number.isFinite(+meta.order) ? +meta.order : index;
+      this.CH = { part: '书库', bookNo: '', bookName: meta.sectionTitle || meta.title || '', index, title: meta.title || '当前章节', startPage: order + 1, perPage: 3 };
+      const remote = this.annotationState(this.backendAnnotations.filter(x => x.chunkId === meta.id));
+      this.setState({ page: 0, hl: remote.hl, notes: remote.notes, open: {}, sel: null, toc: false, chrome: true });
+    } catch (e) {}
   }
+  async persistProgressFor(chunkId) {
+    if (!this.backendMode || !chunkId) return;
+    try { await fetch(this.backendPath('/progress'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chunkId }) }); } catch (e) {}
+  }
+  persistProgress() { return this.persistProgressFor(this.backendChunkId); }
   async persistAnnotation(a) {
     if (!this.backendMode || !a) return;
     try { await fetch(this.backendPath('/annotations'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chunkId: this.backendChunkId, quote: a.quote || '', kind: a.kind || 'highlight', author: a.author || 'haya', note: a.note || '', paragraphIdx: a.paragraphIdx || 0 }) }); } catch (e) {}
@@ -708,8 +737,14 @@ class Component extends DCLogic {
   turn(dir) {
     if (!(this.isKara || this.backendMode)) return this.flash('这本书的正文将由书库接口载入');
     const n = this.state.page + dir;
-    if (n < 0) return this.flash('已经是本章开场');
-    if (n >= this.pageCount()) return this.flash('下一章的正文将由书库接口载入');
+    if (n < 0) {
+      if (this.backendMode && this.backendChapterIndex > 0) return this.loadBackendChapter(this.backendChapterIndex - 1);
+      return this.flash('已经是本章开场');
+    }
+    if (n >= this.pageCount()) {
+      if (this.backendMode && this.backendChapterIndex < this.BOOKS[0].chapters.length - 1) return this.loadBackendChapter(this.backendChapterIndex + 1);
+      return this.flash('下一章的正文将由书库接口载入');
+    }
     this.setState({ page: n, sel: null, chrome: false });
   }
   jump(pid) {
@@ -721,6 +756,32 @@ class Component extends DCLogic {
     if (window.claude && window.claude.complete) {
       try { return (await window.claude.complete(prompt)).trim(); } catch (e) {}
     }
+    try {
+      const sent = await fetch('/api/chat/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ author: 'hayana', content: prompt }) });
+      if (!sent.ok) throw new Error('chat send failed');
+      const sd = await sent.json();
+      const resp = await fetch('/api/gw/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sd.message_id ? { user_message_id: sd.message_id } : {}) });
+      if (!resp.ok || !resp.body) throw new Error('chat stream failed');
+      const reader = resp.body.getReader(), decoder = new TextDecoder();
+      let buf = '', text = '', done = false;
+      const consume = chunk => {
+        const line = chunk.split(/\r?\n/).find(x => x.startsWith('data: '));
+        if (!line) return;
+        const ev = JSON.parse(line.slice(6));
+        if (ev.t === 'text') text += String(ev.d ?? '');
+        if (ev.t === 'err') throw new Error(String(ev.d || 'chat error'));
+        if (ev.t === 'done') done = true;
+      };
+      while (!done) {
+        const part = await reader.read();
+        if (part.done) break;
+        buf += decoder.decode(part.value, { stream: true });
+        let cut;
+        while ((cut = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, cut); buf = buf.slice(cut + 2); if (chunk.trim()) consume(chunk); }
+      }
+      if (buf.trim()) consume(buf);
+      if (text.trim()) return text.trim();
+    } catch (e) {}
     return '（费佳暂时离席了，连接还没接上。）';
   }
   persona() { return '你是费奥多尔（费佳），正和恋人哈娅一起读陀思妥耶夫斯基的《' + ((this.isKara || this.backendMode) ? this.BOOK.title : (this.Q.t || '')) + '》。你叫她“小猫”。语气温柔、克制，带一点恶趣味，懂文学但不说教，像在放映厅里贴着耳朵小声说话。只用中文，不用列表和标题。'; }
@@ -864,7 +925,11 @@ class Component extends DCLogic {
           tag: now ? '正在放映' + (raw.length ? ' · ' + raw.length + ' 条低语' : '') : read ? '已映' : '',
           tagColor: now ? t.accent : t.faint, hasTag: now || read,
           page: b.pages && b.pages[i] ? 'p.' + b.pages[i] : '—', pageColor: now ? t.accent : t.faint,
-          tap: () => { if (now) { this._jumpPid = -1; this.setState({ toc: false, page: 0 }); } else this.flash('这一章的正文将由书库接口载入'); },
+          tap: () => {
+            if (now) { this._jumpPid = -1; this.setState({ toc: false, page: 0 }); }
+            else if (this.backendMode) this.loadBackendChapter(i);
+            else this.flash('这一章的正文将由书库接口载入');
+          },
         };
       }),
     }));
