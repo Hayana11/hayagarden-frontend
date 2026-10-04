@@ -551,6 +551,10 @@ class Component extends DCLogic {
   };
   DEF = { light: 'std', font: 'song', size: 18, lh: 2, margin: 30, turn: 'swipe', fabSide: 'right', fabY: 0.62 };
 
+  backendMode = false;
+  backendBookId = '';
+  backendChunkId = '';
+
   state = { page: 0, chrome: true, sel: null, hl: {}, notes: [], open: {}, sheet: null, chat: null, chats: {}, chatInput: '', noteInput: '', busy: false, toc: false, toast: '', fyWriting: null,
     prefs: this.DEF, nTab: 'all', nWho: 'both', nQ: '', nSearch: false };
   Q = Object.fromEntries(new URLSearchParams(location.search));
@@ -588,6 +592,67 @@ class Component extends DCLogic {
     window.addEventListener('keydown', this._key);
     window.addEventListener('scroll', this._scroll, { passive: true });
     this._prev = this.state;
+    if (this.Q.book) this.loadBackendBook();
+  }
+  backendPath(suffix) { return '/api/books/' + encodeURIComponent(this.backendBookId || this.Q.book) + suffix; }
+  splitBackendText(text) {
+    return String(text || '').replace(/\r/g, '').split(/\n\s*\n+/).map(x => x.replace(/^#+\s*/gm, '').replace(/\n+/g, ' ').trim()).filter(Boolean);
+  }
+  annotationState(rows) {
+    const hl = {}, notes = [];
+    (rows || []).forEach(a => {
+      const pid = Math.max(0, Number.isFinite(+a.paragraphIdx) ? +a.paragraphIdx : 0);
+      const ss = this.SENTS[pid] || [];
+      const qi = a.quote && ss.length ? Math.max(0, ss.findIndex(x => x.includes(a.quote))) : 0;
+      const sid = pid + '-' + (qi < 0 ? 0 : qi);
+      const who = a.author === 'fy' || a.author === 'fyodor' ? 'fy' : 'haya';
+      if (a.kind === 'highlight' || !a.note) hl[sid] = { id: a.id, who, at: a.createdAt || '', style: a.style || 'line' };
+      if (a.note) notes.push({ id: a.id, who, pid, sid, quote: a.quote || '', text: a.note, when: a.createdAt || '' });
+    });
+    return { hl, notes };
+  }
+  async loadBackendBook() {
+    const id = this.Q.book;
+    try {
+      const enc = encodeURIComponent(id);
+      const [cr, ar, rr] = await Promise.all([
+        fetch('/api/books/' + enc + '/chunks'),
+        fetch('/api/books/' + enc + '/annotations'),
+        fetch('/api/books/current'),
+      ]);
+      if (!cr.ok) return;
+      const cd = await cr.json(), chunks = Array.isArray(cd.chunks) ? cd.chunks : [];
+      if (!chunks.length) return;
+      const annotations = ar.ok ? ((await ar.json()).annotations || []) : [];
+      const current = rr.ok ? (await rr.json()).book : null;
+      const wanted = this.Q.chunk || this.Q.chunkId || (current && current.bookId === id ? current.lastChunkId : '');
+      const meta = chunks.find(x => x.id === wanted) || chunks.find(x => x.order > 0 && !/cover/i.test(x.title || '')) || chunks[0];
+      const tr = await fetch('/api/books/' + enc + '/chunks/' + encodeURIComponent(meta.id));
+      if (!tr.ok) return;
+      const td = await tr.json(), paras = this.splitBackendText(td.text);
+      if (!paras.length) return;
+      this.backendMode = true;
+      this.backendBookId = id;
+      this.backendChunkId = meta.id;
+      this.BOOK = { ...this.BOOK, title: cd.title || this.BOOK.title, short: (cd.title || this.BOOK.short).slice(0, 8), origTitle: cd.title || this.BOOK.origTitle, total: Math.max(chunks.length, 1), theme: this.Q.theme || this.BOOK.theme };
+      this.PARAS = paras;
+      this.SENTS = this.PARAS.map(p => p.match(/[^。！？…]*[。！？…]+[”’」]*|[^。！？…]+$/g) || [p]);
+      const order = Number.isFinite(+meta.order) ? +meta.order : 0;
+      const tocChunks = chunks.filter(x => x.title && !/cover/i.test(x.title));
+      const chapterIndex = Math.max(0, tocChunks.findIndex(x => x.id === meta.id));
+      this.CH = { part: '书库', bookNo: '', bookName: meta.sectionTitle || meta.title || '', index: chapterIndex, title: meta.title || '当前章节', startPage: order + 1, perPage: 3 };
+      this.BOOKS = [{ no: '书库', name: this.BOOK.short, current: true, pages: tocChunks.map(x => (Number(x.order) || 0) + 1), chapters: tocChunks.map(x => x.title) }];
+      const remote = this.annotationState(annotations.filter(x => x.chunkId === meta.id));
+      this.setState({ page: 0, hl: remote.hl, notes: remote.notes, open: {}, sel: null });
+    } catch (e) {}
+  }
+  async persistProgress() {
+    if (!this.backendMode || !this.backendChunkId) return;
+    try { await fetch(this.backendPath('/progress'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chunkId: this.backendChunkId }) }); } catch (e) {}
+  }
+  async persistAnnotation(a) {
+    if (!this.backendMode || !a) return;
+    try { await fetch(this.backendPath('/annotations'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chunkId: this.backendChunkId, quote: a.quote || '', kind: a.kind || 'highlight', author: a.author || 'haya', note: a.note || '', paragraphIdx: a.paragraphIdx || 0 }) }); } catch (e) {}
   }
   componentWillUnmount() { clearTimeout(this._hide); clearTimeout(this._toastT); window.removeEventListener('keydown', this._key); window.removeEventListener('scroll', this._scroll); }
   componentDidUpdate() {
@@ -622,6 +687,7 @@ class Component extends DCLogic {
     if (prev.page !== S.page || prev.hl !== S.hl || prev.notes !== S.notes) {
       try { if (this.isKara) localStorage.setItem(this.KEY, JSON.stringify({ page: S.page, hl: S.hl, notes: S.notes })); } catch (e) {}
     }
+    if (this.backendMode && prev.page !== S.page) this.persistProgress();
     if (prev.prefs !== S.prefs) { try { localStorage.setItem(this.PKEY, JSON.stringify(S.prefs)); } catch (e) {} }
     const cs = this.chatScrollRef.current;
     if (cs && (prev.chats !== S.chats || prev.busy !== S.busy)) cs.scrollTop = cs.scrollHeight;
@@ -640,7 +706,7 @@ class Component extends DCLogic {
   }
   setPref(k, v) { this.setState(s => ({ prefs: Object.assign({}, s.prefs, { [k]: v }) })); }
   turn(dir) {
-    if (!this.isKara) return this.flash('这本书的正文将由书库接口载入');
+    if (!(this.isKara || this.backendMode)) return this.flash('这本书的正文将由书库接口载入');
     const n = this.state.page + dir;
     if (n < 0) return this.flash('已经是本章开场');
     if (n >= this.pageCount()) return this.flash('下一章的正文将由书库接口载入');
@@ -657,7 +723,7 @@ class Component extends DCLogic {
     }
     return '（费佳暂时离席了，连接还没接上。）';
   }
-  persona() { return '你是费奥多尔（费佳），正和恋人哈娅一起读陀思妥耶夫斯基的《' + (this.isKara ? this.BOOK.title : (this.Q.t || '')) + '》。你叫她“小猫”。语气温柔、克制，带一点恶趣味，懂文学但不说教，像在放映厅里贴着耳朵小声说话。只用中文，不用列表和标题。'; }
+  persona() { return '你是费奥多尔（费佳），正和恋人哈娅一起读陀思妥耶夫斯基的《' + ((this.isKara || this.backendMode) ? this.BOOK.title : (this.Q.t || '')) + '》。你叫她“小猫”。语气温柔、克制，带一点恶趣味，懂文学但不说教，像在放映厅里贴着耳朵小声说话。只用中文，不用列表和标题。'; }
   async sendChat() {
     const S = this.state, q = S.chatInput.trim();
     if (!q || S.busy || !S.chat) return;
@@ -672,6 +738,7 @@ class Component extends DCLogic {
     this.setState({ fyWriting: note.pid });
     const reply = await this.complete(this.persona() + '\n\n这段原文：「' + this.PARAS[note.pid] + '」\n哈娅在页边写了：「' + note.text + '」\n请你在她的批注旁边回一句，不超过50字，只写批注本身。');
     this.setState(s => ({ fyWriting: null, notes: s.notes.concat([{ id: 'fy-' + Date.now(), who: 'fy', pid: note.pid, text: reply, when: this.now() }]) }));
+    this.persistAnnotation({ kind: 'note', author: 'fy', quote: this.PARAS[note.pid], note: reply, paragraphIdx: note.pid });
   }
 
   renderVals() {
@@ -740,13 +807,13 @@ class Component extends DCLogic {
       };
     };
     const idxs = scroll ? [...Array(PCNT).keys()] : [S.page];
-    const pages = this.isKara ? idxs.map(i => ({
+    const pages = (this.isKara || this.backendMode) ? idxs.map(i => ({
       i, no: CH.startPage + i, showMarker: scroll, gap, line: t.line, faint: t.faint,
       paras: this.PARAS.slice(i * per, (i + 1) * per).map((_, k) => paraOf(i * per + k)),
     })) : [];
 
     const last = scroll || S.page >= PCNT - 1;
-    const nextTitle = this.BOOKS[1].chapters[CH.index + 1];
+    const nextTitle = (this.BOOKS[0] && this.BOOKS[0].chapters && this.BOOKS[0].chapters[CH.index + 1]) || '';
     const chatKey = S.chat && S.chat.key, lines = (chatKey && S.chats[chatKey]) || [];
     const chrome = S.chrome && !sel && !S.sheet;
     const sheet = S.sheet;
@@ -807,7 +874,7 @@ class Component extends DCLogic {
       fyC: pc('fy'), hyC: pc('haya'), bodyFont: font, margin: M + 'px',
       screenName: this.PAPER[pf.light].name,
       orn: Object.fromEntries(Object.keys(this.THEMES).map(k => [k, tk === k])),
-      noText: !this.isKara, tocNote: this.isKara ? '第一部 至 第三部 · 已散场' : '目录将由书库接口载入',
+      noText: !(this.isKara || this.backendMode), tocNote: (this.isKara || this.backendMode) ? '书库 · 已接入' : '目录将由书库接口载入',
       chapterLabel: CH.bookNo + ' · 第' + (CH.index + 1) + '章', roman: roman[CH.index],
       bookLabel: CH.bookNo + ' · ' + CH.bookName, chapterTitle: CH.title, partLabel: CH.part,
       bookTitle: this.BOOK.title, origTitle: this.BOOK.origTitle,
@@ -876,8 +943,10 @@ class Component extends DCLogic {
         if (!sel) return;
         const hl = Object.assign({}, S.hl);
         if (this.hlWho(hl[sel.sid]) === 'haya') { delete hl[sel.sid]; return this.setState({ hl, sel: null }); }
-        hl[sel.sid] = { who: 'haya', at: this.now(), style: pf.hlStyle || 'line' };
+        const style = pf.hlStyle || 'line';
+        hl[sel.sid] = { who: 'haya', at: this.now(), style };
         this.setState({ hl, sel: Object.assign({}, sel, { styles: true }) });
+        this.persistAnnotation({ kind: 'highlight', quote: sel.txt, paragraphIdx: sel.pid });
       },
       doNote: () => this.setState({ sheet: 'note', noteInput: '' }),
       doAsk: () => sel && openChat('p' + sel.pid, this.PARAS[sel.pid], sel.pid),
@@ -998,12 +1067,13 @@ class Component extends DCLogic {
         const note = { id: 'h-' + Date.now(), who: 'haya', pid: sel.pid, sid: sel.sid, quote: sel.txt, text: txt, when: this.now() };
         const hl = Object.assign({}, S.hl); if (!hl[sel.sid]) hl[sel.sid] = { who: 'haya', at: note.when };
         this.setState({ notes: S.notes.concat([note]), hl, sheet: null, sel: null, open: Object.assign({}, S.open, { [sel.pid]: true }) });
+        this.persistAnnotation({ kind: 'note', author: 'haya', quote: note.quote, note: txt, paragraphIdx: note.pid });
         if (P.fyReplies ?? true) this.fyReply(note);
       },
 
       toast: S.toast, toastOp: S.toast ? 1 : 0,
     };
-    if (this.isKara) return out;
+    if (this.isKara || this.backendMode) return out;
     const Q = this.Q, p = +Q.p || 1, n = +Q.n || 0, pcn = n ? Math.round(p / n * 100) : 0;
     return Object.assign(out, {
       chapterLabel: Q.t || '', roman: '', bookLabel: Q.o || '', chapterTitle: Q.t || '', partLabel: '—',
