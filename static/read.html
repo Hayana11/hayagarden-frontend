@@ -985,16 +985,6 @@
     };
   }
 }
-idleText: b.status === 'done' ? '这一部已经散场。想再看一遍，就重映它。' : '还没有开映。排进今晚，它就会出现在场次里。',
-      idleLabel: b.status === 'done' ? '重映这一部' : '排片 · 今晚上映',
-      idleAction: () => (b.status === 'done' ? this.rerun(b.id) : this.schedule(b.id)),
-      seats, seatRow, notes, notesEmpty: notesAll.length === 0,
-      notesLabel: S.seat ? '只看' + this.PEOPLE[S.seat].name + ' · 点座位恢复' : 'whispers after the reel',
-      groups, openList: () => this.setState({ list: true, picker: false }), closeList: () => this.setState({ list: false }),
-      listOp: S.list ? 1 : 0, listPE: S.list ? 'auto' : 'none', listY: S.list ? '0' : '24px',
-    };
-  }
-}
 </script>
 </body>
 </html>
