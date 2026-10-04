@@ -1,331 +1,810 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>read · 共读</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
-<link rel="stylesheet" href="/static/static-nav.css">
-<style>
-*{margin:0;padding:0;box-sizing:border-box;}
-:root{
-  --bg1:#fdf8ef;--bg2:#f7f0e4;
-  --card:rgba(255,255,255,0.65);--card-b:rgba(255,255,255,0.9);
-  --text:#3a2e28;--muted:#9a8a7a;--hint:#b8a090;
-  --primary-bg:rgba(124,106,138,0.15);--primary:#5a4a6a;--primary-dot:#7c6a8a;
-  --amber:rgba(212,165,116,0.85);--amber-s:#d4a574;
-  --div:rgba(210,185,155,0.2);
-  --tag-off:rgba(255,255,255,0.6);--tag-off-b:rgba(210,185,155,0.3);
-}
-html,body{-webkit-text-size-adjust:100%;text-size-adjust:100%;height:100%;overflow:hidden;}
-body{background:linear-gradient(160deg,var(--bg1) 0%,var(--bg2) 100%);background-attachment:fixed;color:var(--text);font-family:-apple-system,'PingFang SC','HarmonyOS Sans SC','Noto Sans CJK SC','Noto Sans SC',sans-serif;max-width:480px;margin:0 auto;display:flex;flex-direction:column;}
-.hd{flex-shrink:0;padding:52px 20px 16px;background:rgba(253,248,239,0.88);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--div);text-align:center;}
-.hd-title{font-family:Georgia,'Times New Roman',serif;font-size:22px;letter-spacing:6px;color:var(--text);font-weight:700;}
-.hd-sub{font-size:11px;letter-spacing:1px;color:var(--amber-s);margin-top:4px;}
-.scroll{flex:1;overflow-y:auto;padding:20px 16px calc(80px + env(safe-area-inset-bottom,0px));}
-.scroll::-webkit-scrollbar{display:none;}
-.sec-label{font-size:10px;letter-spacing:3px;color:var(--hint);margin:0 2px 12px;text-transform:uppercase;}
-/* now reading card */
-.now-card{background:var(--card);border:1px solid var(--card-b);border-radius:18px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:16px;display:flex;margin-bottom:24px;cursor:pointer;transition:transform .15s;}
-/* now reading card */
-.now-card>*+*{margin-left:14px;}
-.now-card:active{transform:scale(.98);}
-.now-cover{width:72px;height:96px;border-radius:10px;flex-shrink:0;display:flex;align-items:center;justify-content:center;}
-.now-info{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between;}
-.now-title{font-family:Georgia,'Times New Roman',serif;font-size:15px;font-weight:700;color:var(--text);line-height:1.4;margin-bottom:4px;}
-.now-author{font-size:12px;color:var(--muted);margin-bottom:12px;}
-.prog-bar{height:4px;background:rgba(210,185,155,0.25);border-radius:2px;overflow:hidden;margin-bottom:5px;}
-.prog-fill{height:100%;background:var(--primary-dot);border-radius:2px;transition:width .4s;}
-.prog-txt{font-size:11px;color:var(--hint);}
-.now-empty{text-align:center;color:var(--hint);font-size:13px;padding:24px 0;}
-/* bookshelf */
-.shelf-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
-.add-btn{width:30px;height:30px;border-radius:50%;background:var(--amber);border:none;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-.book-list{display:flex;flex-direction:column;}.book-list > * + *{margin-top:10px;}
-.book-card{background:var(--card);border:1px solid var(--card-b);border-radius:14px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:12px 14px;display:flex;cursor:pointer;transition:transform .15s;}
-.book-card>*+*{margin-left:12px;}
-.book-card:active{transform:scale(.98);}
-.book-cover{width:42px;height:56px;border-radius:7px;flex-shrink:0;}
-.book-info{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;}
-.book-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
-.book-author{font-size:11px;color:var(--muted);margin-bottom:8px;}
-.book-prog{display:flex;align-items:center;}
-.book-prog>*+*{margin-left:8px;}
-.book-prog-bar{flex:1;height:3px;background:rgba(210,185,155,0.25);border-radius:2px;overflow:hidden;}
-.book-prog-fill{height:100%;background:var(--primary-dot);border-radius:2px;}
-.book-prog-txt{font-size:10px;color:var(--hint);flex-shrink:0;}
-/* modal base */
-.mo{display:none;position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.3);z-index:100;align-items:center;justify-content:center;padding:24px;}
-.mo.show{display:flex;}
-.mb{background:rgba(255,255,255,.97);border-radius:16px;padding:20px;width:100%;max-width:400px;}
-.mb h3{font-size:15px;font-weight:700;color:var(--text);margin-bottom:14px;}
-.mb input,.mb textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--tag-off-b);background:rgba(255,255,255,.7);font-size:13px;font-family:inherit;color:var(--text);outline:none;margin-bottom:10px;}
-.mb textarea{resize:none;min-height:80px;line-height:1.6;}
-.mb input:focus,.mb textarea:focus{border-color:rgba(212,165,116,.6);}
-.mb-row{display:flex;margin-top:4px;}
-.mb-row>*+*{margin-left:8px;}
-.mb-cancel{flex:1;padding:10px;border:1px solid var(--tag-off-b);border-radius:10px;background:var(--tag-off);color:var(--muted);font-size:13px;cursor:pointer;}
-.mb-send{flex:1;padding:10px;border:none;border-radius:10px;background:var(--amber);color:#fff;font-size:13px;cursor:pointer;}
-.mb-send:disabled{opacity:.5;cursor:not-allowed;}
-/* tab bar */
-.tab-bar{display:flex;margin-bottom:14px;background:rgba(210,185,155,0.15);border-radius:10px;padding:3px;}
-/* tab bar */
-.tab-bar>*+*{margin-left:3px;}
-.tab-btn{flex:1;padding:7px;border:none;border-radius:8px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit;transition:all .15s;}
-.tab-btn.act{background:#fff;color:var(--text);font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.08);}
-/* drop zone */
-.drop-zone{border:1.5px dashed rgba(210,185,155,0.6);border-radius:12px;padding:28px 20px;display:flex;flex-direction:column;align-items:center;cursor:pointer;transition:border-color .15s,background .15s;margin-bottom:10px;}
-/* drop zone */
-.drop-zone>*+*{margin-top:6px;}
-.drop-zone:hover,.drop-zone.drag-over{border-color:var(--amber-s);background:rgba(212,165,116,0.05);}
-.drop-zone i{font-size:28px;color:var(--hint);}
-.drop-zone .dz-main{font-size:13px;color:var(--muted);}
-.drop-zone .dz-hint{font-size:11px;color:var(--hint);}
-/* file info row */
-.file-info-row{display:flex;align-items:center;padding:9px 12px;background:rgba(210,185,155,0.12);border-radius:9px;margin-bottom:10px;}
-/* file info row */
-.file-info-row>*+*{margin-left:8px;}
-.file-info-name{font-size:12px;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.file-info-size{font-size:11px;color:var(--hint);flex-shrink:0;}
-.file-remove{border:none;background:none;color:var(--hint);cursor:pointer;font-size:16px;line-height:1;padding:0 2px;flex-shrink:0;}
-/* spinner */
-@keyframes spin{to{transform:rotate(360deg)}}
-.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.4);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle;margin-right:5px;}
-/* status messages */
-.up-ok{font-size:13px;color:#6a9a6a;text-align:center;padding:6px 0;}
-.up-err{font-size:13px;color:#c06060;text-align:center;padding:6px 0;}
-/* bottom nav — see /static/static-nav.css */
-</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
 </head>
 <body>
-<div class="hd">
-  <div class="hd-title">read</div>
-  <div class="hd-sub">she is reading · with me</div>
-</div>
-<div class="scroll">
-  <div class="sec-label">now reading</div>
-  <div id="now-area"></div>
-  <div class="sec-label">bookshelf</div>
-  <div class="shelf-hd">
-    <div></div>
-    <button class="add-btn" onclick="openAdd()">+</button>
+<x-dc>
+<helmet>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;0,6..96,600;1,6..96,400;1,6..96,500&amp;family=Cormorant+Garamond:ital,wght@0,500;1,400;1,500&amp;family=Forum&amp;family=Noto+Serif+SC:wght@400;500;600;700&amp;family=Space+Grotesk:wght@400;500;600&amp;display=swap" rel="stylesheet">
+  <style>
+    html, body { margin:0; padding:0; background:#14100F; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    a { color:#E9C9C4; text-decoration:none; }
+    a:hover { color:#F1E6DF; }
+    @keyframes livePulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    @keyframes lightsDown { 0%{filter:brightness(.15);opacity:0;transform:scale(.985)} 60%{opacity:1} 100%{filter:brightness(1);opacity:1;transform:scale(1)} }
+    @keyframes riseIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
+    @keyframes beamFlicker { 0%,100%{opacity:.9} 8%{opacity:.75} 10%{opacity:.95} 47%{opacity:.82} 50%{opacity:1} 72%{opacity:.86} }
+    @keyframes cursorGlow { 0%,100%{box-shadow:0 0 10px 2px rgba(241,230,223,.35)} 50%{box-shadow:0 0 18px 4px rgba(241,230,223,.55)} }
+    @keyframes candle { 0%,100%{opacity:1;transform:scaleY(1)} 40%{opacity:.85;transform:scaleY(.92)} 70%{opacity:.95;transform:scaleY(1.05)} }
+  </style>
+</helmet>
+
+<div data-screen-label="共读放映厅" style="max-width:430px;margin:0 auto;min-height:100vh;background:{{ roomBg }};transition:background 1.2s ease;font-family:'Noto Serif SC',serif;color:#F1E6DF;position:relative;overflow:hidden;padding:22px 20px 60px;display:flex;flex-direction:column;gap:30px">
+
+  <div style="display:flex;align-items:center;gap:14px;position:relative;z-index:2">
+    <a href="/preview/" style="width:38px;height:38px;border-radius:50%;background:rgba(241,230,223,.06);display:flex;align-items:center;justify-content:center;font-size:20px;color:#BFAEA8;flex-shrink:0">‹</a>
+    <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0">
+      <span style="font-size:17px;font-weight:600;letter-spacing:4px">共读放映厅</span>
+      <span style="font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:3px;color:#9A8A84">SCREEN 01 · PRIVATE</span>
+    </div>
+    <span onClick="{{ openList }}" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:999px;border:1px solid rgba(241,230,223,.14);font-size:12px;letter-spacing:2px;color:#BFAEA8">片单 <span style="font-family:'Bodoni Moda',serif;font-size:13px;color:{{ accent }}">{{ shelfCount }}</span></span>
   </div>
-  <div class="book-list" id="book-list"></div>
-</div>
-<nav class="bnav">
-  <a class="ni" href="/dash"><i class="ti ti-layout-dashboard"></i><span>dash</span></a>
-  <a class="ni" href="/dash/contacts"><i class="ti ti-message-2"></i><span>chat</span></a>
-  <a class="ni act" href="/read"><i class="ti ti-book"></i><span>read</span></a>
-  <a class="ni" href="/board"><i class="ti ti-clipboard-list"></i><span>board</span></a>
-</nav>
 
-<!-- add book modal -->
-<div class="mo" id="add-mo">
-  <div class="mb">
-    <h3>添加书籍</h3>
-    <!-- tab bar -->
-    <div class="tab-bar">
-      <button class="tab-btn act" id="tab-up-btn" onclick="switchTab('upload')">上传文件</button>
-      <button class="tab-btn" id="tab-ps-btn" onclick="switchTab('paste')">粘贴文本</button>
+  <!-- poster -->
+  <div style="position:relative;display:flex;flex-direction:column;align-items:center;gap:16px">
+    {{ beam }}
+    <div ref="{{ posterRef }}" style="position:relative;width:100%;aspect-ratio:2 / 3;border-radius:3px;overflow:hidden;box-shadow:0 30px 60px rgba(0,0,0,.55),0 0 0 1px rgba(241,230,223,.06);animation:lightsDown 1.6s cubic-bezier(.2,.7,.2,1) both">
+      <div style="position:absolute;inset:0;filter:{{ posterFilter }};transition:filter .8s">
+
+        <sc-if value="{{ is.classic }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute;inset:0;background:radial-gradient(ellipse 80% 60% at 50% 32%,#5A1F25 0%,#33111A 55%,#1C0A0D 100%);color:#E3C690">
+            <div style="position:absolute;top:22px;left:22px;right:22px;display:flex;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#C9A46A">
+              <span>SCREEN 01 · 午夜场</span><span>{{ yearRoman }}</span>
+            </div>
+            <div style="position:absolute;left:27%;right:27%;top:13%;height:44%;border:1px solid rgba(201,164,106,.55);border-bottom:none;border-radius:999px 999px 0 0;background:linear-gradient(180deg,rgba(227,198,144,.22) 0%,rgba(227,198,144,.04) 70%,transparent 100%);display:flex;justify-content:center">
+              <div style="position:absolute;inset:10px 10px 0;border:1px solid rgba(201,164,106,.25);border-bottom:none;border-radius:999px 999px 0 0"></div>
+              <div style="position:absolute;top:38%;width:1px;bottom:0;background:linear-gradient(180deg,rgba(227,198,144,.8),rgba(227,198,144,0))"></div>
+              <div style="position:absolute;top:calc(38% - 16px);width:7px;height:14px;border-radius:50% 50% 50% 50% / 60% 60% 40% 40%;background:#F3DDB0;box-shadow:0 0 22px 8px rgba(243,221,176,.35)"></div>
+            </div>
+            <div style="position:absolute;left:0;right:0;top:61%;display:flex;flex-direction:column;align-items:center;gap:10px;padding:0 20px;text-align:center">
+              <span style="font-size:34px;font-weight:600;letter-spacing:8px;color:#F1DDB4;text-wrap:balance">{{ b.title }}</span>
+              <span style="font-family:'Bodoni Moda','Cormorant Garamond',serif;font-style:italic;font-size:17px;color:#C9A46A;letter-spacing:1px">{{ b.orig }}</span>
+            </div>
+            <div style="position:absolute;left:22px;right:22px;bottom:22px;display:flex;flex-direction:column;align-items:center;gap:5px;border-top:1px solid rgba(201,164,106,.3);padding-top:12px;font-family:'Space Grotesk',sans-serif;text-transform:uppercase;text-align:center">
+              <span style="font-size:10px;letter-spacing:3px;color:#E3C690">{{ b.author }} 作品 · {{ b.authorEn }}</span>
+              <span style="font-size:9px;letter-spacing:2px;color:#B08D58">{{ posterSub }} · 费佳 &amp; 哈娅 共读</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ is.noir }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:linear-gradient(180deg,#232A31 0%,#171C21 60%,#101316 100%);color:#C9D6DF">
+            <div style="position:absolute;left:0;right:0;top:0;height:58%;background:repeating-linear-gradient(180deg,rgba(201,214,223,.06) 0 3px,transparent 3px 15px)"></div>
+            <div style="position:absolute;left:-18px;bottom:-70px;font-family:'Cormorant Garamond',serif;font-size:420px;line-height:1;color:rgba(159,182,199,.11)">{{ posterInitial }}</div>
+            <div style="position:absolute;top:22px;right:20px;bottom:22px;writing-mode:vertical-rl;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:4px;color:#7F96A6;text-transform:uppercase">{{ b.authorEn }} · {{ yearRoman }}</div>
+            <div style="position:absolute;top:22px;left:22px;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#9FB6C7">SCREEN 01 · 午夜场</div>
+            <div style="position:absolute;left:24px;right:52px;bottom:30px;display:flex;flex-direction:column;gap:12px">
+              <div style="width:42px;height:1px;background:#9FB6C7"></div>
+              <span style="font-size:32px;font-weight:600;letter-spacing:5px;line-height:1.35;color:#E6EEF3;text-wrap:balance">{{ b.title }}</span>
+              <span style="font-family:'Bodoni Moda','Cormorant Garamond',serif;font-style:italic;font-size:16px;color:#9FB6C7">{{ b.orig }}</span>
+              <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#7F96A6;margin-top:6px">{{ b.author }} · {{ posterSub }}</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ is.poetry }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:#EFE7DF;color:#4A3F3C">
+            <div style="position:absolute;top:22px;left:22px;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#A99590">SCREEN 01 · {{ yearRoman }}</div>
+            <div style="position:absolute;top:16%;left:18%;width:124px;height:124px;border-radius:50%;border:1px solid #B76E79"></div>
+            <div style="position:absolute;top:calc(16% + 18px);left:calc(18% + 30px);width:124px;height:124px;border-radius:50%;background:rgba(183,110,121,.12)"></div>
+            <div style="position:absolute;top:14%;right:30px;writing-mode:vertical-rl;font-size:26px;font-weight:500;letter-spacing:12px;color:#4A3F3C">{{ b.title }}</div>
+            <div style="position:absolute;left:24px;bottom:30px;right:24px;display:flex;flex-direction:column;gap:8px">
+              <span style="font-family:'Bodoni Moda','Cormorant Garamond',serif;font-style:italic;font-size:17px;color:#B76E79">{{ b.orig }}</span>
+              <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#8C7B76">{{ b.author }} · {{ posterSub }} · 费佳 &amp; 哈娅</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ is.fantasy }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:radial-gradient(1px 1px at 18% 22%,#E9E3FF 50%,transparent 51%),radial-gradient(1px 1px at 72% 14%,#E9E3FF 50%,transparent 51%),radial-gradient(1.5px 1.5px at 84% 40%,#E9E3FF 50%,transparent 51%),radial-gradient(1px 1px at 30% 64%,#E9E3FF 50%,transparent 51%),radial-gradient(1px 1px at 58% 80%,#E9E3FF 50%,transparent 51%),radial-gradient(1.5px 1.5px at 12% 86%,#E9E3FF 50%,transparent 51%),radial-gradient(ellipse 90% 70% at 50% 42%,#2A2F5C 0%,#161A36 55%,#0B0D1C 100%);color:#E2DCFA">
+            <div style="position:absolute;top:22px;left:22px;right:22px;display:flex;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#B7A8E8"><span>SCREEN 01 · 午夜场</span><span>{{ yearRoman }}</span></div>
+            <div style="position:absolute;left:50%;top:42%;width:250px;height:250px;margin:-125px 0 0 -125px;border-radius:50%;border:1px solid rgba(183,168,232,.18)"></div>
+            <div style="position:absolute;left:50%;top:42%;width:180px;height:180px;margin:-90px 0 0 -90px;border-radius:50%;border:1px solid rgba(183,168,232,.32)"></div>
+            <div style="position:absolute;left:50%;top:42%;width:110px;height:110px;margin:-55px 0 0 -55px;border-radius:50%;background:radial-gradient(circle,rgba(183,168,232,.45),rgba(183,168,232,0) 70%)"></div>
+            <div style="position:absolute;left:0;right:0;bottom:30px;display:flex;flex-direction:column;align-items:center;gap:10px;padding:0 20px;text-align:center">
+              <span style="font-size:30px;font-weight:600;letter-spacing:7px;color:#F2EEFF">{{ b.title }}</span>
+              <span style="font-family:'Bodoni Moda','Cormorant Garamond',serif;font-style:italic;font-size:16px;color:#B7A8E8">{{ b.orig }}</span>
+              <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#9488C2">{{ b.author }} · {{ posterSub }}</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- 圣像 -->
+        <sc-if value="{{ is.icon }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:radial-gradient(ellipse 85% 65% at 50% 38%,#1E4B50 0%,#12322F 50%,#0A1B1C 100%);color:#E6DCC4">
+            {{ iconUnder }}
+            <div style="position:absolute;left:50%;top:5.2%;width:2px;height:30px;margin-left:-1px;background:#C9A15A"></div>
+            <div style="position:absolute;left:50%;top:calc(5.2% + 4px);width:8px;height:1.5px;margin-left:-4px;background:#C9A15A"></div>
+            <div style="position:absolute;left:50%;top:calc(5.2% + 10px);width:16px;height:2px;margin-left:-8px;background:#C9A15A"></div>
+            <div style="position:absolute;left:50%;top:calc(5.2% + 22px);width:10px;height:1.5px;margin-left:-5px;background:#C9A15A;transform:rotate(22deg)"></div>
+            <div style="position:absolute;left:32.5%;right:32.5%;top:12.5%;bottom:29%;border:1px solid #B89150;border-bottom:none;border-radius:999px 999px 0 0;overflow:hidden;background:radial-gradient(ellipse 70% 22% at 50% 6%,rgba(201,161,90,.32),transparent 80%),linear-gradient(180deg,#244F51 0%,#12302F 48%,#081415 100%);box-shadow:0 0 0 4px rgba(10,27,28,.6),0 0 0 5px rgba(184,145,80,.35)">
+              <div style="position:absolute;inset:5px 5px 0;border:1px solid rgba(184,145,80,.4);border-bottom:none;border-radius:999px 999px 0 0"></div>
+              <div style="position:absolute;left:20%;right:20%;top:9%;height:54%;border-radius:50%;border:1px solid rgba(219,186,116,.9);box-shadow:0 0 22px rgba(219,186,116,.22),inset 0 0 26px rgba(219,186,116,.16)"></div>
+              <div style="position:absolute;left:26%;right:26%;top:12%;height:48%;border-radius:50%;border:1px solid rgba(219,186,116,.3)"></div>
+              <div style="position:absolute;left:0;right:0;bottom:0;height:46%;background:radial-gradient(ellipse 60% 55% at 50% 100%,rgba(239,230,210,.28),transparent 75%)"></div>
+              <div style="position:absolute;left:50%;bottom:8%;width:1.5px;height:24px;margin-left:-.75px;background:linear-gradient(180deg,rgba(239,230,210,.9),rgba(239,230,210,.2))"></div>
+              <div style="position:absolute;left:50%;bottom:calc(8% + 25px);width:5px;height:11px;margin-left:-2.5px;border-radius:50% 50% 50% 50% / 65% 65% 35% 35%;background:#F6EEDC;box-shadow:0 0 16px 6px rgba(246,238,220,.32);transform-origin:50% 100%;animation:candle 3.2s ease-in-out infinite"></div>
+            </div>
+            <div style="position:absolute;left:28%;right:28%;top:71%;height:1px;background:rgba(184,145,80,.7)"></div>
+            <div style="position:absolute;left:30%;right:30%;top:calc(71% + 4px);height:1px;background:rgba(184,145,80,.35)"></div>
+            {{ iconOver }}
+            <div style="position:absolute;left:34px;right:34px;bottom:36px;display:flex;flex-direction:column;align-items:center;gap:9px;text-align:center">
+              <span style="font-family:'Forum',serif;font-size:10px;letter-spacing:6px;color:#9C8150">✠ {{ yearRoman }} ✠</span>
+              <span style="font-size:30px;font-weight:500;letter-spacing:14px;padding-left:14px;color:#EFE6D2;line-height:1.3;text-wrap:balance">{{ b.title }}</span>
+              <span style="font-family:'Forum',serif;font-size:14px;letter-spacing:7px;padding-left:7px;color:#C9A15A;text-transform:uppercase">{{ b.orig }}</span>
+              <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#8A9E98;margin-top:2px">{{ b.author }} · {{ posterSub }}</span>
+            </div>
+            <div style="position:absolute;inset:0;pointer-events:none;box-shadow:inset 0 0 130px 30px rgba(0,0,0,.6)"></div>
+          </div>
+        </sc-if>
+
+        <!-- 白夜 -->
+        <sc-if value="{{ is.whitenight }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:linear-gradient(180deg,#93A6C1 0%,#AEBBD2 22%,#CACCE0 42%,#E2DEEA 57%,#EEEBF1 60%,#B9C0D4 60.2%,#97A2BC 76%,#7B86A3 100%);color:#5F6788">
+            <div style="position:absolute;left:0;right:0;top:50%;height:12%;background:radial-gradient(ellipse 70% 50% at 50% 80%,rgba(255,255,255,.55),transparent 75%)"></div>
+            <div style="position:absolute;left:6%;top:calc(60% - 18px);width:56px;height:18px;background:#8C93AE;opacity:.75">
+              <span style="position:absolute;left:12px;top:5px;width:4px;height:5px;background:#FFF1CF;box-shadow:0 0 8px 2px rgba(255,241,207,.7)"></span>
+              <span style="position:absolute;left:30px;top:5px;width:4px;height:5px;background:#FFF1CF;box-shadow:0 0 8px 2px rgba(255,241,207,.7)"></span>
+            </div>
+            <div style="position:absolute;left:0;top:calc(60% - 8px);width:6%;height:8px;background:#8C93AE;opacity:.6"></div>
+            <div style="position:absolute;left:calc(6% + 56px);top:calc(60% - 11px);width:30px;height:11px;background:#8C93AE;opacity:.55"></div>
+            <div style="position:absolute;left:40%;right:-6%;top:calc(60% - 26px);height:52px;border-top:1px solid rgba(110,118,150,.75);border-radius:50% 50% 0 0 / 100% 100% 0 0"></div>
+            <div style="position:absolute;left:40%;right:-6%;top:calc(60% - 6px);height:1px;background:rgba(110,118,150,.6)"></div>
+            <div style="position:absolute;left:40%;right:-6%;top:calc(60% + 1px);height:30px;border-bottom:1px solid rgba(110,118,150,.22);border-radius:0 0 50% 50% / 0 0 100% 100%"></div>
+            <div style="position:absolute;left:30%;top:calc(60% - 46px);width:1px;height:46px;background:#7A82A0"></div>
+            <div style="position:absolute;left:calc(30% - 2.5px);top:calc(60% - 50px);width:6px;height:6px;border-radius:50%;background:#FFF4DC;box-shadow:0 0 14px 6px rgba(255,244,220,.55)"></div>
+            <div style="position:absolute;left:calc(30% - 3px);top:calc(60% + 6px);display:flex;flex-direction:column;align-items:center;gap:5px">
+              <span style="width:7px;height:1.5px;background:rgba(255,244,220,.7)"></span><span style="width:4px;height:1px;background:rgba(255,244,220,.55)"></span><span style="width:8px;height:1px;background:rgba(255,244,220,.4)"></span><span style="width:3px;height:1px;background:rgba(255,244,220,.3)"></span><span style="width:6px;height:1px;background:rgba(255,244,220,.2)"></span><span style="width:2px;height:1px;background:rgba(255,244,220,.14)"></span>
+            </div>
+            <div style="position:absolute;left:calc(6% + 11px);top:calc(60% + 6px);display:flex;gap:12px">
+              <span style="width:5px;height:22px;background:linear-gradient(180deg,rgba(255,241,207,.45),transparent)"></span><span style="width:5px;height:22px;background:linear-gradient(180deg,rgba(255,241,207,.45),transparent)"></span>
+            </div>
+            <div style="position:absolute;left:0;right:0;top:60%;bottom:0;background:repeating-linear-gradient(180deg,rgba(255,255,255,.07) 0 1px,transparent 1px 9px)"></div>
+            <div style="position:absolute;top:22px;left:24px;right:24px;display:flex;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#6E7696"><span>SCREEN 01 · 白夜场</span><span>{{ yearRoman }}</span></div>
+            <div style="position:absolute;left:0;right:0;top:15%;display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center">
+              <span style="font-size:34px;font-weight:400;letter-spacing:18px;padding-left:18px;color:rgba(84,92,128,.72)">{{ b.title }}</span>
+              <span style="font-family:'Cormorant Garamond',serif;font-style:italic;font-size:19px;letter-spacing:1px;color:rgba(96,104,140,.7)">{{ b.orig }}</span>
+              <span style="font-size:11px;letter-spacing:4px;color:rgba(96,104,140,.65)">{{ b.sub }}</span>
+            </div>
+            <div style="position:absolute;left:24px;right:24px;bottom:28px;display:flex;justify-content:space-between;gap:12px;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#E4E6F0">
+              <span>{{ b.author }} · {{ posterSub }}</span><span>费佳 &amp; 哈娅</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- 热病 -->
+        <sc-if value="{{ is.fever }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:linear-gradient(180deg,#33240F 0%,#33240F 10%,#A57D30 10.4%,#C9A04A 42%,#B98F3D 100%);color:#1C140A">
+            <div style="position:absolute;top:22px;left:22px;right:22px;display:flex;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#C9A04A"><span>SCREEN 01 · 午夜场</span><span>{{ yearRoman }}</span></div>
+            <div style="position:absolute;left:11%;top:17%;width:34px;height:48px;border:1.5px solid #3A2A14;background:linear-gradient(180deg,#F0D995,#D8B567)"><div style="position:absolute;left:50%;top:0;bottom:0;width:1.5px;margin-left:-.75px;background:#3A2A14"></div><div style="position:absolute;top:45%;left:0;right:0;height:1.5px;background:#3A2A14"></div></div>
+            <div style="position:absolute;left:70%;right:0;top:18%;bottom:30%;background:rgba(38,26,12,.9);border-top:1px solid rgba(255,225,150,.35)"></div>
+            <div style="position:absolute;left:58%;right:0;top:26.5%;bottom:30%;background:rgba(38,26,12,.9);border-top:1px solid rgba(255,225,150,.3)"></div>
+            <div style="position:absolute;left:46%;right:0;top:35%;bottom:30%;background:rgba(38,26,12,.9);border-top:1px solid rgba(255,225,150,.26)"></div>
+            <div style="position:absolute;left:34%;right:0;top:43.5%;bottom:30%;background:rgba(38,26,12,.9);border-top:1px solid rgba(255,225,150,.22)"></div>
+            <div style="position:absolute;left:22%;right:0;top:52%;bottom:30%;background:rgba(38,26,12,.9);border-top:1px solid rgba(255,225,150,.18)"></div>
+            <div style="position:absolute;left:10%;right:0;top:60.5%;bottom:30%;background:rgba(38,26,12,.9);border-top:1px solid rgba(255,225,150,.14)"></div>
+            <div style="position:absolute;left:0;right:0;top:70%;height:1px;background:rgba(38,26,12,.6)"></div>
+            <div style="position:absolute;left:24px;right:24px;bottom:28px;display:flex;flex-direction:column;gap:10px">
+              <div style="width:38px;height:2px;background:#6B1E1A"></div>
+              <span style="font-size:42px;font-weight:700;letter-spacing:6px;line-height:1.15;color:#1C140A;text-wrap:balance">{{ b.title }}</span>
+              <span style="font-family:'Cormorant Garamond',serif;font-style:italic;font-size:17px;color:#3A2A14">{{ b.orig }}</span>
+              <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#3E2D14">{{ b.author }} · {{ posterSub }}</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- 流放 -->
+        <sc-if value="{{ is.exile }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:linear-gradient(180deg,#E9E9E6 0%,#F1F0ED 60%,#F3F2EF 78%,#FAF9F7 78.2%,#FDFDFC 100%);color:#4A4F53">
+            <div style="position:absolute;left:0;right:0;top:78%;height:1px;background:#B4B8BA"></div>
+            <div style="position:absolute;left:5%;width:46%;bottom:22%;height:30px;background:repeating-linear-gradient(90deg,#6E7276 0 1.5px,transparent 1.5px 6px);opacity:.55"></div>
+            <div style="position:absolute;left:5%;width:46%;bottom:calc(22% + 22px);height:1px;background:#6E7276;opacity:.5"></div>
+            <div style="position:absolute;left:5%;width:46%;bottom:calc(22% + 8px);height:1px;background:#6E7276;opacity:.5"></div>
+            <div style="position:absolute;left:51%;width:9%;bottom:22%;height:22px;background:repeating-linear-gradient(90deg,#6E7276 0 1.5px,transparent 1.5px 6px);opacity:.35"></div>
+            <div style="position:absolute;right:8%;width:24%;bottom:22%;height:44px;background:repeating-linear-gradient(180deg,#7A6048 0 6px,#5E4835 6px 7px);opacity:.62"></div>
+            <div style="position:absolute;right:8%;width:24%;bottom:calc(22% + 44px);height:4px;background:#5E4835;opacity:.5"></div>
+            <div style="position:absolute;left:10%;bottom:7%;display:flex;align-items:center;transform:rotate(-7deg);opacity:.85">
+              <span style="width:17px;height:9px;border:2px solid #555A5E;border-radius:50%"></span><span style="width:14px;height:3px;margin:0 -4px;background:#555A5E;border-radius:2px"></span><span style="width:17px;height:9px;border:2px solid #555A5E;border-radius:50%"></span><span style="width:14px;height:3px;margin:0 -4px;background:#555A5E;border-radius:2px"></span><span style="width:17px;height:9px;border:2px solid #555A5E;border-radius:50%"></span><span style="width:14px;height:3px;margin:0 -4px;background:#555A5E;border-radius:2px"></span><span style="width:17px;height:9px;border:2px solid #555A5E;border-radius:50%"></span>
+            </div>
+            <span style="position:absolute;left:47%;bottom:3%;width:7px;height:11px;border-radius:50%;background:rgba(120,128,136,.3)"></span>
+            <span style="position:absolute;left:53%;bottom:6.5%;width:7px;height:11px;border-radius:50%;background:rgba(120,128,136,.28)"></span>
+            <span style="position:absolute;left:49.5%;bottom:10%;width:6px;height:9px;border-radius:50%;background:rgba(120,128,136,.26)"></span>
+            <span style="position:absolute;left:54.5%;bottom:13%;width:6px;height:8px;border-radius:50%;background:rgba(120,128,136,.24)"></span>
+            <span style="position:absolute;left:51.5%;bottom:15.6%;width:5px;height:6px;border-radius:50%;background:rgba(120,128,136,.22)"></span>
+            <span style="position:absolute;left:55.5%;bottom:17.8%;width:4px;height:5px;border-radius:50%;background:rgba(120,128,136,.2)"></span>
+            <span style="position:absolute;left:53.5%;bottom:19.6%;width:3px;height:4px;border-radius:50%;background:rgba(120,128,136,.18)"></span>
+            <span style="position:absolute;left:56.3%;bottom:20.9%;width:3px;height:3px;border-radius:50%;background:rgba(120,128,136,.16)"></span>
+            <div style="position:absolute;top:22px;left:24px;right:24px;display:flex;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#7E8387"><span>SCREEN 01 · 午夜场</span><span>{{ yearRoman }}</span></div>
+            <div style="position:absolute;left:50%;top:17%;transform:translateX(-50%) rotate(-5deg);padding:5px;border:2.5px solid rgba(160,82,68,.82);mix-blend-mode:multiply">
+              <div style="border:1px solid rgba(160,82,68,.7);padding:12px 20px 14px;display:flex;flex-direction:column;align-items:center;gap:8px;color:rgba(160,82,68,.88);white-space:nowrap">
+                <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:4px">流放 · EXILE · {{ yearRoman }}</span>
+                <span style="font-size:32px;font-weight:700;letter-spacing:10px;padding-left:10px;line-height:1.1">{{ b.title }}</span>
+                <span style="font-family:'Forum',serif;font-size:11px;letter-spacing:3px;text-transform:uppercase">{{ b.orig }}</span>
+              </div>
+            </div>
+            <div style="position:absolute;left:24px;right:24px;top:47%;display:flex;flex-direction:column;gap:6px;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#8A8F93">
+              <span>{{ b.author }} · {{ b.authorEn }}</span><span>{{ posterSub }}</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- 地下室 -->
+        <sc-if value="{{ is.underground }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:radial-gradient(ellipse 60% 40% at 30% 14%,rgba(196,210,140,.22),transparent 70%),radial-gradient(ellipse 70% 50% at 0% 100%,rgba(10,11,9,.55),transparent 70%),linear-gradient(180deg,#75776F 0%,#62645D 55%,#44463F 100%);color:#121311">
+            {{ ugCrack }}
+            <div style="position:absolute;right:22%;top:0;width:26px;height:66%;background:linear-gradient(180deg,rgba(234,240,222,.34),rgba(234,240,222,0));filter:blur(2px)"></div>
+            <div style="position:absolute;left:13%;top:10%;width:46%;height:4px;border-radius:2px;background:#F2F5EA;box-shadow:0 0 18px 5px rgba(214,232,170,.42),0 0 60px 14px rgba(214,232,170,.15);transform:rotate(-1.6deg)"></div>
+            <div style="position:absolute;left:calc(13% - 4px);top:calc(10% - 2px);width:5px;height:8px;background:#2A2C27;transform:rotate(-1.6deg)"></div>
+            <span style="position:absolute;top:20px;right:18px;font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:600;letter-spacing:1px;color:rgba(18,19,17,.55)">−1</span>
+            <span style="position:absolute;left:6px;top:96px;writing-mode:vertical-rl;font-family:'Space Grotesk',sans-serif;font-size:8px;letter-spacing:5px;color:rgba(18,19,17,.6)">SCREEN 01 · 午夜场 · {{ yearRoman }}</span>
+            <span style="position:absolute;right:0;top:31%;max-width:62%;text-align:right;font-size:12px;letter-spacing:1px;color:#1B1C19">{{ b.epiZh }}</span>
+            <span style="position:absolute;left:30px;top:37%;max-width:46%;font-family:'Cormorant Garamond',serif;font-style:italic;font-size:13px;line-height:3.1;color:rgba(18,19,17,.72)">{{ b.epi }}</span>
+            <div style="position:absolute;left:22px;right:40px;bottom:58px;display:flex;flex-wrap:wrap;align-items:flex-end;line-height:.95">
+              <sc-for list="{{ ugChars }}" as="c" hint-placeholder-count="5">
+                <span style="display:inline-block;font-size:46px;font-weight:700;color:#121311;transform:translateY({{ c.dy }}) scaleX({{ c.sx }});transform-origin:0 100%;margin-right:{{ c.mr }}">{{ c.ch }}</span>
+              </sc-for>
+            </div>
+            <span style="position:absolute;left:24px;bottom:26px;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:9px;color:#BFC78A">{{ b.author }}·{{ posterSub }}</span>
+            <span style="position:absolute;right:4px;bottom:24px;writing-mode:vertical-rl;font-family:'Forum',serif;font-size:10px;letter-spacing:5px;text-transform:uppercase;color:#E4E8DF">{{ b.orig }}</span>
+          </div>
+        </sc-if>
+
+        <!-- 赌场 -->
+        <sc-if value="{{ is.casino }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:radial-gradient(ellipse 80% 60% at 50% 42%,#1F4B3B 0%,#12301F 55%,#07120C 100%);color:#D8C08C">
+            <div style="position:absolute;inset:14px;border:1px solid rgba(216,192,140,.5)"></div>
+            <div style="position:absolute;inset:19px;border:1px solid rgba(216,192,140,.22)"></div>
+            <div style="position:absolute;top:32px;left:34px;right:34px;display:flex;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#BBA373"><span>SALON · SCREEN 01</span><span>{{ yearRoman }}</span></div>
+            <span style="position:absolute;top:56px;left:34px;font-family:'Forum',serif;font-size:10px;letter-spacing:3px;color:rgba(216,192,140,.55)">ROUGE · NOIR</span>
+            <span style="position:absolute;top:56px;right:34px;font-family:'Forum',serif;font-size:10px;letter-spacing:3px;color:rgba(216,192,140,.55)">PAIR · IMPAIR</span>
+            <span style="position:absolute;top:66%;left:34px;font-family:'Bodoni Moda',serif;font-size:12px;letter-spacing:2px;color:rgba(216,192,140,.6)">35 : 1</span>
+            <span style="position:absolute;top:66%;right:34px;font-family:'Forum',serif;font-size:10px;letter-spacing:3px;color:rgba(216,192,140,.55)">MANQUE · PASSE</span>
+            <div style="position:absolute;left:50%;top:40%;width:272px;height:272px;margin:-136px 0 0 -136px;border-radius:50%;border:1px solid rgba(216,192,140,.4)">
+              <sc-for list="{{ wheel }}" as="w" hint-placeholder-count="0">
+                <span style="position:absolute;left:{{ w.x }};top:{{ w.y }};transform:translate(-50%,-50%) rotate({{ w.r }});font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:500;color:{{ w.c }}">{{ w.n }}</span>
+              </sc-for>
+              <div style="position:absolute;inset:24px;border-radius:50%;border:1px solid rgba(216,192,140,.5)"></div>
+              <div style="position:absolute;inset:34px;border-radius:50%;border:7px dashed rgba(216,192,140,.28)"></div>
+              <div style="position:absolute;inset:50px;border-radius:50%;background:radial-gradient(circle at 50% 40%,#25604A,#10301F);box-shadow:inset 0 0 0 1px rgba(216,192,140,.55),inset 0 0 30px rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center">
+                <span style="font-family:'Bodoni Moda',serif;font-size:132px;line-height:1;font-weight:400;color:#DCC48F;margin-top:-8px">0</span>
+              </div>
+              <span style="position:absolute;left:calc(50% + 70px);top:20px;width:7px;height:7px;border-radius:50%;background:#F3EBD8;box-shadow:0 1px 3px rgba(0,0,0,.6)"></span>
+            </div>
+            <div style="position:absolute;left:50%;top:calc(40% + 150px);width:60px;height:1px;margin-left:-30px;background:#A3242B"></div>
+            <div style="position:absolute;left:16%;right:16%;bottom:30px;padding:13px 14px 12px;border-radius:2px;background:linear-gradient(180deg,#E2CB94 0%,#B6995C 48%,#9A7E45 52%,#D3BA82 100%);box-shadow:inset 0 1px 0 rgba(255,250,230,.5),0 8px 18px rgba(0,0,0,.55);display:flex;flex-direction:column;align-items:center;gap:5px;color:#2A2212">
+              <span style="position:absolute;left:6px;top:6px;width:4px;height:4px;border-radius:50%;background:#6E5A30"></span><span style="position:absolute;right:6px;top:6px;width:4px;height:4px;border-radius:50%;background:#6E5A30"></span><span style="position:absolute;left:6px;bottom:6px;width:4px;height:4px;border-radius:50%;background:#6E5A30"></span><span style="position:absolute;right:6px;bottom:6px;width:4px;height:4px;border-radius:50%;background:#6E5A30"></span>
+              <span style="font-size:24px;font-weight:700;letter-spacing:12px;padding-left:12px">{{ b.title }}</span>
+              <span style="font-family:'Forum',serif;font-size:10px;letter-spacing:4px;text-transform:uppercase">{{ b.orig }} · {{ casinoLine }}</span>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ hasPosterImage }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:#000">
+            <div style="position:absolute;inset:0;background-image:{{ posterBg }};background-size:cover;background-position:center"></div>
+            <div style="position:absolute;left:0;right:0;bottom:0;height:45%;background:linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,.78))"></div>
+            <div style="position:absolute;left:22px;right:22px;bottom:24px;display:flex;flex-direction:column;gap:6px;color:#F1E6DF">
+              <span style="font-size:28px;font-weight:600;letter-spacing:5px">{{ b.title }}</span>
+              <span style="font-family:'Cormorant Garamond',serif;font-style:italic;font-size:15px;color:#E0D2CB">{{ b.orig }} · {{ b.author }}</span>
+            </div>
+          </div>
+        </sc-if>
+
+        {{ grain }}
+      </div>
+
+      <sc-if value="{{ isDone }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;top:18%;right:18px;transform:rotate(-9deg);padding:9px 14px;border:1px solid rgba(241,230,223,.8);background:rgba(20,16,15,.55);display:flex;flex-direction:column;align-items:center;gap:2px">
+          <span style="font-size:15px;font-weight:600;letter-spacing:6px;padding-left:6px">已散场</span>
+          <span style="font-family:'Space Grotesk',sans-serif;font-size:8px;letter-spacing:3px;color:#BFAEA8">ENDED</span>
+        </div>
+      </sc-if>
     </div>
 
-    <!-- upload tab -->
-    <div id="tab-upload">
-      <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-inp').click()">
-        <i class="ti ti-upload"></i>
-        <span class="dz-main">点击或拖拽上传</span>
-        <span class="dz-hint">.epub 或 .txt</span>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+      <div style="display:flex;align-items:center;gap:10px;font-family:'Space Grotesk',sans-serif;font-size:11px;letter-spacing:4px;color:#BFAEA8">
+        <span style="width:6px;height:6px;border-radius:50%;background:{{ accent }};animation:{{ dotAnim }}"></span>
+        <span>{{ statusLine }}</span>
       </div>
-      <input type="file" id="file-inp" accept=".epub,.txt" style="display:none" onchange="onFileSelect(this)">
-      <div id="file-row" style="display:none" class="file-info-row">
-        <span class="file-info-name" id="file-name"></span>
-        <span class="file-info-size" id="file-size"></span>
-        <button class="file-remove" onclick="resetUpload()">×</button>
-      </div>
-      <div id="up-status"></div>
-      <div class="mb-row">
-        <button class="mb-cancel" onclick="closeAdd()">取消</button>
-        <button class="mb-send" id="up-btn" onclick="submitUpload()" disabled>上传</button>
-      </div>
+      <span onClick="{{ togglePicker }}" style="cursor:pointer;padding:8px 12px;font-size:11px;letter-spacing:2px;color:#7D6E69">{{ themeChip }}</span>
+      <sc-if value="{{ picker }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:6px;animation:riseIn .4s both">
+          <sc-for list="{{ themeOpts }}" as="o" hint-placeholder-count="0">
+            <span onClick="{{ o.pick }}" style="cursor:pointer;padding:7px 12px;border-radius:999px;border:1px solid {{ o.border }};font-size:12px;letter-spacing:1px;color:{{ o.color }}">{{ o.label }}</span>
+          </sc-for>
+        </div>
+      </sc-if>
     </div>
+  </div>
 
-    <!-- paste tab -->
-    <div id="tab-paste" style="display:none">
-      <input id="add-title" placeholder="书名" />
-      <input id="add-author" placeholder="作者" />
-      <textarea id="add-text" placeholder="粘贴正文内容（导入为文本书籍）…"></textarea>
-      <div class="mb-row">
-        <button class="mb-cancel" onclick="closeAdd()">取消</button>
-        <button class="mb-send" onclick="submitAdd()">导入</button>
+  <!-- tonight's reels -->
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <span style="font-size:15px;font-weight:600;letter-spacing:3px">今晚的场次</span>
+      <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:13px;color:#9A8A84">{{ stripLabel }}</span>
+    </div>
+    <div style="position:relative;background:#0A0807;border-radius:3px;padding:14px 0">
+      <div style="position:absolute;left:6px;right:6px;top:4px;height:4px;background:repeating-linear-gradient(90deg,rgba(241,230,223,.14) 0 6px,transparent 6px 13px)"></div>
+      <div style="position:absolute;left:6px;right:6px;bottom:4px;height:4px;background:repeating-linear-gradient(90deg,rgba(241,230,223,.14) 0 6px,transparent 6px 13px)"></div>
+      <div style="display:flex;gap:10px;overflow-x:auto;padding:0 12px;scrollbar-width:none">
+        <sc-for list="{{ frames }}" as="f" hint-placeholder-count="3">
+          <div onClick="{{ f.tap }}" style="cursor:pointer;flex-shrink:0;width:62px;display:flex;flex-direction:column;gap:7px;opacity:{{ f.op }};transition:opacity .4s">
+            <div style="position:relative;width:62px;height:93px;border-radius:2px;background:{{ f.thumb }};box-shadow:0 0 0 1px {{ f.ring }};overflow:hidden;display:flex;align-items:center;justify-content:center">
+              <span style="writing-mode:vertical-rl;font-size:12px;font-weight:600;letter-spacing:3px;color:{{ f.ink }}">{{ f.short }}</span>
+              <div style="position:absolute;left:0;bottom:0;height:2px;width:{{ f.pct }};background:{{ f.accent }}"></div>
+            </div>
+            <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:1px;color:{{ f.metaColor }};text-align:center">{{ f.meta }}</span>
+          </div>
+        </sc-for>
+        <div onClick="{{ openList }}" style="cursor:pointer;flex-shrink:0;width:62px;display:flex;flex-direction:column;gap:7px">
+          <div style="width:62px;height:93px;border-radius:2px;border:1px dashed rgba(241,230,223,.22);display:flex;align-items:center;justify-content:center">
+            <span style="writing-mode:vertical-rl;font-size:12px;letter-spacing:4px;color:#9A8A84">全部片单</span>
+          </div>
+          <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:1px;color:#7D6E69;text-align:center">{{ shelfCount }} 部</span>
+        </div>
       </div>
     </div>
   </div>
+
+  <!-- progress + ticket -->
+  <sc-if value="{{ isPlaying }}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;flex-direction:column;gap:14px;animation:riseIn .8s .5s both">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:12px;letter-spacing:3px;color:#9A8A84">{{ progLabel }}</span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:48px;line-height:1;font-weight:500">{{ pct }}<span style="font-size:20px;color:#9A8A84">%</span></span>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;text-align:right">
+          <span style="font-family:'Bodoni Moda',serif;font-size:16px;letter-spacing:1px">p.{{ b.page }} <span style="color:#9A8A84">/ {{ b.total }}</span></span>
+          <span style="font-size:12px;color:#9A8A84;letter-spacing:1px">{{ b.section }} · 余 {{ remain }} 页</span>
+        </div>
+      </div>
+      <div style="position:relative;height:34px;background:rgba(241,230,223,.05);border-radius:3px;display:flex;flex-direction:column;justify-content:space-between;padding:4px 0">
+        <div style="height:5px;margin:0 6px;background:repeating-linear-gradient(90deg,rgba(241,230,223,.16) 0 6px,transparent 6px 13px)"></div>
+        <div style="height:5px;margin:0 6px;background:repeating-linear-gradient(90deg,rgba(241,230,223,.16) 0 6px,transparent 6px 13px)"></div>
+        <div style="position:absolute;left:0;top:12px;bottom:12px;width:{{ pctStr }};background:{{ accent }};opacity:.85;transition:width .8s"></div>
+        <div style="position:absolute;top:-6px;bottom:-6px;left:{{ pctStr }};width:2px;margin-left:-1px;background:#F1E6DF;border-radius:1px;animation:cursorGlow 3s infinite;transition:left .8s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:2px;color:#7D6E69">
+        <span>开场 · p.1</span><span>片长 {{ b.total }} 页</span>
+      </div>
+      <a href="{{ ticketHref }}" style="margin-top:10px;position:relative;display:flex;align-items:stretch;min-height:104px;border-radius:6px;background:#EFE4D6;color:#2A1F1C;box-shadow:0 14px 30px rgba(0,0,0,.45);overflow:hidden;transition:transform .3s" style-hover="transform:translateY(-2px) rotate(-.4deg)">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:5px;background:{{ accent }}"></div>
+        <div style="flex:1;min-width:0;padding:16px 16px 14px 22px;display:flex;flex-direction:column;justify-content:space-between;gap:10px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+            <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#8C7B70">{{ ticketKicker }}</span>
+            <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#8C7B70">SCREEN 01</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <span style="font-size:19px;font-weight:600;letter-spacing:5px">入场 · {{ b.title }}</span>
+            <span style="font-family:'Bodoni Moda','Cormorant Garamond',serif;font-style:italic;font-size:13px;color:#6E5F57">{{ b.orig }}</span>
+          </div>
+          <div style="display:flex;gap:16px;font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:1px;color:#5E504A">
+            <span style="display:flex;flex-direction:column;gap:2px"><span style="font-size:8px;letter-spacing:2px;color:#9A8A80">SEAT</span>E5 · E6</span>
+            <span style="display:flex;flex-direction:column;gap:2px"><span style="font-size:8px;letter-spacing:2px;color:#9A8A80">场次</span>{{ b.section }}</span>
+            <span style="display:flex;flex-direction:column;gap:2px"><span style="font-size:8px;letter-spacing:2px;color:#9A8A80">开映</span>{{ timeShort }}</span>
+          </div>
+        </div>
+        <div style="position:relative;width:0;border-left:1.5px dashed #BFAE9E;margin:12px 0"></div>
+        <div style="position:absolute;right:86px;top:-9px;width:18px;height:18px;border-radius:50%;background:{{ roomBg }};margin-right:-9px"></div>
+        <div style="position:absolute;right:86px;bottom:-9px;width:18px;height:18px;border-radius:50%;background:{{ roomBg }};margin-right:-9px"></div>
+        <div style="width:86px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 6px">
+          <span style="font-family:'Space Grotesk',sans-serif;font-size:8px;letter-spacing:2px;color:#9A8A80">PAGE</span>
+          <span style="font-family:'Bodoni Moda',serif;font-size:26px;line-height:1;font-weight:500;color:#2A1F1C">{{ b.page }}</span>
+          <span style="font-size:11px;letter-spacing:2px;color:#5E504A">进场 ›</span>
+        </div>
+      </a>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isIdle }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:18px;padding:6px 0;text-align:center;animation:riseIn .6s both">
+      <span style="font-size:14px;line-height:1.9;color:#A8968F;max-width:280px;text-wrap:pretty">{{ idleText }}</span>
+      <span onClick="{{ idleAction }}" style="cursor:pointer;padding:13px 28px;border-radius:999px;border:1px solid {{ accent }};font-size:14px;letter-spacing:4px;color:#F1E6DF">{{ idleLabel }}</span>
+    </div>
+  </sc-if>
+
+  <!-- audience -->
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <span style="font-size:15px;font-weight:600;letter-spacing:3px">今晚的观众</span>
+      <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:13px;color:#9A8A84">two seats, always</span>
+    </div>
+    <div style="display:flex;justify-content:center;gap:7px;padding:4px 0">
+      <sc-for list="{{ seatRow }}" as="s" hint-placeholder-count="9">
+        <div style="width:24px;height:16px;border-radius:7px 7px 3px 3px;background:{{ s.bg }};box-shadow:{{ s.glow }}"></div>
+      </sc-for>
+    </div>
+    <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px">
+      <sc-for list="{{ seats }}" as="p" hint-placeholder-count="2">
+        <div onClick="{{ p.toggle }}" style="cursor:pointer;background:rgba(241,230,223,.035);border-radius:16px;padding:14px 16px;border:1px solid {{ p.border }};display:flex;flex-direction:column;gap:6px;transition:border-color .2s">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="width:8px;height:8px;border-radius:50%;background:{{ p.color }}"></span>
+            <span style="font-size:15px;font-weight:600;letter-spacing:2px">{{ p.name }}</span>
+            <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:13px;color:{{ p.color }};margin-left:auto">{{ p.en }}</span>
+          </div>
+          <span style="font-size:12px;color:#A8968F;letter-spacing:1px">低语 {{ p.count }} · 划线 {{ p.hl }}</span>
+          <span style="font-size:11px;color:#7D6E69;letter-spacing:1px">{{ p.last }}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <!-- notes -->
+  <div style="display:flex;flex-direction:column;gap:6px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <span style="font-size:15px;font-weight:600;letter-spacing:3px">映后谈</span>
+      <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:13px;color:#9A8A84">{{ notesLabel }}</span>
+    </div>
+    <sc-if value="{{ notesEmpty }}" hint-placeholder-val="{{ false }}">
+      <span style="padding:28px 0;text-align:center;font-size:13px;letter-spacing:1px;color:#7D6E69">这一部还没有映后谈</span>
+    </sc-if>
+    <div style="display:flex;flex-direction:column">
+      <sc-for list="{{ notes }}" as="n" hint-placeholder-count="3">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:22px 0;border-bottom:1px solid rgba(241,230,223,.07)">
+          <span style="font-family:'Bodoni Moda',serif;font-style:italic;font-size:12px;color:#7D6E69;letter-spacing:1px">{{ n.when }}</span>
+          <span style="font-family:'Space Grotesk',sans-serif;font-size:11px;letter-spacing:5px;color:{{ n.color }}">{{ n.speaker }}</span>
+          <sc-if value="{{ n.hasQuote }}" hint-placeholder-val="{{ false }}">
+            <span style="font-size:13px;line-height:1.85;color:#9A8A84;padding:0 22px;text-align:center;text-wrap:pretty">{{ n.quote }}</span>
+          </sc-if>
+          <span style="font-size:15px;line-height:1.95;color:#EADDD6;padding:0 14px;text-align:center;text-wrap:pretty">{{ n.text }}</span>
+          <sc-if value="{{ n.hasLink }}" hint-placeholder-val="{{ false }}">
+            <a href="{{ n.href }}" style="font-size:11px;letter-spacing:2px;color:#9A8A84;padding:4px 8px">回到这一段 ›</a>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;align-items:center;gap:8px;padding-top:6px">
+    <span style="font-family:'Bodoni Moda',serif;font-size:11px;letter-spacing:5px;color:#7D6E69">— FIN OF TONIGHT —</span>
+    <span style="font-size:11px;color:#5E524E;letter-spacing:1px">接口位：/api/books · /api/books/current</span>
+  </div>
+
+  <!-- programme -->
+  <div onClick="{{ closeList }}" style="position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.6);opacity:{{ listOp }};pointer-events:{{ listPE }};transition:opacity .45s"></div>
+  <div style="position:fixed;top:0;bottom:0;left:0;right:0;z-index:31;display:flex;justify-content:center;pointer-events:none">
+    <div style="width:100%;max-width:430px;height:100%;overflow-y:auto;background:#14100F;padding:22px 22px 60px;display:flex;flex-direction:column;gap:30px;opacity:{{ listOp }};transform:translateY({{ listY }});transition:opacity .45s,transform .55s cubic-bezier(.2,.7,.2,1);pointer-events:{{ listPE }}">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <span style="font-size:19px;font-weight:600;letter-spacing:5px">片单</span>
+          <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#7D6E69">PROGRAMME · {{ shelfCount }} FILMS</span>
+        </div>
+        <span onClick="{{ closeList }}" style="cursor:pointer;width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:20px;color:#BFAEA8">×</span>
+      </div>
+      <sc-for list="{{ groups }}" as="g" hint-placeholder-count="4">
+        <div style="display:flex;flex-direction:column">
+          <div style="display:flex;align-items:baseline;gap:10px;padding-bottom:10px;border-bottom:1px solid rgba(241,230,223,.08)">
+            <span style="font-size:14px;font-weight:600;letter-spacing:3px">{{ g.zh }}</span>
+            <span style="font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:3px;color:#7D6E69">{{ g.en }}</span>
+            <span style="margin-left:auto;font-family:'Bodoni Moda',serif;font-size:13px;color:#7D6E69">{{ g.count }}</span>
+          </div>
+          <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:14px;padding:13px 0">
+              <div onClick="{{ it.open }}" style="cursor:pointer;flex-shrink:0;width:44px;height:66px;border-radius:2px;background:{{ it.thumb }};box-shadow:0 0 0 1px {{ it.ring }};display:flex;align-items:center;justify-content:center;filter:{{ it.filter }}">
+                <span style="writing-mode:vertical-rl;font-size:9px;font-weight:600;letter-spacing:2px;color:{{ it.ink }}">{{ it.short }}</span>
+              </div>
+              <div onClick="{{ it.open }}" style="cursor:pointer;flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+                <span style="font-size:15px;font-weight:600;letter-spacing:2px">{{ it.title }}</span>
+                <span style="font-family:'Cormorant Garamond',serif;font-style:italic;font-size:14px;color:#9A8A84">{{ it.orig }} · {{ it.year }}</span>
+                <span style="font-size:11px;letter-spacing:1px;color:#7D6E69">{{ it.meta }}</span>
+              </div>
+              <span onClick="{{ it.act }}" style="cursor:pointer;flex-shrink:0;padding:8px 13px;border-radius:999px;border:1px solid rgba(241,230,223,.14);font-size:12px;letter-spacing:2px;color:{{ it.actColor }}">{{ it.actLabel }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </sc-for>
+      <span style="font-size:11px;line-height:1.8;color:#5E524E;text-align:center">海报主题按书目标签自动配好，可在海报下方手动改</span>
+    </div>
+  </div>
 </div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:412,&quot;height&quot;:915},&quot;projectorFlicker&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;氛围&quot;}}">
+class Component extends DCLogic {
+  KEY = 'cinema-shelf-v1';
+  AUTHOR = { author: '陀思妥耶夫斯基', authorEn: 'F. M. Dostoevsky' };
+  // 书架：卡拉马佐夫为现有真实数据；其余书的状态/进度为示例，待接 /api/books
+  SHELF = [
+    { id: 'karamazov', title: '卡拉马佐夫兄弟', short: '卡拉马佐夫', orig: 'Братья Карамазовы', year: 1880, tags: ['家族', '古典'], status: 'now', page: 587, total: 952, section: '第四部 第十一卷' },
+    { id: 'idiot', title: '白痴', short: '白痴', orig: 'Идиот', year: 1869, tags: ['宗教', '圣愚'], status: 'now', page: 214, total: 688, section: '第二部' },
+    { id: 'underground', title: '地下室手记', short: '地下室手记', orig: 'Записки из подполья', year: 1864, tags: ['地下室', '独白'], epi: 'Я человек больной… Я злой человек.', epiZh: '我是个有病的人……我是个凶狠的人。', status: 'rerun', round: 2, page: 38, total: 160, section: '第一部' },
+    { id: 'crime', title: '罪与罚', short: '罪与罚', orig: 'Преступление и наказание', year: 1866, tags: ['罪', '城市'], status: 'done' },
+    { id: 'whitenights', title: '白夜', short: '白夜', orig: 'Белые ночи', year: 1848, tags: ['抒情', '城市之夜'], sub: '感伤的故事 · 摘自一个幻想者的回忆', status: 'done' },
+    { id: 'gambler', title: '赌徒', short: '赌徒', orig: 'Игрок', year: 1866, tags: ['赌', '欲望'], place: 'Roulettenburg', status: 'queue' },
+    { id: 'double', title: '双重人格', short: '双重人格', orig: 'Двойник', year: 1846, tags: ['分身', '心理'], status: 'queue' },
+    { id: 'deadhouse', title: '死屋手记', short: '死屋手记', orig: 'Записки из Мёртвого дома', year: 1862, tags: ['流放', '囚'], status: 'queue' },
+    { id: 'demons', title: '群魔', short: '群魔', orig: 'Бесы', year: 1872, tags: ['政治', '罪'], status: 'queue' },
+    { id: 'adolescent', title: '少年', short: '少年', orig: 'Подросток', year: 1875, tags: ['成长', '抒情'], status: 'queue' },
+  ];
+  NOTES = {
+    karamazov: [
+      { who: 'haya', text: '「我不是不接受上帝，我只是把入场券恭敬地退还。」——伊万这句我想了一晚上。', when: '昨晚 23:41' },
+      { who: 'fy', pid: 6, text: '注意看阿廖沙沉默的地方，陀氏把最重的话都放在沉默里。', when: '昨晚 23:47' },
+      { who: 'fy', pid: -1, text: '明晚读第十一卷第4章，小猫别偷跑进度。', when: '今天 00:12' },
+    ],
+  };
+  // 与「共读阅读」共享的本机进度/划线/批注（待接后端后改为接口）
+  READ = { karamazov: { key: 'kara-reading-room-v1', start: 587 } };
+  PEOPLE = {
+    fy: { name: '费佳', en: 'Fyodor', speaker: 'FYODOR · 费佳', color: '#8A7AB5', glow: 'rgba(138,122,181,.6)' },
+    haya: { name: '哈娅', en: 'Haya', speaker: 'HAYA · 哈娅', color: '#D9A441', glow: 'rgba(217,164,65,.6)' },
+  };
+  THEMES = {
+    classic: { name: '古典', accent: '#C9A46A', beam: 'rgba(227,198,144,.16)', room: '#14100F', thumb: 'radial-gradient(ellipse at 50% 35%,#5A1F25,#1C0A0D)', ink: '#F1DDB4' },
+    icon: { name: '圣像', accent: '#B89150', beam: 'rgba(239,230,210,.12)', room: '#0B1313', thumb: 'radial-gradient(ellipse at 50% 40%,#1E4B50,#0A1B1C)', ink: '#E3C690' },
+    fever: { name: '热病', accent: '#C49A3E', beam: 'rgba(201,160,74,.14)', room: '#15100A', thumb: 'linear-gradient(180deg,#33240F 14%,#C9A04A 14.5%,#A57D30)', ink: '#1C140A' },
+    noir: { name: '阴郁', accent: '#9FB6C7', beam: 'rgba(159,182,199,.14)', room: '#0F1215', thumb: 'linear-gradient(180deg,#232A31,#101316)', ink: '#E6EEF3' },
+    whitenight: { name: '白夜', accent: '#B9C3DC', beam: 'rgba(206,214,234,.14)', room: '#11131A', thumb: 'linear-gradient(180deg,#93A6C1,#E2DEEA 58%,#B9C0D4 60%,#7B86A3)', ink: '#5F6788' },
+    exile: { name: '流放', accent: '#A55B4E', beam: 'rgba(240,240,236,.12)', room: '#121415', thumb: 'linear-gradient(180deg,#E9E9E6 0%,#F1F0ED 77%,#B4B8BA 77.5%,#FAF9F7 78%)', ink: '#A05244' },
+    underground: { name: '地下室', accent: '#B9C27A', beam: 'rgba(214,232,170,.1)', room: '#10110F', thumb: 'linear-gradient(180deg,#75776F,#44463F)', ink: '#121311' },
+    casino: { name: '赌场', accent: '#D8C08C', beam: 'rgba(216,192,140,.13)', room: '#0A120E', thumb: 'radial-gradient(ellipse at 50% 45%,#1F4B3B,#07120C)', ink: '#D8C08C' },
+    poetry: { name: '诗集', accent: '#B76E79', beam: 'rgba(239,231,223,.14)', room: '#151110', thumb: '#EFE7DF', ink: '#4A3F3C' },
+    fantasy: { name: '幻想', accent: '#B7A8E8', beam: 'rgba(183,168,232,.16)', room: '#0E0F1A', thumb: 'radial-gradient(ellipse at 50% 42%,#2A2F5C,#0B0D1C)', ink: '#F2EEFF' },
+  };
+  RULES = [
+    [['流放', '囚'], 'exile'],
+    [['地下室'], 'underground'],
+    [['赌'], 'casino'],
+    [['宗教', '信仰', '圣愚'], 'icon'],
+    [['罪', '热病'], 'fever'],
+    [['抒情', '城市之夜', '成长'], 'whitenight'],
+    [['独白', '心理', '分身'], 'noir'],
+    [['诗', '诗集'], 'poetry'],
+    [['幻想', '童话'], 'fantasy'],
+  ];
+  STATUS = {
+    now: { zh: '正在上映', en: 'NOW SHOWING' },
+    rerun: { zh: '重映', en: 'SECOND RUN' },
+    queue: { zh: '待映', en: 'COMING SOON' },
+    done: { zh: '已散场', en: 'ENDED' },
+  };
 
-<script>
-var books=[], currentBook=null, selectedFile=null;
+  state = { now: new Date(), seat: null, sel: 'karamazov', ov: {}, themeOv: {}, list: false, picker: false };
+  posterRef = React.createRef();
 
-function cover(c1,c2,size){
-  return '<div style="width:'+size+'px;height:'+(size*4/3)+'px;border-radius:'+(size*0.14)+'px;background:linear-gradient(135deg,'+c1+','+c2+');flex-shrink:0;"></div>';
-}
-function pct(r,t){return t?Math.round(r/t*100):0;}
-
-async function load(){
-  var [r1,r2]=await Promise.all([fetch('/api/books/current'),fetch('/api/books')]);
-  var d1=await r1.json(), d2=await r2.json();
-  currentBook=d1.book;
-  books=d2.books||[];
-  renderNow();
-  renderShelf();
-}
-
-function renderNow(){
-  var el=document.getElementById('now-area');
-  if(!currentBook){el.innerHTML='<div class="now-empty">还没有正在阅读的书</div>';return;}
-  var b=currentBook;
-  var p=b.progress||0;
-  el.innerHTML='<div class="now-card" onclick="openBook(\''+escId(b.bookId)+'\')">'
-    +'<div class="now-cover" style="background:linear-gradient(135deg,'+b.color1+','+b.color2+')"></div>'
-    +'<div class="now-info">'
-    +'<div><div class="now-title">'+esc(b.title)+'</div>'
-    +'<div class="now-author">'+esc(b.author)+'</div></div>'
-    +'<div><div class="prog-bar"><div class="prog-fill" style="width:'+p+'%"></div></div>'
-    +'<div class="prog-txt">'+p+'% · '+b.read+'/'+b.total+' 章</div></div>'
-    +'</div></div>';
-}
-
-function renderShelf(){
-  var el=document.getElementById('book-list');
-  if(!books.length){el.innerHTML='<div style="color:var(--hint);font-size:13px;text-align:center;padding:20px 0;">书架空空的</div>';return;}
-  el.innerHTML=books.map(function(b){
-    var p=pct(b.read,b.total);
-    return '<div class="book-card" onclick="openBook(\''+escId(b.bookId)+'\')">'
-      +'<div class="book-cover" style="background:linear-gradient(135deg,'+b.color1+','+b.color2+')"></div>'
-      +'<div class="book-info">'
-      +'<div class="book-title">'+esc(b.title)+'</div>'
-      +'<div class="book-author">'+esc(b.author)+'</div>'
-      +'<div class="book-prog">'
-      +'<div class="book-prog-bar"><div class="book-prog-fill" style="width:'+p+'%"></div></div>'
-      +'<span class="book-prog-txt">'+p+'%</span>'
-      +'</div></div></div>';
-  }).join('');
-}
-
-function openBook(bookId){
-  window.location.href='/reader?book='+encodeURIComponent(bookId);
-}
-
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function escId(s){return String(s||'').replace(/'/g,"\\'");}
-
-/* ---- modal ---- */
-function openAdd(){
-  resetUpload();
-  switchTab('upload');
-  document.getElementById('add-mo').classList.add('show');
-}
-function closeAdd(){
-  document.getElementById('add-mo').classList.remove('show');
-  resetUpload();
-}
-
-function switchTab(tab){
-  var isUp = tab==='upload';
-  document.getElementById('tab-upload').style.display = isUp ? '' : 'none';
-  document.getElementById('tab-paste').style.display  = isUp ? 'none' : '';
-  document.getElementById('tab-up-btn').classList.toggle('act', isUp);
-  document.getElementById('tab-ps-btn').classList.toggle('act', !isUp);
-}
-
-function resetUpload(){
-  selectedFile = null;
-  var inp = document.getElementById('file-inp');
-  if(inp) inp.value='';
-  document.getElementById('drop-zone').style.display='';
-  document.getElementById('file-row').style.display='none';
-  document.getElementById('up-status').innerHTML='';
-  var btn=document.getElementById('up-btn');
-  btn.disabled=true;
-  btn.innerHTML='上传';
-}
-
-function fmtSize(b){
-  if(b<1024) return b+' B';
-  if(b<1048576) return (b/1024).toFixed(1)+' KB';
-  return (b/1048576).toFixed(1)+' MB';
-}
-
-function onFileSelect(inp){
-  if(inp.files&&inp.files[0]) setFile(inp.files[0]);
-}
-
-function setFile(file){
-  var ext=file.name.split('.').pop().toLowerCase();
-  if(ext!=='epub'&&ext!=='txt'){alert('只支持 .epub 和 .txt 文件');return;}
-  selectedFile=file;
-  document.getElementById('drop-zone').style.display='none';
-  document.getElementById('file-name').textContent=file.name;
-  document.getElementById('file-size').textContent=fmtSize(file.size);
-  document.getElementById('file-row').style.display='flex';
-  document.getElementById('up-status').innerHTML='';
-  document.getElementById('up-btn').disabled=false;
-}
-
-async function submitUpload(){
-  if(!selectedFile) return;
-  var btn=document.getElementById('up-btn');
-  var status=document.getElementById('up-status');
-  btn.disabled=true;
-  btn.innerHTML='<span class="spinner"></span>上传中';
-  status.innerHTML='';
-  var fd=new FormData();
-  fd.append('file',selectedFile);
-  try{
-    var r=await fetch('/api/books/upload',{method:'POST',body:fd});
-    var d=await r.json();
-    if(r.ok&&d.ok){
-      status.innerHTML='<div class="up-ok">导入成功，共 '+d.chunks+' 章节</div>';
-      setTimeout(function(){closeAdd();load();},1500);
-    } else {
-      btn.disabled=false;
-      btn.innerHTML='上传';
-      status.innerHTML='<div class="up-err">'+(d.error||'上传失败')+'</div>';
+  componentDidMount() {
+    try {
+      const d = JSON.parse(localStorage.getItem(this.KEY) || 'null');
+      if (d) this.setState({ ov: d.ov || {}, themeOv: d.themeOv || {}, sel: d.sel || 'karamazov' });
+    } catch (e) {}
+    this._t = setInterval(() => this.setState({ now: new Date() }), 15000);
+    this.loadReading();
+    this._sync = () => { if (!document.hidden) this.loadReading(); };
+    window.addEventListener('storage', this._sync);
+    window.addEventListener('pageshow', this._sync);
+    document.addEventListener('visibilitychange', this._sync);
+    this._prev = this.state;
+  }
+  componentWillUnmount() {
+    clearInterval(this._t);
+    window.removeEventListener('storage', this._sync);
+    window.removeEventListener('pageshow', this._sync);
+    document.removeEventListener('visibilitychange', this._sync);
+  }
+  loadReading() {
+    const reading = {};
+    Object.keys(this.READ).forEach(id => {
+      try { const d = JSON.parse(localStorage.getItem(this.READ[id].key) || 'null'); if (d) reading[id] = d; } catch (e) {}
+    });
+    this.setState({ reading });
+  }
+  fmtTs(ts) {
+    const d = new Date(ts), n = new Date(), p = x => String(x).padStart(2, '0'), hm = p(d.getHours()) + ':' + p(d.getMinutes());
+    const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((day(n) - day(d)) / 864e5);
+    return diff === 0 ? '今天 ' + hm : diff === 1 ? '昨天 ' + hm : (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
+  }
+  liveNotes(id) {
+    const seed = this.NOTES[id] || [], r = this.state.reading && this.state.reading[id];
+    if (!r) return seed;
+    const extra = (r.notes || []).map(n => {
+      const ts = parseInt(String(n.id || '').split('-')[1], 10);
+      return { who: n.who, text: n.text, quote: n.quote || '', pid: n.pid, ts: ts || 0, when: ts ? this.fmtTs(ts) : n.when };
+    }).sort((a, b) => a.ts - b.ts);
+    return seed.concat(extra);
+  }
+  hlCount(id, who) {
+    const r = this.state.reading && this.state.reading[id];
+    return r && r.hl ? Object.values(r.hl).filter(v => (typeof v === 'string' ? v : v && v.who) === who).length : 0;
+  }
+  componentDidUpdate() {
+    const prev = this._prev || this.state; this._prev = this.state;
+    const S = this.state;
+    if (prev.sel !== S.sel) {
+      const el = this.posterRef.current;
+      if (el && el.animate) el.animate([
+        { filter: 'brightness(.08)', opacity: .15, transform: 'scale(.985)' },
+        { filter: 'brightness(1)', opacity: 1, transform: 'none' },
+      ], { duration: 1200, easing: 'cubic-bezier(.2,.7,.2,1)' });
     }
-  } catch(e){
-    btn.disabled=false;
-    btn.innerHTML='上传';
-    status.innerHTML='<div class="up-err">网络错误</div>';
+    if (prev.sel !== S.sel || prev.ov !== S.ov || prev.themeOv !== S.themeOv) {
+      try { localStorage.setItem(this.KEY, JSON.stringify({ sel: S.sel, ov: S.ov, themeOv: S.themeOv })); } catch (e) {}
+    }
+  }
+
+  roman(n) {
+    const m = [[1000,'M'],[900,'CM'],[500,'D'],[400,'CD'],[100,'C'],[90,'XC'],[50,'L'],[40,'XL'],[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
+    let s = ''; for (const [v, r] of m) while (n >= v) { s += r; n -= v; } return s;
+  }
+  autoTheme(b) {
+    for (const [keys, th] of this.RULES) if (b.tags.some(t => keys.includes(t))) return th;
+    return 'classic';
+  }
+  book(id) {
+    const base = this.SHELF.find(x => x.id === id) || this.SHELF[0];
+    const b = Object.assign({}, this.AUTHOR, base, this.state.ov[base.id] || {});
+    const rd = this.state.reading && this.state.reading[base.id], ov = this.state.ov[base.id] || {};
+    if (rd && rd.page != null && ov.page == null && this.READ[base.id]) b.page = this.READ[base.id].start + rd.page;
+    b.auto = this.autoTheme(b);
+    b.theme = this.state.themeOv[b.id] || b.auto;
+    b.manual = !!this.state.themeOv[b.id];
+    b.pct = b.total ? Math.round(b.page / b.total * 100) : 0;
+    b.sub = b.sub || ''; b.epi = b.epi || ''; b.epiZh = b.epiZh || '';
+    return b;
+  }
+  setStatus(id, patch) { this.setState(s => ({ ov: Object.assign({}, s.ov, { [id]: Object.assign({}, s.ov[id] || {}, patch) }) })); }
+  rerun(id) {
+    const b = this.book(id);
+    this.setStatus(id, { status: 'rerun', round: (b.round || 1) + 1, page: 1, total: b.total || 0, section: b.section || '开场' });
+  }
+  schedule(id) { const b = this.book(id); this.setStatus(id, { status: 'now', page: 1, total: b.total || 0, section: b.section || '开场' }); }
+  finish(id) { this.setStatus(id, { status: 'done' }); }
+
+  tex() {
+    if (this._tex) return this._tex;
+    const enc = s => 'url("data:image/svg+xml;utf8,' + encodeURIComponent(s) + '")';
+    const gold = "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600'><filter id='f' x='0' y='0' width='100%' height='100%'><feTurbulence type='fractalNoise' baseFrequency='.013 .019' numOctaves='4' seed='9' result='n'/><feColorMatrix in='n' type='matrix' values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  6 0 0 0 -3.05' result='m'/><feComponentTransfer in='m' result='a'><feFuncA type='discrete' tableValues='0 1'/></feComponentTransfer><feFlood flood-color='#A9874A'/><feComposite in2='a' operator='in'/></filter><rect width='400' height='600' filter='url(#f)'/></svg>";
+    let seed = 23; const r = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    let d = '';
+    for (let i = 0; i < 26; i++) {
+      let x = r() * 400, y = r() * 600, a = r() * Math.PI * 2;
+      d += 'M' + x.toFixed(1) + ' ' + y.toFixed(1);
+      const n = 5 + Math.floor(r() * 9);
+      for (let j = 0; j < n; j++) { a += (r() - .5) * 1.3; const L = 6 + r() * 24; x += Math.cos(a) * L; y += Math.sin(a) * L; d += ' L' + x.toFixed(1) + ' ' + y.toFixed(1); }
+    }
+    const cracks = "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600' viewBox='0 0 400 600'><path d='" + d + "' fill='none' stroke='#000' stroke-opacity='.55' stroke-width='.7'/><path d='" + d + "' transform='translate(.9 .9)' fill='none' stroke='#E3C690' stroke-opacity='.13' stroke-width='.5'/></svg>";
+    const cross = "<svg xmlns='http://www.w3.org/2000/svg' width='12' height='16'><g fill='#C9A15A'><rect x='5.5' y='2' width='1' height='12'/><rect x='4' y='3.6' width='4' height='.8'/><rect x='2.5' y='5.8' width='7' height='.9'/><rect x='3.6' y='10' width='4.8' height='.8' transform='rotate(22 6 10.4)'/></g></svg>";
+    const h = React.createElement, abs = st => Object.assign({ position: 'absolute', pointerEvents: 'none' }, st);
+    const band = st => h('div', { style: abs(Object.assign({ backgroundImage: enc(cross), opacity: .5 }, st)) });
+    let cd = 'M318 0', cx = 318, cy = 0;
+    while (cy < 600) { cx += (r() - .5) * 26; cy += 10 + r() * 22; cd += ' L' + cx.toFixed(1) + ' ' + cy.toFixed(1); if (r() < .18) { const bx = cx + (r() - .5) * 60, by = cy + 20 + r() * 30; cd += ' M' + cx.toFixed(1) + ' ' + cy.toFixed(1) + ' L' + bx.toFixed(1) + ' ' + by.toFixed(1) + ' M' + cx.toFixed(1) + ' ' + cy.toFixed(1); } }
+    const crack = "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='600' viewBox='0 0 400 600'><path d='" + cd + "' fill='none' stroke='#141512' stroke-opacity='.75' stroke-width='1.2'/><path d='" + cd + "' transform='translate(1.2 .6)' fill='none' stroke='#DCE3C8' stroke-opacity='.12' stroke-width='.8'/></svg>";
+    this._tex = {
+      crack: h(React.Fragment, null,
+        h('div', { style: abs({ inset: 0, backgroundImage: enc(crack), backgroundSize: '100% 100%' }) }),
+        h('div', { style: abs({ left: '62%', right: 0, top: '20%', bottom: '10%', background: 'radial-gradient(ellipse 50% 60% at 60% 50%, rgba(70,80,40,.35), transparent 70%)' }) })),
+      under: h('div', { style: abs({ inset: 0, backgroundImage: enc(gold), backgroundSize: '100% 100%', opacity: .5,
+        WebkitMaskImage: 'radial-gradient(ellipse 75% 55% at 50% 32%, #000 25%, transparent 78%)', maskImage: 'radial-gradient(ellipse 75% 55% at 50% 32%, #000 25%, transparent 78%)' }) }),
+      over: h(React.Fragment, null,
+        h('div', { style: abs({ inset: 0, backgroundImage: enc(cracks), backgroundSize: '100% 100%', opacity: .85 }) }),
+        h('div', { style: abs({ inset: 8, border: '1px solid rgba(184,145,80,.45)' }) }),
+        h('div', { style: abs({ inset: 28, border: '1px solid rgba(184,145,80,.3)' }) }),
+        band({ top: 10, left: 10, right: 10, height: 16, backgroundRepeat: 'repeat-x' }),
+        band({ bottom: 10, left: 10, right: 10, height: 16, backgroundRepeat: 'repeat-x' }),
+        band({ top: 26, bottom: 26, left: 13, width: 12, backgroundRepeat: 'repeat-y' }),
+        band({ top: 26, bottom: 26, right: 13, width: 12, backgroundRepeat: 'repeat-y' })),
+    };
+    return this._tex;
+  }
+
+  renderVals() {
+    const S = this.state, P = this.props;
+    const all = this.SHELF.map(x => this.book(x.id));
+    const b = this.book(S.sel);
+    const T = this.THEMES[b.theme];
+    const flicker = P.projectorFlicker ?? true;
+    const pad = n => String(n).padStart(2, '0');
+    const playing = b.status === 'now' || b.status === 'rerun';
+    const notesAll = this.liveNotes(b.id);
+    const img = (b.posterImage || '').trim();
+    const select = id => { this.setState({ sel: id, list: false, picker: false, seat: null }); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+
+    const seats = ['fy', 'haya'].map(k => {
+      const p = this.PEOPLE[k], mine = notesAll.filter(n => n.who === k), active = S.seat === k;
+      return {
+        name: p.name, en: p.en, color: p.color, count: mine.length, hl: this.hlCount(b.id, k),
+        last: mine.length ? '最近 ' + mine[mine.length - 1].when : '尚未留言',
+        border: active ? p.color : 'rgba(241,230,223,.08)',
+        toggle: () => this.setState(s => ({ seat: s.seat === k ? null : k })),
+      };
+    });
+    const seatRow = Array.from({ length: 9 }, (_, i) => {
+      const k = i === 4 ? 'fy' : i === 5 ? 'haya' : null;
+      if (!k) return { bg: 'rgba(241,230,223,.08)', glow: 'none' };
+      const dim = S.seat && S.seat !== k;
+      return { bg: dim ? 'rgba(241,230,223,.16)' : this.PEOPLE[k].color, glow: dim ? 'none' : '0 0 14px ' + this.PEOPLE[k].glow };
+    });
+    const linkable = !!this.READ[b.id];
+    const notes = notesAll.filter(n => !S.seat || n.who === S.seat).map(n => ({
+      text: n.text, when: n.when, speaker: this.PEOPLE[n.who].speaker, color: this.PEOPLE[n.who].color,
+      hasQuote: !!n.quote, quote: '「' + (n.quote || '') + '」',
+      hasLink: linkable && typeof n.pid === 'number',
+      href: '/preview/reader.html?book=' + b.id + '&theme=' + b.theme + '&pid=' + n.pid,
+    }));
+
+    const reels = all.filter(x => x.status === 'now').concat(all.filter(x => x.status === 'rerun'));
+    const frames = reels.map(x => {
+      const th = this.THEMES[x.theme], on = x.id === b.id;
+      return {
+        short: x.short, thumb: th.thumb, ink: th.ink, accent: th.accent, pct: x.pct + '%',
+        ring: on ? '#F1E6DF' : 'rgba(241,230,223,.08)', op: on ? 1 : .55,
+        meta: x.status === 'rerun' ? '重映 · ' + x.pct + '%' : x.pct + '%', metaColor: on ? '#BFAEA8' : '#7D6E69',
+        tap: () => select(x.id),
+      };
+    });
+
+    const groups = ['now', 'rerun', 'queue', 'done'].map(st => {
+      const items = all.filter(x => x.status === st).map(x => {
+        const th = this.THEMES[x.theme];
+        const meta = (st === 'now' ? 'p.' + x.page + ' / ' + x.total + ' · ' + x.pct + '%' : st === 'rerun' ? '第' + (x.round === 2 ? '二' : x.round) + '轮 · ' + x.pct + '%' : this.STATUS[st].zh) + ' · 海报：' + th.name;
+        const act = { now: ['散场', () => this.finish(x.id)], rerun: ['散场', () => this.finish(x.id)], queue: ['排片', () => this.schedule(x.id)], done: ['重映', () => this.rerun(x.id)] }[st];
+        return {
+          title: x.title, short: x.short, orig: x.orig, year: x.year, meta,
+          thumb: th.thumb, ink: th.ink, ring: x.id === b.id ? '#F1E6DF' : 'rgba(241,230,223,.08)',
+          filter: st === 'done' ? 'grayscale(.6) brightness(.7)' : 'none',
+          actLabel: act[0], actColor: st === 'done' || st === 'queue' ? th.accent : '#9A8A84',
+          act: () => act[1](), open: () => select(x.id),
+        };
+      });
+      return { zh: this.STATUS[st].zh, en: this.STATUS[st].en, count: items.length, items };
+    }).filter(g => g.items.length);
+
+    const themeOpts = [{ key: null, label: '自动 · ' + this.THEMES[b.auto].name }].concat(Object.keys(this.THEMES).map(k => ({ key: k, label: this.THEMES[k].name }))).map(o => {
+      const on = o.key === null ? !b.manual : b.manual && b.theme === o.key;
+      return {
+        label: o.label, border: on ? T.accent : 'rgba(241,230,223,.12)', color: on ? '#F1E6DF' : '#9A8A84',
+        pick: () => this.setState(s => { const t = Object.assign({}, s.themeOv); if (o.key) t[b.id] = o.key; else delete t[b.id]; return { themeOv: t }; }),
+      };
+    });
+
+    const beam = React.createElement('div', { style: {
+      position: 'absolute', left: '-20%', right: '-20%', top: '-60px', height: '78%', pointerEvents: 'none',
+      background: 'radial-gradient(ellipse 50% 60% at 50% 30%, ' + T.beam + ', transparent 72%)',
+      WebkitMaskImage: 'linear-gradient(180deg, transparent 0%, #000 35%)', maskImage: 'linear-gradient(180deg, transparent 0%, #000 35%)',
+      animation: flicker ? 'beamFlicker 7s infinite' : 'none', zIndex: 0, transition: 'background 1.2s',
+    } });
+    const grain = React.createElement('div', { style: {
+      position: 'absolute', inset: 0, pointerEvents: 'none', opacity: b.theme === 'fever' ? .32 : .2, mixBlendMode: 'overlay',
+      backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")",
+    } });
+    const tex = this.tex();
+    const WH = [32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
+    const RED = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36];
+    const wheel = b.theme === 'casino' ? WH.map((n, i) => { const a = (i + 1) / 37 * 360, rad = a * Math.PI / 180; return { n, x: (50 + 45.6 * Math.sin(rad)).toFixed(2) + '%', y: (50 - 45.6 * Math.cos(rad)).toFixed(2) + '%', r: a.toFixed(1) + 'deg', c: RED.includes(n) ? '#C4343B' : '#D8C08C' }; }) : [];
+    const SX = [1, .68, 1.12, 1, .6, 1.2], DY = ['0px', '7px', '-4px', '0px', '12px', '-2px'], MR = ['0px', '-6px', '2px', '10px', '-8px', '0px'];
+    const ugChars = b.theme === 'underground' ? [...b.title].map((ch, i) => ({ ch, sx: SX[i % 6], dy: DY[i % 6], mr: MR[i % 6] })) : [];
+    const roundZh = b.round === 2 ? '二' : b.round;
+    const q = b.id === 'karamazov' ? '' : '&t=' + encodeURIComponent(b.title) + '&o=' + encodeURIComponent(b.orig) + '&p=' + b.page + '&n=' + b.total;
+
+    return {
+      wheel, ugChars, ugCrack: tex.crack, casinoLine: b.place || (playing ? b.section : this.STATUS[b.status].zh),
+      b, timeShort: pad(S.now.getHours()) + ':' + pad(S.now.getMinutes()),
+      roomBg: T.room, accent: T.accent, beam, grain, iconUnder: tex.under, iconOver: tex.over, posterRef: this.posterRef,
+      is: Object.fromEntries(Object.keys(this.THEMES).map(k => [k, !img && b.theme === k])),
+      hasPosterImage: !!img, posterBg: img ? 'url("' + img.replace(/"/g, '%22') + '")' : 'none',
+      posterFilter: b.status === 'done' ? 'grayscale(.55) brightness(.72)' : 'none',
+      posterInitial: b.orig.charAt(0), yearRoman: this.roman(b.year),
+      posterSub: playing ? b.section : this.STATUS[b.status].zh,
+      isDone: b.status === 'done',
+      statusLine: this.STATUS[b.status].en + ' · ' + (b.status === 'rerun' ? '重映 第' + roundZh + '轮' : this.STATUS[b.status].zh),
+      dotAnim: playing ? 'livePulse 2.4s infinite' : 'none',
+      themeChip: '海报 · ' + T.name + (b.manual ? ' · 手动' : ' · 自动配') + (S.picker ? ' ˄' : ' ˅'),
+      picker: S.picker, themeOpts,
+      togglePicker: () => this.setState(s => ({ picker: !s.picker })),
+      frames, stripLabel: reels.length + ' 部同时上映',
+      shelfCount: all.length,
+      isPlaying: playing, isIdle: !playing,
+      progLabel: b.status === 'rerun' ? '第' + roundZh + '轮 · 已放映' : '已放映',
+      pct: b.pct, pctStr: b.pct + '%', remain: (b.total || 0) - (b.page || 0),
+      ticketKicker: b.status === 'rerun' ? 'ADMIT TWO · 重映' : 'ADMIT TWO · 私人放映',
+      ticketHref: '/preview/reader.html?book=' + b.id + '&theme=' + b.theme + q,
+      idleText: b.status === 'done' ? '这一部已经散场。想再看一遍，就重映它。' : '还没有开映。排进今晚，它就会出现在场次里。',
+      idleLabel: b.status === 'done' ? '重映这一部' : '排片 · 今晚上映',
+      idleAction: () => (b.status === 'done' ? this.rerun(b.id) : this.schedule(b.id)),
+      seats, seatRow, notes, notesEmpty: notesAll.length === 0,
+      notesLabel: S.seat ? '只看' + this.PEOPLE[S.seat].name + ' · 点座位恢复' : 'whispers after the reel',
+      groups, openList: () => this.setState({ list: true, picker: false }), closeList: () => this.setState({ list: false }),
+      listOp: S.list ? 1 : 0, listPE: S.list ? 'auto' : 'none', listY: S.list ? '0' : '24px',
+    };
   }
 }
-
-/* ---- paste text (original flow) ---- */
-async function submitAdd(){
-  var title=document.getElementById('add-title').value.trim();
-  var author=document.getElementById('add-author').value.trim();
-  var text=document.getElementById('add-text').value.trim();
-  if(!title||!text) return;
-  var r=await fetch('/reading/api/import',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({title,author,text,source:{type:'text'}})
-  });
-  if(r.ok){closeAdd();load();}else{alert('导入失败');}
-}
-
-/* ---- drag and drop ---- */
-(function(){
-  var dz=document.getElementById('drop-zone');
-  dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('drag-over');});
-  dz.addEventListener('dragleave',function(){dz.classList.remove('drag-over');});
-  dz.addEventListener('drop',function(e){
-    e.preventDefault();
-    dz.classList.remove('drag-over');
-    var files=e.dataTransfer.files;
-    if(files&&files[0]) setFile(files[0]);
-  });
-})();
-
-load();
 </script>
-<script src="/static/smart-quote.js"></script>
 </body>
 </html>
+
