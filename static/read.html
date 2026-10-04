@@ -27,7 +27,7 @@
   </style>
 </helmet>
 
-<div data-screen-label="共读放映厅" style="max-width:430px;margin:0 auto;min-height:100vh;background:{{ roomBg }};transition:background 1.2s ease;font-family:'Noto Serif SC',serif;color:#F1E6DF;position:relative;overflow:hidden;padding:22px 20px 60px;display:flex;flex-direction:column;gap:30px">
+<div data-screen-label="共读放映厅" style="max-width:430px;margin:0 auto;min-height:100vh;background:{{ roomBg }};transition:background 1.2s ease;font-family:'Noto Serif SC',serif;color:#F1E6DF;position:relative;overflow:hidden;padding:22px 20px 60px;display:{{ shellDisplay }};flex-direction:column;gap:30px">
 
   <div style="display:flex;align-items:center;gap:14px;position:relative;z-index:2">
     <a href="/preview/" style="width:38px;height:38px;border-radius:50%;background:rgba(241,230,223,.06);display:flex;align-items:center;justify-content:center;font-size:20px;color:#BFAEA8;flex-shrink:0">‹</a>
@@ -389,7 +389,7 @@
         <div style="width:86px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px 6px">
           <span style="font-family:'Space Grotesk',sans-serif;font-size:8px;letter-spacing:2px;color:#9A8A80">PAGE</span>
           <span style="font-family:'Bodoni Moda',serif;font-size:26px;line-height:1;font-weight:500;color:#2A1F1C">{{ b.page }}</span>
-          <span style="font-size:11px;letter-spacing:2px;color:#5E504A">进场 ›</span>
+          <span style="font-size:11px;letter-spacing:2px;color:#5E504A">{{ ticketAction }}</span>
         </div>
       </a>
     </div>
@@ -496,33 +496,13 @@
     </div>
   </div>
 </div>
-</x-dc>
-<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:412,&quot;height&quot;:915},&quot;projectorFlicker&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;氛围&quot;}}">
-class Component extends DCLogic {
+  <div data-screen-label="共读放映厅空态" style="display:{{ emptyDisplay }};max-width:430px;min-height:100vh;margin:0 auto;background:#14100F;color:#F1E6DF;font-family:'Noto Serif SC',serif;align-items:center;justify-content:center;flex-direction:column;gap:14px;padding:40px;textclass Component extends DCLogic {
   KEY = 'cinema-shelf-v1';
   AUTHOR = { author: '陀思妥耶夫斯基', authorEn: 'F. M. Dostoevsky' };
-  // 书架：卡拉马佐夫为现有真实数据；其余书的状态/进度为示例，待接 /api/books
-  SHELF = [
-    { id: 'karamazov', title: '卡拉马佐夫兄弟', short: '卡拉马佐夫', orig: 'Братья Карамазовы', year: 1880, tags: ['家族', '古典'], status: 'now', page: 587, total: 952, section: '第四部 第十一卷' },
-    { id: 'idiot', title: '白痴', short: '白痴', orig: 'Идиот', year: 1869, tags: ['宗教', '圣愚'], status: 'now', page: 214, total: 688, section: '第二部' },
-    { id: 'underground', title: '地下室手记', short: '地下室手记', orig: 'Записки из подполья', year: 1864, tags: ['地下室', '独白'], epi: 'Я человек больной… Я злой человек.', epiZh: '我是个有病的人……我是个凶狠的人。', status: 'rerun', round: 2, page: 38, total: 160, section: '第一部' },
-    { id: 'crime', title: '罪与罚', short: '罪与罚', orig: 'Преступление и наказание', year: 1866, tags: ['罪', '城市'], status: 'done' },
-    { id: 'whitenights', title: '白夜', short: '白夜', orig: 'Белые ночи', year: 1848, tags: ['抒情', '城市之夜'], sub: '感伤的故事 · 摘自一个幻想者的回忆', status: 'done' },
-    { id: 'gambler', title: '赌徒', short: '赌徒', orig: 'Игрок', year: 1866, tags: ['赌', '欲望'], place: 'Roulettenburg', status: 'queue' },
-    { id: 'double', title: '双重人格', short: '双重人格', orig: 'Двойник', year: 1846, tags: ['分身', '心理'], status: 'queue' },
-    { id: 'deadhouse', title: '死屋手记', short: '死屋手记', orig: 'Записки из Мёртвого дома', year: 1862, tags: ['流放', '囚'], status: 'queue' },
-    { id: 'demons', title: '群魔', short: '群魔', orig: 'Бесы', year: 1872, tags: ['政治', '罪'], status: 'queue' },
-    { id: 'adolescent', title: '少年', short: '少年', orig: 'Подросток', year: 1875, tags: ['成长', '抒情'], status: 'queue' },
-  ];
-  NOTES = {
-    karamazov: [
-      { who: 'haya', text: '「我不是不接受上帝，我只是把入场券恭敬地退还。」——伊万这句我想了一晚上。', when: '昨晚 23:41' },
-      { who: 'fy', pid: 6, text: '注意看阿廖沙沉默的地方，陀氏把最重的话都放在沉默里。', when: '昨晚 23:47' },
-      { who: 'fy', pid: -1, text: '明晚读第十一卷第4章，小猫别偷跑进度。', when: '今天 00:12' },
-    ],
-  };
-  // 与「共读阅读」共享的本机进度/划线/批注（待接后端后改为接口）
-  READ = { karamazov: { key: 'kara-reading-room-v1', start: 587 } };
+  // Runtime shelf data comes from the server; no demo titles live in this page.
+  SHELF = [];
+  NOTES = {};
+  READ = {};
   PEOPLE = {
     fy: { name: '费佳', en: 'Fyodor', speaker: 'FYODOR · 费佳', color: '#8A7AB5', glow: 'rgba(138,122,181,.6)' },
     haya: { name: '哈娅', en: 'Haya', speaker: 'HAYA · 哈娅', color: '#D9A441', glow: 'rgba(217,164,65,.6)' },
@@ -557,54 +537,239 @@ class Component extends DCLogic {
     done: { zh: '已散场', en: 'ENDED' },
   };
 
-  state = { now: new Date(), seat: null, sel: 'karamazov', ov: {}, themeOv: {}, list: false, picker: false };
+  state = { now: new Date(), seat: null, sel: null, ov: {}, themeOv: {}, list: false, picker: false, shelf: [], ready: false, connection: 'loading', emptyMessage: '正在连接微信读书…', progressByBook: {}, notesByBook: {}, localAnnotations: {}, coverFailed: {} };
   posterRef = React.createRef();
 
   componentDidMount() {
+    this._cache = { progress: {}, notes: {}, localAnnotations: {}, cover: {}, loading: {} };
     try {
       const d = JSON.parse(localStorage.getItem(this.KEY) || 'null');
-      if (d) this.setState({ ov: d.ov || {}, themeOv: d.themeOv || {}, sel: d.sel || 'karamazov' });
+      if (d) this.setState({ ov: d.ov || {}, themeOv: d.themeOv || {}, sel: d.sel || null });
     } catch (e) {}
     this._t = setInterval(() => this.setState({ now: new Date() }), 15000);
-    this.loadReading();
-    this._sync = () => { if (!document.hidden) this.loadReading(); };
-    window.addEventListener('storage', this._sync);
-    window.addEventListener('pageshow', this._sync);
-    document.addEventListener('visibilitychange', this._sync);
     this._prev = this.state;
+    this.loadLibrary();
   }
+  async apiJson(path) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = setTimeout(() => { if (controller) controller.abort(); }, 8000);
+    try {
+      const response = await fetch(path, controller ? { signal: controller.signal } : undefined);
+      let payload = {};
+      try { payload = await response.json(); } catch (e) {}
+      if (!response.ok) {
+        const error = new Error((payload && payload.code) || 'HTTP_' + response.status);
+        error.code = (payload && payload.code) || '';
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  matchKey(value) {
+    return String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  }
+  localBook(raw) {
+    if (!raw || raw.bookId == null) return null;
+    return {
+      bookId: String(raw.bookId),
+      title: String(raw.title || ''),
+      author: String(raw.author || ''),
+      total: Number(raw.total) || 0,
+      read: Number(raw.read) || 0,
+      lastReadAt: raw.lastReadAt || '',
+      wereadBookId: raw.wereadBookId == null ? '' : String(raw.wereadBookId),
+    };
+  }
+  mergeShelves(remote, localPayload) {
+    const locals = ((localPayload && localPayload.books) || []).map(x => this.localBook(x)).filter(Boolean);
+    const books = ((remote && remote.books) || []).map(raw => {
+      const remoteId = String(raw.bookId || '');
+      const explicit = locals.filter(x => x.wereadBookId && x.wereadBookId === remoteId);
+      let local = explicit.length === 1 ? explicit[0] : null;
+      let matchSource = local ? 'manifest' : '';
+      if (!local) {
+        const title = this.matchKey(raw.title);
+        const author = this.matchKey(raw.author);
+        const candidates = title && author ? locals.filter(x => this.matchKey(x.title) === title && this.matchKey(x.author) === author) : [];
+        if (candidates.length === 1) {
+          local = candidates[0];
+          matchSource = 'title-author';
+        }
+      }
+      return {
+        id: remoteId,
+        source: 'weread',
+        wereadBookId: remoteId,
+        localBookId: local ? local.bookId : '',
+        localAvailable: !!local,
+        matchSource: matchSource || 'none',
+        title: String(raw.title || ''),
+        short: String(raw.title || '').slice(0, 8),
+        orig: String(raw.title || ''),
+        author: String(raw.author || ''),
+        authorEn: '',
+        year: 0,
+        tags: Array.isArray(raw.category) ? raw.category : [],
+        cover: raw.cover || '',
+        posterImage: raw.cover || '',
+        total: local ? local.total : 0,
+        read: local ? local.read : 0,
+        lastReadAt: raw.readUpdateTime || '',
+        readUpdateTime: raw.readUpdateTime || '',
+        finishReading: !!raw.finishReading,
+        isTop: !!raw.isTop,
+        secret: !!raw.secret,
+        deepLink: raw.deepLink || '',
+        status: 'queue',
+        page: 0,
+        section: '',
+      };
+    });
+    if (!books.length) return [];
+    let unfinished = books.filter(x => !x.finishReading);
+    unfinished = unfinished.slice().sort((a, b) => this.timeValue(b.readUpdateTime) - this.timeValue(a.readUpdateTime));
+    const currentId = unfinished.length ? unfinished[0].id : '';
+    return books.map(x => Object.assign({}, x, {
+      status: x.finishReading ? 'done' : (x.id === currentId ? 'now' : 'queue'),
+    }));
+  }
+  localFallback(localPayload) {
+    const locals = ((localPayload && localPayload.books) || []).map(x => this.localBook(x)).filter(Boolean);
+    if (!locals.length) return [];
+    const books = locals.map(x => ({
+      id: x.bookId,
+      source: 'local',
+      wereadBookId: x.wereadBookId,
+      localBookId: x.bookId,
+      localAvailable: true,
+      matchSource: 'local-only',
+      title: x.title,
+      short: x.title.slice(0, 8),
+      orig: x.title,
+      author: x.author,
+      authorEn: '',
+      year: 0,
+      tags: [],
+      cover: '',
+      posterImage: '',
+      total: x.total,
+      read: x.read,
+      lastReadAt: x.lastReadAt,
+      readUpdateTime: x.lastReadAt,
+      finishReading: !!(x.total && x.read >= x.total),
+      isTop: false,
+      secret: false,
+      deepLink: '',
+      status: 'queue',
+      page: 0,
+      section: '',
+    }));
+    const unfinished = books.filter(x => !x.finishReading).slice().sort((a, b) => this.timeValue(b.lastReadAt) - this.timeValue(a.lastReadAt));
+    const currentId = unfinished.length ? unfinished[0].id : '';
+    return books.map(x => Object.assign({}, x, { status: x.finishReading ? 'done' : (x.id === currentId ? 'now' : 'queue') }));
+  }
+  timeValue(value) {
+    if (typeof value === 'number' || /^\d+$/.test(String(value || ''))) {
+      const n = Number(value);
+      return n < 1e12 ? n * 1000 : n;
+    }
+    const t = Date.parse(value || '');
+    return Number.isFinite(t) ? t : 0;
+  }
+  async loadLibrary() {
+    let local = null, remote = null, remoteError = null;
+    try { local = await this.apiJson('/api/books'); } catch (e) {}
+    try { remote = await this.apiJson('/api/weread/shelf'); } catch (e) { remoteError = e; }
+    const shelf = remote ? this.mergeShelves(remote, local) : this.localFallback(local);
+    const connection = remote ? 'connected' : (remoteError && remoteError.code === 'WEREAD_NOT_CONFIGURED' ? 'not-configured' : 'fallback');
+    if (!shelf.length) {
+      const emptyMessage = connection === 'not-configured' ? '微信读书还没有连接' : remote ? '微信读书书架为空' : '书架暂时无法载入';
+      this.setState({ shelf: [], ready: true, connection, emptyMessage });
+      return;
+    }
+    this.SHELF = shelf;
+    const saved = this.state.sel && shelf.some(x => x.id === this.state.sel) ? this.state.sel : '';
+    const unfinished = shelf.filter(x => x.status === 'now');
+    const selected = saved || (unfinished[0] && unfinished[0].id) || shelf[0].id;
+    this.setState({ shelf, sel: selected, ready: true, connection, emptyMessage: '' });
+  }
+  async loadSelectedBook(id) {
+    const item = (this.state.shelf || []).find(x => x.id === id);
+    if (!item || this._cache.loading[id]) return;
+    this._cache.loading[id] = true;
+    const remoteId = item.wereadBookId || (item.source === 'weread' ? item.id : '');
+    const requests = [];
+    if (remoteId && !Object.prototype.hasOwnProperty.call(this._cache.progress, remoteId)) {
+      requests.push(this.apiJson('/api/weread/books/' + encodeURIComponent(remoteId) + '/progress').then(x => {
+        this._cache.progress[remoteId] = x;
+      }).catch(() => { this._cache.progress[remoteId] = null; }));
+    }
+    if (remoteId && !Object.prototype.hasOwnProperty.call(this._cache.notes, remoteId)) {
+      requests.push(this.apiJson('/api/weread/books/' + encodeURIComponent(remoteId) + '/notes').then(x => {
+        this._cache.notes[remoteId] = Array.isArray(x && x.notes) ? x.notes : [];
+      }).catch(() => { this._cache.notes[remoteId] = []; }));
+    }
+    if (item.localAvailable && item.localBookId && !Object.prototype.hasOwnProperty.call(this._cache.localAnnotations, item.localBookId)) {
+      requests.push(this.apiJson('/api/books/' + encodeURIComponent(item.localBookId) + '/annotations').then(x => {
+        this._cache.localAnnotations[item.localBookId] = Array.isArray(x && x.annotations) ? x.annotations : [];
+      }).catch(() => { this._cache.localAnnotations[item.localBookId] = []; }));
+    }
+    this.loadCover(item.id, item.posterImage);
+    await Promise.all(requests);
+    const patch = {};
+    if (remoteId) patch.progressByBook = Object.assign({}, this.state.progressByBook, { [remoteId]: this._cache.progress[remoteId] || null });
+    if (remoteId) patch.notesByBook = Object.assign({}, this.state.notesByBook, { [remoteId]: this._cache.notes[remoteId] || [] });
+    if (item.localBookId) patch.localAnnotations = Object.assign({}, this.state.localAnnotations, { [item.localBookId]: this._cache.localAnnotations[item.localBookId] || [] });
+    this.setState(patch);
+  }
+  loadCover(id, url) {
+    if (!url || this._cache.cover[id] || typeof Image === 'undefined') return;
+    this._cache.cover[id] = true;
+    const image = new Image();
+    image.onload = () => this.setState({ coverFailed: Object.assign({}, this.state.coverFailed, { [id]: false }) });
+    image.onerror = () => this.setState({ coverFailed: Object.assign({}, this.state.coverFailed, { [id]: true }) });
+    image.src = url;
+  }
+
   componentWillUnmount() {
     clearInterval(this._t);
-    window.removeEventListener('storage', this._sync);
-    window.removeEventListener('pageshow', this._sync);
-    document.removeEventListener('visibilitychange', this._sync);
   }
-  loadReading() {
-    const reading = {};
-    Object.keys(this.READ).forEach(id => {
-      try { const d = JSON.parse(localStorage.getItem(this.READ[id].key) || 'null'); if (d) reading[id] = d; } catch (e) {}
-    });
-    this.setState({ reading });
-  }
-  fmtTs(ts) {
+  fmtTs(  fmtTs(ts) {
     const d = new Date(ts), n = new Date(), p = x => String(x).padStart(2, '0'), hm = p(d.getHours()) + ':' + p(d.getMinutes());
     const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
     const diff = Math.round((day(n) - day(d)) / 864e5);
     return diff === 0 ? '今天 ' + hm : diff === 1 ? '昨天 ' + hm : (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
   }
   liveNotes(id) {
-    const seed = this.NOTES[id] || [], r = this.state.reading && this.state.reading[id];
-    if (!r) return seed;
-    const extra = (r.notes || []).map(n => {
-      const ts = parseInt(String(n.id || '').split('-')[1], 10);
-      return { who: n.who, text: n.text, quote: n.quote || '', pid: n.pid, ts: ts || 0, when: ts ? this.fmtTs(ts) : n.when };
-    }).sort((a, b) => a.ts - b.ts);
-    return seed.concat(extra);
+    const base = (this.state.notesByBook[id] || []).map(n => ({
+      who: n.who === 'fy' ? 'fy' : 'haya',
+      text: n.text || '',
+      quote: n.quote || '',
+      pid: typeof n.range === 'number' ? n.range : null,
+      when: n.createdAt ? this.fmtTs(n.createdAt) : '',
+      ts: this.timeValue(n.createdAt),
+    }));
+    const localId = ((this.state.shelf || []).find(x => x.id === id) || {}).localBookId;
+    const local = (localId ? this.state.localAnnotations[localId] : []) || [];
+    const localNotes = local.filter(n => n.note || n.text).map(n => ({
+      who: n.author === 'fy' || n.author === 'fyodor' ? 'fy' : 'haya',
+      text: n.note || n.text || '',
+      quote: n.quote || '',
+      pid: Number.isFinite(+n.paragraphIdx) ? +n.paragraphIdx : null,
+      when: n.createdAt ? this.fmtTs(n.createdAt) : '',
+      ts: this.timeValue(n.createdAt),
+    }));
+    return base.concat(localNotes).sort((a, b) => a.ts - b.ts);
   }
   hlCount(id, who) {
-    const r = this.state.reading && this.state.reading[id];
-    return r && r.hl ? Object.values(r.hl).filter(v => (typeof v === 'string' ? v : v && v.who) === who).length : 0;
+    const item = (this.state.shelf || []).find(x => x.id === id);
+    const rows = item && item.localBookId ? (this.state.localAnnotations[item.localBookId] || []) : [];
+    return rows.filter(v => (v.author === who || (who === 'haya' && !v.author))).length;
   }
+  componentDidUpdate() {
   componentDidUpdate() {
     const prev = this._prev || this.state; this._prev = this.state;
     const S = this.state;
@@ -618,6 +783,7 @@ class Component extends DCLogic {
     if (prev.sel !== S.sel || prev.ov !== S.ov || prev.themeOv !== S.themeOv) {
       try { localStorage.setItem(this.KEY, JSON.stringify({ sel: S.sel, ov: S.ov, themeOv: S.themeOv })); } catch (e) {}
     }
+    if (prev.sel !== S.sel && S.sel) this.loadSelectedBook(S.sel);
   }
 
   roman(n) {
@@ -629,17 +795,27 @@ class Component extends DCLogic {
     return 'classic';
   }
   book(id) {
-    const base = this.SHELF.find(x => x.id === id) || this.SHELF[0];
+    const base = (this.state.shelf || []).find(x => x.id === id) || this.SHELF.find(x => x.id === id) || {
+      id: '', title: '', short: '', orig: '', author: '', authorEn: '', year: 0, tags: [],
+      status: 'queue', page: 0, total: 0, section: '', localAvailable: false, localBookId: '',
+      cover: '', posterImage: '', deepLink: '',
+    };
     const b = Object.assign({}, this.AUTHOR, base, this.state.ov[base.id] || {});
-    const rd = this.state.reading && this.state.reading[base.id], ov = this.state.ov[base.id] || {};
-    if (rd && rd.page != null && ov.page == null && this.READ[base.id]) b.page = this.READ[base.id].start + rd.page;
+    const remote = b.wereadBookId && this.state.progressByBook[b.wereadBookId];
+    const remotePct = remote && Number.isFinite(+remote.progress) ? Math.max(0, Math.min(100, Math.round(+remote.progress))) : null;
+    b.progress = remotePct == null ? (b.finishReading ? 100 : (b.total ? Math.round((b.read || 0) / b.total * 100) : 0)) : remotePct;
+    b.page = b.total ? Math.round(b.total * b.progress / 100) : (b.read || 0);
+    if (b.finishReading || b.progress === 100) b.status = 'done';
+    b.section = b.section || (remote && remote.chapterUid ? String(remote.chapterUid) : '');
+    b.posterImage = b.cover && !this.state.coverFailed[b.id] ? b.cover : '';
     b.auto = this.autoTheme(b);
     b.theme = this.state.themeOv[b.id] || b.auto;
     b.manual = !!this.state.themeOv[b.id];
-    b.pct = b.total ? Math.round(b.page / b.total * 100) : 0;
+    b.pct = b.progress;
     b.sub = b.sub || ''; b.epi = b.epi || ''; b.epiZh = b.epiZh || '';
     return b;
   }
+  setStatus(id, patch) {
   setStatus(id, patch) { this.setState(s => ({ ov: Object.assign({}, s.ov, { [id]: Object.assign({}, s.ov[id] || {}, patch) }) })); }
   rerun(id) {
     const b = this.book(id);
@@ -687,8 +863,9 @@ class Component extends DCLogic {
 
   renderVals() {
     const S = this.state, P = this.props;
-    const all = this.SHELF.map(x => this.book(x.id));
-    const b = this.book(S.sel);
+    const all = (S.shelf || []).map(x => this.book(x.id));
+    const selectedId = S.sel || (all[0] && all[0].id) || '';
+    const b = this.book(selectedId);
     const T = this.THEMES[b.theme];
     const flicker = P.projectorFlicker ?? true;
     const pad = n => String(n).padStart(2, '0');
@@ -712,12 +889,12 @@ class Component extends DCLogic {
       const dim = S.seat && S.seat !== k;
       return { bg: dim ? 'rgba(241,230,223,.16)' : this.PEOPLE[k].color, glow: dim ? 'none' : '0 0 14px ' + this.PEOPLE[k].glow };
     });
-    const linkable = !!this.READ[b.id];
+    const linkable = !!b.localAvailable && !!b.localBookId;
     const notes = notesAll.filter(n => !S.seat || n.who === S.seat).map(n => ({
-      text: n.text, when: n.when, speaker: this.PEOPLE[n.who].speaker, color: this.PEOPLE[n.who].color,
+      text: n.text, when: n.when, speaker: (this.PEOPLE[n.who] || this.PEOPLE.haya).speaker, color: (this.PEOPLE[n.who] || this.PEOPLE.haya).color,
       hasQuote: !!n.quote, quote: '「' + (n.quote || '') + '」',
       hasLink: linkable && typeof n.pid === 'number',
-      href: '/preview/reader.html?book=' + b.id + '&theme=' + b.theme + '&pid=' + n.pid,
+      href: '/preview/reader.html?book=' + encodeURIComponent(b.localBookId) + '&theme=' + b.theme + '&pid=' + n.pid,
     }));
 
     const reels = all.filter(x => x.status === 'now').concat(all.filter(x => x.status === 'rerun'));
@@ -772,19 +949,20 @@ class Component extends DCLogic {
     const SX = [1, .68, 1.12, 1, .6, 1.2], DY = ['0px', '7px', '-4px', '0px', '12px', '-2px'], MR = ['0px', '-6px', '2px', '10px', '-8px', '0px'];
     const ugChars = b.theme === 'underground' ? [...b.title].map((ch, i) => ({ ch, sx: SX[i % 6], dy: DY[i % 6], mr: MR[i % 6] })) : [];
     const roundZh = b.round === 2 ? '二' : b.round;
-    const q = b.id === 'karamazov' ? '' : '&t=' + encodeURIComponent(b.title) + '&o=' + encodeURIComponent(b.orig) + '&p=' + b.page + '&n=' + b.total;
+    const q = '&t=' + encodeURIComponent(b.title) + '&o=' + encodeURIComponent(b.orig) + '&p=' + b.page + '&n=' + b.total;
 
     return {
       wheel, ugChars, ugCrack: tex.crack, casinoLine: b.place || (playing ? b.section : this.STATUS[b.status].zh),
       b, timeShort: pad(S.now.getHours()) + ':' + pad(S.now.getMinutes()),
       roomBg: T.room, accent: T.accent, beam, grain, iconUnder: tex.under, iconOver: tex.over, posterRef: this.posterRef,
+      shellDisplay: all.length ? 'flex' : 'none', emptyDisplay: all.length ? 'none' : 'flex', emptyMessage: S.emptyMessage,
       is: Object.fromEntries(Object.keys(this.THEMES).map(k => [k, !img && b.theme === k])),
       hasPosterImage: !!img, posterBg: img ? 'url("' + img.replace(/"/g, '%22') + '")' : 'none',
       posterFilter: b.status === 'done' ? 'grayscale(.55) brightness(.72)' : 'none',
       posterInitial: b.orig.charAt(0), yearRoman: this.roman(b.year),
       posterSub: playing ? b.section : this.STATUS[b.status].zh,
       isDone: b.status === 'done',
-      statusLine: this.STATUS[b.status].en + ' · ' + (b.status === 'rerun' ? '重映 第' + roundZh + '轮' : this.STATUS[b.status].zh),
+      statusLine: S.connection === 'not-configured' ? '微信读书还没有连接 · 本地书库' : S.connection === 'fallback' ? '微信读书暂时不可用 · 本地书库' : this.STATUS[b.status].en + ' · ' + (b.status === 'rerun' ? '重映 第' + roundZh + '轮' : this.STATUS[b.status].zh),
       dotAnim: playing ? 'livePulse 2.4s infinite' : 'none',
       themeChip: '海报 · ' + T.name + (b.manual ? ' · 手动' : ' · 自动配') + (S.picker ? ' ˄' : ' ˅'),
       picker: S.picker, themeOpts,
@@ -795,8 +973,19 @@ class Component extends DCLogic {
       progLabel: b.status === 'rerun' ? '第' + roundZh + '轮 · 已放映' : '已放映',
       pct: b.pct, pctStr: b.pct + '%', remain: (b.total || 0) - (b.page || 0),
       ticketKicker: b.status === 'rerun' ? 'ADMIT TWO · 重映' : 'ADMIT TWO · 私人放映',
-      ticketHref: '/preview/reader.html?book=' + b.id + '&theme=' + b.theme + q,
-      idleText: b.status === 'done' ? '这一部已经散场。想再看一遍，就重映它。' : '还没有开映。排进今晚，它就会出现在场次里。',
+      ticketHref: b.localAvailable && b.localBookId ? '/preview/reader.html?book=' + encodeURIComponent(b.localBookId) + '&theme=' + b.theme + q : (b.deepLink || '#'),
+      ticketAction: b.localAvailable ? '进场 ›' : '正文尚未入库',
+      idleText: !b.localAvailable ? '正文尚未入库，可从微信读书官方入口打开。' : b.status === 'done' ? '这一部已经散场。想再看一遍，就重映它。' : '还没有开映。排进今晚，它就会出现在场次里。',
+      idleLabel: b.status === 'done' ? '重映这一部' : '排片 · 今晚上映',
+      idleAction: () => (b.status === 'done' ? this.rerun(b.id) : this.schedule(b.id)),
+      seats, seatRow, notes, notesEmpty: notesAll.length === 0,
+      notesLabel: S.seat ? '只看' + this.PEOPLE[S.seat].name + ' · 点座位恢复' : 'whispers after the reel',
+      groups, openList: () => this.setState({ list: true, picker: false }), closeList: () => this.setState({ list: false }),
+      listOp: S.list ? 1 : 0, listPE: S.list ? 'auto' : 'none', listY: S.list ? '0' : '24px',
+    };
+  }
+}
+idleText: b.status === 'done' ? '这一部已经散场。想再看一遍，就重映它。' : '还没有开映。排进今晚，它就会出现在场次里。',
       idleLabel: b.status === 'done' ? '重映这一部' : '排片 · 今晚上映',
       idleAction: () => (b.status === 'done' ? this.rerun(b.id) : this.schedule(b.id)),
       seats, seatRow, notes, notesEmpty: notesAll.length === 0,
