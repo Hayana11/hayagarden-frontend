@@ -65,8 +65,7 @@ actual object AutoSyncPlatform {
         }
     }
 
-    actual fun supportsBatteryOptimization(): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+    actual fun supportsBatteryOptimization(): Boolean = true
 
     actual fun batteryOptimizationStatus(): BatteryOptimizationStatus {
         if (!supportsBatteryOptimization()) return BatteryOptimizationStatus.UNAVAILABLE

@@ -12,7 +12,6 @@ import com.bettermifitness.sync.health.HealthAvailability
 import com.bettermifitness.sync.health.HealthPermissionRequester
 import com.bettermifitness.sync.health.HealthReadiness
 import com.bettermifitness.sync.i18n.L10n
-import com.bettermifitness.sync.sync.SyncOutcomeLabels
 import com.bettermifitness.sync.sync.WorkerDiagnosticOutcome
 import com.bettermifitness.sync.util.RelativeTime
 import kotlinx.coroutines.flow.MutableStateFlow
