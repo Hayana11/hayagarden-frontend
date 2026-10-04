@@ -3,9 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="./react.production.min.js"></script>
-<script src="./react-dom.production.min.js"></script>
-<script src="./support.js?v=20261004-raw-template-fix"></script>
+<script>
+(function () {
+  var pathname = window.location.pathname || '';
+  var base = pathname.indexOf('/preview/') === 0
+    ? '/preview/'
+    : window.location.port === '5174'
+      ? './'
+      : '/static/';
+  var files = [
+    'react.production.min.js',
+    'react-dom.production.min.js',
+    'support.js?v=20261004-raw-template-fix'
+  ];
+  for (var i = 0; i < files.length; i++) {
+    document.write('<script src="' + base + files[i] + '"><\\/script>');
+  }
+})();
+</script>
 </head>
 <body>
 <x-dc>
