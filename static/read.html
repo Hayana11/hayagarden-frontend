@@ -800,12 +800,18 @@
       status: 'queue', page: 0, total: 0, section: '', localAvailable: false, localBookId: '',
       cover: '', posterImage: '', deepLink: '',
     };
-    const b = Object.assign({}, this.AUTHOR, base, this.state.ov[base.id] || {});
+    const manual = this.state.ov[base.id] || {};
+    const b = Object.assign({}, this.AUTHOR, base, manual);
     const remote = b.wereadBookId && this.state.progressByBook[b.wereadBookId];
     const remotePct = remote && Number.isFinite(+remote.progress) ? Math.max(0, Math.min(100, Math.round(+remote.progress))) : null;
     b.progress = remotePct == null ? (b.finishReading ? 100 : (b.total ? Math.round((b.read || 0) / b.total * 100) : 0)) : remotePct;
     b.page = b.total ? Math.round(b.total * b.progress / 100) : (b.read || 0);
-    if (b.finishReading || b.progress === 100) b.status = 'done';
+    if (!manual.status && (b.finishReading || b.progress === 100)) b.status = 'done';
+    if (manual.status === 'rerun') {
+      b.status = 'rerun';
+      b.page = Number(manual.page) || 0;
+      b.progress = b.total ? Math.round(b.page / b.total * 100) : 0;
+    }
     b.section = b.section || (remote && remote.chapterUid ? String(remote.chapterUid) : '');
     b.posterImage = b.cover && !this.state.coverFailed[b.id] ? b.cover : '';
     b.auto = this.autoTheme(b);
