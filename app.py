@@ -17,6 +17,7 @@ from moments_routes import create_moments_blueprint
 from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 from monopoly_rooms import MonopolyService
 from monopoly_routes import create_monopoly_blueprint
+from weread_routes import create_weread_blueprint
 from valence_scale import normalize_arousal, normalize_valence
 from tools.product_handlers import (
     ProductHandlerError,
@@ -155,6 +156,7 @@ app.register_blueprint(create_moments_blueprint(
 ))
 app.register_blueprint(create_external_mcp_admin_blueprint())
 app.register_blueprint(create_monopoly_blueprint(MonopolyService(db_path=DB_PATH)))
+app.register_blueprint(create_weread_blueprint())
 from context_compression_routes import create_context_compression_blueprint
 app.register_blueprint(create_context_compression_blueprint(db_path=DB_PATH))
 
@@ -1936,6 +1938,7 @@ def books_list():
                 'author': m.get('author',''), 'total': total,
                 'read': read, 'color1': c1, 'color2': c2,
                 'lastReadAt': bp.get('lastReadAt'),
+                'wereadBookId': m.get('wereadBookId') or ((m.get('weread') or {}).get('bookId') if isinstance(m.get('weread'), dict) else None),
             })
     books.sort(key=lambda x: x.get('lastReadAt') or '', reverse=True)
     return jsonify({'books': books})
