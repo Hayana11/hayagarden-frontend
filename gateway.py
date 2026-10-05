@@ -6036,11 +6036,24 @@ def _stream_cc_deferred_confirmation(request_data, *, reality_context=''):
         yield _sse_json({'t': 'err', 'd': str(exc), 'code': str(exc)})
 
 def _gw_first_turn_jsonl_grew(session) -> bool:
-    """True when candidate JSONL grew past claim-time start_offset."""
+    """True when bytes past start_offset contain more than startup bookkeeping."""
     try:
-        return int(session.jsonl_path.stat().st_size) > int(session.start_offset)
-    except OSError:
-        # Fail closed: treat unreadable size as dirty.
+        size = int(session.jsonl_path.stat().st_size)
+        start = int(session.start_offset)
+        if size <= start:
+            return False
+        sid = str(
+            getattr(getattr(session, 'staged', None), '_session_id', None) or ''
+        ).strip()
+        if cc_resident.staged_jsonl_has_only_safe_startup_observations(
+            session.jsonl_path,
+            frozen_size=start,
+            expected_session_id=sid,
+        ):
+            return False
+        return True
+    except (OSError, TypeError, ValueError):
+        # Fail closed: unreadable / malformed evidence is dirty.
         return True
 
 
@@ -10399,6 +10412,9 @@ def _gw_build_switch_hooks():
             staged.wait_staged_health(
                 jsonl_path=forge_path,
                 expected_sha256=intent.get('target_jsonl_sha256'),
+                expected_size=intent.get('target_jsonl_size'),
+                expected_session_id=intent.get('target_session_id'),
+                allow_startup_observation_append=True,
             )
         except cc_resident.ResidentError as exc:
             try:
