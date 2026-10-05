@@ -1082,7 +1082,14 @@ def abort_first_turn_clean(
     if session.stdin_sent:
         raise FirstTurnError('stdin already sent', error_code='FIRST_TURN_NOT_CLEAN')
     if _jsonl_size(session.jsonl_path) > int(session.start_offset):
-        raise FirstTurnError('jsonl grew', error_code='FIRST_TURN_NOT_CLEAN')
+        from cc_resident import staged_jsonl_has_only_safe_startup_observations
+        sid = str(getattr(session.staged, '_session_id', None) or '').strip()
+        if not staged_jsonl_has_only_safe_startup_observations(
+            session.jsonl_path,
+            frozen_size=int(session.start_offset),
+            expected_session_id=sid,
+        ):
+            raise FirstTurnError('jsonl grew', error_code='FIRST_TURN_NOT_CLEAN')
     if session._db_committed:
         raise FirstTurnError('already committed', error_code='FIRST_TURN_ALREADY_COMMITTED')
 
