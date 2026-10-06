@@ -33,6 +33,26 @@ def _mapped_http_error(status):
     return WereadError("WEREAD_BAD_RESPONSE", 502)
 
 
+def _is_zero_errcode(value):
+    if value is None or value is False:
+        return True
+    if isinstance(value, (int, float)):
+        return value == 0
+    return str(value).strip() in {"", "0"}
+
+
+def _gateway_business_error(payload):
+    if not isinstance(payload, dict):
+        return None
+    # upgrade_info is intentionally reduced to a stable status code.  The
+    # upstream detail may contain sensitive or implementation-specific data.
+    if "upgrade_info" in payload and payload.get("upgrade_info") is not None:
+        return WereadError("WEREAD_UPGRADE_REQUIRED", 502)
+    if "errcode" in payload and not _is_zero_errcode(payload.get("errcode")):
+        return WereadError("WEREAD_BUSINESS_ERROR", 502)
+    return None
+
+
 class WereadClient:
     def __init__(self, api_key=None, opener=None, timeout=8):
         self.api_key = (api_key if api_key is not None else os.environ.get("WEREAD_API_KEY", "")).strip()
@@ -42,11 +62,18 @@ class WereadClient:
     def call(self, api_name, params=None):
         if not self.api_key:
             raise WereadError("WEREAD_NOT_CONFIGURED", 503)
-        body = json.dumps({
+
+        # The WeChat Reading Skill gateway requires business arguments at the
+        # top level.  Reserved protocol fields always come from this adapter.
+        body_fields = {
             "api_name": api_name,
             "skill_version": SKILL_VERSION,
-            "params": params or {},
-        }, ensure_ascii=False).encode("utf-8")
+        }
+        if isinstance(params, dict):
+            for key, value in params.items():
+                if key not in {"api_name", "skill_version"}:
+                    body_fields[key] = value
+        body = json.dumps(body_fields, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             GATEWAY_URL,
             data=body,
@@ -75,6 +102,11 @@ class WereadClient:
         if len(raw) > MAX_RESPONSE_BYTES:
             raise WereadError("WEREAD_BAD_RESPONSE", 502)
         try:
-            return json.loads(raw.decode("utf-8"))
+            payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise WereadError("WEREAD_BAD_RESPONSE", 502) from None
+
+        business_error = _gateway_business_error(payload)
+        if business_error:
+            raise business_error
+        return payload
