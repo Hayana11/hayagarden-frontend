@@ -1016,7 +1016,7 @@ class Component extends DCLogic {
       b, timeShort: pad(S.now.getHours()) + ':' + pad(S.now.getMinutes()),
       roomBg: T.room, accent: T.accent, beam, grain, iconUnder: tex.under, iconOver: tex.over, posterRef: this.posterRef,
       shellDisplay: all.length ? 'flex' : 'none', emptyDisplay: all.length ? 'none' : 'flex', emptyMessage: S.emptyMessage,
-      connectionLabel: S.connection === 'connected' ? '微信读书 · 已连接' : '',
+      connectionLabel: S.connection === 'connected' ? '微信读书 · 已连接' : S.connection === 'not-configured' ? '连接微信读书' : S.connection === 'fallback' ? '更新连接' : '',
       connectModalDisplay: S.connectModal ? 'flex' : 'none',
       connectAction: () => this.openConnectModal(),
       closeConnectModal: () => this.closeConnectModal(),
