@@ -68,16 +68,10 @@ function filterConsoleBlock(memory) {
   assert.match(css, /\.calendar-legend-row > \* > \* \+ \* \{[\s\S]*?margin-left:\s*5px/);
 }
 
-// C. Read — inset fallback + SPA contacts route for static HTML
-{
-  const read = readStatic('read.html');
-  assert.doesNotMatch(read, /\.mo\{[^}]*\binset\s*:\s*0/);
-  assert.match(read, /\.mo\{[^}]*top:\s*0[^}]*right:\s*0[^}]*bottom:\s*0[^}]*left:\s*0/);
-  assert.match(read, /href="\/dash\/contacts"[^>]*>[\s\S]*?chat/);
-  assert.doesNotMatch(read, /href="\/contacts"/);
-  assert.doesNotMatch(read, /href="\/chat"/);
-  assert.match(read, /href="\/static\/static-nav\.css"/);
-}
+// C. The current static/read.html is the standalone WeRead reading hall.
+// Its old .mo / /dash/contacts / static-nav.css contract was removed from
+// the base read page; its runtime is covered by the dedicated JS compile and
+// mock Chromium smoke checks rather than by stale navigation assertions.
 
 // D. Board — overlay above bnav + inset fallback + SPA contacts route
 {
