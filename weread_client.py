@@ -46,7 +46,7 @@ def _gateway_business_error(payload):
         return None
     # upgrade_info is intentionally reduced to a stable status code.  The
     # upstream detail may contain sensitive or implementation-specific data.
-    if "upgrade_info" in payload and payload.get("upgrade_info") is not None:
+    if "upgrade_info" in payload:
         return WereadError("WEREAD_UPGRADE_REQUIRED", 502)
     if "errcode" in payload and not _is_zero_errcode(payload.get("errcode")):
         return WereadError("WEREAD_BUSINESS_ERROR", 502)
