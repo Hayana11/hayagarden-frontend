@@ -11,6 +11,8 @@ from tools import health_store
 import moments_store
 import moments_cover
 from moments_auth import OwnerAuthError, require_owner
+from daily_context_bff import same_origin_mutation_ok
+from weread_client import WereadClient, WereadError
 from context_usage_routes import create_context_usage_blueprint
 from health_ingest_routes import create_health_blueprint
 from moments_routes import create_moments_blueprint
@@ -2774,11 +2776,41 @@ def _valid_weread_key(value):
 @app.route('/api/config/weread-key', methods=['POST'])
 def config_set_weread_key():
     import subprocess
-    data = request.get_json(silent=True) or {}
+
+    try:
+        require_owner(request)
+    except OwnerAuthError as exc:
+        return jsonify({'ok': False, 'error': exc.message}), exc.status_code
+    if not same_origin_mutation_ok(request):
+        return jsonify({'ok': False, 'error': 'cross-origin mutation rejected'}), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
     raw_key = data.get('key')
     key = raw_key.strip() if isinstance(raw_key, str) else ''
     if not _valid_weread_key(key):
         return jsonify({'ok': False, 'code': 'WEREAD_KEY_INVALID'}), 400
+
+    try:
+        validation = WereadClient(api_key=key).call('/shelf/sync')
+        if isinstance(validation, dict):
+            if 'upgrade_info' in validation:
+                return jsonify({'ok': False, 'code': 'WEREAD_UPGRADE_REQUIRED'}), 502
+            errcode = validation.get('errcode')
+            if errcode not in (None, False, 0, '', '0'):
+                return jsonify({'ok': False, 'code': 'WEREAD_UNAVAILABLE'}), 502
+    except WereadError as exc:
+        if exc.code == 'WEREAD_UNAUTHORIZED':
+            return jsonify({'ok': False, 'code': 'WEREAD_KEY_INVALID'}), 401
+        if exc.code == 'WEREAD_UPGRADE_REQUIRED':
+            return jsonify({'ok': False, 'code': 'WEREAD_UPGRADE_REQUIRED'}), 502
+        if exc.code == 'WEREAD_RATE_LIMITED':
+            return jsonify({'ok': False, 'code': 'WEREAD_RATE_LIMITED'}), 429
+        return jsonify({'ok': False, 'code': 'WEREAD_UNAVAILABLE'}), 502
+    except Exception:
+        return jsonify({'ok': False, 'code': 'WEREAD_UNAVAILABLE'}), 502
+
     try:
         _env_set('WEREAD_API_KEY', key)
         os.environ['WEREAD_API_KEY'] = key
