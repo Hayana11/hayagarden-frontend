@@ -51,6 +51,81 @@ UNIFIED_NORMAL_WAKE_JSONL_FINALITY_RETRY_DELAYS = (
     0.0, 0.05, 0.15, 0.35, 0.45,
 )
 
+# Claude Code may append uuid-less process bookkeeping while a staged
+# --resume process starts, before any user stdin is sent. These rows are not
+# conversation events and the transcript reader already projects them away.
+# Keep this allowlist intentionally tiny: any conversation-shaped or unknown
+# append still fails closed.
+STAGED_STARTUP_OBSERVATION_TYPES = frozenset({
+    'atis-latch',
+    'mode',
+    'cost-state',
+})
+
+
+def staged_jsonl_has_only_safe_startup_observations(
+    path,
+    *,
+    frozen_size,
+    frozen_sha256=None,
+    expected_session_id=None,
+):
+    """Prove bytes after one frozen transcript prefix are harmless startup rows."""
+    try:
+        frozen_size = int(frozen_size)
+    except (TypeError, ValueError):
+        return False
+    if frozen_size < 0:
+        return False
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return False
+        with open(path, 'rb') as handle:
+            raw = handle.read()
+    except OSError:
+        return False
+    if len(raw) < frozen_size:
+        return False
+    prefix = raw[:frozen_size]
+    if frozen_sha256 and hashlib.sha256(prefix).hexdigest() != str(frozen_sha256):
+        return False
+    suffix = raw[frozen_size:]
+    if not suffix:
+        return True
+    if frozen_size and not prefix.endswith(b'\n'):
+        return False
+    if not suffix.endswith(b'\n'):
+        return False
+    sid = str(expected_session_id or '').strip()
+    try:
+        text = suffix.decode('utf-8')
+    except UnicodeDecodeError:
+        return False
+    for raw_line in text.splitlines():
+        if not raw_line.strip():
+            return False
+        try:
+            obj = json.loads(raw_line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(obj, dict):
+            return False
+        if str(obj.get('type') or '') not in STAGED_STARTUP_OBSERVATION_TYPES:
+            return False
+        if (
+            obj.get('uuid')
+            or obj.get('parentUuid')
+            or obj.get('message') is not None
+            or obj.get('requestId')
+            or obj.get('request_id')
+            or obj.get('isSidechain') is True
+        ):
+            return False
+        row_sid = str(obj.get('sessionId') or '').strip()
+        if not sid or row_sid != sid:
+            return False
+    return True
+
 # Claude stdout events that refresh the stall / inactivity deadline.
 # Gateway/SSE heartbeats are synthetic and must NOT be listed here.
 _CLAUDE_ACTIVITY_STREAM_EVENTS = frozenset({
@@ -2141,8 +2216,16 @@ class ResidentSession:
         health_ms=None,
         jsonl_path=None,
         expected_sha256=None,
+        expected_size=None,
+        expected_session_id=None,
+        allow_startup_observation_append=False,
     ):
-        """No-stdin health window for staged --resume process."""
+        """No-stdin health window for staged --resume process.
+
+        Strict callers retain byte-for-byte immutability. Manual-window resume
+        may opt into a narrow exception for Claude Code's uuid-less startup
+        bookkeeping while preserving the frozen transcript prefix exactly.
+        """
         import config_store
         from tools.claude_forge_core import sha256_file
 
@@ -2153,13 +2236,28 @@ class ResidentSession:
                 health_ms = 2000
         health_ms = max(0, int(health_ms))
         before = None
+        path = None
         if jsonl_path is not None:
             from pathlib import Path
             path = Path(jsonl_path)
             if not path.is_file():
                 raise ResidentError('staged_spawn_failed:jsonl_missing')
             before = path.read_bytes()
-            if expected_sha256 and sha256_file(path) != str(expected_sha256):
+            if allow_startup_observation_append:
+                frozen_size = len(before) if expected_size is None else int(expected_size)
+                sid = str(
+                    expected_session_id
+                    or getattr(self, '_session_id', None)
+                    or ''
+                ).strip()
+                if not staged_jsonl_has_only_safe_startup_observations(
+                    path,
+                    frozen_size=frozen_size,
+                    frozen_sha256=expected_sha256,
+                    expected_session_id=sid,
+                ):
+                    raise ResidentError('staged_jsonl_mutated_before_handoff')
+            elif expected_sha256 and sha256_file(path) != str(expected_sha256):
                 raise ResidentError('staged_jsonl_mutated_before_handoff')
 
         deadline = time.time() + (health_ms / 1000.0)
@@ -2182,19 +2280,31 @@ class ResidentSession:
                 if any(m.lower() in lower for m in stderr_fatal_markers):
                     raise ResidentError('staged_stderr_fatal')
                 raise ResidentError('staged_exited_during_health_window')
-            # Non-blocking peek at stderr for fatal markers without consuming all.
             time.sleep(min(0.05, max(0.0, deadline - time.time())))
 
         if not self._alive():
             raise ResidentError('staged_exited_during_health_window')
-        if jsonl_path is not None:
-            from pathlib import Path
-            path = Path(jsonl_path)
-            after = path.read_bytes()
-            if before != after:
-                raise ResidentError('staged_jsonl_mutated_before_handoff')
-            if expected_sha256 and sha256_file(path) != str(expected_sha256):
-                raise ResidentError('staged_jsonl_mutated_before_handoff')
+        if path is not None:
+            if allow_startup_observation_append:
+                frozen_size = len(before or b'') if expected_size is None else int(expected_size)
+                sid = str(
+                    expected_session_id
+                    or getattr(self, '_session_id', None)
+                    or ''
+                ).strip()
+                if not staged_jsonl_has_only_safe_startup_observations(
+                    path,
+                    frozen_size=frozen_size,
+                    frozen_sha256=expected_sha256,
+                    expected_session_id=sid,
+                ):
+                    raise ResidentError('staged_jsonl_mutated_before_handoff')
+            else:
+                after = path.read_bytes()
+                if before != after:
+                    raise ResidentError('staged_jsonl_mutated_before_handoff')
+                if expected_sha256 and sha256_file(path) != str(expected_sha256):
+                    raise ResidentError('staged_jsonl_mutated_before_handoff')
         return True
 
     def _commit_sent_context(self, commit_meta):
