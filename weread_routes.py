@@ -90,16 +90,29 @@ def _book(item):
 
 
 def _album(item):
-    album_id = _pick(item, "albumId", "album_id", "id")
+    # Official /shelf/sync albums are split between albumInfo and
+    # albumInfoExtra.  A flat album object is not a valid contract.
+    if not isinstance(item, dict):
+        return None
+    info = item.get("albumInfo")
+    extra = item.get("albumInfoExtra")
+    if not isinstance(info, dict):
+        return None
+    if not isinstance(extra, dict):
+        extra = {}
+    album_id = _pick(info, "albumId")
     if album_id is None:
         return None
     return {
         "albumId": str(album_id),
-        "title": str(_pick(item, "title", "albumTitle", default="")),
-        "cover": _pick(item, "cover", "coverUrl", "cover_url"),
-        "category": _categories(_pick(item, "category", "categories", "tags")),
-        "isTop": _bool(_pick(item, "isTop", "is_top", default=False)),
-        "deepLink": _pick(item, "deepLink", "deep_link", "url"),
+        "title": str(_pick(info, "name", default="")),
+        "author": str(_pick(info, "authorName", default="")),
+        "cover": _pick(info, "cover"),
+        "trackCount": _int(_pick(info, "trackCount", default=0)),
+        "finish": _bool(_pick(info, "finish", default=False)),
+        "secret": _bool(_pick(extra, "secret", default=False)),
+        "lectureReadUpdateTime": _pick(extra, "lectureReadUpdateTime"),
+        "isTop": _bool(_pick(extra, "isTop", default=False)),
     }
 
 
@@ -108,7 +121,7 @@ def normalize_shelf(raw):
     if not isinstance(data, dict):
         data = {}
     books = [item for item in (_book(x) for x in _items(data, "books", "bookList", "book_list")) if item]
-    albums = [item for item in (_album(x) for x in _items(data, "albums", "albumList", "album_list")) if item]
+    albums = [item for item in (_album(x) for x in _items(data, "albums")) if item]
     mp = _pick(data, "mp", "articleCollection", "article_collection")
     return {
         "books": books,
@@ -120,6 +133,8 @@ def normalize_shelf(raw):
 
 def normalize_progress(book_id, raw):
     data = _unwrap(raw)
+    if isinstance(data, dict) and isinstance(data.get("book"), dict):
+        data = data["book"]
     if isinstance(data, list):
         data = data[0] if data else {}
     if not isinstance(data, dict):
@@ -140,27 +155,50 @@ def normalize_progress(book_id, raw):
 def _note(item, kind, index):
     if not isinstance(item, dict):
         return None
-    note_id = _pick(item, "id", "bookmarkId", "bookmark_id", "reviewId", "review_id")
+
+    source = item
+    if kind == "review":
+        source = item.get("review")
+        if not isinstance(source, dict):
+            return None
+        note_id = _pick(source, "reviewId")
+        quote = _pick(source, "abstract", default="")
+        text = _pick(source, "content", default="")
+    else:
+        note_id = _pick(source, "bookmarkId")
+        quote = _pick(source, "markText", default="")
+        text = _pick(source, "note", "content", "comment", "text", default="")
+
     if note_id is None:
         note_id = kind + "-" + str(index)
-    quote = _pick(item, "quote", "markText", "mark_text", "bookText", "book_text")
-    text = _pick(item, "note", "content", "comment", "review", "text", default="")
-    position = _pick(item, "range", "position")
+    position = _pick(source, "range", "position")
     if position is None:
-        start = _pick(item, "start", "startPos", "start_pos", "begin")
-        end = _pick(item, "end", "endPos", "end_pos")
+        start = _pick(source, "start", "startPos", "start_pos", "begin")
+        end = _pick(source, "end", "endPos", "end_pos")
         if start is not None or end is not None:
             position = {"start": start, "end": end}
-    return {
+
+    note = {
         "id": str(note_id),
         "type": kind,
         "who": "haya",
         "quote": str(quote or ""),
         "text": str(text or ""),
-        "chapterUid": _pick(item, "chapterUid", "chapter_uid"),
+        "chapterUid": _pick(source, "chapterUid", "chapter_uid"),
         "range": position,
-        "createdAt": _pick(item, "createdAt", "created_at", "updateTime", "update_time"),
+        "createdAt": _pick(source, "createTime", "createdAt", "created_at", "updateTime", "update_time"),
     }
+    if kind == "bookmark":
+        note["bookId"] = _pick(source, "bookId", "book_id")
+        note["colorStyle"] = _pick(source, "colorStyle")
+    else:
+        note.update({
+            "chapterIdx": _pick(source, "chapterIdx", "chapter_idx"),
+            "chapterName": _pick(source, "chapterName", "chapter_name"),
+            "star": _pick(source, "star"),
+            "isFinish": _bool(_pick(source, "isFinish", "is_finish", default=False)),
+        })
+    return note
 
 
 def normalize_notes(book_id, bookmarks, reviews):
@@ -181,7 +219,10 @@ def normalize_notes(book_id, bookmarks, reviews):
 
 
 def _error_response(error):
-    return jsonify({"ok": False, "code": error.code}), error.status
+    body = {"ok": False, "code": error.code}
+    if error.code == "WEREAD_UPGRADE_REQUIRED":
+        body["upgradeRequired"] = True
+    return jsonify(body), error.status
 
 
 def create_weread_blueprint(client_factory=None):
@@ -213,13 +254,13 @@ def create_weread_blueprint(client_factory=None):
         try:
             client = get_client()
             bookmarks = client.call("/book/bookmarklist", {"bookId": book_id})
-            reviews = client.call("/review/list/mine", {"bookId": book_id})
+            reviews = client.call("/review/list/mine", {"bookid": book_id})
             bookmarks = _unwrap(bookmarks)
             reviews = _unwrap(reviews)
             return jsonify(normalize_notes(
                 book_id,
-                _items(bookmarks, "bookmarks", "bookmarkList", "bookmark_list"),
-                _items(reviews, "reviews", "reviewList", "review_list"),
+                _items(bookmarks, "updated"),
+                _items(reviews, "reviews"),
             ))
         except WereadError as error:
             return _error_response(error)
