@@ -34,6 +34,9 @@
     <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0">
       <span style="font-size:17px;font-weight:600;letter-spacing:4px">共读放映厅</span>
       <span style="font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:3px;color:#9A8A84">SCREEN 01 · PRIVATE</span>
+      <sc-if value="{{ connectionLabel }}" hint-placeholder-val="">
+        <span onClick="{{ openConnectModal }}" style="cursor:pointer;font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:2px;color:#B89150">{{ connectionLabel }}</span>
+      </sc-if>
     </div>
     <span onClick="{{ openList }}" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:999px;border:1px solid rgba(241,230,223,.14);font-size:12px;letter-spacing:2px;color:#BFAEA8">片单 <span style="font-family:'Bodoni Moda',serif;font-size:13px;color:{{ accent }}">{{ shelfCount }}</span></span>
   </div>
@@ -500,6 +503,27 @@
     <span style="font-size:19px;font-weight:600;letter-spacing:5px">共读放映厅</span>
     <span style="font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:3px;color:#7D6E69">SCREEN 01 · PRIVATE</span>
     <span style="font-size:14px;line-height:1.9;color:#A8968F">{{ emptyMessage }}</span>
+    <span onClick="{{ connectAction }}" style="cursor:pointer;padding:13px 28px;border-radius:999px;border:1px solid #B89150;font-size:14px;letter-spacing:4px;color:#F1E6DF">{{ connectActionLabel }}</span>
+  </div>
+  <div style="display:{{ connectModalDisplay }};position:fixed;inset:0;z-index:50;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.66)">
+    <div onClick="{{ closeConnectModal }}" style="position:absolute;inset:0"></div>
+    <div style="position:relative;z-index:1;width:100%;max-width:380px;background:#1B1513;border:1px solid rgba(241,230,223,.14);box-shadow:0 24px 70px rgba(0,0,0,.55);padding:24px;display:flex;flex-direction:column;gap:18px;color:#F1E6DF">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <span style="font-size:19px;font-weight:600;letter-spacing:4px">连接微信读书</span>
+          <span style="font-size:12px;line-height:1.8;color:#A8968F">粘贴 WeRead API Key。密钥只保存在服务器，不会出现在浏览器页面或书架数据中。</span>
+        </div>
+        <span onClick="{{ closeConnectModal }}" style="cursor:pointer;font-size:20px;line-height:1;color:#BFAEA8">×</span>
+      </div>
+      <input id="weread-key-input" type="password" autocomplete="off" spellcheck="false" aria-label="WeRead API Key" placeholder="WEREAD API KEY" style="width:100%;box-sizing:border-box;border:1px solid rgba(241,230,223,.16);border-radius:2px;background:rgba(241,230,223,.05);color:#F1E6DF;padding:13px 14px;font:inherit;font-size:13px;letter-spacing:1px;outline:none">
+      <sc-if value="{{ connectError }}" hint-placeholder-val="">
+        <span style="font-size:12px;line-height:1.7;color:#D58B7E">{{ connectError }}</span>
+      </sc-if>
+      <div style="display:flex;justify-content:flex-end;gap:10px;align-items:center">
+        <span onClick="{{ closeConnectModal }}" style="cursor:pointer;padding:10px 14px;font-size:12px;letter-spacing:2px;color:#9A8A84">取消</span>
+        <span onClick="{{ submitConnect }}" style="cursor:pointer;padding:10px 16px;border-radius:999px;border:1px solid #B89150;font-size:12px;letter-spacing:2px;color:#F1E6DF;opacity:{{ connectButtonOpacity }}">{{ connectButtonLabel }}</span>
+      </div>
+    </div>
   </div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:412,&quot;height&quot;:915},&quot;projectorFlicker&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;氛围&quot;}}">
@@ -544,7 +568,7 @@ class Component extends DCLogic {
     done: { zh: '已散场', en: 'ENDED' },
   };
 
-  state = { now: new Date(), seat: null, sel: null, ov: {}, themeOv: {}, list: false, picker: false, shelf: [], ready: false, connection: 'loading', emptyMessage: '正在连接微信读书…', progressByBook: {}, notesByBook: {}, localAnnotations: {}, coverFailed: {} };
+  state = { now: new Date(), seat: null, sel: null, ov: {}, themeOv: {}, list: false, picker: false, shelf: [], ready: false, connection: 'loading', emptyMessage: '正在连接微信读书…', connectModal: false, connectBusy: false, connectError: '', progressByBook: {}, notesByBook: {}, localAnnotations: {}, coverFailed: {} };
   posterRef = React.createRef();
 
   componentDidMount() {
@@ -556,6 +580,72 @@ class Component extends DCLogic {
     this._t = setInterval(() => this.setState({ now: new Date() }), 15000);
     this._prev = this.state;
     this.loadLibrary();
+  }
+  clearConnectInput() {
+    const input = document.getElementById('weread-key-input');
+    if (input) input.value = '';
+  }
+  openConnectModal() {
+    this.clearConnectInput();
+    this.setState({ connectModal: true, connectBusy: false, connectError: '' });
+    setTimeout(() => {
+      const input = document.getElementById('weread-key-input');
+      if (input) input.focus();
+    }, 0);
+  }
+  closeConnectModal() {
+    this.clearConnectInput();
+    this.setState({ connectModal: false, connectBusy: false, connectError: '' });
+  }
+  connectErrorMessage(error) {
+    const code = error && error.code;
+    if (code === 'WEREAD_KEY_INVALID' || code === 'WEREAD_UNAUTHORIZED') return 'Key 无效';
+    if (code === 'WEREAD_UNAVAILABLE' || code === 'WEREAD_UPSTREAM_ERROR' || code === 'WEREAD_RATE_LIMITED' || code === 'WEREAD_UPGRADE_REQUIRED') return '微信读书暂时不可用';
+    return '保存失败';
+  }
+  async waitFrontendReady() {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        await this.apiJson('/api/books');
+        return;
+      } catch (e) {}
+      await new Promise(resolve => setTimeout(resolve, 350));
+    }
+    const error = new Error('WEREAD_UNAVAILABLE');
+    error.code = 'WEREAD_UNAVAILABLE';
+    throw error;
+  }
+  async submitConnect() {
+    if (this.state.connectBusy) return;
+    const input = document.getElementById('weread-key-input');
+    const key = input ? String(input.value || '').trim() : '';
+    if (!key) {
+      this.setState({ connectError: 'Key 无效' });
+      return;
+    }
+    this.setState({ connectBusy: true, connectError: '' });
+    try {
+      const response = await fetch('/api/config/weread-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+      let payload = {};
+      try { payload = await response.json(); } catch (e) {}
+      if (!response.ok || !payload.ok) {
+        const error = new Error('WEREAD_KEY_SAVE_FAILED');
+        error.code = payload.code || (response.status === 400 ? 'WEREAD_KEY_INVALID' : 'WEREAD_KEY_SAVE_FAILED');
+        throw error;
+      }
+      this.clearConnectInput();
+      await this.waitFrontendReady();
+      const remote = await this.apiJson('/api/weread/shelf');
+      await this.loadLibrary(remote);
+      this.setState({ connectModal: false, connectBusy: false, connectError: '' });
+    } catch (error) {
+      this.clearConnectInput();
+      this.setState({ connectBusy: false, connectError: this.connectErrorMessage(error) });
+    }
   }
   async apiJson(path) {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -648,10 +738,12 @@ class Component extends DCLogic {
     const t = Date.parse(value || '');
     return Number.isFinite(t) ? t : 0;
   }
-  async loadLibrary() {
-    let local = null, remote = null, remoteError = null;
+  async loadLibrary(remoteOverride) {
+    let local = null, remote = remoteOverride === undefined ? null : remoteOverride, remoteError = null;
     try { local = await this.apiJson('/api/books'); } catch (e) {}
-    try { remote = await this.apiJson('/api/weread/shelf'); } catch (e) { remoteError = e; }
+    if (remoteOverride === undefined) {
+      try { remote = await this.apiJson('/api/weread/shelf'); } catch (e) { remoteError = e; }
+    }
     const shelf = remote ? this.mergeShelves(remote, local) : this.localFallback(local);
     const connection = remote ? 'connected' : (remoteError && remoteError.code === 'WEREAD_NOT_CONFIGURED' ? 'not-configured' : 'fallback');
     if (!shelf.length) {
@@ -924,6 +1016,16 @@ class Component extends DCLogic {
       b, timeShort: pad(S.now.getHours()) + ':' + pad(S.now.getMinutes()),
       roomBg: T.room, accent: T.accent, beam, grain, iconUnder: tex.under, iconOver: tex.over, posterRef: this.posterRef,
       shellDisplay: all.length ? 'flex' : 'none', emptyDisplay: all.length ? 'none' : 'flex', emptyMessage: S.emptyMessage,
+      connectionLabel: S.connection === 'connected' ? '微信读书 · 已连接' : '',
+      connectModalDisplay: S.connectModal ? 'flex' : 'none',
+      connectAction: () => this.openConnectModal(),
+      closeConnectModal: () => this.closeConnectModal(),
+      openConnectModal: () => this.openConnectModal(),
+      submitConnect: () => this.submitConnect(),
+      connectActionLabel: S.connection === 'connected' ? '更新连接' : '连接微信读书',
+      connectError: S.connectError,
+      connectButtonLabel: S.connectBusy ? '正在连接…' : '保存并连接',
+      connectButtonOpacity: S.connectBusy ? .55 : 1,
       is: Object.fromEntries(Object.keys(this.THEMES).map(k => [k, !img && b.theme === k])),
       hasPosterImage: !!img, posterBg: img ? 'url("' + img.replace(/"/g, '%22') + '")' : 'none',
       posterFilter: b.status === 'done' ? 'grayscale(.55) brightness(.72)' : 'none',
