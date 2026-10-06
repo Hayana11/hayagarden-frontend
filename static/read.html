@@ -599,6 +599,8 @@ class Component extends DCLogic {
   }
   connectErrorMessage(error) {
     const code = error && error.code;
+    const status = error && error.status;
+    if (status === 401 || status === 403 || code === 'OWNER_AUTH_REQUIRED') return '当前页面没有修改权限';
     if (code === 'WEREAD_KEY_INVALID' || code === 'WEREAD_UNAUTHORIZED') return 'Key 无效';
     if (code === 'WEREAD_UNAVAILABLE' || code === 'WEREAD_UPSTREAM_ERROR' || code === 'WEREAD_RATE_LIMITED' || code === 'WEREAD_UPGRADE_REQUIRED') return '微信读书暂时不可用';
     return '保存失败';
@@ -634,7 +636,14 @@ class Component extends DCLogic {
       try { payload = await response.json(); } catch (e) {}
       if (!response.ok || !payload.ok) {
         const error = new Error('WEREAD_KEY_SAVE_FAILED');
-        error.code = payload.code || (response.status === 400 ? 'WEREAD_KEY_INVALID' : 'WEREAD_KEY_SAVE_FAILED');
+        error.status = response.status;
+        error.code = payload.code || (
+          response.status === 401 || response.status === 403
+            ? 'OWNER_AUTH_REQUIRED'
+            : response.status === 400
+              ? 'WEREAD_KEY_INVALID'
+              : 'WEREAD_KEY_SAVE_FAILED'
+        );
         throw error;
       }
       this.clearConnectInput();
