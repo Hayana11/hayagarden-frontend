@@ -11,12 +11,15 @@ from tools import health_store
 import moments_store
 import moments_cover
 from moments_auth import OwnerAuthError, require_owner
+from daily_context_bff import same_origin_mutation_ok
+from weread_client import WereadClient, WereadError
 from context_usage_routes import create_context_usage_blueprint
 from health_ingest_routes import create_health_blueprint
 from moments_routes import create_moments_blueprint
 from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 from monopoly_rooms import MonopolyService
 from monopoly_routes import create_monopoly_blueprint
+from weread_routes import create_weread_blueprint
 from valence_scale import normalize_arousal, normalize_valence
 from tools.product_handlers import (
     ProductHandlerError,
@@ -155,6 +158,7 @@ app.register_blueprint(create_moments_blueprint(
 ))
 app.register_blueprint(create_external_mcp_admin_blueprint())
 app.register_blueprint(create_monopoly_blueprint(MonopolyService(db_path=DB_PATH)))
+app.register_blueprint(create_weread_blueprint())
 from context_compression_routes import create_context_compression_blueprint
 app.register_blueprint(create_context_compression_blueprint(db_path=DB_PATH))
 
@@ -1936,6 +1940,7 @@ def books_list():
                 'author': m.get('author',''), 'total': total,
                 'read': read, 'color1': c1, 'color2': c2,
                 'lastReadAt': bp.get('lastReadAt'),
+                'wereadBookId': m.get('wereadBookId') or ((m.get('weread') or {}).get('bookId') if isinstance(m.get('weread'), dict) else None),
             })
     books.sort(key=lambda x: x.get('lastReadAt') or '', reverse=True)
     return jsonify({'books': books})
@@ -2760,6 +2765,64 @@ def config_set_cc_token():
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+_WEREAD_KEY_RE = re.compile(r'^wrk-[A-Za-z0-9][A-Za-z0-9._~+/=-]{15,511}$')
+
+
+def _valid_weread_key(value):
+    return isinstance(value, str) and bool(_WEREAD_KEY_RE.fullmatch(value))
+
+
+@app.route('/api/config/weread-key', methods=['POST'])
+def config_set_weread_key():
+    import subprocess
+
+    try:
+        require_owner(request)
+    except OwnerAuthError as exc:
+        return jsonify({'ok': False, 'error': exc.message}), exc.status_code
+    if not same_origin_mutation_ok(request):
+        return jsonify({'ok': False, 'error': 'cross-origin mutation rejected'}), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
+    raw_key = data.get('key')
+    key = raw_key.strip() if isinstance(raw_key, str) else ''
+    if not _valid_weread_key(key):
+        return jsonify({'ok': False, 'code': 'WEREAD_KEY_INVALID'}), 400
+
+    try:
+        validation = WereadClient(api_key=key).call('/shelf/sync')
+        if isinstance(validation, dict):
+            if 'upgrade_info' in validation:
+                return jsonify({'ok': False, 'code': 'WEREAD_UPGRADE_REQUIRED'}), 502
+            errcode = validation.get('errcode')
+            if errcode not in (None, False, 0, '', '0'):
+                return jsonify({'ok': False, 'code': 'WEREAD_UNAVAILABLE'}), 502
+    except WereadError as exc:
+        if exc.code == 'WEREAD_UNAUTHORIZED':
+            return jsonify({'ok': False, 'code': 'WEREAD_KEY_INVALID'}), 401
+        if exc.code == 'WEREAD_UPGRADE_REQUIRED':
+            return jsonify({'ok': False, 'code': 'WEREAD_UPGRADE_REQUIRED'}), 502
+        if exc.code == 'WEREAD_RATE_LIMITED':
+            return jsonify({'ok': False, 'code': 'WEREAD_RATE_LIMITED'}), 429
+        return jsonify({'ok': False, 'code': 'WEREAD_UNAVAILABLE'}), 502
+    except Exception:
+        return jsonify({'ok': False, 'code': 'WEREAD_UNAVAILABLE'}), 502
+
+    try:
+        _env_set('WEREAD_API_KEY', key)
+        os.environ['WEREAD_API_KEY'] = key
+        restart_env = os.environ.copy()
+        restart_env.pop('WEREAD_API_KEY', None)
+        subprocess.Popen(
+            ['systemctl', 'restart', 'frontend'],
+            env=restart_env,
+        )
+        return jsonify({'ok': True})
+    except Exception:
+        return jsonify({'ok': False, 'code': 'WEREAD_KEY_SAVE_FAILED'}), 500
 
 
 # ── Monitor tables init ──
