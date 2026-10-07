@@ -26,9 +26,16 @@ def _raw_config() -> dict:
                 "enabled": True,
                 "minTurns": 1,
                 "repeatMinTurns": 1,
-                "nextStage": "s1",
+                "nextStage": "s2",
                 "holdable": True,
                 "poolIds": ["cycle-pool", "turn-pool"],
+            },
+            {
+                "id": "s2",
+                "enabled": True,
+                "terminalWithoutContinue": True,
+                "continueTarget": "s1",
+                "poolIds": [],
             },
         ],
         "cues": [
