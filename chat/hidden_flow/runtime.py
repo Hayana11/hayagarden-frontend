@@ -231,7 +231,7 @@ def propose_transition(
         state_after = start_flow(
             config,
             control,
-            started_at=datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            started_at="user-message:%d" % int(plan.user_message_id),
             engine_enabled=True,
         )
     else:
