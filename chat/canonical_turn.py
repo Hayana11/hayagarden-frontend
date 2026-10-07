@@ -454,6 +454,7 @@ def build_canonical_turn(
         elif kind == 'text':
             segments.append_text(value)
     raw_assistant_text = parser.text
+    sanitized_thinking = parser.thinking
     if hidden_sanitize is not None:
         parsed = parse_hidden_flow_control(
             raw_assistant_text,
@@ -461,6 +462,7 @@ def build_canonical_turn(
         )
         hidden_control = parsed.to_dict() if parsed is not None else None
         raw_assistant_text = hidden_sanitize(raw_assistant_text)
+        sanitized_thinking = hidden_sanitize(sanitized_thinking)
     content, choices = extract_choices(strip_save_markers(raw_assistant_text))
     content = str(content or '').strip()
     if not content and choices:
@@ -475,7 +477,7 @@ def build_canonical_turn(
         sanitized_values = []
         for segment in segment_values:
             item = dict(segment)
-            if str(item.get('type') or '') == 'text':
+            if str(item.get('type') or '') in ('text', 'thinking'):
                 item['text'] = hidden_sanitize(str(item.get('text') or ''))
             sanitized_values.append(item)
         segment_values = sanitized_values
@@ -502,7 +504,7 @@ def build_canonical_turn(
     }
     return CanonicalTurn(
         content=content,
-        thinking=parser.thinking,
+        thinking=sanitized_thinking,
         display_segments=json.dumps(canonical_segments, ensure_ascii=False, separators=(',', ':')),
         tool_calls=tuple(tool_calls),
         choices=tuple(choices),
@@ -512,7 +514,7 @@ def build_canonical_turn(
         transcript_identity=identity,
         projection_hash=_hash_projection(
             content,
-            parser.thinking,
+            sanitized_thinking,
             canonical_segments,
             tool_calls,
             choices,
