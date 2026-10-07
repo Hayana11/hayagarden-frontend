@@ -65,56 +65,8 @@ def parse_hidden_flow_control(raw: str, *, expected_flow_id: Optional[str] = Non
 
 
 def sanitize_hidden_flow_text(raw: str) -> str:
-    """Remove complete and trailing partial control payloads from visible text."""
-    text = str(raw or "")
-    output: list[str] = []
-    cursor = 0
-    folded = text.casefold()
-    opener = "<" + _CONTROL_NAME
-    while cursor < len(text):
-        start = folded.find(opener, cursor)
-        if start < 0:
-            output.append(text[cursor:])
-            break
-        boundary = start + len(opener)
-        if boundary < len(text) and (text[boundary].isalnum() or text[boundary] in "_-"):
-            output.append(text[cursor:boundary])
-            cursor = boundary
-            continue
-        output.append(text[cursor:start])
-        close = _find_close(text, boundary)
-        if close < 0:
-            break
-        cursor = close + 2
-    result = "".join(output)
-    folded_result = result.casefold()
-    for index in range(len(result) - 1, -1, -1):
-        suffix = folded_result[index:]
-        if len(suffix) > 1 and _OPENER_PREFIX(suffix):
-            result = result[:index]
-            break
-    return result
+    """Remove the same private protocol accepted by the live stream filter."""
+    from .stream_filter import HiddenFlowStreamFilter
 
-
-def _OPENER_PREFIX(value: str) -> bool:
-    return ("<" + _CONTROL_NAME).casefold().startswith(value.casefold())
-
-
-def _find_close(text: str, start: int) -> int:
-    quote: Optional[str] = None
-    index = start
-    while index < len(text) - 1:
-        char = text[index]
-        if quote is not None:
-            if char == quote:
-                quote = None
-            index += 1
-            continue
-        if char in {"\"", "'"}:
-            quote = char
-            index += 1
-            continue
-        if text[index:index + 2] == "/>":
-            return index
-        index += 1
-    return -1
+    stream = HiddenFlowStreamFilter()
+    return stream.feed(str(raw or "")) + stream.finish()
