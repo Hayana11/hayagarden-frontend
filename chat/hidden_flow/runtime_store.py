@@ -442,3 +442,19 @@ def finalize_snapshot(
             (int(assistant_message_id),),
         ).fetchone()
     )
+
+
+def load_runtime_bundle(
+    chat_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    connection = _connect(db_path)
+    try:
+        ensure_hidden_flow_schema(conn=connection)
+        return {
+            "configs": load_configs(conn=connection),
+            "runtime": load_runtime(chat_id, conn=connection),
+        }
+    finally:
+        connection.close()
