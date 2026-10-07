@@ -6895,27 +6895,39 @@ def ensure_resident_and_stream(
             content=content,
         )
 
-        hidden_filter = None
+        text_filter = None
+        thinking_filter = None
         if _hidden_flow_runtime_enabled(plan):
             from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
-            hidden_filter = HiddenFlowStreamFilter()
+            text_filter = HiddenFlowStreamFilter()
+            thinking_filter = HiddenFlowStreamFilter()
 
         try:
             for evt, payload in resident.send_turn(content, **send_kwargs):
                 if heartbeat.failed:
                     close_local_resident_if_bound(resident, expected_key=plan.resident_key)
                     raise LeaseHeartbeatTerminalFailure('lease heartbeat failed during stream')
-                if hidden_filter is not None and evt == 'text':
-                    visible_payload = hidden_filter.feed(
+                if text_filter is not None and evt == 'text':
+                    visible_payload = text_filter.feed(
                         payload if isinstance(payload, str) else str(payload or '')
                     )
                     if not visible_payload:
                         continue
                     payload = visible_payload
-                elif hidden_filter is not None and evt == 'done':
-                    visible_tail = hidden_filter.finish()
+                elif thinking_filter is not None and evt == 'think':
+                    visible_payload = thinking_filter.feed(
+                        payload if isinstance(payload, str) else str(payload or '')
+                    )
+                    if not visible_payload:
+                        continue
+                    payload = visible_payload
+                elif text_filter is not None and evt == 'done':
+                    visible_tail = text_filter.finish()
                     if visible_tail:
                         yield 'text', visible_tail
+                    thinking_tail = thinking_filter.finish()
+                    if thinking_tail:
+                        yield 'think', thinking_tail
                 if evt == 'done':
                     receipt = (
                         getattr(payload[2], 'terminal_receipt', None)
