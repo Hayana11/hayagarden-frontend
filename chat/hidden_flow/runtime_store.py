@@ -118,7 +118,13 @@ def _decode_config(row: sqlite3.Row) -> Optional[tuple[FlowConfig, int]]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
     config = normalize_flow_config(raw)
-    if config is None or not config.enabled or not bool(row["enabled"]):
+    if (
+        config is None
+        or not config.enabled
+        or not bool(row["enabled"])
+        or config.flow_id != str(row["flow_id"] or "")
+        or int(row["schema_version"]) != int(config.schema_version)
+    ):
         return None
     return config, int(row["version"])
 
