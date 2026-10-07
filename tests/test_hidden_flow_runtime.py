@@ -294,6 +294,7 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
             user_content="hello",
             db_path=self.db_path,
             worker_id="worker",
+            turn_lease={"lease": "test"},
         )
         if hidden_plan is not None:
             plan.hidden_flow_enabled = True
