@@ -3487,6 +3487,11 @@ def _prepare_hidden_flow_plan(
         and str(provider or "").strip() == "claude_code"
         and str(turn_kind or "").strip() in {"hot", "cold", "respawn"}
     )
+    if not eligible:
+        class _DisabledHiddenFlowPlan:
+            enabled = False
+            eligible = False
+        return _DisabledHiddenFlowPlan()
     from chat.hidden_flow.runtime import disabled_hidden_flow_plan
     if not eligible:
         return disabled_hidden_flow_plan(
