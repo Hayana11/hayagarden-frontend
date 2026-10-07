@@ -2,7 +2,7 @@
 
 from .config import DEFAULT_FLOW_CONFIG, HIDDEN_FLOW_ENGINE_ENABLED, normalize_flow_config
 from .control import parse_hidden_flow_control, sanitize_hidden_flow_text
-from .draw import draw_for_guide, draw_pool, render_private_guide
+from .draw import draw_for_guide, draw_for_guide_with_state, draw_pool, render_private_guide
 from .engine import apply_flow_control, start_flow
 from .stream_filter import HiddenFlowStreamFilter
 from .types import (
@@ -34,6 +34,7 @@ __all__ = [
     "StageSpec",
     "apply_flow_control",
     "draw_for_guide",
+    "draw_for_guide_with_state",
     "draw_pool",
     "normalize_flow_config",
     "parse_hidden_flow_control",

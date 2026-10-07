@@ -10,7 +10,7 @@ from pathlib import Path
 
 from chat.hidden_flow.config import DEFAULT_FLOW_CONFIG, normalize_flow_config
 from chat.hidden_flow.control import parse_hidden_flow_control, sanitize_hidden_flow_text
-from chat.hidden_flow.draw import draw_for_guide, draw_pool, render_private_guide
+from chat.hidden_flow.draw import draw_for_guide, draw_for_guide_with_state, draw_pool, render_private_guide
 from chat.hidden_flow.engine import apply_flow_control as _apply_flow_control
 from chat.hidden_flow.engine import start_flow as _start_flow
 from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
@@ -19,6 +19,8 @@ from chat.hidden_flow.types import (
     FlowConfig,
     FlowControl,
     FlowState,
+    DrawItem,
+    DrawResult,
     PoolEntry,
     PoolSpec,
 )
@@ -228,7 +230,33 @@ class HiddenFlowStateTests(unittest.TestCase):
         state = start_flow(self.config, _control("demo-flow", "start"))
         wrong = apply_flow_control(self.config, state, _control("other", "stop"))
         self.assertEqual(wrong, state)
+        wrong_keys = apply_flow_control(self.config, state, _control("other", keys="should-not-apply"))
+        self.assertEqual(wrong_keys, state)
         self.assertFalse(apply_flow_control(self.config, state, _control("demo-flow", "stop")).active)
+
+    def test_active_keys_only_and_hold_update_context(self) -> None:
+        state = start_flow(self.config, _control("demo-flow", "start", "initial"))
+        state = apply_flow_control(self.config, state, _control("demo-flow", keys="keys-only"))
+        self.assertEqual(state.context_keys, ("keys-only",))
+        self.assertEqual((state.stage, state.stage_turn), ("s1", 2))
+        state = apply_flow_control(self.config, state, _control("demo-flow", "hold", "hold-key"))
+        self.assertEqual(state.context_keys, ("hold-key",))
+        self.assertEqual((state.stage, state.stage_turn), ("s1", 3))
+
+    def test_active_start_does_not_overwrite_existing_context(self) -> None:
+        state = start_flow(self.config, _control("demo-flow", "start", "original"))
+        restarted = apply_flow_control(self.config, state, _control("demo-flow", "start", "new"))
+        self.assertEqual(restarted.context_keys, ("original",))
+        self.assertEqual((restarted.stage, restarted.stage_turn, restarted.cycle), ("s1", 2, 1))
+
+    def test_continue_inherits_latest_context_keys(self) -> None:
+        state = start_flow(self.config, _control("demo-flow", "start"))
+        state = apply_flow_control(self.config, state, _control("demo-flow", keys="latest"))
+        state = apply_flow_control(self.config, state)
+        state = apply_flow_control(self.config, state)
+        self.assertEqual(state.stage, "s3")
+        continued = apply_flow_control(self.config, state, _control("demo-flow", "continue"))
+        self.assertEqual(continued.context_keys, ("latest",))
 
     def test_terminal_without_continue_ends_and_continue_starts_new_cycle(self) -> None:
         state = start_flow(self.config, _control("demo-flow", "start"))
@@ -337,6 +365,73 @@ class HiddenFlowDrawTests(unittest.TestCase):
         self.assertLessEqual(len(result.draws), 12)
         self.assertLessEqual(sum(len(item.text) for item in result.draws), 8000)
 
+    def test_cycle_draw_is_written_reused_and_turn_draw_is_not_fixed(self) -> None:
+        first, cached_state = draw_for_guide_with_state(
+            self.config,
+            self.state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        self.assertIn("cycle-pool", cached_state.fixed_draws)
+        self.assertNotIn("shared", cached_state.fixed_draws)
+        self.assertEqual(cached_state.fixed_draws["cycle-pool"][0]["text"], "C")
+        retry, retry_state = draw_for_guide_with_state(
+            self.config,
+            cached_state,
+            source_message_id="m2",
+            pool_ids=["cycle-pool"],
+        )
+        self.assertEqual(retry, first)
+        self.assertEqual(retry_state.fixed_draws, cached_state.fixed_draws)
+
+    def test_invalid_cycle_cache_is_rebuilt_from_current_config(self) -> None:
+        bad_state = FlowState(
+            active=True,
+            flow_id="demo-flow",
+            stage="s1",
+            cycle=1,
+            stage_turn=1,
+            fixed_draws={
+                "cycle-pool": [
+                    {
+                        "poolId": "cycle-pool",
+                        "entryId": "missing",
+                        "text": "untrusted",
+                        "drawIndex": 0,
+                        "seed": "bad",
+                    }
+                ]
+            },
+            started_at="flow-t0",
+        )
+        result, safe_state = draw_for_guide_with_state(
+            self.config,
+            bad_state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        self.assertNotIn("untrusted", result.texts)
+        self.assertEqual(safe_state.fixed_draws["cycle-pool"][0]["entryId"], "c")
+
+    def test_cycle_cache_revalidates_changed_entry_text(self) -> None:
+        _, cached_state = draw_for_guide_with_state(
+            self.config,
+            self.state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        raw = _raw_config()
+        raw["pools"][1]["entries"][0]["text"] = "changed"
+        changed_config = normalize_flow_config(raw)
+        result, changed_state = draw_for_guide_with_state(
+            changed_config,
+            cached_state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        self.assertIn("changed", result.texts)
+        self.assertEqual(changed_state.fixed_draws["cycle-pool"][0]["text"], "changed")
+
 
 class HiddenFlowSerializationTests(unittest.TestCase):
     def test_flow_state_and_applied_guide_round_trip(self) -> None:
@@ -347,7 +442,17 @@ class HiddenFlowSerializationTests(unittest.TestCase):
             cycle=2,
             stage_turn=3,
             context_keys=("a", "b"),
-            fixed_draws={"p": {"entryId": "e"}},
+            fixed_draws={
+                "p": [
+                    {
+                        "poolId": "p",
+                        "entryId": "e",
+                        "text": "anchor",
+                        "drawIndex": 0,
+                        "seed": "seed",
+                    }
+                ]
+            },
             started_at="t0",
         )
         decoded = FlowState.from_dict(json.loads(json.dumps(state.to_dict())))
@@ -361,6 +466,64 @@ class HiddenFlowSerializationTests(unittest.TestCase):
         )
         guide_decoded = AppliedGuide.from_dict(json.loads(json.dumps(guide.to_dict())))
         self.assertEqual(guide_decoded.to_dict(), guide.to_dict())
+
+    def test_real_cycle_draw_state_round_trips_and_fixed_draw_caps_are_strict(self) -> None:
+        config = normalize_flow_config(_raw_config())
+        state = start_flow(config, _control("demo-flow", "start"), started_at="flow-t0")
+        _, with_draw = draw_for_guide_with_state(
+            config,
+            state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        decoded = FlowState.from_dict(json.loads(json.dumps(with_draw.to_dict())))
+        self.assertEqual(decoded.to_dict(), with_draw.to_dict())
+
+        too_many = dict(with_draw.to_dict())
+        too_many["fixedDraws"] = {
+            "cycle-pool": [
+                {
+                    "poolId": "cycle-pool",
+                    "entryId": str(index),
+                    "text": "x",
+                    "drawIndex": index,
+                    "seed": "seed",
+                }
+                for index in range(13)
+            ]
+        }
+        with self.assertRaises(ValueError):
+            FlowState.from_dict(too_many)
+
+        too_long = dict(with_draw.to_dict())
+        too_long["fixedDraws"] = {
+            "cycle-pool": [
+                {
+                    "poolId": "cycle-pool",
+                    "entryId": "c",
+                    "text": "x" * 8001,
+                    "drawIndex": 0,
+                    "seed": "seed",
+                }
+            ]
+        }
+        with self.assertRaises(ValueError):
+            FlowState.from_dict(too_long)
+
+        not_json_safe = dict(with_draw.to_dict())
+        not_json_safe["fixedDraws"] = {
+            "cycle-pool": [
+                {
+                    "poolId": "cycle-pool",
+                    "entryId": "c",
+                    "text": object(),
+                    "drawIndex": 0,
+                    "seed": "seed",
+                }
+            ]
+        }
+        with self.assertRaises(ValueError):
+            FlowState.from_dict(not_json_safe)
 
     def test_unknown_schema_fails_closed(self) -> None:
         with self.assertRaises(ValueError):
@@ -409,6 +572,16 @@ class HiddenFlowGuideAndPrivacyTests(unittest.TestCase):
         self.assertIn("&lt;unsafe&gt;", guide)
         self.assertNotIn("<unsafe>", guide)
         self.assertTrue(guide.endswith("</hidden_flow_guidance>"))
+
+    def test_private_guide_does_not_trust_missing_cached_entry(self) -> None:
+        config = normalize_flow_config(_raw_config())
+        state = start_flow(config, _control("demo-flow", "start"))
+        guide = render_private_guide(
+            config,
+            state,
+            DrawResult((DrawItem("cycle-pool", "missing", "untrusted", 0, "bad"),)),
+        )
+        self.assertNotIn("untrusted", guide)
 
     def test_new_modules_have_no_network_or_runtime_writer_imports(self) -> None:
         root = Path(__file__).resolve().parents[1] / "chat" / "hidden_flow"

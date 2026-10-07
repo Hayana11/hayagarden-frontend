@@ -77,6 +77,7 @@ def apply_flow_control(
         return _inactive()
     if control is not None and control.action == "start":
         control = None
+    next_context_keys = tuple(control.keys[:4]) if control is not None and control.keys else current.context_keys
     if stage.terminal_without_continue:
         if control is not None and control.action == "continue" and stage.continue_target:
             return FlowState(
@@ -85,7 +86,7 @@ def apply_flow_control(
                 stage=stage.continue_target,
                 cycle=current.cycle + 1,
                 stage_turn=1,
-                context_keys=current.context_keys,
+                context_keys=next_context_keys,
                 fixed_draws={},
                 started_at=current.started_at,
             )
@@ -98,7 +99,7 @@ def apply_flow_control(
             stage=current.stage,
             cycle=current.cycle,
             stage_turn=current.stage_turn + 1,
-            context_keys=current.context_keys,
+            context_keys=next_context_keys,
             fixed_draws=dict(current.fixed_draws),
             started_at=current.started_at,
         )
@@ -109,7 +110,7 @@ def apply_flow_control(
             stage=current.stage,
             cycle=current.cycle,
             stage_turn=current.stage_turn + 1,
-            context_keys=current.context_keys,
+            context_keys=next_context_keys,
             fixed_draws=dict(current.fixed_draws),
             started_at=current.started_at,
         )
@@ -121,7 +122,7 @@ def apply_flow_control(
         stage=stage.next_stage,
         cycle=current.cycle,
         stage_turn=1,
-        context_keys=current.context_keys,
+        context_keys=next_context_keys,
         fixed_draws=dict(current.fixed_draws),
         started_at=current.started_at,
     )

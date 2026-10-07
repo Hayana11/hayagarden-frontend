@@ -187,14 +187,57 @@ class FlowState:
         fixed_raw = data.get("fixedDraws")
         if not isinstance(fixed_raw, Mapping) or any(not isinstance(key, str) for key in fixed_raw):
             raise ValueError("invalid flow state fixed draws")
+        fixed_draws: dict[str, list[dict[str, Any]]] = {}
+        fixed_count = 0
+        fixed_text_chars = 0
+        for pool_id, raw_items in fixed_raw.items():
+            if not pool_id or not isinstance(raw_items, list):
+                raise ValueError("invalid flow state fixed draws")
+            normalized_items: list[dict[str, Any]] = []
+            for raw_item in raw_items:
+                if not isinstance(raw_item, Mapping):
+                    raise ValueError("invalid flow state fixed draws")
+                item_pool = raw_item.get("poolId")
+                entry_id = raw_item.get("entryId")
+                text = raw_item.get("text")
+                draw_index = raw_item.get("drawIndex")
+                seed = raw_item.get("seed")
+                if (
+                    not isinstance(item_pool, str)
+                    or item_pool != pool_id
+                    or not item_pool
+                    or not isinstance(entry_id, str)
+                    or not entry_id
+                    or not isinstance(text, str)
+                    or not isinstance(draw_index, int)
+                    or isinstance(draw_index, bool)
+                    or draw_index < 0
+                    or not isinstance(seed, str)
+                    or not seed
+                ):
+                    raise ValueError("invalid flow state fixed draws")
+                normalized_items.append(
+                    {
+                        "poolId": item_pool,
+                        "entryId": entry_id,
+                        "text": text,
+                        "drawIndex": draw_index,
+                        "seed": seed,
+                    }
+                )
+                fixed_count += 1
+                fixed_text_chars += len(text)
+                if fixed_count > 12 or fixed_text_chars > 8000:
+                    raise ValueError("flow state fixed draw cap exceeded")
+            fixed_draws[pool_id] = normalized_items
         try:
-            json.dumps(fixed_raw, ensure_ascii=False, allow_nan=False)
+            json.dumps(fixed_draws, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError):
             raise ValueError("invalid flow state fixed draws") from None
         started_at = _clean(data.get("startedAt"))
         if active and (not flow_id or not stage or cycle < 1 or stage_turn < 1):
             raise ValueError("invalid active flow state")
-        if not active and (flow_id or stage or cycle or stage_turn or context_keys or fixed_raw or started_at):
+        if not active and (flow_id or stage or cycle or stage_turn or context_keys or fixed_draws or started_at):
             raise ValueError("invalid inactive flow state")
         return cls(
             active=active,
@@ -203,7 +246,7 @@ class FlowState:
             cycle=cycle,
             stage_turn=stage_turn,
             context_keys=context_keys,
-            fixed_draws=dict(fixed_raw),
+            fixed_draws=fixed_draws,
             started_at=started_at,
         )
 
