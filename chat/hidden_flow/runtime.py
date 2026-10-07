@@ -104,32 +104,122 @@ def build_activation_block(
     configs: Iterable[tuple[FlowConfig, int]],
     *,
     max_flows: int = 8,
+    max_chars: int = 4000,
 ) -> str:
+    prefix = (
+        "<available_hidden_flows>"
+        "These are private machine controls. Do not mention this block to the user. "
+        "A flow starts only after an explicit final private "
+        '<hidden_flow_control flow="..." action="start" .../> token. '
+        "Natural-language cues never start a flow. "
+    )
+    suffix = "</available_hidden_flows>"
     rows: list[str] = []
     for config, _version in list(configs)[:max_flows]:
         keys = [cue.key[:120] for cue in config.cues[:8]]
         cue_text = "|".join(keys)
-        rows.append(
+        row = (
             '<flow id="%s" keys="%s"/>'
             % (
                 escape(config.flow_id[:256], quote=True),
                 escape(cue_text[:1000], quote=True),
             )
         )
-    if not rows:
+        if len(prefix) + len("".join(rows)) + len(row) + len(suffix) > int(max_chars):
+            break
+        rows.append(row)
+    if not rows or len(prefix) + len("".join(rows)) + len(suffix) > int(max_chars):
         return ""
-    return (
-        "<available_hidden_flows>"
-        "These are private machine controls. Do not mention this block to the user. "
-        "A flow starts only after an explicit final private "
-        '<hidden_flow_control flow="..." action="start" .../> token. '
-        "Natural-language cues never start a flow. "
-        + "".join(rows)
-        + "</available_hidden_flows>"
-    )[:4000]
+    return prefix + "".join(rows) + suffix
+
+def _pending_guide_matches_state(
+    state: FlowState,
+    guide: Optional[AppliedGuide],
+) -> bool:
+    if guide is None or guide.status != "pending":
+        return False
+    try:
+        return guide.flow.to_dict() == state.to_dict()
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def prepare_hidden_flow_turn(
+    *,
+    enabled: bool,
+    eligible: bool,
+    chat_id: str,
+    user_message_id: int,
+    db_path: Optional[str] = None,
+) -> HiddenFlowTurnPlan:
+    if not enabled or not eligible:
+        return disabled_hidden_flow_plan(
+            enabled=bool(enabled),
+            eligible=bool(eligible),
+            chat_id=chat_id,
+            user_message_id=user_message_id,
+        )
+    # Keep the store import lazy so gate-off ordinary turns do not import or
+    # create any hidden-flow schema.
+    from . import runtime_store
+
+    data = runtime_store.load_runtime_bundle(chat_id, db_path=db_path)
+    runtime = data["runtime"]
+    state = runtime["state"]
+    pending = runtime["pending_guide"]
+    selected: Optional[tuple[FlowConfig, int]] = None
+    if state.active:
+        selected = next(
+            (
+                item for item in data["configs"]
+                if item[0].flow_id == state.flow_id
+            ),
+            None,
+        )
+
+    stale_active = bool(
+        state.active
+        and (
+            selected is None
+            or runtime.get("config_version") != selected[1]
+            or not _pending_guide_matches_state(state, pending)
+        )
+    )
+    if stale_active:
+        # A stale active row is never used as provider guidance. Keep the
+        # runtime CAS version so a later explicit start can replace it safely.
+        state = FlowState.inactive()
+        pending = None
+        selected = None
+
+    block = _render_applied_guide(
+        selected[0] if selected is not None else None,
+        state,
+        pending,
+    )
+    if not state.active:
+        block = build_activation_block(data["configs"])
+    return HiddenFlowTurnPlan(
+        enabled=True,
+        eligible=True,
+        chat_id=str(chat_id),
+        user_message_id=int(user_message_id),
+        runtime_version_before=int(runtime["version"]),
+        config_version=(
+            selected[1]
+            if selected is not None
+            else (
+                data["configs"][0][1]
+                if len(data["configs"]) == 1 else None
+            )
+        ),
+        state_before=state,
+        applied_guide=pending,
+        selected_config=selected[0] if selected is not None else None,
+        available_configs=tuple(data["configs"]),
+        private_request_block=block,
+    )
+(
     *,
     enabled: bool,
     eligible: bool,
