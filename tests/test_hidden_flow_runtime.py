@@ -12,6 +12,7 @@ from unittest import mock
 from chat.hidden_flow import runtime, runtime_store
 from chat.hidden_flow.config import normalize_flow_config
 from chat.hidden_flow.control import parse_hidden_flow_control
+from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
 from chat.hidden_flow.types import FlowState
 import chat.daily_runtime as daily_runtime
 
@@ -374,7 +375,7 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
         off_resident = mock.Mock()
         off_resident.generation = 1
         off_resident.session_id = "session-1"
-        off_resident.ensure_alive.return_value = True
+        off_resident.ensure_alive.return_value = False
         off_resident.send_turn.side_effect = lambda content, **_kwargs: (
             off_sent.append(content) or iter([("done", {})])
         )
@@ -388,6 +389,64 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
                 )
             )
         self.assertEqual(off_sent, ["hello"])
+
+    def test_partial_rescue_filters_private_suffix_and_keeps_flow_unchanged(self) -> None:
+        self._commit_started_runtime()
+        hidden_plan = runtime.prepare_hidden_flow_turn(
+            enabled=True,
+            eligible=True,
+            chat_id="default",
+            user_message_id=30,
+            db_path=self.db_path,
+        )
+        plan = self._daily_plan(hidden_plan=hidden_plan)
+        before = runtime_store.load_runtime("default", db_path=self.db_path)
+        text_filter = HiddenFlowStreamFilter()
+        thinking_filter = HiddenFlowStreamFilter()
+        rescued_text = (
+            text_filter.feed("visible text<hidden_flow_guidan")
+            + text_filter.finish()
+        )
+        rescued_thinking = (
+            thinking_filter.feed("visible thought<hidden_flow_guidan")
+            + thinking_filter.finish()
+        )
+        captured: dict[str, object] = {}
+
+        def fake_persist(**kwargs):
+            captured.update(kwargs)
+            return 101
+
+        with mock.patch.object(
+            daily_runtime.dc,
+            "persist_daily_assistant_if_current",
+            side_effect=fake_persist,
+        ):
+            assistant_id = daily_runtime.persist_partial_daily_stream_rescue(
+                plan,
+                content=rescued_text,
+                thinking=rescued_thinking,
+            )
+        self.assertEqual(assistant_id, 101)
+        self.assertEqual(captured["content"], "visible text")
+        self.assertEqual(captured["thinking"], "visible thought")
+        self.assertNotIn("hidden_flow_", str(captured["content"]))
+        self.assertNotIn("hidden_flow_", str(captured["thinking"]))
+        self.assertNotIn("hidden_flow_", str(captured["cache_info"]))
+        self.assertFalse(plan.manifest.get("error_code"))
+        after = runtime_store.load_runtime("default", db_path=self.db_path)
+        self.assertEqual(after["version"], before["version"])
+        self.assertEqual(after["state"].to_dict(), before["state"].to_dict())
+        self.assertEqual(
+            after["pending_guide"].to_dict(),
+            before["pending_guide"].to_dict(),
+        )
+        conn = runtime_store._connect(self.db_path)
+        self.assertIsNone(conn.execute(
+            "SELECT 1 FROM hidden_flow_message_snapshots WHERE assistant_message_id=?",
+            (101,),
+        ).fetchone())
+        conn.close()
 
     def test_daily_plan_canonical_persist_and_terminal_callbacks(self) -> None:
         self._commit_started_runtime()

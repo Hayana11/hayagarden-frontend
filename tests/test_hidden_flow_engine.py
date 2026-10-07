@@ -203,6 +203,50 @@ class HiddenFlowStreamingTests(unittest.TestCase):
         self.assertEqual("".join(outputs) + stream.finish(), "ok!")
 
 
+    def test_private_block_visible_tails_across_chunk_boundaries(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed("before<hidden_flow_guidance>sec"),
+            "before",
+        )
+        self.assertEqual(
+            stream.feed("ret</hidden_flow_guidance>after"),
+            "after",
+        )
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed("before<hidden_flow_guidance>secret</hidden_flow_guid"),
+            "before",
+        )
+        self.assertEqual(
+            stream.feed("ance>after"),
+            "after",
+        )
+
+    def test_available_and_multiple_private_blocks_preserve_visible_tails(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed("A<available_hidden_flows><flow id=\"x\"/></available_hidden_flows>B"),
+            "AB",
+        )
+        self.assertEqual(
+            self._single_chars(
+                "A<hidden_flow_guidance>x</hidden_flow_guidance>\n"
+                "B<available_hidden_flows>y</available_hidden_flows>C"
+            ),
+            "A\nBC",
+        )
+
+    def test_thinking_filter_preserves_visible_tail_after_guidance(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed(
+                "thought<hidden_flow_guidance>x</hidden_flow_guidance>visible thought"
+            ),
+            "thoughtvisible thought",
+        )
+
+
     def test_guidance_and_activation_blocks_are_invisible(self) -> None:
         value = (
             "visible"

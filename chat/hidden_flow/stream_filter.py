@@ -125,7 +125,7 @@ class HiddenFlowStreamFilter:
                     return self._feed_normal(value[index + 1:])
             return ""
 
-        for char in value:
+        for index, char in enumerate(value):
             self._hidden += char
             if not self._hidden_open_complete:
                 if self._hidden_quote is not None:
@@ -139,7 +139,7 @@ class HiddenFlowStreamFilter:
             close = _CLOSERS[kind]
             close_index = self._hidden.casefold().find(close.casefold())
             if close_index >= 0:
-                remainder = self._hidden[close_index + len(close):]
+                remainder = value[index + 1:]
                 self._reset_hidden()
                 return self._feed_normal(remainder)
         return ""
