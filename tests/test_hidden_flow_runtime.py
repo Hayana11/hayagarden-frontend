@@ -185,6 +185,91 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
             })
         conn.close()
 
+    def _commit_started_runtime(self) -> None:
+        runtime_store.upsert_flow_config(_raw_config(), db_path=self.db_path)
+        plan = runtime.prepare_hidden_flow_turn(
+            enabled=True,
+            eligible=True,
+            chat_id="default",
+            user_message_id=20,
+            db_path=self.db_path,
+        )
+        transition = runtime.propose_transition(
+            plan,
+            parse_hidden_flow_control(
+                '<hidden_flow_control flow="demo-flow" action="start" keys="a"/>'
+            ),
+        )
+        self.assertIsNotNone(transition)
+        snapshot = runtime.build_pending_snapshot(
+            plan, transition, assistant_message_id=21
+        )
+        conn = runtime_store._connect(self.db_path)
+        runtime_store.stage_snapshot(conn, snapshot)
+        runtime_store.finalize_snapshot(conn, 21)
+        conn.commit()
+        conn.close()
+
+    def test_active_runtime_with_new_config_version_fails_closed(self) -> None:
+        self._commit_started_runtime()
+        before = runtime_store.load_runtime("default", db_path=self.db_path)
+        self.assertTrue(before["state"].active)
+        self.assertEqual(before["config_version"], 1)
+        runtime_store.upsert_flow_config(_raw_config(), db_path=self.db_path)
+        plan = runtime.prepare_hidden_flow_turn(
+            enabled=True,
+            eligible=True,
+            chat_id="default",
+            user_message_id=22,
+            db_path=self.db_path,
+        )
+        self.assertFalse(plan.state_before.active)
+        self.assertIsNone(plan.applied_guide)
+        self.assertIsNone(plan.selected_config)
+        self.assertIn("<available_hidden_flows>", plan.private_request_block)
+        after = runtime_store.load_runtime("default", db_path=self.db_path)
+        self.assertTrue(after["state"].active)
+        self.assertEqual(after["version"], before["version"])
+        self.assertEqual(after["config_version"], before["config_version"])
+
+    def test_active_runtime_without_matching_pending_guide_fails_closed(self) -> None:
+        self._commit_started_runtime()
+        conn = runtime_store._connect(self.db_path)
+        conn.execute(
+            "UPDATE hidden_flow_runtime SET pending_guide_json=NULL WHERE chat_id=?",
+            ("default",),
+        )
+        conn.commit()
+        conn.close()
+        plan = runtime.prepare_hidden_flow_turn(
+            enabled=True,
+            eligible=True,
+            chat_id="default",
+            user_message_id=23,
+            db_path=self.db_path,
+        )
+        self.assertFalse(plan.state_before.active)
+        self.assertIsNone(plan.applied_guide)
+        self.assertIn("<available_hidden_flows>", plan.private_request_block)
+
+    def test_activation_block_never_returns_a_cut_protocol_tag(self) -> None:
+        config = normalize_flow_config(_raw_config())
+        self.assertIsNotNone(config)
+        block = runtime.build_activation_block(
+            [(config, 1)] * 8,
+            max_chars=4000,
+        )
+        self.assertLessEqual(len(block), 4000)
+        self.assertTrue(block.startswith("<available_hidden_flows>"))
+        self.assertTrue(block.endswith("</available_hidden_flows>"))
+        short = runtime.build_activation_block(
+            [(config, 1)] * 8,
+            max_chars=240,
+        )
+        self.assertLessEqual(len(short), 240)
+        self.assertTrue(short.endswith("</available_hidden_flows>"))
+
+
 
 if __name__ == "__main__":
     unittest.main()
