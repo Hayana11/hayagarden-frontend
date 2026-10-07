@@ -74,6 +74,7 @@ class HiddenFlowStoreTests(unittest.TestCase):
 
     def test_pending_snapshot_commit_and_runtime_cas(self) -> None:
         conn = runtime_store._connect(self.db_path)
+        runtime_store.ensure_hidden_flow_schema(conn=conn)
         runtime_store.stage_snapshot(conn, _snapshot(10))
         runtime_store.finalize_snapshot(conn, 10)
         conn.commit()
@@ -91,6 +92,7 @@ class HiddenFlowStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runtime_store._json({"bad": math.nan})
         conn = runtime_store._connect(self.db_path)
+        runtime_store.ensure_hidden_flow_schema(conn=conn)
         with self.assertRaises(ValueError):
             runtime_store.stage_snapshot(
                 conn,
