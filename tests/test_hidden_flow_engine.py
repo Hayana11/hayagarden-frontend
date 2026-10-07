@@ -235,15 +235,17 @@ class HiddenFlowStateTests(unittest.TestCase):
         self.assertFalse(apply_flow_control(self.config, state, _control("demo-flow", "stop")).active)
 
     def test_active_keys_only_and_hold_update_context(self) -> None:
+        preserved = start_flow(self.config, _control("demo-flow", "start", "initial"))
+        preserved = apply_flow_control(self.config, preserved)
+        self.assertEqual(preserved.context_keys, ("initial",))
+
         state = start_flow(self.config, _control("demo-flow", "start", "initial"))
         state = apply_flow_control(self.config, state, _control("demo-flow", keys="keys-only"))
         self.assertEqual(state.context_keys, ("keys-only",))
         self.assertEqual((state.stage, state.stage_turn), ("s1", 2))
-        state = apply_flow_control(self.config, state)
-        self.assertEqual(state.context_keys, ("keys-only",))
         state = apply_flow_control(self.config, state, _control("demo-flow", "hold", "hold-key"))
         self.assertEqual(state.context_keys, ("hold-key",))
-        self.assertEqual((state.stage, state.stage_turn), ("s1", 4))
+        self.assertEqual((state.stage, state.stage_turn), ("s1", 3))
 
     def test_active_start_does_not_overwrite_existing_context(self) -> None:
         state = start_flow(self.config, _control("demo-flow", "start", "original"))
