@@ -548,6 +548,57 @@ class CanonicalTurnTests(unittest.TestCase):
         self.assertIsNone(turn.hidden_flow_control)
 
 
+    def test_hidden_protocol_is_removed_from_thinking_and_display_segments(self):
+        turn = self._build([
+            _row('assistant', uuid='a1', message={
+                'role': 'assistant',
+                'content': [
+                    {
+                        'type': 'thinking',
+                        'thinking': (
+                            'reason '
+                            '<hidden_flow_control flow="demo-flow" action="hold"/>'
+                            '<hidden_flow_guidance flow="demo-flow">private</hidden_flow_guidance>'
+                            ' visible-thought'
+                        ),
+                    },
+                    {
+                        'type': 'text',
+                        'text': (
+                            'visible '
+                            '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
+                            'answer'
+                        ),
+                    },
+                ],
+                'stop_reason': 'end_turn',
+            }),
+            _row('result', stop_reason='end_turn'),
+        ], hidden_flow_enabled=True)
+        self.assertEqual(turn.content, 'visible answer')
+        self.assertEqual(turn.thinking, 'reason  visible-thought')
+        self.assertNotIn('hidden_flow_', turn.thinking)
+        self.assertNotIn('hidden_flow_', turn.content)
+        self.assertNotIn('hidden_flow_', turn.display_segments)
+        self.assertIn('"type":"thinking"', turn.display_segments)
+
+    def test_partial_private_thinking_protocol_is_dropped(self):
+        turn = self._build([
+            _row('assistant', uuid='a1', message={
+                'role': 'assistant',
+                'content': [
+                    {'type': 'thinking', 'thinking': 'reason<hidden_flow_guidan'},
+                    {'type': 'text', 'text': 'answer'},
+                ],
+                'stop_reason': 'end_turn',
+            }),
+            _row('result', stop_reason='end_turn'),
+        ], hidden_flow_enabled=True)
+        self.assertEqual(turn.thinking, 'reason')
+        self.assertEqual(turn.content, 'answer')
+        self.assertNotIn('hidden_flow_', turn.display_segments)
+
+
 
 if __name__ == '__main__':
     unittest.main()
