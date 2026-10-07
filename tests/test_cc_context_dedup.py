@@ -454,6 +454,7 @@ class FeedbackConsumeTests(unittest.TestCase):
                 'type': 'result',
                 'is_error': False,
                 'result': 'ok',
+                'stop_reason': 'end_turn',
                 'usage': {},
             }),
         ]
@@ -571,6 +572,7 @@ class ClientDisconnectKillTests(unittest.TestCase):
                 'type': 'result',
                 'is_error': False,
                 'result': 'ok',
+                'stop_reason': 'end_turn',
                 'usage': {},
             }),
         ]
@@ -818,6 +820,7 @@ def _result_line(text='ok'):
         'type': 'result',
         'is_error': False,
         'result': text,
+        'stop_reason': 'end_turn',
         'usage': {},
     }, ensure_ascii=False)
 
