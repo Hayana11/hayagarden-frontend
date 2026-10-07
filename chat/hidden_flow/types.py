@@ -197,6 +197,8 @@ class FlowState:
             for raw_item in raw_items:
                 if not isinstance(raw_item, Mapping):
                     raise ValueError("invalid flow state fixed draws")
+                if set(raw_item) != {"poolId", "entryId", "text", "drawIndex", "seed"}:
+                    raise ValueError("invalid flow state fixed draws")
                 item_pool = raw_item.get("poolId")
                 entry_id = raw_item.get("entryId")
                 text = raw_item.get("text")

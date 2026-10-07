@@ -185,6 +185,15 @@ def _cached_cycle_draw(
         draws.append(DrawItem(pool.pool_id, entry_id, text, item_index, seed))
     if not draws or sum(len(item.text) for item in draws) > MAX_PRIVATE_TEXT:
         return None
+    expected = draw_pool(
+        pool,
+        flow_id=flow_id,
+        cycle=cycle,
+        flow_started_at=flow_started_at,
+        draw_index=draw_index,
+    )
+    if tuple(item.to_dict() for item in draws) != tuple(item.to_dict() for item in expected.draws):
+        return None
     return DrawResult(tuple(draws), text_chars=sum(len(item.text) for item in draws))
 
 
@@ -234,7 +243,6 @@ def _draw_for_guide_with_state(
     for pool_id in selected_ids:
         if pool_id in seen_pools:
             continue
-        pool_index = len(seen_pools)
         seen_pools.add(pool_id)
         pool = config.pool(pool_id)
         if pool is None:
@@ -248,7 +256,7 @@ def _draw_for_guide_with_state(
                 flow_id=config.flow_id,
                 cycle=state.cycle,
                 flow_started_at=state.started_at,
-                draw_index=pool_index,
+                draw_index=0,
             )
             cache_hit = drawn is not None
         if drawn is None:
@@ -260,7 +268,7 @@ def _draw_for_guide_with_state(
                 flow_id=config.flow_id,
                 cycle=state.cycle,
                 flow_started_at=state.started_at,
-                draw_index=pool_index,
+                draw_index=0,
             )
         accepted: list[DrawItem] = []
         pool_complete = True

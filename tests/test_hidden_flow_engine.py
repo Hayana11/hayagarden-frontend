@@ -435,6 +435,66 @@ class HiddenFlowDrawTests(unittest.TestCase):
         self.assertIn("changed", result.texts)
         self.assertEqual(changed_state.fixed_draws["cycle-pool"][0]["text"], "changed")
 
+    def test_cycle_cache_identity_is_independent_of_pool_order(self) -> None:
+        first, cached_state = draw_for_guide_with_state(
+            self.config,
+            self.state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        raw = _raw_config()
+        raw["stages"][0]["poolIds"] = ["cycle-pool", "shared"]
+        reordered_config = normalize_flow_config(raw)
+        retry, retry_state = draw_for_guide_with_state(
+            reordered_config,
+            cached_state,
+            source_message_id="m2",
+            pool_ids=["cycle-pool"],
+        )
+        first_cycle = [item for item in first.draws if item.pool_id == "cycle-pool"]
+        retry_cycle = [item for item in retry.draws if item.pool_id == "cycle-pool"]
+        self.assertEqual(retry_cycle, first_cycle)
+        self.assertEqual(retry_state.fixed_draws, cached_state.fixed_draws)
+
+    def test_cycle_cache_rejects_another_current_entry(self) -> None:
+        raw = _raw_config()
+        raw["pools"][1]["entries"].append({"id": "d", "text": "D"})
+        config = normalize_flow_config(raw)
+        state = start_flow(config, _control("demo-flow", "start"), started_at="flow-t0")
+        first, cached_state = draw_for_guide_with_state(
+            config,
+            state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        cached_item = cached_state.fixed_draws["cycle-pool"][0]
+        alternate = "d" if cached_item["entryId"] == "c" else "c"
+        alternate_text = "D" if alternate == "d" else "C"
+        tampered = FlowState(
+            active=True,
+            flow_id=cached_state.flow_id,
+            stage=cached_state.stage,
+            cycle=cached_state.cycle,
+            stage_turn=cached_state.stage_turn,
+            fixed_draws={
+                "cycle-pool": [
+                    dict(cached_item, entryId=alternate, text=alternate_text)
+                ]
+            },
+            started_at=cached_state.started_at,
+        )
+        retry, safe_state = draw_for_guide_with_state(
+            config,
+            tampered,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        self.assertEqual(
+            [item for item in retry.draws if item.pool_id == "cycle-pool"],
+            [item for item in first.draws if item.pool_id == "cycle-pool"],
+        )
+        self.assertEqual(safe_state.fixed_draws, cached_state.fixed_draws)
+
 
 class HiddenFlowSerializationTests(unittest.TestCase):
     def test_flow_state_and_applied_guide_round_trip(self) -> None:
@@ -527,6 +587,22 @@ class HiddenFlowSerializationTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             FlowState.from_dict(not_json_safe)
+
+        unknown_not_json_safe = dict(with_draw.to_dict())
+        unknown_not_json_safe["fixedDraws"] = {
+            "cycle-pool": [
+                {
+                    "poolId": "cycle-pool",
+                    "entryId": "c",
+                    "text": "C",
+                    "drawIndex": 0,
+                    "seed": "seed",
+                    "extra": object(),
+                }
+            ]
+        }
+        with self.assertRaises(ValueError):
+            FlowState.from_dict(unknown_not_json_safe)
 
     def test_unknown_schema_fails_closed(self) -> None:
         with self.assertRaises(ValueError):
