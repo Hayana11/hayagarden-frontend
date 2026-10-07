@@ -306,7 +306,7 @@ def build_pending_snapshot(
         "assistant_message_id": int(assistant_message_id),
         "user_message_id": int(plan.user_message_id),
         "chat_id": str(plan.chat_id),
-        "flow_id": state_after.flow_id if state_after.active else None,
+        "flow_id": transition.config.flow_id,
         "runtime_version_before": int(plan.runtime_version_before),
         "config_version": int(transition.config_version),
         "applied_guide": _consumed_guide(
