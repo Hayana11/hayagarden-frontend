@@ -40,6 +40,7 @@ class CanonicalTurn:
     terminal_state: str
     transcript_identity: dict[str, Any]
     projection_hash: str
+    hidden_flow_control: dict[str, Any] | None = None
 
 
 def _json_blocks(message: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -287,6 +288,8 @@ def build_canonical_turn(
     resident_generation: int | None = None,
     transcript_process_generation: int | None = None,
     terminal_receipt: Any = None,
+    hidden_flow_enabled: bool = False,
+    hidden_flow_expected_flow_id: str | None = None,
 ) -> CanonicalTurn:
     """Build one final projection from a closed provider transcript range."""
     rows = _read_closed_range(transcript_path, start_offset, end_offset)
@@ -311,6 +314,15 @@ def build_canonical_turn(
         expected_session_id=expected_sid,
         expected_process_generation=transcript_process_generation,
     )
+    hidden_control = None
+    hidden_sanitize = None
+    if hidden_flow_enabled:
+        # Keep protocol parsing lazy and scoped to the eligible Daily path.
+        from chat.hidden_flow.control import (
+            parse_hidden_flow_control,
+            sanitize_hidden_flow_text,
+        )
+        hidden_sanitize = sanitize_hidden_flow_text
 
     for row in rows:
         row_sid = str(row.get('sessionId') or '').strip()
@@ -441,7 +453,15 @@ def build_canonical_turn(
             segments.append_thinking(value)
         elif kind == 'text':
             segments.append_text(value)
-    content, choices = extract_choices(strip_save_markers(parser.text))
+    raw_assistant_text = parser.text
+    if hidden_sanitize is not None:
+        parsed = parse_hidden_flow_control(
+            raw_assistant_text,
+            expected_flow_id=hidden_flow_expected_flow_id,
+        )
+        hidden_control = parsed.to_dict() if parsed is not None else None
+        raw_assistant_text = hidden_sanitize(raw_assistant_text)
+    content, choices = extract_choices(strip_save_markers(raw_assistant_text))
     content = str(content or '').strip()
     if not content and choices:
         content = '[选项: ' + ' / '.join(choices) + ']'
@@ -450,8 +470,17 @@ def build_canonical_turn(
             'canonical assistant content is empty',
             error_code='canonical_content_empty',
         )
+    segment_values = segments.as_list()
+    if hidden_sanitize is not None:
+        sanitized_values = []
+        for segment in segment_values:
+            item = dict(segment)
+            if str(item.get('type') or '') == 'text':
+                item['text'] = hidden_sanitize(str(item.get('text') or ''))
+            sanitized_values.append(item)
+        segment_values = sanitized_values
     canonical_segments = finalize_display_segments(
-        segments.as_list(),
+        segment_values,
         visible_text=content,
     )
     if not canonical_segments:
@@ -488,6 +517,7 @@ def build_canonical_turn(
             tool_calls,
             choices,
         ),
+        hidden_flow_control=hidden_control,
     )
 
 
