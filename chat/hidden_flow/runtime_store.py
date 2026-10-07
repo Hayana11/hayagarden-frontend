@@ -281,6 +281,24 @@ def load_runtime(
             connection.close()
 
 
+
+def _state_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, FlowState):
+        return value.to_dict()
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise ValueError("invalid hidden flow state")
+
+def _guide_dict(value: Any) -> Optional[dict[str, Any]]:
+    if value is None:
+        return None
+    if isinstance(value, AppliedGuide):
+        return value.to_dict()
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise ValueError("invalid hidden flow guide")
+
+
 def stage_snapshot(
     conn: sqlite3.Connection,
     snapshot: Mapping[str, Any],
@@ -296,16 +314,36 @@ def stage_snapshot(
     )
     if any(key not in snapshot for key in required):
         raise ValueError("incomplete hidden flow snapshot")
-    state_before = FlowState.from_dict(snapshot["state_before"])
-    state_after = FlowState.from_dict(snapshot["state_after"])
-    applied = snapshot.get("applied_guide")
-    next_guide = snapshot.get("next_guide")
+    state_before_raw = _state_dict(snapshot["state_before"])
+    state_after_raw = _state_dict(snapshot["state_after"])
+    state_before = FlowState.from_dict(state_before_raw)
+    state_after = FlowState.from_dict(state_after_raw)
+    applied = _guide_dict(snapshot.get("applied_guide"))
+    next_guide = _guide_dict(snapshot.get("next_guide"))
     if applied is not None:
         AppliedGuide.from_dict(applied)
     if next_guide is not None:
         AppliedGuide.from_dict(next_guide)
     control = snapshot.get("control")
-    control_json = None if control is None else _json(dict(control))
+    if control is not None:
+        if not isinstance(control, Mapping):
+            raise ValueError("invalid hidden flow control")
+        if set(control) - {"flowId", "action", "keys"}:
+            raise ValueError("invalid hidden flow control")
+        if not isinstance(control.get("flowId"), str):
+            raise ValueError("invalid hidden flow control")
+        if control.get("action") is not None and control.get("action") not in {
+            "start", "hold", "continue", "stop"
+        }:
+            raise ValueError("invalid hidden flow control")
+        keys = control.get("keys", [])
+        if not isinstance(keys, list) or len(keys) > 4 or any(
+            not isinstance(item, str) for item in keys
+        ):
+            raise ValueError("invalid hidden flow control")
+        control_json = _json(dict(control))
+    else:
+        control_json = None
     now = _now()
     conn.execute(
         """
@@ -332,8 +370,8 @@ def stage_snapshot(
             ),
             _json(applied) if applied is not None else None,
             control_json,
-            _json(state_before.to_dict()),
-            _json(state_after.to_dict()),
+            _json(state_before_raw),
+            _json(state_after_raw),
             _json(next_guide) if next_guide is not None else None,
             now,
             now,
