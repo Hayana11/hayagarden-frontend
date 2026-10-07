@@ -6896,7 +6896,7 @@ def ensure_resident_and_stream(
         )
 
         hidden_filter = None
-        if plan.hidden_flow_enabled and plan.hidden_flow_eligible:
+        if _hidden_flow_runtime_enabled(plan):
             from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
             hidden_filter = HiddenFlowStreamFilter()
 
