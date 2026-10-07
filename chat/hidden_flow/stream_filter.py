@@ -104,4 +104,3 @@ class HiddenFlowStreamFilter:
 
     def close(self) -> str:
         return self.finish()
-

@@ -181,4 +181,3 @@ def render_private_guide(
         used += len(block)
     chunks.append("</hidden_flow_guidance>")
     return "".join(chunks)
-

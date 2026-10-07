@@ -118,4 +118,3 @@ def _find_close(text: str, start: int) -> int:
             return index
         index += 1
     return -1
-

@@ -244,4 +244,3 @@ def normalize_flow_config(raw: Any) -> Optional[FlowConfig]:
         cues=cues,
         pools=pools,
     )
-

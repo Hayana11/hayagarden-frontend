@@ -42,7 +42,6 @@ def start_flow(
         started_at=str(started_at or ""),
     )
 
-
 def apply_flow_control(
     config: Optional[FlowConfig],
     state: Optional[FlowState],
