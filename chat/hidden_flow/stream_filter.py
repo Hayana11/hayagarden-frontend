@@ -45,13 +45,18 @@ class HiddenFlowStreamFilter:
                     visible.append(char)
                 continue
             candidate = self._pending + char
+            if self._pending.casefold() == _OPENER.casefold():
+                if char in " \t\r\n/>":
+                    self._hidden = self._pending
+                    self._pending = ""
+                    self._quote = None
+                    return "".join(visible) + self._feed_hidden(value[index:])
+                visible.append(self._release_mismatch(candidate))
+                continue
             if self._is_prefix(candidate):
                 self._pending = candidate
                 if candidate.casefold() == _OPENER.casefold():
-                    self._hidden = candidate
-                    self._pending = ""
-                    self._quote = None
-                    return "".join(visible) + self._feed_hidden(value[index + 1 :])
+                    continue
                 continue
             visible.append(self._release_mismatch(candidate))
         return "".join(visible)

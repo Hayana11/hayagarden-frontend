@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
@@ -27,6 +28,17 @@ def _string_tuple(value: Any, *, limit: Optional[int] = None) -> tuple[str, ...]
             result.append(text)
         if limit is not None and len(result) >= limit:
             break
+    return tuple(result)
+
+
+def _strict_string_tuple(value: Any, *, limit: int) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > limit:
+        raise ValueError("invalid bounded string list")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or item.strip() != item or item in result:
+            raise ValueError("invalid bounded string list")
+        result.append(item)
     return tuple(result)
 
 
@@ -162,17 +174,37 @@ class FlowState:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "FlowState":
-        if not isinstance(data, Mapping) or data.get("schemaVersion") != SCHEMA_VERSION:
+        if not isinstance(data, Mapping) or type(data.get("schemaVersion")) is not int or data.get("schemaVersion") != SCHEMA_VERSION:
             raise ValueError("unsupported flow state schema")
+        active = data.get("active")
+        if not isinstance(active, bool):
+            raise ValueError("invalid flow state active flag")
+        flow_id = _clean(data.get("flowId"))
+        stage = _clean(data.get("stage"))
+        cycle = int(data.get("cycle") or 0)
+        stage_turn = int(data.get("stageTurn") or 0)
+        context_keys = _strict_string_tuple(data.get("contextKeys"), limit=4)
+        fixed_raw = data.get("fixedDraws")
+        if not isinstance(fixed_raw, Mapping) or any(not isinstance(key, str) for key in fixed_raw):
+            raise ValueError("invalid flow state fixed draws")
+        try:
+            json.dumps(fixed_raw, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError):
+            raise ValueError("invalid flow state fixed draws") from None
+        started_at = _clean(data.get("startedAt"))
+        if active and (not flow_id or not stage or cycle < 1 or stage_turn < 1):
+            raise ValueError("invalid active flow state")
+        if not active and (flow_id or stage or cycle or stage_turn or context_keys or fixed_raw or started_at):
+            raise ValueError("invalid inactive flow state")
         return cls(
-            active=_bool(data.get("active")),
-            flow_id=_clean(data.get("flowId")),
-            stage=_clean(data.get("stage")),
-            cycle=max(0, int(data.get("cycle") or 0)),
-            stage_turn=max(0, int(data.get("stageTurn") or 0)),
-            context_keys=_string_tuple(data.get("contextKeys"), limit=4),
-            fixed_draws=dict(data.get("fixedDraws") or {}),
-            started_at=_clean(data.get("startedAt")),
+            active=active,
+            flow_id=flow_id,
+            stage=stage,
+            cycle=cycle,
+            stage_turn=stage_turn,
+            context_keys=context_keys,
+            fixed_draws=dict(fixed_raw),
+            started_at=started_at,
         )
 
 
@@ -207,13 +239,23 @@ class DrawItem:
 @dataclass(frozen=True)
 class DrawResult:
     draws: tuple[DrawItem, ...] = ()
+    truncated: bool = False
+    truncation_reason: Optional[str] = None
+    text_chars: int = 0
+    seed_version: int = 1
 
     @property
     def texts(self) -> tuple[str, ...]:
         return tuple(item.text for item in self.draws)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"draws": [item.to_dict() for item in self.draws]}
+        return {
+            "draws": [item.to_dict() for item in self.draws],
+            "truncated": self.truncated,
+            "truncationReason": self.truncation_reason,
+            "textChars": self.text_chars,
+            "seedVersion": self.seed_version,
+        }
 
 
 @dataclass
@@ -241,24 +283,32 @@ class AppliedGuide:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "AppliedGuide":
-        if not isinstance(data, Mapping) or data.get("schemaVersion") != SCHEMA_VERSION:
+        if not isinstance(data, Mapping) or type(data.get("schemaVersion")) is not int or data.get("schemaVersion") != SCHEMA_VERSION:
             raise ValueError("unsupported applied guide schema")
         status = _clean(data.get("status"))
         if status not in {"pending", "consumed"}:
             raise ValueError("unsupported applied guide status")
         draws = data.get("draws") or []
-        if not isinstance(draws, list):
+        if not isinstance(draws, list) or len(draws) > 12 or any(not isinstance(item, Mapping) for item in draws):
             raise ValueError("invalid applied guide draws")
+        if sum(len(_clean(item.get("text"))) for item in draws) > 8000:
+            raise ValueError("applied guide text cap exceeded")
+        source_message_id = None if data.get("sourceMessageId") is None else _clean(data.get("sourceMessageId"))
+        consumed_by = (
+            None
+            if data.get("consumedByUserMessageId") is None
+            else _clean(data.get("consumedByUserMessageId"))
+        )
+        if status == "pending" and consumed_by is not None:
+            raise ValueError("pending guide cannot have a consumer")
+        if status == "consumed" and (not source_message_id or not consumed_by):
+            raise ValueError("consumed guide identity is incomplete")
         return cls(
             status=status,
-            source_message_id=(None if data.get("sourceMessageId") is None else _clean(data.get("sourceMessageId"))),
-            consumed_by_user_message_id=(
-                None
-                if data.get("consumedByUserMessageId") is None
-                else _clean(data.get("consumedByUserMessageId"))
-            ),
-            keys=_string_tuple(data.get("keys"), limit=4),
-            draws=tuple(dict(item) for item in draws if isinstance(item, Mapping)),
+            source_message_id=source_message_id,
+            consumed_by_user_message_id=consumed_by,
+            keys=_strict_string_tuple(data.get("keys"), limit=4),
+            draws=tuple(dict(item) for item in draws),
             created_at=_clean(data.get("createdAt")),
             flow=FlowState.from_dict(data.get("flow") or {}),
         )

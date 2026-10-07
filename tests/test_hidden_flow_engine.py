@@ -11,13 +11,24 @@ from pathlib import Path
 from chat.hidden_flow.config import DEFAULT_FLOW_CONFIG, normalize_flow_config
 from chat.hidden_flow.control import parse_hidden_flow_control, sanitize_hidden_flow_text
 from chat.hidden_flow.draw import draw_for_guide, draw_pool, render_private_guide
-from chat.hidden_flow.engine import apply_flow_control, start_flow
+from chat.hidden_flow.engine import apply_flow_control as _apply_flow_control
+from chat.hidden_flow.engine import start_flow as _start_flow
 from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
 from chat.hidden_flow.types import (
     AppliedGuide,
+    FlowConfig,
     FlowControl,
     FlowState,
+    PoolSpec,
 )
+
+
+def start_flow(config, control, **kwargs):
+    return _start_flow(config, control, engine_enabled=True, **kwargs)
+
+
+def apply_flow_control(config, state, control=None, **kwargs):
+    return _apply_flow_control(config, state, control, engine_enabled=True, **kwargs)
 
 
 def _control(flow: str, action: str | None = None, keys: str = "") -> FlowControl:
@@ -137,6 +148,10 @@ class HiddenFlowSanitizerTests(unittest.TestCase):
             sanitize_hidden_flow_text('a<hidden_flow_control bad="x"/>b'),
             "ab",
         )
+        self.assertEqual(
+            sanitize_hidden_flow_text('a<hidden_flow_control flow="x/>y" action="hold"/>b'),
+            "ab",
+        )
 
     def test_partial_control_is_invisible(self) -> None:
         self.assertEqual(sanitize_hidden_flow_text("hello<hidden_flow_control"), "hello")
@@ -174,6 +189,7 @@ class HiddenFlowStreamingTests(unittest.TestCase):
         self.assertEqual(stream.feed("好"), "好")
         self.assertEqual(stream.feed("<hello>"), "<hello>")
         self.assertEqual(stream.finish(), "")
+        self.assertEqual(self._single_chars("<hidden_flow_controller>"), "<hidden_flow_controller>")
 
     def test_visible_text_and_tag_only_emit_visible_text(self) -> None:
         stream = HiddenFlowStreamFilter()
@@ -229,6 +245,7 @@ class HiddenFlowStateTests(unittest.TestCase):
 
     def test_boundary_and_disabled_config_fail_closed(self) -> None:
         state = start_flow(self.config, _control("demo-flow", "start"))
+        self.assertFalse(_start_flow(self.config, _control("demo-flow", "start")).active)
         self.assertFalse(apply_flow_control(self.config, state, boundary_override=True).active)
         disabled = normalize_flow_config(_raw_config(enabled=False))
         self.assertFalse(start_flow(disabled, _control("demo-flow", "start")).active)
@@ -241,6 +258,19 @@ class HiddenFlowStateTests(unittest.TestCase):
         cyclic = _raw_config()
         cyclic["stages"][1]["nextStage"] = "s1"
         self.assertIsNone(normalize_flow_config(cyclic))
+        terminal_missing = _raw_config()
+        terminal_missing["stages"][2]["continueTarget"] = None
+        self.assertIsNone(normalize_flow_config(terminal_missing))
+        terminal_next = _raw_config()
+        terminal_next["stages"][2]["nextStage"] = "s1"
+        self.assertIsNone(normalize_flow_config(terminal_next))
+        malformed_object = FlowConfig(
+            flow_id="demo-flow",
+            enabled=True,
+            initial_stage="s1",
+            stages=(),
+        )
+        self.assertIsNone(normalize_flow_config(malformed_object))
         self.assertIsNone(normalize_flow_config({"schemaVersion": 99}))
 
 
@@ -258,6 +288,14 @@ class HiddenFlowDrawTests(unittest.TestCase):
         self.assertEqual(first, retry)
         self.assertNotEqual(first.draws[0].seed, other.draws[0].seed)
         self.assertEqual(len({item.entry_id for item in first.draws}), len(first.draws))
+        self.assertEqual(
+            draw_pool(
+                PoolSpec("p", True, "turn", 1, ()),
+                source_message_id="a\x00b",
+                flow_id="demo-flow",
+            ).draws,
+            (),
+        )
 
     def test_cycle_draw_is_fixed_per_cycle_and_changes_with_cycle(self) -> None:
         pool = self.config.pool("cycle-pool")
@@ -328,6 +366,30 @@ class HiddenFlowSerializationTests(unittest.TestCase):
             FlowState.from_dict({"schemaVersion": 99})
         with self.assertRaises(ValueError):
             AppliedGuide.from_dict({"schemaVersion": 99})
+        with self.assertRaises(ValueError):
+            FlowState.from_dict({
+                "schemaVersion": True,
+                "active": False,
+                "flowId": "",
+                "stage": "",
+                "cycle": 0,
+                "stageTurn": 0,
+                "contextKeys": [],
+                "fixedDraws": {},
+                "startedAt": "",
+            })
+        with self.assertRaises(ValueError):
+            FlowState.from_dict({
+                "schemaVersion": 1,
+                "active": True,
+                "flowId": "",
+                "stage": "",
+                "cycle": 0,
+                "stageTurn": 0,
+                "contextKeys": [],
+                "fixedDraws": {},
+                "startedAt": "",
+            })
 
 
 class HiddenFlowGuideAndPrivacyTests(unittest.TestCase):
@@ -345,6 +407,7 @@ class HiddenFlowGuideAndPrivacyTests(unittest.TestCase):
         self.assertLessEqual(len(guide), 8000)
         self.assertIn("&lt;unsafe&gt;", guide)
         self.assertNotIn("<unsafe>", guide)
+        self.assertTrue(guide.endswith("</hidden_flow_guidance>"))
 
     def test_new_modules_have_no_network_or_runtime_writer_imports(self) -> None:
         root = Path(__file__).resolve().parents[1] / "chat" / "hidden_flow"

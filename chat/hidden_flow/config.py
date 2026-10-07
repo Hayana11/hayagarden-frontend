@@ -151,7 +151,10 @@ def _graph_is_valid(stages: tuple[StageSpec, ...], initial_stage: Optional[str])
             return False
         if stage.continue_target is not None and stage.continue_target not in stage_ids:
             return False
-        if not stage.terminal_without_continue and not stage.next_stage:
+        if stage.terminal_without_continue:
+            if stage.next_stage is not None or not stage.continue_target:
+                return False
+        elif not stage.next_stage or stage.continue_target is not None:
             return False
     # The within-cycle path must terminate; a cycle boundary is represented by
     # continueTarget and is therefore checked separately by the engine.
@@ -167,10 +170,59 @@ def _graph_is_valid(stages: tuple[StageSpec, ...], initial_stage: Optional[str])
     return True
 
 
+def _is_normalized_config(config: FlowConfig) -> bool:
+    if type(config.schema_version) is not int or config.schema_version != 1:
+        return False
+    if not config.flow_id or config.flow_id != config.flow_id.strip():
+        return False
+    pool_ids = [item.pool_id for item in config.pools]
+    if len(pool_ids) != len(set(pool_ids)):
+        return False
+    for pool in config.pools:
+        if not pool.enabled or not pool.pool_id or pool.draw_mode not in {"turn", "cycle"}:
+            return False
+        if not 1 <= pool.draw_count <= 5 or len(pool.entries) > 160:
+            return False
+        entry_ids = [item.entry_id for item in pool.entries]
+        if len(entry_ids) != len(set(entry_ids)):
+            return False
+        if any(
+            not item.entry_id
+            or item.entry_id != item.entry_id.strip()
+            or not item.text
+            or item.text != item.text.strip()
+            or len(item.text) > 1200
+            for item in pool.entries
+        ):
+            return False
+    stage_ids = [item.stage_id for item in config.stages]
+    if len(stage_ids) != len(set(stage_ids)):
+        return False
+    for stage in config.stages:
+        if not stage.enabled or not stage.stage_id or stage.stage_id != stage.stage_id.strip():
+            return False
+        if not 1 <= stage.min_turns <= 12 or not 1 <= stage.repeat_min_turns <= 12:
+            return False
+        if any(pool_id not in pool_ids for pool_id in stage.pool_ids):
+            return False
+    cue_ids = [item.cue_id for item in config.cues]
+    cue_keys = [item.key.casefold() for item in config.cues]
+    if len(cue_ids) != len(set(cue_ids)) or len(cue_keys) != len(set(cue_keys)):
+        return False
+    for cue in config.cues:
+        if not cue.enabled or not cue.cue_id or not cue.key or cue.key != cue.key.strip():
+            return False
+        if any(pool_id not in pool_ids for pool_id in cue.pool_ids):
+            return False
+    return _graph_is_valid(config.stages, config.initial_stage)
+
+
 def normalize_flow_config(raw: Any) -> Optional[FlowConfig]:
     """Return a normalized config, or ``None`` when it cannot be trusted."""
     if isinstance(raw, FlowConfig):
-        return raw if raw.schema_version == 1 and _graph_is_valid(raw.stages, raw.initial_stage) else None
+        if not raw.flow_id and not raw.enabled and not raw.stages and not raw.cues and not raw.pools:
+            return raw if raw.schema_version == 1 else None
+        return raw if _is_normalized_config(raw) else None
     if not isinstance(raw, Mapping) or raw.get("schemaVersion") != 1:
         return None
     flow_id = _text(raw.get("flowId", raw.get("id")))

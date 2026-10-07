@@ -82,7 +82,7 @@ def sanitize_hidden_flow_text(raw: str) -> str:
             cursor = boundary
             continue
         output.append(text[cursor:start])
-        close = text.find("/>", boundary)
+        close = _find_close(text, boundary)
         if close < 0:
             break
         cursor = close + 2
@@ -98,4 +98,24 @@ def sanitize_hidden_flow_text(raw: str) -> str:
 
 def _OPENER_PREFIX(value: str) -> bool:
     return ("<" + _CONTROL_NAME).casefold().startswith(value.casefold())
+
+
+def _find_close(text: str, start: int) -> int:
+    quote: Optional[str] = None
+    index = start
+    while index < len(text) - 1:
+        char = text[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"\"", "'"}:
+            quote = char
+            index += 1
+            continue
+        if text[index:index + 2] == "/>":
+            return index
+        index += 1
+    return -1
 

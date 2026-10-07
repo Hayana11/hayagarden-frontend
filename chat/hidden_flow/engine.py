@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .config import normalize_flow_config
+from .config import HIDDEN_FLOW_ENGINE_ENABLED, normalize_flow_config
 from .types import FlowConfig, FlowControl, FlowState
 
 
@@ -17,11 +17,13 @@ def start_flow(
     control: Optional[FlowControl],
     *,
     started_at: str = "",
+    engine_enabled: bool = HIDDEN_FLOW_ENGINE_ENABLED,
 ) -> FlowState:
     """Create cycle one only for an explicit matching start action."""
     normalized = normalize_flow_config(config)
     if (
         normalized is None
+        or not engine_enabled
         or not normalized.enabled
         or control is None
         or control.flow_id != normalized.flow_id
@@ -47,14 +49,15 @@ def apply_flow_control(
     control: Optional[FlowControl] = None,
     *,
     boundary_override: bool = False,
+    engine_enabled: bool = HIDDEN_FLOW_ENGINE_ENABLED,
 ) -> FlowState:
     """Advance one turn, or fail closed when the caller reports a boundary."""
     normalized = normalize_flow_config(config)
-    if boundary_override or normalized is None or not normalized.enabled:
+    if boundary_override or not engine_enabled or normalized is None or not normalized.enabled:
         return _inactive()
     current = state or _inactive()
     if not current.active:
-        return start_flow(normalized, control)
+        return start_flow(normalized, control, engine_enabled=engine_enabled)
     if current.flow_id != normalized.flow_id:
         return _inactive()
     stage = normalized.stage(current.stage)
