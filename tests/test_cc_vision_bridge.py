@@ -305,7 +305,7 @@ class VisionBridgeUnitTests(unittest.TestCase):
                     }}) + '\n',
                     json.dumps({
                         'type': 'result', 'subtype': 'success',
-                        'is_error': False, 'result': 'ok',
+                        'is_error': False, 'result': 'ok', 'stop_reason': 'end_turn',
                         'session_id': 'sess-vision',
                         'usage': {
                             'input_tokens': 1, 'output_tokens': 1,
