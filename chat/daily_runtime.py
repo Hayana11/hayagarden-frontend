@@ -7304,7 +7304,7 @@ def build_canonical_turn_for_plan(
         ),
     )
     plan._canonical_turn = turn
-    if plan.hidden_flow_enabled and plan.hidden_flow_eligible:
+    if _hidden_flow_runtime_enabled(plan):
         from chat.hidden_flow.runtime import control_from_dict, propose_transition
         plan._hidden_flow_transition = propose_transition(
             plan.hidden_flow_plan,
