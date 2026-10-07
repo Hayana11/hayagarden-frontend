@@ -13,7 +13,7 @@ from chat.hidden_flow import runtime, runtime_store
 from chat.hidden_flow.config import normalize_flow_config
 from chat.hidden_flow.control import parse_hidden_flow_control
 from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
-from chat.hidden_flow.types import FlowState
+from chat.hidden_flow.types import AppliedGuide, FlowState
 import chat.daily_runtime as daily_runtime
 
 
@@ -118,6 +118,59 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(transition)
         self.assertTrue(transition.state_after.active)
         self.assertEqual(transition.state_after.context_keys, ("a",))
+
+    def test_active_private_guide_defines_control_semantics_and_stays_private(self) -> None:
+        config = normalize_flow_config(_raw_config())
+        assert config is not None
+        state = FlowState(
+            active=True,
+            flow_id="demo-flow",
+            stage="s1",
+            cycle=1,
+            stage_turn=1,
+            context_keys=("a",),
+            started_at="t0",
+        )
+        guide = AppliedGuide(
+            status="pending",
+            source_message_id="assistant-1",
+            keys=("a",),
+            draws=(
+                {
+                    "poolId": "cycle-pool",
+                    "entryId": "one",
+                    "text": "cycle one",
+                    "drawIndex": 0,
+                    "seed": "seed",
+                },
+            ),
+            created_at="t0",
+            flow=state,
+        )
+
+        rendered = runtime._render_applied_guide(config, state, guide)
+        for phrase in (
+            "Private protocol",
+            'action="stop"',
+            'action="hold"',
+            'action="continue"',
+        ):
+            self.assertIn(phrase, rendered)
+        self.assertLessEqual(len(rendered), 8000)
+
+        self.assertEqual(
+            runtime.sanitize_hidden_flow_text("visible" + rendered + "tail"),
+            "visibletail",
+        )
+        persisted = json.dumps(guide.to_dict(), ensure_ascii=False)
+        for phrase in (
+            "Private protocol",
+            'action="stop"',
+            'action="hold"',
+            'action="continue"',
+        ):
+            self.assertNotIn(phrase, persisted)
+
 
     def test_pending_commit_contains_real_cycle_draw_and_roundtrips(self) -> None:
         version = runtime_store.upsert_flow_config(_raw_config(), db_path=self.db_path)
