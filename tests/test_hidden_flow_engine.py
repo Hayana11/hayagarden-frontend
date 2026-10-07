@@ -19,6 +19,7 @@ from chat.hidden_flow.types import (
     FlowConfig,
     FlowControl,
     FlowState,
+    PoolEntry,
     PoolSpec,
 )
 
@@ -290,7 +291,7 @@ class HiddenFlowDrawTests(unittest.TestCase):
         self.assertEqual(len({item.entry_id for item in first.draws}), len(first.draws))
         self.assertEqual(
             draw_pool(
-                PoolSpec("p", True, "turn", 1, ()),
+                PoolSpec("p", True, "turn", 1, (PoolEntry("e", "text"),)),
                 source_message_id="a\x00b",
                 flow_id="demo-flow",
             ).draws,
