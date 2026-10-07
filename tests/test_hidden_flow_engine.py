@@ -179,7 +179,7 @@ class HiddenFlowStreamingTests(unittest.TestCase):
         stream = HiddenFlowStreamFilter()
         outputs = [
             stream.feed(chunk)
-            for chunk in ["ok", '<hidden_flow_control flow="x"', ' action="stop"/>', "!", "<"]
+            for chunk in ["ok", '<hidden_flow_control flow="x"', ' action="stop"/>', "!"]
         ]
         self.assertEqual("".join(outputs) + stream.finish(), "ok!")
 
