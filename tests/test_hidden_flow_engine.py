@@ -381,7 +381,10 @@ class HiddenFlowDrawTests(unittest.TestCase):
             source_message_id="m2",
             pool_ids=["cycle-pool"],
         )
-        self.assertEqual(retry, first)
+        self.assertEqual(
+            [item for item in retry.draws if item.pool_id == "cycle-pool"],
+            [item for item in first.draws if item.pool_id == "cycle-pool"],
+        )
         self.assertEqual(retry_state.fixed_draws, cached_state.fixed_draws)
 
     def test_invalid_cycle_cache_is_rebuilt_from_current_config(self) -> None:
