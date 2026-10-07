@@ -8,6 +8,7 @@ snapshot; the SQLite work itself lives in runtime_store.py.
 from __future__ import annotations
 
 import datetime
+from html import escape
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
@@ -111,8 +112,8 @@ def build_activation_block(
         rows.append(
             '<flow id="%s" keys="%s"/>'
             % (
-                config.flow_id[:256].replace('"', ""),
-                cue_text.replace('"', ""),
+                escape(config.flow_id[:256], quote=True),
+                escape(cue_text[:1000], quote=True),
             )
         )
     if not rows:
