@@ -113,7 +113,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
                 'message_start',
                 _usage(3, 0, cache_read=10, cache_creation=20),
             ),
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         event = next(
             row for row in logs
@@ -136,7 +136,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
                 'message_delta',
                 _usage(1, 7, cache_read=11, cache_creation=12),
             ),
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         event = next(
             row for row in logs
@@ -152,7 +152,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
         _, logs, _ = self._run([
             _stream_event('message_start', _usage(1, 0)),
             _assistant('req-r1', _usage(1, 9)),
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         event = next(
             row for row in logs
@@ -166,7 +166,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
     def test_result_without_usage_logs_false(self):
         _, logs, _ = self._run([
             _stream_event('message_start', _usage(1, 0)),
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         event = next(
             row for row in logs
@@ -193,7 +193,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
             ),
             _stream_event('message_start', _usage(1, 0)),
             _assistant('req-r2', _usage(1, 1153)),
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         closes = [
             row for row in logs if row.get('stage') == 'ROUND_CLOSE'
@@ -220,6 +220,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
             ),
             {
                 'type': 'result',
+                'stop_reason': 'end_turn',
                 'requestId': 'req-r1',
                 'usage': _usage(3, 53),
             },
@@ -253,6 +254,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
             ),
             {
                 'type': 'result',
+                'stop_reason': 'end_turn',
                 'result': 'RESULT_SENTINEL',
                 'usage': _usage(1, 9),
             },
@@ -306,6 +308,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
             ),
             {
                 'type': 'result',
+                'stop_reason': 'end_turn',
                 'usage': _usage(
                     4, 1476, cache_read=145720, cache_creation=5480,
                 ),
@@ -405,7 +408,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
                     }],
                 },
             },
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         with (
             mock.patch.object(cc_resident, 'StreamWatchdog', _NoopWatchdog),
@@ -473,7 +476,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
             _stream_event('message_start', _usage(1, 0)),
             _assistant('req-r2', _usage(1, 7)),
             _stream_event('message_delta', _usage(1, 999)),
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         done = next(payload for event, payload in output if event == 'done')
         rounds = done[2]['rounds']
@@ -496,7 +499,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
             _stream_event('message_start', _usage(1, 0)),
             _assistant('req-r1', _usage(1, 3)),
             _stream_event('message_delta', _usage(1, 8)),
-            {'type': 'result'},
+            {'type': 'result', 'stop_reason': 'end_turn'},
         ])
         done = next(payload for event, payload in output if event == 'done')
         self.assertEqual(done[2]['num_rounds'], 1)

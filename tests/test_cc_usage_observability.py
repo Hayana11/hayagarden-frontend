@@ -846,7 +846,7 @@ class IdleBeforeLastUsedTests(unittest.TestCase):
                 "type": "stream_event",
                 "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "hi"}},
             }),
-            json.dumps({"type": "result", "is_error": False, "result": "ok"}),
+            json.dumps({"type": "result", "is_error": False, "result": "ok", "stop_reason": "end_turn"}),
         ]
         with mock.patch("subprocess.Popen", return_value=FakeProc(lines)), \
              mock.patch("chat.cc_runtime.require_managed_claude_runtime", return_value="2.1.280"), \
@@ -873,7 +873,7 @@ class IdleBeforeLastUsedTests(unittest.TestCase):
                 "type": "stream_event",
                 "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "yo"}},
             }),
-            json.dumps({"type": "result", "is_error": False, "result": "ok"}),
+            json.dumps({"type": "result", "is_error": False, "result": "ok", "stop_reason": "end_turn"}),
         ]
         sess._proc = FakeProc(lines2)
         with mock.patch("time.time", return_value=1600.0):
