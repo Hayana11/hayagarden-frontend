@@ -6488,6 +6488,15 @@ def _observe_continuity_shadow(
     )
 
 
+
+def _hidden_flow_runtime_enabled(plan: Any) -> bool:
+    return bool(
+        getattr(plan, "hidden_flow_enabled", False)
+        and getattr(plan, "hidden_flow_eligible", False)
+        and getattr(plan, "hidden_flow_plan", None) is not None
+    )
+
+
 def ensure_resident_and_stream(
     plan: DailyTurnPlan,
     *,
@@ -6803,7 +6812,7 @@ def ensure_resident_and_stream(
             except Exception:
                 logger.warning('reality_context prefix injection failed; continuing without', exc_info=True)
 
-        if plan.hidden_flow_enabled and plan.hidden_flow_eligible:
+        if _hidden_flow_runtime_enabled(plan):
             from chat.hidden_flow.runtime import render_plan_request
             content = render_plan_request(plan.hidden_flow_plan, content)
 
@@ -7285,12 +7294,11 @@ def build_canonical_turn_for_plan(
         resident_generation=plan.resident_generation,
         transcript_process_generation=plan.transcript_process_generation,
         terminal_receipt=plan.terminal_receipt,
-        hidden_flow_enabled=bool(plan.hidden_flow_enabled and plan.hidden_flow_eligible),
+        hidden_flow_enabled=_hidden_flow_runtime_enabled(plan),
         hidden_flow_expected_flow_id=(
             plan.hidden_flow_plan.state_before.flow_id
             if (
-                plan.hidden_flow_enabled
-                and plan.hidden_flow_eligible
+                _hidden_flow_runtime_enabled(plan)
                 and getattr(plan.hidden_flow_plan.state_before, 'active', False)
             ) else None
         ),
