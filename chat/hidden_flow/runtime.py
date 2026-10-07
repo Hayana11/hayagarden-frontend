@@ -13,7 +13,7 @@ from typing import Any, Iterable, Optional
 
 from .control import parse_hidden_flow_control
 from .draw import draw_for_guide_with_state, render_private_guide
-from .engine import apply_flow_control
+from .engine import apply_flow_control, start_flow
 from .types import AppliedGuide, DrawItem, DrawResult, FlowConfig, FlowControl, FlowState
 
 
@@ -223,12 +223,24 @@ def propose_transition(
         config, config_version = selected
     if config is None or config_version is None:
         return None
-    state_after = apply_flow_control(
-        config,
-        plan.state_before,
-        control,
-        engine_enabled=True,
-    )
+    if (
+        not plan.state_before.active
+        and control is not None
+        and control.action == "start"
+    ):
+        state_after = start_flow(
+            config,
+            control,
+            started_at=datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            engine_enabled=True,
+        )
+    else:
+        state_after = apply_flow_control(
+            config,
+            plan.state_before,
+            control,
+            engine_enabled=True,
+        )
     if (
         state_after.to_dict() == plan.state_before.to_dict()
         and plan.applied_guide is None
