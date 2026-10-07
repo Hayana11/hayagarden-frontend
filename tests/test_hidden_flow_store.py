@@ -110,6 +110,35 @@ class HiddenFlowStoreTests(unittest.TestCase):
             )
         conn.close()
 
+    def test_config_version_cas_rejects_mid_turn_mutation(self) -> None:
+        runtime_store.upsert_flow_config(_config(), db_path=self.db_path)
+        conn = runtime_store._connect(self.db_path)
+        runtime_store.ensure_hidden_flow_schema(conn=conn)
+        runtime_store.stage_snapshot(conn, _snapshot(20))
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(
+            runtime_store.upsert_flow_config(_config(), db_path=self.db_path),
+            2,
+        )
+        conn = runtime_store._connect(self.db_path)
+        with self.assertRaises(runtime_store.HiddenFlowConflict):
+            runtime_store.finalize_snapshot(conn, 20)
+        conn.rollback()
+        status = conn.execute(
+            "SELECT status FROM hidden_flow_message_snapshots "
+            "WHERE assistant_message_id=?",
+            (20,),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(status, runtime_store.SNAPSHOT_PENDING)
+        self.assertEqual(
+            runtime_store.load_runtime("default", db_path=self.db_path)["version"],
+            0,
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()
