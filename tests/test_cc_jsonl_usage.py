@@ -386,7 +386,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
                     },
                 },
             }),
-            json.dumps({"type": "result", "is_error": False}),
+            json.dumps({"type": "result", "is_error": False, "stop_reason": "end_turn"}),
         ]
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._proc = FakeProc(lines)
@@ -477,6 +477,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
             json.dumps({
                 "type": "result",
                 "is_error": False,
+                "stop_reason": "end_turn",
                 "result": text,
             }),
         ]
@@ -517,7 +518,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
                     },
                 },
             }),
-            json.dumps({"type": "result", "is_error": False}),
+            json.dumps({"type": "result", "is_error": False, "stop_reason": "end_turn"}),
         ]
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._proc = FakeProc(lines)
@@ -556,7 +557,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
                 "cache_read_input_tokens": 0,
                 "cache_creation_input_tokens": 100,
             }}}),
-            json.dumps({"type": "result", "is_error": False}),
+            json.dumps({"type": "result", "is_error": False, "stop_reason": "end_turn"}),
         ]
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._proc = FakeProc(lines)
@@ -589,7 +590,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
                     "delta": {"type": "text_delta", "text": "hi"},
                 },
             }),
-            json.dumps({"type": "result", "is_error": False}),
+            json.dumps({"type": "result", "is_error": False, "stop_reason": "end_turn"}),
         ]
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._proc = FakeProc(lines)
@@ -622,7 +623,7 @@ class ResidentJsonlHookTests(unittest.TestCase):
 
     def test_resident_no_idle_heartbeat_by_default(self):
         lines = [
-            json.dumps({"type": "result", "is_error": False}),
+            json.dumps({"type": "result", "is_error": False, "stop_reason": "end_turn"}),
         ]
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
         resident._proc = FakeProc(lines)
