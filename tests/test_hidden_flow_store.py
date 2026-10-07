@@ -37,6 +37,8 @@ def _snapshot(aid: int, version: int = 0) -> dict:
         "assistant_message_id": aid,
         "user_message_id": aid - 1,
         "chat_id": "default",
+        "flow_id": "store-flow",
+        "config_version": 1,
         "runtime_version_before": version,
         "state_before": FlowState.inactive().to_dict(),
         "state_after": FlowState.inactive().to_dict(),
@@ -73,6 +75,7 @@ class HiddenFlowStoreTests(unittest.TestCase):
         self.assertEqual(runtime_store.load_configs(self.db_path), ())
 
     def test_pending_snapshot_commit_and_runtime_cas(self) -> None:
+        runtime_store.upsert_flow_config(_config(), db_path=self.db_path)
         conn = runtime_store._connect(self.db_path)
         runtime_store.ensure_hidden_flow_schema(conn=conn)
         runtime_store.stage_snapshot(conn, _snapshot(10))
