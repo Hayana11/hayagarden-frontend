@@ -420,6 +420,16 @@ def finalize_snapshot(
     expected = int(row["runtime_version_before"])
     if current_version != expected:
         raise HiddenFlowConflict("hidden flow runtime version CAS failed")
+    config_row = conn.execute(
+        "SELECT version, enabled FROM hidden_flow_configs WHERE flow_id=?",
+        (str(row["flow_id"] or ""),),
+    ).fetchone()
+    if (
+        config_row is None
+        or int(config_row["version"]) != int(row["config_version"])
+        or not bool(config_row["enabled"])
+    ):
+        raise HiddenFlowConflict("hidden flow config version CAS failed")
     state_after = FlowState.from_dict(json.loads(str(row["state_after_json"])))
     next_guide = (
         AppliedGuide.from_dict(json.loads(str(row["next_guide_json"])))
