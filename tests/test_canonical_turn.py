@@ -42,6 +42,8 @@ class CanonicalTurnTests(unittest.TestCase):
         terminal_receipt=None,
         resident_generation=None,
         transcript_process_generation=None,
+        hidden_flow_enabled=False,
+        hidden_flow_expected_flow_id=None,
     ):
         path = _write(rows)
         try:
@@ -55,6 +57,8 @@ class CanonicalTurnTests(unittest.TestCase):
                 resident_generation=resident_generation,
                 transcript_process_generation=transcript_process_generation,
                 terminal_receipt=terminal_receipt,
+                hidden_flow_enabled=hidden_flow_enabled,
+                hidden_flow_expected_flow_id=hidden_flow_expected_flow_id,
             )
         finally:
             path.unlink(missing_ok=True)
@@ -509,6 +513,40 @@ class CanonicalTurnTests(unittest.TestCase):
                 _row('result', stop_reason='end_turn'),
             ])
         self.assertEqual(duplicate.exception.error_code, 'tool_result_duplicate')
+
+
+    def test_hidden_control_is_parsed_and_removed_from_canonical_projection(self):
+        turn = self._build([
+            _row('assistant', uuid='a1', message={
+                'role': 'assistant',
+                'content': [{
+                    'type': 'text',
+                    'text': 'visible<hidden_flow_control flow="demo-flow" action="hold" keys="a|b"/>',
+                }],
+                'stop_reason': 'end_turn',
+            }),
+            _row('result', stop_reason='end_turn'),
+        ], hidden_flow_enabled=True)
+        self.assertEqual(turn.content, 'visible')
+        self.assertEqual(turn.hidden_flow_control['flowId'], 'demo-flow')
+        self.assertEqual(turn.hidden_flow_control['action'], 'hold')
+        self.assertNotIn('hidden_flow_control', turn.display_segments)
+
+    def test_invalid_hidden_control_is_sanitized_without_transition(self):
+        turn = self._build([
+            _row('assistant', uuid='a1', message={
+                'role': 'assistant',
+                'content': [{
+                    'type': 'text',
+                    'text': 'visible<hidden_flow_control flow="demo-flow" keys="a|b|c|d|e"/>',
+                }],
+                'stop_reason': 'end_turn',
+            }),
+            _row('result', stop_reason='end_turn'),
+        ], hidden_flow_enabled=True)
+        self.assertEqual(turn.content, 'visible')
+        self.assertIsNone(turn.hidden_flow_control)
+
 
 
 if __name__ == '__main__':
