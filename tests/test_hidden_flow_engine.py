@@ -203,6 +203,24 @@ class HiddenFlowStreamingTests(unittest.TestCase):
         self.assertEqual("".join(outputs) + stream.finish(), "ok!")
 
 
+    def test_guidance_and_activation_blocks_are_invisible(self) -> None:
+        value = (
+            "visible"
+            '<hidden_flow_guidance flow="demo-flow">private</hidden_flow_guidance>'
+            '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
+            "tail"
+        )
+        self.assertEqual(self._single_chars(value), "visibletail")
+
+    def test_malformed_confirmed_private_block_drops_to_eof(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        output = stream.feed(
+            'visible<hidden_flow_guidance flow="demo-flow">private without close'
+        )
+        self.assertEqual(output, "visible")
+        self.assertEqual(stream.finish(), "")
+
+
 class HiddenFlowStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = normalize_flow_config(_raw_config())
