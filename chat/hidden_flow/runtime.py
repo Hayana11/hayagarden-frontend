@@ -219,66 +219,6 @@ def prepare_hidden_flow_turn(
         available_configs=tuple(data["configs"]),
         private_request_block=block,
     )
-(
-    *,
-    enabled: bool,
-    eligible: bool,
-    chat_id: str,
-    user_message_id: int,
-    db_path: Optional[str] = None,
-) -> HiddenFlowTurnPlan:
-    if not enabled or not eligible:
-        return disabled_hidden_flow_plan(
-            enabled=bool(enabled),
-            eligible=bool(eligible),
-            chat_id=chat_id,
-            user_message_id=user_message_id,
-        )
-    # Keep the store import lazy so gate-off ordinary turns do not import or
-    # create any hidden-flow schema.
-    from . import runtime_store
-
-    data = runtime_store.load_runtime_bundle(chat_id, db_path=db_path)
-    state = data["runtime"]["state"]
-    pending = data["runtime"]["pending_guide"]
-    selected: Optional[tuple[FlowConfig, int]] = None
-    if state.active:
-        selected = next(
-            (
-                item for item in data["configs"]
-                if item[0].flow_id == state.flow_id
-            ),
-            None,
-        )
-    block = _render_applied_guide(
-        selected[0] if selected is not None else None,
-        state,
-        pending,
-    )
-    if not state.active:
-        block = build_activation_block(data["configs"])
-    return HiddenFlowTurnPlan(
-        enabled=True,
-        eligible=True,
-        chat_id=str(chat_id),
-        user_message_id=int(user_message_id),
-        runtime_version_before=int(data["runtime"]["version"]),
-        config_version=(
-            selected[1]
-            if selected is not None
-            else (
-                data["configs"][0][1]
-                if len(data["configs"]) == 1 else None
-            )
-        ),
-        state_before=state,
-        applied_guide=pending,
-        selected_config=selected[0] if selected is not None else None,
-        available_configs=tuple(data["configs"]),
-        private_request_block=block,
-    )
-
-
 def append_private_request_block(content: Any, block: str) -> Any:
     """Return a new request carrier without stringifying multimodal content."""
     if not block:
