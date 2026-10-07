@@ -3493,13 +3493,6 @@ def _prepare_hidden_flow_plan(
             eligible = False
         return _DisabledHiddenFlowPlan()
     from chat.hidden_flow.runtime import disabled_hidden_flow_plan
-    if not eligible:
-        return disabled_hidden_flow_plan(
-            enabled=False,
-            eligible=False,
-            chat_id=chat_id,
-            user_message_id=user_message_id,
-        )
     try:
         from chat.hidden_flow.runtime import prepare_hidden_flow_turn
         return prepare_hidden_flow_turn(
