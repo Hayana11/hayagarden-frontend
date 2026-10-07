@@ -11,7 +11,7 @@ from unittest import mock
 
 from chat.hidden_flow import runtime, runtime_store
 from chat.hidden_flow.config import normalize_flow_config
-from chat.hidden_flow.control import parse_hidden_flow_control
+from chat.hidden_flow.control import parse_hidden_flow_control, sanitize_hidden_flow_text
 from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
 from chat.hidden_flow.types import AppliedGuide, FlowState
 import chat.daily_runtime as daily_runtime
@@ -159,7 +159,7 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
         self.assertLessEqual(len(rendered), 8000)
 
         self.assertEqual(
-            runtime.sanitize_hidden_flow_text("visible" + rendered + "tail"),
+            sanitize_hidden_flow_text("visible" + rendered + "tail"),
             "visibletail",
         )
         persisted = json.dumps(guide.to_dict(), ensure_ascii=False)
