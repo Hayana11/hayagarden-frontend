@@ -323,3 +323,22 @@ def parse_control_for_plan(
 
 def render_plan_request(plan: HiddenFlowTurnPlan, content: Any) -> Any:
     return append_private_request_block(content, plan.private_request_block)
+
+
+def control_from_dict(value: Any) -> Optional[FlowControl]:
+    if not isinstance(value, dict):
+        return None
+    flow_id = value.get("flowId")
+    action = value.get("action")
+    keys = value.get("keys")
+    if not isinstance(flow_id, str):
+        return None
+    if action is not None and not isinstance(action, str):
+        return None
+    if not isinstance(keys, list) or any(not isinstance(item, str) for item in keys):
+        return None
+    return FlowControl(
+        flow_id=flow_id,
+        action=action,
+        keys=tuple(keys[:4]),
+    )
