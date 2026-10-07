@@ -636,8 +636,12 @@ class ResidentJsonlHookTests(unittest.TestCase):
                 return_value=replay.replay_jsonl_lines([]),
             ),
         ):
-            list(resident.send_turn("hello"))
-        select_mock.assert_not_called()
+            events = list(resident.send_turn("hello"))
+        self.assertEqual(
+            [payload for event, payload in events if event == "heartbeat"],
+            [],
+        )
+        select_mock.assert_called_once()
 
     def test_unified_normal_wake_waits_for_multitool_late_flush(self):
         resident = ResidentSession("/tmp/cc-test", "", "/tmp/mcp.json")
