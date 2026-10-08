@@ -8190,5 +8190,118 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
             os.unlink(db)
 
 
+from types import SimpleNamespace
+
+
+class HiddenFlowHotNoopParityTests(unittest.TestCase):
+    def _plan(self, *, block='', enabled=False, suffix='', assembly=None):
+        return SimpleNamespace(
+            hot_decision='NO_OP',
+            assembly=dict(assembly or {}),
+            user_content='hello',
+            provider_display_thinking_suffix=suffix,
+            hidden_flow_enabled=enabled,
+            hidden_flow_eligible=enabled,
+            hidden_flow_plan=(
+                SimpleNamespace(private_request_block=block)
+                if enabled else None
+            ),
+            manifest={},
+        )
+
+    def _assert_rejected(self, plan, content):
+        with self.assertRaises(daily_runtime.DailyRuntimeError) as raised:
+            daily_runtime._validate_hot_no_op_payload(plan, content)
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_hot_hidden_flow_private_payload_invalid',
+        )
+
+    def test_gate_off_plain_hot_noop_remains_valid(self):
+        plan = self._plan()
+        daily_runtime._validate_hot_no_op_payload(plan, 'hello')
+        self.assertEqual(plan.manifest['context_plan_current_request_count'], 1)
+
+    def test_gate_on_available_block_and_active_guidance_are_valid(self):
+        for block in (
+            '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>',
+            '<hidden_flow_guidance flow="demo-flow" stage="approach"></hidden_flow_guidance>',
+        ):
+            with self.subTest(block=block):
+                plan = self._plan(block=block, enabled=True)
+                content = 'hello' + chr(10) + chr(10) + block
+                original = content
+                daily_runtime._validate_hot_no_op_payload(plan, content)
+                self.assertEqual(content, original)
+                self.assertEqual(
+                    plan.manifest['context_plan_current_request_count'],
+                    1,
+                )
+
+    def test_display_thinking_suffix_is_checked_after_private_payload(self):
+        block = '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
+        suffix = chr(10) + chr(10) + 'DISPLAY_THINKING_SUFFIX'
+        plan = self._plan(block=block, enabled=True, suffix=suffix)
+        daily_runtime._validate_hot_no_op_payload(
+            plan,
+            'hello' + suffix + chr(10) + chr(10) + block,
+        )
+
+    def test_multimodal_removes_only_final_exact_private_text_part(self):
+        block = '<hidden_flow_guidance flow="demo-flow" stage="approach"></hidden_flow_guidance>'
+        suffix = chr(10) + chr(10) + 'DISPLAY_THINKING_SUFFIX'
+        plan = self._plan(block=block, enabled=True, suffix=suffix)
+        image = {
+            'type': 'image',
+            'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'AA=='},
+        }
+        content = [
+            {'type': 'text', 'text': 'hello'},
+            image,
+            {'type': 'text', 'text': suffix},
+            {'type': 'text', 'text': chr(10) + chr(10) + block},
+        ]
+        original = [dict(item) if isinstance(item, dict) else item for item in content]
+        daily_runtime._validate_hot_no_op_payload(plan, content)
+        self.assertEqual(content, original)
+
+    def test_private_payload_missing_repeated_misplaced_or_tampered_fails_closed(self):
+        block = '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
+        plan = self._plan(block=block, enabled=True)
+        cases = (
+            'hello',
+            'hello' + chr(10) + chr(10) + block + chr(10) + chr(10) + block,
+            'hello' + chr(10) + chr(10) + block + 'tail',
+            'hello' + chr(10) + chr(10) + block.replace('demo-flow', 'other-flow'),
+        )
+        for content in cases:
+            with self.subTest(content=content):
+                self._assert_rejected(plan, content)
+
+    def test_private_payload_without_authorized_plan_fails_closed(self):
+        block = '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
+        self._assert_rejected(
+            self._plan(),
+            'hello' + chr(10) + chr(10) + block,
+        )
+
+    def test_original_history_handoff_guards_remain_active(self):
+        block = '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
+        for assembly, expected in (
+            ({'context_plan_representation_blocks': [{'body': 'replayed'}]},
+             'context_plan_hot_history_replay'),
+            ({'day_handoff': 'handoff'},
+             'context_plan_hot_legacy_replay'),
+        ):
+            with self.subTest(expected=expected):
+                plan = self._plan(block=block, enabled=True, assembly=assembly)
+                with self.assertRaises(daily_runtime.DailyRuntimeError) as raised:
+                    daily_runtime._validate_hot_no_op_payload(
+                        plan,
+                        'hello' + chr(10) + chr(10) + block,
+                    )
+                self.assertEqual(raised.exception.error_code, expected)
+
+
 if __name__ == '__main__':
     unittest.main()

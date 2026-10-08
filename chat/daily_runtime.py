@@ -2992,6 +2992,89 @@ def _provider_content_text(content: Any) -> str:
     return ''
 
 
+_HIDDEN_FLOW_PRIVATE_MARKERS = (
+    '<available_hidden_flow',
+    '<hidden_flow_',
+)
+
+
+def _hidden_flow_carrier_has_marker(value: Any) -> bool:
+    if isinstance(value, str):
+        return any(marker in value for marker in _HIDDEN_FLOW_PRIVATE_MARKERS)
+    if isinstance(value, dict):
+        return (
+            value.get('type') == 'text'
+            and _hidden_flow_carrier_has_marker(str(value.get('text') or ''))
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_hidden_flow_carrier_has_marker(item) for item in value)
+    return False
+
+
+def _hidden_flow_expected_private_block(plan: DailyTurnPlan) -> Optional[str]:
+    if not _hidden_flow_runtime_enabled(plan):
+        return None
+    hidden_plan = getattr(plan, 'hidden_flow_plan', None)
+    if hidden_plan is None:
+        return None
+    block = getattr(hidden_plan, 'private_request_block', '')
+    return block if isinstance(block, str) else ''
+
+
+def _strip_hidden_flow_private_payload(
+    plan: DailyTurnPlan,
+    content: Any,
+) -> Any:
+    """Validate and remove only the authorized request-private suffix copy."""
+    expected = _hidden_flow_expected_private_block(plan)
+    if expected is None or not expected:
+        if _hidden_flow_carrier_has_marker(content):
+            raise DailyRuntimeError(
+                'hidden flow private request payload is not authorized',
+                error_code='context_plan_hot_hidden_flow_private_payload_invalid',
+            )
+        return content
+
+    expected_suffix = NL + NL + expected
+    if isinstance(content, str):
+        if not content.endswith(expected_suffix):
+            raise DailyRuntimeError(
+                'hidden flow private request payload is not the exact final suffix',
+                error_code='context_plan_hot_hidden_flow_private_payload_invalid',
+            )
+        stripped = content[:-len(expected_suffix)]
+        if _hidden_flow_carrier_has_marker(stripped):
+            raise DailyRuntimeError(
+                'hidden flow private request payload is repeated or misplaced',
+                error_code='context_plan_hot_hidden_flow_private_payload_invalid',
+            )
+        return stripped
+
+    if isinstance(content, (list, tuple)):
+        items = list(content)
+        if (
+            not items
+            or not isinstance(items[-1], dict)
+            or items[-1].get('type') != 'text'
+            or items[-1].get('text') != expected_suffix
+        ):
+            raise DailyRuntimeError(
+                'hidden flow private request payload is not the exact final text part',
+                error_code='context_plan_hot_hidden_flow_private_payload_invalid',
+            )
+        if _hidden_flow_carrier_has_marker(items[:-1]):
+            raise DailyRuntimeError(
+                'hidden flow private request payload is repeated or misplaced',
+                error_code='context_plan_hot_hidden_flow_private_payload_invalid',
+            )
+        return items[:-1]
+
+    raise DailyRuntimeError(
+        'hidden flow private request carrier is invalid',
+        error_code='context_plan_hot_hidden_flow_private_payload_invalid',
+    )
+
+
 def _validate_hot_no_op_payload(plan: DailyTurnPlan, content: Any) -> None:
     """Keep NO_OP on the existing incremental payload contract."""
     if getattr(plan, 'hot_decision', None) != 'NO_OP':
@@ -3009,7 +3092,8 @@ def _validate_hot_no_op_payload(plan: DailyTurnPlan, content: Any) -> None:
             'normal hot NO_OP contains legacy handoff/carryover replay',
             error_code='context_plan_hot_legacy_replay',
         )
-    text = _provider_content_text(content)
+    checked_content = _strip_hidden_flow_private_payload(plan, content)
+    text = _provider_content_text(checked_content)
     user_text = str(plan.user_content or '')
     suffix = str(plan.provider_display_thinking_suffix or '')
     if suffix and text.endswith(suffix):
