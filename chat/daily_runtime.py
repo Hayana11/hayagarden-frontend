@@ -3075,6 +3075,25 @@ def _strip_hidden_flow_private_payload(
     )
 
 
+def _strip_hot_display_thinking_suffix(content: Any, suffix: str) -> Any:
+    """Remove the provider-only suffix from a carrier copy, never in place."""
+    suffix = str(suffix or '')
+    if not suffix:
+        return content
+    if isinstance(content, str):
+        return content[:-len(suffix)] if content.endswith(suffix) else content
+    if isinstance(content, (list, tuple)):
+        items = list(content)
+        if items and isinstance(items[-1], dict) and items[-1].get('type') == 'text':
+            value = str(items[-1].get('text') or '')
+            if value.endswith(suffix):
+                item = dict(items[-1])
+                item['text'] = value[:-len(suffix)]
+                items[-1] = item
+                return items
+    return content
+
+
 def _validate_hot_no_op_payload(plan: DailyTurnPlan, content: Any) -> None:
     """Keep NO_OP on the existing incremental payload contract."""
     if getattr(plan, 'hot_decision', None) != 'NO_OP':
@@ -3093,11 +3112,10 @@ def _validate_hot_no_op_payload(plan: DailyTurnPlan, content: Any) -> None:
             error_code='context_plan_hot_legacy_replay',
         )
     checked_content = _strip_hidden_flow_private_payload(plan, content)
+    suffix = str(plan.provider_display_thinking_suffix or '')
+    checked_content = _strip_hot_display_thinking_suffix(checked_content, suffix)
     text = _provider_content_text(checked_content)
     user_text = str(plan.user_content or '')
-    suffix = str(plan.provider_display_thinking_suffix or '')
-    if suffix and text.endswith(suffix):
-        text = text[:-len(suffix)]
     if user_text.strip() and user_text.strip() != '[image]' and not text.endswith(user_text):
         raise DailyRuntimeError(
             'normal hot current request is not installed exactly once',
