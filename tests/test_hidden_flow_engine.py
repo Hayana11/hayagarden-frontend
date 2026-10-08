@@ -341,6 +341,11 @@ class HiddenFlowStateTests(unittest.TestCase):
         advanced = apply_flow_control(self.config, restarted, _control("demo-flow", "advance"))
         self.assertEqual((advanced.stage, advanced.context_keys, advanced.cycle), ("s2", ("latest",), 1))
 
+    def test_invalid_matching_action_fails_closed(self) -> None:
+        state = start_flow(self.config, _control("demo-flow", "start", "original"))
+        invalid = FlowControl("demo-flow", "invalid", ("should-not-apply",))
+        self.assertEqual(apply_flow_control(self.config, state, invalid), state)
+
     def test_stop_is_immediate_before_and_after_minimum(self) -> None:
         state = self._at_stage_s2()
         before = apply_flow_control(self.config, state, _control("demo-flow", "stop"))
