@@ -9,6 +9,14 @@ from typing import Any, Mapping, Optional
 
 SCHEMA_VERSION = 1
 
+HIDDEN_FLOW_CONTROL_ACTIONS = frozenset({
+    "start",
+    "advance",
+    "stop",
+    "hold",
+    "continue",
+})
+
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
@@ -92,6 +100,7 @@ class StageSpec:
     min_turns: int = 1
     repeat_min_turns: int = 1
     next_stage: Optional[str] = None
+    terminal: bool = False
     continue_target: Optional[str] = None
     terminal_without_continue: bool = False
     holdable: bool = False
@@ -104,6 +113,7 @@ class StageSpec:
             "minTurns": self.min_turns,
             "repeatMinTurns": self.repeat_min_turns,
             "nextStage": self.next_stage,
+            "terminal": self.terminal,
             "continueTarget": self.continue_target,
             "terminalWithoutContinue": self.terminal_without_continue,
             "holdable": self.holdable,
@@ -237,7 +247,7 @@ class FlowState:
         except (TypeError, ValueError):
             raise ValueError("invalid flow state fixed draws") from None
         started_at = _clean(data.get("startedAt"))
-        if active and (not flow_id or not stage or cycle < 1 or stage_turn < 1):
+        if active and (cycle != 1 or not flow_id or not stage or stage_turn < 1):
             raise ValueError("invalid active flow state")
         if not active and (flow_id or stage or cycle or stage_turn or context_keys or fixed_draws or started_at):
             raise ValueError("invalid inactive flow state")

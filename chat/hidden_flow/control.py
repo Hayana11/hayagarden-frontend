@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from .types import FlowControl
+from .types import HIDDEN_FLOW_CONTROL_ACTIONS, FlowControl
 
 
 _CONTROL_NAME = "hidden_flow_control"
@@ -14,7 +14,7 @@ _CONTROL_TAG_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _ATTRIBUTE_RE = re.compile(r"(?P<name>[A-Za-z][A-Za-z0-9_-]*)\s*=\s*(?P<quote>[\"'])(?P<value>.*?)\2", re.DOTALL)
-_VALID_ACTIONS = {"start", "hold", "continue", "stop"}
+_VALID_ACTIONS = HIDDEN_FLOW_CONTROL_ACTIONS
 
 
 def _keys(raw: str) -> Optional[tuple[str, ...]]:

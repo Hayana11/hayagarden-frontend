@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from chat.hidden_flow import runtime_store
-from chat.hidden_flow.types import FlowState
+from chat.hidden_flow.types import HIDDEN_FLOW_CONTROL_ACTIONS, FlowState
 
 
 def _config(enabled: bool = True) -> dict:
@@ -23,8 +23,7 @@ def _config(enabled: bool = True) -> dict:
                 "enabled": True,
                 "minTurns": 1,
                 "repeatMinTurns": 1,
-                "terminalWithoutContinue": True,
-                "continueTarget": "s1",
+                "terminal": True,
             }
         ],
         "cues": [],
@@ -90,6 +89,27 @@ class HiddenFlowStoreTests(unittest.TestCase):
             runtime_store.load_runtime("default", db_path=self.db_path)["version"],
             1,
         )
+
+    def test_all_shared_control_actions_are_accepted_by_snapshot_validation(self) -> None:
+        conn = runtime_store._connect(self.db_path)
+        runtime_store.ensure_hidden_flow_schema(conn=conn)
+        for index, action in enumerate(sorted(HIDDEN_FLOW_CONTROL_ACTIONS), start=100):
+            runtime_store.stage_snapshot(
+                conn,
+                {
+                    **_snapshot(index),
+                    "control": {
+                        "flowId": "store-flow",
+                        "action": action,
+                        "keys": [],
+                    },
+                },
+            )
+            conn.execute(
+                "DELETE FROM hidden_flow_message_snapshots WHERE assistant_message_id=?",
+                (index,),
+            )
+        conn.close()
 
     def test_non_json_safe_values_are_rejected_before_database_write(self) -> None:
         with self.assertRaises(ValueError):

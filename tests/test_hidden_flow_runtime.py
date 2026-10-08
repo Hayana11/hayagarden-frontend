@@ -30,14 +30,27 @@ def _raw_config() -> dict:
                 "minTurns": 1,
                 "repeatMinTurns": 1,
                 "nextStage": "s2",
-                "holdable": True,
                 "poolIds": ["cycle-pool", "turn-pool"],
             },
             {
                 "id": "s2",
                 "enabled": True,
-                "terminalWithoutContinue": True,
-                "continueTarget": "s1",
+                "minTurns": 3,
+                "nextStage": "s3",
+                "poolIds": [],
+            },
+            {
+                "id": "s3",
+                "enabled": True,
+                "minTurns": 1,
+                "nextStage": "s4",
+                "poolIds": [],
+            },
+            {
+                "id": "s4",
+                "enabled": True,
+                "minTurns": 1,
+                "terminal": True,
                 "poolIds": [],
             },
         ],
@@ -151,11 +164,22 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
         rendered = runtime._render_applied_guide(config, state, guide)
         for phrase in (
             "Private protocol",
+            "Remain in the current stage by default",
+            "never advances automatically",
+            'action="advance"',
             'action="stop"',
-            'action="hold"',
-            'action="continue"',
+            'minimum="1"',
+            'terminal="false"',
+            'next_stage="s2"',
+            'next_terminal="false"',
         ):
             self.assertIn(phrase, rendered)
+        for old_phrase in (
+            "holdable stage",
+            "terminal/review stage",
+            "continueTarget",
+        ):
+            self.assertNotIn(old_phrase, rendered)
         self.assertLessEqual(len(rendered), 8000)
 
         self.assertEqual(
@@ -165,12 +189,57 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
         persisted = json.dumps(guide.to_dict(), ensure_ascii=False)
         for phrase in (
             "Private protocol",
+            'action="advance"',
             'action="stop"',
-            'action="hold"',
-            'action="continue"',
         ):
             self.assertNotIn(phrase, persisted)
 
+
+    def test_preterminal_and_terminal_guidance_use_mechanical_rules(self) -> None:
+        config = normalize_flow_config(_raw_config())
+        self.assertIsNotNone(config)
+        for stage_id, expected in (
+            ("s3", "The next stage is terminal"),
+            ("s4", "This is the terminal stage"),
+        ):
+            state = FlowState(
+                active=True,
+                flow_id="demo-flow",
+                stage=stage_id,
+                cycle=1,
+                stage_turn=1,
+            )
+            guide = AppliedGuide(
+                status="pending",
+                source_message_id="assistant-" + stage_id,
+                created_at="t0",
+                flow=state,
+            )
+            rendered = runtime._render_applied_guide(config, state, guide)
+            self.assertIn(expected, rendered)
+            self.assertIn('minimum="1"', rendered)
+            self.assertLessEqual(len(rendered), 8000)
+        terminal_state = FlowState(
+            active=True,
+            flow_id="demo-flow",
+            stage="s4",
+            cycle=1,
+            stage_turn=1,
+        )
+        terminal_guide = AppliedGuide(
+            status="pending",
+            source_message_id="assistant-terminal",
+            created_at="t0",
+            flow=terminal_state,
+        )
+        terminal_rendered = runtime._render_applied_guide(
+            config, terminal_state, terminal_guide
+        )
+        self.assertIn("ends mechanically", terminal_rendered)
+        self.assertIn('action="continue"', terminal_rendered)
+        self.assertNotIn("terminal/review stage", terminal_rendered)
+        self.assertNotIn("continueTarget", terminal_rendered)
+        self.assertNotIn("holdable stage", terminal_rendered)
 
     def test_pending_commit_contains_real_cycle_draw_and_roundtrips(self) -> None:
         version = runtime_store.upsert_flow_config(_raw_config(), db_path=self.db_path)

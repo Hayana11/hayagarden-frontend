@@ -12,6 +12,26 @@ def _inactive() -> FlowState:
     return FlowState.inactive()
 
 
+def _copy_state(
+    current: FlowState,
+    *,
+    stage: Optional[str] = None,
+    stage_turn: Optional[int] = None,
+    context_keys: Optional[tuple[str, ...]] = None,
+) -> FlowState:
+    return FlowState(
+        active=True,
+        flow_id=current.flow_id,
+        stage=current.stage if stage is None else stage,
+        cycle=current.cycle,
+        stage_turn=current.stage_turn if stage_turn is None else stage_turn,
+        context_keys=current.context_keys if context_keys is None else context_keys,
+        fixed_draws=dict(current.fixed_draws),
+        started_at=current.started_at,
+        schema_version=current.schema_version,
+    )
+
+
 def start_flow(
     config: Optional[FlowConfig],
     control: Optional[FlowControl],
@@ -42,6 +62,7 @@ def start_flow(
         started_at=str(started_at or ""),
     )
 
+
 def apply_flow_control(
     config: Optional[FlowConfig],
     state: Optional[FlowState],
@@ -50,79 +71,65 @@ def apply_flow_control(
     boundary_override: bool = False,
     engine_enabled: bool = HIDDEN_FLOW_ENGINE_ENABLED,
 ) -> FlowState:
-    """Advance one turn, or fail closed when the caller reports a boundary."""
+    """Apply one eligible reply using explicit-advance progression."""
     normalized = normalize_flow_config(config)
     if boundary_override or not engine_enabled or normalized is None or not normalized.enabled:
         return _inactive()
     current = state or _inactive()
     if not current.active:
         return start_flow(normalized, control, engine_enabled=engine_enabled)
-    if current.flow_id != normalized.flow_id:
+    if (
+        current.flow_id != normalized.flow_id
+        or current.cycle != 1
+    ):
         return _inactive()
     stage = normalized.stage(current.stage)
     if stage is None:
         return _inactive()
     if control is not None and control.flow_id != normalized.flow_id:
-        return FlowState(
-            active=current.active,
-            flow_id=current.flow_id,
-            stage=current.stage,
-            cycle=current.cycle,
-            stage_turn=current.stage_turn,
-            context_keys=current.context_keys,
-            fixed_draws=dict(current.fixed_draws),
-            started_at=current.started_at,
-        )
+        return _copy_state(current)
     if control is not None and control.action == "stop":
         return _inactive()
-    if control is not None and control.action == "start":
-        control = None
-    next_context_keys = tuple(control.keys[:4]) if control is not None and control.keys else current.context_keys
-    if stage.terminal_without_continue:
-        if control is not None and control.action == "continue" and stage.continue_target:
-            return FlowState(
-                active=True,
-                flow_id=normalized.flow_id,
-                stage=stage.continue_target,
-                cycle=current.cycle + 1,
-                stage_turn=1,
+
+    # An active start token is an invalid restart attempt. It cannot replace
+    # the current flow or its context keys.
+    accepted_control = None if control is not None and control.action == "start" else control
+    next_context_keys = (
+        tuple(accepted_control.keys[:4])
+        if accepted_control is not None and accepted_control.keys
+        else current.context_keys
+    )
+
+    if stage.terminal:
+        if current.stage_turn < stage.min_turns:
+            return _copy_state(
+                current,
+                stage_turn=current.stage_turn + 1,
                 context_keys=next_context_keys,
-                fixed_draws={},
-                started_at=current.started_at,
             )
         return _inactive()
-    minimum = stage.repeat_min_turns if current.cycle > 1 else stage.min_turns
-    if current.stage_turn < minimum:
-        return FlowState(
-            active=True,
-            flow_id=current.flow_id,
-            stage=current.stage,
-            cycle=current.cycle,
+
+    # Minimum is only a lower bound. It gates advance; it never triggers it.
+    if current.stage_turn < stage.min_turns:
+        return _copy_state(
+            current,
             stage_turn=current.stage_turn + 1,
             context_keys=next_context_keys,
-            fixed_draws=dict(current.fixed_draws),
-            started_at=current.started_at,
         )
-    if control is not None and control.action == "hold" and stage.holdable:
-        return FlowState(
-            active=True,
-            flow_id=current.flow_id,
-            stage=current.stage,
-            cycle=current.cycle,
-            stage_turn=current.stage_turn + 1,
+
+    if accepted_control is not None and accepted_control.action == "advance":
+        if stage.next_stage is None:
+            return _inactive()
+        return _copy_state(
+            current,
+            stage=stage.next_stage,
+            stage_turn=1,
             context_keys=next_context_keys,
-            fixed_draws=dict(current.fixed_draws),
-            started_at=current.started_at,
         )
-    if not stage.next_stage:
-        return _inactive()
-    return FlowState(
-        active=True,
-        flow_id=current.flow_id,
-        stage=stage.next_stage,
-        cycle=current.cycle,
-        stage_turn=1,
+
+    # No action, hold, and continue are all legacy-compatible stay actions.
+    return _copy_state(
+        current,
+        stage_turn=current.stage_turn + 1,
         context_keys=next_context_keys,
-        fixed_draws=dict(current.fixed_draws),
-        started_at=current.started_at,
     )

@@ -521,7 +521,7 @@ class CanonicalTurnTests(unittest.TestCase):
                 'role': 'assistant',
                 'content': [{
                     'type': 'text',
-                    'text': 'visible<hidden_flow_control flow="demo-flow" action="hold" keys="a|b"/>',
+                    'text': 'visible<hidden_flow_control flow="demo-flow" action="advance" keys="a|b"/>',
                 }],
                 'stop_reason': 'end_turn',
             }),
@@ -529,7 +529,7 @@ class CanonicalTurnTests(unittest.TestCase):
         ], hidden_flow_enabled=True)
         self.assertEqual(turn.content, 'visible')
         self.assertEqual(turn.hidden_flow_control['flowId'], 'demo-flow')
-        self.assertEqual(turn.hidden_flow_control['action'], 'hold')
+        self.assertEqual(turn.hidden_flow_control['action'], 'advance')
         self.assertNotIn('hidden_flow_control', turn.display_segments)
 
     def test_invalid_hidden_control_is_sanitized_without_transition(self):
@@ -557,7 +557,7 @@ class CanonicalTurnTests(unittest.TestCase):
                         'type': 'thinking',
                         'thinking': (
                             'reason '
-                            '<hidden_flow_control flow="demo-flow" action="hold"/>'
+                            '<hidden_flow_control flow="demo-flow" action="advance"/>'
                             '<hidden_flow_guidance flow="demo-flow">private</hidden_flow_guidance>'
                             ' visible-thought'
                         ),

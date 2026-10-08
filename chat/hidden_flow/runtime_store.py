@@ -14,7 +14,7 @@ import sqlite3
 from typing import Any, Mapping, Optional
 
 from .config import normalize_flow_config
-from .types import AppliedGuide, FlowConfig, FlowState
+from .types import HIDDEN_FLOW_CONTROL_ACTIONS, AppliedGuide, FlowConfig, FlowState
 
 
 DEFAULT_HIDDEN_FLOW_DB_PATH = os.environ.get("HAYA_DB_PATH", "/opt/frontend/memories.db")
@@ -338,9 +338,7 @@ def stage_snapshot(
             raise ValueError("invalid hidden flow control")
         if not isinstance(control.get("flowId"), str):
             raise ValueError("invalid hidden flow control")
-        if control.get("action") is not None and control.get("action") not in {
-            "start", "hold", "continue", "stop"
-        }:
+        if control.get("action") is not None and control.get("action") not in HIDDEN_FLOW_CONTROL_ACTIONS:
             raise ValueError("invalid hidden flow control")
         keys = control.get("keys", [])
         if not isinstance(keys, list) or len(keys) > 4 or any(

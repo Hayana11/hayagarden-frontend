@@ -105,6 +105,7 @@ def _normalize_stages(raw_stages: Any, pool_ids: set[str]) -> tuple[StageSpec, .
                     default=1,
                 ),
                 next_stage=next_stage,
+                terminal=_enabled(raw.get("terminal"), False),
                 continue_target=continue_target,
                 terminal_without_continue=_enabled(raw.get("terminalWithoutContinue"), False),
                 holdable=_enabled(raw.get("holdable"), False),
@@ -149,15 +150,11 @@ def _graph_is_valid(stages: tuple[StageSpec, ...], initial_stage: Optional[str])
     for stage in stages:
         if stage.next_stage is not None and stage.next_stage not in stage_ids:
             return False
-        if stage.continue_target is not None and stage.continue_target not in stage_ids:
-            return False
-        if stage.terminal_without_continue:
-            if stage.next_stage is not None or not stage.continue_target:
+        if stage.terminal:
+            if stage.next_stage is not None or stage.continue_target is not None:
                 return False
-        elif not stage.next_stage or stage.continue_target is not None:
-            return False
-    # The within-cycle path must terminate; a cycle boundary is represented by
-    # continueTarget and is therefore checked separately by the engine.
+    # The nextStage graph is a finite forward path. Legacy continueTarget is
+    # retained for snapshot compatibility but never participates in this graph.
     for stage in stages:
         seen: set[str] = set()
         current: Optional[str] = stage.stage_id
@@ -199,7 +196,12 @@ def _is_normalized_config(config: FlowConfig) -> bool:
     if len(stage_ids) != len(set(stage_ids)):
         return False
     for stage in config.stages:
-        if not stage.enabled or not stage.stage_id or stage.stage_id != stage.stage_id.strip():
+        if (
+            not stage.enabled
+            or not stage.stage_id
+            or stage.stage_id != stage.stage_id.strip()
+            or type(stage.terminal) is not bool
+        ):
             return False
         if not 1 <= stage.min_turns <= 12 or not 1 <= stage.repeat_min_turns <= 12:
             return False
