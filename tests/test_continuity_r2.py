@@ -346,7 +346,12 @@ class ReplayFixtureTests(unittest.TestCase):
         self.assertEqual(build_source_members(derive_completed_turns(rows), ()), ())
 
     def test_replay_reports_candidate_distribution_and_determinism(self):
+        import datetime as dt
+
         from scripts.replay_continuity_sources import replay
+
+        utc8 = dt.timezone(dt.timedelta(hours=8))
+        base_date = (dt.datetime.now(utc8).date() - dt.timedelta(days=1)).isoformat()
 
         with tempfile.TemporaryDirectory() as directory:
             db_path = f'{directory}/replay.db'
@@ -375,9 +380,9 @@ class ReplayFixtureTests(unittest.TestCase):
                 'cache_info, source_kind, attachments, image_url, file_url, file_name) '
                 'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 [
-                    (1, 'hayana', 'u', '', '2026-09-08 04:01:00', '', '', 0, '', 'chat', '[]', '', '', ''),
-                    (2, 'assistant', 'a', '', '2026-09-08 04:02:00', '', '', 0, '', 'chat', '[]', '', '', ''),
-                    (3, 'assistant', 'wake', '', '2026-09-08 04:03:00', '', '', 0,
+                    (1, 'hayana', 'u', '', f'{base_date} 04:01:00', '', '', 0, '', 'chat', '[]', '', '', ''),
+                    (2, 'assistant', 'a', '', f'{base_date} 04:02:00', '', '', 0, '', 'chat', '[]', '', '', ''),
+                    (3, 'assistant', 'wake', '', f'{base_date} 04:03:00', '', '', 0,
                      json.dumps({
                          'wake_mode': 'normal', 'canonical_chat_history': True,
                          'unified_chat_resident': True, 'b3_authority': True,
@@ -392,12 +397,19 @@ class ReplayFixtureTests(unittest.TestCase):
 
         self.assertEqual(result['source_unit_count'], 2)
         self.assertEqual(result['candidate_count'], 1)
-        self.assertEqual(result['daily_candidate_distribution'], {'2026-09-08': 1})
+        self.assertEqual(result['daily_candidate_distribution'], {base_date: 1})
         self.assertTrue(result['candidate_coverage_valid'])
         self.assertTrue(result['determinism_valid'])
 
     def test_replay_keeps_cross_midnight_turn_atomic(self):
+        import datetime as dt
+
         from scripts.replay_continuity_sources import replay
+
+        utc8 = dt.timezone(dt.timedelta(hours=8))
+        base_day = dt.datetime.now(utc8).date() - dt.timedelta(days=1)
+        base_date = base_day.isoformat()
+        next_date = (base_day + dt.timedelta(days=1)).isoformat()
 
         with tempfile.TemporaryDirectory() as directory:
             db_path = f'{directory}/midnight.db'
@@ -416,8 +428,8 @@ class ReplayFixtureTests(unittest.TestCase):
                 'cache_info, source_kind, attachments, image_url, file_url, file_name) '
                 'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 [
-                    (1, 'hayana', 'u', '', '2026-09-08 23:59:00', '', '', 0, '', 'chat', '[]', '', '', ''),
-                    (2, 'assistant', 'a', '', '2026-09-09 00:01:00', '', '', 0, '', 'chat', '[]', '', '', ''),
+                    (1, 'hayana', 'u', '', f'{base_date} 23:59:00', '', '', 0, '', 'chat', '[]', '', '', ''),
+                    (2, 'assistant', 'a', '', f'{next_date} 00:01:00', '', '', 0, '', 'chat', '[]', '', '', ''),
                 ],
             )
             conn.commit()
@@ -426,7 +438,7 @@ class ReplayFixtureTests(unittest.TestCase):
             result = replay(db_path, days=30)
 
         self.assertEqual(result['completed_turns'], 1)
-        self.assertEqual(result['completed_turns_by_day'], {'2026-09-08': 1})
+        self.assertEqual(result['completed_turns_by_day'], {base_date: 1})
         self.assertEqual(result['source_unit_count'], 1)
         self.assertTrue(result['coverage_valid'])
         self.assertTrue(result['candidate_coverage_valid'])
