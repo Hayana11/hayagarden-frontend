@@ -352,15 +352,25 @@ def render_private_guide(
     if not config.enabled or not state.active or config.stage(state.stage) is None:
         return ""
     result = draw_result or DrawResult()
+    stage = config.stage(state.stage)
+    if stage is None:
+        return ""
+    next_stage = config.stage(stage.next_stage) if stage.next_stage else None
     safe_flow = escape(str(config.flow_id)[:256], quote=True)
     safe_stage = escape(str(state.stage)[:256], quote=True)
+    safe_next_stage = escape(str(stage.next_stage or "")[:256], quote=True)
     chunks = [
-        '<hidden_flow_guidance flow="%s" stage="%s" cycle="%d" turn="%d">'
+        '<hidden_flow_guidance flow="%s" stage="%s" cycle="%d" turn="%d" '
+        'minimum="%d" terminal="%s" next_stage="%s" next_terminal="%s">'
         % (
             safe_flow,
             safe_stage,
             int(state.cycle),
             int(state.stage_turn),
+            int(stage.min_turns),
+            str(bool(stage.terminal)).lower(),
+            safe_next_stage,
+            str(bool(next_stage and next_stage.terminal)).lower(),
         )
     ]
     used = len(chunks[0])

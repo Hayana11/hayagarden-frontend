@@ -1,31 +1,54 @@
-"""Stateful privacy-first filtering for provider text deltas."""
+"""Stateful privacy-first filtering for all private provider protocol deltas."""
 
 from __future__ import annotations
 
 
-_OPENER = "<hidden_flow_control"
+_OPENERS = (
+    ("control", "<hidden_flow_control"),
+    ("guidance", "<hidden_flow_guidance"),
+    ("available", "<available_hidden_flows"),
+)
+_CLOSERS = {
+    "guidance": "</hidden_flow_guidance>",
+    "available": "</available_hidden_flows>",
+}
+_BOUNDARY = frozenset(" \t\r\n/>")
 
 
 class HiddenFlowStreamFilter:
-    """Emit ordinary text promptly while withholding protocol candidates."""
+    """Emit ordinary text promptly while withholding private protocol candidates."""
 
     def __init__(self) -> None:
         self._pending = ""
         self._hidden = ""
-        self._quote: str | None = None
+        self._hidden_kind: str | None = None
+        self._hidden_quote: str | None = None
+        self._hidden_open_complete = False
         self._finished = False
 
     @staticmethod
+    def _opener_kind(value: str) -> str | None:
+        folded = value.casefold()
+        for kind, opener in _OPENERS:
+            if folded == opener.casefold():
+                return kind
+        return None
+
+    @staticmethod
     def _is_prefix(value: str) -> bool:
-        return _OPENER.casefold().startswith(value.casefold())
+        folded = value.casefold()
+        return any(opener.casefold().startswith(folded) for _kind, opener in _OPENERS)
 
     @staticmethod
     def _suffix_prefix(value: str) -> int:
         folded = value.casefold()
-        for length in range(min(len(value), len(_OPENER)), 0, -1):
-            if folded[-length:] == _OPENER[:length].casefold():
-                return length
-        return 0
+        longest = 0
+        for _kind, opener in _OPENERS:
+            for length in range(min(len(value), len(opener)), 0, -1):
+                if folded[-length:] == opener[:length].casefold():
+                    longest = max(longest, length)
+                    break
+        return longest
 
     def _release_mismatch(self, value: str) -> str:
         keep = self._suffix_prefix(value)
@@ -35,47 +58,90 @@ class HiddenFlowStreamFilter:
         self._pending = ""
         return value
 
+    def _start_hidden(self, kind: str, seed: str) -> None:
+        self._hidden = seed
+        self._hidden_kind = kind
+        self._hidden_quote = None
+        self._hidden_open_complete = (
+            kind in _CLOSERS and seed.endswith(">")
+        )
+        self._pending = ""
+
+    def _reset_hidden(self) -> None:
+        self._hidden = ""
+        self._hidden_kind = None
+        self._hidden_quote = None
+        self._hidden_open_complete = False
+        self._pending = ""
+
     def _feed_normal(self, value: str) -> str:
         visible: list[str] = []
-        for index, char in enumerate(value):
+        index = 0
+        while index < len(value):
+            char = value[index]
             if not self._pending:
                 if char == "<":
                     self._pending = char
                 else:
                     visible.append(char)
+                index += 1
                 continue
+
+            pending_kind = self._opener_kind(self._pending)
+            if pending_kind is not None:
+                if char in _BOUNDARY:
+                    self._start_hidden(pending_kind, self._pending + char)
+                    visible.append(self._feed_hidden(value[index + 1:]))
+                    return "".join(visible)
+                visible.append(self._release_mismatch(self._pending + char))
+                index += 1
+                continue
+
             candidate = self._pending + char
-            if self._pending.casefold() == _OPENER.casefold():
-                if char in " \t\r\n/>":
-                    self._hidden = self._pending
-                    self._pending = ""
-                    self._quote = None
-                    return "".join(visible) + self._feed_hidden(value[index:])
-                visible.append(self._release_mismatch(candidate))
-                continue
             if self._is_prefix(candidate):
                 self._pending = candidate
-                if candidate.casefold() == _OPENER.casefold():
-                    continue
+                index += 1
                 continue
             visible.append(self._release_mismatch(candidate))
+            index += 1
         return "".join(visible)
 
     def _feed_hidden(self, value: str) -> str:
+        kind = self._hidden_kind
+        if kind is None:
+            return self._feed_normal(value)
+        if kind == "control":
+            for index, char in enumerate(value):
+                self._hidden += char
+                if self._hidden_quote is not None:
+                    if char == self._hidden_quote:
+                        self._hidden_quote = None
+                    continue
+                if char in {"\"", "'"}:
+                    self._hidden_quote = char
+                    continue
+                if self._hidden.endswith("/>"):
+                    self._reset_hidden()
+                    return self._feed_normal(value[index + 1:])
+            return ""
+
         for index, char in enumerate(value):
             self._hidden += char
-            if self._quote is not None:
-                if char == self._quote:
-                    self._quote = None
+            if not self._hidden_open_complete:
+                if self._hidden_quote is not None:
+                    if char == self._hidden_quote:
+                        self._hidden_quote = None
+                elif char in {"\"", "'"}:
+                    self._hidden_quote = char
+                elif char == ">":
+                    self._hidden_open_complete = True
                 continue
-            if char in {"\"", "'"}:
-                self._quote = char
-                continue
-            if char == ">" and self._hidden.endswith("/>"):
-                self._hidden = ""
-                self._quote = None
-                self._pending = ""
-                return self.feed(value[index + 1 :])
+            close = _CLOSERS[kind]
+            close_index = self._hidden.casefold().find(close.casefold())
+            if close_index >= 0:
+                remainder = value[index + 1:]
+                self._reset_hidden()
+                return self._feed_normal(remainder)
         return ""
 
     def feed(self, delta: str) -> str:
@@ -93,8 +159,7 @@ class HiddenFlowStreamFilter:
             return ""
         self._finished = True
         if self._hidden:
-            self._hidden = ""
-            self._pending = ""
+            self._reset_hidden()
             return ""
         pending = self._pending
         self._pending = ""

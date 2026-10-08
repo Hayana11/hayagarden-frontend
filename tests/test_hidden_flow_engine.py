@@ -44,7 +44,7 @@ def _control(flow: str, action: str | None = None, keys: str = "") -> FlowContro
     return parse_hidden_flow_control("".join(pieces))  # type: ignore[return-value]
 
 
-def _raw_config(*, enabled: bool = True, terminal: bool = True) -> dict:
+def _raw_config(*, enabled: bool = True, terminal: bool = True, terminal_min: int = 1) -> dict:
     return {
         "schemaVersion": 1,
         "flowId": " demo-flow ",
@@ -55,7 +55,7 @@ def _raw_config(*, enabled: bool = True, terminal: bool = True) -> dict:
                 "id": "s1",
                 "enabled": True,
                 "minTurns": 2,
-                "repeatMinTurns": 13,
+                "repeatMinTurns": 12,
                 "nextStage": "s2",
                 "holdable": True,
                 "poolIds": ["shared", "missing"],
@@ -63,15 +63,23 @@ def _raw_config(*, enabled: bool = True, terminal: bool = True) -> dict:
             {
                 "id": "s2",
                 "enabled": True,
-                "minTurns": 1,
+                "minTurns": 3,
                 "nextStage": "s3",
                 "poolIds": ["cycle-pool"],
             },
             {
                 "id": "s3",
                 "enabled": True,
-                "terminalWithoutContinue": terminal,
-                "continueTarget": "s1",
+                "minTurns": 1,
+                "nextStage": "s4",
+                "poolIds": [],
+            },
+            {
+                "id": "s4",
+                "enabled": True,
+                "minTurns": terminal_min,
+                "terminal": terminal,
+                "poolIds": [],
             },
         ],
         "cues": [
@@ -105,7 +113,7 @@ def _raw_config(*, enabled: bool = True, terminal: bool = True) -> dict:
 
 class HiddenFlowParserTests(unittest.TestCase):
     def test_explicit_start_hold_continue_stop_parse(self) -> None:
-        for action in ("start", "hold", "continue", "stop"):
+        for action in ("start", "advance", "hold", "continue", "stop"):
             parsed = parse_hidden_flow_control(
                 f'<hidden_flow_control flow="demo-flow" action="{action}"/>'
             )
@@ -203,78 +211,216 @@ class HiddenFlowStreamingTests(unittest.TestCase):
         self.assertEqual("".join(outputs) + stream.finish(), "ok!")
 
 
+    def test_private_block_visible_tails_across_chunk_boundaries(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed("before<hidden_flow_guidance>sec"),
+            "before",
+        )
+        self.assertEqual(
+            stream.feed("ret</hidden_flow_guidance>after"),
+            "after",
+        )
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed("before<hidden_flow_guidance>secret</hidden_flow_guid"),
+            "before",
+        )
+        self.assertEqual(
+            stream.feed("ance>after"),
+            "after",
+        )
+
+    def test_available_and_multiple_private_blocks_preserve_visible_tails(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed("A<available_hidden_flows><flow id=\"x\"/></available_hidden_flows>B"),
+            "AB",
+        )
+        self.assertEqual(
+            self._single_chars(
+                "A<hidden_flow_guidance>x</hidden_flow_guidance>\n"
+                "B<available_hidden_flows>y</available_hidden_flows>C"
+            ),
+            "A\nBC",
+        )
+
+    def test_thinking_filter_preserves_visible_tail_after_guidance(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        self.assertEqual(
+            stream.feed(
+                "thought<hidden_flow_guidance>x</hidden_flow_guidance>visible thought"
+            ),
+            "thoughtvisible thought",
+        )
+
+
+    def test_guidance_and_activation_blocks_are_invisible(self) -> None:
+        value = (
+            "visible"
+            '<hidden_flow_guidance flow="demo-flow">private</hidden_flow_guidance>'
+            '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
+            "tail"
+        )
+        self.assertEqual(self._single_chars(value), "visibletail")
+
+    def test_malformed_confirmed_private_block_drops_to_eof(self) -> None:
+        stream = HiddenFlowStreamFilter()
+        output = stream.feed(
+            'visible<hidden_flow_guidance flow="demo-flow">private without close'
+        )
+        self.assertEqual(output, "visible")
+        self.assertEqual(stream.finish(), "")
+
+
 class HiddenFlowStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = normalize_flow_config(_raw_config())
         self.assertIsNotNone(self.config)
 
-    def test_context_alone_does_not_start(self) -> None:
-        state = start_flow(self.config, _control("demo-flow", keys="only-context"))
-        self.assertFalse(state.active)
+    def _at_stage_s2(self, config=None):
+        config = config or self.config
+        state = start_flow(config, _control("demo-flow", "start"))
+        state = apply_flow_control(config, state)
+        return apply_flow_control(config, state, _control("demo-flow", "advance"))
 
-    def test_explicit_start_initializes_cycle_and_stage(self) -> None:
+    def _at_stage_s3(self, config=None):
+        config = config or self.config
+        state = self._at_stage_s2(config)
+        state = apply_flow_control(config, state)
+        state = apply_flow_control(config, state, _control("demo-flow", "advance"))
+        state = apply_flow_control(config, state)
+        state = apply_flow_control(config, state)
+        return apply_flow_control(config, state, _control("demo-flow", "advance"))
+
+    def _at_stage_s4(self, config=None):
+        config = config or self.config
+        return apply_flow_control(
+            config,
+            self._at_stage_s3(config),
+            _control("demo-flow", "advance"),
+        )
+
+    def test_start_requires_explicit_start_and_keys_only_does_not_start(self) -> None:
+        self.assertFalse(start_flow(self.config, _control("demo-flow", keys="only-context")).active)
         state = start_flow(self.config, _control("demo-flow", "start", "a|b"), started_at="t0")
         self.assertEqual((state.active, state.cycle, state.stage, state.stage_turn), (True, 1, "s1", 1))
         self.assertEqual(state.context_keys, ("a", "b"))
 
-    def test_minimum_and_hold_are_enforced(self) -> None:
-        state = start_flow(self.config, _control("demo-flow", "start"))
+    def test_minimum_is_lower_bound_and_advance_is_explicit(self) -> None:
+        state = self._at_stage_s2()
+        self.assertEqual((state.stage, state.stage_turn, state.cycle), ("s2", 1, 1))
         state = apply_flow_control(self.config, state)
-        self.assertEqual((state.stage, state.stage_turn), ("s1", 2))
-        state = apply_flow_control(self.config, state, _control("demo-flow", "hold"))
-        self.assertEqual((state.stage, state.stage_turn), ("s1", 3))
+        self.assertEqual((state.stage, state.stage_turn), ("s2", 2))
+        state = apply_flow_control(self.config, state, _control("demo-flow", "advance"))
+        self.assertEqual((state.stage, state.stage_turn), ("s2", 3))
         state = apply_flow_control(self.config, state)
-        self.assertEqual((state.stage, state.stage_turn), ("s2", 1))
+        self.assertEqual((state.stage, state.stage_turn), ("s2", 4))
+        state = apply_flow_control(self.config, state)
+        self.assertEqual((state.stage, state.stage_turn), ("s2", 5))
+        state = apply_flow_control(self.config, state, _control("demo-flow", "advance"))
+        self.assertEqual((state.stage, state.stage_turn, state.cycle), ("s3", 1, 1))
 
-    def test_wrong_flow_is_a_noop_and_stop_is_immediate(self) -> None:
-        state = start_flow(self.config, _control("demo-flow", "start"))
-        wrong = apply_flow_control(self.config, state, _control("other", "stop"))
-        self.assertEqual(wrong, state)
-        wrong_keys = apply_flow_control(self.config, state, _control("other", keys="should-not-apply"))
-        self.assertEqual(wrong_keys, state)
-        self.assertFalse(apply_flow_control(self.config, state, _control("demo-flow", "stop")).active)
-
-    def test_active_keys_only_and_hold_update_context(self) -> None:
-        preserved = start_flow(self.config, _control("demo-flow", "start", "initial"))
-        preserved = apply_flow_control(self.config, preserved)
-        self.assertEqual(preserved.context_keys, ("initial",))
-
-        state = start_flow(self.config, _control("demo-flow", "start", "initial"))
-        state = apply_flow_control(self.config, state, _control("demo-flow", keys="keys-only"))
-        self.assertEqual(state.context_keys, ("keys-only",))
-        self.assertEqual((state.stage, state.stage_turn), ("s1", 2))
+    def test_hold_and_continue_are_legacy_stay_actions_after_minimum(self) -> None:
+        state = self._at_stage_s2()
+        state = apply_flow_control(self.config, state)
         state = apply_flow_control(self.config, state, _control("demo-flow", "hold", "hold-key"))
-        self.assertEqual(state.context_keys, ("hold-key",))
-        self.assertEqual((state.stage, state.stage_turn), ("s1", 3))
+        self.assertEqual((state.stage, state.stage_turn, state.context_keys), ("s2", 3, ("hold-key",)))
+        state = apply_flow_control(self.config, state, _control("demo-flow", "continue"))
+        self.assertEqual((state.stage, state.stage_turn, state.cycle), ("s2", 4, 1))
 
-    def test_active_start_does_not_overwrite_existing_context(self) -> None:
-        state = start_flow(self.config, _control("demo-flow", "start", "original"))
-        restarted = apply_flow_control(self.config, state, _control("demo-flow", "start", "new"))
-        self.assertEqual(restarted.context_keys, ("original",))
-        self.assertEqual((restarted.stage, restarted.stage_turn, restarted.cycle), ("s1", 2, 1))
-
-    def test_continue_inherits_latest_context_keys(self) -> None:
-        state = start_flow(self.config, _control("demo-flow", "start"))
+    def test_active_keys_update_without_action_and_wrong_flow_does_not_update(self) -> None:
+        state = start_flow(self.config, _control("demo-flow", "start", "initial"))
         state = apply_flow_control(self.config, state, _control("demo-flow", keys="latest"))
-        state = apply_flow_control(self.config, state)
-        state = apply_flow_control(self.config, state)
-        self.assertEqual(state.stage, "s3")
-        continued = apply_flow_control(self.config, state, _control("demo-flow", "continue"))
-        self.assertEqual(continued.context_keys, ("latest",))
+        self.assertEqual(state.context_keys, ("latest",))
+        wrong = apply_flow_control(self.config, state, _control("other", keys="wrong"))
+        self.assertEqual(wrong, state)
+        restarted = apply_flow_control(self.config, state, _control("demo-flow", "start", "new"))
+        self.assertEqual(restarted.context_keys, ("latest",))
+        self.assertEqual((restarted.stage, restarted.stage_turn, restarted.cycle), ("s1", 3, 1))
+        advanced = apply_flow_control(self.config, restarted, _control("demo-flow", "advance"))
+        self.assertEqual((advanced.stage, advanced.context_keys, advanced.cycle), ("s2", ("latest",), 1))
 
-    def test_terminal_without_continue_ends_and_continue_starts_new_cycle(self) -> None:
-        state = start_flow(self.config, _control("demo-flow", "start"))
+    def test_invalid_matching_action_fails_closed(self) -> None:
+        state = start_flow(self.config, _control("demo-flow", "start", "original"))
+        invalid = FlowControl("demo-flow", "invalid", ("should-not-apply",))
+        self.assertEqual(apply_flow_control(self.config, state, invalid), state)
+
+    def test_stop_is_immediate_before_and_after_minimum(self) -> None:
+        state = self._at_stage_s2()
+        before = apply_flow_control(self.config, state, _control("demo-flow", "stop"))
+        self.assertFalse(before.active)
         state = apply_flow_control(self.config, state)
         state = apply_flow_control(self.config, state)
-        self.assertEqual(state.stage, "s2")
-        state = apply_flow_control(self.config, state)
-        self.assertEqual(state.stage, "s3")
-        state.fixed_draws["cycle"] = "old"
+        after = apply_flow_control(self.config, state, _control("demo-flow", "stop"))
+        self.assertFalse(after.active)
+
+    def test_terminal_minimum_one_ends_first_reply(self) -> None:
+        state = self._at_stage_s4()
         ended = apply_flow_control(self.config, state)
         self.assertFalse(ended.active)
-        continued = apply_flow_control(self.config, state, _control("demo-flow", "continue"))
-        self.assertEqual((continued.stage, continued.cycle, continued.stage_turn), ("s1", 2, 1))
-        self.assertEqual(continued.fixed_draws, {})
+
+    def test_terminal_minimum_greater_than_one_ignores_actions_until_complete(self) -> None:
+        config = normalize_flow_config(_raw_config(terminal_min=2))
+        state = self._at_stage_s4(config)
+        state = apply_flow_control(config, state, _control("demo-flow", "advance"))
+        self.assertEqual((state.active, state.stage, state.stage_turn), (True, "s4", 2))
+        for action in ("continue", "hold", "advance"):
+            self.assertFalse(
+                apply_flow_control(config, state, _control("demo-flow", action)).active
+            )
+
+    def test_final_non_terminal_stage_stays_until_explicit_advance(self) -> None:
+        raw = _raw_config()
+        raw["stages"][2]["nextStage"] = None
+        raw["stages"][3]["enabled"] = False
+        config = normalize_flow_config(raw)
+        self.assertIsNotNone(config)
+        state = self._at_stage_s3(config)
+        state = apply_flow_control(config, state)
+        self.assertEqual((state.active, state.stage, state.stage_turn), (True, "s3", 2))
+        self.assertFalse(
+            apply_flow_control(config, state, _control("demo-flow", "advance")).active
+        )
+
+    def test_fixed_draws_are_preserved_across_advance_and_cycle_never_increments(self) -> None:
+        state = self._at_stage_s2()
+        state = FlowState(
+            active=True,
+            flow_id=state.flow_id,
+            stage=state.stage,
+            cycle=1,
+            stage_turn=3,
+            fixed_draws={"cycle-pool": [{"poolId": "cycle-pool", "entryId": "c", "text": "C", "drawIndex": 0, "seed": "seed"}]},
+            started_at=state.started_at,
+        )
+        advanced = apply_flow_control(self.config, state, _control("demo-flow", "advance"))
+        self.assertEqual((advanced.stage, advanced.stage_turn, advanced.cycle), ("s3", 1, 1))
+        self.assertEqual(advanced.fixed_draws, state.fixed_draws)
+
+    def test_graph_accepts_ordinary_final_and_rejects_invalid_terminal_edges(self) -> None:
+        ordinary = _raw_config()
+        ordinary["stages"][2]["nextStage"] = None
+        ordinary["stages"][3]["enabled"] = False
+        self.assertIsNotNone(normalize_flow_config(ordinary))
+
+        invalid_next = _raw_config()
+        invalid_next["stages"][0]["nextStage"] = "missing"
+        self.assertIsNone(normalize_flow_config(invalid_next))
+
+        cyclic = _raw_config()
+        cyclic["stages"][1]["nextStage"] = "s1"
+        self.assertIsNone(normalize_flow_config(cyclic))
+
+        terminal_next = _raw_config()
+        terminal_next["stages"][3]["nextStage"] = "s1"
+        self.assertIsNone(normalize_flow_config(terminal_next))
+
+        terminal_target = _raw_config()
+        terminal_target["stages"][3]["continueTarget"] = "s1"
+        self.assertIsNone(normalize_flow_config(terminal_target))
+
+        self.assertIsNone(normalize_flow_config({"schemaVersion": 99}))
 
     def test_boundary_and_disabled_config_fail_closed(self) -> None:
         state = start_flow(self.config, _control("demo-flow", "start"))
@@ -283,29 +429,6 @@ class HiddenFlowStateTests(unittest.TestCase):
         disabled = normalize_flow_config(_raw_config(enabled=False))
         self.assertFalse(start_flow(disabled, _control("demo-flow", "start")).active)
         self.assertFalse(start_flow(DEFAULT_FLOW_CONFIG, _control("demo-flow", "start")).active)
-
-    def test_invalid_graph_and_schema_fail_closed(self) -> None:
-        invalid = _raw_config()
-        invalid["stages"][0]["nextStage"] = "missing"
-        self.assertIsNone(normalize_flow_config(invalid))
-        cyclic = _raw_config()
-        cyclic["stages"][1]["nextStage"] = "s1"
-        self.assertIsNone(normalize_flow_config(cyclic))
-        terminal_missing = _raw_config()
-        terminal_missing["stages"][2]["continueTarget"] = None
-        self.assertIsNone(normalize_flow_config(terminal_missing))
-        terminal_next = _raw_config()
-        terminal_next["stages"][2]["nextStage"] = "s1"
-        self.assertIsNone(normalize_flow_config(terminal_next))
-        malformed_object = FlowConfig(
-            flow_id="demo-flow",
-            enabled=True,
-            initial_stage="s1",
-            stages=(),
-        )
-        self.assertIsNone(normalize_flow_config(malformed_object))
-        self.assertIsNone(normalize_flow_config({"schemaVersion": 99}))
-
 
 class HiddenFlowDrawTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -390,6 +513,23 @@ class HiddenFlowDrawTests(unittest.TestCase):
             [item for item in first.draws if item.pool_id == "cycle-pool"],
         )
         self.assertEqual(retry_state.fixed_draws, cached_state.fixed_draws)
+
+    def test_new_explicit_start_redraws_flow_fixed_pool(self) -> None:
+        first, cached = draw_for_guide_with_state(
+            self.config,
+            self.state,
+            source_message_id="m1",
+            pool_ids=["cycle-pool"],
+        )
+        restarted = start_flow(self.config, _control("demo-flow", "start"), started_at="flow-t1")
+        second, _ = draw_for_guide_with_state(
+            self.config,
+            restarted,
+            source_message_id="m2",
+            pool_ids=["cycle-pool"],
+        )
+        self.assertNotEqual(first.draws[0].seed, second.draws[0].seed)
+        self.assertNotEqual(cached.started_at, restarted.started_at)
 
     def test_invalid_cycle_cache_is_rebuilt_from_current_config(self) -> None:
         bad_state = FlowState(
@@ -506,7 +646,7 @@ class HiddenFlowSerializationTests(unittest.TestCase):
             active=True,
             flow_id="demo-flow",
             stage="s1",
-            cycle=2,
+            cycle=1,
             stage_turn=3,
             context_keys=("a", "b"),
             fixed_draws={

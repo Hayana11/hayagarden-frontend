@@ -2521,6 +2521,7 @@ def advance_resident_history_cursor(
     finalize_message_id: Optional[int] = None,
     expected_context_epoch: Optional[int] = None,
     terminal_receipt_id: Optional[int] = None,
+    hidden_flow_finalize_callback: Optional[Any] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """Advance the resident cursor, optionally promoting one pending assistant."""
@@ -2642,6 +2643,9 @@ def advance_resident_history_cursor(
                     conn.rollback()
                     raise ConflictError('terminal mapping receipt consume CAS failed')
 
+        if finalize_message_id is not None and hidden_flow_finalize_callback is not None:
+            hidden_flow_finalize_callback(conn, int(finalize_message_id))
+
         if current is not None and new_id == current:
             conn.commit()
             return {
@@ -2682,6 +2686,7 @@ def finalize_daily_assistant_and_advance_cursor(
     expected_cursor: Union[int, None, object] = _CURSOR_CAS_OMITTED,
     expected_context_epoch: Optional[int] = None,
     terminal_receipt_id: Optional[int] = None,
+    hidden_flow_finalize_callback: Optional[Any] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """Atomically make a pending assistant formal and advance its cursor."""
@@ -2693,6 +2698,7 @@ def finalize_daily_assistant_and_advance_cursor(
         finalize_message_id=int(assistant_message_id),
         expected_context_epoch=expected_context_epoch,
         terminal_receipt_id=terminal_receipt_id,
+        hidden_flow_finalize_callback=hidden_flow_finalize_callback,
         db_path=db_path,
     )
 
@@ -3423,6 +3429,7 @@ def persist_daily_assistant_if_current(
     source_kind: str = SOURCE_KIND_CHAT,
     db_path: Optional[str] = None,
     now: Optional[datetime.datetime] = None,
+    hidden_flow_stage_callback: Optional[Any] = None,
 ) -> int:
     """Atomically verify epoch+lease and INSERT assistant with context membership."""
     ensure_schema(db_path)
@@ -3490,6 +3497,8 @@ def persist_daily_assistant_if_current(
                 int(resident_generation), 'assistant', now_s,
             ),
         )
+        if hidden_flow_stage_callback is not None:
+            hidden_flow_stage_callback(conn, int(assistant_id))
         conn.commit()
         return assistant_id
     except Exception:
@@ -3760,6 +3769,15 @@ def rollback_daily_assistant_terminalization(
             if int(consumed.rowcount or 0) != 1:
                 conn.rollback()
                 raise ConflictError('terminal mapping receipt delete CAS failed')
+
+        # A pending hidden snapshot is part of the same rollback boundary.
+        hidden_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='hidden_flow_message_snapshots'"
+        ).fetchone()
+        if hidden_table is not None:
+            from chat.hidden_flow.runtime_store import delete_pending_snapshot
+            delete_pending_snapshot(conn, aid)
 
         conn.commit()
         return {
