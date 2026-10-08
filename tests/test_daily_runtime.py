@@ -8210,8 +8210,8 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
         )
 
     def _assert_rejected(self, plan, content):
-        with self.assertRaises(daily_runtime.DailyRuntimeError) as raised:
-            daily_runtime._validate_hot_no_op_payload(plan, content)
+        with self.assertRaises(dr.DailyRuntimeError) as raised:
+            dr._validate_hot_no_op_payload(plan, content)
         self.assertEqual(
             raised.exception.error_code,
             'context_plan_hot_hidden_flow_private_payload_invalid',
@@ -8219,7 +8219,7 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
 
     def test_gate_off_plain_hot_noop_remains_valid(self):
         plan = self._plan()
-        daily_runtime._validate_hot_no_op_payload(plan, 'hello')
+        dr._validate_hot_no_op_payload(plan, 'hello')
         self.assertEqual(plan.manifest['context_plan_current_request_count'], 1)
 
     def test_gate_on_available_block_and_active_guidance_are_valid(self):
@@ -8231,7 +8231,7 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
                 plan = self._plan(block=block, enabled=True)
                 content = 'hello' + chr(10) + chr(10) + block
                 original = content
-                daily_runtime._validate_hot_no_op_payload(plan, content)
+                dr._validate_hot_no_op_payload(plan, content)
                 self.assertEqual(content, original)
                 self.assertEqual(
                     plan.manifest['context_plan_current_request_count'],
@@ -8242,7 +8242,7 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
         block = '<available_hidden_flows><flow id="demo-flow"/></available_hidden_flows>'
         suffix = chr(10) + chr(10) + 'DISPLAY_THINKING_SUFFIX'
         plan = self._plan(block=block, enabled=True, suffix=suffix)
-        daily_runtime._validate_hot_no_op_payload(
+        dr._validate_hot_no_op_payload(
             plan,
             'hello' + suffix + chr(10) + chr(10) + block,
         )
@@ -8262,7 +8262,7 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
             {'type': 'text', 'text': chr(10) + chr(10) + block},
         ]
         original = [dict(item) if isinstance(item, dict) else item for item in content]
-        daily_runtime._validate_hot_no_op_payload(plan, content)
+        dr._validate_hot_no_op_payload(plan, content)
         self.assertEqual(content, original)
 
     def test_private_payload_missing_repeated_misplaced_or_tampered_fails_closed(self):
@@ -8295,8 +8295,8 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 plan = self._plan(block=block, enabled=True, assembly=assembly)
-                with self.assertRaises(daily_runtime.DailyRuntimeError) as raised:
-                    daily_runtime._validate_hot_no_op_payload(
+                with self.assertRaises(dr.DailyRuntimeError) as raised:
+                    dr._validate_hot_no_op_payload(
                         plan,
                         'hello' + chr(10) + chr(10) + block,
                     )
