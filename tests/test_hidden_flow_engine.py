@@ -111,7 +111,7 @@ def _raw_config(*, enabled: bool = True, terminal: bool = True, terminal_min: in
     }
 
 
-class HiddenFlowParserTestsclass HiddenFlowParserTests(unittest.TestCase):
+class HiddenFlowParserTests(unittest.TestCase):
     def test_explicit_start_hold_continue_stop_parse(self) -> None:
         for action in ("start", "advance", "hold", "continue", "stop"):
             parsed = parse_hidden_flow_control(
