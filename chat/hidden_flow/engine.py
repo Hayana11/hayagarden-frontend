@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .config import HIDDEN_FLOW_ENGINE_ENABLED, normalize_flow_config
-from .types import FlowConfig, FlowControl, FlowState
+from .types import HIDDEN_FLOW_CONTROL_ACTIONS, FlowConfig, FlowControl, FlowState
 
 
 def _inactive() -> FlowState:
@@ -87,6 +87,11 @@ def apply_flow_control(
     if stage is None:
         return _inactive()
     if control is not None and control.flow_id != normalized.flow_id:
+        return _copy_state(current)
+    if control is not None and (
+        control.action is not None
+        and control.action not in HIDDEN_FLOW_CONTROL_ACTIONS
+    ):
         return _copy_state(current)
     if control is not None and control.action == "stop":
         return _inactive()
