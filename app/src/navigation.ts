@@ -29,13 +29,14 @@ export const ROUTES = {
   manualContextWindow: '/manual-context-window',
   toolroom: '/toolroom',
   contextCompression: '/context-compression',
-  flowStudio: '/flow-studio-soft-glow',
+  flowStudio: '/flow-studio',
 } as const;
 
 // Preview deep-link alias when BrowserRouter basename is `/preview`.
 // SPA links still use ROUTES.contextCompression.
 export const CONTEXT_COMPRESSION_PREVIEW_PATH = `/dash${ROUTES.contextCompression}`;
-export const FLOW_STUDIO_PREVIEW_PATH = `/dash${ROUTES.flowStudio}`;
+export const FLOW_STUDIO_PREVIEW_ROUTE = '/flow-studio-soft-glow';
+export const FLOW_STUDIO_PREVIEW_PATH = `/dash${FLOW_STUDIO_PREVIEW_ROUTE}`;
 
 export type SpaRoute = (typeof ROUTES)[keyof typeof ROUTES];
 

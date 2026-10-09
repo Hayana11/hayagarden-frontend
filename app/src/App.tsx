@@ -19,9 +19,10 @@ import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewSc
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
 import { ContextCompressionScreen } from './screens/ContextCompressionScreen';
 import { ToolroomScreen } from './screens/ToolroomScreen';
+import { FlowStudioScreen } from './screens/FlowStudioScreen';
 import { FlowStudioSoftGlowScreen } from './screens/FlowStudioSoftGlowScreen';
 import { useLegacyNativeCompat } from './hooks/useLegacyNativeCompat';
-import { CONTEXT_COMPRESSION_PREVIEW_PATH, FLOW_STUDIO_PREVIEW_PATH, MONOPOLY_ROOM_PATH, ROUTES } from './navigation';
+import { CONTEXT_COMPRESSION_PREVIEW_PATH, FLOW_STUDIO_PREVIEW_PATH, FLOW_STUDIO_PREVIEW_ROUTE, MONOPOLY_ROOM_PATH, ROUTES } from './navigation';
 import { resolveRouterBasename } from './routerBasename';
 
 function AppRoutes() {
@@ -44,9 +45,10 @@ function AppRoutes() {
       <Route path={ROUTES.dailySoftWindow} element={<DailySoftWindowPreviewScreen />} />
       <Route path={ROUTES.manualContextWindow} element={<ManualContextWindowPreviewScreen />} />
       <Route path={ROUTES.contextCompression} element={<ContextCompressionScreen />} />
+      <Route path={ROUTES.flowStudio} element={<FlowStudioScreen />} />
       {import.meta.env.BASE_URL === '/preview/' ? (
         <>
-          <Route path={ROUTES.flowStudio} element={<FlowStudioSoftGlowScreen />} />
+          <Route path={FLOW_STUDIO_PREVIEW_ROUTE} element={<FlowStudioSoftGlowScreen />} />
           <Route path={FLOW_STUDIO_PREVIEW_PATH} element={<FlowStudioSoftGlowScreen />} />
         </>
       ) : null}
