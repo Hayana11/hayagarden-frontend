@@ -130,6 +130,13 @@ def _request_payload() -> tuple[Optional[dict[str, Any]], Optional[Any]]:
             "editor request exceeds the size limit",
             413,
         )
+    raw_body = request.get_data(cache=True)
+    if len(raw_body) > MAX_BODY_BYTES:
+        return None, _error(
+            "EDITOR_REQUEST_TOO_LARGE",
+            "editor request exceeds the size limit",
+            413,
+        )
     if not request.is_json:
         return None, _error(
             "EDITOR_JSON_REQUIRED",
@@ -706,12 +713,11 @@ def create_flow_studio_blueprint(
                     (EDITOR_SCHEMA_VERSION, encoded, next_revision, stamp, flow_id),
                 )
             connection.commit()
-            runtime_raw = _decode_runtime(runtime)
             editor_row = {
                 "revision": next_revision,
                 "updated_at": stamp,
             }
-            return _response(_bundle_payload(flow_id, runtime_raw, document, editor_row))
+            return _response(_bundle_payload(flow_id, runtime, document, editor_row))
         except sqlite3.Error:
             connection.rollback()
             return _error("EDITOR_STORAGE_ERROR", "editor document could not be saved", 500)
