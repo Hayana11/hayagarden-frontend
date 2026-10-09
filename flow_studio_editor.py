@@ -183,6 +183,32 @@ def _decode_runtime(row: Mapping[str, Any]) -> dict[str, Any]:
     return raw
 
 
+
+def _ensure_stage_transition_modes(document: Mapping[str, Any]) -> dict[str, Any]:
+    result = _copy(dict(document))
+    stages = result.get("stages") or []
+    enabled = [stage for stage in stages if stage.get("enabled") is True]
+    enabled_ids = [stage.get("id") for stage in enabled]
+    for index, stage in enumerate(stages):
+        mode = stage.get("nextStageMode")
+        if mode not in {"sequence", "explicit"}:
+            next_id = stage.get("nextStageId")
+            expected = (
+                enabled_ids[enabled.index(stage) + 1]
+                if stage in enabled and enabled.index(stage) + 1 < len(enabled_ids)
+                else None
+            )
+            mode = (
+                "sequence"
+                if stage.get("terminal") is True
+                or next_id is None
+                or next_id == expected
+                else "explicit"
+            )
+        stage["nextStageMode"] = mode
+    return result
+
+
 def _runtime_to_editor(flow_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     document: dict[str, Any] = _copy(dict(raw))
     document["schemaVersion"] = EDITOR_SCHEMA_VERSION
@@ -207,6 +233,7 @@ def _runtime_to_editor(flow_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         stage.setdefault("poolIds", [])
         stages.append(stage)
     document["stages"] = stages
+    document = _ensure_stage_transition_modes(document)
 
     pools: list[dict[str, Any]] = []
     for raw_pool in raw.get("pools") or []:
@@ -273,7 +300,7 @@ def _load_bundle(
         raise ValueError("stored editor document is invalid JSON") from exc
     if not isinstance(document, dict):
         raise ValueError("stored editor document is not an object")
-    return runtime, document, dict(editor_row)
+    return runtime, _ensure_stage_transition_modes(document), dict(editor_row)
 
 
 def _validate_editor_document(
@@ -339,6 +366,11 @@ def _validate_editor_document(
         next_id = stage.get("nextStageId")
         if next_id is not None and (not isinstance(next_id, str) or not next_id.strip()):
             errors.append(f"{path}.nextStageId must be a string or null")
+        transition_mode = stage.get("nextStageMode")
+        if transition_mode is not None and transition_mode not in {"sequence", "explicit"}:
+            errors.append(f"{path}.nextStageMode must be sequence or explicit")
+        if transition_mode == "explicit" and next_id is None:
+            errors.append(f"{path}.explicit transition requires nextStageId")
         pool_ids = stage.get("poolIds")
         if not isinstance(pool_ids, list) or any(
             not isinstance(item, str) or not item.strip() for item in pool_ids
@@ -409,17 +441,19 @@ def _validate_editor_document(
 
 
 def _materialize_stage_order(document: dict[str, Any]) -> dict[str, Any]:
-    result = _copy(document)
+    result = _ensure_stage_transition_modes(document)
     stages = result.get("stages") or []
     enabled = [stage for stage in stages if stage.get("enabled") is True]
     if result.get("initialStage") is None and enabled:
         result["initialStage"] = enabled[0]["id"]
     enabled_ids = [stage["id"] for stage in enabled]
     for index, stage in enumerate(enabled):
-        if stage.get("terminal") is True:
-            continue
-        if stage.get("nextStageId") is None and index + 1 < len(enabled_ids):
-            stage["nextStageId"] = enabled_ids[index + 1]
+        if stage.get("nextStageMode") == "sequence":
+            stage["nextStageId"] = (
+                None
+                if stage.get("terminal") is True or index + 1 >= len(enabled_ids)
+                else enabled_ids[index + 1]
+            )
     return result
 
 
@@ -431,6 +465,7 @@ def compile_editor_document(
     Disabled editor objects remain in the editor document but are excluded from
     Runtime FlowConfig v1. Any such loss is reported explicitly.
     """
+    document = _ensure_stage_transition_modes(document)
     runtime: dict[str, Any] = {
         "schemaVersion": RUNTIME_SCHEMA_VERSION,
         "flowId": document.get("flowId"),
@@ -509,16 +544,17 @@ def compile_editor_document(
             errors.append(f"stage {stage_id}: minTurns must be between 1 and 12")
         if not _is_int(repeat_min_turns) or not 1 <= repeat_min_turns <= 12:
             errors.append(f"stage {stage_id}: repeatMinTurns must be between 1 and 12")
-        next_stage = stage.get("nextStageId")
-        if next_stage is None and stage.get("terminal") is not True:
+        if stage.get("nextStageMode") == "sequence":
             position = enabled_stage_order.index(stage_id)
             next_stage = (
-                enabled_stage_order[position + 1]
-                if position + 1 < len(enabled_stage_order)
-                else None
+                None
+                if stage.get("terminal") is True or position + 1 >= len(enabled_stage_order)
+                else enabled_stage_order[position + 1]
             )
-            if next_stage:
+            if next_stage is not None:
                 unsupported.append(f"stages[{stage_id}].nextStageId (derived)")
+        else:
+            next_stage = stage.get("nextStageId")
         if next_stage is not None and next_stage not in enabled_stage_ids:
             errors.append(f"stage {stage_id}: nextStageId is not an enabled stage")
         if stage.get("terminal") is True and (next_stage is not None or stage.get("continueTarget")):
