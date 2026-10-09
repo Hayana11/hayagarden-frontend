@@ -1,22 +1,23 @@
-import { createFlowStudioMockAdapter } from '../lib/flowStudio/flowStudioMock';
+import { createFlowStudioApiAdapter } from '../lib/flowStudio/flowStudioApi';
 import { FlowStudioWorkspace } from './FlowStudioWorkspace';
 
-const productionMockAdapter = createFlowStudioMockAdapter('production');
+const productionApiAdapter = createFlowStudioApiAdapter('intimacy-v1');
 
 /**
  * Formal Flow Studio entry point.
  *
- * This wrapper intentionally owns a separate Mock Adapter instance from the
- * Preview entry point. Replacing this adapter later must not change the
- * reviewed Soft Glow visual shell or the Preview route.
+ * The formal editor uses the owner-authenticated server document API. Preview
+ * keeps its separate Mock Adapter and never reaches this adapter.
  */
 export function FlowStudioScreen() {
   return (
     <FlowStudioWorkspace
-      dataAdapter={productionMockAdapter}
+      dataAdapter={productionApiAdapter}
       backPath="/chat"
-      surfaceLabel="正式编辑器 · 本地 Mock"
-      modeLabel="正式页面 · Mock 数据"
+      surfaceLabel="正式编辑器 · 服务器草稿"
+      modeLabel="正式页面 · 未发布"
+      persistenceLabel="已保存至服务器"
+      storageKicker="CURRENT SERVER STATE"
     />
   );
 }
