@@ -260,9 +260,23 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         stage_two = next(stage for stage in stages if stage["id"] == "s2")
         disabled = next(stage for stage in stages if stage["id"] == "disabled-stage")
         reloaded["document"]["stages"] = [stage_two, stage_one, disabled]
+        reordered = self._save(reloaded["document"], reloaded["editorRevision"])
+        self.assertEqual(reordered.status_code, 200)
+        reordered_stage = next(
+            stage for stage in reordered.get_json()["document"]["stages"]
+            if stage["id"] == "s1"
+        )
+        self.assertEqual(reordered_stage["nextStageMode"], "sequence")
+        self.assertIsNone(reordered_stage["nextStageId"])
+
+        reloaded_again = self._get()
+        stage_one = next(
+            stage for stage in reloaded_again["document"]["stages"]
+            if stage["id"] == "s1"
+        )
         stage_one["nextStageMode"] = "explicit"
         stage_one["nextStageId"] = "s2"
-        explicit = self._save(reloaded["document"], reloaded["editorRevision"])
+        explicit = self._save(reloaded_again["document"], reloaded_again["editorRevision"])
         self.assertEqual(explicit.status_code, 200)
         explicit_stage = next(
             stage for stage in explicit.get_json()["document"]["stages"]
