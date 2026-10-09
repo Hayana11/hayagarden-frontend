@@ -471,8 +471,6 @@ def compile_editor_document(
             continue
         entries = []
         for entry in pool.get("entries") or []:
-            if entry.get("text"):
-                unsupported.append(f"pools[{pool_id}].entries[{entry['id']}].enabled")
             if entry.get("enabled") is not True:
                 unsupported.append(f"pools[{pool_id}].entries[{entry['id']}].enabled")
                 continue
