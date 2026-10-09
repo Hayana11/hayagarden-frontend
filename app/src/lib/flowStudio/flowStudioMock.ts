@@ -22,6 +22,11 @@ export type FlowStudioStage = {
   terminal: boolean;
   poolIds: string[];
   nextStageId: string | null;
+  enabled?: boolean;
+  repeatMinTurns?: number;
+  continueTarget?: string | null;
+  terminalWithoutContinue?: boolean;
+  holdable?: boolean;
 };
 
 export type FlowStudioCue = {
