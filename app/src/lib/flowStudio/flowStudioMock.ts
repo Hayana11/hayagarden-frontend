@@ -39,6 +39,7 @@ export type FlowStudioCue = {
 
 export type FlowStudioData = {
   version: number;
+  editorRevision?: number;
   savedAt: string;
   enabled: boolean;
   stages: FlowStudioStage[];
