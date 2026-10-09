@@ -83,6 +83,7 @@ export function FlowStudioWorkspace({
   const navigate = useNavigate();
   const [tab, setTab] = useState<FlowTab>('overview');
   const [libraryTab, setLibraryTab] = useState<LibraryTab>('pools');
+  const isServerBacked = persistenceLabel.includes('服务器');
   const emptyData: FlowStudioData = {
     version: 0,
     savedAt: '',
@@ -286,7 +287,9 @@ export function FlowStudioWorkspace({
   const undo = () => {
     const previous = history[history.length - 1];
     if (!previous) return;
-    setDraft(cloneFlowStudioData(previous));
+    const restored = cloneFlowStudioData(previous);
+    draftRef.current = restored;
+    setDraft(restored);
     setHistory((current) => current.slice(0, -1));
     notify('已撤销上一步');
   };
@@ -453,7 +456,6 @@ export function FlowStudioWorkspace({
     return ['LOCAL FLOW GUIDANCE', `Current stage: ${stage?.name || '未选择'}`, `Current stage turn: ${drawTurn}`, `Context cues: ${cueNames}`, 'The next turn should keep the selected creative direction.', 'No model request is made by this local mock.'].join('\n');
   }, [draft, drawCueIds, drawStageId, drawTurn]);
 
-  const isServerBacked = persistenceLabel.includes('服务器');
   const storageChip = isServerBacked ? '服务器草稿' : '本地 Mock';
   const draftRevisionLabel = isServerBacked
     ? `编辑修订 ${draft.editorRevision ?? 0}`
@@ -558,10 +560,10 @@ export function FlowStudioWorkspace({
   const statusBar = dirty ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">有未保存的编辑修改</span><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{saving ? '保存中…' : (isServerBacked ? '保存至服务器' : '保存模拟数据')}</button></div> : null;
 
   if (loadState === 'loading') {
-    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>正在读取编辑器…</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>正在从服务器加载真实草稿，不会回退到 Mock 数据。</p></article></div></main>;
+    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>{isServerBacked ? '正在读取编辑器…' : '正在准备视觉原型…'}</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>{isServerBacked ? '正在从服务器加载真实草稿，不会回退到 Mock 数据。' : '正在加载本地视觉原型数据，不会读取真实 API。'}</p></article></div></main>;
   }
   if (loadState === 'error') {
-    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">FLOW STUDIO UNAVAILABLE</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>读取失败</h2><p style={{ margin: '0 0 18px', color: 'var(--flow-soft)', lineHeight: 1.8 }}>{loadError || '服务器草稿暂时不可用。'}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></article></div></main>;
+    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">FLOW STUDIO UNAVAILABLE</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>读取失败</h2><p style={{ margin: '0 0 18px', color: 'var(--flow-soft)', lineHeight: 1.8 }}>{loadError || (isServerBacked ? '服务器草稿暂时不可用。' : '本地视觉原型暂时不可用。')}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></article></div></main>;
   }
   return (
     <main className="flow-studio-page">
