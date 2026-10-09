@@ -45,8 +45,36 @@ function isFlowStudioData(value: unknown): value is FlowStudioData {
     && typeof value === 'object'
     && Array.isArray((value as FlowStudioData).stages)
     && Array.isArray((value as FlowStudioData).pools)
-    && Array.isArray((value as FlowStudioData).cues),
+    && Array.isArray((value as FlowStudioData).cues)
+    && Array.isArray((value as FlowStudioData).dimensions),
   );
+}
+
+function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData {
+  if (!isFlowStudioData(payload.document)) {
+    throw new FlowStudioApiError(
+      502,
+      'EDITOR_RESPONSE_INVALID',
+      '服务器返回的 Flow Studio 文档不可用',
+      payload,
+    );
+  }
+  const document = cloneFlowStudioData(payload.document);
+  const runtime = payload.runtime && typeof payload.runtime === 'object'
+    ? payload.runtime as Record<string, unknown>
+    : {};
+  return {
+    ...document,
+    version: typeof runtime.version === 'number' ? runtime.version : document.version,
+    savedAt: typeof payload.savedAt === 'string' ? payload.savedAt : document.savedAt,
+  };
+}
+
+function editorDocumentForRequest(next: FlowStudioData): FlowStudioData {
+  const document = cloneFlowStudioData(next) as FlowStudioData & Record<string, unknown>;
+  delete document.version;
+  delete document.savedAt;
+  return document;
 }
 
 async function requestJson(
@@ -89,16 +117,8 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
       const payload = await requestJson(
         '/api/flow-studio/editor/' + encodeURIComponent(flowId),
       );
-      if (!isFlowStudioData(payload.document)) {
-        throw new FlowStudioApiError(
-          502,
-          'EDITOR_RESPONSE_INVALID',
-          '服务器返回的 Flow Studio 文档不可用',
-          payload,
-        );
-      }
       revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : 0;
-      return cloneFlowStudioData(payload.document);
+      return documentForWorkspace(payload);
     },
 
     async save(next) {
@@ -108,7 +128,7 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
           method: 'PUT',
           body: JSON.stringify({
             expectedRevision: revision,
-            document: next,
+            document: editorDocumentForRequest(next),
           }),
         },
       ).catch((error: unknown) => {
@@ -121,16 +141,8 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
         }
         throw error;
       });
-      if (!isFlowStudioData(payload.document)) {
-        throw new FlowStudioApiError(
-          502,
-          'EDITOR_RESPONSE_INVALID',
-          '服务器保存响应中的文档不可用',
-          payload,
-        );
-      }
       revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : revision + 1;
-      return cloneFlowStudioData(payload.document);
+      return documentForWorkspace(payload);
     },
   };
 }
