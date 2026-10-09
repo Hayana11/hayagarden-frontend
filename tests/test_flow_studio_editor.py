@@ -359,7 +359,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         )
         self.assertEqual(invalid.status_code, 200)
         self.assertFalse(invalid.get_json()["valid"])
-        self.assertIn("final enabled stage must be marked as terminal", invalid.get_json()["errors"])
+        self.assertIn("the final enabled stage must be marked as terminal", invalid.get_json()["errors"])
 
     def test_malformed_document_and_unknown_flow_are_rejected(self):
         malformed = self.client.put(
