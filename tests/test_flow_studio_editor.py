@@ -173,6 +173,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200)
         saved_payload = saved.get_json()
         self.assertEqual(saved_payload["editorRevision"], 1)
+        self.assertEqual(saved_payload["runtime"]["version"], 7)
         self.assertEqual(saved_payload["document"]["stages"][0]["nextStageId"], "s2")
         reloaded = self._get()
         self.assertEqual(reloaded["source"], "editor")
