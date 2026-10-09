@@ -11,7 +11,9 @@
     <title>Fyodor · Dash</title>
     <script>
       (function(){
+        var isFlowStudioSandbox = /\\/preview\\/dash\\/flow-studio-soft-glow(?:\\/|$)/.test(location.pathname);
         function send(kind,msg,src,line,col){
+          if(isFlowStudioSandbox) return;
           try{
             var x=new XMLHttpRequest();
             x.open('POST','/api/client-error',true);
