@@ -22,6 +22,7 @@ export type FlowStudioStage = {
   terminal: boolean;
   poolIds: string[];
   nextStageId: string | null;
+  nextStageMode?: 'sequence' | 'explicit';
   enabled?: boolean;
   repeatMinTurns?: number;
   continueTarget?: string | null;
@@ -56,6 +57,7 @@ export type FlowStudioData = {
 export type FlowStudioDataAdapter = {
   load(): FlowStudioData | Promise<FlowStudioData>;
   save(next: FlowStudioData): FlowStudioData | Promise<FlowStudioData>;
+  acceptRevision?(revision: number): void;
 };
 
 export type FlowStudioMockScope = 'preview' | 'production' | 'standalone';
