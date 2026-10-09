@@ -307,6 +307,60 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         connection.close()
         self.assertEqual(count, 0)
 
+    def test_initial_stage_follows_enabled_order_and_terminal_validation(self):
+        first = self._get()
+        document = first["document"]
+        stage_one = next(stage for stage in document["stages"] if stage["id"] == "s1")
+        stage_two = next(stage for stage in document["stages"] if stage["id"] == "s2")
+        disabled = next(stage for stage in document["stages"] if stage["id"] == "disabled-stage")
+        document["stages"] = [stage_two, stage_one, disabled]
+        reordered = self._save(document, first["editorRevision"])
+        self.assertEqual(reordered.status_code, 200)
+        self.assertEqual(reordered.get_json()["document"]["initialStage"], "s2")
+
+        reloaded = self._get()
+        stages = reloaded["document"]["stages"]
+        stage_one = next(stage for stage in stages if stage["id"] == "s1")
+        stage_two = next(stage for stage in stages if stage["id"] == "s2")
+        disabled = next(stage for stage in stages if stage["id"] == "disabled-stage")
+        stage_two["enabled"] = False
+        reloaded["document"]["stages"] = [stage_two, stage_one, disabled]
+        disabled_start = self._save(reloaded["document"], reloaded["editorRevision"])
+        self.assertEqual(disabled_start.status_code, 200)
+        self.assertEqual(disabled_start.get_json()["document"]["initialStage"], "s1")
+
+        reloaded = self._get()
+        stages = reloaded["document"]["stages"]
+        stage_one = next(stage for stage in stages if stage["id"] == "s1")
+        stage_two = next(stage for stage in stages if stage["id"] == "s2")
+        disabled = next(stage for stage in stages if stage["id"] == "disabled-stage")
+        stage_two["enabled"] = True
+        reloaded["document"]["stages"] = [stage_one, stage_two, disabled]
+        reenabled = self._save(reloaded["document"], reloaded["editorRevision"])
+        self.assertEqual(reenabled.status_code, 200)
+        self.assertEqual(reenabled.get_json()["document"]["initialStage"], "s1")
+
+        valid = self.client.post(
+            "/api/flow-studio/editor/intimacy-v1/validate",
+            json={"document": reenabled.get_json()["document"]},
+        )
+        self.assertEqual(valid.status_code, 200)
+        self.assertTrue(valid.get_json()["valid"])
+
+        invalid_document = json.loads(json.dumps(reenabled.get_json()["document"]))
+        invalid_document["stages"] = [
+            invalid_document["stages"][1],
+            invalid_document["stages"][0],
+            invalid_document["stages"][2],
+        ]
+        invalid = self.client.post(
+            "/api/flow-studio/editor/intimacy-v1/validate",
+            json={"document": invalid_document},
+        )
+        self.assertEqual(invalid.status_code, 200)
+        self.assertFalse(invalid.get_json()["valid"])
+        self.assertIn("final enabled stage must be marked as terminal", invalid.get_json()["errors"])
+
     def test_malformed_document_and_unknown_flow_are_rejected(self):
         malformed = self.client.put(
             "/api/flow-studio/editor/intimacy-v1",
@@ -317,7 +371,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.get_json()["code"], "FLOW_NOT_FOUND")
 
-    def test_owner_auth_error_is_not_exposed_as_public_data(self):
+    def test_owner_auth_error_is_explicit_for_get_put_and_validate(self):
         from moments_auth import OwnerAuthError
 
         app = Flask(__name__)
@@ -331,9 +385,24 @@ class FlowStudioEditorApiTests(unittest.TestCase):
                 owner_guard=reject,
             )
         )
-        response = app.test_client().get("/api/flow-studio/editor/intimacy-v1")
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.get_json()["code"], "OWNER_AUTH_REQUIRED")
+        client = app.test_client()
+        responses = [
+            client.get("/api/flow-studio/editor/intimacy-v1"),
+            client.put(
+                "/api/flow-studio/editor/intimacy-v1",
+                json={"expectedRevision": 0, "document": {}},
+            ),
+            client.post(
+                "/api/flow-studio/editor/intimacy-v1/validate",
+                json={"document": {}},
+            ),
+        ]
+        for response in responses:
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.get_json()["code"], "OWNER_AUTH_REQUIRED")
+            self.assertEqual(response.headers["WWW-Authenticate"], "Bearer")
+            self.assertNotIn("document", response.get_json())
+            self.assertNotIn("runtime", response.get_json())
 
 
 if __name__ == "__main__":
