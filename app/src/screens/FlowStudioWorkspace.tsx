@@ -48,6 +48,8 @@ export type FlowStudioWorkspaceProps = {
   backPath: string;
   surfaceLabel: string;
   modeLabel: string;
+  persistenceLabel?: string;
+  storageKicker?: string;
 };
 
 export function FlowStudioWorkspace({
@@ -55,12 +57,27 @@ export function FlowStudioWorkspace({
   backPath,
   surfaceLabel,
   modeLabel,
+  persistenceLabel = '已保存到本地 Mock 草稿',
+  storageKicker = 'CURRENT MOCK STATE',
 }: FlowStudioWorkspaceProps) {
   const navigate = useNavigate();
   const [tab, setTab] = useState<FlowTab>('overview');
   const [libraryTab, setLibraryTab] = useState<LibraryTab>('pools');
-  const [saved, setSaved] = useState<FlowStudioData>(() => dataAdapter.load());
-  const [draft, setDraft] = useState<FlowStudioData>(() => dataAdapter.load());
+  const emptyData: FlowStudioData = {
+    version: 0,
+    savedAt: '',
+    enabled: false,
+    stages: [],
+    pools: [],
+    cues: [],
+    dimensions: [],
+  };
+  const [saved, setSaved] = useState<FlowStudioData>(emptyData);
+  const [draft, setDraft] = useState<FlowStudioData>(emptyData);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [loadError, setLoadError] = useState('');
+  const [loadNonce, setLoadNonce] = useState(0);
+  const [conflict, setConflict] = useState(false);
   const [history, setHistory] = useState<FlowStudioData[]>([]);
   const [openStage, setOpenStage] = useState<string | null>(null);
   const [reorderingStages, setReorderingStages] = useState(false);
@@ -80,7 +97,26 @@ export function FlowStudioWorkspace({
   const [toast, setToast] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const dirty = useMemo(() => JSON.stringify(saved) !== JSON.stringify(draft), [saved, draft]);
+  useEffect(() => {
+    let active = true;
+    setLoadState('loading');
+    setLoadError('');
+    Promise.resolve(dataAdapter.load()).then((loaded) => {
+      if (!active) return;
+      const next = cloneFlowStudioData(loaded);
+      setSaved(next);
+      setDraft(cloneFlowStudioData(next));
+      setHistory([]);
+      setLoadState('ready');
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setLoadState('error');
+      setLoadError(error instanceof Error ? error.message : '读取服务器草稿失败');
+    });
+    return () => { active = false; };
+  }, [dataAdapter, loadNonce]);
+
+  const dirty = useMemo(() => loadState === 'ready' && JSON.stringify(saved) !== JSON.stringify(draft), [draft, loadState, saved]);
   const enabledEntries = draft.pools.reduce((total, pool) => total + pool.entries.filter((entry) => entry.enabled).length, 0);
 
   useEffect(() => {
@@ -120,19 +156,30 @@ export function FlowStudioWorkspace({
     });
   };
 
-  const saveDraft = () => {
+  const saveDraft = async () => {
     setSaving(true);
-    window.setTimeout(() => {
-      const persisted = dataAdapter.save(draft);
+    try {
+      const persisted = await Promise.resolve(dataAdapter.save(draft));
       setSaved(persisted);
       setDraft(cloneFlowStudioData(persisted));
       setHistory([]);
+      setConflict(false);
+      notify(persistenceLabel);
+    } catch (error: unknown) {
+      const status = error && typeof error === 'object' ? (error as { status?: unknown }).status : null;
+      if (status === 409) {
+        setConflict(true);
+        notify('服务器版本冲突，本地修改仍保留');
+      } else {
+        notify('保存失败，未保存修改仍保留');
+      }
+    } finally {
       setSaving(false);
-      notify('已保存到本地 Mock 草稿');
-    }, 220);
+    }
   };
 
   const discardDraft = () => {
+    setConflict(false);
     setDraft(cloneFlowStudioData(saved));
     setHistory([]);
     setEditingEntry(null);
@@ -301,10 +348,14 @@ export function FlowStudioWorkspace({
     return ['LOCAL FLOW GUIDANCE', `Current stage: ${stage?.name || '未选择'}`, `Current stage turn: ${drawTurn}`, `Context cues: ${cueNames}`, 'The next turn should keep the selected creative direction.', 'No model request is made by this local mock.'].join('\n');
   }, [draft, drawCueIds, drawStageId, drawTurn]);
 
+  const isServerBacked = persistenceLabel.includes('服务器');
+  const storageChip = isServerBacked ? '服务器草稿' : '本地 Mock';
   const statusTitle = draft.enabled ? 'Standby' : '已暂停';
-  const statusBody = draft.enabled
-    ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
-    : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
+  const statusBody = isServerBacked
+    ? '这是服务器上的可编辑草稿。保存只更新编辑器文档，不会发布到 Hidden Flow 运行配置。'
+    : draft.enabled
+      ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
+      : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
 
   const renderStage = (stage: FlowStudioStage, index: number) => {
     const isOpen = openStage === stage.id;
@@ -390,8 +441,14 @@ export function FlowStudioWorkspace({
     );
   };
 
-  const statusBar = dirty ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">有未保存的沙盒修改</span><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving}>{saving ? '保存中…' : '保存模拟数据'}</button></div> : null;
+  const statusBar = dirty ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">有未保存的编辑修改</span><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving}>{saving ? '保存中…' : (isServerBacked ? '保存至服务器' : '保存模拟数据')}</button></div> : null;
 
+  if (loadState === 'loading') {
+    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>正在读取编辑器…</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>正在从服务器加载真实草稿，不会回退到 Mock 数据。</p></article></div></main>;
+  }
+  if (loadState === 'error') {
+    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">FLOW STUDIO UNAVAILABLE</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>读取失败</h2><p style={{ margin: '0 0 18px', color: 'var(--flow-soft)', lineHeight: 1.8 }}>{loadError || '服务器草稿暂时不可用。'}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></article></div></main>;
+  }
   return (
     <main className="flow-studio-page">
       <div className="flow-studio-glow flow-studio-glow-left" /><div className="flow-studio-glow flow-studio-glow-right" />
@@ -401,7 +458,7 @@ export function FlowStudioWorkspace({
 
         {tab === 'overview' ? (
           <section className="flow-screen flow-overview" aria-label="概览">
-            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">CURRENT MOCK STATE</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">本地 Mock</span><span>不调用模型</span><span>不写入后端</span></div></div><div className="flow-status-meta"><span>Draft v{draft.version}</span><span>{modeLabel}</span></div></article>
+            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">{storageKicker}</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">{storageChip}</span><span>未发布</span><span>不调用模型</span></div></div><div className="flow-status-meta"><span>Draft v{draft.version}</span><span>{modeLabel}</span></div></article>
             <article className="flow-control-card"><div className="flow-control-row"><div><strong>运行总闸</strong><small>真实服务器级开关 · 本页只读</small></div><span className="flow-readonly-pill">生产隔离</span></div><div className="flow-control-row"><div><strong>启用这份沙盒配置</strong><small>{draft.enabled ? '仅改变当前 Mock 状态，关闭不会删除内容' : '已停用，保存后仍只留在沙盒内'}</small></div><Switch checked={draft.enabled} label="启用沙盒配置" onChange={() => mutate('沙盒启用状态已更新', (next) => { next.enabled = !next.enabled; })} /></div><div className="flow-control-row"><div><strong>会话记录</strong><small>没有连接真实聊天，不会产生运行记录</small></div><span className="flow-muted-value">无</span></div></article>
             <div className="flow-section-heading"><span>流程 · {draft.stages.length} 个阶段</span><button type="button" onClick={() => setTab('stages')}>编辑 ›</button></div>
             <article className="flow-stage-chain"><div className="flow-chain-line" />{draft.stages.map((stage, index) => <button type="button" className="flow-chain-node" key={stage.id} onClick={() => { setTab('stages'); setOpenStage(stage.id); }}><span className={stage.terminal ? 'is-terminal' : ''}>{stage.terminal ? '✦' : index + 1}</span><b>{stage.name || '未命名'}</b></button>)}<p>每个阶段默认停留；达到最低轮数后，也要明确推进才会前进。</p></article>
@@ -443,6 +500,7 @@ export function FlowStudioWorkspace({
           </section>
         ) : null}
 
+        {conflict ? <div className="flow-inline-confirm"><span>服务器已有更新。你可以刷新服务器版本，或保留当前本地草稿继续编辑。</span><button type="button" onClick={() => { setConflict(false); setLoadNonce((value) => value + 1); }}>刷新服务器版本</button><button type="button" className="is-danger" onClick={() => setConflict(false)}>保留本地草稿</button></div> : null}
         {deleteTarget ? <div className="flow-inline-confirm"><span>确定将这个{deleteTarget.kind === 'stage' ? '阶段' : '灵感池'}移入删除草稿吗？保存前仍可撤销。</span><button type="button" onClick={() => setDeleteTarget(null)}>取消</button><button type="button" className="is-danger" onClick={confirmDelete}>确认删除</button></div> : null}
         {statusBar}
       </div>
