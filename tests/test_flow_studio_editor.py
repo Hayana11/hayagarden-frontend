@@ -209,6 +209,39 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(body["currentRevision"], 1)
         self.assertEqual(body["currentDocument"]["stages"][0]["name"], "先保存")
 
+    def test_reorder_disable_delete_and_reenable_round_trip(self):
+        first = self._get()
+        document = first["document"]
+        document["stages"] = [
+            document["stages"][1],
+            document["stages"][0],
+            document["stages"][2],
+        ]
+        document["pools"][1]["enabled"] = False
+        document["pools"][0]["entries"] = [document["pools"][0]["entries"][0]]
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+
+        reloaded = self._get()
+        self.assertEqual(
+            [stage["id"] for stage in reloaded["document"]["stages"]],
+            ["s2", "s1", "disabled-stage"],
+        )
+        self.assertFalse(reloaded["document"]["pools"][1]["enabled"])
+        self.assertEqual(
+            [entry["id"] for entry in reloaded["document"]["pools"][0]["entries"]],
+            ["e1"],
+        )
+
+        reloaded["document"]["pools"][1]["enabled"] = True
+        reenabled = self._save(
+            reloaded["document"],
+            reloaded["editorRevision"],
+        )
+        self.assertEqual(reenabled.status_code, 200)
+        again = self._get()
+        self.assertTrue(again["document"]["pools"][1]["enabled"])
+
     def test_validate_maps_modes_and_reports_runtime_limits_without_writing(self):
         document = self._get()["document"]
         document["pools"][0]["mode"] = "perStage"
