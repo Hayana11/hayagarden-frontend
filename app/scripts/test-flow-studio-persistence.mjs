@@ -4,6 +4,7 @@ import {
   createFlowStudioApiAdapter,
   FlowStudioConflictError,
 } from '../src/lib/flowStudio/flowStudioApi.ts';
+import { mergeFlowStudioDocuments } from '../src/lib/flowStudio/flowStudioMerge.ts';
 
 const document = {
   version: 17,
@@ -84,11 +85,58 @@ assert.equal(saved.editorRevision, 6);
 assert.equal(requests[1].init.body.includes('"expectedRevision":4'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 
+const mergeBase = {
+  ...document,
+  stages: [{ ...document.stages[0], name: '原始阶段', minTurns: 1 }],
+  pools: [{
+    id: 'pool-1',
+    name: '原始灵感池',
+    enabled: true,
+    mode: 'perTurn',
+    count: 1,
+    entries: [{ id: 'entry-1', text: '原始条目', enabled: true }],
+  }],
+};
+const localDifferent = {
+  ...mergeBase,
+  stages: [{ ...mergeBase.stages[0], name: '本地阶段修改' }],
+};
+const remoteDifferent = {
+  ...mergeBase,
+  pools: [{ ...mergeBase.pools[0], name: '服务器灵感池修改' }],
+};
+const nonOverlapping = mergeFlowStudioDocuments(mergeBase, localDifferent, remoteDifferent);
+assert.equal(nonOverlapping.conflicts.length, 0);
+assert.equal(nonOverlapping.document.stages[0].name, '本地阶段修改');
+assert.equal(nonOverlapping.document.pools[0].name, '服务器灵感池修改');
+
+const localSameField = {
+  ...mergeBase,
+  stages: [{ ...mergeBase.stages[0], name: '本地同字段修改' }],
+};
+const remoteSameField = {
+  ...mergeBase,
+  stages: [{ ...mergeBase.stages[0], name: '服务器同字段修改' }],
+};
+const overlapping = mergeFlowStudioDocuments(mergeBase, localSameField, remoteSameField);
+assert.equal(overlapping.conflicts.length, 1);
+assert.match(overlapping.conflicts[0].path, /stages\\.s1\\.name/);
+assert.equal(
+  mergeFlowStudioDocuments(mergeBase, localSameField, remoteSameField, 'remote').document.stages[0].name,
+  '服务器同字段修改',
+);
+assert.equal(
+  mergeFlowStudioDocuments(mergeBase, localSameField, remoteSameField, 'local').document.stages[0].name,
+  '本地同字段修改',
+);
+
 const workspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
 assert.match(workspace, /draftRef\.current/);
 assert.match(workspace, /newerEditsExist/);
 assert.match(workspace, /disabled=\{saving \|\| Boolean\(conflict\)\}/);
-assert.match(workspace, /以服务器版本为基线保留本地修改/);
+assert.match(workspace, /mergeFlowStudioDocuments/);
+assert.match(workspace, /resolveMerge/);
+assert.match(workspace, /明确保留本地冲突字段/);
 
 const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', import.meta.url), 'utf8');
 const preview = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.tsx', import.meta.url), 'utf8');
