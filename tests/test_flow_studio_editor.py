@@ -567,14 +567,16 @@ class FlowStudioEditorApiTests(unittest.TestCase):
 
     def test_deploy_uses_explicit_migration_after_backup(self):
         root = os.path.dirname(os.path.dirname(__file__))
-        deploy_source = open(
+        with open(
             os.path.join(root, "scripts", "deploy-frontend.sh"),
             encoding="utf-8",
-        ).read()
-        editor_source = open(
+        ) as handle:
+            deploy_source = handle.read()
+        with open(
             os.path.join(root, "flow_studio_editor.py"),
             encoding="utf-8",
-        ).read()
+        ) as handle:
+            editor_source = handle.read()
         backup_marker = 'bash "$ROOT/tools/backup.sh"'
         migration_marker = '"$PYTHON" "$staging/migrations/flow_studio_editor.py"'
         self.assertIn(migration_marker, deploy_source)
