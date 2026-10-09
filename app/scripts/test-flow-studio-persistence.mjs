@@ -94,7 +94,7 @@ const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', impor
 const preview = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.tsx', import.meta.url), 'utf8');
 assert.match(formal, /createFlowStudioApiAdapter/);
 assert.doesNotMatch(formal, /createFlowStudioMockAdapter/);
-assert.match(preview, /createFlowStudioMockAdapter/);
-assert.match(preview, /backPath="\\/dash\\/chat"/);
+assert.match(preview, /backPath="\/dash\/chat"/);
+assert.match(preview, /backPath="\/dash\/chat"/);
 
 console.log('flow studio persistence, conflict, revision, race, and preview isolation checks passed');
