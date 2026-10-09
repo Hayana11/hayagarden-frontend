@@ -462,7 +462,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
             connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
             ).fetchall(),
-            before_tables + [("flow_studio_editor_documents",)],
+            sorted(before_tables + [("flow_studio_editor_documents",)]),
         )
         self.assertEqual(
             connection.execute(
