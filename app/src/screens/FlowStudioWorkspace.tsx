@@ -117,6 +117,17 @@ export function FlowStudioWorkspace({
   }, [dataAdapter, loadNonce]);
 
   const dirty = useMemo(() => loadState === 'ready' && JSON.stringify(saved) !== JSON.stringify(draft), [draft, loadState, saved]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warnBeforeLeave = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeLeave);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeave);
+  }, [dirty]);
+
   const enabledEntries = draft.pools.reduce((total, pool) => total + pool.entries.filter((entry) => entry.enabled).length, 0);
 
   useEffect(() => {
@@ -126,6 +137,11 @@ export function FlowStudioWorkspace({
   }, [toast]);
 
   const notify = (message: string) => setToast(message);
+
+  const leaveStudio = () => {
+    if (dirty && !window.confirm('还有未保存的编辑修改，确定离开吗？')) return;
+    navigate(backPath);
+  };
 
   const mutate = (message: string, recipe: (next: FlowStudioData) => void) => {
     const next = cloneFlowStudioData(draft);
@@ -198,7 +214,7 @@ export function FlowStudioWorkspace({
     const id = uid('stage');
     mutate('已添加新阶段', (next) => {
       const terminalIndex = next.stages.findIndex((stage) => stage.terminal);
-      const stage: FlowStudioStage = { id, name: '新阶段', minTurns: 1, terminal: false, poolIds: [], nextStageId: null };
+      const stage: FlowStudioStage = { id, name: '新阶段', minTurns: 1, terminal: false, poolIds: [], nextStageId: null, enabled: true, repeatMinTurns: 1, continueTarget: null, terminalWithoutContinue: false, holdable: false };
       if (terminalIndex >= 0) next.stages.splice(terminalIndex, 0, stage);
       else next.stages.push(stage);
     });
@@ -453,7 +469,7 @@ export function FlowStudioWorkspace({
     <main className="flow-studio-page">
       <div className="flow-studio-glow flow-studio-glow-left" /><div className="flow-studio-glow flow-studio-glow-right" />
       <div className="flow-studio-content">
-        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={() => navigate(backPath)}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : `已保存 · v${draft.version}`}</div></div></header>
+        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : `已保存 · v${draft.version}`}</div></div></header>
         <div className="flow-tabbar" role="tablist" aria-label="Flow Studio 页面">{([['overview', '概览'], ['stages', '阶段'], ['library', '灵感库']] as Array<[FlowTab, string]>).map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'is-active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>
 
         {tab === 'overview' ? (
