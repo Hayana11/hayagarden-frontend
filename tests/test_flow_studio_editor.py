@@ -242,6 +242,35 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         again = self._get()
         self.assertTrue(again["document"]["pools"][1]["enabled"])
 
+    def test_sequence_links_rematerialize_and_explicit_links_survive_reorder(self):
+        first = self._get()
+        document = first["document"]
+        document["stages"][0]["nextStageMode"] = "sequence"
+        document["stages"][0]["nextStageId"] = "disabled-stage"
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        saved_document = saved.get_json()["document"]
+        first_stage = next(stage for stage in saved_document["stages"] if stage["id"] == "s1")
+        self.assertEqual(first_stage["nextStageMode"], "sequence")
+        self.assertEqual(first_stage["nextStageId"], "s2")
+
+        reloaded = self._get()
+        stages = reloaded["document"]["stages"]
+        stage_one = next(stage for stage in stages if stage["id"] == "s1")
+        stage_two = next(stage for stage in stages if stage["id"] == "s2")
+        disabled = next(stage for stage in stages if stage["id"] == "disabled-stage")
+        reloaded["document"]["stages"] = [stage_two, stage_one, disabled]
+        stage_one["nextStageMode"] = "explicit"
+        stage_one["nextStageId"] = "s2"
+        explicit = self._save(reloaded["document"], reloaded["editorRevision"])
+        self.assertEqual(explicit.status_code, 200)
+        explicit_stage = next(
+            stage for stage in explicit.get_json()["document"]["stages"]
+            if stage["id"] == "s1"
+        )
+        self.assertEqual(explicit_stage["nextStageMode"], "explicit")
+        self.assertEqual(explicit_stage["nextStageId"], "s2")
+
     def test_validate_maps_modes_and_reports_runtime_limits_without_writing(self):
         document = self._get()["document"]
         document["pools"][0]["mode"] = "perStage"
