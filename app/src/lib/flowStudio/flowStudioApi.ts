@@ -60,12 +60,11 @@ function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData 
     );
   }
   const document = cloneFlowStudioData(payload.document);
-  const runtime = payload.runtime && typeof payload.runtime === 'object'
-    ? payload.runtime as Record<string, unknown>
-    : {};
   return {
     ...document,
-    version: typeof runtime.version === 'number' ? runtime.version : document.version,
+    // Runtime config version is not the editable draft revision.
+    version: 0,
+    editorRevision: typeof payload.editorRevision === 'number' ? payload.editorRevision : 0,
     savedAt: typeof payload.savedAt === 'string' ? payload.savedAt : document.savedAt,
   };
 }
@@ -73,6 +72,7 @@ function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData 
 function editorDocumentForRequest(next: FlowStudioData): FlowStudioData {
   const document = cloneFlowStudioData(next) as FlowStudioData & Record<string, unknown>;
   delete (document as Record<string, unknown>).version;
+  delete (document as Record<string, unknown>).editorRevision;
   delete (document as Record<string, unknown>).savedAt;
   return document;
 }
@@ -143,6 +143,12 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
       });
       revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : revision + 1;
       return documentForWorkspace(payload);
+    },
+
+    acceptRevision(nextRevision) {
+      if (Number.isInteger(nextRevision) && nextRevision >= 0) {
+        revision = nextRevision;
+      }
     },
   };
 }
