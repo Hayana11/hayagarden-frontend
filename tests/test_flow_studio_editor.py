@@ -372,11 +372,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(missing.get_json()["code"], "FLOW_NOT_FOUND")
 
     def test_owner_cookie_session_allows_editor_get_and_missing_cookie_is_401(self):
-        from moments_auth import (
-            OwnerAuthError,
-            owner_session_digest,
-            require_owner,
-        )
+        from moments_auth import owner_session_digest, require_owner
 
         app = Flask(__name__)
         app.register_blueprint(
