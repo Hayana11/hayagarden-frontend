@@ -48,8 +48,8 @@ export type FlowStudioData = {
  * this same front-end shape; no API, database, or runtime state belongs here.
  */
 export type FlowStudioDataAdapter = {
-  load(): FlowStudioData;
-  save(next: FlowStudioData): FlowStudioData;
+  load(): FlowStudioData | Promise<FlowStudioData>;
+  save(next: FlowStudioData): FlowStudioData | Promise<FlowStudioData>;
 };
 
 export type FlowStudioMockScope = 'preview' | 'production' | 'standalone';
