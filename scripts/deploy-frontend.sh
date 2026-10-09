@@ -210,6 +210,9 @@ restore_runtime() {
 }
 
 bash "$ROOT/tools/backup.sh"
+# The editor schema is an explicit deployment migration. It runs only after the
+# consistent database backup succeeds and before the target services restart.
+"$PYTHON" "$staging/migrations/flow_studio_editor.py" --db-path "$ROOT/memories.db"
 protected_overlay_write_manifest "$ROOT" "$current_sha" "$target_sha" "$protected_manifest"
 snapshot_runtime
 

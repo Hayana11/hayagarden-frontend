@@ -15,6 +15,7 @@ from daily_context_bff import same_origin_mutation_ok
 from weread_client import WereadClient, WereadError
 from context_usage_routes import create_context_usage_blueprint
 from health_ingest_routes import create_health_blueprint
+from flow_studio_editor import create_flow_studio_blueprint
 from moments_routes import create_moments_blueprint
 from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 from monopoly_rooms import MonopolyService
@@ -148,6 +149,7 @@ app.register_blueprint(create_context_usage_blueprint(
 app.register_blueprint(create_health_blueprint(
     db_path=HEALTH_DB_PATH,
 ))
+app.register_blueprint(create_flow_studio_blueprint(db_path=DB_PATH))
 from daily_context_routes import create_daily_context_blueprint
 app.register_blueprint(create_daily_context_blueprint(db_path=DB_PATH))
 from context_window_routes import create_context_window_blueprint

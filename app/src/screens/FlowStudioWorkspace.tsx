@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   cloneFlowStudioData,
@@ -9,14 +9,45 @@ import {
   type FlowStudioPool,
   type FlowStudioStage,
 } from '../lib/flowStudio/flowStudioMock';
+import {
+  mergeFlowStudioDocuments,
+  type FlowStudioMergeConflict,
+  type FlowStudioMergePreference,
+} from '../lib/flowStudio/flowStudioMerge';
 import './FlowStudioSoftGlowScreen.css';
 
 type FlowTab = 'overview' | 'stages' | 'library';
 type LibraryTab = 'pools' | 'cues';
 type DeleteTarget = { kind: 'stage' | 'pool'; id: string } | null;
+type ConflictState = {
+  currentDocument: FlowStudioData | null;
+  currentRevision: number | null;
+};
+type PendingMerge = {
+  serverDocument: FlowStudioData;
+  serverRevision: number | null;
+  conflicts: FlowStudioMergeConflict[];
+};
 
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function syncSequenceStageLinks(data: FlowStudioData): void {
+  const enabledStages = data.stages.filter((stage) => stage.enabled !== false);
+  const enabledIds = enabledStages.map((stage) => stage.id);
+  data.initialStage = enabledIds[0] ?? null;
+  enabledStages.forEach((stage, index) => {
+    const expectedNext = index + 1 < enabledIds.length ? enabledIds[index + 1] : null;
+    const inferredSequence = stage.nextStageMode == null
+      && (!stage.nextStageId || stage.nextStageId === expectedNext);
+    if (stage.nextStageMode === 'sequence' || inferredSequence) {
+      stage.nextStageMode = 'sequence';
+      stage.nextStageId = stage.terminal || expectedNext == null ? null : expectedNext;
+    } else if (stage.nextStageMode == null) {
+      stage.nextStageMode = 'explicit';
+    }
+  });
 }
 
 function Switch({ checked, onChange, label }: { checked: boolean; onChange: () => void; label: string }) {
@@ -48,6 +79,8 @@ export type FlowStudioWorkspaceProps = {
   backPath: string;
   surfaceLabel: string;
   modeLabel: string;
+  persistenceLabel?: string;
+  storageKicker?: string;
 };
 
 export function FlowStudioWorkspace({
@@ -55,12 +88,30 @@ export function FlowStudioWorkspace({
   backPath,
   surfaceLabel,
   modeLabel,
+  persistenceLabel = '已保存到本地 Mock 草稿',
+  storageKicker = 'CURRENT MOCK STATE',
 }: FlowStudioWorkspaceProps) {
   const navigate = useNavigate();
   const [tab, setTab] = useState<FlowTab>('overview');
   const [libraryTab, setLibraryTab] = useState<LibraryTab>('pools');
-  const [saved, setSaved] = useState<FlowStudioData>(() => dataAdapter.load());
-  const [draft, setDraft] = useState<FlowStudioData>(() => dataAdapter.load());
+  const isServerBacked = persistenceLabel.includes('服务器');
+  const emptyData: FlowStudioData = {
+    version: 0,
+    savedAt: '',
+    enabled: false,
+    stages: [],
+    pools: [],
+    cues: [],
+    dimensions: [],
+  };
+  const [saved, setSaved] = useState<FlowStudioData>(emptyData);
+  const [draft, setDraft] = useState<FlowStudioData>(emptyData);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [loadError, setLoadError] = useState('');
+  const [loadNonce, setLoadNonce] = useState(0);
+  const [conflict, setConflict] = useState<ConflictState | null>(null);
+  const [pendingMerge, setPendingMerge] = useState<PendingMerge | null>(null);
+  const draftRef = useRef<FlowStudioData>(emptyData);
   const [history, setHistory] = useState<FlowStudioData[]>([]);
   const [openStage, setOpenStage] = useState<string | null>(null);
   const [reorderingStages, setReorderingStages] = useState(false);
@@ -80,7 +131,41 @@ export function FlowStudioWorkspace({
   const [toast, setToast] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const dirty = useMemo(() => JSON.stringify(saved) !== JSON.stringify(draft), [saved, draft]);
+  useEffect(() => {
+    let active = true;
+    setLoadState('loading');
+    setLoadError('');
+    Promise.resolve(dataAdapter.load()).then((loaded) => {
+      if (!active) return;
+      const next = cloneFlowStudioData(loaded);
+      syncSequenceStageLinks(next);
+      setSaved(next);
+      draftRef.current = cloneFlowStudioData(next);
+      setDraft(cloneFlowStudioData(next));
+      setHistory([]);
+      setConflict(null);
+      setPendingMerge(null);
+      setLoadState('ready');
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setLoadState('error');
+      setLoadError(error instanceof Error ? error.message : '读取服务器草稿失败');
+    });
+    return () => { active = false; };
+  }, [dataAdapter, loadNonce]);
+
+  const dirty = useMemo(() => loadState === 'ready' && JSON.stringify(saved) !== JSON.stringify(draft), [draft, loadState, saved]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warnBeforeLeave = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeLeave);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeave);
+  }, [dirty]);
+
   const enabledEntries = draft.pools.reduce((total, pool) => total + pool.entries.filter((entry) => entry.enabled).length, 0);
 
   useEffect(() => {
@@ -91,10 +176,16 @@ export function FlowStudioWorkspace({
 
   const notify = (message: string) => setToast(message);
 
+  const leaveStudio = () => {
+    if (dirty && !window.confirm('还有未保存的编辑修改，确定离开吗？')) return;
+    navigate(backPath);
+  };
+
   const mutate = (message: string, recipe: (next: FlowStudioData) => void) => {
     const next = cloneFlowStudioData(draft);
     recipe(next);
-    setHistory((current) => [...current, cloneFlowStudioData(draft)].slice(-24));
+    setHistory((current) => [...current, cloneFlowStudioData(draftRef.current)].slice(-24));
+    draftRef.current = next;
     setDraft(next);
     notify(message);
   };
@@ -120,29 +211,155 @@ export function FlowStudioWorkspace({
     });
   };
 
-  const saveDraft = () => {
+  const saveDraft = async () => {
+    if (saving) return;
+    if (conflict) {
+      notify('请先处理服务器版本冲突，再重新保存');
+      return;
+    }
+    const requestDraft = cloneFlowStudioData(draftRef.current);
     setSaving(true);
-    window.setTimeout(() => {
-      const persisted = dataAdapter.save(draft);
-      setSaved(persisted);
-      setDraft(cloneFlowStudioData(persisted));
-      setHistory([]);
+    try {
+      const persisted = await Promise.resolve(dataAdapter.save(requestDraft));
+      const newerEditsExist = JSON.stringify(draftRef.current) !== JSON.stringify(requestDraft);
+      const savedDocument = cloneFlowStudioData(persisted);
+      setSaved(savedDocument);
+      setConflict(null);
+      if (newerEditsExist) {
+        const localDocument = cloneFlowStudioData(draftRef.current);
+        localDocument.editorRevision = savedDocument.editorRevision;
+        localDocument.savedAt = savedDocument.savedAt;
+        draftRef.current = localDocument;
+        setDraft(localDocument);
+        notify('服务器已保存本次快照；保存期间的新修改仍保留，请再次保存');
+      } else {
+        draftRef.current = cloneFlowStudioData(savedDocument);
+        setDraft(cloneFlowStudioData(savedDocument));
+        setHistory([]);
+        notify(persistenceLabel);
+      }
+    } catch (error: unknown) {
+      const errorRecord = error && typeof error === 'object'
+        ? error as { status?: unknown; currentDocument?: FlowStudioData | null; currentRevision?: unknown }
+        : {};
+      if (errorRecord.status === 409) {
+        setPendingMerge(null);
+        setConflict({
+          currentDocument: errorRecord.currentDocument
+            ? cloneFlowStudioData(errorRecord.currentDocument)
+            : null,
+          currentRevision: typeof errorRecord.currentRevision === 'number'
+            ? errorRecord.currentRevision
+            : null,
+        });
+        notify('服务器版本冲突，本地修改仍保留；请先比较版本差异');
+      } else {
+        notify('保存失败，未保存修改仍保留');
+      }
+    } finally {
       setSaving(false);
-      notify('已保存到本地 Mock 草稿');
-    }, 220);
+    }
   };
 
   const discardDraft = () => {
-    setDraft(cloneFlowStudioData(saved));
+    const conflictBase = conflict?.currentDocument
+      ? cloneFlowStudioData(conflict.currentDocument)
+      : cloneFlowStudioData(saved);
+    if (conflict?.currentRevision != null) {
+      conflictBase.editorRevision = conflict.currentRevision;
+      dataAdapter.acceptRevision?.(conflict.currentRevision);
+    }
+    draftRef.current = cloneFlowStudioData(conflictBase);
+    setSaved(conflictBase);
+    setDraft(cloneFlowStudioData(conflictBase));
+    setConflict(null);
+    setPendingMerge(null);
     setHistory([]);
     setEditingEntry(null);
-    notify('已取消未保存修改');
+    notify('已取消未保存修改，并采用服务器最新版本');
+  };
+
+  const applyMergedDocument = (
+    mergedDocument: FlowStudioData,
+    serverDocument: FlowStudioData,
+    serverRevision: number | null,
+    message: string,
+  ) => {
+    const savedServerDocument = cloneFlowStudioData(serverDocument);
+    const nextDraft = cloneFlowStudioData(mergedDocument);
+    if (serverRevision != null) {
+      savedServerDocument.editorRevision = serverRevision;
+      nextDraft.editorRevision = serverRevision;
+      dataAdapter.acceptRevision?.(serverRevision);
+    }
+    nextDraft.savedAt = savedServerDocument.savedAt;
+    setSaved(savedServerDocument);
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+    setConflict(null);
+    setPendingMerge(null);
+    setHistory([]);
+    notify(message);
+  };
+
+  const rebaseConflict = () => {
+    if (!conflict?.currentDocument) {
+      setConflict(null);
+      setPendingMerge(null);
+      setLoadNonce((value) => value + 1);
+      return;
+    }
+    const serverDocument = cloneFlowStudioData(conflict.currentDocument);
+    const merge = mergeFlowStudioDocuments(
+      saved,
+      draftRef.current,
+      serverDocument,
+    );
+    if (merge.conflicts.length) {
+      setPendingMerge({
+        serverDocument,
+        serverRevision: conflict.currentRevision,
+        conflicts: merge.conflicts,
+      });
+      notify('发现重叠修改，请明确选择冲突字段的版本');
+      return;
+    }
+    applyMergedDocument(
+      merge.document,
+      serverDocument,
+      conflict.currentRevision,
+      '已合并本地与服务器的不同字段，请重新保存',
+    );
+  };
+
+  const resolveMerge = (preference: FlowStudioMergePreference) => {
+    if (!pendingMerge) return;
+    const merge = mergeFlowStudioDocuments(
+      saved,
+      draftRef.current,
+      pendingMerge.serverDocument,
+      preference,
+    );
+    if (merge.conflicts.length) {
+      notify('仍有未解决的版本差异，未改变本地草稿');
+      return;
+    }
+    applyMergedDocument(
+      merge.document,
+      pendingMerge.serverDocument,
+      pendingMerge.serverRevision,
+      preference === 'local'
+        ? '已明确保留本地冲突字段；服务器其他修改已保留，请重新保存'
+        : '已采用服务器冲突字段；本地其他修改已保留，请重新保存',
+    );
   };
 
   const undo = () => {
     const previous = history[history.length - 1];
     if (!previous) return;
-    setDraft(cloneFlowStudioData(previous));
+    const restored = cloneFlowStudioData(previous);
+    draftRef.current = restored;
+    setDraft(restored);
     setHistory((current) => current.slice(0, -1));
     notify('已撤销上一步');
   };
@@ -151,9 +368,10 @@ export function FlowStudioWorkspace({
     const id = uid('stage');
     mutate('已添加新阶段', (next) => {
       const terminalIndex = next.stages.findIndex((stage) => stage.terminal);
-      const stage: FlowStudioStage = { id, name: '新阶段', minTurns: 1, terminal: false, poolIds: [], nextStageId: null };
+      const stage: FlowStudioStage = { id, name: '新阶段', minTurns: 1, terminal: false, poolIds: [], nextStageId: null, enabled: true, repeatMinTurns: 1, continueTarget: null, terminalWithoutContinue: false, holdable: false };
       if (terminalIndex >= 0) next.stages.splice(terminalIndex, 0, stage);
       else next.stages.push(stage);
+      syncSequenceStageLinks(next);
     });
     setOpenStage(id);
     setTab('stages');
@@ -188,6 +406,7 @@ export function FlowStudioWorkspace({
       const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
       if (currentIndex < 0 || targetIndex < 0 || targetIndex >= next.stages.length) return;
       [next.stages[currentIndex], next.stages[targetIndex]] = [next.stages[targetIndex], next.stages[currentIndex]];
+      syncSequenceStageLinks(next);
     });
   };
 
@@ -199,7 +418,13 @@ export function FlowStudioWorkspace({
     mutate(kind === 'stage' ? '阶段已移入删除草稿' : '灵感池已移入删除草稿', (next) => {
       if (kind === 'stage') {
         next.stages = next.stages.filter((stage) => stage.id !== id);
-        next.stages.forEach((stage) => { if (stage.nextStageId === id) stage.nextStageId = null; });
+        next.stages.forEach((stage) => {
+          if (stage.nextStageId === id) {
+            stage.nextStageMode = 'sequence';
+            stage.nextStageId = null;
+          }
+        });
+        syncSequenceStageLinks(next);
       } else {
         next.pools = next.pools.filter((pool) => pool.id !== id);
         next.stages.forEach((stage) => { stage.poolIds = stage.poolIds.filter((poolId) => poolId !== id); });
@@ -301,10 +526,22 @@ export function FlowStudioWorkspace({
     return ['LOCAL FLOW GUIDANCE', `Current stage: ${stage?.name || '未选择'}`, `Current stage turn: ${drawTurn}`, `Context cues: ${cueNames}`, 'The next turn should keep the selected creative direction.', 'No model request is made by this local mock.'].join('\n');
   }, [draft, drawCueIds, drawStageId, drawTurn]);
 
+  const storageChip = isServerBacked ? '服务器草稿' : '本地 Mock';
+  const draftRevisionLabel = isServerBacked
+    ? `编辑修订 ${draft.editorRevision ?? 0}`
+    : `Draft v${draft.version}`;
+  const configTitle = isServerBacked ? '启用这份编辑草稿' : '启用这份沙盒配置';
+  const configHelp = isServerBacked
+    ? (draft.enabled ? '仅改变编辑器草稿启用状态；发布前不会改变运行配置' : '已停用，保存后仍不会发布到运行配置')
+    : (draft.enabled ? '仅改变当前 Mock 状态，关闭不会删除内容' : '已停用，保存后仍只留在沙盒内');
+  const configLabel = isServerBacked ? '启用编辑草稿' : '启用沙盒配置';
+  const configToast = isServerBacked ? '编辑草稿启用状态已更新' : '沙盒启用状态已更新';
   const statusTitle = draft.enabled ? 'Standby' : '已暂停';
-  const statusBody = draft.enabled
-    ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
-    : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
+  const statusBody = isServerBacked
+    ? '这是服务器上的可编辑草稿。保存只更新编辑器文档，不会发布到 Hidden Flow 运行配置。'
+    : draft.enabled
+      ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
+      : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
 
   const renderStage = (stage: FlowStudioStage, index: number) => {
     const isOpen = openStage === stage.id;
@@ -324,9 +561,9 @@ export function FlowStudioWorkspace({
             <label className="flow-field"><span>名称</span><input value={stage.name} onChange={(event) => updateStage(stage.id, (target) => { target.name = event.target.value; }, '阶段名称已更新')} placeholder="为这一阶段命名" /></label>
             <div className="flow-editor-grid">
               <div className="flow-field"><span>最低轮数 <small>1–99</small></span><div className="flow-stepper"><button type="button" onClick={() => updateStage(stage.id, (target) => { target.minTurns = Math.max(1, target.minTurns - 1); }, '最低轮数已调整')}>−</button><b>{stage.minTurns}</b><button type="button" onClick={() => updateStage(stage.id, (target) => { target.minTurns = Math.min(99, target.minTurns + 1); }, '最低轮数已调整')}>＋</button></div></div>
-              <label className="flow-field"><span>推进至</span><select value={stage.nextStageId || ''} disabled={stage.terminal} onChange={(event) => updateStage(stage.id, (target) => { target.nextStageId = event.target.value || null; }, '推进关系已更新')}><option value="">按顺序推进</option>{nextOptions.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.name}</option>)}</select></label>
+              <label className="flow-field"><span>推进至</span><select value={stage.nextStageId || ''} disabled={stage.terminal} onChange={(event) => updateStage(stage.id, (target, data) => { const nextStageId = event.target.value || null; target.nextStageMode = nextStageId ? 'explicit' : 'sequence'; target.nextStageId = nextStageId; syncSequenceStageLinks(data); }, '推进关系已更新')}><option value="">按顺序推进</option>{nextOptions.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.name}</option>)}</select></label>
             </div>
-            <div className="flow-toggle-row"><div><strong>设为结束阶段</strong><small>完成最低轮数后，沙盒流程在这里收束</small></div><Switch checked={stage.terminal} label={`将${stage.name || '本阶段'}设为结束阶段`} onChange={() => mutate('结束阶段状态已更新', (next) => { next.stages.forEach((candidate) => { candidate.terminal = candidate.id === stage.id ? !stage.terminal : false; }); })} /></div>
+            <div className="flow-toggle-row"><div><strong>设为结束阶段</strong><small>{isServerBacked ? '完成最低轮数后，编辑流程在这里收束' : '完成最低轮数后，沙盒流程在这里收束'}</small></div><Switch checked={stage.terminal} label={`将${stage.name || '本阶段'}设为结束阶段`} onChange={() => mutate('结束阶段状态已更新', (next) => { next.stages.forEach((candidate) => { candidate.terminal = candidate.id === stage.id ? !stage.terminal : false; }); syncSequenceStageLinks(next); })} /></div>
             <div className="flow-field"><span>关联灵感池</span><div className="flow-choice-wrap">{draft.pools.map((pool) => { const selected = stage.poolIds.includes(pool.id); return <button type="button" className={`flow-choice flow-stage-pool-choice ${selected ? 'is-selected' : ''}`} key={pool.id} onClick={() => updateStage(stage.id, (target) => { target.poolIds = selected ? target.poolIds.filter((id) => id !== pool.id) : [...target.poolIds, pool.id]; }, '阶段关联已更新')}><span className="flow-choice-symbol">{selected ? '✓' : '+'}</span>{pool.name}</button>; })}</div></div>
             <div className="flow-row-actions"><button type="button" className="flow-soft-button is-danger" onClick={() => requestDelete('stage', stage.id)}>删除阶段</button></div>
           </div>
@@ -390,27 +627,33 @@ export function FlowStudioWorkspace({
     );
   };
 
-  const statusBar = dirty ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">有未保存的沙盒修改</span><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving}>{saving ? '保存中…' : '保存模拟数据'}</button></div> : null;
+  const statusBar = dirty ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">有未保存的编辑修改</span><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{saving ? '保存中…' : (isServerBacked ? '保存至服务器' : '保存模拟数据')}</button></div> : null;
 
+  if (loadState === 'loading') {
+    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>{isServerBacked ? '正在读取编辑器…' : '正在准备视觉原型…'}</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>{isServerBacked ? '正在从服务器加载真实草稿，不会回退到 Mock 数据。' : '正在加载本地视觉原型数据，不会读取真实 API。'}</p></article></div></main>;
+  }
+  if (loadState === 'error') {
+    return <main className="flow-studio-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">FLOW STUDIO UNAVAILABLE</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>读取失败</h2><p style={{ margin: '0 0 18px', color: 'var(--flow-soft)', lineHeight: 1.8 }}>{loadError || (isServerBacked ? '服务器草稿暂时不可用。' : '本地视觉原型暂时不可用。')}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></article></div></main>;
+  }
   return (
     <main className="flow-studio-page">
       <div className="flow-studio-glow flow-studio-glow-left" /><div className="flow-studio-glow flow-studio-glow-right" />
       <div className="flow-studio-content">
-        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={() => navigate(backPath)}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : `已保存 · v${draft.version}`}</div></div></header>
+        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : (isServerBacked ? `已保存 · 编辑修订 ${draft.editorRevision ?? 0}` : `已保存 · v${draft.version}`)}</div></div></header>
         <div className="flow-tabbar" role="tablist" aria-label="Flow Studio 页面">{([['overview', '概览'], ['stages', '阶段'], ['library', '灵感库']] as Array<[FlowTab, string]>).map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'is-active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>
 
         {tab === 'overview' ? (
           <section className="flow-screen flow-overview" aria-label="概览">
-            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">CURRENT MOCK STATE</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">本地 Mock</span><span>不调用模型</span><span>不写入后端</span></div></div><div className="flow-status-meta"><span>Draft v{draft.version}</span><span>{modeLabel}</span></div></article>
-            <article className="flow-control-card"><div className="flow-control-row"><div><strong>运行总闸</strong><small>真实服务器级开关 · 本页只读</small></div><span className="flow-readonly-pill">生产隔离</span></div><div className="flow-control-row"><div><strong>启用这份沙盒配置</strong><small>{draft.enabled ? '仅改变当前 Mock 状态，关闭不会删除内容' : '已停用，保存后仍只留在沙盒内'}</small></div><Switch checked={draft.enabled} label="启用沙盒配置" onChange={() => mutate('沙盒启用状态已更新', (next) => { next.enabled = !next.enabled; })} /></div><div className="flow-control-row"><div><strong>会话记录</strong><small>没有连接真实聊天，不会产生运行记录</small></div><span className="flow-muted-value">无</span></div></article>
+            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">{storageKicker}</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">{storageChip}</span><span>未发布</span><span>不调用模型</span></div></div><div className="flow-status-meta"><span>{draftRevisionLabel}</span><span>{modeLabel}</span></div></article>
+            <article className="flow-control-card"><div className="flow-control-row"><div><strong>运行总闸</strong><small>真实服务器级开关 · 本页只读</small></div><span className="flow-readonly-pill">生产隔离</span></div><div className="flow-control-row"><div><strong>{configTitle}</strong><small>{configHelp}</small></div><Switch checked={draft.enabled} label={configLabel} onChange={() => mutate(configToast, (next) => { next.enabled = !next.enabled; })} /></div><div className="flow-control-row"><div><strong>会话记录</strong><small>没有连接真实聊天，不会产生运行记录</small></div><span className="flow-muted-value">无</span></div></article>
             <div className="flow-section-heading"><span>流程 · {draft.stages.length} 个阶段</span><button type="button" onClick={() => setTab('stages')}>编辑 ›</button></div>
-            <article className="flow-stage-chain"><div className="flow-chain-line" />{draft.stages.map((stage, index) => <button type="button" className="flow-chain-node" key={stage.id} onClick={() => { setTab('stages'); setOpenStage(stage.id); }}><span className={stage.terminal ? 'is-terminal' : ''}>{stage.terminal ? '✦' : index + 1}</span><b>{stage.name || '未命名'}</b></button>)}<p>每个阶段默认停留；达到最低轮数后，也要明确推进才会前进。</p></article>
+            <article className="flow-stage-chain"><div className="flow-chain-line" />{draft.stages.map((stage, index) => <button type="button" className="flow-chain-node" key={stage.id} onClick={() => { setTab('stages'); setOpenStage(stage.id); }}><span className={stage.terminal ? 'is-terminal' : ''}>{stage.terminal ? '✦' : index + 1}</span><b>{stage.name || '未命名'}</b></button>)}<p>第一启用阶段为起始阶段；达到最低轮数后，按顺序推进或显式跳转。</p></article>
             <div className="flow-action-grid"><button type="button" className="flow-action-card" onClick={() => { setShowDraw(true); setDrawn(false); }}><span className="flow-action-icon is-rose"><Icon name="spark" /></span><strong>试抽一次</strong><small>本地模拟抽取 · 不调用模型</small></button><button type="button" className="flow-action-card" onClick={() => { setTab('library'); setLibraryTab('pools'); }}><span className="flow-action-icon is-violet"><Icon name="book" /></span><strong>灵感库</strong><small>{draft.pools.length} 池 · {enabledEntries} 条启用</small></button></div>
             <div className="flow-section-heading flow-dimension-heading"><span>未来创作维度</span><small>先做视觉结构，后续再接数据源</small></div><div className="flow-dimension-grid">{draft.dimensions.map((dimension) => <article className={`flow-dimension-card is-${dimension.tone}`} key={dimension.id}><span>{dimension.label.slice(0, 1)}</span><div><strong>{dimension.label}</strong><small>{dimension.detail}</small></div><em>设计中</em></article>)}</div>
           </section>
         ) : null}
 
-        {tab === 'stages' ? <section className="flow-screen" aria-label="阶段"><div className="flow-screen-intro"><span>点击阶段展开编辑。流程从上往下进行。</span><button type="button" className={`flow-text-button ${reorderingStages ? 'is-active' : ''}`} onClick={() => setReorderingStages((value) => !value)}>{reorderingStages ? '完成排序' : '调整顺序'}</button></div><div className="flow-stage-list">{draft.stages.map(renderStage)}</div><button type="button" className="flow-add-row" onClick={addStage}><Icon name="plus" />新增阶段</button></section> : null}
+        {tab === 'stages' ? <section className="flow-screen" aria-label="阶段"><div className="flow-screen-intro"><span>点击阶段展开编辑。流程从上往下进行，第一启用阶段为起始阶段。</span><button type="button" className={`flow-text-button ${reorderingStages ? 'is-active' : ''}`} onClick={() => setReorderingStages((value) => !value)}>{reorderingStages ? '完成排序' : '调整顺序'}</button></div><div className="flow-stage-list">{draft.stages.map(renderStage)}</div><button type="button" className="flow-add-row" onClick={addStage}><Icon name="plus" />新增阶段</button></section> : null}
 
         {tab === 'library' ? (
           <section className="flow-screen" aria-label="灵感库">
@@ -443,6 +686,7 @@ export function FlowStudioWorkspace({
           </section>
         ) : null}
 
+        {conflict ? <div className="flow-inline-confirm"><span>{pendingMerge ? `发现 ${pendingMerge.conflicts.length} 个重叠修改：${pendingMerge.conflicts.map((item) => item.path).join('、')}。请选择冲突字段版本。` : '服务器已有更新，不能直接覆盖。请先比较版本差异。'}</span>{pendingMerge ? <><button type="button" onClick={() => resolveMerge('remote')}>保留服务器冲突字段</button><button type="button" className="is-danger" onClick={() => resolveMerge('local')}>明确保留本地冲突字段</button></> : conflict.currentDocument ? <button type="button" onClick={rebaseConflict}>比较并合并本地修改</button> : <button type="button" onClick={() => { setConflict(null); setLoadNonce((value) => value + 1); }}>重新读取服务器版本</button>}</div> : null}
         {deleteTarget ? <div className="flow-inline-confirm"><span>确定将这个{deleteTarget.kind === 'stage' ? '阶段' : '灵感池'}移入删除草稿吗？保存前仍可撤销。</span><button type="button" onClick={() => setDeleteTarget(null)}>取消</button><button type="button" className="is-danger" onClick={confirmDelete}>确认删除</button></div> : null}
         {statusBar}
       </div>

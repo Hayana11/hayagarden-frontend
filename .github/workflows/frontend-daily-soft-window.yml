@@ -65,6 +65,7 @@ jobs:
           npm run test:chat-capacity-header
           npm run test:task-timer-real-data-wiring
           npm run test:memory-cold-start
+          npm run test:flow-studio-persistence
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -120,6 +121,7 @@ jobs:
           python -m unittest tests.test_context_window_first_turn.ContextWindowFirstTurnTests.test_happy_path_first_delta_commit_and_complete
           python -m unittest tests.test_rewrite_activation_atomicity
           python -m unittest tests.test_weread_routes tests.test_weread_key_setup -v
+          python -m unittest tests.test_flow_studio_editor -v
       - name: Claude chat effort backend regressions
         env:
           HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-effort-config.db

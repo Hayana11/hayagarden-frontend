@@ -22,6 +22,12 @@ export type FlowStudioStage = {
   terminal: boolean;
   poolIds: string[];
   nextStageId: string | null;
+  nextStageMode?: 'sequence' | 'explicit';
+  enabled?: boolean;
+  repeatMinTurns?: number;
+  continueTarget?: string | null;
+  terminalWithoutContinue?: boolean;
+  holdable?: boolean;
 };
 
 export type FlowStudioCue = {
@@ -34,6 +40,8 @@ export type FlowStudioCue = {
 
 export type FlowStudioData = {
   version: number;
+  editorRevision?: number;
+  initialStage?: string | null;
   savedAt: string;
   enabled: boolean;
   stages: FlowStudioStage[];
@@ -48,8 +56,9 @@ export type FlowStudioData = {
  * this same front-end shape; no API, database, or runtime state belongs here.
  */
 export type FlowStudioDataAdapter = {
-  load(): FlowStudioData;
-  save(next: FlowStudioData): FlowStudioData;
+  load(): FlowStudioData | Promise<FlowStudioData>;
+  save(next: FlowStudioData): FlowStudioData | Promise<FlowStudioData>;
+  acceptRevision?(revision: number): void;
 };
 
 export type FlowStudioMockScope = 'preview' | 'production' | 'standalone';
