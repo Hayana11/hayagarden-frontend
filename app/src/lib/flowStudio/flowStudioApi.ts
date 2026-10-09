@@ -31,7 +31,13 @@ export class FlowStudioConflictError extends FlowStudioApiError {
     );
     this.name = 'FlowStudioConflictError';
     this.currentDocument = isFlowStudioData(payload.currentDocument)
-      ? payload.currentDocument
+      ? {
+          ...cloneFlowStudioData(payload.currentDocument),
+          version: 0,
+          savedAt: typeof (payload.currentDocument as FlowStudioData).savedAt === 'string'
+            ? (payload.currentDocument as FlowStudioData).savedAt
+            : '',
+        }
       : null;
     this.currentRevision = typeof payload.currentRevision === 'number'
       ? payload.currentRevision
