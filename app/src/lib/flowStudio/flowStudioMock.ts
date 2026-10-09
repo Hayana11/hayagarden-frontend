@@ -52,7 +52,11 @@ export type FlowStudioDataAdapter = {
   save(next: FlowStudioData): FlowStudioData;
 };
 
-export type FlowStudioMockAdapter = FlowStudioDataAdapter;
+export type FlowStudioMockScope = 'preview' | 'production' | 'standalone';
+
+export type FlowStudioMockAdapter = FlowStudioDataAdapter & {
+  readonly scope: FlowStudioMockScope;
+};
 
 export function cloneFlowStudioData<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -135,9 +139,10 @@ const MOCK_DATA: FlowStudioData = {
   ],
 };
 
-export function createFlowStudioMockAdapter(): FlowStudioMockAdapter {
+export function createFlowStudioMockAdapter(scope: FlowStudioMockScope = 'standalone'): FlowStudioMockAdapter {
   let saved = cloneFlowStudioData(MOCK_DATA);
   return {
+    scope,
     load: () => cloneFlowStudioData(saved),
     save: (next) => {
       saved = cloneFlowStudioData(next);
