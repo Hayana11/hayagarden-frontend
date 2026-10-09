@@ -72,8 +72,8 @@ function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData 
 
 function editorDocumentForRequest(next: FlowStudioData): FlowStudioData {
   const document = cloneFlowStudioData(next) as FlowStudioData & Record<string, unknown>;
-  delete document.version;
-  delete document.savedAt;
+  delete (document as Record<string, unknown>).version;
+  delete (document as Record<string, unknown>).savedAt;
   return document;
 }
 
