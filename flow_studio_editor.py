@@ -46,32 +46,6 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return connection
 
 
-def ensure_editor_schema(
-    db_path: str = DEFAULT_DB_PATH,
-    *,
-    conn: Optional[sqlite3.Connection] = None,
-) -> None:
-    owned = conn is None
-    connection = conn or _connect(db_path)
-    try:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS flow_studio_editor_documents (
-                flow_id TEXT PRIMARY KEY,
-                schema_version INTEGER NOT NULL,
-                document_json TEXT NOT NULL,
-                revision INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.commit()
-    finally:
-        if owned:
-            connection.close()
-
-
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
@@ -666,10 +640,6 @@ def create_flow_studio_blueprint(
 ):
     blueprint = Blueprint("flow_studio_editor", __name__)
 
-    @blueprint.before_request
-    def _ensure_schema():
-        ensure_editor_schema(db_path)
-
     @blueprint.get("/api/flow-studio/editor/<flow_id>")
     def get_editor(flow_id: str):
         auth = _guard(owner_guard)
@@ -825,5 +795,4 @@ __all__ = [
     "RUNTIME_SCHEMA_VERSION",
     "compile_editor_document",
     "create_flow_studio_blueprint",
-    "ensure_editor_schema",
 ]
