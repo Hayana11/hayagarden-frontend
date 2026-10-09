@@ -192,13 +192,17 @@ def _ensure_stage_transition_modes(document: Mapping[str, Any]) -> dict[str, Any
     stages = result.get("stages") or []
     enabled = [stage for stage in stages if stage.get("enabled") is True]
     enabled_ids = [stage.get("id") for stage in enabled]
-    for index, stage in enumerate(stages):
+    enabled_positions = {
+        stage.get("id"): position for position, stage in enumerate(enabled)
+    }
+    for stage in stages:
         mode = stage.get("nextStageMode")
         if mode not in {"sequence", "explicit"}:
             next_id = stage.get("nextStageId")
+            position = enabled_positions.get(stage.get("id"))
             expected = (
-                enabled_ids[enabled.index(stage) + 1]
-                if stage in enabled and enabled.index(stage) + 1 < len(enabled_ids)
+                enabled_ids[position + 1]
+                if position is not None and position + 1 < len(enabled_ids)
                 else None
             )
             mode = (
@@ -325,6 +329,11 @@ def _validate_editor_document(
         errors.append("flowId must match the requested flow")
     if not _is_bool(document.get("enabled")):
         errors.append("enabled must be boolean")
+    initial_stage = document.get("initialStage")
+    if initial_stage is not None and (
+        not isinstance(initial_stage, str) or not initial_stage.strip()
+    ):
+        errors.append("initialStage must be a string or null")
 
     stages = document.get("stages")
     pools = document.get("pools")
