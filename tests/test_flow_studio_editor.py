@@ -371,6 +371,34 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.get_json()["code"], "FLOW_NOT_FOUND")
 
+    def test_owner_cookie_session_allows_editor_get_and_missing_cookie_is_401(self):
+        from moments_auth import (
+            OwnerAuthError,
+            owner_session_digest,
+            require_owner,
+        )
+
+        app = Flask(__name__)
+        app.register_blueprint(
+            create_flow_studio_blueprint(
+                db_path=self.db_path,
+                owner_guard=require_owner,
+            )
+        )
+        client = app.test_client()
+        with patch("moments_auth._get_owner_token", lambda: "test-owner-token"):
+            anonymous = client.get("/api/flow-studio/editor/intimacy-v1")
+            self.assertEqual(anonymous.status_code, 401)
+            self.assertEqual(anonymous.get_json()["code"], "OWNER_AUTH_REQUIRED")
+            self.assertEqual(anonymous.headers["WWW-Authenticate"], "Bearer")
+            client.set_cookie("moments_owner", owner_session_digest("test-owner-token"))
+            authenticated = client.get("/api/flow-studio/editor/intimacy-v1")
+            self.assertEqual(authenticated.status_code, 200)
+            body = authenticated.get_json()
+            self.assertIn("document", body)
+            self.assertIn("editorRevision", body)
+            self.assertIn("runtime", body)
+
     def test_owner_auth_error_is_explicit_for_get_put_and_validate(self):
         from moments_auth import OwnerAuthError
 
