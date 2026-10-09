@@ -444,8 +444,7 @@ def _materialize_stage_order(document: dict[str, Any]) -> dict[str, Any]:
     result = _ensure_stage_transition_modes(document)
     stages = result.get("stages") or []
     enabled = [stage for stage in stages if stage.get("enabled") is True]
-    if result.get("initialStage") is None and enabled:
-        result["initialStage"] = enabled[0]["id"]
+    result["initialStage"] = enabled[0]["id"] if enabled else None
     enabled_ids = [stage["id"] for stage in enabled]
     for index, stage in enumerate(enabled):
         if stage.get("nextStageMode") == "sequence":
@@ -465,7 +464,7 @@ def compile_editor_document(
     Disabled editor objects remain in the editor document but are excluded from
     Runtime FlowConfig v1. Any such loss is reported explicitly.
     """
-    document = _ensure_stage_transition_modes(document)
+    document = _materialize_stage_order(_copy(document))
     runtime: dict[str, Any] = {
         "schemaVersion": RUNTIME_SCHEMA_VERSION,
         "flowId": document.get("flowId"),
