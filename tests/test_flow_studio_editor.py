@@ -7,7 +7,9 @@ from unittest.mock import patch
 
 from flask import Flask
 
+import flow_studio_editor
 from flow_studio_editor import create_flow_studio_blueprint
+from migrations.flow_studio_editor import MigrationError, migrate
 
 
 def _seed_runtime(db_path: str) -> dict:
@@ -116,6 +118,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.addCleanup(lambda: os.unlink(handle.name))
         self.db_path = handle.name
         self.runtime_raw = _seed_runtime(self.db_path)
+        migrate(self.db_path)
         app = Flask(__name__)
         app.register_blueprint(
             create_flow_studio_blueprint(
@@ -428,6 +431,156 @@ class FlowStudioEditorApiTests(unittest.TestCase):
             self.assertNotIn("document", response.get_json())
             self.assertNotIn("runtime", response.get_json())
 
+
+    def test_explicit_migration_is_idempotent_and_preserves_runtime_tables(self):
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        self.addCleanup(lambda: os.unlink(handle.name))
+        db_path = handle.name
+        _seed_runtime(db_path)
+        connection = sqlite3.connect(db_path)
+        connection.execute("CREATE TABLE chat_fixture (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute("INSERT INTO chat_fixture(value) VALUES (?)", ("keep",))
+        connection.commit()
+        before_hidden = connection.execute(
+            "SELECT flow_id, schema_version, enabled, config_json, version, created_at, updated_at "
+            "FROM hidden_flow_configs WHERE flow_id=?",
+            ("intimacy-v1",),
+        ).fetchone()
+        before_tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        connection.close()
+
+        first = migrate(db_path)
+        second = migrate(db_path)
+        self.assertTrue(first["created"])
+        self.assertFalse(second["created"])
+
+        connection = sqlite3.connect(db_path)
+        self.assertEqual(
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall(),
+            before_tables + [("flow_studio_editor_documents",)],
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT flow_id, schema_version, enabled, config_json, version, created_at, updated_at "
+                "FROM hidden_flow_configs WHERE flow_id=?",
+                ("intimacy-v1",),
+            ).fetchone(),
+            before_hidden,
+        )
+        self.assertEqual(
+            connection.execute("SELECT value FROM chat_fixture WHERE id=1").fetchone(),
+            ("keep",),
+        )
+        self.assertEqual(
+            [tuple(row[1:]) for row in connection.execute(
+                "PRAGMA table_info(flow_studio_editor_documents)"
+            ).fetchall()],
+            [
+                ("flow_id", "TEXT", 0, None, 1),
+                ("schema_version", "INTEGER", 1, None, 0),
+                ("document_json", "TEXT", 1, None, 0),
+                ("revision", "INTEGER", 1, None, 0),
+                ("created_at", "TEXT", 1, None, 0),
+                ("updated_at", "TEXT", 1, None, 0),
+            ],
+        )
+        connection.close()
+
+    def test_requests_never_create_schema_and_migration_failure_is_explicit(self):
+        handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        handle.close()
+        self.addCleanup(lambda: os.unlink(handle.name))
+        db_path = handle.name
+        _seed_runtime(db_path)
+
+        app = Flask(__name__)
+
+        def reject(_request):
+            from moments_auth import OwnerAuthError
+            raise OwnerAuthError("unauthorized", 401)
+
+        app.register_blueprint(
+            create_flow_studio_blueprint(db_path=db_path, owner_guard=reject)
+        )
+        client = app.test_client()
+        for response in (
+            client.get("/api/flow-studio/editor/intimacy-v1"),
+            client.put(
+                "/api/flow-studio/editor/intimacy-v1",
+                json={"expectedRevision": 0, "document": {}},
+            ),
+            client.post(
+                "/api/flow-studio/editor/intimacy-v1/validate",
+                json={"document": {}},
+            ),
+        ):
+            self.assertEqual(response.status_code, 401)
+        connection = sqlite3.connect(db_path)
+        self.assertIsNone(
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                ("flow_studio_editor_documents",),
+            ).fetchone()
+        )
+        connection.close()
+
+        migrate(db_path)
+        statements = []
+        original_connect = flow_studio_editor._connect
+
+        def traced_connect(path):
+            connection = original_connect(path)
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with patch("flow_studio_editor._connect", traced_connect):
+            authorized_app = Flask(__name__)
+            authorized_app.register_blueprint(
+                create_flow_studio_blueprint(
+                    db_path=db_path, owner_guard=lambda _request: None
+                )
+            )
+            self.assertEqual(
+                authorized_app.test_client().get(
+                    "/api/flow-studio/editor/intimacy-v1"
+                ).status_code,
+                200,
+            )
+        self.assertFalse(any("CREATE TABLE" in statement.upper() for statement in statements))
+
+        malformed = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        malformed.close()
+        self.addCleanup(lambda: os.unlink(malformed.name))
+        connection = sqlite3.connect(malformed.name)
+        connection.execute(
+            "CREATE TABLE flow_studio_editor_documents (flow_id TEXT PRIMARY KEY)"
+        )
+        connection.commit()
+        connection.close()
+        with self.assertRaises(MigrationError):
+            migrate(malformed.name)
+
+    def test_deploy_uses_explicit_migration_after_backup(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        deploy_source = open(
+            os.path.join(root, "scripts", "deploy-frontend.sh"),
+            encoding="utf-8",
+        ).read()
+        editor_source = open(
+            os.path.join(root, "flow_studio_editor.py"),
+            encoding="utf-8",
+        ).read()
+        backup_marker = 'bash "$ROOT/tools/backup.sh"'
+        migration_marker = '"$PYTHON" "$staging/migrations/flow_studio_editor.py"'
+        self.assertIn(migration_marker, deploy_source)
+        self.assertLess(deploy_source.index(backup_marker), deploy_source.index(migration_marker))
+        self.assertNotIn("@blueprint.before_request", editor_source)
+        self.assertNotIn("def _ensure_schema", editor_source)
 
 if __name__ == "__main__":
     unittest.main()
