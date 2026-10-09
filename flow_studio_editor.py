@@ -107,7 +107,10 @@ def _error(code: str, message: str, status: int, **extra: Any):
 
 
 def _auth_error(exc: OwnerAuthError):
-    return _error("OWNER_AUTH_REQUIRED", exc.message, exc.status_code)
+    response = _error("OWNER_AUTH_REQUIRED", exc.message, exc.status_code)
+    if exc.status_code == 401:
+        response.headers["WWW-Authenticate"] = "Bearer"
+    return response
 
 
 def _guard(owner_guard: Callable[[Any], None]):
