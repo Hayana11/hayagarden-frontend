@@ -120,7 +120,7 @@ const remoteSameField = {
 };
 const overlapping = mergeFlowStudioDocuments(mergeBase, localSameField, remoteSameField);
 assert.equal(overlapping.conflicts.length, 1);
-assert.match(overlapping.conflicts[0].path, /stages\\.s1\\.name/);
+assert.equal(overlapping.conflicts[0].path, 'stages.s1.name');
 assert.equal(
   mergeFlowStudioDocuments(mergeBase, localSameField, remoteSameField, 'remote').document.stages[0].name,
   '服务器同字段修改',
@@ -142,7 +142,6 @@ const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', impor
 const preview = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.tsx', import.meta.url), 'utf8');
 assert.match(formal, /createFlowStudioApiAdapter/);
 assert.doesNotMatch(formal, /createFlowStudioMockAdapter/);
-assert.match(preview, /backPath="\/dash\/chat"/);
 assert.match(preview, /backPath="\/dash\/chat"/);
 
 console.log('flow studio persistence, conflict, revision, race, and preview isolation checks passed');
