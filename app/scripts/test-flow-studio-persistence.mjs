@@ -144,4 +144,14 @@ assert.match(formal, /createFlowStudioApiAdapter/);
 assert.doesNotMatch(formal, /createFlowStudioMockAdapter/);
 assert.match(preview, /backPath="\/dash\/chat"/);
 
+const flowWorkspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
+const flowStyles = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.css', import.meta.url), 'utf8');
+const chatScreen = readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
+assert.match(flowWorkspace, /className=\"flow-studio-page dash-fullscreen-page dash-scroll-page\"/);
+assert.match(flowStyles, /height:100%;min-height:0;max-width:none;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch/);
+assert.match(flowStyles, /overscroll-behavior-y:contain;touch-action:pan-y/);
+assert.match(flowStyles, /safe-area-inset-bottom/);
+assert.match(chatScreen, /正式编辑器 · 服务器草稿/);
+assert.doesNotMatch(chatScreen, /正式编辑器 · 本地 Mock/);
+
 console.log('flow studio persistence, conflict, revision, race, and preview isolation checks passed');
