@@ -15,6 +15,7 @@ import secrets
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -43,11 +44,32 @@ _SETTINGS_LOCK = threading.Lock()
 _SETTINGS_CACHE: tuple[float, tuple[bool, int, int]] | None = None
 _BUDGET_LOCK = threading.Lock()
 _EVENT_TIMES: deque[float] = deque()
+_DROPPED_EVENTS = 0
 
 
 def _safe_code(value: Any, default: str = "unknown") -> str:
     text = _CODE_RE.sub("_", str(value or "").strip())[:80]
     return text or default
+
+
+def request_contains_private_guidance(
+    content: Any,
+    expected_block: str,
+) -> bool:
+    """Verify the exact private block is present in the final request carrier."""
+    expected = str(expected_block or "")
+    if not expected:
+        return False
+    if isinstance(content, str):
+        return expected in content
+    if isinstance(content, (list, tuple)):
+        for part in content:
+            if not isinstance(part, Mapping):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and expected in text:
+                return True
+    return False
 
 
 def _load_settings() -> tuple[bool, int, int]:
@@ -82,15 +104,19 @@ def _load_settings() -> tuple[bool, int, int]:
         return value
 
 
-def _take_budget(max_events: int) -> bool:
+def _take_budget(max_events: int) -> tuple[bool, int]:
+    global _DROPPED_EVENTS
     now = time.monotonic()
     with _BUDGET_LOCK:
         while _EVENT_TIMES and now - _EVENT_TIMES[0] >= 60.0:
             _EVENT_TIMES.popleft()
         if len(_EVENT_TIMES) >= max_events:
-            return False
+            _DROPPED_EVENTS += 1
+            return False, 0
+        dropped = _DROPPED_EVENTS
+        _DROPPED_EVENTS = 0
         _EVENT_TIMES.append(now)
-        return True
+        return True, dropped
 
 
 @dataclass
@@ -108,7 +134,10 @@ class HiddenFlowObservation:
         if not self.enabled or not self.turn_id:
             return
         try:
-            if not _take_budget(self.max_events_per_minute):
+            allowed, dropped_events = _take_budget(
+                self.max_events_per_minute,
+            )
+            if not allowed:
                 return
             now = _datetime.datetime.now(_datetime.timezone.utc)
             payload = {
@@ -121,10 +150,13 @@ class HiddenFlowObservation:
                 "gate_enabled": bool(self.gate_enabled),
                 "eligible": bool(self.eligible),
                 "observed_at": now.isoformat(timespec="seconds"),
+                "retention_days": int(self.retention_days),
                 "retention_until": (
                     now + _datetime.timedelta(days=self.retention_days)
                 ).isoformat(timespec="seconds"),
             }
+            if dropped_events:
+                payload["rate_limited_dropped_events"] = int(dropped_events)
             payload.update(fields)
             _LOGGER.info(json.dumps(
                 payload,
@@ -154,10 +186,23 @@ class HiddenFlowObservation:
             **({"error_code": _safe_code(error_code)} if error_code else {}),
         )
 
-    def record_request_attachment(self, *, attached: bool) -> None:
+    def record_request_attachment(
+        self,
+        *,
+        attached: bool,
+        expected_block_nonempty: bool = True,
+    ) -> None:
+        verified = bool(attached) and bool(expected_block_nonempty)
+        status = (
+            "verified"
+            if verified
+            else ("missing" if expected_block_nonempty else "empty")
+        )
         self._emit(
             "request_attachment",
             private_guidance_attached=bool(attached),
+            private_guidance_attachment_verified=verified,
+            attachment_status=status,
         )
 
     def record_control_parse(self, result: str) -> None:
@@ -207,8 +252,9 @@ def begin_turn(
 
 
 def reset_for_tests() -> None:
-    global _SETTINGS_CACHE
+    global _SETTINGS_CACHE, _DROPPED_EVENTS
     with _SETTINGS_LOCK:
         _SETTINGS_CACHE = None
     with _BUDGET_LOCK:
         _EVENT_TIMES.clear()
+        _DROPPED_EVENTS = 0

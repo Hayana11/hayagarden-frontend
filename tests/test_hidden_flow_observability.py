@@ -1,3 +1,4 @@
+import datetime
 import json
 import sqlite3
 import sys
@@ -128,9 +129,95 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                 self.assertGreater(payload["retention_until"], payload["observed_at"])
                 self.assertEqual(payload["available_config_count"], 1)
                 self.assertTrue(payload["private_guidance_nonempty"])
+                self.assertEqual(payload["retention_days"], 3)
                 self.assertNotIn("message_id", payload)
                 self.assertNotIn("user_message_id", payload)
                 self.assertNotIn("assistant_message_id", payload)
+
+    def test_default_retention_deadline_is_seven_days(self):
+        fake = self._fake_config_store(enabled=True, retention_days=7)
+        with mock.patch.dict(sys.modules, {"config_store": fake}):
+            with mock.patch.object(observability._LOGGER, "info") as info:
+                context = observability.begin_turn(
+                    provider="claude_code",
+                    turn_kind="hot",
+                    gate_enabled=True,
+                    eligible=True,
+                )
+                context.record_prepare(outcome="success")
+                payload = self._payloads(info.call_args_list)[0]
+                observed_at = datetime.datetime.fromisoformat(
+                    payload["observed_at"].replace("Z", "+00:00")
+                )
+                retention_until = datetime.datetime.fromisoformat(
+                    payload["retention_until"].replace("Z", "+00:00")
+                )
+                self.assertEqual(
+                    retention_until - observed_at,
+                    datetime.timedelta(days=7),
+                )
+                self.assertEqual(payload["retention_days"], 7)
+
+    def test_rate_limited_dropped_event_count_is_emitted(self):
+        fake = self._fake_config_store(enabled=True, max_events=1)
+        with mock.patch.dict(sys.modules, {"config_store": fake}):
+            with mock.patch.object(
+                observability.time,
+                "monotonic",
+                side_effect=[0.0, 0.0, 0.0, 61.0],
+            ):
+                with mock.patch.object(observability._LOGGER, "info") as info:
+                    context = observability.begin_turn(
+                        provider="claude_code",
+                        turn_kind="hot",
+                        gate_enabled=True,
+                        eligible=True,
+                    )
+                    context.record_prepare(outcome="success")
+                    context.record_request_attachment(attached=True)
+                    context.record_control_parse("none")
+                    payloads = self._payloads(info.call_args_list)
+                    self.assertEqual(len(payloads), 2)
+                    self.assertEqual(
+                        payloads[-1]["rate_limited_dropped_events"],
+                        1,
+                    )
+
+    def test_request_attachment_is_verified_against_final_carrier(self):
+        block = "<private-guidance>opaque</private-guidance>"
+        self.assertTrue(
+            observability.request_contains_private_guidance(
+                "user\n\n" + block,
+                block,
+            )
+        )
+        self.assertTrue(
+            observability.request_contains_private_guidance(
+                [{"type": "text", "text": "user\n\n" + block}],
+                block,
+            )
+        )
+        self.assertFalse(
+            observability.request_contains_private_guidance("user", block)
+        )
+        fake = self._fake_config_store(enabled=True)
+        with mock.patch.dict(sys.modules, {"config_store": fake}):
+            with mock.patch.object(observability._LOGGER, "info") as info:
+                context = observability.begin_turn(
+                    provider="claude_code",
+                    turn_kind="hot",
+                    gate_enabled=True,
+                    eligible=True,
+                )
+                context.record_request_attachment(
+                    attached=True,
+                    expected_block_nonempty=True,
+                )
+                payload = self._payloads(info.call_args_list)[0]
+                self.assertTrue(
+                    payload["private_guidance_attachment_verified"]
+                )
+                self.assertEqual(payload["attachment_status"], "verified")
 
     def test_prepare_success_failure_and_ineligible_are_classified(self):
         fake = self._fake_config_store(enabled=True)
@@ -171,7 +258,10 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                     available_config_count=1,
                     private_guidance_nonempty=True,
                 )
-                context.record_request_attachment(attached=True)
+                context.record_request_attachment(
+                    attached=True,
+                    expected_block_nonempty=True,
+                )
                 context.record_control_parse("none")
                 context.record_transition(created=False)
                 context.record_control_parse("valid")

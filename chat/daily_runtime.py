@@ -6955,12 +6955,25 @@ def ensure_resident_and_stream(
 
         if _hidden_flow_runtime_enabled(plan):
             from chat.hidden_flow.runtime import render_plan_request
-            before_hidden_flow_content = content
+            from chat.hidden_flow.observability import (
+                request_contains_private_guidance,
+            )
             content = render_plan_request(plan.hidden_flow_plan, content)
             observation = getattr(plan, "hidden_flow_observation", None)
             if observation is not None:
+                private_block = str(
+                    getattr(
+                        plan.hidden_flow_plan,
+                        "private_request_block",
+                        "",
+                    ) or ""
+                )
                 observation.record_request_attachment(
-                    attached=content is not before_hidden_flow_content,
+                    attached=request_contains_private_guidance(
+                        content,
+                        private_block,
+                    ),
+                    expected_block_nonempty=bool(private_block),
                 )
 
         _bind_context_install_render_receipt(plan.assembly, content)
