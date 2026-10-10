@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from chat.hidden_flow import observability
-from chat.hidden_flow.config import DEFAULT_FLOW_CONFIG, normalize_flow_config
+from chat.hidden_flow.config import normalize_flow_config
 from chat.hidden_flow.control import classify_hidden_flow_control
 from chat.hidden_flow.engine import apply_flow_control, start_flow
 from chat.hidden_flow.runtime import (
@@ -46,6 +46,38 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
     @staticmethod
     def _payloads(calls):
         return [json.loads(call.args[0]) for call in calls]
+
+    @staticmethod
+    def _enabled_config():
+        return {
+            "schemaVersion": 1,
+            "flowId": "test-flow",
+            "enabled": True,
+            "initialStage": "start",
+            "pools": [{
+                "id": "pool",
+                "enabled": True,
+                "drawMode": "turn",
+                "drawCount": 1,
+                "entries": [{"id": "entry-1", "text": "safe diagnostic entry"}],
+            }],
+            "stages": [{
+                "id": "start",
+                "enabled": True,
+                "minTurns": 1,
+                "repeatMinTurns": 1,
+                "nextStage": None,
+                "terminal": True,
+                "poolIds": ["pool"],
+            }],
+            "cues": [{
+                "id": "cue-1",
+                "key": "safe",
+                "enabled": True,
+                "poolIds": ["pool"],
+            }],
+        }
+
 
     def test_gate_closed_emits_nothing(self):
         fake = self._fake_config_store(enabled=False)
@@ -148,6 +180,66 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                 self.assertNotIn("token", rendered.lower())
                 self.assertNotIn("cookie", rendered.lower())
 
+    def test_daily_prepare_path_reports_success_and_failure(self):
+        from chat import daily_runtime
+
+        def get_bool(key, default=False):
+            if key in {"HIDDEN_FLOW_ENGINE_ENABLED", "HIDDEN_FLOW_OBSERVABILITY_ENABLED"}:
+                return True
+            return default
+
+        def get_int(key, default=0):
+            return 120 if "MAX_EVENTS" in key else 7
+
+        with mock.patch.object(daily_runtime.config_store, "get_bool", side_effect=get_bool):
+            with mock.patch.object(daily_runtime.config_store, "get_int", side_effect=get_int):
+                with mock.patch.object(observability._LOGGER, "info") as info:
+                    fake_plan = types.SimpleNamespace(
+                        enabled=True,
+                        eligible=True,
+                        available_configs=((object(), 1),),
+                        private_request_block="opaque-private-guidance",
+                    )
+                    with mock.patch(
+                        "chat.hidden_flow.runtime.prepare_hidden_flow_turn",
+                        return_value=fake_plan,
+                    ):
+                        sink = []
+                        result = daily_runtime._prepare_hidden_flow_plan(
+                            provider="claude_code",
+                            turn_kind="hot",
+                            chat_id="diagnostic",
+                            user_message_id=1,
+                            db_path=None,
+                            observation_sink=sink,
+                        )
+                    self.assertIs(result, fake_plan)
+                    self.assertEqual(len(sink), 1)
+                    self.assertEqual(
+                        json.loads(info.call_args.args[0])["prepare"],
+                        "success",
+                    )
+                observability.reset_for_tests()
+                with mock.patch.object(observability._LOGGER, "info") as info:
+                    with mock.patch(
+                        "chat.hidden_flow.runtime.prepare_hidden_flow_turn",
+                        side_effect=RuntimeError("isolated failure"),
+                    ):
+                        sink = []
+                        result = daily_runtime._prepare_hidden_flow_plan(
+                            provider="claude_code",
+                            turn_kind="hot",
+                            chat_id="diagnostic",
+                            user_message_id=2,
+                            db_path=None,
+                            observation_sink=sink,
+                        )
+                    self.assertFalse(result.enabled)
+                    self.assertEqual(
+                        json.loads(info.call_args.args[0])["prepare"],
+                        "failed",
+                    )
+
     def test_control_classification(self):
         self.assertEqual(classify_hidden_flow_control("", expected_flow_id=None), "none")
         self.assertEqual(
@@ -171,7 +263,8 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
         )
 
     def test_started_flow_without_advance_stays_in_stage(self):
-        config = normalize_flow_config(DEFAULT_FLOW_CONFIG)
+        raw_config = self._enabled_config()
+        config = normalize_flow_config(raw_config)
         self.assertIsNotNone(config)
         control = FlowControl(flow_id=config.flow_id, action="start", keys=())
         state = start_flow(config, control, started_at="diagnostic", engine_enabled=True)
@@ -181,7 +274,8 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
         self.assertEqual(continued.stage_turn, state.stage_turn + 1)
 
     def test_snapshot_outcomes_and_cas_conflict_are_observable(self):
-        config = normalize_flow_config(DEFAULT_FLOW_CONFIG)
+        raw_config = self._enabled_config()
+        config = normalize_flow_config(raw_config)
         self.assertIsNotNone(config)
         with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
             db = str(Path(tmp) / "runtime.sqlite3")
@@ -194,7 +288,7 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                         config.flow_id,
                         config.schema_version,
                         1,
-                        json.dumps(DEFAULT_FLOW_CONFIG, ensure_ascii=False),
+                        json.dumps(raw_config, ensure_ascii=False),
                         1,
                         now,
                         now,
