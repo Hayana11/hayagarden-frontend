@@ -64,6 +64,31 @@ def parse_hidden_flow_control(raw: str, *, expected_flow_id: Optional[str] = Non
     return FlowControl(flow_id=flow_id, action=action, keys=keys)
 
 
+def classify_hidden_flow_control(
+    raw: str,
+    *,
+    expected_flow_id: Optional[str] = None,
+) -> str:
+    """Classify the control without retaining or returning its raw text."""
+    text = str(raw or "")
+    if not text.strip():
+        return "none"
+    if _CONTROL_NAME not in text.casefold():
+        return "none"
+    try:
+        parsed = parse_hidden_flow_control(text)
+        if parsed is None:
+            return "invalid"
+        if (
+            expected_flow_id is not None
+            and parsed.flow_id != str(expected_flow_id).strip()
+        ):
+            return "flow_id_mismatch"
+        return "valid"
+    except Exception:
+        return "unknown"
+
+
 def sanitize_hidden_flow_text(raw: str) -> str:
     """Remove the same private protocol accepted by the live stream filter."""
     from .stream_filter import HiddenFlowStreamFilter
