@@ -2820,6 +2820,7 @@ def _commit_production_context_receipt(
             measurement_semantics=str(context_plan.measurement_semantics),
             installed_source_watermark=cursor_after,
             members=members,
+            context_plan=context_plan,
         )
         conn = dc._connect(plan.db_path)
         try:
@@ -3784,6 +3785,120 @@ def _assemble_plan(
             'context_plan_hot_pending': True,
         })
     return daily_plan
+
+
+
+def prepare_rewrite_context_plan(
+    *,
+    user_message_id: int,
+    chat_id: str = DEFAULT_CHAT_ID,
+    request_id: Optional[str] = None,
+    rewrite_id: str = '',
+    db_path: Optional[str] = None,
+    static_system: str = '',
+    static_system_sha256: str = '',
+    persona_sha256: str = '',
+    provider: str = 'claude_code',
+    model: str = '',
+    user_content: str = '',
+) -> DailyTurnPlan:
+    """Build the rewrite view with the existing canonical ContextPlan path.
+
+    This is intentionally lease-free and does not touch the resident. Rewrite
+    staging owns activation and lifecycle; this helper only reuses the same
+    existing assemble-plan, canonical plan, and projection path used by
+    cold/respawn turns.
+    """
+    if not _context_plan_consumer_enabled():
+        raise DailyRuntimeError(
+            'rewrite ContextPlan consumer is disabled',
+            error_code='context_plan_consumer_disabled',
+            retryable=False,
+        )
+    message_id = int(user_message_id or 0)
+    if message_id <= 0:
+        raise DailyRuntimeError(
+            'rewrite ContextPlan current request is missing',
+            error_code='context_plan_current_request_missing',
+            retryable=False,
+        )
+    conn = dc._connect(db_path)
+    try:
+        rows = conn.execute(
+            'SELECT context_id, context_epoch, resident_generation '
+            'FROM daily_message_contexts WHERE message_id=?',
+            (message_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) != 1:
+        raise DailyRuntimeError(
+            'rewrite ContextPlan current request mapping is not exact',
+            error_code='context_plan_current_request_mapping_ambiguous',
+            retryable=False,
+        )
+    mapping = rows[0]
+    context_id = int(mapping['context_id'])
+    context_epoch = int(mapping['context_epoch'])
+    resident_generation = int(mapping['resident_generation'])
+    refreshed = dc.get_daily_context_by_id(context_id, db_path=db_path)
+    if not refreshed:
+        raise DailyRuntimeError(
+            'rewrite ContextPlan daily context is unavailable',
+            error_code='context_plan_context_unavailable',
+            retryable=False,
+        )
+    if (
+        int(refreshed.get('context_epoch') or -1) != context_epoch
+        or int(refreshed.get('resident_generation') or -1) != resident_generation
+    ):
+        raise DailyRuntimeError(
+            'rewrite ContextPlan context identity changed',
+            error_code='context_plan_context_identity_changed',
+            retryable=False,
+        )
+    user_row = _fetch_user_message(message_id, db_path=db_path)
+    created_at = _parse_message_created_at(user_row.get('created_at') or '')
+    plan = _assemble_plan(
+        req_id=str(request_id or uuid.uuid4()),
+        owner='rewrite:%s' % str(rewrite_id or message_id),
+        chat_id=str(chat_id or DEFAULT_CHAT_ID),
+        local_day=str(refreshed.get('local_day') or chat_day_for_timestamp(created_at)),
+        refreshed=refreshed,
+        user_message_id=message_id,
+        user_content=str(user_content or user_row.get('content') or ''),
+        is_cold=True,
+        is_respawn=False,
+        turn_kind='rewrite',
+        cursor_before=dc.get_resident_history_cursor(
+            context_id,
+            resident_generation,
+            db_path=db_path,
+        ),
+        resident=None,
+        static_system=str(static_system or ''),
+        static_system_sha256=str(static_system_sha256 or _sha256_text(static_system)),
+        persona_sha256=str(persona_sha256 or ''),
+        provider=str(provider or 'claude_code'),
+        model=str(model or ''),
+        db_path=db_path,
+        lease_acquired=False,
+        turn_lease={},
+        user_created_at=created_at,
+        origin_local_day=str(refreshed.get('local_day') or ''),
+        turn_started_at=created_at,
+    )
+    if getattr(plan, 'continuity_plan', None) is None:
+        raise DailyRuntimeError(
+            'rewrite ContextPlan was not installed',
+            error_code='context_plan_rewrite_not_installed',
+            retryable=False,
+        )
+    plan.manifest.update({
+        'context_plan_rewrite': True,
+        'context_plan_rewrite_id': str(rewrite_id or ''),
+    })
+    return plan
 
 
 def prepare_daily_turn(

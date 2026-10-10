@@ -17,6 +17,15 @@ from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 CONTEXT_RECEIPT_SCHEMA_VERSION = 'context_receipt_v1'
+INSTALL_PROOF_VERSION = 'context_receipt_install_proof_v1'
+INSTALL_PROOF_OK = 'SAFE_FORK_REUSE'
+INSTALL_PROOF_REQUIRED = 'context_receipt_install_proof_required'
+INSTALL_PROOF_MISSING = 'context_receipt_install_proof_missing'
+INSTALL_PROOF_INVALID = 'context_receipt_install_proof_invalid'
+INSTALL_PROOF_BOUNDARY_MISMATCH = 'context_receipt_install_proof_boundary_mismatch'
+INSTALL_PROOF_PARTIAL_REPRESENTATION = 'context_receipt_install_proof_partial_representation'
+INSTALL_PROOF_MISMATCH = 'context_receipt_install_proof_mismatch'
+INSTALL_PROOF_RUNTIME_IDENTITY_MISMATCH = 'context_receipt_install_proof_runtime_identity_mismatch'
 RECEIPT_RESULT_INSTALLED = 'installed'
 RECEIPT_RESULT_SUPERSEDED = 'superseded'
 
@@ -100,6 +109,9 @@ class ContextReceipt:
     committed_at: str = ''
     updated_at: str = ''
     superseded_by_generation: Optional[int] = None
+    # Canonical metadata-only ContextPlan install proof. Empty is retained for
+    # legacy receipts; the shared rewrite verifier fails closed when absent.
+    install_proof: str = ''
 
     @classmethod
     def build(
@@ -119,10 +131,18 @@ class ContextReceipt:
         measurement_semantics: str,
         installed_source_watermark: int,
         members: Iterable[ContextReceiptMember],
+        context_plan: Any = None,
+        install_proof: str = '',
         committed_at: str = '',
         updated_at: str = '',
     ) -> 'ContextReceipt':
         normalized = _normalize_members(members)
+        if context_plan is not None:
+            computed_proof = canonical_install_proof(context_plan)
+            if install_proof and str(install_proof) != computed_proof:
+                raise ValueError('install_proof does not match context_plan')
+            install_proof = computed_proof
+        install_proof = _normalize_install_proof(install_proof)
         now = _utc_now() if not committed_at else str(committed_at)
         return cls(
             context_id=int(context_id),
@@ -143,6 +163,7 @@ class ContextReceipt:
             result=RECEIPT_RESULT_INSTALLED,
             committed_at=now,
             updated_at=str(updated_at or now),
+            install_proof=install_proof,
         )
 
 
@@ -152,6 +173,307 @@ def _utc_now() -> str:
 
 def _canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def _context_plan_member_identity(member: Any) -> dict[str, Any]:
+    """Use the canonical ContextPlan member identity for receipt proofs."""
+    from continuity.context_plan import _member_identity
+    return dict(_member_identity(member))
+
+
+def _context_plan_representation_payload(representation: Any) -> dict[str, Any]:
+    return {
+        'representation_id': str(getattr(representation, 'representation_id', '') or ''),
+        'kind': str(getattr(representation, 'kind', '') or ''),
+        'source_members': [
+            _context_plan_member_identity(member)
+            for member in tuple(getattr(representation, 'source_members', ()) or ())
+        ],
+        'source_refs': [
+            str(ref) for ref in tuple(getattr(representation, 'source_refs', ()) or ())
+        ],
+        'source_revisions': [
+            str(revision)
+            for revision in tuple(getattr(representation, 'source_revisions', ()) or ())
+        ],
+        'source_hash': str(getattr(representation, 'source_hash', '') or ''),
+        'estimated_tokens': int(getattr(representation, 'estimated_tokens', 0) or 0),
+        'chunk_id': getattr(representation, 'chunk_id', None),
+        'candidate_id': getattr(representation, 'candidate_id', None),
+        'snapshot_id': getattr(representation, 'snapshot_id', None),
+        'provenance': [
+            list(item) if isinstance(item, (tuple, list)) else item
+            for item in tuple(getattr(representation, 'provenance', ()) or ())
+        ],
+    }
+
+
+def _context_plan_section_payload(section: Any) -> dict[str, Any]:
+    return {
+        'kind': str(getattr(section, 'kind', '') or ''),
+        'source_ref': str(getattr(section, 'source_ref', '') or ''),
+        'content_hash': str(getattr(section, 'content_hash', '') or ''),
+        'estimated_tokens': int(getattr(section, 'estimated_tokens', 0) or 0),
+        'representation_id': getattr(section, 'representation_id', None),
+    }
+
+
+def canonical_install_proof(context_plan: Any) -> str:
+    """Serialize provider-visible ContextPlan identity, excluding current_request.
+
+    This is a projection only: ContextPlan remains the sole planner/source
+    selector. Bodies and provider payloads never enter the durable proof.
+    """
+    if context_plan is None:
+        raise ValueError('context_plan is required')
+    representations = tuple(getattr(context_plan, 'representations', ()) or ())
+    representation_payloads = tuple(
+        _context_plan_representation_payload(representation)
+        for representation in representations
+    )
+    selected_raw_source_seqs = sorted({
+        int(member.get('seq'))
+        for representation in representation_payloads
+        if str(representation.get('kind') or '') == 'raw'
+        for member in tuple(representation.get('source_members') or ())
+        if member.get('seq') is not None
+    })
+    sections = tuple(
+        section for section in tuple(getattr(context_plan, 'ordered_sections', ()) or ())
+        if str(getattr(section, 'kind', '') or '') != 'current_request'
+    )
+    policy = getattr(context_plan, 'budget_policy', None)
+    payload = {
+        'version': INSTALL_PROOF_VERSION,
+        'measurement_semantics': str(
+            getattr(context_plan, 'measurement_semantics', '') or ''
+        ),
+        'budget_policy_version': str(
+            getattr(context_plan, 'budget_policy_version', '') or ''
+        ),
+        'budget_policy': ({
+            'token_budget': int(policy.token_budget),
+            'reserve_budget': int(policy.reserve_budget),
+            'recent_raw_target': int(policy.recent_raw_target),
+        } if policy is not None else None),
+        'budget_status': str(getattr(context_plan, 'budget_status', '') or ''),
+        'recent_raw_source_seqs': selected_raw_source_seqs,
+        'representations': list(representation_payloads),
+        'ordered_sections': [
+            _context_plan_section_payload(section) for section in sections
+        ],
+    }
+    return _canonical(payload)
+
+
+def _normalize_install_proof(value: object) -> str:
+    if value is None or value == '':
+        return ''
+    if not isinstance(value, str):
+        raise ValueError('install_proof must be canonical JSON text')
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('install_proof is not valid JSON') from exc
+    if not isinstance(parsed, dict) or parsed.get('version') != INSTALL_PROOF_VERSION:
+        raise ValueError('install_proof version is unsupported')
+    canonical = _canonical(parsed)
+    if canonical != value:
+        raise ValueError('install_proof is not canonical JSON')
+    return canonical
+
+
+def _source_ref_turn_ids(source_ref: object) -> Optional[tuple[int, int]]:
+    parts = str(source_ref or '').split(':')
+    if len(parts) != 3 or parts[0] != 'turn':
+        return None
+    try:
+        user_id, assistant_id = int(parts[1]), int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    if user_id <= 0 or assistant_id <= 0:
+        return None
+    return user_id, assistant_id
+
+
+def _member_is_prefix(
+    member: Mapping[str, Any],
+    *,
+    fork_boundary_message_id: int,
+    rewrite_user_message_id: int,
+) -> bool:
+    ids = _source_ref_turn_ids(member.get('source_ref'))
+    return bool(
+        ids is not None
+        and int(ids[1]) <= int(fork_boundary_message_id)
+        and int(ids[0]) < int(rewrite_user_message_id)
+    )
+
+
+def _representation_prefix_flags(
+    representation: Mapping[str, Any],
+    *,
+    fork_boundary_message_id: int,
+    rewrite_user_message_id: int,
+) -> tuple[bool, ...]:
+    members = tuple(representation.get('source_members') or ())
+    if not members:
+        raise ValueError('representation source_members are missing')
+    if any(not isinstance(member, Mapping) for member in members):
+        raise ValueError('representation source_members are invalid')
+    return tuple(
+        _member_is_prefix(
+            member,
+            fork_boundary_message_id=fork_boundary_message_id,
+            rewrite_user_message_id=rewrite_user_message_id,
+        )
+        for member in members
+    )
+
+
+def _prefix_install_proof(
+    proof: Mapping[str, Any],
+    *,
+    fork_boundary_message_id: int,
+    rewrite_user_message_id: int,
+    reject_post_boundary: bool,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Project only whole representations; never retain a partial one."""
+    representations = tuple(proof.get('representations') or ())
+    kept: list[dict[str, Any]] = []
+    for representation in representations:
+        if not isinstance(representation, Mapping):
+            return None, INSTALL_PROOF_INVALID
+        try:
+            flags = _representation_prefix_flags(
+                representation,
+                fork_boundary_message_id=fork_boundary_message_id,
+                rewrite_user_message_id=rewrite_user_message_id,
+            )
+        except ValueError:
+            return None, INSTALL_PROOF_INVALID
+        if all(flags):
+            kept.append(dict(representation))
+        elif any(flags):
+            return None, INSTALL_PROOF_PARTIAL_REPRESENTATION
+        elif reject_post_boundary:
+            return None, INSTALL_PROOF_BOUNDARY_MISMATCH
+
+    kept_ids = {
+        str(item.get('representation_id') or '') for item in kept
+    }
+    sections: list[dict[str, Any]] = []
+    for section in tuple(proof.get('ordered_sections') or ()):
+        if not isinstance(section, Mapping):
+            return None, INSTALL_PROOF_INVALID
+        if str(section.get('kind') or '') == 'current_request':
+            return None, INSTALL_PROOF_INVALID
+        representation_id = section.get('representation_id')
+        if representation_id is not None and str(representation_id) not in kept_ids:
+            continue
+        sections.append(dict(section))
+
+    projected = dict(proof)
+    projected['representations'] = kept
+    projected['ordered_sections'] = sections
+    projected['recent_raw_source_seqs'] = sorted({
+        int(member['seq'])
+        for representation in kept
+        if str(representation.get('kind') or '') == 'raw'
+        for member in tuple(representation.get('source_members') or ())
+        if isinstance(member, Mapping) and member.get('seq') is not None
+    })
+    return projected, ''
+
+
+def verify_install_proof(
+    receipt: Any,
+    context_plan: Any,
+    *,
+    fork_boundary_message_id: int,
+    rewrite_user_message_id: int,
+    runtime_identity: Optional[Mapping[str, Any]] = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Shared fail-closed proof verifier for native fork reuse."""
+    proof_meta: dict[str, Any] = {}
+    if context_plan is None:
+        return False, INSTALL_PROOF_REQUIRED, proof_meta
+    if not bool(getattr(context_plan, 'valid', False)):
+        return False, INSTALL_PROOF_INVALID, proof_meta
+    raw_receipt_proof = (
+        str(getattr(receipt, 'install_proof', '') or '') if receipt else ''
+    )
+    if not raw_receipt_proof:
+        return False, INSTALL_PROOF_MISSING, proof_meta
+    try:
+        receipt_proof = json.loads(_normalize_install_proof(raw_receipt_proof))
+        expected_raw = canonical_install_proof(context_plan)
+        expected_proof = json.loads(expected_raw)
+        expected_prefix, expected_reason = _prefix_install_proof(
+            expected_proof,
+            fork_boundary_message_id=int(fork_boundary_message_id),
+            rewrite_user_message_id=int(rewrite_user_message_id),
+            reject_post_boundary=True,
+        )
+        if expected_prefix is None:
+            return False, expected_reason or INSTALL_PROOF_BOUNDARY_MISMATCH, proof_meta
+        installed_prefix, installed_reason = _prefix_install_proof(
+            receipt_proof,
+            fork_boundary_message_id=int(fork_boundary_message_id),
+            rewrite_user_message_id=int(rewrite_user_message_id),
+            reject_post_boundary=False,
+        )
+        if installed_prefix is None:
+            return False, installed_reason or INSTALL_PROOF_INVALID, proof_meta
+        if _canonical(installed_prefix) != _canonical(expected_prefix):
+            return False, INSTALL_PROOF_MISMATCH, proof_meta
+        runtime = dict(runtime_identity or {})
+        if runtime:
+            expected_static = str(runtime.get('static_system_sha256') or '')
+            invariant_sections = tuple(
+                section for section in (expected_prefix.get('ordered_sections') or ())
+                if str(section.get('kind') or '') == 'invariant_system'
+            )
+            if (
+                not expected_static
+                or len(invariant_sections) != 1
+                or str(invariant_sections[0].get('content_hash') or '')
+                    != expected_static
+                or str(getattr(receipt, 'provider', '') or '')
+                    != str(runtime.get('provider') or '')
+                or str(getattr(receipt, 'model_identity', '') or '')
+                    != str(runtime.get('model') or '')
+                or str(getattr(receipt, 'session_id', '') or '')
+                    != str(runtime.get('session_id') or '')
+                or int(getattr(receipt, 'context_id', -1))
+                    != int(runtime.get('context_id'))
+                or int(getattr(receipt, 'context_epoch', -1))
+                    != int(runtime.get('context_epoch'))
+                or int(getattr(receipt, 'resident_generation', -1))
+                    != int(runtime.get('resident_generation'))
+            ):
+                return False, INSTALL_PROOF_RUNTIME_IDENTITY_MISMATCH, proof_meta
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return False, INSTALL_PROOF_INVALID, proof_meta
+
+    proof_meta.update({
+        'status': INSTALL_PROOF_OK,
+        'install_proof_version': INSTALL_PROOF_VERSION,
+        'install_proof_hash': hashlib.sha256(
+            _canonical(expected_prefix).encode('utf-8')
+        ).hexdigest(),
+        'receipt_install_proof_hash': hashlib.sha256(
+            raw_receipt_proof.encode('utf-8')
+        ).hexdigest(),
+        'representation_count': len(expected_prefix.get('representations') or ()),
+        'fixed_section_count': sum(
+            1 for section in (expected_prefix.get('ordered_sections') or ())
+            if str(section.get('kind') or '') in {
+                'invariant_system', 'accepted_state', 'accepted_open_loops',
+            }
+        ),
+    })
+    return True, '', proof_meta
 
 
 def installed_membership_hash(
@@ -239,6 +561,7 @@ def _validate_receipt(receipt: ContextReceipt) -> None:
         receipt.superseded_by_generation is not None
     ):
         raise ValueError('installed receipt cannot have superseded target')
+    _normalize_install_proof(receipt.install_proof)
 
 
 def _receipt_key(receipt: ContextReceipt) -> tuple[int, int, int]:
@@ -268,6 +591,7 @@ def _receipt_proof(receipt: ContextReceipt) -> tuple[Any, ...]:
             int(receipt.superseded_by_generation)
             if receipt.superseded_by_generation is not None else None
         ),
+        receipt.install_proof,
     )
 
 
@@ -312,6 +636,7 @@ def _receipt_insert_values(receipt: ContextReceipt) -> tuple[Any, ...]:
             int(receipt.superseded_by_generation)
             if receipt.superseded_by_generation is not None else None
         ),
+        receipt.install_proof,
     )
 
 
@@ -339,6 +664,7 @@ def ensure_context_receipt_schema(conn: sqlite3.Connection) -> None:
             committed_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             superseded_by_generation INTEGER NULL,
+            install_proof TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (context_id, context_epoch, resident_generation)
         );
 
@@ -376,6 +702,13 @@ def ensure_context_receipt_schema(conn: sqlite3.Connection) -> None:
             ON context_receipts(session_id);
         '''
     )
+    columns = {
+        row[1] for row in conn.execute('PRAGMA table_info(context_receipts)')
+    }
+    if 'install_proof' not in columns:
+        conn.execute(
+            "ALTER TABLE context_receipts ADD COLUMN install_proof TEXT NOT NULL DEFAULT ''"
+        )
 
 
 @contextmanager
@@ -413,6 +746,7 @@ def _row_to_receipt(row: sqlite3.Row | tuple[Any, ...]) -> ContextReceipt:
             'budget_policy_version', 'measurement_semantics', 'membership_hash',
             'installed_source_watermark', 'receipt_revision', 'result',
             'committed_at', 'updated_at', 'superseded_by_generation',
+            'install_proof',
         )
         data = dict(zip(columns, row))
     return ContextReceipt(
@@ -438,6 +772,7 @@ def _row_to_receipt(row: sqlite3.Row | tuple[Any, ...]) -> ContextReceipt:
             int(data['superseded_by_generation'])
             if data['superseded_by_generation'] is not None else None
         ),
+        install_proof=_normalize_install_proof(data.get('install_proof', '') or ''),
     )
 
 
@@ -482,7 +817,8 @@ def get_receipt(
                   process_generation, plan_id, plan_hash,
                   budget_policy_version, measurement_semantics, membership_hash,
                   installed_source_watermark, receipt_revision, result,
-                  committed_at, updated_at, superseded_by_generation
+                  committed_at, updated_at, superseded_by_generation,
+                  install_proof
            FROM context_receipts
            WHERE context_id=? AND context_epoch=? AND resident_generation=?''',
         (int(context_id), int(context_epoch), int(resident_generation)),
@@ -529,7 +865,8 @@ def create_receipt(
                       process_generation, plan_id, plan_hash,
                       budget_policy_version, measurement_semantics, membership_hash,
                       installed_source_watermark, receipt_revision, result,
-                      committed_at, updated_at, superseded_by_generation
+                      committed_at, updated_at, superseded_by_generation,
+                      install_proof
                FROM context_receipts
                WHERE context_id=? AND context_epoch=? AND resident_generation=?''',
             key,
@@ -557,8 +894,9 @@ def create_receipt(
                    process_generation, plan_id, plan_hash,
                    budget_policy_version, measurement_semantics, membership_hash,
                    installed_source_watermark, receipt_revision, result,
-                   committed_at, updated_at, superseded_by_generation
-               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                   committed_at, updated_at, superseded_by_generation,
+                   install_proof
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             _receipt_insert_values(receipt),
         )
         conn.executemany(
@@ -644,7 +982,7 @@ def hot_advance_receipt(
                    budget_policy_version=?, measurement_semantics=?,
                    membership_hash=?, installed_source_watermark=?,
                    receipt_revision=?, result=?, committed_at=?, updated_at=?,
-                   superseded_by_generation=?
+                   superseded_by_generation=?, install_proof=?
                WHERE context_id=? AND context_epoch=? AND resident_generation=?
                  AND receipt_revision=?''',
             (
@@ -655,7 +993,7 @@ def hot_advance_receipt(
                 updated.membership_hash, int(updated.installed_source_watermark),
                 int(updated.receipt_revision), updated.result,
                 updated.committed_at, updated.updated_at,
-                updated.superseded_by_generation,
+                updated.superseded_by_generation, updated.install_proof,
                 *key, int(expected_receipt_revision),
             ),
         )
@@ -736,11 +1074,21 @@ def mark_superseded(
 
 __all__ = [
     'CONTEXT_RECEIPT_SCHEMA_VERSION',
+    'INSTALL_PROOF_VERSION',
+    'INSTALL_PROOF_OK',
+    'INSTALL_PROOF_REQUIRED',
+    'INSTALL_PROOF_MISSING',
+    'INSTALL_PROOF_INVALID',
+    'INSTALL_PROOF_BOUNDARY_MISMATCH',
+    'INSTALL_PROOF_PARTIAL_REPRESENTATION',
+    'INSTALL_PROOF_MISMATCH',
+    'INSTALL_PROOF_RUNTIME_IDENTITY_MISMATCH',
     'RECEIPT_RESULT_INSTALLED',
     'RECEIPT_RESULT_SUPERSEDED',
     'ContextReceipt',
     'ContextReceiptConflict',
     'ContextReceiptMember',
+    'canonical_install_proof',
     'create_receipt',
     'ensure_context_receipt_schema',
     'get_receipt',
@@ -748,4 +1096,5 @@ __all__ = [
     'hot_advance_receipt',
     'installed_membership_hash',
     'mark_superseded',
+    'verify_install_proof',
 ]

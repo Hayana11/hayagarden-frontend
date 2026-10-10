@@ -46,6 +46,7 @@ REASON_CHILD_RESUME_FAILED = 'child_resume_failed'
 REASON_CHILD_HEALTH_FAILED = 'child_health_failed'
 REASON_RESOLVER_ERROR = 'resolver_error'
 REASON_SOURCE_MISSING = 'source_missing'
+REASON_RUNTIME_IDENTITY_MISMATCH = 'runtime_identity_mismatch'
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class NativeForkPlan:
     tool_profile: str = ''
     static_system_kind: str = ''
     mapping_provenance: dict[str, Any] = field(default_factory=dict)
+    context_receipt_proof: dict[str, Any] = field(default_factory=dict)
 
     def observability(self) -> dict[str, Any]:
         mode = MODE_NATIVE if self.eligible else MODE_COLD
@@ -78,6 +80,17 @@ class NativeForkPlan:
             out['rewrite_cache_tool_profile'] = self.tool_profile
         if self.static_system_kind:
             out['rewrite_cache_static_system_kind'] = self.static_system_kind
+        for key in (
+            'status',
+            'install_proof_version',
+            'install_proof_hash',
+            'receipt_install_proof_hash',
+            'representation_count',
+            'fixed_section_count',
+        ):
+            value = self.context_receipt_proof.get(key)
+            if value is not None:
+                out['rewrite_cache_' + key] = value
         return out
 
 
@@ -194,6 +207,51 @@ def _db_previous_assistant_id(conn, before_message_id: int) -> Optional[int]:
     return int(row[0])
 
 
+def _runtime_lineage_reason(
+    runtime_identity: Optional[Mapping[str, Any]],
+    *,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+) -> str:
+    """Validate only the parent/provider lineage needed by native fork."""
+    runtime = dict(runtime_identity or {})
+    required = (
+        'provider', 'model', 'effort', 'tool_profile', 'session_id',
+        'static_system_sha256', 'context_id', 'context_epoch',
+        'resident_generation',
+    )
+    if any(not str(runtime.get(key) or '').strip() for key in required):
+        return REASON_RUNTIME_IDENTITY_MISMATCH
+    expected_model = str(runtime.get('expected_model') or runtime.get('model') or '')
+    expected_effort = str(runtime.get('expected_effort') or runtime.get('effort') or '')
+    if (
+        str(runtime.get('provider')) != 'claude_code'
+        or str(runtime.get('tool_profile')) != _SOFT_WINDOW_TOOL_PROFILE
+        or str(runtime.get('model')) != expected_model
+        or str(runtime.get('effort')) != expected_effort
+        or (
+            runtime.get('parent_model')
+            and str(runtime.get('parent_model')) != expected_model
+        )
+        or (
+            runtime.get('parent_effort')
+            and str(runtime.get('parent_effort')) != expected_effort
+        )
+    ):
+        return REASON_RUNTIME_IDENTITY_MISMATCH
+    try:
+        if (
+            int(runtime.get('context_id')) != int(context_id)
+            or int(runtime.get('context_epoch')) != int(context_epoch)
+            or int(runtime.get('resident_generation')) != int(resident_generation)
+        ):
+            return REASON_RUNTIME_IDENTITY_MISMATCH
+    except (TypeError, ValueError):
+        return REASON_RUNTIME_IDENTITY_MISMATCH
+    return ''
+
+
 def resolve_rewrite_native_fork(
     conn,
     staging: Mapping[str, Any],
@@ -201,18 +259,23 @@ def resolve_rewrite_native_fork(
     cwd: str,
     claude_home: Optional[str] = None,
     require_flag: bool = True,
+    context_plan: Any = None,
+    runtime_identity: Optional[Mapping[str, Any]] = None,
+    require_context_plan: bool = False,
 ) -> NativeForkPlan:
     """Fail-closed eligibility for opportunistic native fork."""
     op = str(staging.get('operation') or '').strip()
     source_message_id = int(staging.get('source_message_id') or 0)
 
     def _reject(reason: str, **extra: Any) -> NativeForkPlan:
+        proof = extra.pop('context_receipt_proof', None) or {}
         return NativeForkPlan(
             eligible=False,
             reason=reason,
             operation=op,
             source_message_id=source_message_id,
             mapping_provenance=dict(extra),
+            context_receipt_proof=dict(proof),
         )
 
     try:
@@ -341,6 +404,43 @@ def resolve_rewrite_native_fork(
         except OSError:
             return _reject(REASON_PARENT_TRANSCRIPT_MISSING, detail='stat_failed')
 
+        context_receipt_proof: dict[str, Any] = {}
+        if require_context_plan or context_plan is not None:
+            context_epoch = int(fork_row.get('context_epoch') or 0)
+            resident_generation = int(fork_row.get('resident_generation') or 0)
+            lineage_reason = _runtime_lineage_reason(
+                runtime_identity,
+                context_id=int(context_id),
+                context_epoch=context_epoch,
+                resident_generation=resident_generation,
+            )
+            if lineage_reason:
+                return _reject(lineage_reason)
+            try:
+                from chat import context_receipt as receipt_store
+                receipt = receipt_store.get_receipt(
+                    conn,
+                    context_id=int(context_id),
+                    context_epoch=context_epoch,
+                    resident_generation=resident_generation,
+                )
+                safe, proof_reason, context_receipt_proof = (
+                    receipt_store.verify_install_proof(
+                        receipt,
+                        context_plan,
+                        fork_boundary_message_id=int(a0_id),
+                        rewrite_user_message_id=int(rewrite_user_id),
+                        runtime_identity=runtime_identity,
+                    )
+                )
+            except Exception:
+                return _reject('context_receipt_install_proof_invalid')
+            if not safe:
+                return _reject(
+                    proof_reason,
+                    context_receipt_proof=context_receipt_proof,
+                )
+
         return NativeForkPlan(
             eligible=True,
             reason='',
@@ -361,6 +461,7 @@ def resolve_rewrite_native_fork(
                 'context_epoch': int(fork_row.get('context_epoch') or 0),
                 'resident_generation': int(fork_row.get('resident_generation') or 0),
             },
+            context_receipt_proof=context_receipt_proof,
         )
     except Exception as exc:
         log.exception('rewrite native fork resolve failed')
@@ -520,6 +621,9 @@ def try_prepare_native_trial_resident(
     claude_home: Optional[str] = None,
     fork_session_fn: Optional[Callable[..., Any]] = None,
     tool_profile: Optional[str] = None,
+    context_plan: Any = None,
+    runtime_identity: Optional[Mapping[str, Any]] = None,
+    require_context_plan: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Resolve+fork+spawn_resumable on trial resident. Never raises to caller.
 
@@ -535,7 +639,14 @@ def try_prepare_native_trial_resident(
             return False, meta
 
         plan = resolve_rewrite_native_fork(
-            conn, staging, cwd=cwd, claude_home=claude_home, require_flag=True,
+            conn,
+            staging,
+            cwd=cwd,
+            claude_home=claude_home,
+            require_flag=True,
+            context_plan=context_plan,
+            runtime_identity=runtime_identity,
+            require_context_plan=require_context_plan,
         )
         meta.update(plan.observability())
         if not plan.eligible:
