@@ -124,6 +124,7 @@ jobs:
           python -m unittest tests.test_flow_studio_editor -v
           python -m unittest tests.test_hidden_flow_engine -v
           python -m unittest tests.test_hidden_flow_activation_contract -v
+          python -m unittest tests.test_hidden_flow_observability -v
       - name: Claude chat effort backend regressions
         env:
           HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-effort-config.db

@@ -90,6 +90,10 @@ _DEFAULTS = {
     # CONTEXT-LIMIT-R1: independent hot/capacity/cold budget authorities.
     'CC_CAPACITY_SWAP_PROMPT_TARGET': '90000',
     'CC_COLD_REBUILD_GUARD': '70000',
+    # Hidden Flow metadata diagnostics; default OFF and DB-read only.
+    'HIDDEN_FLOW_OBSERVABILITY_ENABLED': '0',
+    'HIDDEN_FLOW_OBSERVABILITY_MAX_EVENTS_PER_MINUTE': '120',
+    'HIDDEN_FLOW_OBSERVABILITY_RETENTION_DAYS': '7',
 }
 
 
