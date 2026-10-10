@@ -4,6 +4,7 @@ import errno
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +79,62 @@ class DiskHousekeepingTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_direct_script_entrypoint_imports_observability_from_isolated_cwd(self):
+        script = Path(dh.__file__).resolve()
+        probe = f"""
+import datetime
+import json
+import os
+import runpy
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+script = {str(script)!r}
+config_tmp = tempfile.TemporaryDirectory(prefix='housekeeping-config-')
+os.environ['HAYAGARDEN_CONFIG_DB_PATH'] = str(Path(config_tmp.name) / 'config.db')
+os.environ['HAYAGARDEN_ENV_PATH'] = str(Path(config_tmp.name) / '.env')
+namespace = runpy.run_path(script, run_name='direct_script_entrypoint')
+def fake_run_housekeeping(mode, dry_run):
+    assert mode == 'daily'
+    assert dry_run is False
+    return types.SimpleNamespace(result='PASS')
+
+namespace['main'].__globals__['run_housekeeping'] = fake_run_housekeeping
+namespace['main'](['--daily', '--execute'])
+assert str(Path(script).resolve().parents[1]) in sys.path
+now = datetime.datetime(2026, 10, 10, 12, 0, tzinfo=datetime.timezone.utc)
+with tempfile.TemporaryDirectory(prefix='housekeeping-entrypoint-') as tmp:
+    path = Path(tmp) / 'observability.jsonl'
+    path.write_text(json.dumps({{
+        'event': 'hidden_flow_observation',
+        'retention_until': '2026-10-09T12:00:00+00:00',
+    }}) + '\\n', encoding='utf-8')
+    deleted, errors = namespace['prune_hidden_flow_observability'](
+        execute=True,
+        log_path=path,
+        now=now,
+        emit=lambda _line: None,
+    )
+    assert (deleted, errors) == (1, []), (deleted, errors)
+config_tmp.cleanup()
+print('DIRECT_SCRIPT_ENTRYPOINT_OK')
+"""
+        env = os.environ.copy()
+        env.pop('PYTHONPATH', None)
+        completed = subprocess.run(
+            [sys.executable, '-c', probe],
+            cwd=self.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn('DIRECT_SCRIPT_ENTRYPOINT_OK', completed.stdout)
 
     def _old_dir(self, name: str) -> Path:
         path = self.root / name
