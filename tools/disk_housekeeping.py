@@ -74,6 +74,7 @@ class RunResult:
     tmp_reclaimed_bytes: int = 0
     cache_reclaimed_bytes: int = 0
     backup_reclaimed_bytes: int = 0
+    hidden_flow_observability_deleted: int = 0
     result: str = 'PASS'
     errors: list[str] = field(default_factory=list)
 
@@ -579,9 +580,46 @@ def _print_end(result: RunResult, stats: DiskStats, emit: Callable[[str], None])
     emit(f'tmp_reclaimed_bytes={result.tmp_reclaimed_bytes}')
     emit(f'cache_reclaimed_bytes={result.cache_reclaimed_bytes}')
     emit(f'backup_reclaimed_bytes={result.backup_reclaimed_bytes}')
+    emit(
+        'hidden_flow_observability_deleted='
+        f'{result.hidden_flow_observability_deleted}'
+    )
     emit(f'disk_after_pct={stats.used_pct}')
     emit(f'disk_after_free_bytes={stats.free_bytes}')
     emit(f'result={result.result}')
+
+
+def prune_hidden_flow_observability(
+    *,
+    execute: bool,
+    log_path: Path | None = None,
+    now: object | None = None,
+    emit: Callable[[str], None] = print,
+) -> tuple[int, list[str]]:
+    """Prune only Hidden Flow's dedicated sink; never vacuum the journal."""
+    if not execute:
+        emit('WOULD_PRUNE_HIDDEN_FLOW_OBSERVABILITY')
+        return 0, []
+    try:
+        from chat.hidden_flow.observability import prune_observability_log
+
+        kwargs: dict[str, object] = {}
+        if log_path is not None:
+            kwargs['path'] = log_path
+        if now is not None:
+            kwargs['now'] = now
+        deleted, kept = prune_observability_log(**kwargs)
+        emit(
+            'PRUNED_HIDDEN_FLOW_OBSERVABILITY '
+            f'expired_events={deleted} retained_events={kept}'
+        )
+        return deleted, []
+    except Exception as exc:
+        emit(
+            'ERROR_PRUNE_HIDDEN_FLOW_OBSERVABILITY '
+            f'error={type(exc).__name__}'
+        )
+        return 0, [f'hidden flow observability cleanup failed: {exc}']
 
 
 def run_housekeeping(
@@ -639,6 +677,12 @@ def run_housekeeping(
             outcome.tmp_candidates = count
             outcome.tmp_deleted = deleted
             outcome.tmp_reclaimed_bytes = reclaimed
+            outcome.errors.extend(errors)
+            deleted, errors = prune_hidden_flow_observability(
+                execute=not dry_run,
+                emit=emit,
+            )
+            outcome.hidden_flow_observability_deleted = deleted
             outcome.errors.extend(errors)
             reclaimed_backup, disk_alert, errors = backup_retention_action(
                 execute=not dry_run,

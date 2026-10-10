@@ -8,8 +8,10 @@ output, private guidance, or control-tag text.
 from __future__ import annotations
 
 import datetime as _datetime
+import fcntl
 import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -17,13 +19,21 @@ import time
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 
 _LOGGER = logging.getLogger("chat.hidden_flow.observability")
+# Gunicorn's production default is INFO, but make this module's threshold
+# explicit so a future parent/root logging change cannot discard enabled
+# observations before they reach the journal or the dedicated sink.
+_LOGGER.setLevel(logging.INFO)
 _SCHEMA_VERSION = 1
 _DEFAULT_MAX_EVENTS_PER_MINUTE = 120
 _DEFAULT_RETENTION_DAYS = 7
+_DEFAULT_LOG_PATH = Path(
+    "/var/log/hayagarden/hidden-flow-observability.jsonl"
+)
 _ALLOWED_PREPARE_OUTCOMES = frozenset({"success", "skipped", "failed"})
 _ALLOWED_CONTROL_RESULTS = frozenset({
     "none",
@@ -45,6 +55,141 @@ _SETTINGS_CACHE: tuple[float, tuple[bool, int, int]] | None = None
 _BUDGET_LOCK = threading.Lock()
 _EVENT_TIMES: deque[float] = deque()
 _DROPPED_EVENTS = 0
+_FILE_HANDLER_LOCK = threading.Lock()
+_FILE_HANDLER: logging.Handler | None = None
+_FILE_HANDLER_PATH: Path | None = None
+
+
+class _LockedJsonFileHandler(logging.Handler):
+    """Append one structured event at a time across Gunicorn workers."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(level=logging.INFO)
+        self.path = path
+        self.lock_path = path.with_name(path.name + ".lock")
+        self._thread_lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record).rstrip("\n") + "\n"
+            self.path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+            with self._thread_lock:
+                with self.lock_path.open("a+", encoding="utf-8") as lock:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    try:
+                        with self.path.open("a", encoding="utf-8") as stream:
+                            stream.write(message)
+                            stream.flush()
+                    finally:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            # Diagnostics must never change the chat or runtime outcome.
+            return
+
+
+def _configured_log_path() -> Path:
+    configured = os.environ.get("HIDDEN_FLOW_OBSERVABILITY_LOG_PATH", "")
+    return Path(configured.strip() or _DEFAULT_LOG_PATH)
+
+
+def _remove_file_handler() -> None:
+    global _FILE_HANDLER, _FILE_HANDLER_PATH
+    with _FILE_HANDLER_LOCK:
+        if _FILE_HANDLER is not None:
+            _LOGGER.removeHandler(_FILE_HANDLER)
+            _FILE_HANDLER.close()
+        _FILE_HANDLER = None
+        _FILE_HANDLER_PATH = None
+        _LOGGER.propagate = True
+
+
+def _ensure_file_handler() -> None:
+    global _FILE_HANDLER, _FILE_HANDLER_PATH
+    path = _configured_log_path()
+    with _FILE_HANDLER_LOCK:
+        if _FILE_HANDLER is not None and _FILE_HANDLER_PATH == path:
+            return
+        if _FILE_HANDLER is not None:
+            _LOGGER.removeHandler(_FILE_HANDLER)
+            _FILE_HANDLER.close()
+        handler = _LockedJsonFileHandler(path)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        _LOGGER.addHandler(handler)
+        # Do not duplicate these events into journald, whose global retention
+        # policy cannot selectively delete only Hidden Flow observations.
+        _LOGGER.propagate = False
+        _FILE_HANDLER = handler
+        _FILE_HANDLER_PATH = path
+
+
+def _parse_utc(value: Any) -> _datetime.datetime | None:
+    try:
+        parsed = _datetime.datetime.fromisoformat(
+            str(value or "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_datetime.timezone.utc)
+    return parsed.astimezone(_datetime.timezone.utc)
+
+
+def prune_observability_log(
+    path: str | os.PathLike[str] | None = None,
+    *,
+    now: _datetime.datetime | None = None,
+    retention_days: int = _DEFAULT_RETENTION_DAYS,
+) -> tuple[int, int]:
+    """Delete expired events from the dedicated sink under a cross-worker lock."""
+    log_path = Path(path) if path is not None else _configured_log_path()
+    if not log_path.is_file():
+        return 0, 0
+    current = now or _datetime.datetime.now(_datetime.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_datetime.timezone.utc)
+    current = current.astimezone(_datetime.timezone.utc)
+    fallback_days = max(1, min(int(retention_days), 30))
+    lock_path = log_path.with_name(log_path.name + ".lock")
+    kept_lines: list[str] = []
+    removed = 0
+    kept = 0
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with log_path.open("r", encoding="utf-8") as source:
+                for line in source:
+                    try:
+                        payload = json.loads(line)
+                    except (TypeError, ValueError):
+                        kept_lines.append(line)
+                        kept += 1
+                        continue
+                    if payload.get("event") != "hidden_flow_observation":
+                        kept_lines.append(line)
+                        kept += 1
+                        continue
+                    expires = _parse_utc(payload.get("retention_until"))
+                    if expires is None:
+                        observed = _parse_utc(payload.get("observed_at"))
+                        if observed is not None:
+                            expires = observed + _datetime.timedelta(
+                                days=fallback_days
+                            )
+                    if expires is not None and expires <= current:
+                        removed += 1
+                    else:
+                        kept_lines.append(line)
+                        kept += 1
+            if removed:
+                temporary = log_path.with_name(log_path.name + ".tmp")
+                with temporary.open("w", encoding="utf-8") as target:
+                    target.writelines(kept_lines)
+                    target.flush()
+                    os.fsync(target.fileno())
+                os.replace(temporary, log_path)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return removed, kept
 
 
 def _safe_code(value: Any, default: str = "unknown") -> str:
@@ -234,7 +379,9 @@ def begin_turn(
 ) -> HiddenFlowObservation:
     enabled, max_events, retention_days = _load_settings()
     if not enabled:
+        _remove_file_handler()
         return HiddenFlowObservation()
+    _ensure_file_handler()
     try:
         turn_id = secrets.token_hex(9)
     except Exception:
@@ -253,6 +400,7 @@ def begin_turn(
 
 def reset_for_tests() -> None:
     global _SETTINGS_CACHE, _DROPPED_EVENTS
+    _remove_file_handler()
     with _SETTINGS_LOCK:
         _SETTINGS_CACHE = None
     with _BUDGET_LOCK:

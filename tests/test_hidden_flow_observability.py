@@ -1,5 +1,8 @@
 import datetime
 import json
+import logging
+import multiprocessing
+import os
 import sqlite3
 import sys
 import tempfile
@@ -19,6 +22,26 @@ from chat.hidden_flow.runtime import (
 )
 from chat.hidden_flow import runtime_store
 from chat.hidden_flow.types import FlowControl, FlowState
+
+
+def _write_observability_sink_worker(path, count):
+    handler = observability._LockedJsonFileHandler(Path(path))
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger = logging.getLogger(f"hidden-flow-test-worker-{os.getpid()}")
+    logger.handlers.clear()
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        for index in range(count):
+            logger.info(json.dumps({
+                "event": "hidden_flow_observation",
+                "worker": os.getpid(),
+                "index": index,
+            }))
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
 
 
 class HiddenFlowObservabilityTests(unittest.TestCase):
@@ -102,6 +125,142 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                 context.record_control_parse("none")
                 self.assertFalse(context.enabled)
                 info.assert_not_called()
+
+    def test_disabled_gate_does_not_create_or_write_dedicated_sink(self):
+        fake = self._fake_config_store(enabled=False)
+        with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
+            log_path = Path(tmp) / "observability.jsonl"
+            with mock.patch.dict(sys.modules, {"config_store": fake}):
+                with mock.patch.dict(
+                    os.environ,
+                    {"HIDDEN_FLOW_OBSERVABILITY_LOG_PATH": str(log_path)},
+                ):
+                    context = observability.begin_turn(
+                        provider="claude_code",
+                        turn_kind="hot",
+                        gate_enabled=False,
+                        eligible=False,
+                    )
+                    context.record_prepare(outcome="skipped")
+            self.assertFalse(context.enabled)
+            self.assertFalse(log_path.exists())
+
+    def test_enabled_event_reaches_dedicated_sink_without_private_content(self):
+        fake = self._fake_config_store(enabled=True)
+        secret = "PRIVATE_GUIDANCE_SENTINEL"
+        with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
+            log_path = Path(tmp) / "observability.jsonl"
+            with mock.patch.dict(sys.modules, {"config_store": fake}):
+                with mock.patch.dict(
+                    os.environ,
+                    {"HIDDEN_FLOW_OBSERVABILITY_LOG_PATH": str(log_path)},
+                ):
+                    with mock.patch.object(observability._LOGGER, "propagate", False):
+                        context = observability.begin_turn(
+                            provider="claude_code",
+                            turn_kind="hot",
+                            gate_enabled=True,
+                            eligible=True,
+                        )
+                        context.record_prepare(
+                            outcome="success",
+                            available_config_count=1,
+                            private_guidance_nonempty=True,
+                        )
+                        self.assertFalse(observability._LOGGER.propagate)
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+            rendered = log_path.read_text(encoding="utf-8")
+            self.assertEqual(payload["event"], "hidden_flow_observation")
+            self.assertEqual(payload["retention_days"], 7)
+            self.assertIn("retention_until", payload)
+            self.assertNotIn(secret, rendered)
+            self.assertNotIn("<hidden_flow_control", rendered)
+            self.assertNotIn("message_id", rendered)
+            self.assertNotIn("user_id", rendered)
+
+    def test_expired_events_are_deleted_by_real_pruner(self):
+        now = datetime.datetime(
+            2026, 10, 10, 12, 0, tzinfo=datetime.timezone.utc
+        )
+        expired = {
+            "event": "hidden_flow_observation",
+            "observed_at": "2026-10-03T11:59:59+00:00",
+            "retention_until": "2026-10-10T11:59:59+00:00",
+        }
+        future = {
+            "event": "hidden_flow_observation",
+            "observed_at": "2026-10-03T12:00:00+00:00",
+            "retention_until": "2026-10-10T12:00:01+00:00",
+        }
+        with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
+            log_path = Path(tmp) / "observability.jsonl"
+            log_path.write_text(
+                "".join(
+                    json.dumps(item, separators=(",", ":")) + "\n"
+                    for item in (expired, future)
+                ),
+                encoding="utf-8",
+            )
+            deleted, kept = observability.prune_observability_log(
+                log_path,
+                now=now,
+            )
+            self.assertEqual((deleted, kept), (1, 1))
+            remaining = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(remaining, [future])
+
+    def test_daily_housekeeping_calls_targeted_pruner(self):
+        from tools import disk_housekeeping
+
+        now = datetime.datetime(
+            2026, 10, 10, 12, 0, tzinfo=datetime.timezone.utc
+        )
+        with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
+            log_path = Path(tmp) / "observability.jsonl"
+            log_path.write_text(
+                json.dumps({
+                    "event": "hidden_flow_observation",
+                    "observed_at": "2026-10-02T12:00:00+00:00",
+                    "retention_until": "2026-10-09T12:00:00+00:00",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            output = []
+            deleted, errors = disk_housekeeping.prune_hidden_flow_observability(
+                execute=True,
+                log_path=log_path,
+                now=now,
+                emit=output.append,
+            )
+            self.assertEqual(deleted, 1)
+            self.assertEqual(errors, [])
+            self.assertTrue(any("expired_events=1" in line for line in output))
+            self.assertEqual(log_path.read_text(encoding="utf-8"), "")
+
+    def test_dedicated_sink_keeps_lines_intact_across_workers(self):
+        if "fork" not in multiprocessing.get_all_start_methods():
+            self.skipTest("cross-worker locking test requires fork")
+        with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
+            log_path = Path(tmp) / "observability.jsonl"
+            context = multiprocessing.get_context("fork")
+            workers = [
+                context.Process(
+                    target=_write_observability_sink_worker,
+                    args=(str(log_path), 40),
+                )
+                for _ in range(3)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=10)
+                self.assertEqual(worker.exitcode, 0)
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 120)
+            self.assertTrue(all(json.loads(line)["event"] == "hidden_flow_observation" for line in lines))
 
     def test_rate_limit_and_retention_metadata(self):
         fake = self._fake_config_store(
