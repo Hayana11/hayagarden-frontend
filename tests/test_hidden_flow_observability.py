@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import os
 import sqlite3
+import stat
 import sys
 import tempfile
 import types
@@ -42,6 +43,10 @@ def _write_observability_sink_worker(path, count):
     finally:
         logger.removeHandler(handler)
         handler.close()
+
+
+def _prune_observability_worker(path, now):
+    observability.prune_observability_log(path, now=now)
 
 
 class HiddenFlowObservabilityTests(unittest.TestCase):
@@ -177,6 +182,7 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
             self.assertNotIn("<hidden_flow_control", rendered)
             self.assertNotIn("message_id", rendered)
             self.assertNotIn("user_id", rendered)
+            self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o600)
 
     def test_expired_events_are_deleted_by_real_pruner(self):
         now = datetime.datetime(
@@ -211,6 +217,88 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                 for line in log_path.read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual(remaining, [future])
+            self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o600)
+
+    def test_pruner_streams_private_temp_and_replaces_private_final_file(self):
+        now = datetime.datetime(
+            2026, 10, 10, 12, 0, tzinfo=datetime.timezone.utc
+        )
+        expired = {
+            "event": "hidden_flow_observation",
+            "retention_until": "2026-10-09T12:00:00+00:00",
+        }
+        future = {
+            "event": "hidden_flow_observation",
+            "retention_until": "2026-10-11T12:00:00+00:00",
+        }
+        with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
+            log_path = Path(tmp) / "observability.jsonl"
+            log_path.write_text(
+                "".join(json.dumps(item) + "\n" for item in (expired, future)),
+                encoding="utf-8",
+            )
+            os.chmod(log_path, 0o644)
+            replacement_modes = []
+            replace = observability.os.replace
+
+            def capture_replace(source, target):
+                replacement_modes.append(
+                    stat.S_IMODE(Path(source).stat().st_mode)
+                )
+                replace(source, target)
+
+            with mock.patch.object(
+                observability.os,
+                "replace",
+                side_effect=capture_replace,
+            ):
+                deleted, kept = observability.prune_observability_log(
+                    log_path,
+                    now=now,
+                )
+            self.assertEqual((deleted, kept), (1, 1))
+            self.assertEqual(replacement_modes, [0o600])
+            self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o600)
+            self.assertFalse(log_path.with_name(log_path.name + ".tmp").exists())
+
+    def test_pruner_and_worker_writes_do_not_lose_records(self):
+        if "fork" not in multiprocessing.get_all_start_methods():
+            self.skipTest("cross-worker locking test requires fork")
+        now = datetime.datetime(
+            2026, 10, 10, 12, 0, tzinfo=datetime.timezone.utc
+        )
+        with tempfile.TemporaryDirectory(prefix="hidden-flow-observability-") as tmp:
+            log_path = Path(tmp) / "observability.jsonl"
+            log_path.write_text(
+                json.dumps({
+                    "event": "hidden_flow_observation",
+                    "retention_until": "2026-10-09T12:00:00+00:00",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            context = multiprocessing.get_context("fork")
+            writer = context.Process(
+                target=_write_observability_sink_worker,
+                args=(str(log_path), 80),
+            )
+            pruner = context.Process(
+                target=_prune_observability_worker,
+                args=(str(log_path), now),
+            )
+            writer.start()
+            pruner.start()
+            writer.join(timeout=10)
+            pruner.join(timeout=10)
+            self.assertEqual(writer.exitcode, 0)
+            self.assertEqual(pruner.exitcode, 0)
+            observability.prune_observability_log(log_path, now=now)
+            records = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(records), 80)
+            self.assertTrue(all(record["event"] == "hidden_flow_observation" for record in records))
+            self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o600)
 
     def test_daily_housekeeping_calls_targeted_pruner(self):
         from tools import disk_housekeeping

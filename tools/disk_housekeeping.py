@@ -26,6 +26,13 @@ except ImportError:  # pragma: no cover - Windows test fallback
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The production unit executes this file directly from /opt/frontend/tools,
+# so Python otherwise starts with /opt/frontend/tools rather than the repo
+# root on sys.path.  Imported-module use keeps its normal package behavior.
+if __package__ in {None, ''}:
+    repo_root_text = os.fspath(REPO_ROOT)
+    if repo_root_text not in sys.path:
+        sys.path.insert(0, repo_root_text)
 TMP_ROOT = Path('/tmp')
 DEPLOY_LOCK = Path('/var/lock/hayagarden-frontend-deploy.lock')
 HOUSEKEEPING_LOCK = Path('/var/lock/hayagarden-housekeeping.lock')

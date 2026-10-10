@@ -60,6 +60,25 @@ _FILE_HANDLER: logging.Handler | None = None
 _FILE_HANDLER_PATH: Path | None = None
 
 
+def _open_private_file(
+    path: Path,
+    flags: int,
+    mode: str,
+):
+    """Open a dedicated observation file and enforce private permissions."""
+    descriptor = os.open(
+        path,
+        flags | os.O_CREAT,
+        0o600,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return os.fdopen(descriptor, mode, encoding="utf-8")
+
+
 class _LockedJsonFileHandler(logging.Handler):
     """Append one structured event at a time across Gunicorn workers."""
 
@@ -74,10 +93,18 @@ class _LockedJsonFileHandler(logging.Handler):
             message = self.format(record).rstrip("\n") + "\n"
             self.path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
             with self._thread_lock:
-                with self.lock_path.open("a+", encoding="utf-8") as lock:
+                with _open_private_file(
+                    self.lock_path,
+                    os.O_RDWR,
+                    "a+",
+                ) as lock:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                     try:
-                        with self.path.open("a", encoding="utf-8") as stream:
+                        with _open_private_file(
+                            self.path,
+                            os.O_WRONLY | os.O_APPEND,
+                            "a",
+                        ) as stream:
                             stream.write(message)
                             stream.flush()
                     finally:
@@ -150,43 +177,52 @@ def prune_observability_log(
     current = current.astimezone(_datetime.timezone.utc)
     fallback_days = max(1, min(int(retention_days), 30))
     lock_path = log_path.with_name(log_path.name + ".lock")
-    kept_lines: list[str] = []
     removed = 0
     kept = 0
-    with lock_path.open("a+", encoding="utf-8") as lock:
+    temporary = log_path.with_name(log_path.name + ".tmp")
+    with _open_private_file(lock_path, os.O_RDWR, "a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
             with log_path.open("r", encoding="utf-8") as source:
-                for line in source:
-                    try:
-                        payload = json.loads(line)
-                    except (TypeError, ValueError):
-                        kept_lines.append(line)
-                        kept += 1
-                        continue
-                    if payload.get("event") != "hidden_flow_observation":
-                        kept_lines.append(line)
-                        kept += 1
-                        continue
-                    expires = _parse_utc(payload.get("retention_until"))
-                    if expires is None:
-                        observed = _parse_utc(payload.get("observed_at"))
-                        if observed is not None:
-                            expires = observed + _datetime.timedelta(
-                                days=fallback_days
-                            )
-                    if expires is not None and expires <= current:
-                        removed += 1
-                    else:
-                        kept_lines.append(line)
-                        kept += 1
-            if removed:
-                temporary = log_path.with_name(log_path.name + ".tmp")
-                with temporary.open("w", encoding="utf-8") as target:
-                    target.writelines(kept_lines)
+                with _open_private_file(
+                    temporary,
+                    os.O_WRONLY | os.O_TRUNC,
+                    "w",
+                ) as target:
+                    for line in source:
+                        try:
+                            payload = json.loads(line)
+                        except (TypeError, ValueError):
+                            target.write(line)
+                            kept += 1
+                            continue
+                        if payload.get("event") != "hidden_flow_observation":
+                            target.write(line)
+                            kept += 1
+                            continue
+                        expires = _parse_utc(payload.get("retention_until"))
+                        if expires is None:
+                            observed = _parse_utc(payload.get("observed_at"))
+                            if observed is not None:
+                                expires = observed + _datetime.timedelta(
+                                    days=fallback_days
+                                )
+                        if expires is not None and expires <= current:
+                            removed += 1
+                        else:
+                            target.write(line)
+                            kept += 1
                     target.flush()
                     os.fsync(target.fileno())
+            if removed:
                 os.replace(temporary, log_path)
+            else:
+                temporary.unlink()
+            os.chmod(log_path, 0o600)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return removed, kept
