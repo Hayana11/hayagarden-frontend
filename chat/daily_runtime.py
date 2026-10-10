@@ -211,6 +211,7 @@ class DailyTurnPlan:
     hidden_flow_enabled: bool = field(default=False, repr=False)
     hidden_flow_eligible: bool = field(default=False, repr=False)
     hidden_flow_plan: Any = field(default=None, repr=False)
+    hidden_flow_observation: Any = field(default=None, repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -3576,6 +3577,7 @@ def _prepare_hidden_flow_plan(
     chat_id: str,
     user_message_id: int,
     db_path: Optional[str],
+    observation_sink: Optional[list[Any]] = None,
 ) -> Any:
     """Snapshot the gate once; excluded Daily paths stay completely inert."""
     try:
@@ -3589,7 +3591,24 @@ def _prepare_hidden_flow_plan(
         and str(provider or "").strip() == "claude_code"
         and str(turn_kind or "").strip() in {"hot", "cold", "respawn"}
     )
+    try:
+        from chat.hidden_flow.observability import begin_turn
+        observation = begin_turn(
+            provider=provider,
+            turn_kind=turn_kind,
+            gate_enabled=gate_enabled,
+            eligible=eligible,
+        )
+    except Exception:
+        observation = None
+    if observation_sink is not None and observation is not None:
+        observation_sink.append(observation)
     if not eligible:
+        if observation is not None:
+            observation.record_prepare(
+                outcome="skipped",
+                error_code="gate_off" if not gate_enabled else "ineligible",
+            )
         class _DisabledHiddenFlowPlan:
             enabled = False
             eligible = False
@@ -3597,15 +3616,30 @@ def _prepare_hidden_flow_plan(
     from chat.hidden_flow.runtime import disabled_hidden_flow_plan
     try:
         from chat.hidden_flow.runtime import prepare_hidden_flow_turn
-        return prepare_hidden_flow_turn(
+        plan = prepare_hidden_flow_turn(
             enabled=True,
             eligible=True,
             chat_id=chat_id,
             user_message_id=int(user_message_id),
             db_path=db_path,
         )
-    except Exception:
+        if observation is not None:
+            available = getattr(plan, "available_configs", ()) or ()
+            observation.record_prepare(
+                outcome="success",
+                available_config_count=len(available),
+                private_guidance_nonempty=bool(
+                    getattr(plan, "private_request_block", "")
+                ),
+            )
+        return plan
+    except Exception as exc:
         logger.warning("hidden flow plan preparation failed", exc_info=True)
+        if observation is not None:
+            observation.record_prepare(
+                outcome="failed",
+                error_code=type(exc).__name__,
+            )
         return disabled_hidden_flow_plan(
             enabled=False,
             eligible=False,
@@ -3743,12 +3777,17 @@ def _assemble_plan(
         origin_local_day=origin_local_day or local_day,
         turn_started_at=turn_started_at or user_created_at,
     )
+    observation_sink: list[Any] = []
     hidden_plan = _prepare_hidden_flow_plan(
         provider=provider,
         turn_kind=turn_kind,
         chat_id=chat_id,
         user_message_id=int(user_message_id),
         db_path=db_path,
+        observation_sink=observation_sink,
+    )
+    daily_plan.hidden_flow_observation = (
+        observation_sink[0] if observation_sink else None
     )
     daily_plan.hidden_flow_enabled = bool(getattr(hidden_plan, "enabled", False))
     daily_plan.hidden_flow_eligible = bool(getattr(hidden_plan, "eligible", False))
@@ -6916,7 +6955,13 @@ def ensure_resident_and_stream(
 
         if _hidden_flow_runtime_enabled(plan):
             from chat.hidden_flow.runtime import render_plan_request
+            before_hidden_flow_content = content
             content = render_plan_request(plan.hidden_flow_plan, content)
+            observation = getattr(plan, "hidden_flow_observation", None)
+            if observation is not None:
+                observation.record_request_attachment(
+                    attached=content is not before_hidden_flow_content,
+                )
 
         _bind_context_install_render_receipt(plan.assembly, content)
 
@@ -7160,9 +7205,22 @@ def stream_daily_resident_turn(
 def _finalize_hidden_flow_snapshot(plan: DailyTurnPlan) -> Callable[[sqlite3.Connection, int], None]:
     def finalize(conn: sqlite3.Connection, assistant_id: int) -> None:
         from chat.hidden_flow.runtime_store import finalize_snapshot
+        observation = getattr(plan, "hidden_flow_observation", None)
         try:
             finalize_snapshot(conn, int(assistant_id))
+            if observation is not None:
+                observation.record_snapshot("committed")
         except Exception as exc:
+            if observation is not None:
+                status = (
+                    "conflict"
+                    if "Conflict" in type(exc).__name__
+                    else "rollback"
+                )
+                observation.record_snapshot(
+                    status,
+                    error_code=type(exc).__name__,
+                )
             raise ConflictError("hidden flow runtime CAS failed") from exc
     return finalize
 
@@ -7344,7 +7402,19 @@ def persist_daily_assistant_for_plan(
                 plan._hidden_flow_transition,
                 assistant_message_id=int(assistant_id),
             )
-            stage_snapshot(conn, snapshot)
+            try:
+                stage_snapshot(conn, snapshot)
+            except Exception as exc:
+                observation = getattr(plan, "hidden_flow_observation", None)
+                if observation is not None:
+                    observation.record_snapshot(
+                        "rollback",
+                        error_code=type(exc).__name__,
+                    )
+                raise
+            observation = getattr(plan, "hidden_flow_observation", None)
+            if observation is not None:
+                observation.record_snapshot("pending")
     return dc.persist_daily_assistant_if_current(
         chat_id=plan.chat_id,
         context_id=plan.context_id,
@@ -7394,36 +7464,50 @@ def build_canonical_turn_for_plan(
             'transcript finality identity is incomplete',
             error_code='transcript_finality_incomplete',
         )
-    turn = build_canonical_turn(
-        str(plan.transcript_path),
-        start_offset=int(plan.transcript_start_offset),
-        end_offset=int(plan.transcript_end_offset),
-        session_id=str(plan.transcript_claude_session_id),
-        mode=mode,
-        stop_reason=stop_reason,
-        mapping_status=str(plan.manifest.get('transcript_mapping_status') or 'UNVERIFIED'),
-        message_id=None,
-        context_id=plan.context_id,
-        context_epoch=plan.context_epoch,
-        resident_generation=plan.resident_generation,
-        transcript_process_generation=plan.transcript_process_generation,
-        terminal_receipt=plan.terminal_receipt,
-        hidden_flow_enabled=_hidden_flow_runtime_enabled(plan),
-        hidden_flow_expected_flow_id=(
-            plan.hidden_flow_plan.state_before.flow_id
-            if (
-                _hidden_flow_runtime_enabled(plan)
-                and getattr(plan.hidden_flow_plan.state_before, 'active', False)
-            ) else None
-        ),
-    )
+    observation = getattr(plan, "hidden_flow_observation", None)
+    try:
+        turn = build_canonical_turn(
+            str(plan.transcript_path),
+            start_offset=int(plan.transcript_start_offset),
+            end_offset=int(plan.transcript_end_offset),
+            session_id=str(plan.transcript_claude_session_id),
+            mode=mode,
+            stop_reason=stop_reason,
+            mapping_status=str(plan.manifest.get('transcript_mapping_status') or 'UNVERIFIED'),
+            message_id=None,
+            context_id=plan.context_id,
+            context_epoch=plan.context_epoch,
+            resident_generation=plan.resident_generation,
+            transcript_process_generation=plan.transcript_process_generation,
+            terminal_receipt=plan.terminal_receipt,
+            hidden_flow_enabled=_hidden_flow_runtime_enabled(plan),
+            hidden_flow_expected_flow_id=(
+                plan.hidden_flow_plan.state_before.flow_id
+                if (
+                    _hidden_flow_runtime_enabled(plan)
+                    and getattr(plan.hidden_flow_plan.state_before, 'active', False)
+                ) else None
+            ),
+        )
+    except Exception as exc:
+        if observation is not None:
+            observation.record_control_parse("unknown")
+        raise
     plan._canonical_turn = turn
     if _hidden_flow_runtime_enabled(plan):
         from chat.hidden_flow.runtime import control_from_dict, propose_transition
+        if observation is not None:
+            observation.record_control_parse(
+                getattr(turn, "hidden_flow_control_classification", "unknown")
+            )
         plan._hidden_flow_transition = propose_transition(
             plan.hidden_flow_plan,
             control_from_dict(getattr(turn, 'hidden_flow_control', None)),
         )
+        if observation is not None:
+            observation.record_transition(
+                created=plan._hidden_flow_transition is not None,
+            )
     plan.manifest.update({
         'canonical_projection_hash': turn.projection_hash,
         'canonical_content_length': len(turn.content),

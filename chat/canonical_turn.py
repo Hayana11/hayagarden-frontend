@@ -41,6 +41,7 @@ class CanonicalTurn:
     transcript_identity: dict[str, Any]
     projection_hash: str
     hidden_flow_control: dict[str, Any] | None = None
+    hidden_flow_control_classification: str = 'unknown'
 
 
 def _json_blocks(message: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -315,10 +316,12 @@ def build_canonical_turn(
         expected_process_generation=transcript_process_generation,
     )
     hidden_control = None
+    hidden_control_classification = 'unknown'
     hidden_sanitize = None
     if hidden_flow_enabled:
         # Keep protocol parsing lazy and scoped to the eligible Daily path.
         from chat.hidden_flow.control import (
+            classify_hidden_flow_control,
             parse_hidden_flow_control,
             sanitize_hidden_flow_text,
         )
@@ -456,6 +459,10 @@ def build_canonical_turn(
     raw_assistant_text = parser.text
     sanitized_thinking = parser.thinking
     if hidden_sanitize is not None:
+        hidden_control_classification = classify_hidden_flow_control(
+            raw_assistant_text,
+            expected_flow_id=hidden_flow_expected_flow_id,
+        )
         parsed = parse_hidden_flow_control(
             raw_assistant_text,
             expected_flow_id=hidden_flow_expected_flow_id,
@@ -520,6 +527,7 @@ def build_canonical_turn(
             choices,
         ),
         hidden_flow_control=hidden_control,
+        hidden_flow_control_classification=hidden_control_classification,
     )
 
 
