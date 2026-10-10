@@ -4,25 +4,22 @@ import android.content.Context
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.bettermifitness.sync.data.preferences.SyncPreferences
 import com.bettermifitness.sync.di.initKoin
+import kotlin.time.Clock
 import org.koin.core.context.GlobalContext
 import org.koin.mp.KoinPlatform
 
-/**
- * Opportunistic background sync (WorkManager).
- * Mirrors iOS BGAppRefresh: last **1 day**, requires Auto-sync ON, no permission UI.
- *
- * Retry policy:
- * - Success / partial success / skipped / not logged in / health unavailable → [Result.success]
- * - Transient [SyncOutcome.Failed] → [Result.retry] (WorkManager exponential backoff)
- * - Non-retryable failures (auth without refresh, permanent) → [Result.failure]
- */
 class MiSyncWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
+        val startedAt = Clock.System.now().toString()
+        val diagnostics = loadDiagnostics()
+        recordStartedSafely(diagnostics, startedAt)
+
         return try {
             ensureKoin()
             val coordinator = KoinPlatform.getKoin().get<SyncCoordinator>()
@@ -35,27 +32,66 @@ class MiSyncWorker(
                 userInitiated = false,
             )
             Log.i(TAG, "background sync finished: $outcome")
-            when (outcome) {
-                SyncOutcome.Success,
-                is SyncOutcome.PartialSuccess,
-                SyncOutcome.Skipped,
-                SyncOutcome.NotLoggedIn,
-                SyncOutcome.HealthUnavailable,
-                // Another path owns the run; do not queue retries that stack more work.
-                SyncOutcome.AlreadyRunning,
-                -> Result.success()
-                is SyncOutcome.Failed ->
-                    if (outcome.shouldRetryBackground()) Result.retry() else Result.failure()
+            val mapping = outcome.toWorkerOutcomeMapping()
+            val result = when (mapping.result) {
+                WorkerResultKind.SUCCESS -> Result.success()
+                WorkerResultKind.RETRY -> Result.retry()
+                WorkerResultKind.FAILURE -> Result.failure()
             }
+            recordFinishedSafely(diagnostics, mapping.diagnosticOutcome, mapping.error)
+            result
         } catch (e: Exception) {
             Log.e(TAG, "background sync error", e)
+            recordFinishedSafely(
+                diagnostics = diagnostics,
+                outcome = WorkerDiagnosticOutcome.RETRY,
+                error = e.message,
+            )
             Result.retry()
+        }
+    }
+
+    private suspend fun loadDiagnostics(): SyncPreferences? {
+        return try {
+            ensureKoin()
+            KoinPlatform.getKoin().get<SyncPreferences>()
+        } catch (e: Exception) {
+            Log.w(TAG, "worker diagnostics unavailable", e)
+            null
+        }
+    }
+
+    private suspend fun recordStartedSafely(
+        diagnostics: SyncPreferences?,
+        timestamp: String,
+    ) {
+        if (diagnostics == null) return
+        try {
+            diagnostics.recordWorkerStarted(timestamp)
+        } catch (e: Exception) {
+            Log.w(TAG, "worker start diagnostic unavailable", e)
+        }
+    }
+
+    private suspend fun recordFinishedSafely(
+        diagnostics: SyncPreferences?,
+        outcome: String,
+        error: String?,
+    ) {
+        if (diagnostics == null) return
+        try {
+            diagnostics.recordWorkerFinished(
+                timestamp = Clock.System.now().toString(),
+                outcome = outcome,
+                error = error,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "worker finish diagnostic unavailable", e)
         }
     }
 
     private fun ensureKoin() {
         if (GlobalContext.getOrNull() == null) {
-            // Application should have started Koin; defensive for edge process starts.
             com.bettermifitness.sync.di.provideAndroidContext(applicationContext)
             initKoin()
         }

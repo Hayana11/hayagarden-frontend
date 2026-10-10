@@ -16,36 +16,32 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
-/**
- * Process-wide scope for hot preference flows. Lives as long as the app;
- * cancelled only on process death (never in practice).
- */
 private val prefsScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
 /**
- * User sync settings and last-sync timestamps (SRP: not credentials).
- *
- * Owns the single hot [snapshot] flow: one DataStore subscription for the whole
- * process (started via [start]), so screens never replay the cold-load pop-in.
- * Per DataStore docs, expose the flow and share it; collectors only observe.
+ * User sync settings, last-run outcomes, and lightweight Worker diagnostics.
+ * Diagnostic writes are never on the sync success path.
  */
 class SyncPreferences(
     private val dataStore: DataStore<Preferences>,
 ) : SyncPreferencesPort {
     val lastSyncTime: Flow<String?> = dataStore.data.map { it[LAST_SYNC_KEY] }
-
     val lastBackgroundSyncTime: Flow<String?> = dataStore.data.map { it[LAST_BACKGROUND_SYNC_KEY] }
-
-    /** Last run status code from [com.bettermifitness.sync.sync.SyncOutcome.toStatusCode]. */
     val lastSyncStatus: Flow<String?> = dataStore.data.map { it[LAST_SYNC_STATUS_KEY] }
-
     val lastSyncMessage: Flow<String?> = dataStore.data.map { it[LAST_SYNC_MESSAGE_KEY] }
-
     val lastBackgroundSyncStatus: Flow<String?> =
         dataStore.data.map { it[LAST_BACKGROUND_SYNC_STATUS_KEY] }
-
     val lastBackgroundSyncMessage: Flow<String?> =
         dataStore.data.map { it[LAST_BACKGROUND_SYNC_MESSAGE_KEY] }
+
+    val lastWorkerStartedAt: Flow<String?> =
+        dataStore.data.map { it[LAST_WORKER_STARTED_AT_KEY] }
+    val lastWorkerFinishedAt: Flow<String?> =
+        dataStore.data.map { it[LAST_WORKER_FINISHED_AT_KEY] }
+    val lastWorkerOutcome: Flow<String?> =
+        dataStore.data.map { it[LAST_WORKER_OUTCOME_KEY] }
+    val lastWorkerError: Flow<String?> =
+        dataStore.data.map { it[LAST_WORKER_ERROR_KEY] }
 
     override val autoSync: Flow<Boolean> = dataStore.data.map {
         it[AUTO_SYNC_KEY]?.toBooleanStrictOrNull() ?: false
@@ -59,12 +55,6 @@ class SyncPreferences(
         it[SYNC_RANGE_DAYS_KEY] ?: 7
     }
 
-    /**
-     * Hot snapshot shared by all screens: single DataStore subscription for the
-     * whole process. Started eagerly so the first emission lands before screens
-     * draw; collectors created later observe the latest value immediately.
-     * Sync/config writes still go through the suspend setters below.
-     */
     val snapshot: StateFlow<UserPrefsSnapshot> = combine(
         enabledMetrics,
         syncRangeDays,
@@ -97,22 +87,29 @@ class SyncPreferences(
     override suspend fun updateLastSyncOutcome(status: String, message: String?) {
         dataStore.edit { prefs ->
             prefs[LAST_SYNC_STATUS_KEY] = status
-            if (message.isNullOrBlank()) {
-                prefs.remove(LAST_SYNC_MESSAGE_KEY)
-            } else {
-                prefs[LAST_SYNC_MESSAGE_KEY] = message.take(400)
-            }
+            if (message.isNullOrBlank()) prefs.remove(LAST_SYNC_MESSAGE_KEY)
+            else prefs[LAST_SYNC_MESSAGE_KEY] = message.take(400)
         }
     }
 
     override suspend fun updateLastBackgroundSyncOutcome(status: String, message: String?) {
         dataStore.edit { prefs ->
             prefs[LAST_BACKGROUND_SYNC_STATUS_KEY] = status
-            if (message.isNullOrBlank()) {
-                prefs.remove(LAST_BACKGROUND_SYNC_MESSAGE_KEY)
-            } else {
-                prefs[LAST_BACKGROUND_SYNC_MESSAGE_KEY] = message.take(400)
-            }
+            if (message.isNullOrBlank()) prefs.remove(LAST_BACKGROUND_SYNC_MESSAGE_KEY)
+            else prefs[LAST_BACKGROUND_SYNC_MESSAGE_KEY] = message.take(400)
+        }
+    }
+
+    suspend fun recordWorkerStarted(timestamp: String) {
+        dataStore.edit { it[LAST_WORKER_STARTED_AT_KEY] = timestamp }
+    }
+
+    suspend fun recordWorkerFinished(timestamp: String, outcome: String, error: String?) {
+        dataStore.edit { prefs ->
+            prefs[LAST_WORKER_FINISHED_AT_KEY] = timestamp
+            prefs[LAST_WORKER_OUTCOME_KEY] = outcome
+            if (error.isNullOrBlank()) prefs.remove(LAST_WORKER_ERROR_KEY)
+            else prefs[LAST_WORKER_ERROR_KEY] = error.take(400)
         }
     }
 
@@ -157,6 +154,14 @@ class SyncPreferences(
             stringPreferencesKey("last_background_sync_status")
         private val LAST_BACKGROUND_SYNC_MESSAGE_KEY =
             stringPreferencesKey("last_background_sync_message")
+        private val LAST_WORKER_STARTED_AT_KEY =
+            stringPreferencesKey("last_worker_started_at")
+        private val LAST_WORKER_FINISHED_AT_KEY =
+            stringPreferencesKey("last_worker_finished_at")
+        private val LAST_WORKER_OUTCOME_KEY =
+            stringPreferencesKey("last_worker_outcome")
+        private val LAST_WORKER_ERROR_KEY =
+            stringPreferencesKey("last_worker_error")
         private val AUTO_SYNC_KEY = stringPreferencesKey("auto_sync")
         private val ENABLED_METRICS_KEY = stringSetPreferencesKey("enabled_metrics")
         private val SYNC_RANGE_DAYS_KEY = intPreferencesKey("sync_range_days")
