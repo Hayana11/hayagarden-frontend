@@ -3263,7 +3263,7 @@ export function ChatScreen() {
                   <div style={{ width: 34, height: 34, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, background: 'rgba(213,160,176,.16)', color: 'var(--rose)', fontSize: 17 }}>✦</div>
                   <div className="vstack vstack-2" style={{ minWidth: 0 }}>
                     <span style={{ fontSize: 14.5, color: 'var(--ink)', letterSpacing: 1 }}>Flow Studio</span>
-                    <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>正式编辑器 · 本地 Mock</span>
+                    <span style={{ fontSize: 11.5, color: 'var(--faint)' }}>正式编辑器 · 服务器草稿</span>
                   </div>
                   <span style={{ marginLeft: 'auto', color: 'var(--ghost)', fontSize: 16 }}>›</span>
                 </Link>
