@@ -248,6 +248,23 @@ class HiddenFlowObservabilityTests(unittest.TestCase):
                         "failed",
                     )
 
+                observability.reset_for_tests()
+                with mock.patch.object(observability._LOGGER, "info") as info:
+                    sink = []
+                    result = daily_runtime._prepare_hidden_flow_plan(
+                        provider="not-claude",
+                        turn_kind="hot",
+                        chat_id="diagnostic",
+                        user_message_id=3,
+                        db_path=None,
+                        observation_sink=sink,
+                    )
+                    self.assertFalse(result.enabled)
+                    self.assertEqual(
+                        json.loads(info.call_args.args[0])["prepare"],
+                        "skipped",
+                    )
+
     def test_control_classification(self):
         self.assertEqual(classify_hidden_flow_control("", expected_flow_id=None), "none")
         self.assertEqual(
