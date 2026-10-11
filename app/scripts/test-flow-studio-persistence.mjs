@@ -6,6 +6,7 @@ import {
 } from '../src/lib/flowStudio/flowStudioApi.ts';
 import { mergeFlowStudioDocuments } from '../src/lib/flowStudio/flowStudioMerge.ts';
 import { createFlowStudioMockAdapter } from '../src/lib/flowStudio/flowStudioMock.ts';
+import { hasEditableFlowStudioChanges } from '../src/lib/flowStudio/flowStudioDocument.ts';
 import { createRuotaPool, filterRuotaEntries, RUOTA_TEMPLATES } from '../src/lib/flowStudio/flowStudioTemplates.ts';
 
 const document = {
@@ -137,6 +138,54 @@ const adapter = createFlowStudioApiAdapter('intimacy-v1');
 const loaded = await adapter.load();
 assert.equal(loaded.editorRevision, 4);
 assert.equal(loaded.version, 0, 'runtime version must not masquerade as editor revision');
+
+const editableBaseline = {
+  ...document,
+  editorRevision: 4,
+  runtimeVersion: 99,
+  savedAt: 'server-load',
+  published: true,
+  stages: [{ ...document.stages[0], guidancePrompt: '' }],
+  pools: [{
+    id: 'pool-dirty',
+    name: '测试灵感池',
+    enabled: true,
+    mode: 'perTurn',
+    count: 1,
+    entries: [{ id: 'entry-dirty', text: '原始条目', enabled: true }],
+  }],
+  cues: [{ id: 'cue-dirty', key: '原始情境', kind: '地点', enabled: true, poolIds: [] }],
+};
+const metadataOnly = {
+  ...editableBaseline,
+  version: 900,
+  editorRevision: 5,
+  runtimeVersion: 100,
+  savedAt: 'new-server-time',
+  published: false,
+};
+assert.equal(hasEditableFlowStudioChanges(editableBaseline, metadataOnly), false, 'server metadata must not make the editor dirty');
+
+const editableChanges = [
+  ['stage name', { stages: [{ ...editableBaseline.stages[0], name: '新阶段名称' }] }],
+  ['stage guidance', { stages: [{ ...editableBaseline.stages[0], guidancePrompt: '阶段提示词' }] }],
+  ['pool entry', { pools: [{ ...editableBaseline.pools[0], entries: [{ ...editableBaseline.pools[0].entries[0], text: '新条目' }] }] }],
+  ['cue', { cues: [{ ...editableBaseline.cues[0], key: '新情境' }] }],
+  ['enabled', { enabled: false }],
+];
+for (const [label, change] of editableChanges) {
+  assert.equal(
+    hasEditableFlowStudioChanges(editableBaseline, { ...editableBaseline, ...change }),
+    true,
+    label + ' must make the editor dirty',
+  );
+}
+
+const activeGuardSaved = { ...editableBaseline, editorRevision: 6, runtimeVersion: 100, savedAt: 'guarded-save', published: false };
+const activeGuardDraft = { ...activeGuardSaved };
+assert.equal(hasEditableFlowStudioChanges(activeGuardSaved, activeGuardDraft), false);
+const activeGuardState = { dirty: hasEditableFlowStudioChanges(activeGuardSaved, activeGuardDraft), runtimeApplyPending: true };
+assert.deepEqual(activeGuardState, { dirty: false, runtimeApplyPending: true }, 'guarded editor save is pending runtime apply, not dirty');
 
 await assert.rejects(
   () => adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], name: '本地冲突' }] }),
@@ -308,6 +357,14 @@ assert.equal(mockAdapter.load().stages[0].guidancePrompt, 'STAGE_GUIDANCE_MOCK')
 
 const workspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
 assert.match(workspace, /draftRef\.current/);
+assert.match(workspace, /hasEditableFlowStudioChanges\(saved, draft\)/);
+assert.match(workspace, /hasEditableFlowStudioChanges\(requestDraft, draftRef\.current\)/);
+assert.doesNotMatch(workspace, /JSON\.stringify\(saved\) !== JSON\.stringify\(draft\)/);
+assert.doesNotMatch(workspace, /JSON\.stringify\(draftRef\.current\) !== JSON\.stringify\(requestDraft\)/);
+assert.match(workspace, /runtimeApplyPending \? '编辑已保存 · 等待应用'/);
+assert.match(workspace, /有未保存修改/);
+assert.match(workspace, /if \(dirty && !window\.confirm/);
+assert.match(workspace, /setRuntimeApplyPending\(true\)/);
 assert.match(workspace, /newerEditsExist/);
 assert.match(workspace, /disabled=\{saving \|\| Boolean\(conflict\)\}/);
 assert.match(workspace, /mergeFlowStudioDocuments/);
