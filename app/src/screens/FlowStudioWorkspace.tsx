@@ -14,6 +14,7 @@ import {
   type FlowStudioMergeConflict,
   type FlowStudioMergePreference,
 } from '../lib/flowStudio/flowStudioMerge';
+import { createRuotaPool, RUOTA_TEMPLATES } from '../lib/flowStudio/flowStudioTemplates';
 import './FlowStudioSoftGlowScreen.css';
 
 type FlowTab = 'overview' | 'stages' | 'library';
@@ -125,6 +126,7 @@ export function FlowStudioWorkspace({
   const [searchQuery, setSearchQuery] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
   const [showDraw, setShowDraw] = useState(false);
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [drawStageId, setDrawStageId] = useState('stage-2');
   const [drawCueIds, setDrawCueIds] = useState<string[]>(['cue-1']);
   const [drawTurn, setDrawTurn] = useState(1);
@@ -467,6 +469,21 @@ export function FlowStudioWorkspace({
     setLibraryTab('pools');
   };
 
+  const createTemplatePool = (templateId: string) => {
+    let createdId = '';
+    mutate('已从 Ruota 模板创建灵感池', (next) => {
+      const pool = createRuotaPool(templateId, next.pools.map((item) => item.id));
+      createdId = pool.id;
+      next.pools.push(pool);
+    });
+    setShowTemplatePicker(false);
+    setSearchQuery('');
+    setOpenPool(createdId);
+    setOpenPoolSettings(null);
+    setTab('library');
+    setLibraryTab('pools');
+  };
+
   const addCue = () => {
     const id = uid('cue');
     mutate('已添加新情境词', (next) => {
@@ -757,7 +774,17 @@ export function FlowStudioWorkspace({
               <>
                 <div className="flow-pool-list">{filteredPools.map(renderPool)}</div>
                 {!filteredPools.length ? <div className="flow-empty">没有匹配的灵感池。换一个关键词试试。</div> : null}
-                <button type="button" className="flow-add-row" onClick={addPool}><Icon name="plus" />新增灵感池</button>
+                <div className="flow-pool-create-actions">
+                  <button type="button" className="flow-add-row" onClick={addPool}><Icon name="plus" />新建空白灵感池</button>
+                  <button type="button" className="flow-add-row is-template" onClick={() => setShowTemplatePicker((value) => !value)}><Icon name="spark" />从模板创建</button>
+                </div>
+                {showTemplatePicker ? (
+                  <div className="flow-template-panel" aria-label="从模板创建灵感池">
+                    <div className="flow-template-heading"><div><strong>Ruota della Fortuna</strong><small>六个普通维度 · 创建后仍是可编辑的普通灵感池</small></div><button type="button" className="flow-icon-button" aria-label="关闭模板选择" onClick={() => setShowTemplatePicker(false)}><Icon name="close" /></button></div>
+                    <div className="flow-template-grid">{RUOTA_TEMPLATES.map((template) => <button type="button" className="flow-template-card" key={template.id} onClick={() => createTemplatePool(template.id)}><strong>{template.label}</strong><small>{template.entries.length} 条灵感</small></button>)}</div>
+                    <p className="flow-template-attribution">Based on Ruota della Fortuna by Copper (29-Cu) · <a href="https://github.com/29-Cu/Ruota-della-Fortuna" target="_blank" rel="noreferrer">source / MIT</a></p>
+                  </div>
+                ) : null}
               </>
             ) : (
               <>
