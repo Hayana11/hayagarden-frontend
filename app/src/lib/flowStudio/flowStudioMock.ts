@@ -41,6 +41,8 @@ export type FlowStudioCue = {
 export type FlowStudioData = {
   version: number;
   editorRevision?: number;
+  runtimeVersion?: number;
+  published?: boolean;
   initialStage?: string | null;
   savedAt: string;
   enabled: boolean;
@@ -55,9 +57,25 @@ export type FlowStudioData = {
  * A future API adapter can normalize async/server data before handing the page
  * this same front-end shape; no API, database, or runtime state belongs here.
  */
+export type FlowStudioValidationResult = {
+  valid: boolean;
+  publishable: boolean;
+  errors: string[];
+  unsupportedFields: string[];
+  displayOnlyFields: string[];
+  unsafeFields: string[];
+};
+
+export type FlowStudioPublishResult = {
+  document: FlowStudioData;
+  displayOnlyFields: string[];
+};
+
 export type FlowStudioDataAdapter = {
   load(): FlowStudioData | Promise<FlowStudioData>;
   save(next: FlowStudioData): FlowStudioData | Promise<FlowStudioData>;
+  validate?(next: FlowStudioData): FlowStudioValidationResult | Promise<FlowStudioValidationResult>;
+  publish?(next: FlowStudioData): FlowStudioPublishResult | Promise<FlowStudioPublishResult>;
   acceptRevision?(revision: number): void;
 };
 

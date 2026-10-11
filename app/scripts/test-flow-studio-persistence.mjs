@@ -48,7 +48,40 @@ const responses = [
       document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
       editorRevision: 6,
       savedAt: 'server-save',
-      runtime: { version: 101, schemaVersion: 1, engineEnabled: false },
+      runtime: { version: 101, schemaVersion: 1, engineEnabled: false, published: false },
+    },
+  },
+  {
+    status: 200,
+    body: {
+      ok: true,
+      valid: true,
+      publishable: true,
+      errors: [],
+      unsupportedFields: [],
+      displayOnlyFields: [],
+      unsafeFields: [],
+    },
+  },
+  {
+    status: 200,
+    body: {
+      ok: true,
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      editorRevision: 6,
+      savedAt: 'published',
+      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: true },
+      displayOnlyFields: [],
+    },
+  },
+  {
+    status: 200,
+    body: {
+      ok: true,
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      editorRevision: 6,
+      savedAt: 'published',
+      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: true },
     },
   },
 ];
@@ -84,6 +117,19 @@ const saved = await adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], na
 assert.equal(saved.editorRevision, 6);
 assert.equal(requests[1].init.body.includes('"expectedRevision":4'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
+
+const validation = await adapter.validate?.(saved);
+assert.equal(validation?.valid, true);
+assert.equal(validation?.publishable, true);
+const published = await adapter.publish?.(saved);
+assert.equal(published?.document.editorRevision, 6);
+assert.equal(published?.document.runtimeVersion, 102);
+assert.equal(published?.document.published, true);
+assert.equal(requests[3].url.endsWith('/validate'), true);
+assert.equal(requests[4].url.endsWith('/publish'), true);
+assert.equal(requests[4].init.body.includes('"expectedRuntimeVersion":101'), true);
+assert.equal(requests[5].url.endsWith('/intimacy-v1'), true);
+
 
 const mergeBase = {
   ...document,
@@ -137,6 +183,8 @@ assert.match(workspace, /disabled=\{saving \|\| Boolean\(conflict\)\}/);
 assert.match(workspace, /mergeFlowStudioDocuments/);
 assert.match(workspace, /resolveMerge/);
 assert.match(workspace, /明确保留本地冲突字段/);
+assert.match(workspace, /验证并发布/);
+assert.match(workspace, /请先保存当前草稿，再验证并发布/);
 
 const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', import.meta.url), 'utf8');
 const preview = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.tsx', import.meta.url), 'utf8');

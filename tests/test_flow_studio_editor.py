@@ -151,6 +151,16 @@ class FlowStudioEditorApiTests(unittest.TestCase):
             json={"expectedRevision": revision, "document": document},
         )
 
+    def _publish(self, document, revision, runtime_version=7):
+        return self.client.post(
+            "/api/flow-studio/editor/intimacy-v1/publish",
+            json={
+                "expectedRevision": revision,
+                "expectedRuntimeVersion": runtime_version,
+                "document": document,
+            },
+        )
+
     def test_existing_runtime_is_imported_without_dropping_disabled_editor_data(self):
         payload = self._get()
         self.assertEqual(payload["source"], "runtime-import")
@@ -288,6 +298,150 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(explicit_stage["nextStageMode"], "explicit")
         self.assertEqual(explicit_stage["nextStageId"], "s2")
 
+    def test_publish_is_explicit_and_updates_runtime_only_after_saved_draft(self):
+        first = self._get()
+        document = first["document"]
+        document["stages"][0]["minTurns"] = 2
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json()["runtime"]["version"], 7)
+
+        connection = sqlite3.connect(self.db_path)
+        before = connection.execute(
+            "SELECT version, config_json FROM hidden_flow_configs WHERE flow_id=?",
+            ("intimacy-v1",),
+        ).fetchone()
+        connection.close()
+        self.assertEqual(before[0], 7)
+
+        published = self._publish(
+            saved.get_json()["document"],
+            saved.get_json()["editorRevision"],
+            7,
+        )
+        self.assertEqual(published.status_code, 200)
+        body = published.get_json()
+        self.assertTrue(body["runtime"]["published"])
+        self.assertEqual(body["runtime"]["version"], 8)
+        self.assertEqual(body["editorRevision"], 1)
+
+        connection = sqlite3.connect(self.db_path)
+        after = connection.execute(
+            "SELECT version, config_json FROM hidden_flow_configs WHERE flow_id=?",
+            ("intimacy-v1",),
+        ).fetchone()
+        connection.close()
+        self.assertEqual(after[0], 8)
+        self.assertEqual(json.loads(after[1])["stages"][0]["minTurns"], 2)
+
+    def test_publish_validation_failure_does_not_change_runtime(self):
+        first = self._get()
+        document = first["document"]
+        document["stages"][0]["minTurns"] = 99
+        response = self._publish(document, first["editorRevision"], 7)
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.get_json()["code"], "PUBLISH_VALIDATION_FAILED")
+        self.assertIn("stage s1: minTurns must be between 1 and 12", response.get_json()["errors"])
+
+        connection = sqlite3.connect(self.db_path)
+        row = connection.execute(
+            "SELECT version, config_json FROM hidden_flow_configs WHERE flow_id=?",
+            ("intimacy-v1",),
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row[0], 7)
+        self.assertEqual(json.loads(row[1]), self.runtime_raw)
+
+    def test_publish_rejects_editor_and_runtime_version_conflicts(self):
+        first = self._get()
+        document = first["document"]
+        document["stages"][0]["minTurns"] = 2
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+
+        editor_conflict = self._publish(saved.get_json()["document"], 0, 7)
+        self.assertEqual(editor_conflict.status_code, 409)
+        self.assertEqual(editor_conflict.get_json()["code"], "EDITOR_REVISION_CONFLICT")
+        self.assertEqual(editor_conflict.get_json()["currentRevision"], 1)
+
+        runtime_conflict = self._publish(
+            saved.get_json()["document"],
+            saved.get_json()["editorRevision"],
+            6,
+        )
+        self.assertEqual(runtime_conflict.status_code, 409)
+        self.assertEqual(runtime_conflict.get_json()["code"], "RUNTIME_VERSION_CONFLICT")
+        self.assertEqual(runtime_conflict.get_json()["currentRuntimeVersion"], 7)
+
+    def test_publish_blocks_active_flow_without_changing_runtime(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            """
+            INSERT INTO hidden_flow_runtime
+                (chat_id, schema_version, flow_id, state_json,
+                 pending_guide_json, config_version, version, updated_at)
+            VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                "chat-active",
+                1,
+                "intimacy-v1",
+                json.dumps({"active": True, "flowId": "intimacy-v1"}),
+                None,
+                7,
+                1,
+                "2026-10-11 10:00:00",
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        first = self._get()
+        response = self._publish(first["document"], first["editorRevision"], 7)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "FLOW_ACTIVE")
+        connection = sqlite3.connect(self.db_path)
+        self.assertEqual(
+            connection.execute(
+                "SELECT version FROM hidden_flow_configs WHERE flow_id=?",
+                ("intimacy-v1",),
+            ).fetchone()[0],
+            7,
+        )
+        connection.close()
+
+    def test_publish_transaction_failure_preserves_runtime_config(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            """
+            CREATE TRIGGER fail_flow_studio_publish
+            BEFORE UPDATE OF config_json ON hidden_flow_configs
+            BEGIN
+                SELECT RAISE(ABORT, 'publish test failure');
+            END
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        first = self._get()
+        document = first["document"]
+        document["stages"][0]["minTurns"] = 2
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        response = self._publish(saved.get_json()["document"], 1, 7)
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["code"], "RUNTIME_PUBLISH_FAILED")
+
+        connection = sqlite3.connect(self.db_path)
+        row = connection.execute(
+            "SELECT version, config_json FROM hidden_flow_configs WHERE flow_id=?",
+            ("intimacy-v1",),
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row[0], 7)
+        self.assertEqual(json.loads(row[1]), self.runtime_raw)
+
     def test_validate_maps_modes_and_reports_runtime_limits_without_writing(self):
         document = self._get()["document"]
         document["pools"][0]["mode"] = "perStage"
@@ -422,6 +576,14 @@ class FlowStudioEditorApiTests(unittest.TestCase):
             client.post(
                 "/api/flow-studio/editor/intimacy-v1/validate",
                 json={"document": {}},
+            ),
+            client.post(
+                "/api/flow-studio/editor/intimacy-v1/publish",
+                json={
+                    "expectedRevision": 0,
+                    "expectedRuntimeVersion": 7,
+                    "document": {},
+                },
             ),
         ]
         for response in responses:
