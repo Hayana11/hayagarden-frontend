@@ -418,6 +418,7 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
             db_path=self.db_path,
             worker_id="worker",
             turn_lease={"lease": "test"},
+            lease_acquired=True,
         )
         if hidden_plan is not None:
             plan.hidden_flow_enabled = True
@@ -647,6 +648,40 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
             conn.commit()
             conn.close()
 
+            conn = runtime_store._connect(self.db_path)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_resident_turn_leases (
+                    context_id INTEGER NOT NULL,
+                    resident_generation INTEGER NOT NULL,
+                    lease_owner TEXT NOT NULL,
+                    request_message_id INTEGER NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO daily_resident_turn_leases
+                    (context_id, resident_generation, lease_owner,
+                     request_message_id, acquired_at, expires_at, updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    1,
+                    1,
+                    "owner",
+                    30,
+                    "2026-10-11 10:00:00",
+                    "2099-10-11 10:00:00",
+                    "2026-10-11 10:00:00",
+                ),
+            )
+            conn.commit()
+            conn.close()
+
             def fake_finalize(*_args, hidden_flow_finalize_callback=None, **_kwargs):
                 conn = runtime_store._connect(self.db_path)
                 hidden_flow_finalize_callback(conn, 100)
@@ -686,6 +721,76 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
             os.unlink(transcript_path)
 
 
+
+
+    def test_hidden_flow_finalization_rejects_expired_resident_lease(self) -> None:
+        runtime_store.upsert_flow_config(_raw_config(), db_path=self.db_path)
+        hidden_plan = runtime.prepare_hidden_flow_turn(
+            enabled=True,
+            eligible=True,
+            chat_id="default",
+            user_message_id=30,
+            db_path=self.db_path,
+        )
+        transition = runtime.propose_transition(
+            hidden_plan,
+            parse_hidden_flow_control(
+                '<hidden_flow_control flow="demo-flow" action="start" keys="a"/>'
+            ),
+        )
+        self.assertIsNotNone(transition)
+        snapshot = runtime.build_pending_snapshot(
+            hidden_plan,
+            transition,
+            assistant_message_id=100,
+        )
+        conn = runtime_store._connect(self.db_path)
+        runtime_store.stage_snapshot(conn, snapshot)
+        conn.execute(
+            """
+            CREATE TABLE daily_resident_turn_leases (
+                context_id INTEGER NOT NULL,
+                resident_generation INTEGER NOT NULL,
+                lease_owner TEXT NOT NULL,
+                request_message_id INTEGER NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO daily_resident_turn_leases
+                (context_id, resident_generation, lease_owner,
+                 request_message_id, acquired_at, expires_at, updated_at)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            (
+                1,
+                1,
+                "owner",
+                30,
+                "2026-10-11 08:00:00",
+                "2026-10-11 08:01:00",
+                "2026-10-11 08:00:00",
+            ),
+        )
+        conn.commit()
+        plan = self._daily_plan(hidden_plan=hidden_plan)
+        plan._hidden_flow_transition = transition
+        with self.assertRaises(daily_runtime.ConflictError):
+            daily_runtime._finalize_hidden_flow_snapshot(plan)(conn, 100)
+        self.assertEqual(
+            conn.execute(
+                "SELECT status FROM hidden_flow_message_snapshots "
+                "WHERE assistant_message_id=?",
+                (100,),
+            ).fetchone()[0],
+            runtime_store.SNAPSHOT_PENDING,
+        )
+        conn.rollback()
+        conn.close()
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,7 @@ import config_store
 from daily_context_bff import same_origin_mutation_ok
 from moments_auth import OwnerAuthError, require_owner
 from chat.hidden_flow.config import normalize_flow_config
+from chat.hidden_flow.types import AppliedGuide, FlowState
 
 EDITOR_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 1
@@ -617,6 +618,174 @@ _EDITOR_DOCUMENT_METADATA_FIELDS = {
 }
 
 
+_EDITOR_DOCUMENT_FIELDS = frozenset({
+    "schemaVersion",
+    "flowId",
+    "enabled",
+    "initialStage",
+    "stages",
+    "pools",
+    "cues",
+    "dimensions",
+}) | _EDITOR_DOCUMENT_METADATA_FIELDS
+
+_EDITOR_STAGE_FIELDS = frozenset({
+    "id",
+    "name",
+    "enabled",
+    "minTurns",
+    "repeatMinTurns",
+    "nextStageId",
+    "nextStageMode",
+    "terminal",
+    "continueTarget",
+    "terminalWithoutContinue",
+    "holdable",
+    "poolIds",
+})
+_EDITOR_POOL_FIELDS = frozenset({
+    "id",
+    "name",
+    "enabled",
+    "mode",
+    "count",
+    "entries",
+})
+_EDITOR_ENTRY_FIELDS = frozenset({"id", "text", "enabled"})
+_EDITOR_CUE_FIELDS = frozenset({"id", "key", "kind", "enabled", "poolIds"})
+_EDITOR_DIMENSION_FIELDS = frozenset({"id", "label", "detail", "tone"})
+
+_RUNTIME_STATE_FIELDS = frozenset({
+    "schemaVersion",
+    "flowId",
+    "active",
+    "stage",
+    "cycle",
+    "stageTurn",
+    "contextKeys",
+    "fixedDraws",
+    "startedAt",
+})
+
+
+def _unknown_editor_fields(document: Mapping[str, Any]) -> set[str]:
+    """Find nested fields that compile_editor_document would otherwise ignore."""
+    unsafe: set[str] = set()
+
+    def record(value: Any, path: str, allowed: frozenset[str]) -> None:
+        if not isinstance(value, Mapping):
+            return
+        for key in value:
+            if key not in allowed:
+                unsafe.add(f"{path}.{key}")
+
+    record(document, "document", _EDITOR_DOCUMENT_FIELDS)
+
+    def items(key: str) -> list[Any]:
+        value = document.get(key)
+        return value if isinstance(value, list) else []
+
+    def item_path(collection: str, index: int, item: Any) -> str:
+        identifier = _text(item.get("id")) if isinstance(item, Mapping) else ""
+        return f"{collection}[{identifier or index}]"
+
+    for index, stage in enumerate(items("stages")):
+        record(stage, item_path("stages", index, stage), _EDITOR_STAGE_FIELDS)
+    for index, pool in enumerate(items("pools")):
+        pool_path = item_path("pools", index, pool)
+        record(pool, pool_path, _EDITOR_POOL_FIELDS)
+        entries = pool.get("entries") if isinstance(pool, Mapping) else None
+        if isinstance(entries, list):
+            for entry_index, entry in enumerate(entries):
+                entry_id = _text(entry.get("id")) if isinstance(entry, Mapping) else ""
+                record(
+                    entry,
+                    f"{pool_path}.entries[{entry_id or entry_index}]",
+                    _EDITOR_ENTRY_FIELDS,
+                )
+    for index, cue in enumerate(items("cues")):
+        record(cue, item_path("cues", index, cue), _EDITOR_CUE_FIELDS)
+    for index, dimension in enumerate(items("dimensions")):
+        record(
+            dimension,
+            item_path("dimensions", index, dimension),
+            _EDITOR_DIMENSION_FIELDS,
+        )
+    return unsafe
+
+
+def _decode_verified_flow_state(value: Any) -> FlowState:
+    """Decode a runtime state without the fail-open behavior used by runtime reads."""
+    if not isinstance(value, Mapping) or set(value) != _RUNTIME_STATE_FIELDS:
+        raise ValueError("runtime state shape is not recognized")
+    if type(value["schemaVersion"]) is not int:
+        raise ValueError("runtime state schemaVersion is invalid")
+    for field in ("flowId", "stage", "startedAt"):
+        if not isinstance(value[field], str):
+            raise ValueError(f"runtime state {field} is invalid")
+    for field in ("cycle", "stageTurn"):
+        if type(value[field]) is not int:
+            raise ValueError(f"runtime state {field} is invalid")
+    if not isinstance(value["contextKeys"], list) or not isinstance(
+        value["fixedDraws"], dict
+    ):
+        raise ValueError("runtime state collections are invalid")
+    return FlowState.from_dict(value)
+
+
+def _verify_runtime_row(
+    row: Mapping[str, Any],
+    state: FlowState,
+    flow_id: str,
+) -> None:
+    if type(row["schema_version"]) is not int:
+        raise ValueError("runtime schemaVersion is invalid")
+    if row["schema_version"] != state.schema_version:
+        raise ValueError("runtime schemaVersion does not match state")
+    if type(row["version"]) is not int or row["version"] < 0:
+        raise ValueError("runtime version is invalid")
+    if not isinstance(row["chat_id"], str) or not row["chat_id"].strip():
+        raise ValueError("runtime chat id is invalid")
+    if not isinstance(row["updated_at"], str) or not row["updated_at"].strip():
+        raise ValueError("runtime updated_at is invalid")
+    row_flow_id = row["flow_id"]
+    if row_flow_id is not None and (
+        not isinstance(row_flow_id, str) or not row_flow_id.strip()
+    ):
+        raise ValueError("runtime flow id is invalid")
+    config_version = row["config_version"]
+    if config_version is not None and (
+        type(config_version) is not int or config_version < 0
+    ):
+        raise ValueError("runtime config version is invalid")
+    if state.active:
+        if row_flow_id != state.flow_id or state.flow_id != flow_id:
+            raise ValueError("runtime active flow association is invalid")
+        if config_version is None:
+            raise ValueError("active runtime config version is missing")
+    elif row_flow_id is not None:
+        raise ValueError("inactive runtime has a flow id")
+    pending = row["pending_guide_json"]
+    if pending is not None:
+        guide = AppliedGuide.from_dict(json.loads(str(pending)))
+        if guide.status != "pending" or guide.flow.to_dict() != state.to_dict():
+            raise ValueError("runtime pending guide does not match state")
+
+
+def _decode_verified_snapshot_state(value: Any, flow_id: str) -> FlowState:
+    state = _decode_verified_flow_state(value)
+    if state.active and state.flow_id != flow_id:
+        raise ValueError("snapshot flow association is invalid")
+    return state
+
+
+def _runtime_timestamp(value: Any) -> _datetime.datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("runtime lease timestamp is invalid")
+    return _datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(
         value,
@@ -639,17 +808,8 @@ def _classify_publish_fields(
     until the editor document no longer contains an unsafe omission.
     """
     display_only: set[str] = set()
-    unsafe: set[str] = set()
-    allowed = {
-        "schemaVersion",
-        "flowId",
-        "enabled",
-        "initialStage",
-        "stages",
-        "pools",
-        "cues",
-        "dimensions",
-    } | _EDITOR_DOCUMENT_METADATA_FIELDS
+    unsafe: set[str] = set(_unknown_editor_fields(document))
+    allowed = _EDITOR_DOCUMENT_FIELDS
     for key in document:
         if key not in allowed:
             unsafe.add(f"document.{key}")
@@ -727,25 +887,138 @@ def _active_runtime_status(
     connection: sqlite3.Connection,
     flow_id: str,
 ) -> str:
-    """Return active, inactive, or unknown without creating runtime tables."""
-    rows = connection.execute(
-        """
-        SELECT flow_id, state_json
-        FROM hidden_flow_runtime
-        WHERE flow_id=?
-        """,
-        (flow_id,),
-    ).fetchall()
+    """Return a fail-closed publish status using existing runtime/lease tables."""
     unknown = False
-    for row in rows:
+    active = False
+    lease_active = False
+    pending = False
+    now = _datetime.datetime.utcnow() + _datetime.timedelta(hours=8)
+
+    try:
+        config_row = connection.execute(
+            "SELECT version FROM hidden_flow_configs WHERE flow_id=?",
+            (flow_id,),
+        ).fetchone()
+        if config_row is None or type(config_row["version"]) is not int:
+            return "unknown"
+        runtime_rows = connection.execute(
+            """
+            SELECT chat_id, schema_version, flow_id, state_json,
+                   pending_guide_json, config_version, version, updated_at
+            FROM hidden_flow_runtime
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "unknown"
+
+    for row in runtime_rows:
+        row_flow_id = row["flow_id"]
         try:
-            state = json.loads(str(row["state_json"]))
+            state = _decode_verified_flow_state(
+                json.loads(str(row["state_json"]))
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            if row_flow_id == flow_id:
+                unknown = True
+            continue
+        relevant = row_flow_id == flow_id or (
+            state.active and state.flow_id == flow_id
+        )
+        if not relevant:
+            continue
+        try:
+            _verify_runtime_row(row, state, flow_id)
         except (TypeError, ValueError, json.JSONDecodeError):
             unknown = True
             continue
-        if isinstance(state, dict) and state.get("active") is True:
-            return "active"
-    return "unknown" if unknown else "inactive"
+        if state.active:
+            active = True
+
+    try:
+        snapshot_rows = connection.execute(
+            """
+            SELECT flow_id, status, config_version, state_before_json,
+                   state_after_json, next_guide_json
+            FROM hidden_flow_message_snapshots
+            WHERE status=?
+            """,
+            ("PENDING",),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "unknown"
+
+    for row in snapshot_rows:
+        snapshot_flow_id = row["flow_id"]
+        if snapshot_flow_id is None:
+            unknown = True
+            continue
+        if snapshot_flow_id != flow_id:
+            continue
+        try:
+            if type(row["config_version"]) is not int or row["config_version"] < 0:
+                raise ValueError("snapshot config version is invalid")
+            before = _decode_verified_snapshot_state(
+                json.loads(str(row["state_before_json"])),
+                flow_id,
+            )
+            after = _decode_verified_snapshot_state(
+                json.loads(str(row["state_after_json"])),
+                flow_id,
+            )
+            next_guide = row["next_guide_json"]
+            if next_guide is not None:
+                guide = AppliedGuide.from_dict(json.loads(str(next_guide)))
+                if guide.status != "pending" or guide.flow.to_dict() != after.to_dict():
+                    raise ValueError("snapshot pending guide is invalid")
+            pending = True
+            _ = before
+        except (TypeError, ValueError, json.JSONDecodeError):
+            unknown = True
+
+    try:
+        lease_rows = connection.execute(
+            """
+            SELECT context_id, resident_generation, lease_owner,
+                   request_message_id, acquired_at, expires_at, updated_at
+            FROM daily_resident_turn_leases
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "unknown"
+
+    for row in lease_rows:
+        try:
+            if (
+                type(row["context_id"]) is not int
+                or row["context_id"] <= 0
+                or type(row["resident_generation"]) is not int
+                or row["resident_generation"] <= 0
+                or not isinstance(row["lease_owner"], str)
+                or not row["lease_owner"].strip()
+                or type(row["request_message_id"]) is not int
+                or row["request_message_id"] <= 0
+            ):
+                raise ValueError("turn lease identity is invalid")
+            acquired_at = _runtime_timestamp(row["acquired_at"])
+            expires_at = _runtime_timestamp(row["expires_at"])
+            updated_at = _runtime_timestamp(row["updated_at"])
+            if acquired_at > expires_at or updated_at > expires_at:
+                raise ValueError("turn lease timestamps are invalid")
+            if expires_at <= now:
+                raise ValueError("turn lease is expired")
+            lease_active = True
+        except (TypeError, ValueError):
+            unknown = True
+
+    if unknown:
+        return "unknown"
+    if active:
+        return "active"
+    if lease_active:
+        return "lease_active"
+    if pending:
+        return "pending"
+    return "inactive"
 
 
 def create_flow_studio_blueprint(
@@ -1055,6 +1328,24 @@ def create_flow_studio_blueprint(
                 return _error(
                     "FLOW_ACTIVE",
                     "an active flow is using this configuration; finish it before publishing",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                )
+            if active_status == "lease_active":
+                connection.rollback()
+                return _error(
+                    "FLOW_TURN_LEASE_ACTIVE",
+                    "a resident turn is still in flight; finish it before publishing",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                )
+            if active_status == "pending":
+                connection.rollback()
+                return _error(
+                    "FLOW_PENDING_SNAPSHOT",
+                    "a Hidden Flow snapshot is awaiting commit; finish it before publishing",
                     409,
                     currentRevision=current_revision,
                     currentRuntimeVersion=current_runtime_version,
