@@ -71,8 +71,8 @@ class HiddenFlowPrivateLeakageRecoveryTests(unittest.TestCase):
                 )
 
             self.assertEqual(assistant_id, 101)
-            self.assertEqual(captured["content"], "visible response tail ")
-            self.assertEqual(captured["thinking"], "visible response tail ")
+            self.assertEqual(captured["content"], "visible response tail")
+            self.assertEqual(captured["thinking"], "visible response tail")
             assert_no_hidden_flow_private_content(self, captured)
         finally:
             os.unlink(db_path)
