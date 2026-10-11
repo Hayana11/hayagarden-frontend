@@ -9,6 +9,7 @@ export class FlowStudioApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly payload: unknown;
+  savedDocument?: FlowStudioData;
 
   constructor(status: number, code: string, message: string, payload: unknown) {
     super(message);
@@ -143,6 +144,143 @@ async function requestJson(
 export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapter {
   let revision = 0;
 
+  const validateEditorDocument = async (next: FlowStudioData) => {
+    const payload = await requestJson(
+      '/api/flow-studio/editor/' + encodeURIComponent(flowId) + '/validate',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          document: editorDocumentForRequest(next),
+        }),
+      },
+    );
+    const list = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : [];
+    return {
+      valid: payload.valid === true,
+      publishable: payload.publishable === true,
+      errors: list(payload.errors),
+      unsupportedFields: list(payload.unsupportedFields),
+      displayOnlyFields: list(payload.displayOnlyFields),
+      unsafeFields: list(payload.unsafeFields),
+    };
+  };
+
+  const publishEditorDocument = async (next: FlowStudioData): Promise<FlowStudioPublishResult> => {
+    const expectedRuntimeVersion = next.runtimeVersion;
+    if (!Number.isInteger(expectedRuntimeVersion) || (expectedRuntimeVersion as number) < 0) {
+      throw new FlowStudioApiError(
+        409,
+        'RUNTIME_VERSION_REQUIRED',
+        '缺少当前运行配置版本，请先重新读取服务器草稿',
+        {},
+      );
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = await requestJson(
+        '/api/flow-studio/editor/' + encodeURIComponent(flowId) + '/publish',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            expectedRevision: revision,
+            expectedRuntimeVersion,
+            document: editorDocumentForRequest(next),
+          }),
+        },
+      );
+    } catch (error: unknown) {
+      if (error instanceof FlowStudioApiError && error.status === 409) {
+        throw new FlowStudioConflictError(
+          (error.payload && typeof error.payload === 'object')
+            ? error.payload as Record<string, unknown>
+            : {},
+        );
+      }
+      throw error;
+    }
+
+    const confirmed = await requestJson(
+      '/api/flow-studio/editor/' + encodeURIComponent(flowId),
+    );
+    const confirmedDocument = documentForWorkspace(confirmed);
+    const publishedRuntime = payload.runtime && typeof payload.runtime === 'object'
+      ? payload.runtime as Record<string, unknown>
+      : {};
+    const confirmedRuntime = confirmed.runtime && typeof confirmed.runtime === 'object'
+      ? confirmed.runtime as Record<string, unknown>
+      : {};
+    if (
+      publishedRuntime.version !== confirmedRuntime.version
+      || typeof publishedRuntime.configDigest !== 'string'
+      || publishedRuntime.configDigest !== confirmedRuntime.configDigest
+      || confirmedRuntime.published !== true
+      || stableJson(editorDocumentForRequest(confirmedDocument))
+        !== stableJson(editorDocumentForRequest(next))
+    ) {
+      throw new FlowStudioApiError(
+        502,
+        'PUBLISH_CONFIRMATION_FAILED',
+        '服务器发布结果未通过重新读取确认',
+        confirmed,
+      );
+    }
+    revision = typeof confirmed.editorRevision === 'number'
+      ? confirmed.editorRevision
+      : revision;
+    return {
+      document: confirmedDocument,
+      displayOnlyFields: Array.isArray(payload.displayOnlyFields)
+        ? payload.displayOnlyFields.filter(
+            (item): item is string => typeof item === 'string',
+          )
+        : [],
+    };
+  };
+
+  const saveEditorDocument = async (next: FlowStudioData): Promise<FlowStudioData> => {
+    const payload = await requestJson(
+      '/api/flow-studio/editor/' + encodeURIComponent(flowId),
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          expectedRevision: revision,
+          document: editorDocumentForRequest(next),
+        }),
+      },
+    ).catch((error: unknown) => {
+      if (error instanceof FlowStudioApiError && error.status === 409) {
+        throw new FlowStudioConflictError(
+          (error.payload && typeof error.payload === 'object')
+            ? error.payload as Record<string, unknown>
+            : {},
+        );
+      }
+      throw error;
+    });
+    revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : revision + 1;
+    const savedDocument = documentForWorkspace(payload);
+
+    try {
+      const validation = await validateEditorDocument(savedDocument);
+      if (!validation.valid || !validation.publishable) {
+        throw new FlowStudioApiError(
+          422,
+          'EDITOR_SAVE_VALIDATION_FAILED',
+          '保存的配置未通过安全校验',
+          { ...validation },
+        );
+      }
+      return (await publishEditorDocument(savedDocument)).document;
+    } catch (error: unknown) {
+      if (error instanceof FlowStudioApiError) {
+        error.savedDocument = savedDocument;
+      }
+      throw error;
+    }
+  };
+
   return {
     async load() {
       const payload = await requestJson(
@@ -152,124 +290,9 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
       return documentForWorkspace(payload);
     },
 
-    async save(next) {
-      const payload = await requestJson(
-        '/api/flow-studio/editor/' + encodeURIComponent(flowId),
-        {
-          method: 'PUT',
-          body: JSON.stringify({
-            expectedRevision: revision,
-            document: editorDocumentForRequest(next),
-          }),
-        },
-      ).catch((error: unknown) => {
-        if (error instanceof FlowStudioApiError && error.status === 409) {
-          throw new FlowStudioConflictError(
-            (error.payload && typeof error.payload === 'object')
-              ? error.payload as Record<string, unknown>
-              : {},
-          );
-        }
-        throw error;
-      });
-      revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : revision + 1;
-      return documentForWorkspace(payload);
-    },
-
-    async validate(next) {
-      const payload = await requestJson(
-        '/api/flow-studio/editor/' + encodeURIComponent(flowId) + '/validate',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            document: editorDocumentForRequest(next),
-          }),
-        },
-      );
-      const list = (value: unknown): string[] => Array.isArray(value)
-        ? value.filter((item): item is string => typeof item === 'string')
-        : [];
-      return {
-        valid: payload.valid === true,
-        publishable: payload.publishable === true,
-        errors: list(payload.errors),
-        unsupportedFields: list(payload.unsupportedFields),
-        displayOnlyFields: list(payload.displayOnlyFields),
-        unsafeFields: list(payload.unsafeFields),
-      };
-    },
-
-    async publish(next): Promise<FlowStudioPublishResult> {
-      const expectedRuntimeVersion = next.runtimeVersion;
-      if (!Number.isInteger(expectedRuntimeVersion) || (expectedRuntimeVersion as number) < 0) {
-        throw new FlowStudioApiError(
-          409,
-          'RUNTIME_VERSION_REQUIRED',
-          '缺少当前运行配置版本，请先重新读取服务器草稿',
-          {},
-        );
-      }
-      let payload: Record<string, unknown>;
-      try {
-        payload = await requestJson(
-          '/api/flow-studio/editor/' + encodeURIComponent(flowId) + '/publish',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              expectedRevision: revision,
-              expectedRuntimeVersion,
-              document: editorDocumentForRequest(next),
-            }),
-          },
-        );
-      } catch (error: unknown) {
-        if (error instanceof FlowStudioApiError && error.status === 409) {
-          throw new FlowStudioConflictError(
-            (error.payload && typeof error.payload === 'object')
-              ? error.payload as Record<string, unknown>
-              : {},
-          );
-        }
-        throw error;
-      }
-
-      const confirmed = await requestJson(
-        '/api/flow-studio/editor/' + encodeURIComponent(flowId),
-      );
-      const confirmedDocument = documentForWorkspace(confirmed);
-      const publishedRuntime = payload.runtime && typeof payload.runtime === 'object'
-        ? payload.runtime as Record<string, unknown>
-        : {};
-      const confirmedRuntime = confirmed.runtime && typeof confirmed.runtime === 'object'
-        ? confirmed.runtime as Record<string, unknown>
-        : {};
-      if (
-        publishedRuntime.version !== confirmedRuntime.version
-        || typeof publishedRuntime.configDigest !== 'string'
-        || publishedRuntime.configDigest !== confirmedRuntime.configDigest
-        || confirmedRuntime.published !== true
-        || stableJson(editorDocumentForRequest(confirmedDocument))
-          !== stableJson(editorDocumentForRequest(next))
-      ) {
-        throw new FlowStudioApiError(
-          502,
-          'PUBLISH_CONFIRMATION_FAILED',
-          '服务器发布结果未通过重新读取确认',
-          confirmed,
-        );
-      }
-      revision = typeof confirmed.editorRevision === 'number'
-        ? confirmed.editorRevision
-        : revision;
-      return {
-        document: confirmedDocument,
-        displayOnlyFields: Array.isArray(payload.displayOnlyFields)
-          ? payload.displayOnlyFields.filter(
-              (item): item is string => typeof item === 'string',
-            )
-          : [],
-      };
-    },
+    save: saveEditorDocument,
+    validate: validateEditorDocument,
+    publish: publishEditorDocument,
 
     acceptRevision(nextRevision) {
       if (Number.isInteger(nextRevision) && nextRevision >= 0) {
