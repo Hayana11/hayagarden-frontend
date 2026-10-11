@@ -7,7 +7,7 @@ import json
 from html import escape
 from typing import Any, Iterable, Mapping, Optional
 
-from .types import DrawItem, DrawResult, FlowConfig, FlowState, PoolSpec
+from .types import MAX_STAGE_GUIDANCE_CHARS, DrawItem, DrawResult, FlowConfig, FlowState, PoolSpec
 
 
 MAX_DRAWS = 12
@@ -374,6 +374,14 @@ def render_private_guide(
         )
     ]
     used = len(chunks[0])
+    if stage.guidance_prompt:
+        block = "<stage_guidance>%s</stage_guidance>" % escape(
+            stage.guidance_prompt[:MAX_STAGE_GUIDANCE_CHARS],
+            quote=False,
+        )
+        if used + len(block) + len("</hidden_flow_guidance>") <= MAX_PRIVATE_TEXT:
+            chunks.append(block)
+            used += len(block)
     for item in result.draws[:MAX_DRAWS]:
         pool = config.pool(item.pool_id)
         if pool is None or not any(entry.entry_id == item.entry_id and entry.text == item.text for entry in pool.entries):
