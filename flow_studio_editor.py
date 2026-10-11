@@ -22,7 +22,7 @@ import config_store
 from daily_context_bff import same_origin_mutation_ok
 from moments_auth import OwnerAuthError, require_owner
 from chat.hidden_flow.config import normalize_flow_config
-from chat.hidden_flow.types import AppliedGuide, FlowState
+from chat.hidden_flow.types import AppliedGuide, FlowState, MAX_STAGE_GUIDANCE_CHARS
 
 EDITOR_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 1
@@ -172,6 +172,7 @@ def _ensure_stage_transition_modes(document: Mapping[str, Any]) -> dict[str, Any
         stage.get("id"): position for position, stage in enumerate(enabled)
     }
     for stage in stages:
+        stage.setdefault("guidancePrompt", "")
         mode = stage.get("nextStageMode")
         if mode not in {"sequence", "explicit"}:
             next_id = stage.get("nextStageId")
@@ -213,6 +214,7 @@ def _runtime_to_editor(flow_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         stage.setdefault("minTurns", 1)
         stage.setdefault("repeatMinTurns", 1)
         stage.setdefault("terminal", False)
+        stage.setdefault("guidancePrompt", "")
         stage.setdefault("poolIds", [])
         stages.append(stage)
     document["stages"] = stages
@@ -343,6 +345,11 @@ def _validate_editor_document(
             errors.append(f"{path}.name must be non-empty")
         elif len(stage["name"]) > MAX_NAME_CHARS:
             errors.append(f"{path}.name is too long")
+        guidance_prompt = stage.get("guidancePrompt", "")
+        if not isinstance(guidance_prompt, str):
+            errors.append(f"{path}.guidancePrompt must be a string")
+        elif len(guidance_prompt) > MAX_STAGE_GUIDANCE_CHARS:
+            errors.append(f"{path}.guidancePrompt is too long")
         for field in ("minTurns", "repeatMinTurns"):
             if not _is_int(stage.get(field)):
                 errors.append(f"{path}.{field} must be an integer")
@@ -425,7 +432,13 @@ def _validate_editor_document(
         ):
             errors.append(f"{path}.poolIds must be an array of strings")
 
-    return (_copy(document) if not errors else None), errors
+    if not errors:
+        normalized_document = _copy(document)
+        for stage in normalized_document.get("stages") or []:
+            if isinstance(stage, dict):
+                stage["guidancePrompt"] = _text(stage.get("guidancePrompt"))
+        return normalized_document, errors
+    return None, errors
 
 
 def _materialize_stage_order(document: dict[str, Any]) -> dict[str, Any]:
@@ -531,6 +544,12 @@ def compile_editor_document(
             errors.append(f"stage {stage_id}: minTurns must be between 1 and 12")
         if not _is_int(repeat_min_turns) or not 1 <= repeat_min_turns <= 12:
             errors.append(f"stage {stage_id}: repeatMinTurns must be between 1 and 12")
+        guidance_prompt = stage.get("guidancePrompt", "")
+        if not isinstance(guidance_prompt, str) or len(guidance_prompt) > MAX_STAGE_GUIDANCE_CHARS:
+            errors.append(f"stage {stage_id}: guidancePrompt must be at most {MAX_STAGE_GUIDANCE_CHARS} characters")
+            guidance_prompt = ""
+        else:
+            guidance_prompt = _text(guidance_prompt)
         if stage.get("nextStageMode") == "sequence":
             position = enabled_stage_order.index(stage_id)
             next_stage = (
@@ -560,6 +579,7 @@ def compile_editor_document(
             "terminalWithoutContinue": bool(stage.get("terminalWithoutContinue", False)),
             "holdable": bool(stage.get("holdable", False)),
             "poolIds": list(pool_refs),
+            "guidancePrompt": guidance_prompt,
         })
 
     initial_stage = runtime.get("initialStage")
@@ -642,6 +662,7 @@ _EDITOR_STAGE_FIELDS = frozenset({
     "terminalWithoutContinue",
     "holdable",
     "poolIds",
+    "guidancePrompt",
 })
 _EDITOR_POOL_FIELDS = frozenset({
     "id",
