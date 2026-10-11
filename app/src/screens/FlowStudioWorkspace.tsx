@@ -6,6 +6,7 @@ import {
   type FlowStudioData,
   type FlowStudioDataAdapter,
   type FlowStudioEntry,
+  type FlowStudioValidationResult,
   type FlowStudioPool,
   type FlowStudioStage,
 } from '../lib/flowStudio/flowStudioMock';
@@ -22,10 +23,12 @@ type DeleteTarget = { kind: 'stage' | 'pool'; id: string } | null;
 type ConflictState = {
   currentDocument: FlowStudioData | null;
   currentRevision: number | null;
+  currentRuntimeVersion: number | null;
 };
 type PendingMerge = {
   serverDocument: FlowStudioData;
   serverRevision: number | null;
+  serverRuntimeVersion: number | null;
   conflicts: FlowStudioMergeConflict[];
 };
 
@@ -130,6 +133,10 @@ export function FlowStudioWorkspace({
   const [showGuide, setShowGuide] = useState(false);
   const [toast, setToast] = useState('');
   const [saving, setSaving] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishStatus, setPublishStatus] = useState<'published' | 'unpublished'>('unpublished');
+  const [publishValidation, setPublishValidation] = useState<FlowStudioValidationResult | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -140,6 +147,8 @@ export function FlowStudioWorkspace({
       const next = cloneFlowStudioData(loaded);
       syncSequenceStageLinks(next);
       setSaved(next);
+      setPublishStatus(next.published ? 'published' : 'unpublished');
+      setPublishValidation(null);
       draftRef.current = cloneFlowStudioData(next);
       setDraft(cloneFlowStudioData(next));
       setHistory([]);
@@ -184,6 +193,8 @@ export function FlowStudioWorkspace({
   const mutate = (message: string, recipe: (next: FlowStudioData) => void) => {
     const next = cloneFlowStudioData(draft);
     recipe(next);
+    setPublishStatus('unpublished');
+    setPublishValidation(null);
     setHistory((current) => [...current, cloneFlowStudioData(draftRef.current)].slice(-24));
     draftRef.current = next;
     setDraft(next);
@@ -228,6 +239,8 @@ export function FlowStudioWorkspace({
       if (newerEditsExist) {
         const localDocument = cloneFlowStudioData(draftRef.current);
         localDocument.editorRevision = savedDocument.editorRevision;
+        localDocument.runtimeVersion = savedDocument.runtimeVersion;
+        localDocument.published = false;
         localDocument.savedAt = savedDocument.savedAt;
         draftRef.current = localDocument;
         setDraft(localDocument);
@@ -240,7 +253,12 @@ export function FlowStudioWorkspace({
       }
     } catch (error: unknown) {
       const errorRecord = error && typeof error === 'object'
-        ? error as { status?: unknown; currentDocument?: FlowStudioData | null; currentRevision?: unknown }
+        ? error as {
+            status?: unknown;
+            currentDocument?: FlowStudioData | null;
+            currentRevision?: unknown;
+            currentRuntimeVersion?: unknown;
+          }
         : {};
       if (errorRecord.status === 409) {
         setPendingMerge(null);
@@ -250,6 +268,9 @@ export function FlowStudioWorkspace({
             : null,
           currentRevision: typeof errorRecord.currentRevision === 'number'
             ? errorRecord.currentRevision
+            : null,
+          currentRuntimeVersion: typeof errorRecord.currentRuntimeVersion === 'number'
+            ? errorRecord.currentRuntimeVersion
             : null,
         });
         notify('服务器版本冲突，本地修改仍保留；请先比较版本差异');
@@ -269,6 +290,12 @@ export function FlowStudioWorkspace({
       conflictBase.editorRevision = conflict.currentRevision;
       dataAdapter.acceptRevision?.(conflict.currentRevision);
     }
+    if (conflict?.currentRuntimeVersion != null) {
+      conflictBase.runtimeVersion = conflict.currentRuntimeVersion;
+    }
+    conflictBase.published = false;
+    setPublishStatus('unpublished');
+    setPublishValidation(null);
     draftRef.current = cloneFlowStudioData(conflictBase);
     setSaved(conflictBase);
     setDraft(cloneFlowStudioData(conflictBase));
@@ -283,6 +310,7 @@ export function FlowStudioWorkspace({
     mergedDocument: FlowStudioData,
     serverDocument: FlowStudioData,
     serverRevision: number | null,
+    serverRuntimeVersion: number | null,
     message: string,
   ) => {
     const savedServerDocument = cloneFlowStudioData(serverDocument);
@@ -293,6 +321,12 @@ export function FlowStudioWorkspace({
       dataAdapter.acceptRevision?.(serverRevision);
     }
     nextDraft.savedAt = savedServerDocument.savedAt;
+    if (serverRuntimeVersion != null) {
+      nextDraft.runtimeVersion = serverRuntimeVersion;
+    }
+    nextDraft.published = false;
+    setPublishStatus('unpublished');
+    setPublishValidation(null);
     setSaved(savedServerDocument);
     draftRef.current = nextDraft;
     setDraft(nextDraft);
@@ -319,6 +353,7 @@ export function FlowStudioWorkspace({
       setPendingMerge({
         serverDocument,
         serverRevision: conflict.currentRevision,
+        serverRuntimeVersion: conflict.currentRuntimeVersion,
         conflicts: merge.conflicts,
       });
       notify('发现重叠修改，请明确选择冲突字段的版本');
@@ -328,6 +363,7 @@ export function FlowStudioWorkspace({
       merge.document,
       serverDocument,
       conflict.currentRevision,
+      conflict.currentRuntimeVersion,
       '已合并本地与服务器的不同字段，请重新保存',
     );
   };
@@ -348,10 +384,119 @@ export function FlowStudioWorkspace({
       merge.document,
       pendingMerge.serverDocument,
       pendingMerge.serverRevision,
+      pendingMerge.serverRuntimeVersion,
       preference === 'local'
         ? '已明确保留本地冲突字段；服务器其他修改已保留，请重新保存'
         : '已采用服务器冲突字段；本地其他修改已保留，请重新保存',
     );
+  };
+
+  const publishDraft = async () => {
+    const validate = dataAdapter.validate;
+    const publish = dataAdapter.publish;
+    if (!isServerBacked || !validate || !publish) {
+      return;
+    }
+    if (saving || validating || publishing) return;
+    if (conflict) {
+      notify('请先处理服务器版本冲突，再验证并发布');
+      return;
+    }
+    if (dirty) {
+      notify('请先保存当前草稿，再验证并发布');
+      return;
+    }
+    const requestDraft = cloneFlowStudioData(draftRef.current);
+    setValidating(true);
+    setPublishValidation(null);
+    try {
+      const result = await Promise.resolve(validate(requestDraft));
+      if (JSON.stringify(draftRef.current) !== JSON.stringify(requestDraft)) {
+        notify('验证期间草稿发生了新修改；本次发布已取消，请重新保存');
+        return;
+      }
+      setPublishValidation(result);
+      if (!result.valid || !result.publishable) {
+        const reason = result.errors[0]
+          || result.unsafeFields[0]
+          || '草稿包含无法安全编译的字段';
+        notify('发布验证失败：' + reason);
+        return;
+      }
+      setValidating(false);
+      setPublishing(true);
+      const resultAfterPublish = await Promise.resolve(publish(requestDraft));
+      const newerEditsExist = JSON.stringify(draftRef.current) !== JSON.stringify(requestDraft);
+      const publishedDocument = cloneFlowStudioData(resultAfterPublish.document);
+      setSaved(publishedDocument);
+      if (newerEditsExist) {
+        const localDocument = cloneFlowStudioData(draftRef.current);
+        localDocument.editorRevision = publishedDocument.editorRevision;
+        localDocument.runtimeVersion = publishedDocument.runtimeVersion;
+        localDocument.savedAt = publishedDocument.savedAt;
+        localDocument.published = false;
+        draftRef.current = localDocument;
+        setDraft(localDocument);
+        setPublishStatus('unpublished');
+        notify('已发布本次快照；期间的新修改仍保留，请再次保存');
+      } else {
+        draftRef.current = cloneFlowStudioData(publishedDocument);
+        setDraft(cloneFlowStudioData(publishedDocument));
+        setHistory([]);
+        setPublishStatus('published');
+        notify(resultAfterPublish.displayOnlyFields.length
+          ? '已验证并发布；展示字段未写入运行配置'
+          : '已验证并发布到运行配置');
+      }
+    } catch (error: unknown) {
+      const errorRecord = error && typeof error === 'object'
+        ? error as {
+            status?: unknown;
+            code?: unknown;
+            message?: unknown;
+            currentDocument?: FlowStudioData | null;
+            currentRevision?: unknown;
+            currentRuntimeVersion?: unknown;
+            payload?: unknown;
+          }
+        : {};
+      const conflictCodes = new Set([
+        'EDITOR_REVISION_CONFLICT',
+        'RUNTIME_VERSION_CONFLICT',
+        'PUBLISH_DRAFT_NOT_SAVED',
+      ]);
+      if (
+        errorRecord.status === 409
+        && conflictCodes.has(String(errorRecord.code))
+      ) {
+        setPendingMerge(null);
+        setConflict({
+          currentDocument: errorRecord.currentDocument
+            ? cloneFlowStudioData(errorRecord.currentDocument)
+            : null,
+          currentRevision: typeof errorRecord.currentRevision === 'number'
+            ? errorRecord.currentRevision
+            : null,
+          currentRuntimeVersion: typeof errorRecord.currentRuntimeVersion === 'number'
+            ? errorRecord.currentRuntimeVersion
+            : null,
+        });
+        notify('发布版本冲突，本地修改仍保留；请先比较服务器版本');
+      } else {
+        const payload = errorRecord.payload && typeof errorRecord.payload === 'object'
+          ? errorRecord.payload as { errors?: unknown }
+          : {};
+        const detail = Array.isArray(payload.errors)
+          ? payload.errors.find((item): item is string => typeof item === 'string')
+          : null;
+        notify(detail || (typeof errorRecord.message === 'string'
+          ? errorRecord.message
+          : '发布失败，运行配置未改变'));
+      }
+    } finally {
+      setValidating(false);
+      setPublishing(false);
+    }
   };
 
   const undo = () => {
@@ -536,9 +681,13 @@ export function FlowStudioWorkspace({
     : (draft.enabled ? '仅改变当前 Mock 状态，关闭不会删除内容' : '已停用，保存后仍只留在沙盒内');
   const configLabel = isServerBacked ? '启用编辑草稿' : '启用沙盒配置';
   const configToast = isServerBacked ? '编辑草稿启用状态已更新' : '沙盒启用状态已更新';
+  const canPublish = isServerBacked && Boolean(dataAdapter.validate && dataAdapter.publish);
+  const effectivePublishStatus = dirty ? '未保存' : (publishStatus === 'published' ? '已发布' : '未发布');
   const statusTitle = draft.enabled ? 'Standby' : '已暂停';
   const statusBody = isServerBacked
-    ? '这是服务器上的可编辑草稿。保存只更新编辑器文档，不会发布到 Hidden Flow 运行配置。'
+    ? (publishStatus === 'published' && !dirty
+      ? '服务器草稿已通过验证并发布到 Hidden Flow 运行配置。后续保存仍只更新编辑器草稿。'
+      : '这是服务器上的可编辑草稿。保存只更新编辑器文档，发布必须由你明确触发并通过版本检查。')
     : draft.enabled
       ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
       : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
@@ -644,7 +793,7 @@ export function FlowStudioWorkspace({
 
         {tab === 'overview' ? (
           <section className="flow-screen flow-overview" aria-label="概览">
-            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">{storageKicker}</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">{storageChip}</span><span>未发布</span><span>不调用模型</span></div></div><div className="flow-status-meta"><span>{draftRevisionLabel}</span><span>{modeLabel}</span></div></article>
+            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">{storageKicker}</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p>{publishValidation && (!publishValidation.valid || !publishValidation.publishable) ? <div className="flow-publish-note">发布验证未通过：{publishValidation.errors[0] || publishValidation.unsafeFields[0] || '存在无法安全编译的字段'}</div> : null}<div className="flow-status-chips"><span className="is-rose">{storageChip}</span><span>{effectivePublishStatus}</span><span>不调用模型</span></div></div><div className="flow-status-meta"><span>{draftRevisionLabel}</span><span>{modeLabel}</span>{canPublish ? <button type="button" className="flow-text-button flow-publish-action" onClick={publishDraft} disabled={saving || validating || publishing || dirty || Boolean(conflict)}>{validating ? '验证中…' : (publishing ? '发布中…' : '验证并发布')}</button> : null}</div></article>
             <article className="flow-control-card"><div className="flow-control-row"><div><strong>运行总闸</strong><small>真实服务器级开关 · 本页只读</small></div><span className="flow-readonly-pill">生产隔离</span></div><div className="flow-control-row"><div><strong>{configTitle}</strong><small>{configHelp}</small></div><Switch checked={draft.enabled} label={configLabel} onChange={() => mutate(configToast, (next) => { next.enabled = !next.enabled; })} /></div><div className="flow-control-row"><div><strong>会话记录</strong><small>没有连接真实聊天，不会产生运行记录</small></div><span className="flow-muted-value">无</span></div></article>
             <div className="flow-section-heading"><span>流程 · {draft.stages.length} 个阶段</span><button type="button" onClick={() => setTab('stages')}>编辑 ›</button></div>
             <article className="flow-stage-chain"><div className="flow-chain-line" />{draft.stages.map((stage, index) => <button type="button" className="flow-chain-node" key={stage.id} onClick={() => { setTab('stages'); setOpenStage(stage.id); }}><span className={stage.terminal ? 'is-terminal' : ''}>{stage.terminal ? '✦' : index + 1}</span><b>{stage.name || '未命名'}</b></button>)}<p>第一启用阶段为起始阶段；达到最低轮数后，按顺序推进或显式跳转。</p></article>

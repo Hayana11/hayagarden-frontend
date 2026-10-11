@@ -7215,11 +7215,46 @@ def stream_daily_resident_turn(
 
 
 
+def _assert_hidden_flow_lease_for_finalize(
+    plan: DailyTurnPlan,
+    connection: sqlite3.Connection,
+) -> None:
+    """Fail closed if the existing resident lease no longer covers Hidden Flow CAS."""
+    if not getattr(plan, "lease_acquired", False) or getattr(
+        plan, "lease_released", False
+    ):
+        raise ConflictError("hidden flow resident lease is not held at finalize")
+    row = connection.execute(
+        """
+        SELECT lease_owner, request_message_id, expires_at
+        FROM daily_resident_turn_leases
+        WHERE context_id=? AND resident_generation=?
+        """,
+        (int(plan.context_id), int(plan.resident_generation)),
+    ).fetchone()
+    if row is None or str(row["lease_owner"]) != str(plan.lease_owner):
+        raise ConflictError("hidden flow resident lease owner mismatch at finalize")
+    if type(row["request_message_id"]) is not int or int(
+        row["request_message_id"]
+    ) != int(plan.user_message_id):
+        raise ConflictError("hidden flow resident lease request mismatch at finalize")
+    try:
+        expires_at = datetime.datetime.strptime(
+            str(row["expires_at"]), "%Y-%m-%d %H:%M:%S"
+        )
+    except (TypeError, ValueError):
+        raise ConflictError("hidden flow resident lease expiry is invalid") from None
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=dc.TZ_OFFSET_HOURS)
+    if expires_at <= now:
+        raise ConflictError("hidden flow resident lease expired at finalize")
+
+
 def _finalize_hidden_flow_snapshot(plan: DailyTurnPlan) -> Callable[[sqlite3.Connection, int], None]:
     def finalize(conn: sqlite3.Connection, assistant_id: int) -> None:
         from chat.hidden_flow.runtime_store import finalize_snapshot
         observation = getattr(plan, "hidden_flow_observation", None)
         try:
+            _assert_hidden_flow_lease_for_finalize(plan, conn)
             finalize_snapshot(conn, int(assistant_id))
             if observation is not None:
                 observation.record_snapshot("committed")

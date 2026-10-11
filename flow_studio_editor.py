@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import datetime as _datetime
+import hashlib
 import json
 import os
 import sqlite3
@@ -21,6 +22,7 @@ import config_store
 from daily_context_bff import same_origin_mutation_ok
 from moments_auth import OwnerAuthError, require_owner
 from chat.hidden_flow.config import normalize_flow_config
+from chat.hidden_flow.types import AppliedGuide, FlowState
 
 EDITOR_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 1
@@ -606,12 +608,260 @@ def compile_editor_document(
     return (runtime if not errors else runtime), sorted(set(errors)), sorted(set(unsupported))
 
 
-def _runtime_meta(runtime: Mapping[str, Any], editor_row: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+
+_EDITOR_DOCUMENT_METADATA_FIELDS = {
+    "version",
+    "editorRevision",
+    "savedAt",
+    "runtimeVersion",
+    "published",
+}
+
+
+_EDITOR_DOCUMENT_FIELDS = frozenset({
+    "schemaVersion",
+    "flowId",
+    "enabled",
+    "initialStage",
+    "stages",
+    "pools",
+    "cues",
+    "dimensions",
+}) | _EDITOR_DOCUMENT_METADATA_FIELDS
+
+_EDITOR_STAGE_FIELDS = frozenset({
+    "id",
+    "name",
+    "enabled",
+    "minTurns",
+    "repeatMinTurns",
+    "nextStageId",
+    "nextStageMode",
+    "terminal",
+    "continueTarget",
+    "terminalWithoutContinue",
+    "holdable",
+    "poolIds",
+})
+_EDITOR_POOL_FIELDS = frozenset({
+    "id",
+    "name",
+    "enabled",
+    "mode",
+    "count",
+    "entries",
+})
+_EDITOR_ENTRY_FIELDS = frozenset({"id", "text", "enabled"})
+_EDITOR_CUE_FIELDS = frozenset({"id", "key", "kind", "enabled", "poolIds"})
+_EDITOR_DIMENSION_FIELDS = frozenset({"id", "label", "detail", "tone"})
+
+_RUNTIME_STATE_FIELDS = frozenset({
+    "schemaVersion",
+    "flowId",
+    "active",
+    "stage",
+    "cycle",
+    "stageTurn",
+    "contextKeys",
+    "fixedDraws",
+    "startedAt",
+})
+
+
+def _unknown_editor_fields(document: Mapping[str, Any]) -> set[str]:
+    """Find nested fields that compile_editor_document would otherwise ignore."""
+    unsafe: set[str] = set()
+
+    def record(value: Any, path: str, allowed: frozenset[str]) -> None:
+        if not isinstance(value, Mapping):
+            return
+        for key in value:
+            if key not in allowed:
+                unsafe.add(f"{path}.{key}")
+
+    record(document, "document", _EDITOR_DOCUMENT_FIELDS)
+
+    def items(key: str) -> list[Any]:
+        value = document.get(key)
+        return value if isinstance(value, list) else []
+
+    def item_path(collection: str, index: int, item: Any) -> str:
+        identifier = _text(item.get("id")) if isinstance(item, Mapping) else ""
+        return f"{collection}[{identifier or index}]"
+
+    for index, stage in enumerate(items("stages")):
+        record(stage, item_path("stages", index, stage), _EDITOR_STAGE_FIELDS)
+    for index, pool in enumerate(items("pools")):
+        pool_path = item_path("pools", index, pool)
+        record(pool, pool_path, _EDITOR_POOL_FIELDS)
+        entries = pool.get("entries") if isinstance(pool, Mapping) else None
+        if isinstance(entries, list):
+            for entry_index, entry in enumerate(entries):
+                entry_id = _text(entry.get("id")) if isinstance(entry, Mapping) else ""
+                record(
+                    entry,
+                    f"{pool_path}.entries[{entry_id or entry_index}]",
+                    _EDITOR_ENTRY_FIELDS,
+                )
+    for index, cue in enumerate(items("cues")):
+        record(cue, item_path("cues", index, cue), _EDITOR_CUE_FIELDS)
+    for index, dimension in enumerate(items("dimensions")):
+        record(
+            dimension,
+            item_path("dimensions", index, dimension),
+            _EDITOR_DIMENSION_FIELDS,
+        )
+    return unsafe
+
+
+def _decode_verified_flow_state(value: Any) -> FlowState:
+    """Decode a runtime state without the fail-open behavior used by runtime reads."""
+    if not isinstance(value, Mapping) or set(value) != _RUNTIME_STATE_FIELDS:
+        raise ValueError("runtime state shape is not recognized")
+    if type(value["schemaVersion"]) is not int:
+        raise ValueError("runtime state schemaVersion is invalid")
+    for field in ("flowId", "stage", "startedAt"):
+        if not isinstance(value[field], str):
+            raise ValueError(f"runtime state {field} is invalid")
+    for field in ("cycle", "stageTurn"):
+        if type(value[field]) is not int:
+            raise ValueError(f"runtime state {field} is invalid")
+    if not isinstance(value["contextKeys"], list) or not isinstance(
+        value["fixedDraws"], dict
+    ):
+        raise ValueError("runtime state collections are invalid")
+    return FlowState.from_dict(value)
+
+
+def _verify_runtime_row(
+    row: Mapping[str, Any],
+    state: FlowState,
+    flow_id: str,
+) -> None:
+    if type(row["schema_version"]) is not int:
+        raise ValueError("runtime schemaVersion is invalid")
+    if row["schema_version"] != state.schema_version:
+        raise ValueError("runtime schemaVersion does not match state")
+    if type(row["version"]) is not int or row["version"] < 0:
+        raise ValueError("runtime version is invalid")
+    if not isinstance(row["chat_id"], str) or not row["chat_id"].strip():
+        raise ValueError("runtime chat id is invalid")
+    if not isinstance(row["updated_at"], str) or not row["updated_at"].strip():
+        raise ValueError("runtime updated_at is invalid")
+    row_flow_id = row["flow_id"]
+    if row_flow_id is not None and (
+        not isinstance(row_flow_id, str) or not row_flow_id.strip()
+    ):
+        raise ValueError("runtime flow id is invalid")
+    config_version = row["config_version"]
+    if config_version is not None and (
+        type(config_version) is not int or config_version < 0
+    ):
+        raise ValueError("runtime config version is invalid")
+    if state.active:
+        if row_flow_id != state.flow_id or state.flow_id != flow_id:
+            raise ValueError("runtime active flow association is invalid")
+        if config_version is None:
+            raise ValueError("active runtime config version is missing")
+    elif row_flow_id is not None:
+        raise ValueError("inactive runtime has a flow id")
+    pending = row["pending_guide_json"]
+    if pending is not None:
+        guide = AppliedGuide.from_dict(json.loads(str(pending)))
+        if guide.status != "pending" or guide.flow.to_dict() != state.to_dict():
+            raise ValueError("runtime pending guide does not match state")
+
+
+def _decode_verified_snapshot_state(value: Any, flow_id: str) -> FlowState:
+    state = _decode_verified_flow_state(value)
+    if state.active and state.flow_id != flow_id:
+        raise ValueError("snapshot flow association is invalid")
+    return state
+
+
+def _runtime_timestamp(value: Any) -> _datetime.datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("runtime lease timestamp is invalid")
+    return _datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _classify_publish_fields(
+    document: Mapping[str, Any],
+    unsupported: list[str],
+) -> tuple[list[str], list[str]]:
+    """Separate presentation-only compiler notices from unsafe omissions.
+
+    The publish endpoint is intentionally fail-closed: names, cue kind labels,
+    dimensions, and compiler-derived sequence links never affect Runtime v1.
+    Disabled or unknown fields can affect behavior and therefore block publish
+    until the editor document no longer contains an unsafe omission.
+    """
+    display_only: set[str] = set()
+    unsafe: set[str] = set(_unknown_editor_fields(document))
+    allowed = _EDITOR_DOCUMENT_FIELDS
+    for key in document:
+        if key not in allowed:
+            unsafe.add(f"document.{key}")
+    for field in unsupported:
+        if (
+            field == "dimensions"
+            or field.endswith(".name")
+            or field.endswith(".kind")
+            or field.endswith(" (derived)")
+            or field.startswith("initialStage (derived")
+        ):
+            display_only.add(field)
+        else:
+            unsafe.add(field)
+    return sorted(display_only), sorted(unsafe)
+
+
+def _is_published(
+    runtime_row: Mapping[str, Any],
+    document: Mapping[str, Any],
+) -> bool:
+    compiled, errors, unsupported = compile_editor_document(document)
+    _, unsafe = _classify_publish_fields(document, unsupported)
+    if errors or unsafe or compiled is None:
+        return False
+    try:
+        return _canonical(compiled) == _canonical(_decode_runtime(runtime_row))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _runtime_meta(
+    runtime: Mapping[str, Any],
+    editor_row: Optional[Mapping[str, Any]],
+    document: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    try:
+        config_digest = hashlib.sha256(
+            _canonical(_decode_runtime(runtime)).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        config_digest = ""
     return {
         "schemaVersion": RUNTIME_SCHEMA_VERSION,
         "version": int(runtime.get("version", 0)),
+        "configDigest": config_digest,
         "engineEnabled": bool(config_store.get_bool("HIDDEN_FLOW_ENGINE_ENABLED", False)),
-        "published": False,
+        "published": (
+            _is_published(runtime, document)
+            if document is not None
+            else False
+        ),
         "editorRevision": int(editor_row["revision"]) if editor_row else 0,
     }
 
@@ -629,8 +879,146 @@ def _bundle_payload(
         "editorRevision": int(editor_row["revision"]) if editor_row else 0,
         "savedAt": editor_row["updated_at"] if editor_row else None,
         "source": "editor" if editor_row else "runtime-import",
-        "runtime": _runtime_meta(runtime_row, editor_row),
+        "runtime": _runtime_meta(runtime_row, editor_row, document),
     }
+
+
+def _active_runtime_status(
+    connection: sqlite3.Connection,
+    flow_id: str,
+) -> str:
+    """Return a fail-closed publish status using existing runtime/lease tables."""
+    unknown = False
+    active = False
+    lease_active = False
+    pending = False
+    now = _datetime.datetime.utcnow() + _datetime.timedelta(hours=8)
+
+    try:
+        config_row = connection.execute(
+            "SELECT version FROM hidden_flow_configs WHERE flow_id=?",
+            (flow_id,),
+        ).fetchone()
+        if config_row is None or type(config_row["version"]) is not int:
+            return "unknown"
+        runtime_rows = connection.execute(
+            """
+            SELECT chat_id, schema_version, flow_id, state_json,
+                   pending_guide_json, config_version, version, updated_at
+            FROM hidden_flow_runtime
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "unknown"
+
+    for row in runtime_rows:
+        row_flow_id = row["flow_id"]
+        try:
+            state = _decode_verified_flow_state(
+                json.loads(str(row["state_json"]))
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            if row_flow_id == flow_id:
+                unknown = True
+            continue
+        relevant = row_flow_id == flow_id or (
+            state.active and state.flow_id == flow_id
+        )
+        if not relevant:
+            continue
+        try:
+            _verify_runtime_row(row, state, flow_id)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            unknown = True
+            continue
+        if state.active:
+            active = True
+
+    try:
+        snapshot_rows = connection.execute(
+            """
+            SELECT flow_id, status, config_version, state_before_json,
+                   state_after_json, next_guide_json
+            FROM hidden_flow_message_snapshots
+            WHERE status=?
+            """,
+            ("PENDING",),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "unknown"
+
+    for row in snapshot_rows:
+        snapshot_flow_id = row["flow_id"]
+        if snapshot_flow_id is None:
+            unknown = True
+            continue
+        if snapshot_flow_id != flow_id:
+            continue
+        try:
+            if type(row["config_version"]) is not int or row["config_version"] < 0:
+                raise ValueError("snapshot config version is invalid")
+            before = _decode_verified_snapshot_state(
+                json.loads(str(row["state_before_json"])),
+                flow_id,
+            )
+            after = _decode_verified_snapshot_state(
+                json.loads(str(row["state_after_json"])),
+                flow_id,
+            )
+            next_guide = row["next_guide_json"]
+            if next_guide is not None:
+                guide = AppliedGuide.from_dict(json.loads(str(next_guide)))
+                if guide.status != "pending" or guide.flow.to_dict() != after.to_dict():
+                    raise ValueError("snapshot pending guide is invalid")
+            pending = True
+            _ = before
+        except (TypeError, ValueError, json.JSONDecodeError):
+            unknown = True
+
+    try:
+        lease_rows = connection.execute(
+            """
+            SELECT context_id, resident_generation, lease_owner,
+                   request_message_id, acquired_at, expires_at, updated_at
+            FROM daily_resident_turn_leases
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "unknown"
+
+    for row in lease_rows:
+        try:
+            if (
+                type(row["context_id"]) is not int
+                or row["context_id"] <= 0
+                or type(row["resident_generation"]) is not int
+                or row["resident_generation"] <= 0
+                or not isinstance(row["lease_owner"], str)
+                or not row["lease_owner"].strip()
+                or type(row["request_message_id"]) is not int
+                or row["request_message_id"] <= 0
+            ):
+                raise ValueError("turn lease identity is invalid")
+            acquired_at = _runtime_timestamp(row["acquired_at"])
+            expires_at = _runtime_timestamp(row["expires_at"])
+            updated_at = _runtime_timestamp(row["updated_at"])
+            if acquired_at > expires_at or updated_at > expires_at:
+                raise ValueError("turn lease timestamps are invalid")
+            if expires_at <= now:
+                raise ValueError("turn lease is expired")
+            lease_active = True
+        except (TypeError, ValueError):
+            unknown = True
+
+    if unknown:
+        return "unknown"
+    if active:
+        return "active"
+    if lease_active:
+        return "lease_active"
+    if pending:
+        return "pending"
+    return "inactive"
 
 
 def create_flow_studio_blueprint(
@@ -754,6 +1142,15 @@ def create_flow_studio_blueprint(
             runtime_row = _runtime_row(connection, flow_id)
             if runtime_row is None:
                 return _error("FLOW_NOT_FOUND", "flow configuration was not found", 404)
+            current = connection.execute(
+                """
+                SELECT revision
+                FROM flow_studio_editor_documents
+                WHERE flow_id=?
+                """,
+                (flow_id,),
+            ).fetchone()
+            current_revision = int(current["revision"]) if current else 0
             document = payload.get("document")
             document, errors = _validate_editor_document(document, flow_id)
             if errors:
@@ -761,28 +1158,269 @@ def create_flow_studio_blueprint(
                     {
                         "ok": True,
                         "valid": False,
+                        "publishable": False,
                         "errors": errors,
                         "unsupportedFields": [],
+                        "displayOnlyFields": [],
+                        "unsafeFields": [],
+                        "editorRevision": current_revision,
+                        "runtime": {
+                            "schemaVersion": RUNTIME_SCHEMA_VERSION,
+                            "version": int(runtime_row["version"]),
+                            "engineEnabled": bool(
+                                config_store.get_bool(
+                                    "HIDDEN_FLOW_ENGINE_ENABLED", False
+                                )
+                            ),
+                            "published": False,
+                        },
                     }
                 )
             compiled, compile_errors, unsupported = compile_editor_document(
                 document or {}
             )
+            display_only, unsafe = _classify_publish_fields(
+                document or {},
+                unsupported,
+            )
             return _response(
                 {
                     "ok": True,
                     "valid": not compile_errors,
+                    "publishable": not compile_errors and not unsafe,
                     "errors": compile_errors,
                     "unsupportedFields": unsupported,
+                    "displayOnlyFields": display_only,
+                    "unsafeFields": unsafe,
+                    "editorRevision": current_revision,
                     "runtime": {
                         "schemaVersion": RUNTIME_SCHEMA_VERSION,
+                        "version": int(runtime_row["version"]),
                         "config": compiled,
                         "engineEnabled": bool(
                             config_store.get_bool("HIDDEN_FLOW_ENGINE_ENABLED", False)
                         ),
-                        "published": False,
+                        "published": _is_published(runtime_row, document or {}),
                     },
                 }
+            )
+        finally:
+            connection.close()
+
+    @blueprint.post("/api/flow-studio/editor/<flow_id>/publish")
+    def publish_editor(flow_id: str):
+        auth = _guard(owner_guard)
+        if auth is not None:
+            return auth
+        if not same_origin_mutation_ok(request):
+            return _error(
+                "CROSS_ORIGIN_MUTATION",
+                "cross-origin mutation rejected",
+                403,
+            )
+        payload, payload_error = _request_payload()
+        if payload_error is not None:
+            return payload_error
+        expected_revision = payload.get("expectedRevision")
+        expected_runtime_version = payload.get("expectedRuntimeVersion")
+        if not _is_int(expected_revision) or expected_revision < 0:
+            return _error(
+                "EDITOR_REVISION_REQUIRED",
+                "expectedRevision must be a non-negative integer",
+                400,
+            )
+        if not _is_int(expected_runtime_version) or expected_runtime_version < 0:
+            return _error(
+                "RUNTIME_VERSION_REQUIRED",
+                "expectedRuntimeVersion must be a non-negative integer",
+                400,
+            )
+        document, errors = _validate_editor_document(
+            payload.get("document"),
+            flow_id,
+        )
+        if errors:
+            return _error(
+                "EDITOR_DOCUMENT_INVALID",
+                "editor document is structurally invalid",
+                422,
+                errors=errors,
+            )
+        document = _materialize_stage_order(document or {})
+        connection = _connect(db_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            runtime = _runtime_row(connection, flow_id)
+            if runtime is None:
+                connection.rollback()
+                return _error(
+                    "FLOW_NOT_FOUND",
+                    "flow configuration was not found",
+                    404,
+                )
+            current = connection.execute(
+                """
+                SELECT flow_id, schema_version, document_json, revision,
+                       created_at, updated_at
+                FROM flow_studio_editor_documents
+                WHERE flow_id=?
+                """,
+                (flow_id,),
+            ).fetchone()
+            current_revision = int(current["revision"]) if current else 0
+            current_runtime_version = int(runtime["version"])
+            current_document = (
+                json.loads(current["document_json"])
+                if current is not None
+                else _runtime_to_editor(flow_id, _decode_runtime(runtime))
+            )
+            current_document = _materialize_stage_order(current_document)
+            if expected_revision != current_revision:
+                connection.rollback()
+                return _error(
+                    "EDITOR_REVISION_CONFLICT",
+                    "editor document changed on the server",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                    currentDocument=current_document,
+                )
+            if expected_runtime_version != current_runtime_version:
+                connection.rollback()
+                return _error(
+                    "RUNTIME_VERSION_CONFLICT",
+                    "runtime configuration changed on the server",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                    currentDocument=current_document,
+                )
+            if _canonical(document) != _canonical(current_document):
+                connection.rollback()
+                return _error(
+                    "PUBLISH_DRAFT_NOT_SAVED",
+                    "save the current editor draft before publishing",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                    currentDocument=current_document,
+                )
+
+            compiled, compile_errors, unsupported = compile_editor_document(document)
+            display_only, unsafe = _classify_publish_fields(document, unsupported)
+            if compile_errors or unsafe or compiled is None:
+                connection.rollback()
+                return _error(
+                    "PUBLISH_VALIDATION_FAILED",
+                    "draft cannot be published until validation passes",
+                    422,
+                    errors=compile_errors,
+                    unsupportedFields=unsupported,
+                    displayOnlyFields=display_only,
+                    unsafeFields=unsafe,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                )
+
+            active_status = _active_runtime_status(connection, flow_id)
+            if active_status == "active":
+                connection.rollback()
+                return _error(
+                    "FLOW_ACTIVE",
+                    "an active flow is using this configuration; finish it before publishing",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                )
+            if active_status == "lease_active":
+                connection.rollback()
+                return _error(
+                    "FLOW_TURN_LEASE_ACTIVE",
+                    "a resident turn is still in flight; finish it before publishing",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                )
+            if active_status == "pending":
+                connection.rollback()
+                return _error(
+                    "FLOW_PENDING_SNAPSHOT",
+                    "a Hidden Flow snapshot is awaiting commit; finish it before publishing",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                )
+            if active_status == "unknown":
+                connection.rollback()
+                return _error(
+                    "FLOW_ACTIVE_STATE_UNKNOWN",
+                    "active flow state could not be verified; publish was blocked",
+                    503,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                )
+
+            current_config = _decode_runtime(runtime)
+            next_version = current_runtime_version
+            if _canonical(current_config) != _canonical(compiled):
+                next_version += 1
+                stamp = _now()
+                updated = connection.execute(
+                    """
+                    UPDATE hidden_flow_configs
+                    SET schema_version=?, enabled=?, config_json=?,
+                        version=?, updated_at=?
+                    WHERE flow_id=? AND version=?
+                    """,
+                    (
+                        RUNTIME_SCHEMA_VERSION,
+                        int(bool(compiled.get("enabled"))),
+                        _json(compiled),
+                        next_version,
+                        stamp,
+                        flow_id,
+                        current_runtime_version,
+                    ),
+                )
+                if int(updated.rowcount or 0) != 1:
+                    raise sqlite3.OperationalError(
+                        "runtime configuration CAS failed"
+                    )
+                runtime = dict(runtime)
+                runtime.update(
+                    {
+                        "schema_version": RUNTIME_SCHEMA_VERSION,
+                        "enabled": int(bool(compiled.get("enabled"))),
+                        "config_json": _json(compiled),
+                        "version": next_version,
+                        "updated_at": stamp,
+                    }
+                )
+            connection.commit()
+            editor_row = (
+                {
+                    "revision": current_revision,
+                    "updated_at": current["updated_at"],
+                }
+                if current is not None
+                else None
+            )
+            response_payload = _bundle_payload(
+                flow_id,
+                runtime,
+                document,
+                editor_row,
+            )
+            response_payload["runtime"]["version"] = next_version
+            response_payload["runtime"]["published"] = True
+            response_payload["displayOnlyFields"] = display_only
+            return _response(response_payload)
+        except sqlite3.Error:
+            connection.rollback()
+            return _error(
+                "RUNTIME_PUBLISH_FAILED",
+                "runtime configuration was not changed",
+                500,
             )
         finally:
             connection.close()

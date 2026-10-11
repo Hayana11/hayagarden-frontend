@@ -2,6 +2,7 @@ import {
   cloneFlowStudioData,
   type FlowStudioData,
   type FlowStudioDataAdapter,
+  type FlowStudioPublishResult,
 } from './flowStudioMock';
 
 export class FlowStudioApiError extends Error {
@@ -21,6 +22,7 @@ export class FlowStudioApiError extends Error {
 export class FlowStudioConflictError extends FlowStudioApiError {
   readonly currentDocument: FlowStudioData | null;
   readonly currentRevision: number | null;
+  readonly currentRuntimeVersion: number | null;
 
   constructor(payload: Record<string, unknown>) {
     super(
@@ -41,6 +43,9 @@ export class FlowStudioConflictError extends FlowStudioApiError {
       : null;
     this.currentRevision = typeof payload.currentRevision === 'number'
       ? payload.currentRevision
+      : null;
+    this.currentRuntimeVersion = typeof payload.currentRuntimeVersion === 'number'
+      ? payload.currentRuntimeVersion
       : null;
   }
 }
@@ -66,13 +71,31 @@ function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData 
     );
   }
   const document = cloneFlowStudioData(payload.document);
+  const runtime = payload.runtime && typeof payload.runtime === 'object'
+    ? payload.runtime as Record<string, unknown>
+    : {};
   return {
     ...document,
     // Runtime config version is not the editable draft revision.
     version: 0,
     editorRevision: typeof payload.editorRevision === 'number' ? payload.editorRevision : 0,
+    runtimeVersion: typeof runtime.version === 'number' ? runtime.version : 0,
+    published: runtime.published === true,
     savedAt: typeof payload.savedAt === 'string' ? payload.savedAt : document.savedAt,
   };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return '[' + value.map((item) => stableJson(item)).join(',') + ']';
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return '{' + Object.keys(record).sort().map((key) => (
+      JSON.stringify(key) + ':' + stableJson(record[key])
+    )).join(',') + '}';
+  }
+  return JSON.stringify(value);
 }
 
 function editorDocumentForRequest(next: FlowStudioData): FlowStudioData {
@@ -80,6 +103,8 @@ function editorDocumentForRequest(next: FlowStudioData): FlowStudioData {
   delete (document as Record<string, unknown>).version;
   delete (document as Record<string, unknown>).editorRevision;
   delete (document as Record<string, unknown>).savedAt;
+  delete (document as Record<string, unknown>).runtimeVersion;
+  delete (document as Record<string, unknown>).published;
   return document;
 }
 
@@ -149,6 +174,101 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
       });
       revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : revision + 1;
       return documentForWorkspace(payload);
+    },
+
+    async validate(next) {
+      const payload = await requestJson(
+        '/api/flow-studio/editor/' + encodeURIComponent(flowId) + '/validate',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            document: editorDocumentForRequest(next),
+          }),
+        },
+      );
+      const list = (value: unknown): string[] => Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === 'string')
+        : [];
+      return {
+        valid: payload.valid === true,
+        publishable: payload.publishable === true,
+        errors: list(payload.errors),
+        unsupportedFields: list(payload.unsupportedFields),
+        displayOnlyFields: list(payload.displayOnlyFields),
+        unsafeFields: list(payload.unsafeFields),
+      };
+    },
+
+    async publish(next): Promise<FlowStudioPublishResult> {
+      const expectedRuntimeVersion = next.runtimeVersion;
+      if (!Number.isInteger(expectedRuntimeVersion) || (expectedRuntimeVersion as number) < 0) {
+        throw new FlowStudioApiError(
+          409,
+          'RUNTIME_VERSION_REQUIRED',
+          '缺少当前运行配置版本，请先重新读取服务器草稿',
+          {},
+        );
+      }
+      let payload: Record<string, unknown>;
+      try {
+        payload = await requestJson(
+          '/api/flow-studio/editor/' + encodeURIComponent(flowId) + '/publish',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              expectedRevision: revision,
+              expectedRuntimeVersion,
+              document: editorDocumentForRequest(next),
+            }),
+          },
+        );
+      } catch (error: unknown) {
+        if (error instanceof FlowStudioApiError && error.status === 409) {
+          throw new FlowStudioConflictError(
+            (error.payload && typeof error.payload === 'object')
+              ? error.payload as Record<string, unknown>
+              : {},
+          );
+        }
+        throw error;
+      }
+
+      const confirmed = await requestJson(
+        '/api/flow-studio/editor/' + encodeURIComponent(flowId),
+      );
+      const confirmedDocument = documentForWorkspace(confirmed);
+      const publishedRuntime = payload.runtime && typeof payload.runtime === 'object'
+        ? payload.runtime as Record<string, unknown>
+        : {};
+      const confirmedRuntime = confirmed.runtime && typeof confirmed.runtime === 'object'
+        ? confirmed.runtime as Record<string, unknown>
+        : {};
+      if (
+        publishedRuntime.version !== confirmedRuntime.version
+        || typeof publishedRuntime.configDigest !== 'string'
+        || publishedRuntime.configDigest !== confirmedRuntime.configDigest
+        || confirmedRuntime.published !== true
+        || stableJson(editorDocumentForRequest(confirmedDocument))
+          !== stableJson(editorDocumentForRequest(next))
+      ) {
+        throw new FlowStudioApiError(
+          502,
+          'PUBLISH_CONFIRMATION_FAILED',
+          '服务器发布结果未通过重新读取确认',
+          confirmed,
+        );
+      }
+      revision = typeof confirmed.editorRevision === 'number'
+        ? confirmed.editorRevision
+        : revision;
+      return {
+        document: confirmedDocument,
+        displayOnlyFields: Array.isArray(payload.displayOnlyFields)
+          ? payload.displayOnlyFields.filter(
+              (item): item is string => typeof item === 'string',
+            )
+          : [],
+      };
     },
 
     acceptRevision(nextRevision) {
