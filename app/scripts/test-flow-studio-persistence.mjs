@@ -6,6 +6,7 @@ import {
 } from '../src/lib/flowStudio/flowStudioApi.ts';
 import { mergeFlowStudioDocuments } from '../src/lib/flowStudio/flowStudioMerge.ts';
 import { createFlowStudioMockAdapter } from '../src/lib/flowStudio/flowStudioMock.ts';
+import { createRuotaPool, filterRuotaEntries, RUOTA_TEMPLATES } from '../src/lib/flowStudio/flowStudioTemplates.ts';
 
 const document = {
   version: 17,
@@ -260,6 +261,43 @@ assert.equal(
   '本地同字段修改',
 );
 
+const ruotaTemplateSource = readFileSync(new URL('../src/lib/flowStudio/templates/ruota.json', import.meta.url), 'utf8');
+const ruotaAsset = JSON.parse(ruotaTemplateSource);
+assert.equal(ruotaAsset.source.repository, '29-Cu/Ruota-della-Fortuna');
+assert.equal(ruotaAsset.source.license, 'MIT');
+assert.deepEqual(ruotaAsset.import.ordinaryDimensions, ['position', 'scenario', 'props', 'roleplay', 'physical', 'mental']);
+assert.equal(ruotaAsset.import.goreExcludedTotal > 0, true);
+assert.equal(RUOTA_TEMPLATES.length, 6);
+assert.equal(RUOTA_TEMPLATES.some((template) => template.id === 'gore'), false);
+assert.equal(RUOTA_TEMPLATES.every((template) => template.entries.length > 0), true);
+assert.equal(ruotaAsset.import.sourceTotal, 440);
+assert.equal(ruotaAsset.import.importedTotal, 415);
+assert.equal(ruotaAsset.import.filteredTotal, 25);
+
+const filteredFixture = filterRuotaEntries([
+  { zh: '安全成人标签', en: 'Adult consensual focus' },
+  { zh: '不应导入', en: 'Forced coercive scene' },
+  { zh: '不应导入', en: 'Explicit blood play' },
+  { zh: '不应导入', en: 'Shota Top' },
+  { zh: '不应导入', en: 'Childhood Friend' },
+  { zh: '不应导入', gore: true },
+]);
+assert.deepEqual(filteredFixture, ['安全成人标签']);
+const templatePool = createRuotaPool('position', []);
+assert.match(templatePool.id, /^ruota_position$/);
+assert.equal(templatePool.name, 'Ruota · 体位 / Entry');
+assert.equal(templatePool.enabled, true);
+assert.equal(templatePool.mode, 'perTurn');
+assert.equal(templatePool.count, 1);
+assert.equal(templatePool.entries.length, RUOTA_TEMPLATES.find((template) => template.id === 'position').entries.length);
+assert.equal(templatePool.entries.every((entry) => entry.enabled), true);
+const duplicateTemplatePool = createRuotaPool('position', [templatePool.id]);
+assert.notEqual(duplicateTemplatePool.id, templatePool.id);
+assert.match(duplicateTemplatePool.id, /^ruota_position_2$/);
+assert.deepEqual({ poolIds: [templatePool.id] }.poolIds, [templatePool.id], 'template pools remain bindable by normal stage poolIds');
+const templateModule = readFileSync(new URL('../src/lib/flowStudio/flowStudioTemplates.ts', import.meta.url), 'utf8');
+assert.doesNotMatch(templateModule, /Math\.random|fetch\(|webhook|mcp/i);
+
 const mockAdapter = createFlowStudioMockAdapter('preview');
 const mockDraft = mockAdapter.load();
 mockDraft.stages[0].guidancePrompt = 'STAGE_GUIDANCE_MOCK';
@@ -278,6 +316,15 @@ assert.doesNotMatch(workspace, /publishDraft|canPublish|publishValidation|valida
 assert.match(workspace, /runtimeApplyPending/);
 assert.match(workspace, /编辑已保存，但当前 Flow 正在运行，运行配置暂未更新。结束当前 Flow 后再次保存即可应用。/);
 assert.match(workspace, /onClick=\{saveDraft\}/);
+assert.match(workspace, /新建空白灵感池/);
+assert.match(workspace, /从模板创建/);
+assert.match(workspace, /RUOTA_TEMPLATES/);
+assert.match(workspace, /createTemplatePool/);
+assert.match(workspace, /六个普通维度/);
+assert.match(workspace, /createRuotaPool/);
+assert.doesNotMatch(workspace, /flow-template-grid[\\s\\S]{0,1500}template\\.entries\\.map/);
+assert.match(flowStyles, /flow-template-panel/);
+assert.match(flowStyles, /flow-template-card/);
 assert.match(workspace, /guidancePrompt/);
 assert.match(workspace, /阶段提示词/);
 assert.match(workspace, /maxLength=\{3000\}/);
