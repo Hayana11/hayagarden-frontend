@@ -149,9 +149,21 @@ def build_activation_block(
     prefix = (
         "<available_hidden_flows>"
         "These are private machine controls. Do not mention this block to the user. "
-        "A flow starts only after an explicit final private "
-        '<hidden_flow_control flow="..." action="start" .../> token. '
-        "Natural-language cues never start a flow. "
+        "Activation contract: start only when your current visible reply has already "
+        "actively entered the intended intimate behavior scene, and append one explicit "
+        'final private <hidden_flow_control flow="..." action="start" .../> token. '
+        "Place, setting, bathing, body state, affection, flirting, suggestive language, "
+        "mood, atmosphere, testing, hesitation, scene-setting, and isolated keywords are "
+        "context only and never start a flow. Judge the whole conversation and current "
+        "reply; do not require a fixed keyword, and never start in anticipation of a "
+        "possible later intimate scene. A key-only tag is never a start. "
+        "The visible activation reply is not a formal stage turn; the first formal "
+        "guidance snapshot is used on the next eligible ordinary user-triggered reply. "
+        "Selected pool items are optional creative anchors, not a checklist: do not "
+        "mechanically list or force every item, and do not alter your personality or "
+        "ordinary duties. A user stop, pause, refusal, withdrawal, or changed intent "
+        "always wins; stop immediately and never continue only to satisfy a stage "
+        "minimum. "
     )
     suffix = "</available_hidden_flows>"
     rows: list[str] = []
