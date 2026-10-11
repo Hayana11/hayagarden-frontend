@@ -245,6 +245,8 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
         : {};
       if (
         publishedRuntime.version !== confirmedRuntime.version
+        || typeof publishedRuntime.configDigest !== 'string'
+        || publishedRuntime.configDigest !== confirmedRuntime.configDigest
         || confirmedRuntime.published !== true
         || stableJson(editorDocumentForRequest(confirmedDocument))
           !== stableJson(editorDocumentForRequest(next))

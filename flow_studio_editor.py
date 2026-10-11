@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import datetime as _datetime
+import hashlib
 import json
 import os
 import sqlite3
@@ -685,9 +686,16 @@ def _runtime_meta(
     editor_row: Optional[Mapping[str, Any]],
     document: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
+    try:
+        config_digest = hashlib.sha256(
+            _canonical(_decode_runtime(runtime)).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        config_digest = ""
     return {
         "schemaVersion": RUNTIME_SCHEMA_VERSION,
         "version": int(runtime.get("version", 0)),
+        "configDigest": config_digest,
         "engineEnabled": bool(config_store.get_bool("HIDDEN_FLOW_ENGINE_ENABLED", False)),
         "published": (
             _is_published(runtime, document)

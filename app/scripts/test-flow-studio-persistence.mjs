@@ -70,7 +70,7 @@ const responses = [
       document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
       editorRevision: 6,
       savedAt: 'published',
-      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: true },
+      runtime: { version: 102, configDigest: 'digest-1', schemaVersion: 1, engineEnabled: false, published: true },
       displayOnlyFields: [],
     },
   },
