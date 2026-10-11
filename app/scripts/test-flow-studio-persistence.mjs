@@ -45,7 +45,7 @@ const responses = [
     status: 200,
     body: {
       ok: true,
-      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] },
       editorRevision: 6,
       savedAt: 'server-save',
       runtime: { version: 101, schemaVersion: 1, engineEnabled: false, published: false },
@@ -235,6 +235,10 @@ assert.doesNotMatch(workspace, /publishDraft|canPublish|publishValidation|valida
 assert.match(workspace, /runtimeApplyPending/);
 assert.match(workspace, /编辑已保存，但当前 Flow 正在运行，运行配置暂未更新。结束当前 Flow 后再次保存即可应用。/);
 assert.match(workspace, /onClick=\{saveDraft\}/);
+assert.match(workspace, /guidancePrompt/);
+assert.match(workspace, /阶段提示词/);
+assert.match(workspace, /maxLength=\{3000\}/);
+assert.match(workspace, /只影响本阶段的创作引导，不改变推进规则/);
 assert.match(workspace, /保存/);
 
 const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', import.meta.url), 'utf8');
