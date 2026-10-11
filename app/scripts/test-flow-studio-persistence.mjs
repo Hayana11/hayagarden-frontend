@@ -78,7 +78,7 @@ const responses = [
     status: 200,
     body: {
       ok: true,
-      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] },
       editorRevision: 6,
       savedAt: 'published',
       runtime: { version: 102, configDigest: 'digest-1', schemaVersion: 1, engineEnabled: false, published: true },
@@ -151,6 +151,7 @@ const saved = await adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], na
 assert.equal(saved.editorRevision, 6);
 assert.equal(requests[1].init.body.includes('"expectedRevision":4'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
+assert.equal(requests[2].init.body.includes('STAGE_GUIDANCE_SENTINEL_A'), true);
 
 assert.equal(saved.runtimeVersion, 102);
 assert.equal(saved.published, true);
@@ -161,6 +162,7 @@ assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 assert.equal(requests[3].url.endsWith('/validate'), true);
 assert.equal(requests[4].url.endsWith('/publish'), true);
 assert.equal(requests[4].init.body.includes('"expectedRuntimeVersion":101'), true);
+assert.equal(requests[4].init.body.includes('STAGE_GUIDANCE_SENTINEL_A'), true);
 assert.equal(requests[5].url.endsWith('/intimacy-v1'), true);
 assert.equal(saved.stages[0].name, '本地保存', 'reload confirmation must retain the saved configuration');
 
