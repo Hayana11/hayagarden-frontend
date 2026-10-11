@@ -3,6 +3,7 @@ import {
   type FlowStudioData,
   type FlowStudioDataAdapter,
   type FlowStudioPublishResult,
+  type FlowStudioValidationResult,
 } from './flowStudioMock';
 
 export class FlowStudioApiError extends Error {

@@ -365,7 +365,13 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         first = self._get()
         document = self._publishable_document(first["document"])
         document["stages"][0]["minTurns"] = 99
-        response = self._publish(document, first["editorRevision"], 7)
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        response = self._publish(
+            saved.get_json()["document"],
+            saved.get_json()["editorRevision"],
+            7,
+        )
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.get_json()["code"], "PUBLISH_VALIDATION_FAILED")
         self.assertIn("stage s1: minTurns must be between 1 and 12", response.get_json()["errors"])
@@ -425,7 +431,13 @@ class FlowStudioEditorApiTests(unittest.TestCase):
 
         first = self._get()
         document = self._publishable_document(first["document"])
-        response = self._publish(document, first["editorRevision"], 7)
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        response = self._publish(
+            saved.get_json()["document"],
+            saved.get_json()["editorRevision"],
+            7,
+        )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["code"], "FLOW_ACTIVE")
         connection = sqlite3.connect(self.db_path)

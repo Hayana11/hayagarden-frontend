@@ -253,12 +253,7 @@ export function FlowStudioWorkspace({
       }
     } catch (error: unknown) {
       const errorRecord = error && typeof error === 'object'
-        ? error as {
-            status?: unknown;
-            currentDocument?: FlowStudioData | null;
-            currentRevision?: unknown;
-            currentRuntimeVersion?: unknown;
-          }
+        ? error as { status?: unknown; currentDocument?: FlowStudioData | null; currentRevision?: unknown }
         : {};
       if (errorRecord.status === 409) {
         setPendingMerge(null);
