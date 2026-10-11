@@ -5,6 +5,7 @@ import {
   FlowStudioConflictError,
 } from '../src/lib/flowStudio/flowStudioApi.ts';
 import { mergeFlowStudioDocuments } from '../src/lib/flowStudio/flowStudioMerge.ts';
+import { createFlowStudioMockAdapter } from '../src/lib/flowStudio/flowStudioMock.ts';
 
 const document = {
   version: 17,
@@ -258,6 +259,12 @@ assert.equal(
   mergeFlowStudioDocuments(mergeBase, localSameField, remoteSameField, 'local').document.stages[0].name,
   '本地同字段修改',
 );
+
+const mockAdapter = createFlowStudioMockAdapter('preview');
+const mockDraft = mockAdapter.load();
+mockDraft.stages[0].guidancePrompt = 'STAGE_GUIDANCE_MOCK';
+await mockAdapter.save(mockDraft);
+assert.equal(mockAdapter.load().stages[0].guidancePrompt, 'STAGE_GUIDANCE_MOCK');
 
 const workspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
 assert.match(workspace, /draftRef\.current/);
