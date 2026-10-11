@@ -10,7 +10,7 @@ const document = {
   version: 17,
   savedAt: 'old',
   enabled: true,
-  stages: [{ id: 's1', name: '试探', minTurns: 1, terminal: true, poolIds: [], nextStageId: null }],
+  stages: [{ id: 's1', name: '试探', minTurns: 1, terminal: true, poolIds: [], nextStageId: null, guidancePrompt: '' }],
   pools: [],
   cues: [],
   dimensions: [],
@@ -67,7 +67,7 @@ const responses = [
     status: 200,
     body: {
       ok: true,
-      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] },
       editorRevision: 6,
       savedAt: 'published',
       runtime: { version: 102, configDigest: 'digest-1', schemaVersion: 1, engineEnabled: false, published: true },
@@ -147,7 +147,7 @@ await assert.rejects(
 );
 
 adapter.acceptRevision?.(5);
-const saved = await adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], name: '本地保存' }] });
+const saved = await adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] });
 assert.equal(saved.editorRevision, 6);
 assert.equal(requests[1].init.body.includes('"expectedRevision":4'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
@@ -155,6 +155,7 @@ assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 assert.equal(saved.runtimeVersion, 102);
 assert.equal(saved.published, true);
 assert.equal(saved.stages[0].name, '本地保存');
+assert.equal(saved.stages[0].guidancePrompt, 'STAGE_GUIDANCE_SENTINEL_A');
 assert.equal(requests[2].url.endsWith('/intimacy-v1'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 assert.equal(requests[3].url.endsWith('/validate'), true);
