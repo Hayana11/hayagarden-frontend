@@ -61,6 +61,26 @@ def _read_reader_rows(rows: list[dict]):
 
 
 class TranscriptReaderTests(unittest.TestCase):
+    def test_meta_user_row_is_not_a_second_candidate(self) -> None:
+        meta_user = _reader_user('meta-u1', 'a1', content='runtime metadata')
+        meta_user['isMeta'] = True
+        graph = _read_reader_rows([
+            _reader_user('u1', None),
+            _reader_assistant(
+                'a1', 'u1',
+                content=[{'type': 'tool_use', 'id': 'toolu-1', 'name': 'Read', 'input': {}}],
+            ),
+            meta_user,
+            _reader_assistant('a2', 'meta-u1'),
+        ])
+        roles = {event.event_uuid: event.event_role for event in graph.events}
+        self.assertEqual(roles['meta-u1'], EventRole.META)
+        self.assertEqual(len(graph.candidate_rounds), 1)
+        self.assertEqual(
+            graph.candidate_rounds[0].candidate_user_event_uuid,
+            'u1',
+        )
+
     def test_read_plain_candidate_user_not_confirmed(self) -> None:
         path = FIXTURE / 'plain_two_rounds.jsonl'
         before = snapshot_source(path)
