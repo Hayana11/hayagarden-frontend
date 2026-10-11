@@ -216,6 +216,74 @@ def upsert_flow_config(
         connection.close()
 
 
+def publish_flow_config(
+    conn: sqlite3.Connection,
+    raw_config: Mapping[str, Any] | FlowConfig,
+    *,
+    expected_version: int,
+    enabled: Optional[bool] = None,
+    now: Optional[str] = None,
+) -> int:
+    """CAS-update one runtime config inside the caller's transaction.
+
+    Flow Studio uses this narrow variant so editor revision checks, active-flow
+    safety checks, and the runtime config write share one SQLite transaction.
+    The caller owns commit/rollback; this function never opens a second
+    connection or commits independently.
+    """
+    config = normalize_flow_config(raw_config)
+    if config is None:
+        raise ValueError("invalid hidden flow config")
+    expected = int(expected_version)
+    if expected < 0:
+        raise ValueError("expected runtime version must be non-negative")
+    enabled_value = bool(config.enabled if enabled is None else enabled)
+    if not enabled_value:
+        config = FlowConfig(
+            flow_id=config.flow_id,
+            enabled=False,
+            initial_stage=config.initial_stage,
+            stages=config.stages,
+            cues=config.cues,
+            pools=config.pools,
+            schema_version=config.schema_version,
+        )
+    existing = conn.execute(
+        "SELECT version FROM hidden_flow_configs WHERE flow_id=?",
+        (config.flow_id,),
+    ).fetchone()
+    current = int(existing["version"]) if existing is not None else 0
+    if current != expected:
+        raise HiddenFlowConflict("hidden flow config version CAS failed")
+    version = current + 1
+    stamp = str(now or _now())
+    encoded = _json(config.to_dict())
+    conn.execute(
+        """
+        INSERT INTO hidden_flow_configs
+            (flow_id, schema_version, enabled, config_json, version,
+             created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(flow_id) DO UPDATE SET
+            schema_version=excluded.schema_version,
+            enabled=excluded.enabled,
+            config_json=excluded.config_json,
+            version=excluded.version,
+            updated_at=excluded.updated_at
+        """,
+        (
+            config.flow_id,
+            int(config.schema_version),
+            int(enabled_value),
+            encoded,
+            version,
+            stamp,
+            stamp,
+        ),
+    )
+    return version
+
+
 def _inactive_state() -> FlowState:
     return FlowState.inactive()
 

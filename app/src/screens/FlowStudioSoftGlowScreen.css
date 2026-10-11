@@ -115,3 +115,11 @@
 .flow-studio-page .flow-cue-pool-choice{height:28px;padding:0 9px;font-size:11px}
 .flow-cue-heading{padding-top:3px}
 .flow-cue-heading small{margin-top:0}
+
+/* Publishing is deliberately a small server-backed action, separate from save. */
+.flow-publish-action{display:flex;align-items:flex-end;flex-direction:column;margin-top:6px;text-align:right}
+.flow-publish-button{min-height:36px;border:1px solid #d99eaf;border-radius:10px;padding:0 12px;color:#fff8f8;background:var(--flow-rose-deep);cursor:pointer;font-size:11.5px;font-weight:600}
+.flow-publish-button:disabled{cursor:default;opacity:.42}
+.flow-publish-action small{max-width:220px;margin-top:4px;color:#a8949a;font-size:10px;line-height:1.4}
+.flow-publish-error{border:1px solid #e8c0c8;border-radius:12px;padding:10px 13px;color:#9e4f5b;background:#fff5f5;font-size:11.5px;line-height:1.55}
+@media (max-width:719px){.flow-publish-action{align-items:stretch;text-align:left}.flow-publish-action small{max-width:none}.flow-publish-button{width:100%}}

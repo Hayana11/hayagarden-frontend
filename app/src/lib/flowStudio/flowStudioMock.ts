@@ -40,7 +40,10 @@ export type FlowStudioCue = {
 
 export type FlowStudioData = {
   version: number;
+  runtimeVersion?: number;
   editorRevision?: number;
+  savedDraft?: boolean;
+  published?: boolean;
   initialStage?: string | null;
   savedAt: string;
   enabled: boolean;
@@ -58,6 +61,7 @@ export type FlowStudioData = {
 export type FlowStudioDataAdapter = {
   load(): FlowStudioData | Promise<FlowStudioData>;
   save(next: FlowStudioData): FlowStudioData | Promise<FlowStudioData>;
+  publish?(): FlowStudioData | Promise<FlowStudioData>;
   acceptRevision?(revision: number): void;
 };
 
