@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from .types import CueSpec, FlowConfig, PoolEntry, PoolSpec, StageSpec
+from .types import MAX_STAGE_GUIDANCE_CHARS, CueSpec, FlowConfig, PoolEntry, PoolSpec, StageSpec
 
 
 HIDDEN_FLOW_ENGINE_ENABLED = False
@@ -93,6 +93,7 @@ def _normalize_stages(raw_stages: Any, pool_ids: set[str]) -> tuple[StageSpec, .
             continue
         next_stage = _text(raw.get("nextStage", raw.get("next_stage"))) or None
         continue_target = _text(raw.get("continueTarget", raw.get("continue_target"))) or None
+        guidance_prompt = _text(raw.get("guidancePrompt", raw.get("guidance_prompt")))[:MAX_STAGE_GUIDANCE_CHARS]
         result.append(
             StageSpec(
                 stage_id=stage_id,
@@ -110,6 +111,7 @@ def _normalize_stages(raw_stages: Any, pool_ids: set[str]) -> tuple[StageSpec, .
                 terminal_without_continue=_enabled(raw.get("terminalWithoutContinue"), False),
                 holdable=_enabled(raw.get("holdable"), False),
                 pool_ids=_ref_tuple(raw.get("poolIds", raw.get("pool_ids")), pool_ids),
+                guidance_prompt=guidance_prompt,
             )
         )
         seen.add(stage_id)
@@ -204,6 +206,12 @@ def _is_normalized_config(config: FlowConfig) -> bool:
         ):
             return False
         if not 1 <= stage.min_turns <= 12 or not 1 <= stage.repeat_min_turns <= 12:
+            return False
+        if (
+            not isinstance(stage.guidance_prompt, str)
+            or stage.guidance_prompt != stage.guidance_prompt.strip()
+            or len(stage.guidance_prompt) > MAX_STAGE_GUIDANCE_CHARS
+        ):
             return False
         if any(pool_id not in pool_ids for pool_id in stage.pool_ids):
             return False

@@ -5,12 +5,13 @@ import {
   FlowStudioConflictError,
 } from '../src/lib/flowStudio/flowStudioApi.ts';
 import { mergeFlowStudioDocuments } from '../src/lib/flowStudio/flowStudioMerge.ts';
+import { createFlowStudioMockAdapter } from '../src/lib/flowStudio/flowStudioMock.ts';
 
 const document = {
   version: 17,
   savedAt: 'old',
   enabled: true,
-  stages: [{ id: 's1', name: '试探', minTurns: 1, terminal: true, poolIds: [], nextStageId: null }],
+  stages: [{ id: 's1', name: '试探', minTurns: 1, terminal: true, poolIds: [], nextStageId: null, guidancePrompt: '' }],
   pools: [],
   cues: [],
   dimensions: [],
@@ -45,7 +46,7 @@ const responses = [
     status: 200,
     body: {
       ok: true,
-      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] },
       editorRevision: 6,
       savedAt: 'server-save',
       runtime: { version: 101, schemaVersion: 1, engineEnabled: false, published: false },
@@ -67,7 +68,7 @@ const responses = [
     status: 200,
     body: {
       ok: true,
-      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] },
       editorRevision: 6,
       savedAt: 'published',
       runtime: { version: 102, configDigest: 'digest-1', schemaVersion: 1, engineEnabled: false, published: true },
@@ -78,7 +79,7 @@ const responses = [
     status: 200,
     body: {
       ok: true,
-      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] },
       editorRevision: 6,
       savedAt: 'published',
       runtime: { version: 102, configDigest: 'digest-1', schemaVersion: 1, engineEnabled: false, published: true },
@@ -147,19 +148,22 @@ await assert.rejects(
 );
 
 adapter.acceptRevision?.(5);
-const saved = await adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], name: '本地保存' }] });
+const saved = await adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], name: '本地保存', guidancePrompt: 'STAGE_GUIDANCE_SENTINEL_A' }] });
 assert.equal(saved.editorRevision, 6);
 assert.equal(requests[1].init.body.includes('"expectedRevision":4'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
+assert.equal(requests[2].init.body.includes('STAGE_GUIDANCE_SENTINEL_A'), true);
 
 assert.equal(saved.runtimeVersion, 102);
 assert.equal(saved.published, true);
 assert.equal(saved.stages[0].name, '本地保存');
+assert.equal(saved.stages[0].guidancePrompt, 'STAGE_GUIDANCE_SENTINEL_A');
 assert.equal(requests[2].url.endsWith('/intimacy-v1'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 assert.equal(requests[3].url.endsWith('/validate'), true);
 assert.equal(requests[4].url.endsWith('/publish'), true);
 assert.equal(requests[4].init.body.includes('"expectedRuntimeVersion":101'), true);
+assert.equal(requests[4].init.body.includes('STAGE_GUIDANCE_SENTINEL_A'), true);
 assert.equal(requests[5].url.endsWith('/intimacy-v1'), true);
 assert.equal(saved.stages[0].name, '本地保存', 'reload confirmation must retain the saved configuration');
 
@@ -203,6 +207,39 @@ assert.equal(nonOverlapping.conflicts.length, 0);
 assert.equal(nonOverlapping.document.stages[0].name, '本地阶段修改');
 assert.equal(nonOverlapping.document.pools[0].name, '服务器灵感池修改');
 
+const guidanceBase = {
+  ...mergeBase,
+  stages: [{ ...mergeBase.stages[0], guidancePrompt: '' }],
+};
+const guidanceLocal = {
+  ...guidanceBase,
+  stages: [{ ...guidanceBase.stages[0], guidancePrompt: 'STAGE_GUIDANCE_LOCAL' }],
+};
+const guidanceRemote = {
+  ...guidanceBase,
+  stages: [{ ...guidanceBase.stages[0], name: '服务器阶段' }],
+};
+const guidanceNonOverlapping = mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemote);
+assert.equal(guidanceNonOverlapping.conflicts.length, 0);
+assert.equal(guidanceNonOverlapping.document.stages[0].guidancePrompt, 'STAGE_GUIDANCE_LOCAL');
+assert.equal(guidanceNonOverlapping.document.stages[0].name, '服务器阶段');
+
+const guidanceRemoteConflict = {
+  ...guidanceBase,
+  stages: [{ ...guidanceBase.stages[0], guidancePrompt: 'STAGE_GUIDANCE_REMOTE' }],
+};
+const guidanceOverlapping = mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemoteConflict);
+assert.equal(guidanceOverlapping.conflicts.length, 1);
+assert.equal(guidanceOverlapping.conflicts[0].path, 'stages.s1.guidancePrompt');
+assert.equal(
+  mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemoteConflict, 'remote').document.stages[0].guidancePrompt,
+  'STAGE_GUIDANCE_REMOTE',
+);
+assert.equal(
+  mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemoteConflict, 'local').document.stages[0].guidancePrompt,
+  'STAGE_GUIDANCE_LOCAL',
+);
+
 const localSameField = {
   ...mergeBase,
   stages: [{ ...mergeBase.stages[0], name: '本地同字段修改' }],
@@ -223,6 +260,12 @@ assert.equal(
   '本地同字段修改',
 );
 
+const mockAdapter = createFlowStudioMockAdapter('preview');
+const mockDraft = mockAdapter.load();
+mockDraft.stages[0].guidancePrompt = 'STAGE_GUIDANCE_MOCK';
+await mockAdapter.save(mockDraft);
+assert.equal(mockAdapter.load().stages[0].guidancePrompt, 'STAGE_GUIDANCE_MOCK');
+
 const workspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
 assert.match(workspace, /draftRef\.current/);
 assert.match(workspace, /newerEditsExist/);
@@ -235,6 +278,10 @@ assert.doesNotMatch(workspace, /publishDraft|canPublish|publishValidation|valida
 assert.match(workspace, /runtimeApplyPending/);
 assert.match(workspace, /编辑已保存，但当前 Flow 正在运行，运行配置暂未更新。结束当前 Flow 后再次保存即可应用。/);
 assert.match(workspace, /onClick=\{saveDraft\}/);
+assert.match(workspace, /guidancePrompt/);
+assert.match(workspace, /阶段提示词/);
+assert.match(workspace, /maxLength=\{3000\}/);
+assert.match(workspace, /只影响本阶段的创作引导，不改变推进规则/);
 assert.match(workspace, /保存/);
 
 const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', import.meta.url), 'utf8');
