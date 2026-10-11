@@ -62,7 +62,7 @@ export const RUOTA_TEMPLATES: RuotaTemplate[] = RUOTA_DIMENSION_IDS.map((id) => 
   return {
     id: dimension.id,
     label: dimension.label,
-    entries: [...dimension.entries],
+    entries: filterRuotaEntries(dimension.entries.map((zh) => ({ zh }))),
     sourceTotal: dimension.sourceTotal,
     importedTotal: dimension.importedTotal,
     filteredTotal: dimension.filteredTotal,
