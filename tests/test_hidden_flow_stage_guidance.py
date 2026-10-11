@@ -84,7 +84,7 @@ class HiddenFlowStageGuidanceTests(unittest.TestCase):
 
     def test_editor_compile_persists_stage_guidance_without_unknown_field(self) -> None:
         compiled, errors, unsupported = compile_editor_document(
-            _editor_document("STAGE_GUIDANCE_SENTINEL_A")
+            _editor_document("  STAGE_GUIDANCE_SENTINEL_A  ")
         )
         self.assertFalse(errors)
         self.assertNotIn("stages[a].guidancePrompt", unsupported)
@@ -111,6 +111,17 @@ class HiddenFlowStageGuidanceTests(unittest.TestCase):
         self.assertNotIn("STAGE_GUIDANCE_C", rendered)
         self.assertEqual(rendered.count("</hidden_flow_guidance>"), 1)
         self.assertNotIn("<hint>", rendered)
+
+    def test_escaped_guidance_stays_within_private_budget(self) -> None:
+        config = normalize_flow_config(_raw_config(guidance="<" * MAX_STAGE_GUIDANCE_CHARS))
+        self.assertIsNotNone(config)
+        assert config is not None
+        rendered = render_private_guide(
+            config,
+            FlowState(active=True, flow_id="guidance-test", stage="b", cycle=1, stage_turn=1),
+        )
+        self.assertLessEqual(len(rendered), 8000)
+        self.assertNotIn("<<", rendered)
 
     def test_guidance_length_is_bounded_and_editor_overflow_is_rejected(self) -> None:
         oversized = "x" * (MAX_STAGE_GUIDANCE_CHARS + 400)
