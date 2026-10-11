@@ -27,7 +27,7 @@ const BLOCKED_ZH_LABELS = new Set([
 ]);
 
 const BLOCKED_TEXT_PATTERNS = [
-  /\b(?:consensual non-consent|non-consensual|nonconsensual|dubious consent|reverse rape|rape fantasy|forced orgasm|kidnapping|coercion|without consent|unconscious|sleep induction|sleep stealing|somnophilia|brainwashing|hypnosis|groping|secret recording|voyeurism|bestiality|underage|minor|teen|schoolgirl|schoolboy|shota|loli|child|children|blood play|blood sucking|wound|cutting|knife|needle|impalement|strangl(?:ing)?|chokehold|asphyx(?:iation)?|choking|drown(?:ing)?|scald(?:ing)?|acid play|water torture|torture|branding|extreme|amputation|organ play|bone breaking|flesh wall|cannibal|vore|stitching|nailing|piercing play|dislocation play)\b/i,
+  /\b(?:consensual non-consent|non-consensual|nonconsensual|dubious consent|reverse rape|rape fantasy|forced orgasm|kidnapping|coerc(?:ion|ive)|without consent|unconscious|sleep induction|sleep stealing|somnophilia|brainwashing|hypnosis|groping|secret recording|voyeurism|bestiality|underage|minor|teen|schoolgirl|schoolboy|shota|loli|child|children|blood play|blood sucking|wound|cutting|knife|needle|impalement|strangl(?:ing)?|chokehold|asphyx(?:iation)?|choking|drown(?:ing)?|scald(?:ing)?|acid play|water torture|torture|branding|extreme|amputation|organ play|bone breaking|flesh wall|cannibal|vore|stitching|nailing|piercing play|dislocation play)\b/i,
 ];
 
 function isRejected(entry: RuotaSourceEntry): boolean {
