@@ -342,6 +342,24 @@ def draw_for_guide_with_state(
     )
 
 
+def _escape_bounded(value: str, max_chars: int) -> str:
+    """Escape text without exceeding a bounded output budget."""
+    if max_chars <= 0:
+        return ""
+    escaped = escape(value, quote=False)
+    if len(escaped) <= max_chars:
+        return escaped
+    low = 0
+    high = len(value)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(escape(value[:middle], quote=False)) <= max_chars:
+            low = middle
+        else:
+            high = middle - 1
+    return escape(value[:low], quote=False)
+
+
 def render_private_guide(
     config: FlowConfig,
     state: FlowState,
@@ -375,11 +393,14 @@ def render_private_guide(
     ]
     used = len(chunks[0])
     if stage.guidance_prompt:
-        block = "<stage_guidance>%s</stage_guidance>" % escape(
+        wrapper_size = len("<stage_guidance></stage_guidance>")
+        remaining = MAX_PRIVATE_TEXT - used - len("</hidden_flow_guidance>") - wrapper_size
+        escaped_prompt = _escape_bounded(
             stage.guidance_prompt[:MAX_STAGE_GUIDANCE_CHARS],
-            quote=False,
+            remaining,
         )
-        if used + len(block) + len("</hidden_flow_guidance>") <= MAX_PRIVATE_TEXT:
+        if escaped_prompt:
+            block = "<stage_guidance>%s</stage_guidance>" % escaped_prompt
             chunks.append(block)
             used += len(block)
     for item in result.draws[:MAX_DRAWS]:
