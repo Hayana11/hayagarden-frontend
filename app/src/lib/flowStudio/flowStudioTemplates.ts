@@ -20,14 +20,14 @@ export type RuotaTemplate = {
 const RUOTA_DIMENSION_IDS = ['position', 'scenario', 'props', 'roleplay', 'physical', 'mental'] as const;
 
 const BLOCKED_ZH_LABELS = new Set([
-  '合意强制', '绑架幻想', '强暴幻想', '催眠', '睡姦', '正太攻', '逆強', '模糊同意',
-  '强制高潮', '水责', '窒息', '刀play', '针刺play', '穿刺play', '血play', '乳头虐',
-  '春药', '吸血', '窥视癖', '偷拍', '睡眠诱导', '针', '刀', '未成年', '儿童', '幼女',
+  '合意强制', '绑架幻想', '强暴幻想', '催眠', '睡姦', '睡取', '正太攻', '逆強', '兽', '模糊同意',
+  '强制高潮', '水责', '窒息', '锁喉', '刀play', '针刺play', '穿刺play', '血play', '烙印', '烙印/烫印',
+  '乳头虐', '春药', '吸血', '窥视癖', '偷拍', '睡眠诱导', '针', '刀', '未成年', '儿童', '幼女',
   '小学生', '中学生', '萝莉', '正太', '男童', '女童',
 ]);
 
 const BLOCKED_TEXT_PATTERNS = [
-  /\b(?:consensual non-consent|non-consensual|nonconsensual|dubious consent|reverse rape|rape fantasy|forced orgasm|kidnapping|coercion|without consent|unconscious|sleep induction|somnophilia|brainwashing|hypnosis|groping|secret recording|voyeurism|underage|minor|teen|schoolgirl|schoolboy|shota|loli|child|children|blood play|blood sucking|wound|cutting|knife|needle|impalement|strangl(?:ing)?|asphyx(?:iation)?|choking|drown(?:ing)?|scald(?:ing)?|acid play|water torture|torture|severe branding|extreme|amputation|organ play|bone breaking|flesh wall|cannibal|vore|stitching|nailing|piercing play|dislocation play)\b/i,
+  /\b(?:consensual non-consent|non-consensual|nonconsensual|dubious consent|reverse rape|rape fantasy|forced orgasm|kidnapping|coercion|without consent|unconscious|sleep induction|sleep stealing|somnophilia|brainwashing|hypnosis|groping|secret recording|voyeurism|bestiality|underage|minor|teen|schoolgirl|schoolboy|shota|loli|child|children|blood play|blood sucking|wound|cutting|knife|needle|impalement|strangl(?:ing)?|chokehold|asphyx(?:iation)?|choking|drown(?:ing)?|scald(?:ing)?|acid play|water torture|torture|branding|extreme|amputation|organ play|bone breaking|flesh wall|cannibal|vore|stitching|nailing|piercing play|dislocation play)\b/i,
 ];
 
 function isRejected(entry: RuotaSourceEntry): boolean {
