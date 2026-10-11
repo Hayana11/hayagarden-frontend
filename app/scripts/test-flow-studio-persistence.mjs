@@ -51,6 +51,28 @@ const responses = [
       runtime: { version: 101, schemaVersion: 1, engineEnabled: false },
     },
   },
+  {
+    status: 200,
+    body: {
+      ok: true,
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      editorRevision: 6,
+      savedAt: 'server-publish',
+      source: 'editor',
+      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: true },
+    },
+  },
+  {
+    status: 200,
+    body: {
+      ok: true,
+      document: { ...document, stages: [{ ...document.stages[0], name: '本地保存' }] },
+      editorRevision: 6,
+      savedAt: 'server-publish',
+      source: 'editor',
+      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: true },
+    },
+  },
 ];
 
 globalThis.fetch = async (url, init = {}) => {
@@ -84,6 +106,13 @@ const saved = await adapter.save({ ...loaded, stages: [{ ...loaded.stages[0], na
 assert.equal(saved.editorRevision, 6);
 assert.equal(requests[1].init.body.includes('"expectedRevision":4'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
+
+const published = await adapter.publish?.();
+assert.equal(published?.published, true);
+assert.equal(published?.runtimeVersion, 102);
+assert.equal(requests[3].url.endsWith('/publish'), true);
+assert.equal(requests[3].init.body.includes('"expectedRevision":6'), true);
+assert.equal(requests[3].init.body.includes('"expectedRuntimeVersion":101'), true);
 
 const mergeBase = {
   ...document,
@@ -147,7 +176,7 @@ assert.match(preview, /backPath="\/dash\/chat"/);
 const flowWorkspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
 const flowStyles = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.css', import.meta.url), 'utf8');
 const chatScreen = readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
-assert.match(flowWorkspace, /className=\"flow-studio-page dash-fullscreen-page dash-scroll-page\"/);
+assert.match(flowWorkspace, /className="flow-studio-page dash-fullscreen-page dash-scroll-page"/);
 assert.match(flowStyles, /height:100%;min-height:0;max-width:none;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch/);
 assert.match(flowStyles, /overscroll-behavior-y:contain;touch-action:pan-y/);
 assert.match(flowStyles, /safe-area-inset-bottom/);

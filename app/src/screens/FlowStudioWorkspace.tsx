@@ -97,6 +97,9 @@ export function FlowStudioWorkspace({
   const isServerBacked = persistenceLabel.includes('服务器');
   const emptyData: FlowStudioData = {
     version: 0,
+    runtimeVersion: 0,
+    savedDraft: false,
+    published: false,
     savedAt: '',
     enabled: false,
     stages: [],
@@ -130,6 +133,8 @@ export function FlowStudioWorkspace({
   const [showGuide, setShowGuide] = useState(false);
   const [toast, setToast] = useState('');
   const [saving, setSaving] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -145,6 +150,7 @@ export function FlowStudioWorkspace({
       setHistory([]);
       setConflict(null);
       setPendingMerge(null);
+      setPublishError('');
       setLoadState('ready');
     }).catch((error: unknown) => {
       if (!active) return;
@@ -187,6 +193,7 @@ export function FlowStudioWorkspace({
     setHistory((current) => [...current, cloneFlowStudioData(draftRef.current)].slice(-24));
     draftRef.current = next;
     setDraft(next);
+    setPublishError('');
     notify(message);
   };
 
@@ -261,6 +268,68 @@ export function FlowStudioWorkspace({
     }
   };
 
+  const publishDraft = async () => {
+    if (!isServerBacked || !dataAdapter.publish || publishing) return;
+    if (dirty) {
+      const message = '请先保存草稿，再验证并发布';
+      setPublishError(message);
+      notify(message);
+      return;
+    }
+    if (!draft.savedDraft) {
+      const message = '请先保存服务器草稿，再验证并发布';
+      setPublishError(message);
+      notify(message);
+      return;
+    }
+    if (draft.published) {
+      notify('当前草稿已经发布');
+      return;
+    }
+    setPublishing(true);
+    setPublishError('');
+    try {
+      const confirmed = cloneFlowStudioData(await dataAdapter.publish());
+      draftRef.current = confirmed;
+      setSaved(confirmed);
+      setDraft(cloneFlowStudioData(confirmed));
+      setConflict(null);
+      setPendingMerge(null);
+      setHistory([]);
+      notify('已验证并发布到运行配置');
+    } catch (error: unknown) {
+      const errorRecord = error && typeof error === 'object'
+        ? error as { status?: unknown; message?: unknown; payload?: unknown; currentDocument?: FlowStudioData | null; currentRevision?: unknown }
+        : {};
+      const payload = errorRecord.payload && typeof errorRecord.payload === 'object'
+        ? errorRecord.payload as Record<string, unknown>
+        : {};
+      const errors = Array.isArray(payload.errors)
+        ? payload.errors.filter((item): item is string => typeof item === 'string')
+        : [];
+      const blocked = Array.isArray(payload.blockedFields)
+        ? payload.blockedFields.filter((item): item is string => typeof item === 'string')
+        : [];
+      const detail = errors.length
+        ? errors.join('；')
+        : blocked.length
+          ? `无法安全编译：${blocked.join('、')}`
+          : String(errorRecord.message || '验证并发布失败，运行配置未改变');
+      setPublishError(detail);
+      if (errorRecord.status === 409 && errorRecord.currentDocument) {
+        setConflict({
+          currentDocument: cloneFlowStudioData(errorRecord.currentDocument),
+          currentRevision: typeof errorRecord.currentRevision === 'number'
+            ? errorRecord.currentRevision
+            : null,
+        });
+      }
+      notify(detail);
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   const discardDraft = () => {
     const conflictBase = conflict?.currentDocument
       ? cloneFlowStudioData(conflict.currentDocument)
@@ -274,6 +343,7 @@ export function FlowStudioWorkspace({
     setDraft(cloneFlowStudioData(conflictBase));
     setConflict(null);
     setPendingMerge(null);
+    setPublishError('');
     setHistory([]);
     setEditingEntry(null);
     notify('已取消未保存修改，并采用服务器最新版本');
@@ -298,6 +368,7 @@ export function FlowStudioWorkspace({
     setDraft(nextDraft);
     setConflict(null);
     setPendingMerge(null);
+    setPublishError('');
     setHistory([]);
     notify(message);
   };
@@ -526,6 +597,22 @@ export function FlowStudioWorkspace({
     return ['LOCAL FLOW GUIDANCE', `Current stage: ${stage?.name || '未选择'}`, `Current stage turn: ${drawTurn}`, `Context cues: ${cueNames}`, 'The next turn should keep the selected creative direction.', 'No model request is made by this local mock.'].join('\n');
   }, [draft, drawCueIds, drawStageId, drawTurn]);
 
+  const draftSaved = !isServerBacked || draft.savedDraft === true;
+  const published = isServerBacked && draft.published === true;
+  const publishDisabled = !isServerBacked
+    || !dataAdapter.publish
+    || dirty
+    || !draftSaved
+    || published
+    || publishing
+    || Boolean(conflict);
+  const publishHint = dirty
+    ? '请先保存草稿'
+    : !draftSaved
+      ? '先保存一份服务器草稿'
+      : published
+        ? '运行配置与当前草稿一致'
+        : '发布前会再次验证修订号、运行版本与编译结果';
   const storageChip = isServerBacked ? '服务器草稿' : '本地 Mock';
   const draftRevisionLabel = isServerBacked
     ? `编辑修订 ${draft.editorRevision ?? 0}`
@@ -538,7 +625,9 @@ export function FlowStudioWorkspace({
   const configToast = isServerBacked ? '编辑草稿启用状态已更新' : '沙盒启用状态已更新';
   const statusTitle = draft.enabled ? 'Standby' : '已暂停';
   const statusBody = isServerBacked
-    ? '这是服务器上的可编辑草稿。保存只更新编辑器文档，不会发布到 Hidden Flow 运行配置。'
+    ? published
+      ? '服务器草稿已通过编译验证，并与当前 Hidden Flow 运行配置一致。'
+      : '这是服务器上的可编辑草稿。保存只更新编辑器文档；只有明确点击发布才会写入运行配置。'
     : draft.enabled
       ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
       : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
@@ -639,12 +728,12 @@ export function FlowStudioWorkspace({
     <main className="flow-studio-page dash-fullscreen-page dash-scroll-page">
       <div className="flow-studio-glow flow-studio-glow-left" /><div className="flow-studio-glow flow-studio-glow-right" />
       <div className="flow-studio-content">
-        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : (isServerBacked ? `已保存 · 编辑修订 ${draft.editorRevision ?? 0}` : `已保存 · v${draft.version}`)}</div></div></header>
+        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '未保存' : !draftSaved ? '未保存草稿' : published ? '已发布' : (isServerBacked ? `已保存草稿 · 编辑修订 ${draft.editorRevision ?? 0}` : `已保存 · v${draft.version}`)}</div></div></header>
         <div className="flow-tabbar" role="tablist" aria-label="Flow Studio 页面">{([['overview', '概览'], ['stages', '阶段'], ['library', '灵感库']] as Array<[FlowTab, string]>).map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'is-active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>
 
         {tab === 'overview' ? (
           <section className="flow-screen flow-overview" aria-label="概览">
-            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">{storageKicker}</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">{storageChip}</span><span>未发布</span><span>不调用模型</span></div></div><div className="flow-status-meta"><span>{draftRevisionLabel}</span><span>{modeLabel}</span></div></article>
+            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">{storageKicker}</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">{storageChip}</span><span>{dirty ? '未保存' : !draftSaved ? '未保存草稿' : published ? '已发布' : '已保存草稿'}</span><span>不调用模型</span></div></div><div className="flow-status-meta"><span>{draftRevisionLabel}</span><span>{modeLabel}</span>{isServerBacked ? <div className="flow-publish-action"><button type="button" className="flow-publish-button" onClick={publishDraft} disabled={publishDisabled} title={publishHint}>{publishing ? '验证中…' : published ? '已发布' : '验证并发布'}</button><small>{publishHint}</small></div> : null}</div></article>
             <article className="flow-control-card"><div className="flow-control-row"><div><strong>运行总闸</strong><small>真实服务器级开关 · 本页只读</small></div><span className="flow-readonly-pill">生产隔离</span></div><div className="flow-control-row"><div><strong>{configTitle}</strong><small>{configHelp}</small></div><Switch checked={draft.enabled} label={configLabel} onChange={() => mutate(configToast, (next) => { next.enabled = !next.enabled; })} /></div><div className="flow-control-row"><div><strong>会话记录</strong><small>没有连接真实聊天，不会产生运行记录</small></div><span className="flow-muted-value">无</span></div></article>
             <div className="flow-section-heading"><span>流程 · {draft.stages.length} 个阶段</span><button type="button" onClick={() => setTab('stages')}>编辑 ›</button></div>
             <article className="flow-stage-chain"><div className="flow-chain-line" />{draft.stages.map((stage, index) => <button type="button" className="flow-chain-node" key={stage.id} onClick={() => { setTab('stages'); setOpenStage(stage.id); }}><span className={stage.terminal ? 'is-terminal' : ''}>{stage.terminal ? '✦' : index + 1}</span><b>{stage.name || '未命名'}</b></button>)}<p>第一启用阶段为起始阶段；达到最低轮数后，按顺序推进或显式跳转。</p></article>
@@ -687,6 +776,7 @@ export function FlowStudioWorkspace({
         ) : null}
 
         {conflict ? <div className="flow-inline-confirm"><span>{pendingMerge ? `发现 ${pendingMerge.conflicts.length} 个重叠修改：${pendingMerge.conflicts.map((item) => item.path).join('、')}。请选择冲突字段版本。` : '服务器已有更新，不能直接覆盖。请先比较版本差异。'}</span>{pendingMerge ? <><button type="button" onClick={() => resolveMerge('remote')}>保留服务器冲突字段</button><button type="button" className="is-danger" onClick={() => resolveMerge('local')}>明确保留本地冲突字段</button></> : conflict.currentDocument ? <button type="button" onClick={rebaseConflict}>比较并合并本地修改</button> : <button type="button" onClick={() => { setConflict(null); setLoadNonce((value) => value + 1); }}>重新读取服务器版本</button>}</div> : null}
+        {publishError ? <div className="flow-publish-error" role="alert">发布未完成：{publishError}</div> : null}
         {deleteTarget ? <div className="flow-inline-confirm"><span>确定将这个{deleteTarget.kind === 'stage' ? '阶段' : '灵感池'}移入删除草稿吗？保存前仍可撤销。</span><button type="button" onClick={() => setDeleteTarget(null)}>取消</button><button type="button" className="is-danger" onClick={confirmDelete}>确认删除</button></div> : null}
         {statusBar}
       </div>

@@ -21,6 +21,7 @@ import config_store
 from daily_context_bff import same_origin_mutation_ok
 from moments_auth import OwnerAuthError, require_owner
 from chat.hidden_flow.config import normalize_flow_config
+from chat.hidden_flow import runtime_store
 
 EDITOR_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 1
@@ -32,6 +33,10 @@ MAX_ENTRIES_PER_POOL = 320
 MAX_CUES = 256
 MAX_TEXT_CHARS = 1200
 MAX_NAME_CHARS = 200
+PUBLISH_UI_ONLY_FIELDS = frozenset({
+    "dimensions",
+    "initialStage (derived from first enabled stage)",
+})
 
 
 def _now() -> str:
@@ -160,6 +165,73 @@ def _decode_runtime(row: Mapping[str, Any]) -> dict[str, Any]:
     return raw
 
 
+def _classify_unsupported_fields(
+    fields: list[str],
+) -> tuple[list[str], list[str]]:
+    """Separate presentation-only compiler notes from unsafe runtime loss."""
+    ui_only: list[str] = []
+    blocked: list[str] = []
+    for field in fields:
+        is_ui_only = field in PUBLISH_UI_ONLY_FIELDS
+        if field.startswith("stages["):
+            is_ui_only = is_ui_only or field.endswith(".name") or field.endswith(
+                ".nextStageId (derived)"
+            )
+        elif field.startswith("pools["):
+            is_ui_only = is_ui_only or field.endswith(".name")
+        elif field.startswith("cues["):
+            is_ui_only = is_ui_only or field.endswith(".kind")
+        (ui_only if is_ui_only else blocked).append(field)
+    return sorted(set(ui_only)), sorted(set(blocked))
+
+
+def _canonical_runtime(value: Any) -> Optional[dict[str, Any]]:
+    try:
+        normalized = normalize_flow_config(value)
+    except Exception:
+        return None
+    return normalized.to_dict() if normalized is not None else None
+
+
+def _publish_stamp_after(value: Any) -> str:
+    now = (_datetime.datetime.utcnow() + _datetime.timedelta(hours=8)).replace(
+        microsecond=0
+    )
+    try:
+        previous = _datetime.datetime.fromisoformat(
+            str(value or "").replace("Z", "").replace(" ", "T")
+        )
+        if now <= previous:
+            now = previous + _datetime.timedelta(seconds=1)
+    except ValueError:
+        pass
+    return now.isoformat(timespec="seconds")
+
+
+def _publish_analysis(
+    document: Mapping[str, Any],
+) -> tuple[Optional[dict[str, Any]], list[str], list[str], list[str]]:
+    compiled, errors, unsupported = compile_editor_document(document)
+    ui_only, blocked = _classify_unsupported_fields(unsupported)
+    return compiled, errors, ui_only, blocked
+
+
+def _stored_document(
+    runtime: Mapping[str, Any],
+    editor_row: Optional[Mapping[str, Any]],
+    flow_id: str,
+) -> dict[str, Any]:
+    if editor_row is None:
+        return _runtime_to_editor(flow_id, _decode_runtime(runtime))
+    try:
+        document = json.loads(str(editor_row["document_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("stored editor document is invalid JSON") from exc
+    if not isinstance(document, dict):
+        raise ValueError("stored editor document is not an object")
+    return _ensure_stage_transition_modes(document)
+
+
 
 def _ensure_stage_transition_modes(document: Mapping[str, Any]) -> dict[str, Any]:
     result = _copy(dict(document))
@@ -272,16 +344,8 @@ def _load_bundle(
         """,
         (flow_id,),
     ).fetchone()
-    if editor_row is None:
-        document = _runtime_to_editor(flow_id, _decode_runtime(runtime))
-        return runtime, document, None
-    try:
-        document = json.loads(str(editor_row["document_json"]))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("stored editor document is invalid JSON") from exc
-    if not isinstance(document, dict):
-        raise ValueError("stored editor document is not an object")
-    return runtime, _ensure_stage_transition_modes(document), dict(editor_row)
+    document = _stored_document(runtime, dict(editor_row) if editor_row is not None else None, flow_id)
+    return runtime, document, dict(editor_row) if editor_row is not None else None
 
 
 def _validate_editor_document(
@@ -606,12 +670,29 @@ def compile_editor_document(
     return (runtime if not errors else runtime), sorted(set(errors)), sorted(set(unsupported))
 
 
-def _runtime_meta(runtime: Mapping[str, Any], editor_row: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+def _runtime_meta(
+    runtime: Mapping[str, Any],
+    editor_row: Optional[Mapping[str, Any]],
+    document: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    published = False
+    if document is not None:
+        compiled, errors, _ui_only, blocked = _publish_analysis(document)
+        runtime_updated = str(runtime.get("updated_at") or "").replace(" ", "T")
+        editor_updated = str(editor_row.get("updated_at") or "").replace(" ", "T") if editor_row else ""
+        published = bool(
+            not errors
+            and not blocked
+            and compiled is not None
+            and _canonical_runtime(compiled) == _canonical_runtime(_decode_runtime(runtime))
+            and bool(editor_row)
+            and runtime_updated > editor_updated
+        )
     return {
         "schemaVersion": RUNTIME_SCHEMA_VERSION,
         "version": int(runtime.get("version", 0)),
         "engineEnabled": bool(config_store.get_bool("HIDDEN_FLOW_ENGINE_ENABLED", False)),
-        "published": False,
+        "published": published,
         "editorRevision": int(editor_row["revision"]) if editor_row else 0,
     }
 
@@ -629,8 +710,30 @@ def _bundle_payload(
         "editorRevision": int(editor_row["revision"]) if editor_row else 0,
         "savedAt": editor_row["updated_at"] if editor_row else None,
         "source": "editor" if editor_row else "runtime-import",
-        "runtime": _runtime_meta(runtime_row, editor_row),
+        "runtime": _runtime_meta(runtime_row, editor_row, document),
     }
+
+
+def _active_runtime_safety_check(connection: sqlite3.Connection) -> str:
+    """Return a blocking reason unless no active Hidden Flow can be disturbed."""
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hidden_flow_runtime'"
+    ).fetchone()
+    if table is None:
+        return "runtime_schema_missing"
+    rows = connection.execute(
+        "SELECT state_json, pending_guide_json FROM hidden_flow_runtime"
+    ).fetchall()
+    for row in rows:
+        try:
+            state = json.loads(str(row["state_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return "runtime_state_unreadable"
+        if not isinstance(state, dict):
+            return "runtime_state_unreadable"
+        if state.get("active") is True or row["pending_guide_json"] is not None:
+            return "active_flow"
+    return ""
 
 
 def create_flow_studio_blueprint(
@@ -768,15 +871,20 @@ def create_flow_studio_blueprint(
             compiled, compile_errors, unsupported = compile_editor_document(
                 document or {}
             )
+            ui_only, blocked = _classify_unsupported_fields(unsupported)
             return _response(
                 {
                     "ok": True,
                     "valid": not compile_errors,
+                    "publishable": not compile_errors and not blocked,
                     "errors": compile_errors,
                     "unsupportedFields": unsupported,
+                    "uiOnlyFields": ui_only,
+                    "blockedFields": blocked,
                     "runtime": {
                         "schemaVersion": RUNTIME_SCHEMA_VERSION,
                         "config": compiled,
+                        "version": int(runtime_row["version"]),
                         "engineEnabled": bool(
                             config_store.get_bool("HIDDEN_FLOW_ENGINE_ENABLED", False)
                         ),
@@ -786,6 +894,216 @@ def create_flow_studio_blueprint(
             )
         finally:
             connection.close()
+
+    @blueprint.post("/api/flow-studio/editor/<flow_id>/publish")
+    def publish_editor(flow_id: str):
+        auth = _guard(owner_guard)
+        if auth is not None:
+            return auth
+        if not same_origin_mutation_ok(request):
+            return _error("CROSS_ORIGIN_MUTATION", "cross-origin mutation rejected", 403)
+        payload, payload_error = _request_payload()
+        if payload_error is not None:
+            return payload_error
+        expected_revision = payload.get("expectedRevision")
+        expected_runtime_version = payload.get("expectedRuntimeVersion")
+        if not _is_int(expected_revision) or expected_revision < 1:
+            return _error(
+                "EDITOR_REVISION_REQUIRED",
+                "a saved editor revision is required before publishing",
+                400,
+            )
+        if not _is_int(expected_runtime_version) or expected_runtime_version < 0:
+            return _error(
+                "RUNTIME_VERSION_REQUIRED",
+                "expectedRuntimeVersion must be a non-negative integer",
+                400,
+            )
+
+        connection = _connect(db_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            runtime = _runtime_row(connection, flow_id)
+            if runtime is None:
+                connection.rollback()
+                return _error("FLOW_NOT_FOUND", "flow configuration was not found", 404)
+            current = connection.execute(
+                """
+                SELECT flow_id, schema_version, document_json, revision, created_at, updated_at
+                FROM flow_studio_editor_documents
+                WHERE flow_id=?
+                """,
+                (flow_id,),
+            ).fetchone()
+            if current is None:
+                connection.rollback()
+                return _error(
+                    "EDITOR_DRAFT_REQUIRED",
+                    "请先保存服务器草稿，再验证并发布",
+                    409,
+                    currentRevision=0,
+                    currentRuntimeVersion=int(runtime["version"]),
+                )
+            current_revision = int(current["revision"])
+            if expected_revision != current_revision:
+                current_document = _stored_document(runtime, dict(current), flow_id)
+                connection.rollback()
+                return _error(
+                    "EDITOR_REVISION_CONFLICT",
+                    "editor document changed on the server",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=int(runtime["version"]),
+                    currentDocument=current_document,
+                )
+            current_runtime_version = int(runtime["version"])
+            if expected_runtime_version != current_runtime_version:
+                current_document = _stored_document(runtime, dict(current), flow_id)
+                connection.rollback()
+                return _error(
+                    "RUNTIME_VERSION_CONFLICT",
+                    "运行配置已变化，不能覆盖较新的服务器版本",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                    currentDocument=current_document,
+                )
+
+            document = _stored_document(runtime, dict(current), flow_id)
+            document, structural_errors = _validate_editor_document(document, flow_id)
+            if structural_errors:
+                connection.rollback()
+                return _error(
+                    "FLOW_PUBLISH_INVALID",
+                    "草稿无法通过发布前验证",
+                    422,
+                    errors=structural_errors,
+                    uiOnlyFields=[],
+                    blockedFields=[],
+                )
+            compiled, compile_errors, ui_only, blocked = _publish_analysis(document or {})
+            if compile_errors:
+                connection.rollback()
+                return _error(
+                    "FLOW_PUBLISH_INVALID",
+                    "草稿无法编译为安全的运行配置",
+                    422,
+                    errors=compile_errors,
+                    uiOnlyFields=ui_only,
+                    blockedFields=blocked,
+                )
+            if blocked:
+                connection.rollback()
+                return _error(
+                    "FLOW_PUBLISH_UNSUPPORTED",
+                    "草稿包含无法安全编译的运行字段，未发布",
+                    422,
+                    errors=[],
+                    uiOnlyFields=ui_only,
+                    blockedFields=blocked,
+                )
+            safety = _active_runtime_safety_check(connection)
+            if safety == "active_flow":
+                connection.rollback()
+                return _error(
+                    "FLOW_ACTIVE_PUBLISH_BLOCKED",
+                    "当前有活动流程，暂不能替换运行配置；请等流程结束后再发布",
+                    409,
+                )
+            if safety:
+                connection.rollback()
+                return _error(
+                    "FLOW_RUNTIME_SAFETY_UNKNOWN",
+                    "无法确认活动流程状态，已阻止发布以保护现有运行配置",
+                    503,
+                )
+            try:
+                next_runtime_version = runtime_store.publish_flow_config(
+                    connection,
+                    compiled or {},
+                    expected_version=current_runtime_version,
+                    enabled=bool((compiled or {}).get("enabled")),
+                    now=_publish_stamp_after(current["updated_at"]),
+                )
+            except runtime_store.HiddenFlowConflict:
+                connection.rollback()
+                return _error(
+                    "RUNTIME_VERSION_CONFLICT",
+                    "运行配置已变化，不能覆盖较新的服务器版本",
+                    409,
+                    currentRevision=current_revision,
+                    currentRuntimeVersion=current_runtime_version,
+                    currentDocument=document,
+                )
+            updated_runtime = _runtime_row(connection, flow_id)
+            if (
+                updated_runtime is None
+                or int(updated_runtime["version"]) != int(next_runtime_version)
+                or _canonical_runtime(_decode_runtime(updated_runtime))
+                != _canonical_runtime(compiled)
+            ):
+                connection.rollback()
+                return _error(
+                    "FLOW_PUBLISH_VERIFY_FAILED",
+                    "发布校验未通过，原运行配置已保留",
+                    500,
+                )
+            connection.commit()
+        except (sqlite3.Error, RuntimeError, ValueError, TypeError):
+            connection.rollback()
+            return _error(
+                "FLOW_PUBLISH_STORAGE_ERROR",
+                "发布失败，原运行配置已保留",
+                500,
+            )
+        finally:
+            connection.close()
+
+        confirmed_connection = _connect(db_path)
+        try:
+            confirmed_runtime = _runtime_row(confirmed_connection, flow_id)
+            confirmed_editor = confirmed_connection.execute(
+                """
+                SELECT flow_id, schema_version, document_json, revision, created_at, updated_at
+                FROM flow_studio_editor_documents
+                WHERE flow_id=?
+                """,
+                (flow_id,),
+            ).fetchone()
+            if confirmed_runtime is None or confirmed_editor is None:
+                return _error(
+                    "FLOW_PUBLISH_VERIFY_FAILED",
+                    "发布后重新读取服务器配置失败",
+                    502,
+                )
+            confirmed_document = _stored_document(
+                confirmed_runtime, dict(confirmed_editor), flow_id
+            )
+            confirmed_compiled, confirmed_errors, _ui_only, confirmed_blocked = _publish_analysis(
+                confirmed_document
+            )
+            if (
+                confirmed_errors
+                or confirmed_blocked
+                or _canonical_runtime(confirmed_compiled)
+                != _canonical_runtime(_decode_runtime(confirmed_runtime))
+                or int(confirmed_runtime["version"]) != int(next_runtime_version)
+            ):
+                return _error(
+                    "FLOW_PUBLISH_VERIFY_FAILED",
+                    "发布后服务器配置与编译结果不一致",
+                    502,
+                )
+            return _response(
+                _bundle_payload(
+                    flow_id,
+                    confirmed_runtime,
+                    confirmed_document,
+                    dict(confirmed_editor),
+                )
+            )
+        finally:
+            confirmed_connection.close()
 
     return blueprint
 
