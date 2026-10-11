@@ -323,8 +323,6 @@ assert.match(workspace, /createTemplatePool/);
 assert.match(workspace, /六个普通维度/);
 assert.match(workspace, /createRuotaPool/);
 assert.doesNotMatch(workspace, /flow-template-grid[\\s\\S]{0,1500}template\\.entries\\.map/);
-assert.match(flowStyles, /flow-template-panel/);
-assert.match(flowStyles, /flow-template-card/);
 assert.match(workspace, /guidancePrompt/);
 assert.match(workspace, /阶段提示词/);
 assert.match(workspace, /maxLength=\{3000\}/);
@@ -343,6 +341,8 @@ assert.doesNotMatch(preview, /createFlowStudioApiAdapter|validate|publish/);
 
 const flowWorkspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
 const flowStyles = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.css', import.meta.url), 'utf8');
+assert.match(flowStyles, /flow-template-panel/);
+assert.match(flowStyles, /flow-template-card/);
 const chatScreen = readFileSync(new URL('../src/screens/ChatScreen.tsx', import.meta.url), 'utf8');
 assert.match(flowWorkspace, /className=\"flow-studio-page dash-fullscreen-page dash-scroll-page\"/);
 assert.match(flowStyles, /height:100%;min-height:0;max-width:none;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch/);
