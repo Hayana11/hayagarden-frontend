@@ -9,6 +9,7 @@ import {
   type FlowStudioPool,
   type FlowStudioStage,
 } from '../lib/flowStudio/flowStudioMock';
+import { hasEditableFlowStudioChanges } from '../lib/flowStudio/flowStudioDocument';
 import {
   mergeFlowStudioDocuments,
   type FlowStudioMergeConflict,
@@ -160,7 +161,7 @@ export function FlowStudioWorkspace({
     return () => { active = false; };
   }, [dataAdapter, loadNonce]);
 
-  const dirty = useMemo(() => loadState === 'ready' && JSON.stringify(saved) !== JSON.stringify(draft), [draft, loadState, saved]);
+  const dirty = useMemo(() => loadState === 'ready' && hasEditableFlowStudioChanges(saved, draft), [draft, loadState, saved]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -240,7 +241,7 @@ export function FlowStudioWorkspace({
     setSaving(true);
     try {
       const persisted = await Promise.resolve(dataAdapter.save(requestDraft));
-      const newerEditsExist = JSON.stringify(draftRef.current) !== JSON.stringify(requestDraft);
+      const newerEditsExist = hasEditableFlowStudioChanges(requestDraft, draftRef.current);
       const savedDocument = cloneFlowStudioData(persisted);
       setSaved(savedDocument);
       setRuntimeApplyPending(false);
@@ -727,7 +728,7 @@ export function FlowStudioWorkspace({
     );
   };
 
-  const statusBar = dirty || runtimeApplyPending ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">{dirty ? '有未保存的编辑修改' : '编辑已保存，等待应用'}</span>{dirty ? <><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button></> : null}<button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{saving ? '保存中…' : '保存'}</button></div> : null;
+  const statusBar = dirty || runtimeApplyPending ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">{dirty ? '有未保存修改' : '编辑已保存 · 等待应用'}</span>{dirty ? <><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button></> : null}<button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{saving ? '保存中…' : '保存'}</button></div> : null;
 
   if (loadState === 'loading') {
     return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>{isServerBacked ? '正在读取编辑器…' : '正在准备视觉原型…'}</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>{isServerBacked ? '正在从服务器加载真实草稿，不会回退到 Mock 数据。' : '正在加载本地视觉原型数据，不会读取真实 API。'}</p></article></div></main>;
@@ -739,7 +740,7 @@ export function FlowStudioWorkspace({
     <main className="flow-studio-page dash-fullscreen-page dash-scroll-page">
       <div className="flow-studio-glow flow-studio-glow-left" /><div className="flow-studio-glow flow-studio-glow-right" />
       <div className="flow-studio-content">
-        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : (isServerBacked ? `已保存 · 编辑修订 ${draft.editorRevision ?? 0}` : `已保存 · v${draft.version}`)}</div></div></header>
+        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : (runtimeApplyPending ? '编辑已保存 · 等待应用' : (isServerBacked ? `已保存 · 编辑修订 ${draft.editorRevision ?? 0}` : `已保存 · v${draft.version}`))}</div></div></header>
         <div className="flow-tabbar" role="tablist" aria-label="Flow Studio 页面">{([['overview', '概览'], ['stages', '阶段'], ['library', '灵感库']] as Array<[FlowTab, string]>).map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'is-active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>
 
         {tab === 'overview' ? (
