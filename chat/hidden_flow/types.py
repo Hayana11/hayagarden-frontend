@@ -8,6 +8,7 @@ from typing import Any, Mapping, Optional
 
 
 SCHEMA_VERSION = 1
+MAX_STAGE_GUIDANCE_CHARS = 3000
 
 HIDDEN_FLOW_CONTROL_ACTIONS = frozenset({
     "start",
@@ -105,6 +106,7 @@ class StageSpec:
     terminal_without_continue: bool = False
     holdable: bool = False
     pool_ids: tuple[str, ...] = ()
+    guidance_prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +120,7 @@ class StageSpec:
             "terminalWithoutContinue": self.terminal_without_continue,
             "holdable": self.holdable,
             "poolIds": list(self.pool_ids),
+            "guidancePrompt": self.guidance_prompt,
         }
 
 
