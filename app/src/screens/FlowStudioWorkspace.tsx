@@ -153,7 +153,7 @@ export function FlowStudioWorkspace({
     }).catch((error: unknown) => {
       if (!active) return;
       setLoadState('error');
-      setLoadError(error instanceof Error ? error.message : '读取服务器草稿失败');
+      setLoadError(error instanceof Error ? error.message : '读取服务器配置失败');
     });
     return () => { active = false; };
   }, [dataAdapter, loadNonce]);
@@ -715,7 +715,7 @@ export function FlowStudioWorkspace({
     return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>{isServerBacked ? '正在读取编辑器…' : '正在准备视觉原型…'}</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>{isServerBacked ? '正在从服务器加载真实草稿，不会回退到 Mock 数据。' : '正在加载本地视觉原型数据，不会读取真实 API。'}</p></article></div></main>;
   }
   if (loadState === 'error') {
-    return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">FLOW STUDIO UNAVAILABLE</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>读取失败</h2><p style={{ margin: '0 0 18px', color: 'var(--flow-soft)', lineHeight: 1.8 }}>{loadError || (isServerBacked ? '服务器草稿暂时不可用。' : '本地视觉原型暂时不可用。')}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></article></div></main>;
+    return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">FLOW STUDIO UNAVAILABLE</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>读取失败</h2><p style={{ margin: '0 0 18px', color: 'var(--flow-soft)', lineHeight: 1.8 }}>{loadError || (isServerBacked ? '服务器配置暂时不可用。' : '本地视觉原型暂时不可用。')}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></article></div></main>;
   }
   return (
     <main className="flow-studio-page dash-fullscreen-page dash-scroll-page">
