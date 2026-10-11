@@ -28,6 +28,7 @@ export type FlowStudioStage = {
   continueTarget?: string | null;
   terminalWithoutContinue?: boolean;
   holdable?: boolean;
+  guidancePrompt?: string;
 };
 
 export type FlowStudioCue = {
@@ -99,11 +100,11 @@ const MOCK_DATA: FlowStudioData = {
     { id: 'process', label: '过程', detail: '进入与收束', tone: 'green' },
   ],
   stages: [
-    { id: 'stage-1', name: '试探', minTurns: 1, terminal: false, poolIds: ['pool-a'], nextStageId: null },
-    { id: 'stage-2', name: '靠近', minTurns: 3, terminal: false, poolIds: ['pool-a', 'pool-b'], nextStageId: null },
-    { id: 'stage-3', name: '渐深', minTurns: 3, terminal: false, poolIds: ['pool-b', 'pool-c'], nextStageId: null },
-    { id: 'stage-4', name: '临界', minTurns: 2, terminal: false, poolIds: ['pool-b', 'pool-c'], nextStageId: null },
-    { id: 'stage-5', name: '终章', minTurns: 1, terminal: true, poolIds: ['pool-d'], nextStageId: null },
+    { id: 'stage-1', name: '试探', minTurns: 1, terminal: false, poolIds: ['pool-a'], nextStageId: null, guidancePrompt: '' },
+    { id: 'stage-2', name: '靠近', minTurns: 3, terminal: false, poolIds: ['pool-a', 'pool-b'], nextStageId: null, guidancePrompt: '' },
+    { id: 'stage-3', name: '渐深', minTurns: 3, terminal: false, poolIds: ['pool-b', 'pool-c'], nextStageId: null, guidancePrompt: '' },
+    { id: 'stage-4', name: '临界', minTurns: 2, terminal: false, poolIds: ['pool-b', 'pool-c'], nextStageId: null, guidancePrompt: '' },
+    { id: 'stage-5', name: '终章', minTurns: 1, terminal: true, poolIds: ['pool-d'], nextStageId: null, guidancePrompt: '' },
   ],
   pools: [
     {
