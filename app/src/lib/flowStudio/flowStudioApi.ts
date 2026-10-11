@@ -29,7 +29,7 @@ export class FlowStudioConflictError extends FlowStudioApiError {
     super(
       409,
       String(payload.code || 'EDITOR_REVISION_CONFLICT'),
-      String(payload.error || '服务器草稿已被其他窗口修改'),
+      String(payload.error || '服务器配置已被其他窗口修改'),
       payload,
     );
     this.name = 'FlowStudioConflictError';
@@ -173,7 +173,7 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
       throw new FlowStudioApiError(
         409,
         'RUNTIME_VERSION_REQUIRED',
-        '缺少当前运行配置版本，请先重新读取服务器草稿',
+        '缺少当前运行配置版本，请先重新读取服务器配置',
         {},
       );
     }
