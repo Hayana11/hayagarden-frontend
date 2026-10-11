@@ -84,6 +84,40 @@ const responses = [
       runtime: { version: 102, configDigest: 'digest-1', schemaVersion: 1, engineEnabled: false, published: true },
     },
   },
+  {
+    status: 200,
+    body: {
+      ok: true,
+      document: { ...document, stages: [{ ...document.stages[0], name: '运行冲突重试' }] },
+      editorRevision: 7,
+      savedAt: 'server-save-again',
+      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: false },
+    },
+  },
+  {
+    status: 200,
+    body: {
+      ok: true,
+      valid: true,
+      publishable: true,
+      errors: [],
+      unsupportedFields: [],
+      displayOnlyFields: [],
+      unsafeFields: [],
+    },
+  },
+  {
+    status: 409,
+    body: {
+      ok: false,
+      code: 'RUNTIME_VERSION_CONFLICT',
+      error: 'runtime configuration changed on the server',
+      currentRevision: 7,
+      currentRuntimeVersion: 103,
+      currentDocument: { ...document, stages: [{ ...document.stages[0], name: '服务器运行版本' }] },
+    },
+  },
+
 ];
 
 globalThis.fetch = async (url, init = {}) => {
@@ -118,17 +152,30 @@ assert.equal(saved.editorRevision, 6);
 assert.equal(requests[1].init.body.includes('"expectedRevision":4'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 
-const validation = await adapter.validate?.(saved);
-assert.equal(validation?.valid, true);
-assert.equal(validation?.publishable, true);
-const published = await adapter.publish?.(saved);
-assert.equal(published?.document.editorRevision, 6);
-assert.equal(published?.document.runtimeVersion, 102);
-assert.equal(published?.document.published, true);
+assert.equal(saved.runtimeVersion, 102);
+assert.equal(saved.published, true);
+assert.equal(saved.stages[0].name, '本地保存');
+assert.equal(requests[2].url.endsWith('/intimacy-v1'), true);
+assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 assert.equal(requests[3].url.endsWith('/validate'), true);
 assert.equal(requests[4].url.endsWith('/publish'), true);
 assert.equal(requests[4].init.body.includes('"expectedRuntimeVersion":101'), true);
 assert.equal(requests[5].url.endsWith('/intimacy-v1'), true);
+assert.equal(saved.stages[0].name, '本地保存', 'reload confirmation must retain the saved configuration');
+
+await assert.rejects(
+  () => adapter.save({ ...saved, stages: [{ ...saved.stages[0], name: '运行冲突重试' }] }),
+  (error) => {
+    assert.ok(error instanceof FlowStudioConflictError);
+    assert.equal(error.code, 'RUNTIME_VERSION_CONFLICT');
+    assert.equal(error.currentRuntimeVersion, 103);
+    assert.equal(error.savedDocument?.stages[0].name, '运行冲突重试');
+    return true;
+  },
+);
+assert.equal(requests[6].url.endsWith('/intimacy-v1'), true);
+assert.equal(requests[7].url.endsWith('/validate'), true);
+assert.equal(requests[8].url.endsWith('/publish'), true);
 
 
 const mergeBase = {
@@ -183,15 +230,22 @@ assert.match(workspace, /disabled=\{saving \|\| Boolean\(conflict\)\}/);
 assert.match(workspace, /mergeFlowStudioDocuments/);
 assert.match(workspace, /resolveMerge/);
 assert.match(workspace, /明确保留本地冲突字段/);
-assert.match(workspace, /验证并发布/);
-assert.match(workspace, /请先保存当前草稿，再验证并发布/);
+assert.doesNotMatch(workspace, /验证并发布|已发布|未发布|发布验证未通过|请先保存当前草稿，再验证并发布/);
+assert.doesNotMatch(workspace, /publishDraft|canPublish|publishValidation|validating|publishing/);
+assert.match(workspace, /runtimeApplyPending/);
+assert.match(workspace, /编辑已保存，但当前 Flow 正在运行，运行配置暂未更新。结束当前 Flow 后再次保存即可应用。/);
+assert.match(workspace, /onClick=\{saveDraft\}/);
+assert.match(workspace, /保存/);
 
 const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', import.meta.url), 'utf8');
 const preview = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.tsx', import.meta.url), 'utf8');
 assert.match(formal, /createFlowStudioApiAdapter/);
 assert.doesNotMatch(formal, /createFlowStudioMockAdapter/);
-assert.doesNotMatch(formal, /正式页面 · 未发布/);
+assert.match(formal, /服务器配置/);
+assert.doesNotMatch(formal, /服务器草稿|正式页面 · 未发布/);
 assert.match(preview, /backPath="\/dash\/chat"/);
+assert.match(preview, /createFlowStudioMockAdapter/);
+assert.doesNotMatch(preview, /createFlowStudioApiAdapter|validate|publish/);
 
 const flowWorkspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');
 const flowStyles = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.css', import.meta.url), 'utf8');
@@ -200,7 +254,8 @@ assert.match(flowWorkspace, /className=\"flow-studio-page dash-fullscreen-page d
 assert.match(flowStyles, /height:100%;min-height:0;max-width:none;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch/);
 assert.match(flowStyles, /overscroll-behavior-y:contain;touch-action:pan-y/);
 assert.match(flowStyles, /safe-area-inset-bottom/);
-assert.match(chatScreen, /正式编辑器 · 服务器草稿/);
-assert.doesNotMatch(chatScreen, /正式编辑器 · 本地 Mock/);
+assert.doesNotMatch(flowStyles, /flow-publish-action|flow-publish-note/);
+assert.match(chatScreen, /服务器配置/);
+assert.doesNotMatch(chatScreen, /正式编辑器 · 服务器草稿|正式编辑器 · 本地 Mock/);
 
 console.log('flow studio persistence, conflict, revision, race, and preview isolation checks passed');
