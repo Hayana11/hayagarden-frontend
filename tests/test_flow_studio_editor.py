@@ -89,6 +89,16 @@ def _seed_runtime(db_path: str) -> dict:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE hidden_flow_runtime (
+            chat_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            flow_id TEXT,
+            state_json TEXT,
+            pending_guide_json TEXT,
+            config_version INTEGER,
+            version INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     connection.execute(
@@ -160,6 +170,23 @@ class FlowStudioEditorApiTests(unittest.TestCase):
                 "document": document,
             },
         )
+
+    def _publishable_document(self, document):
+        result = json.loads(json.dumps(document))
+        result["stages"] = [
+            stage for stage in result["stages"] if stage.get("enabled") is True
+        ]
+        result["pools"] = [
+            pool for pool in result["pools"] if pool.get("enabled") is True
+        ]
+        for pool in result["pools"]:
+            pool["entries"] = [
+                entry for entry in pool["entries"] if entry.get("enabled") is not False
+            ]
+        result["cues"] = [
+            cue for cue in result["cues"] if cue.get("enabled") is not False
+        ]
+        return result
 
     def test_existing_runtime_is_imported_without_dropping_disabled_editor_data(self):
         payload = self._get()
@@ -300,7 +327,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
 
     def test_publish_is_explicit_and_updates_runtime_only_after_saved_draft(self):
         first = self._get()
-        document = first["document"]
+        document = self._publishable_document(first["document"])
         document["stages"][0]["minTurns"] = 2
         saved = self._save(document, first["editorRevision"])
         self.assertEqual(saved.status_code, 200)
@@ -336,7 +363,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
 
     def test_publish_validation_failure_does_not_change_runtime(self):
         first = self._get()
-        document = first["document"]
+        document = self._publishable_document(first["document"])
         document["stages"][0]["minTurns"] = 99
         response = self._publish(document, first["editorRevision"], 7)
         self.assertEqual(response.status_code, 422)
@@ -354,7 +381,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
 
     def test_publish_rejects_editor_and_runtime_version_conflicts(self):
         first = self._get()
-        document = first["document"]
+        document = self._publishable_document(first["document"])
         document["stages"][0]["minTurns"] = 2
         saved = self._save(document, first["editorRevision"])
         self.assertEqual(saved.status_code, 200)
@@ -397,7 +424,8 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         connection.close()
 
         first = self._get()
-        response = self._publish(first["document"], first["editorRevision"], 7)
+        document = self._publishable_document(first["document"])
+        response = self._publish(document, first["editorRevision"], 7)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["code"], "FLOW_ACTIVE")
         connection = sqlite3.connect(self.db_path)
@@ -425,7 +453,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         connection.close()
 
         first = self._get()
-        document = first["document"]
+        document = self._publishable_document(first["document"])
         document["stages"][0]["minTurns"] = 2
         saved = self._save(document, first["editorRevision"])
         self.assertEqual(saved.status_code, 200)
