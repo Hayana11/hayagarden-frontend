@@ -271,14 +271,17 @@ assert.equal(RUOTA_TEMPLATES.length, 6);
 assert.equal(RUOTA_TEMPLATES.some((template) => template.id === 'gore'), false);
 assert.equal(RUOTA_TEMPLATES.every((template) => template.entries.length > 0), true);
 assert.equal(ruotaAsset.import.sourceTotal, 440);
-assert.equal(ruotaAsset.import.importedTotal, 415);
-assert.equal(ruotaAsset.import.filteredTotal, 25);
+assert.equal(ruotaAsset.import.importedTotal, 410);
+assert.equal(ruotaAsset.import.filteredTotal, 30);
 
 const filteredFixture = filterRuotaEntries([
   { zh: '安全成人标签', en: 'Adult consensual focus' },
   { zh: '不应导入', en: 'Forced coercive scene' },
   { zh: '不应导入', en: 'Explicit blood play' },
   { zh: '不应导入', en: 'Shota Top' },
+  { zh: '不应导入', en: 'Sleep Stealing' },
+  { zh: '不应导入', en: 'Bestiality' },
+  { zh: '不应导入', en: 'Chokehold' },
   { zh: '不应导入', en: 'Childhood Friend' },
   { zh: '不应导入', gore: true },
 ]);
