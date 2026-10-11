@@ -164,6 +164,13 @@ def _classify_event(raw: Mapping[str, Any]) -> tuple[EventType, EventRole, bool]
     etype_raw = str(raw.get('type') or '')
     message = raw.get('message') if isinstance(raw.get('message'), dict) else {}
 
+    # Claude Code can emit a user-shaped metadata row after a tool round. It
+    # is part of the resident transcript, but it is not a new chat turn. Do
+    # this check before the ``user`` branch below so these rows can never
+    # create a second candidate_user in the same mapping range.
+    if raw.get('isMeta') is True:
+        return EventType.UNKNOWN, EventRole.META, is_sidechain
+
     if etype_raw == 'summary':
         return EventType.SUMMARY, EventRole.SUMMARY, is_sidechain
     if etype_raw == 'assistant':
