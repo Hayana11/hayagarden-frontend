@@ -190,6 +190,7 @@ const formal = readFileSync(new URL('../src/screens/FlowStudioScreen.tsx', impor
 const preview = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.tsx', import.meta.url), 'utf8');
 assert.match(formal, /createFlowStudioApiAdapter/);
 assert.doesNotMatch(formal, /createFlowStudioMockAdapter/);
+assert.doesNotMatch(formal, /正式页面 · 未发布/);
 assert.match(preview, /backPath="\/dash\/chat"/);
 
 const flowWorkspace = readFileSync(new URL('../src/screens/FlowStudioWorkspace.tsx', import.meta.url), 'utf8');

@@ -15,7 +15,7 @@ export function FlowStudioScreen() {
       dataAdapter={productionApiAdapter}
       backPath="/chat"
       surfaceLabel="正式编辑器 · 服务器草稿"
-      modeLabel="正式页面 · 未发布"
+      modeLabel="正式页面 · 服务器草稿"
       persistenceLabel="已保存至服务器"
       storageKicker="CURRENT SERVER STATE"
     />
