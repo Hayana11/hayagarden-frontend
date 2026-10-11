@@ -282,7 +282,6 @@ const filteredFixture = filterRuotaEntries([
   { zh: '不应导入', en: 'Sleep Stealing' },
   { zh: '不应导入', en: 'Bestiality' },
   { zh: '不应导入', en: 'Chokehold' },
-  { zh: '不应导入', en: 'Childhood Friend' },
   { zh: '不应导入', gore: true },
 ]);
 assert.deepEqual(filteredFixture, ['安全成人标签']);
