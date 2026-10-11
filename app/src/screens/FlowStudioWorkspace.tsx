@@ -260,15 +260,7 @@ export function FlowStudioWorkspace({
             currentRuntimeVersion?: unknown;
           }
         : {};
-      const conflictCodes = new Set([
-        'EDITOR_REVISION_CONFLICT',
-        'RUNTIME_VERSION_CONFLICT',
-        'PUBLISH_DRAFT_NOT_SAVED',
-      ]);
-      if (
-        errorRecord.status === 409
-        && conflictCodes.has(String(errorRecord.code))
-      ) {
+      if (errorRecord.status === 409) {
         setPendingMerge(null);
         setConflict({
           currentDocument: errorRecord.currentDocument
@@ -468,7 +460,15 @@ export function FlowStudioWorkspace({
             payload?: unknown;
           }
         : {};
-      if (errorRecord.status === 409) {
+      const conflictCodes = new Set([
+        'EDITOR_REVISION_CONFLICT',
+        'RUNTIME_VERSION_CONFLICT',
+        'PUBLISH_DRAFT_NOT_SAVED',
+      ]);
+      if (
+        errorRecord.status === 409
+        && conflictCodes.has(String(errorRecord.code))
+      ) {
         setPendingMerge(null);
         setConflict({
           currentDocument: errorRecord.currentDocument
