@@ -204,6 +204,39 @@ assert.equal(nonOverlapping.conflicts.length, 0);
 assert.equal(nonOverlapping.document.stages[0].name, '本地阶段修改');
 assert.equal(nonOverlapping.document.pools[0].name, '服务器灵感池修改');
 
+const guidanceBase = {
+  ...mergeBase,
+  stages: [{ ...mergeBase.stages[0], guidancePrompt: '' }],
+};
+const guidanceLocal = {
+  ...guidanceBase,
+  stages: [{ ...guidanceBase.stages[0], guidancePrompt: 'STAGE_GUIDANCE_LOCAL' }],
+};
+const guidanceRemote = {
+  ...guidanceBase,
+  stages: [{ ...guidanceBase.stages[0], name: '服务器阶段' }],
+};
+const guidanceNonOverlapping = mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemote);
+assert.equal(guidanceNonOverlapping.conflicts.length, 0);
+assert.equal(guidanceNonOverlapping.document.stages[0].guidancePrompt, 'STAGE_GUIDANCE_LOCAL');
+assert.equal(guidanceNonOverlapping.document.stages[0].name, '服务器阶段');
+
+const guidanceRemoteConflict = {
+  ...guidanceBase,
+  stages: [{ ...guidanceBase.stages[0], guidancePrompt: 'STAGE_GUIDANCE_REMOTE' }],
+};
+const guidanceOverlapping = mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemoteConflict);
+assert.equal(guidanceOverlapping.conflicts.length, 1);
+assert.equal(guidanceOverlapping.conflicts[0].path, 'stages.s1.guidancePrompt');
+assert.equal(
+  mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemoteConflict, 'remote').document.stages[0].guidancePrompt,
+  'STAGE_GUIDANCE_REMOTE',
+);
+assert.equal(
+  mergeFlowStudioDocuments(guidanceBase, guidanceLocal, guidanceRemoteConflict, 'local').document.stages[0].guidancePrompt,
+  'STAGE_GUIDANCE_LOCAL',
+);
+
 const localSameField = {
   ...mergeBase,
   stages: [{ ...mergeBase.stages[0], name: '本地同字段修改' }],
