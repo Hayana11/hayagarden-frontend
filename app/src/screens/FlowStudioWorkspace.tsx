@@ -8,6 +8,7 @@ import {
   type FlowStudioEntry,
   type FlowStudioPool,
   type FlowStudioStage,
+  type FlowStudioRuntimeApplyState,
 } from '../lib/flowStudio/flowStudioMock';
 import { hasEditableFlowStudioChanges } from '../lib/flowStudio/flowStudioDocument';
 import {
@@ -136,6 +137,22 @@ export function FlowStudioWorkspace({
   const [toast, setToast] = useState('');
   const [saving, setSaving] = useState(false);
   const [runtimeApplyPending, setRuntimeApplyPending] = useState(false);
+  const [runtimeApplyBlocked, setRuntimeApplyBlocked] = useState(false);
+  const [runtimeApplyBlockedReason, setRuntimeApplyBlockedReason] = useState<string | null>(null);
+
+  const currentRuntimeApplyState = (): FlowStudioRuntimeApplyState => (
+    dataAdapter.getRuntimeApplyState?.() ?? {
+      applyPending: false,
+      applyBlocked: false,
+      applyBlockedReason: null,
+    }
+  );
+
+  const setRuntimeApplyState = (state: FlowStudioRuntimeApplyState) => {
+    setRuntimeApplyPending(state.applyPending);
+    setRuntimeApplyBlocked(state.applyBlocked);
+    setRuntimeApplyBlockedReason(state.applyBlockedReason);
+  };
 
   useEffect(() => {
     let active = true;
@@ -146,8 +163,8 @@ export function FlowStudioWorkspace({
       const next = cloneFlowStudioData(loaded);
       syncSequenceStageLinks(next);
       setSaved(next);
-      setRuntimeApplyPending(false);
-        draftRef.current = cloneFlowStudioData(next);
+      setRuntimeApplyState(currentRuntimeApplyState());
+      draftRef.current = cloneFlowStudioData(next);
       setDraft(cloneFlowStudioData(next));
       setHistory([]);
       setConflict(null);
@@ -218,7 +235,10 @@ export function FlowStudioWorkspace({
     });
   };
 
-  const retainEditorSave = (persisted: FlowStudioData) => {
+  const retainEditorSave = (
+    persisted: FlowStudioData,
+    applyState = currentRuntimeApplyState(),
+  ) => {
     const savedDocument = cloneFlowStudioData(persisted);
     const localDocument = cloneFlowStudioData(draftRef.current);
     localDocument.editorRevision = savedDocument.editorRevision;
@@ -228,7 +248,7 @@ export function FlowStudioWorkspace({
     setSaved(savedDocument);
     draftRef.current = localDocument;
     setDraft(localDocument);
-    setRuntimeApplyPending(true);
+    setRuntimeApplyState(applyState);
   };
 
   const saveDraft = async () => {
@@ -244,7 +264,7 @@ export function FlowStudioWorkspace({
       const newerEditsExist = hasEditableFlowStudioChanges(requestDraft, draftRef.current);
       const savedDocument = cloneFlowStudioData(persisted);
       setSaved(savedDocument);
-      setRuntimeApplyPending(false);
+      setRuntimeApplyState(currentRuntimeApplyState());
       setConflict(null);
       if (newerEditsExist) {
         const localDocument = cloneFlowStudioData(draftRef.current);
@@ -289,19 +309,25 @@ export function FlowStudioWorkspace({
         'PUBLISH_DRAFT_NOT_SAVED',
       ]);
       if (savedDocument && guardCodes.has(String(errorRecord.code))) {
-        retainEditorSave(savedDocument);
-        notify('编辑已保存，但当前 Flow 正在运行，运行配置暂未更新。结束当前 Flow 后再次保存即可应用。');
+        retainEditorSave(savedDocument, {
+          applyPending: true,
+          applyBlocked: false,
+          applyBlockedReason: null,
+        });
+        notify('编辑已保存 · 等待当前 Flow 结束后自动应用');
         return;
       }
       if (savedDocument && !conflictCodes.has(String(errorRecord.code))) {
-        retainEditorSave(savedDocument);
+        retainEditorSave(savedDocument, currentRuntimeApplyState());
         const payload = errorRecord.payload && typeof errorRecord.payload === 'object'
           ? errorRecord.payload as { errors?: unknown }
           : {};
         const detail = Array.isArray(payload.errors)
           ? payload.errors.find((item): item is string => typeof item === 'string')
           : null;
-        notify(detail ? '编辑已保存，但配置暂未应用：' + detail : '编辑已保存，但运行配置暂未更新，请稍后再次保存');
+        notify(detail
+          ? '编辑已保存，但配置暂未应用：' + detail
+          : '编辑已保存，但自动应用暂未完成，请修正配置或稍后重试');
         return;
       }
       if (
@@ -344,6 +370,7 @@ export function FlowStudioWorkspace({
     draftRef.current = cloneFlowStudioData(conflictBase);
     setSaved(conflictBase);
     setDraft(cloneFlowStudioData(conflictBase));
+    setRuntimeApplyState(currentRuntimeApplyState());
     setConflict(null);
     setPendingMerge(null);
     setHistory([]);
@@ -370,7 +397,7 @@ export function FlowStudioWorkspace({
       nextDraft.runtimeVersion = serverRuntimeVersion;
     }
     nextDraft.published = false;
-    setRuntimeApplyPending(false);
+    setRuntimeApplyState(currentRuntimeApplyState());
     setSaved(savedServerDocument);
     draftRef.current = nextDraft;
     setDraft(nextDraft);
@@ -636,9 +663,11 @@ export function FlowStudioWorkspace({
   const configToast = isServerBacked ? '配置启用状态已更新' : '沙盒启用状态已更新';
   const statusTitle = draft.enabled ? 'Standby' : '已暂停';
   const statusBody = isServerBacked
-    ? (runtimeApplyPending
-      ? '编辑已保存，但当前 Flow 正在运行，运行配置暂未更新。结束当前 Flow 后再次保存即可应用。'
-      : '保存后会自动校验并应用到 Hidden Flow 运行配置，供之后启动的新 Flow 使用。')
+    ? (runtimeApplyBlocked
+      ? '编辑已保存，但自动应用被校验阻止；请修正配置后保存。'
+      : runtimeApplyPending
+        ? '编辑已保存，当前 Flow 结束后会自动应用最新编辑稿。'
+        : '保存后会自动校验并应用到 Hidden Flow 运行配置，供之后启动的新 Flow 使用。')
     : draft.enabled
       ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
       : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
@@ -728,7 +757,7 @@ export function FlowStudioWorkspace({
     );
   };
 
-  const statusBar = dirty || runtimeApplyPending ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">{dirty ? '有未保存修改' : '编辑已保存 · 等待应用'}</span>{dirty ? <><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button></> : null}<button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{saving ? '保存中…' : '保存'}</button></div> : null;
+  const statusBar = dirty || runtimeApplyPending || runtimeApplyBlocked ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">{dirty ? '有未保存修改' : (runtimeApplyBlocked ? '编辑已保存 · 自动应用被阻止' : '编辑已保存 · 等待当前 Flow 结束后自动应用')}</span>{dirty ? <><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{saving ? '保存中…' : '保存'}</button></> : null}</div> : null;
 
   if (loadState === 'loading') {
     return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>{isServerBacked ? '正在读取编辑器…' : '正在准备视觉原型…'}</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>{isServerBacked ? '正在从服务器加载真实草稿，不会回退到 Mock 数据。' : '正在加载本地视觉原型数据，不会读取真实 API。'}</p></article></div></main>;
@@ -740,7 +769,7 @@ export function FlowStudioWorkspace({
     <main className="flow-studio-page dash-fullscreen-page dash-scroll-page">
       <div className="flow-studio-glow flow-studio-glow-left" /><div className="flow-studio-glow flow-studio-glow-right" />
       <div className="flow-studio-content">
-        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : (runtimeApplyPending ? '编辑已保存 · 等待应用' : (isServerBacked ? `已保存 · 编辑修订 ${draft.editorRevision ?? 0}` : `已保存 · v${draft.version}`))}</div></div></header>
+        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={\`flow-status-dot \${dirty ? 'is-dirty' : ''}\`} />{surfaceLabel} · {dirty ? '有未保存修改' : (runtimeApplyBlocked ? '编辑已保存 · 自动应用被阻止' : (runtimeApplyPending ? '编辑已保存 · 等待当前 Flow 结束后自动应用' : (isServerBacked ? \`已保存 · 编辑修订 \${draft.editorRevision ?? 0}\` : \`已保存 · v\${draft.version}\`)))}</div></div></header>
         <div className="flow-tabbar" role="tablist" aria-label="Flow Studio 页面">{([['overview', '概览'], ['stages', '阶段'], ['library', '灵感库']] as Array<[FlowTab, string]>).map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'is-active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>
 
         {tab === 'overview' ? (

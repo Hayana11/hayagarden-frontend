@@ -58,6 +58,12 @@ export type FlowStudioData = {
  * A future API adapter can normalize async/server data before handing the page
  * this same front-end shape; no API, database, or runtime state belongs here.
  */
+export type FlowStudioRuntimeApplyState = {
+  applyPending: boolean;
+  applyBlocked: boolean;
+  applyBlockedReason: string | null;
+};
+
 export type FlowStudioValidationResult = {
   valid: boolean;
   publishable: boolean;
@@ -77,6 +83,7 @@ export type FlowStudioDataAdapter = {
   save(next: FlowStudioData): FlowStudioData | Promise<FlowStudioData>;
   validate?(next: FlowStudioData): FlowStudioValidationResult | Promise<FlowStudioValidationResult>;
   publish?(next: FlowStudioData): FlowStudioPublishResult | Promise<FlowStudioPublishResult>;
+  getRuntimeApplyState?(): FlowStudioRuntimeApplyState;
   acceptRevision?(revision: number): void;
 };
 

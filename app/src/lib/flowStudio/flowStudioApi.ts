@@ -3,6 +3,7 @@ import {
   type FlowStudioData,
   type FlowStudioDataAdapter,
   type FlowStudioPublishResult,
+  type FlowStudioRuntimeApplyState,
 } from './flowStudioMock';
 
 export class FlowStudioApiError extends Error {
@@ -60,6 +61,21 @@ function isFlowStudioData(value: unknown): value is FlowStudioData {
     && Array.isArray((value as FlowStudioData).cues)
     && Array.isArray((value as FlowStudioData).dimensions),
   );
+}
+
+function runtimeApplyStateForPayload(
+  payload: Record<string, unknown>,
+): FlowStudioRuntimeApplyState {
+  const runtime = payload.runtime && typeof payload.runtime === 'object'
+    ? payload.runtime as Record<string, unknown>
+    : {};
+  return {
+    applyPending: runtime.applyPending === true,
+    applyBlocked: runtime.applyBlocked === true,
+    applyBlockedReason: typeof runtime.applyBlockedReason === 'string'
+      ? runtime.applyBlockedReason
+      : null,
+  };
 }
 
 function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData {
@@ -143,6 +159,11 @@ async function requestJson(
 
 export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapter {
   let revision = 0;
+  let runtimeApplyState: FlowStudioRuntimeApplyState = {
+    applyPending: false,
+    applyBlocked: false,
+    applyBlockedReason: null,
+  };
 
   const validateEditorDocument = async (next: FlowStudioData) => {
     const payload = await requestJson(
@@ -229,6 +250,7 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
     revision = typeof confirmed.editorRevision === 'number'
       ? confirmed.editorRevision
       : revision;
+    runtimeApplyState = runtimeApplyStateForPayload(confirmed);
     return {
       document: confirmedDocument,
       displayOnlyFields: Array.isArray(payload.displayOnlyFields)
@@ -261,6 +283,7 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
     });
     revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : revision + 1;
     const savedDocument = documentForWorkspace(payload);
+    runtimeApplyState = runtimeApplyStateForPayload(payload);
 
     try {
       const validation = await validateEditorDocument(savedDocument);
@@ -287,12 +310,17 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
         '/api/flow-studio/editor/' + encodeURIComponent(flowId),
       );
       revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : 0;
+      runtimeApplyState = runtimeApplyStateForPayload(payload);
       return documentForWorkspace(payload);
     },
 
     save: saveEditorDocument,
     validate: validateEditorDocument,
     publish: publishEditorDocument,
+
+    getRuntimeApplyState() {
+      return { ...runtimeApplyState };
+    },
 
     acceptRevision(nextRevision) {
       if (Number.isInteger(nextRevision) && nextRevision >= 0) {
