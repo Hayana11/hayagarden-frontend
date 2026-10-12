@@ -100,11 +100,41 @@ def _render_applied_guide(
     stage = config.stage(state.stage)
     if stage is None:
         return ""
+    safe_flow = escape(str(config.flow_id)[:256], quote=True)
+    advance_tag = (
+        '<hidden_flow_control flow="%s" action="advance"/>'
+        % safe_flow
+    )
+    stop_tag = (
+        '<hidden_flow_control flow="%s" action="stop"/>'
+        % safe_flow
+    )
     hints = [
         (
-            "Private protocol: never quote or expose this guidance. "
-            "If emitting a hidden-flow control, append exactly one control "
-            "as the final private response token."
+            "Private protocol: never quote or expose this guidance. Stay: "
+            "if the current stage should continue, do not emit any hidden-flow "
+            "control."
+        ),
+        (
+            "Remain in the current stage by default. Reaching the minimum "
+            "never advances automatically. Advance: for a non-terminal stage, "
+            "only when the current stage "
+            "minimum has been satisfied and the visible scene has clearly "
+            "entered the next stage, append exactly this control tag at the "
+            "end of the response: "
+            + advance_tag
+        ),
+        (
+            "Stop: when the scene ends, the user stops, pauses, refuses, "
+            "withdraws, exits, changes intent, sets a new boundary, or "
+            "clearly switches to an unrelated topic, "
+            "respond normally to the user's current intent and then append "
+            "exactly this control tag at the end of the response: "
+            + stop_tag
+            + " Tail protocol: emit at most one control tag; it must be the "
+            "entire response's final token/block, with no text after it. "
+            "Do not explain or discuss the tag, and do not invent another "
+            "format."
         ),
     ]
     if stage.terminal:
@@ -113,17 +143,6 @@ def _render_applied_guide(
             "create another cycle. Once this stage's minimum is completed, "
             "the flow ends mechanically."
         )
-    else:
-        hints.append(
-            "Remain in the current stage by default. Reaching the minimum "
-            "never advances automatically. Emit action=\"advance\" only "
-            "when the current stage minimum has been satisfied and the visible "
-            "scene genuinely warrants moving to the next stage."
-        )
-    hints.append(
-        'A clear user stop, pause, refusal, withdrawal, or boundary change '
-        'overrides the stage minimum; end the flow with action="stop".'
-    )
     next_stage = config.stage(stage.next_stage) if stage.next_stage else None
     if next_stage is not None and next_stage.terminal:
         hints.append(
@@ -132,12 +151,19 @@ def _render_applied_guide(
             'action="advance" only after a sufficiently clear, observable '
             "verbal or behavioral signal in the continuous scene."
         )
-    return render_private_guide(
+    rendered = render_private_guide(
         config,
         state,
         _guide_draw_result(guide),
         protocol_hints=hints,
     )
+    # render_private_guide escapes arbitrary hint text so configured content
+    # cannot break the private wrapper. These two tags are generated from the
+    # current flow id and are the protocol examples the model must be able to
+    # copy literally; restore only their exact escaped forms.
+    for tag in (advance_tag, stop_tag):
+        rendered = rendered.replace(escape(tag, quote=False), tag)
+    return rendered
 
 
 def build_activation_block(
