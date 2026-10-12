@@ -94,7 +94,7 @@ const responses = [
       document: { ...document, stages: [{ ...document.stages[0], name: '运行冲突重试' }] },
       editorRevision: 7,
       savedAt: 'server-save-again',
-      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: false },
+      runtime: { version: 102, schemaVersion: 1, engineEnabled: false, published: false, applyPending: true },
     },
   },
   {
@@ -208,6 +208,11 @@ assert.equal(saved.runtimeVersion, 102);
 assert.equal(saved.published, true);
 assert.equal(saved.stages[0].name, '本地保存');
 assert.equal(saved.stages[0].guidancePrompt, 'STAGE_GUIDANCE_SENTINEL_A');
+assert.deepEqual(adapter.getRuntimeApplyState?.(), {
+  applyPending: false,
+  applyBlocked: false,
+  applyBlockedReason: null,
+});
 assert.equal(requests[2].url.endsWith('/intimacy-v1'), true);
 assert.equal(requests[2].init.body.includes('"expectedRevision":5'), true);
 assert.equal(requests[3].url.endsWith('/validate'), true);
@@ -230,7 +235,11 @@ await assert.rejects(
 assert.equal(requests[6].url.endsWith('/intimacy-v1'), true);
 assert.equal(requests[7].url.endsWith('/validate'), true);
 assert.equal(requests[8].url.endsWith('/publish'), true);
-
+assert.deepEqual(adapter.getRuntimeApplyState?.(), {
+  applyPending: true,
+  applyBlocked: false,
+  applyBlockedReason: null,
+}, 'server-derived pending state survives the guarded publish response');
 
 const mergeBase = {
   ...document,
@@ -361,10 +370,11 @@ assert.match(workspace, /hasEditableFlowStudioChanges\(saved, draft\)/);
 assert.match(workspace, /hasEditableFlowStudioChanges\(requestDraft, draftRef\.current\)/);
 assert.doesNotMatch(workspace, /JSON\.stringify\(saved\) !== JSON\.stringify\(draft\)/);
 assert.doesNotMatch(workspace, /JSON\.stringify\(draftRef\.current\) !== JSON\.stringify\(requestDraft\)/);
-assert.match(workspace, /runtimeApplyPending \? '编辑已保存 · 等待应用'/);
+assert.match(workspace, /runtimeApplyPending \? '编辑已保存 · 等待当前 Flow 结束后自动应用'/);
 assert.match(workspace, /有未保存修改/);
 assert.match(workspace, /if \(dirty && !window\.confirm/);
-assert.match(workspace, /setRuntimeApplyPending\(true\)/);
+assert.match(workspace, /setRuntimeApplyState/);
+assert.match(workspace, /getRuntimeApplyState/);
 assert.match(workspace, /newerEditsExist/);
 assert.match(workspace, /disabled=\{saving \|\| Boolean\(conflict\)\}/);
 assert.match(workspace, /mergeFlowStudioDocuments/);
@@ -373,7 +383,8 @@ assert.match(workspace, /明确保留本地冲突字段/);
 assert.doesNotMatch(workspace, /验证并发布|已发布|未发布|发布验证未通过|请先保存当前草稿，再验证并发布/);
 assert.doesNotMatch(workspace, /publishDraft|canPublish|publishValidation|validating|publishing/);
 assert.match(workspace, /runtimeApplyPending/);
-assert.match(workspace, /编辑已保存，但当前 Flow 正在运行，运行配置暂未更新。结束当前 Flow 后再次保存即可应用。/);
+assert.match(workspace, /编辑已保存 · 等待当前 Flow 结束后自动应用/);
+assert.doesNotMatch(workspace, /结束当前 Flow 后再次保存即可应用/);
 assert.match(workspace, /onClick=\{saveDraft\}/);
 assert.match(workspace, /新建空白灵感池/);
 assert.match(workspace, /从模板创建/);
