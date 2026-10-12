@@ -122,6 +122,7 @@ jobs:
           python -m unittest tests.test_rewrite_activation_atomicity
           python -m unittest tests.test_weread_routes tests.test_weread_key_setup -v
           python -m unittest tests.test_flow_studio_editor -v
+          python -m unittest tests.test_hidden_flow_runtime -v
           python -m unittest tests.test_hidden_flow_stage_guidance -v
           python -m unittest tests.test_hidden_flow_engine -v
           python -m unittest tests.test_hidden_flow_activation_contract -v
