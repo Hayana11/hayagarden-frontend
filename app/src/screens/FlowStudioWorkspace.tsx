@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   cloneFlowStudioData,
@@ -9,6 +9,9 @@ import {
   type FlowStudioPool,
   type FlowStudioStage,
   type FlowStudioRuntimeApplyState,
+  type FlowStudioRuntimeStatus,
+  FLOW_STUDIO_GLOBAL_GUIDANCE_MAX_CHARS,
+  UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS,
 } from '../lib/flowStudio/flowStudioMock';
 import { hasEditableFlowStudioChanges } from '../lib/flowStudio/flowStudioDocument';
 import {
@@ -17,9 +20,12 @@ import {
   type FlowStudioMergePreference,
 } from '../lib/flowStudio/flowStudioMerge';
 import { createRuotaPool, RUOTA_TEMPLATES } from '../lib/flowStudio/flowStudioTemplates';
+import { FlowStudioDrawDock } from './FlowStudioDrawDock';
 import './FlowStudioSoftGlowScreen.css';
 
 type FlowTab = 'overview' | 'stages' | 'library';
+type SavePhase = 'idle' | 'saving' | 'applying';
+const FLOW_TABS: Array<[FlowTab, string]> = [['overview', '概览'], ['stages', '阶段'], ['library', '灵感库']];
 type LibraryTab = 'pools' | 'cues';
 type DeleteTarget = { kind: 'stage' | 'pool'; id: string } | null;
 type ConflictState = {
@@ -82,24 +88,20 @@ function Icon({ name }: { name: 'spark' | 'book' | 'search' | 'plus' | 'chevron'
 export type FlowStudioWorkspaceProps = {
   dataAdapter: FlowStudioDataAdapter;
   backPath: string;
+  /** Accessible name of the surface; never rendered as visible chrome. */
   surfaceLabel: string;
-  modeLabel: string;
   persistenceLabel?: string;
-  storageKicker?: string;
 };
 
 export function FlowStudioWorkspace({
   dataAdapter,
   backPath,
   surfaceLabel,
-  modeLabel,
-  persistenceLabel = '已保存到本地 Mock 草稿',
-  storageKicker = 'CURRENT MOCK STATE',
+  persistenceLabel = '已保存',
 }: FlowStudioWorkspaceProps) {
   const navigate = useNavigate();
   const [tab, setTab] = useState<FlowTab>('overview');
   const [libraryTab, setLibraryTab] = useState<LibraryTab>('pools');
-  const isServerBacked = persistenceLabel.includes('服务器');
   const emptyData: FlowStudioData = {
     version: 0,
     savedAt: '',
@@ -127,17 +129,21 @@ export function FlowStudioWorkspace({
   const [editingText, setEditingText] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
-  const [showDraw, setShowDraw] = useState(false);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
-  const [drawStageId, setDrawStageId] = useState('stage-2');
-  const [drawCueIds, setDrawCueIds] = useState<string[]>(['cue-1']);
-  const [drawTurn, setDrawTurn] = useState(1);
-  const [drawn, setDrawn] = useState(false);
-  const [showGuide, setShowGuide] = useState(false);
+  const [guidanceOpen, setGuidanceOpen] = useState(false);
+  const [guidanceEditing, setGuidanceEditing] = useState(false);
   const [toast, setToast] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [savePhase, setSavePhase] = useState<SavePhase>('idle');
+  const saving = savePhase !== 'idle';
+  const [applyIncomplete, setApplyIncomplete] = useState(false);
   const [runtimeApplyPending, setRuntimeApplyPending] = useState(false);
   const [runtimeApplyBlocked, setRuntimeApplyBlocked] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<FlowStudioRuntimeStatus>(UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS);
+
+  const readRuntimeStatus = () => {
+    const status = dataAdapter.getRuntimeStatus?.();
+    if (status) setRuntimeStatus(status);
+  };
 
   const currentRuntimeApplyState = (): FlowStudioRuntimeApplyState => (
     dataAdapter.getRuntimeApplyState?.() ?? {
@@ -159,9 +165,12 @@ export function FlowStudioWorkspace({
     Promise.resolve(dataAdapter.load()).then((loaded) => {
       if (!active) return;
       const next = cloneFlowStudioData(loaded);
+      if (typeof next.guidancePrompt !== 'string') next.guidancePrompt = '';
       syncSequenceStageLinks(next);
       setSaved(next);
       setRuntimeApplyState(currentRuntimeApplyState());
+      readRuntimeStatus();
+      setApplyIncomplete(false);
       draftRef.current = cloneFlowStudioData(next);
       setDraft(cloneFlowStudioData(next));
       setHistory([]);
@@ -187,8 +196,6 @@ export function FlowStudioWorkspace({
     window.addEventListener('beforeunload', warnBeforeLeave);
     return () => window.removeEventListener('beforeunload', warnBeforeLeave);
   }, [dirty]);
-
-  const enabledEntries = draft.pools.reduce((total, pool) => total + pool.entries.filter((entry) => entry.enabled).length, 0);
 
   useEffect(() => {
     if (!toast) return;
@@ -256,13 +263,17 @@ export function FlowStudioWorkspace({
       return;
     }
     const requestDraft = cloneFlowStudioData(draftRef.current);
-    setSaving(true);
+    setSavePhase('saving');
     try {
-      const persisted = await Promise.resolve(dataAdapter.save(requestDraft));
+      const persisted = await Promise.resolve(dataAdapter.save(requestDraft, {
+        onProgress: (phase) => { if (phase === 'editorSaved') setSavePhase('applying'); },
+      }));
       const newerEditsExist = hasEditableFlowStudioChanges(requestDraft, draftRef.current);
       const savedDocument = cloneFlowStudioData(persisted);
       setSaved(savedDocument);
       setRuntimeApplyState(currentRuntimeApplyState());
+      readRuntimeStatus();
+      setApplyIncomplete(false);
       setConflict(null);
       if (newerEditsExist) {
         const localDocument = cloneFlowStudioData(draftRef.current);
@@ -312,11 +323,15 @@ export function FlowStudioWorkspace({
           applyBlocked: false,
           applyBlockedReason: null,
         });
+        readRuntimeStatus();
+        setApplyIncomplete(false);
         notify('编辑已保存 · 等待当前 Flow 结束后自动应用');
         return;
       }
       if (savedDocument && !conflictCodes.has(String(errorRecord.code))) {
         retainEditorSave(savedDocument, currentRuntimeApplyState());
+        readRuntimeStatus();
+        setApplyIncomplete(true);
         const payload = errorRecord.payload && typeof errorRecord.payload === 'object'
           ? errorRecord.payload as { errors?: unknown }
           : {};
@@ -349,7 +364,7 @@ export function FlowStudioWorkspace({
         notify('保存失败，运行配置未改变');
       }
     } finally {
-      setSaving(false);
+      setSavePhase('idle');
     }
   };
 
@@ -630,45 +645,49 @@ export function FlowStudioWorkspace({
     return draft.cues.filter((cue) => cue.key.toLocaleLowerCase().includes(query) || cue.kind.toLocaleLowerCase().includes(query));
   }, [draft.cues, searchQuery]);
 
-  const drawResults = useMemo(() => {
-    const stage = draft.stages.find((item) => item.id === drawStageId) || draft.stages[0];
-    if (!stage) return [];
-    const poolIds = new Set(stage.poolIds);
-    draft.cues.filter((cue) => drawCueIds.includes(cue.id)).forEach((cue) => cue.poolIds.forEach((id) => poolIds.add(id)));
-    return draft.pools
-      .filter((pool) => pool.enabled && poolIds.has(pool.id))
-      .flatMap((pool) => pool.entries.filter((entry) => entry.enabled && entry.text.trim()).slice(0, pool.count).map((entry) => ({ ...entry, poolName: pool.name, mode: pool.mode === 'perTurn' ? '每轮重抽' : '整段固定' })))
-      .slice(0, 5);
-  }, [draft, drawCueIds, drawStageId]);
+  const enabledStages = useMemo(() => draft.stages.filter((stage) => stage.enabled !== false), [draft.stages]);
+  const activeFlow = runtimeStatus.activeFlow;
+  const flowRunning = activeFlow.state === 'active';
+  const activeStageIndex = flowRunning
+    ? enabledStages.findIndex((stage) => stage.id === activeFlow.stage)
+    : -1;
+  const activeStageName = flowRunning
+    ? (draft.stages.find((stage) => stage.id === activeFlow.stage)?.name || activeFlow.stage || '')
+    : '';
+  // Status reflects what is saved/applied, not the unsaved draft toggle.
+  const engineOff = runtimeStatus.engineEnabled === false;
+  const featureOff = engineOff || !saved.enabled;
+  const statusTone: 'off' | 'idle' | 'running' | 'unknown' = featureOff
+    ? 'off'
+    : flowRunning
+      ? 'running'
+      : activeFlow.state === 'idle' ? 'idle' : 'unknown';
+  const statusText = statusTone === 'off'
+    ? '已关闭'
+    : statusTone === 'running'
+      ? ['运行中', activeStageName, activeFlow.stageTurn ? `第 ${activeFlow.stageTurn} 轮` : ''].filter(Boolean).join(' · ')
+      : statusTone === 'idle' ? '空闲' : '运行状态暂不可读';
+  const statusHint = engineOff
+    ? '运行总闸未开启 · 总闸只读'
+    : !saved.enabled
+      ? (draft.enabled ? '已打开，保存后生效' : '配置已停用')
+      : (draft.enabled ? '' : '已关闭，保存后生效');
 
-  const drawGuide = useMemo(() => {
-    const stage = draft.stages.find((item) => item.id === drawStageId) || draft.stages[0];
-    const cueNames = draft.cues.filter((cue) => drawCueIds.includes(cue.id)).map((cue) => cue.key).join('、') || '无';
-    return ['LOCAL FLOW GUIDANCE', `Current stage: ${stage?.name || '未选择'}`, `Current stage turn: ${drawTurn}`, `Context cues: ${cueNames}`, 'The next turn should keep the selected creative direction.', 'No model request is made by this local mock.'].join('\n');
-  }, [draft, drawCueIds, drawStageId, drawTurn]);
-
-  const storageChip = isServerBacked ? '服务器配置' : '本地 Mock';
-  const draftRevisionLabel = isServerBacked
-    ? `编辑修订 ${draft.editorRevision ?? 0}`
-    : `Draft v${draft.version}`;
-  const configTitle = isServerBacked ? '启用这份配置' : '启用这份沙盒配置';
-  const configHelp = isServerBacked
-    ? (draft.enabled
-      ? '这份配置已启用；保存后应用到之后启动的新 Flow。'
-      : '这份配置已停用；保存后之后的新 Flow 不再使用它。')
-    : (draft.enabled ? '仅改变当前 Mock 状态，关闭不会删除内容' : '已停用，保存后仍只留在沙盒内');
-  const configLabel = isServerBacked ? '启用配置' : '启用沙盒配置';
-  const configToast = isServerBacked ? '配置启用状态已更新' : '沙盒启用状态已更新';
-  const statusTitle = draft.enabled ? 'Standby' : '已暂停';
-  const statusBody = isServerBacked
-    ? (runtimeApplyBlocked
-      ? '编辑已保存，但自动应用被校验阻止；请修正配置后保存。'
-      : runtimeApplyPending
-        ? '编辑已保存，当前 Flow 结束后会自动应用最新编辑稿。'
-        : '保存后会自动校验并应用到 Hidden Flow 运行配置，供之后启动的新 Flow 使用。')
-    : draft.enabled
-      ? '这是一个只改变本地 Mock 草稿的编辑空间。可以放心试错，任何保存都不会触达真实 Flow。'
-      : '这份沙盒配置暂时停用。停用只影响当前浏览器里的 Mock 状态，不会改变真实运行总闸。';
+  const saveStateText = savePhase === 'saving'
+    ? '正在保存…'
+    : savePhase === 'applying'
+      ? '编辑已保存 · 正在应用运行配置…'
+      : dirty
+        ? '有未保存修改'
+        : (runtimeApplyBlocked || applyIncomplete)
+          ? '编辑已保存 · 自动应用未完成'
+          : runtimeApplyPending ? '编辑已保存 · 等待当前 Flow 结束后自动应用' : '已保存 · 已应用';
+  const saveStateTone = savePhase !== 'idle'
+    ? 'is-busy'
+    : dirty
+      ? 'is-dirty'
+      : (runtimeApplyBlocked || applyIncomplete) ? 'is-warn' : runtimeApplyPending ? 'is-wait' : '';
+  const globalGuidance = draft.guidancePrompt ?? '';
 
   const renderStage = (stage: FlowStudioStage, index: number) => {
     const isOpen = openStage === stage.id;
@@ -691,7 +710,7 @@ export function FlowStudioWorkspace({
               <label className="flow-field"><span>推进至</span><select value={stage.nextStageId || ''} disabled={stage.terminal} onChange={(event) => updateStage(stage.id, (target, data) => { const nextStageId = event.target.value || null; target.nextStageMode = nextStageId ? 'explicit' : 'sequence'; target.nextStageId = nextStageId; syncSequenceStageLinks(data); }, '推进关系已更新')}><option value="">按顺序推进</option>{nextOptions.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.name}</option>)}</select></label>
             </div>
             <label className="flow-field flow-stage-guidance-field"><span>阶段提示词 <small>最多 3000 字</small></span><textarea value={stage.guidancePrompt ?? ''} maxLength={3000} rows={4} onChange={(event) => updateStage(stage.id, (target) => { target.guidancePrompt = event.target.value; }, '阶段提示词已更新')} placeholder="写下这个阶段希望模型保持的节奏、表达方式或关注重点。留空则使用默认行为。" /><small className="flow-stage-guidance-help">只影响本阶段的创作引导，不改变推进规则。</small></label>
-            <div className="flow-toggle-row"><div><strong>设为结束阶段</strong><small>{isServerBacked ? '完成最低轮数后，编辑流程在这里收束' : '完成最低轮数后，沙盒流程在这里收束'}</small></div><Switch checked={stage.terminal} label={`将${stage.name || '本阶段'}设为结束阶段`} onChange={() => mutate('结束阶段状态已更新', (next) => { next.stages.forEach((candidate) => { candidate.terminal = candidate.id === stage.id ? !stage.terminal : false; }); syncSequenceStageLinks(next); })} /></div>
+            <div className="flow-toggle-row"><div><strong>设为结束阶段</strong><small>完成最低轮数后，流程在这里收束</small></div><Switch checked={stage.terminal} label={`将${stage.name || '本阶段'}设为结束阶段`} onChange={() => mutate('结束阶段状态已更新', (next) => { next.stages.forEach((candidate) => { candidate.terminal = candidate.id === stage.id ? !stage.terminal : false; }); syncSequenceStageLinks(next); })} /></div>
             <div className="flow-field"><span>关联灵感池</span><div className="flow-choice-wrap">{draft.pools.map((pool) => { const selected = stage.poolIds.includes(pool.id); return <button type="button" className={`flow-choice flow-stage-pool-choice ${selected ? 'is-selected' : ''}`} key={pool.id} onClick={() => updateStage(stage.id, (target) => { target.poolIds = selected ? target.poolIds.filter((id) => id !== pool.id) : [...target.poolIds, pool.id]; }, '阶段关联已更新')}><span className="flow-choice-symbol">{selected ? '✓' : '+'}</span>{pool.name}</button>; })}</div></div>
             <div className="flow-row-actions"><button type="button" className="flow-soft-button is-danger" onClick={() => requestDelete('stage', stage.id)}>删除阶段</button></div>
           </div>
@@ -755,29 +774,86 @@ export function FlowStudioWorkspace({
     );
   };
 
-  const statusBar = dirty || runtimeApplyPending || runtimeApplyBlocked ? <div className="flow-save-bar"><span className="flow-save-dot" /><span className="flow-save-copy">{dirty ? '有未保存修改' : (runtimeApplyBlocked ? '编辑已保存 · 自动应用被阻止' : '编辑已保存 · 等待当前 Flow 结束后自动应用')}</span>{dirty ? <><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{saving ? '保存中…' : '保存'}</button></> : null}</div> : null;
+  const statusBar = dirty || saving ? <div className={`flow-save-bar ${saving ? 'is-busy' : ''}`}><span className="flow-save-dot" /><span className="flow-save-copy">{saveStateText}</span>{dirty || saving ? <><button type="button" className="flow-save-link" onClick={undo} disabled={!history.length || saving}><Icon name="undo" />撤销</button><button type="button" className="flow-save-link" onClick={discardDraft} disabled={saving}>取消</button><button type="button" className="flow-save-button" onClick={saveDraft} disabled={saving || Boolean(conflict)}>{savePhase === 'saving' ? '保存中…' : savePhase === 'applying' ? '应用中…' : '保存'}</button></> : null}</div> : null;
 
   if (loadState === 'loading') {
-    return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">READING FLOW STUDIO</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>{isServerBacked ? '正在读取编辑器…' : '正在准备视觉原型…'}</h2><p style={{ margin: 0, color: 'var(--flow-soft)', lineHeight: 1.8 }}>{isServerBacked ? '正在从服务器加载真实草稿，不会回退到 Mock 数据。' : '正在加载本地视觉原型数据，不会读取真实 API。'}</p></article></div></main>;
+    return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page" aria-label={surfaceLabel}><div className="flow-studio-content"><div className="flow-load-card"><span className="flow-load-dot" />正在读取 Flow Studio…</div></div></main>;
   }
   if (loadState === 'error') {
-    return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page"><div className="flow-studio-content"><article className="flow-status-card" style={{ padding: 28, marginTop: 28 }}><div className="flow-kicker">FLOW STUDIO UNAVAILABLE</div><h2 style={{ margin: '14px 0 8px', fontSize: 26 }}>读取失败</h2><p style={{ margin: '0 0 18px', color: 'var(--flow-soft)', lineHeight: 1.8 }}>{loadError || (isServerBacked ? '服务器配置暂时不可用。' : '本地视觉原型暂时不可用。')}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></article></div></main>;
+    return <main className="flow-studio-page dash-fullscreen-page dash-scroll-page" aria-label={surfaceLabel}><div className="flow-studio-content"><div className="flow-load-card is-error"><strong>读取失败</strong><p>{loadError || '配置暂时不可用。'}</p><button type="button" className="flow-run-button" onClick={() => setLoadNonce((value) => value + 1)}>重新读取</button></div></div></main>;
   }
+
+  const tabIndex = Math.max(0, FLOW_TABS.findIndex(([key]) => key === tab));
+
+  const flowSummary = (
+    <div
+      className={`flow-console-chain ${flowRunning ? 'is-running' : ''}`}
+      role="link"
+      tabIndex={0}
+      aria-label={`流程共 ${enabledStages.length} 个阶段，查看阶段`}
+      onClick={() => setTab('stages')}
+      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setTab('stages'); } }}
+      style={{ '--flow-chain-count': Math.max(1, enabledStages.length) } as CSSProperties}
+    >
+      {enabledStages.length ? enabledStages.map((stage, index) => {
+        const position = activeStageIndex < 0 ? 'is-future' : index < activeStageIndex ? 'is-past' : index === activeStageIndex ? 'is-current' : 'is-future';
+        return (
+          <div className={`flow-console-node ${position}`} key={stage.id} aria-current={position === 'is-current' ? 'step' : undefined}>
+            {index > 0 ? <span className={`flow-console-link ${index === activeStageIndex ? 'is-flowing' : ''}`} aria-hidden="true" /> : null}
+            <span className={`flow-console-dot ${stage.terminal ? 'is-terminal' : ''}`}>{stage.terminal ? '✦' : index + 1}</span>
+            <span className="flow-console-name" title={stage.name}>{stage.name || '未命名'}</span>
+          </div>
+        );
+      }) : <p className="flow-console-empty">还没有启用的阶段</p>}
+    </div>
+  );
+
   return (
-    <main className="flow-studio-page dash-fullscreen-page dash-scroll-page">
+    <main className="flow-studio-page dash-fullscreen-page dash-scroll-page" aria-label={surfaceLabel}>
       <div className="flow-studio-glow flow-studio-glow-left" /><div className="flow-studio-glow flow-studio-glow-right" />
       <div className="flow-studio-content">
-        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className="flow-save-state"><span className={`flow-status-dot ${dirty ? 'is-dirty' : ''}`} />{surfaceLabel} · {dirty ? '有未保存修改' : (runtimeApplyBlocked ? '编辑已保存 · 自动应用被阻止' : (runtimeApplyPending ? '编辑已保存 · 等待当前 Flow 结束后自动应用' : (isServerBacked ? `已保存 · 编辑修订 ${draft.editorRevision ?? 0}` : `已保存 · v${draft.version}`)))}</div></div></header>
-        <div className="flow-tabbar" role="tablist" aria-label="Flow Studio 页面">{([['overview', '概览'], ['stages', '阶段'], ['library', '灵感库']] as Array<[FlowTab, string]>).map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'is-active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}</div>
+        <header className="flow-studio-header"><button type="button" className="flow-back-button" aria-label="返回" onClick={leaveStudio}>‹</button><div className="flow-studio-title"><div className="flow-title-row"><h1>Flow Studio</h1></div><div className={`flow-save-state ${saveStateTone}`} role="status"><span className="flow-status-dot" />{saveStateText}</div></div></header>
+        <div className="flow-tabbar" role="tablist" aria-label="Flow Studio 页面" style={{ '--flow-tab-index': tabIndex } as CSSProperties}>
+          <span className="flow-tab-pill" aria-hidden="true" />
+          {FLOW_TABS.map(([key, label]) => <button type="button" role="tab" aria-selected={tab === key} className={tab === key ? 'is-active' : ''} onClick={() => setTab(key)} key={key}>{label}</button>)}
+        </div>
 
         {tab === 'overview' ? (
           <section className="flow-screen flow-overview" aria-label="概览">
-            <article className="flow-status-card"><div className="flow-status-card-main"><div className="flow-kicker">{storageKicker}</div><div className="flow-status-title"><h2>{statusTitle}</h2><span /></div><p>{statusBody}</p><div className="flow-status-chips"><span className="is-rose">{storageChip}</span><span>不调用模型</span></div></div><div className="flow-status-meta"><span>{draftRevisionLabel}</span><span>{modeLabel}</span></div></article>
-            <article className="flow-control-card"><div className="flow-control-row"><div><strong>运行总闸</strong><small>真实服务器级开关 · 本页只读</small></div><span className="flow-readonly-pill">生产隔离</span></div><div className="flow-control-row"><div><strong>{configTitle}</strong><small>{configHelp}</small></div><Switch checked={draft.enabled} label={configLabel} onChange={() => mutate(configToast, (next) => { next.enabled = !next.enabled; })} /></div><div className="flow-control-row"><div><strong>会话记录</strong><small>没有连接真实聊天，不会产生运行记录</small></div><span className="flow-muted-value">无</span></div></article>
-            <div className="flow-section-heading"><span>流程 · {draft.stages.length} 个阶段</span><button type="button" onClick={() => setTab('stages')}>编辑 ›</button></div>
-            <article className="flow-stage-chain"><div className="flow-chain-line" />{draft.stages.map((stage, index) => <button type="button" className="flow-chain-node" key={stage.id} onClick={() => { setTab('stages'); setOpenStage(stage.id); }}><span className={stage.terminal ? 'is-terminal' : ''}>{stage.terminal ? '✦' : index + 1}</span><b>{stage.name || '未命名'}</b></button>)}<p>第一启用阶段为起始阶段；达到最低轮数后，按顺序推进或显式跳转。</p></article>
-            <div className="flow-action-grid"><button type="button" className="flow-action-card" onClick={() => { setShowDraw(true); setDrawn(false); }}><span className="flow-action-icon is-rose"><Icon name="spark" /></span><strong>试抽一次</strong><small>本地模拟抽取 · 不调用模型</small></button><button type="button" className="flow-action-card" onClick={() => { setTab('library'); setLibraryTab('pools'); }}><span className="flow-action-icon is-violet"><Icon name="book" /></span><strong>灵感库</strong><small>{draft.pools.length} 池 · {enabledEntries} 条启用</small></button></div>
-            <div className="flow-section-heading flow-dimension-heading"><span>未来创作维度</span><small>先做视觉结构，后续再接数据源</small></div><div className="flow-dimension-grid">{draft.dimensions.map((dimension) => <article className={`flow-dimension-card is-${dimension.tone}`} key={dimension.id}><span>{dimension.label.slice(0, 1)}</span><div><strong>{dimension.label}</strong><small>{dimension.detail}</small></div><em>设计中</em></article>)}</div>
+            <article className={`flow-console-card is-${statusTone}`}>
+              <div className="flow-console-head">
+                <div className="flow-console-title">
+                  <h2>Hidden Flow</h2>
+                  <div className="flow-console-status">
+                    <span className="flow-state-dot" aria-hidden="true"><i /></span>
+                    <span>{statusText}</span>
+                  </div>
+                  {statusHint ? <small className="flow-console-hint">{statusHint}</small> : null}
+                </div>
+                <Switch checked={draft.enabled} label="启用 Hidden Flow 配置（保存后生效）" onChange={() => mutate(draft.enabled ? 'Hidden Flow 将在保存后关闭' : 'Hidden Flow 将在保存后启用', (next) => { next.enabled = !next.enabled; })} />
+              </div>
+              {flowSummary}
+            </article>
+
+            <article className={`flow-guidance-card ${guidanceOpen || guidanceEditing ? 'is-open' : ''}`}>
+              <div className="flow-guidance-head">
+                <button type="button" className="flow-guidance-toggle" aria-expanded={guidanceOpen || guidanceEditing} onClick={() => { if (guidanceEditing) { setGuidanceEditing(false); setGuidanceOpen(false); } else { setGuidanceOpen((value) => !value); } }}>
+                  <span className="flow-guidance-copy"><strong>全局提示词</strong><small>应用于所有阶段的基础引导</small></span>
+                </button>
+                <button type="button" className={`flow-icon-button flow-guidance-edit ${guidanceEditing ? 'is-active' : ''}`} aria-label={guidanceEditing ? '完成编辑全局提示词' : '编辑全局提示词'} aria-pressed={guidanceEditing} onClick={() => { setGuidanceEditing((value) => !value); setGuidanceOpen(true); }}><Icon name="edit" /></button>
+                <button type="button" className="flow-guidance-chevron" aria-label={guidanceOpen || guidanceEditing ? '收起全局提示词' : '展开全局提示词'} onClick={() => { if (guidanceEditing) { setGuidanceEditing(false); setGuidanceOpen(false); } else { setGuidanceOpen((value) => !value); } }}><Icon name="chevron" /></button>
+              </div>
+              {guidanceEditing ? (
+                <div className="flow-guidance-body">
+                  <textarea autoFocus value={globalGuidance} maxLength={FLOW_STUDIO_GLOBAL_GUIDANCE_MAX_CHARS} rows={6} onChange={(event) => mutate('全局提示词已更新', (next) => { next.guidancePrompt = event.target.value; })} placeholder="写下所有阶段共享的基础节奏、表达方式或关注重点。留空则不添加。" aria-label="全局提示词" />
+                  <div className="flow-guidance-meta"><span>随 Flow Studio 一起保存</span><span>{globalGuidance.length} / {FLOW_STUDIO_GLOBAL_GUIDANCE_MAX_CHARS}</span></div>
+                </div>
+              ) : guidanceOpen ? (
+                <div className="flow-guidance-body">
+                  {globalGuidance.trim() ? <p className="flow-guidance-text">{globalGuidance}</p> : <p className="flow-guidance-text is-empty">尚未设置全局提示词</p>}
+                </div>
+              ) : null}
+            </article>
           </section>
         ) : null}
 
@@ -830,7 +906,7 @@ export function FlowStudioWorkspace({
       </div>
 
       {toast ? <div className="flow-toast" role="status">{toast}</div> : null}
-      {showDraw ? <div className="flow-draw-layer"><button type="button" className="flow-draw-backdrop" aria-label="关闭试抽" onClick={() => setShowDraw(false)} /><section className="flow-draw-sheet" role="dialog" aria-modal="true" aria-labelledby="flow-draw-title"><div className="flow-sheet-handle" /><header className="flow-sheet-header"><div><h2 id="flow-draw-title">试抽一次</h2><p>不调用模型 · 不改变聊天 · 使用未保存草稿</p></div><button type="button" className="flow-close-button" onClick={() => setShowDraw(false)}><Icon name="close" /></button></header><div className="flow-sheet-scroll"><div className="flow-sheet-field"><span>阶段</span><div className="flow-choice-wrap">{draft.stages.map((stage) => <button type="button" className={`flow-choice ${drawStageId === stage.id ? 'is-selected' : ''}`} key={stage.id} onClick={() => { setDrawStageId(stage.id); setDrawn(false); }}>{stage.name}</button>)}</div></div><div className="flow-sheet-field"><span>情境词 <small>最多 4 个</small></span><div className="flow-choice-wrap">{draft.cues.filter((cue) => cue.enabled).map((cue) => { const selected = drawCueIds.includes(cue.id); return <button type="button" className={`flow-choice ${selected ? 'is-selected' : ''}`} key={cue.id} onClick={() => { setDrawCueIds((current) => selected ? current.filter((id) => id !== cue.id) : current.length < 4 ? [...current, cue.id] : current); setDrawn(false); }}>{selected ? '✓ ' : ''}{cue.key}</button>; })}</div></div><div className="flow-turn-row"><span>假设本阶段第几轮</span><div className="flow-stepper is-compact"><button type="button" onClick={() => setDrawTurn((value) => Math.max(1, value - 1))}>−</button><b>{drawTurn}</b><button type="button" onClick={() => setDrawTurn((value) => value + 1)}>＋</button></div></div>{drawn ? <div className="flow-draw-result"><span className="flow-result-kicker">LOCAL MOCK DRAW · {drawResults.length} 条</span><div className="flow-result-list">{drawResults.map((entry) => <div className="flow-result-row" key={entry.id}><span /><div><strong>{entry.text}</strong><small>{entry.poolName} · {entry.mode}</small></div></div>)}</div>{!drawResults.length ? <p>当前选择没有可用的本地灵感。</p> : null}<button type="button" className="flow-guide-toggle" onClick={() => setShowGuide((value) => !value)}>查看本地模拟引导 <Icon name="chevron" /></button>{showGuide ? <pre className="flow-guide">{drawGuide}</pre> : null}</div> : null}</div><footer><button type="button" className="flow-run-button" onClick={() => { setDrawn(true); setShowGuide(false); }}>{drawn ? '重新本地试抽' : '开始本地试抽'}</button></footer></section></div> : null}
+      <FlowStudioDrawDock draft={draft} activeStageId={flowRunning ? activeFlow.stage : null} saveBarVisible={Boolean(statusBar)} />
     </main>
   );
 }

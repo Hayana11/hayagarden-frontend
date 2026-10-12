@@ -9,6 +9,7 @@ from typing import Any, Mapping, Optional
 
 SCHEMA_VERSION = 1
 MAX_STAGE_GUIDANCE_CHARS = 3000
+MAX_GLOBAL_GUIDANCE_CHARS = 5000
 
 HIDDEN_FLOW_CONTROL_ACTIONS = frozenset({
     "start",
@@ -133,6 +134,7 @@ class FlowConfig:
     cues: tuple[CueSpec, ...] = ()
     pools: tuple[PoolSpec, ...] = ()
     schema_version: int = SCHEMA_VERSION
+    guidance_prompt: str = ""
 
     def stage(self, stage_id: str) -> Optional[StageSpec]:
         return next((item for item in self.stages if item.stage_id == stage_id), None)
@@ -153,6 +155,9 @@ class FlowConfig:
             "stages": [item.to_dict() for item in self.stages],
             "cues": [item.to_dict() for item in self.cues],
             "pools": [item.to_dict() for item in self.pools],
+            # Omitted when empty so configs without a global prompt keep
+            # their existing canonical form and digest.
+            **({"guidancePrompt": self.guidance_prompt} if self.guidance_prompt else {}),
         }
 
 

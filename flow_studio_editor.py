@@ -22,7 +22,12 @@ import config_store
 from daily_context_bff import same_origin_mutation_ok
 from moments_auth import OwnerAuthError, require_owner
 from chat.hidden_flow.config import normalize_flow_config
-from chat.hidden_flow.types import AppliedGuide, FlowState, MAX_STAGE_GUIDANCE_CHARS
+from chat.hidden_flow.types import (
+    AppliedGuide,
+    FlowState,
+    MAX_GLOBAL_GUIDANCE_CHARS,
+    MAX_STAGE_GUIDANCE_CHARS,
+)
 
 EDITOR_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 1
@@ -258,6 +263,7 @@ def _runtime_to_editor(flow_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         cues.append(cue)
     document["cues"] = cues
     document.setdefault("dimensions", [])
+    document["guidancePrompt"] = _text(raw.get("guidancePrompt"))
     return document
 
 
@@ -312,6 +318,13 @@ def _validate_editor_document(
         not isinstance(initial_stage, str) or not initial_stage.strip()
     ):
         errors.append("initialStage must be a string or null")
+    global_guidance = document.get("guidancePrompt", "")
+    if global_guidance is not None and not isinstance(global_guidance, str):
+        errors.append("guidancePrompt must be a string")
+    elif len((global_guidance or "").strip()) > MAX_GLOBAL_GUIDANCE_CHARS:
+        errors.append(
+            f"guidancePrompt must be at most {MAX_GLOBAL_GUIDANCE_CHARS} characters"
+        )
 
     stages = document.get("stages")
     pools = document.get("pools")
@@ -434,6 +447,9 @@ def _validate_editor_document(
 
     if not errors:
         normalized_document = _copy(document)
+        normalized_document["guidancePrompt"] = _text(
+            normalized_document.get("guidancePrompt")
+        )
         for stage in normalized_document.get("stages") or []:
             if isinstance(stage, dict):
                 stage["guidancePrompt"] = _text(stage.get("guidancePrompt"))
@@ -478,6 +494,18 @@ def compile_editor_document(
     }
     errors: list[str] = []
     unsupported: list[str] = []
+    global_guidance = document.get("guidancePrompt", "")
+    if global_guidance is not None and not isinstance(global_guidance, str):
+        errors.append("guidancePrompt must be a string")
+    else:
+        global_guidance = _text(global_guidance)
+        if len(global_guidance) > MAX_GLOBAL_GUIDANCE_CHARS:
+            errors.append(
+                f"guidancePrompt must be at most {MAX_GLOBAL_GUIDANCE_CHARS} characters"
+            )
+        elif global_guidance:
+            # Only emitted when set, so existing runtime configs stay canonical.
+            runtime["guidancePrompt"] = global_guidance
 
     stages = document.get("stages") or []
     pools = document.get("pools") or []
@@ -646,6 +674,7 @@ _EDITOR_DOCUMENT_FIELDS = frozenset({
     "pools",
     "cues",
     "dimensions",
+    "guidancePrompt",
 }) | _EDITOR_DOCUMENT_METADATA_FIELDS
 
 _EDITOR_STAGE_FIELDS = frozenset({
@@ -957,6 +986,40 @@ def _runtime_meta(
     }
 
 
+def _active_flow_summary(
+    connection: sqlite3.Connection,
+    flow_id: str,
+) -> dict[str, Any]:
+    """Read-only, user-facing Flow summary: stage id and turn only.
+
+    Never exposes context keys, draws, snapshots, leases or versions.
+    """
+    try:
+        rows = connection.execute(
+            """
+            SELECT state_json, updated_at
+            FROM hidden_flow_runtime
+            WHERE flow_id=?
+            ORDER BY updated_at DESC
+            """,
+            (flow_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {"state": "unknown", "stage": None, "stageTurn": None}
+    for row in rows:
+        try:
+            state = _decode_verified_flow_state(json.loads(str(row["state_json"])))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {"state": "unknown", "stage": None, "stageTurn": None}
+        if state.active and state.flow_id == flow_id:
+            return {
+                "state": "active",
+                "stage": state.stage,
+                "stageTurn": int(state.stage_turn),
+            }
+    return {"state": "idle", "stage": None, "stageTurn": None}
+
+
 def _bundle_payload(
     flow_id: str,
     runtime_row: Mapping[str, Any],
@@ -1214,7 +1277,9 @@ def create_flow_studio_blueprint(
                 return _error("FLOW_NOT_FOUND", "flow configuration was not found", 404)
             except (ValueError, json.JSONDecodeError):
                 return _error("FLOW_STORAGE_INVALID", "stored flow configuration is invalid", 500)
-            return _response(_bundle_payload(flow_id, runtime, document, editor_row))
+            payload = _bundle_payload(flow_id, runtime, document, editor_row)
+            payload["runtime"]["activeFlow"] = _active_flow_summary(connection, flow_id)
+            return _response(payload)
         finally:
             connection.close()
 

@@ -66,6 +66,7 @@ jobs:
           npm run test:task-timer-real-data-wiring
           npm run test:memory-cold-start
           npm run test:flow-studio-persistence
+          npm run test:flow-studio-overview-console
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -124,6 +125,7 @@ jobs:
           python -m unittest tests.test_flow_studio_editor -v
           python -m unittest tests.test_hidden_flow_runtime -v
           python -m unittest tests.test_hidden_flow_stage_guidance -v
+          python -m unittest tests.test_flow_studio_overview_console -v
           python -m unittest tests.test_hidden_flow_engine -v
           python -m unittest tests.test_hidden_flow_activation_contract -v
           python -m unittest tests.test_hidden_flow_observability -v

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from .types import MAX_STAGE_GUIDANCE_CHARS, CueSpec, FlowConfig, PoolEntry, PoolSpec, StageSpec
+from .types import MAX_GLOBAL_GUIDANCE_CHARS, MAX_STAGE_GUIDANCE_CHARS, CueSpec, FlowConfig, PoolEntry, PoolSpec, StageSpec
 
 
 HIDDEN_FLOW_ENGINE_ENABLED = False
@@ -215,6 +215,12 @@ def _is_normalized_config(config: FlowConfig) -> bool:
             return False
         if any(pool_id not in pool_ids for pool_id in stage.pool_ids):
             return False
+    if (
+        not isinstance(config.guidance_prompt, str)
+        or config.guidance_prompt != config.guidance_prompt.strip()
+        or len(config.guidance_prompt) > MAX_GLOBAL_GUIDANCE_CHARS
+    ):
+        return False
     cue_ids = [item.cue_id for item in config.cues]
     cue_keys = [item.key.casefold() for item in config.cues]
     if len(cue_ids) != len(set(cue_ids)) or len(cue_keys) != len(set(cue_keys)):
@@ -246,6 +252,15 @@ def normalize_flow_config(raw: Any) -> Optional[FlowConfig]:
     cues = _normalize_cues(raw.get("cues"), pool_ids)
     if not _graph_is_valid(stages, initial_stage) or initial_stage not in stage_ids:
         return None
+    raw_guidance = raw.get("guidancePrompt", raw.get("guidance_prompt", ""))
+    if raw_guidance is None:
+        raw_guidance = ""
+    if not isinstance(raw_guidance, str):
+        return None
+    guidance_prompt = raw_guidance.strip()
+    # Fail closed instead of silently truncating an oversized global prompt.
+    if len(guidance_prompt) > MAX_GLOBAL_GUIDANCE_CHARS:
+        return None
     return FlowConfig(
         flow_id=flow_id,
         enabled=_enabled(raw.get("enabled"), False),
@@ -253,4 +268,5 @@ def normalize_flow_config(raw: Any) -> Optional[FlowConfig]:
         stages=stages,
         cues=cues,
         pools=pools,
+        guidance_prompt=guidance_prompt,
     )

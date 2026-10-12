@@ -14,10 +14,8 @@ export function FlowStudioScreen() {
     <FlowStudioWorkspace
       dataAdapter={productionApiAdapter}
       backPath="/chat"
-      surfaceLabel="服务器配置"
-      modeLabel="正式页面"
-      persistenceLabel="已保存并应用到 Hidden Flow"
-      storageKicker="CURRENT SERVER STATE"
+      surfaceLabel="Flow Studio · 服务器配置"
+      persistenceLabel="已保存 · 已应用"
     />
   );
 }

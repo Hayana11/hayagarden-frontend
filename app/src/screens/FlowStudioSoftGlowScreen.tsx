@@ -12,8 +12,8 @@ export function FlowStudioSoftGlowScreen() {
     <FlowStudioWorkspace
       dataAdapter={previewMockAdapter}
       backPath="/dash/chat"
-      surfaceLabel="Soft Glow · 视觉原型"
-      modeLabel="视觉原型模式"
+      surfaceLabel="Flow Studio · 视觉预览"
+      persistenceLabel="已保存（预览）"
     />
   );
 }

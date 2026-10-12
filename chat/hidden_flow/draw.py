@@ -7,7 +7,7 @@ import json
 from html import escape
 from typing import Any, Iterable, Mapping, Optional
 
-from .types import MAX_STAGE_GUIDANCE_CHARS, DrawItem, DrawResult, FlowConfig, FlowState, PoolSpec
+from .types import MAX_GLOBAL_GUIDANCE_CHARS, MAX_STAGE_GUIDANCE_CHARS, DrawItem, DrawResult, FlowConfig, FlowState, PoolSpec
 
 
 MAX_DRAWS = 12
@@ -392,9 +392,27 @@ def render_private_guide(
         )
     ]
     used = len(chunks[0])
+    # The global prompt gets its own budget so it never crowds out the
+    # stage prompt or anchors that fit within the original private budget.
+    budget = MAX_PRIVATE_TEXT + (
+        MAX_GLOBAL_GUIDANCE_CHARS + len("<global_guidance></global_guidance>")
+        if config.guidance_prompt else 0
+    )
+    # Base layer first; the current stage prompt follows as its refinement.
+    if config.guidance_prompt:
+        wrapper_size = len("<global_guidance></global_guidance>")
+        remaining = budget - used - len("</hidden_flow_guidance>") - wrapper_size
+        escaped_global = _escape_bounded(
+            config.guidance_prompt[:MAX_GLOBAL_GUIDANCE_CHARS],
+            remaining,
+        )
+        if escaped_global:
+            block = "<global_guidance>%s</global_guidance>" % escaped_global
+            chunks.append(block)
+            used += len(block)
     if stage.guidance_prompt:
         wrapper_size = len("<stage_guidance></stage_guidance>")
-        remaining = MAX_PRIVATE_TEXT - used - len("</hidden_flow_guidance>") - wrapper_size
+        remaining = budget - used - len("</hidden_flow_guidance>") - wrapper_size
         escaped_prompt = _escape_bounded(
             stage.guidance_prompt[:MAX_STAGE_GUIDANCE_CHARS],
             remaining,
@@ -413,13 +431,13 @@ def render_private_guide(
             escape(str(item.entry_id)[:256], quote=True),
             value,
         )
-        if used + len(block) + len("</hidden_flow_guidance>") > MAX_PRIVATE_TEXT:
+        if used + len(block) + len("</hidden_flow_guidance>") > budget:
             break
         chunks.append(block)
         used += len(block)
     for hint in list(protocol_hints)[:4]:
         block = "<hint>%s</hint>" % escape(str(hint or "")[:1200], quote=False)
-        if used + len(block) + len("</hidden_flow_guidance>") > MAX_PRIVATE_TEXT:
+        if used + len(block) + len("</hidden_flow_guidance>") > budget:
             break
         chunks.append(block)
         used += len(block)

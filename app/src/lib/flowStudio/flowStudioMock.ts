@@ -45,6 +45,8 @@ export type FlowStudioData = {
   runtimeVersion?: number;
   published?: boolean;
   initialStage?: string | null;
+  /** Root-level base guidance applied to every stage; private runtime data. */
+  guidancePrompt?: string;
   savedAt: string;
   enabled: boolean;
   stages: FlowStudioStage[];
@@ -78,9 +80,37 @@ export type FlowStudioPublishResult = {
   displayOnlyFields: string[];
 };
 
+export const FLOW_STUDIO_GLOBAL_GUIDANCE_MAX_CHARS = 5000;
+
+/** User-facing runtime summary only: no versions, digests, leases or snapshots. */
+export type FlowStudioActiveFlow = {
+  state: 'active' | 'idle' | 'unknown';
+  stage: string | null;
+  stageTurn: number | null;
+};
+
+export type FlowStudioRuntimeStatus = {
+  /** Server master gate; null when the adapter cannot read it. */
+  engineEnabled: boolean | null;
+  activeFlow: FlowStudioActiveFlow;
+};
+
+export type FlowStudioSavePhase = 'editorSaved';
+
+export type FlowStudioSaveOptions = {
+  /** Fired as soon as the editor document is durably stored, before apply. */
+  onProgress?: (phase: FlowStudioSavePhase) => void;
+};
+
+export const UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS: FlowStudioRuntimeStatus = {
+  engineEnabled: null,
+  activeFlow: { state: 'unknown', stage: null, stageTurn: null },
+};
+
 export type FlowStudioDataAdapter = {
   load(): FlowStudioData | Promise<FlowStudioData>;
-  save(next: FlowStudioData): FlowStudioData | Promise<FlowStudioData>;
+  save(next: FlowStudioData, options?: FlowStudioSaveOptions): FlowStudioData | Promise<FlowStudioData>;
+  getRuntimeStatus?(): FlowStudioRuntimeStatus;
   validate?(next: FlowStudioData): FlowStudioValidationResult | Promise<FlowStudioValidationResult>;
   publish?(next: FlowStudioData): FlowStudioPublishResult | Promise<FlowStudioPublishResult>;
   getRuntimeApplyState?(): FlowStudioRuntimeApplyState;
@@ -101,6 +131,7 @@ const MOCK_DATA: FlowStudioData = {
   version: 7,
   savedAt: '10/08 13:42',
   enabled: true,
+  guidancePrompt: '保持叙述温柔、克制，优先回应对方上一句话里的情绪。',
   dimensions: [
     { id: 'speed', label: '速度', detail: '快慢与停顿', tone: 'rose' },
     { id: 'posture', label: '姿势', detail: '靠近与退后', tone: 'violet' },
@@ -174,14 +205,39 @@ const MOCK_DATA: FlowStudioData = {
   ],
 };
 
+/**
+ * Preview-only runtime look. `?flow=active|idle|off` on the preview URL lets the
+ * visual prototype show each console state; it never reads the real runtime.
+ */
+function previewRuntimeStatus(scope: FlowStudioMockScope): FlowStudioRuntimeStatus {
+  let mode = scope === 'preview' ? 'active' : 'idle';
+  try {
+    const requested = new URLSearchParams(globalThis.location?.search ?? '').get('flow');
+    if (scope === 'preview' && (requested === 'active' || requested === 'idle' || requested === 'off')) {
+      mode = requested;
+    }
+  } catch {
+    // Non-browser test runtimes have no location.
+  }
+  if (mode === 'off') {
+    return { engineEnabled: false, activeFlow: { state: 'idle', stage: null, stageTurn: null } };
+  }
+  if (mode === 'active') {
+    return { engineEnabled: true, activeFlow: { state: 'active', stage: 'stage-3', stageTurn: 2 } };
+  }
+  return { engineEnabled: true, activeFlow: { state: 'idle', stage: null, stageTurn: null } };
+}
+
 export function createFlowStudioMockAdapter(scope: FlowStudioMockScope = 'standalone'): FlowStudioMockAdapter {
   let saved = cloneFlowStudioData(MOCK_DATA);
   return {
     scope,
     load: () => cloneFlowStudioData(saved),
-    save: (next) => {
+    save: (next, options) => {
       saved = cloneFlowStudioData(next);
+      options?.onProgress?.('editorSaved');
       return cloneFlowStudioData(saved);
     },
+    getRuntimeStatus: () => previewRuntimeStatus(scope),
   };
 }

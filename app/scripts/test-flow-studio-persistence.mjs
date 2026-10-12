@@ -371,6 +371,10 @@ assert.match(workspace, /hasEditableFlowStudioChanges\(requestDraft, draftRef\.c
 assert.doesNotMatch(workspace, /JSON\.stringify\(saved\) !== JSON\.stringify\(draft\)/);
 assert.doesNotMatch(workspace, /JSON\.stringify\(draftRef\.current\) !== JSON\.stringify\(requestDraft\)/);
 assert.match(workspace, /runtimeApplyPending \? '编辑已保存 · 等待当前 Flow 结束后自动应用'/);
+assert.match(workspace, /正在保存…/);
+assert.match(workspace, /编辑已保存 · 正在应用运行配置…/);
+assert.match(workspace, /编辑已保存 · 自动应用未完成/);
+assert.match(workspace, /已保存 · 已应用/);
 assert.match(workspace, /有未保存修改/);
 assert.match(workspace, /if \(dirty && !window\.confirm/);
 assert.match(workspace, /setRuntimeApplyState/);
@@ -404,6 +408,7 @@ const preview = readFileSync(new URL('../src/screens/FlowStudioSoftGlowScreen.ts
 assert.match(formal, /createFlowStudioApiAdapter/);
 assert.doesNotMatch(formal, /createFlowStudioMockAdapter/);
 assert.match(formal, /服务器配置/);
+assert.doesNotMatch(formal, /modeLabel|storageKicker|CURRENT SERVER STATE|正式页面/);
 assert.doesNotMatch(formal, /服务器草稿|正式页面 · 未发布/);
 assert.match(preview, /backPath="\/dash\/chat"/);
 assert.match(preview, /createFlowStudioMockAdapter/);
