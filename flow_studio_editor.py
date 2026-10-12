@@ -462,8 +462,9 @@ def compile_editor_document(
 ) -> tuple[Optional[dict[str, Any]], list[str], list[str]]:
     """Compile without persistence or engine calls.
 
-    Disabled editor objects remain in the editor document but are excluded from
-    Runtime FlowConfig v1. Any such loss is reported explicitly.
+    Disabled editor stages and cues remain in the editor document but are
+    excluded from Runtime FlowConfig v1. Disabled pools remain in the runtime
+    config so their existing references stay valid; draw_pool() skips them.
     """
     document = _materialize_stage_order(_copy(document))
     runtime: dict[str, Any] = {
@@ -481,8 +482,8 @@ def compile_editor_document(
     stages = document.get("stages") or []
     pools = document.get("pools") or []
     cues = document.get("cues") or []
-    enabled_pool_ids = {
-        pool["id"] for pool in pools if pool.get("enabled") is True
+    existing_pool_ids = {
+        pool["id"] for pool in pools
     }
     enabled_stage_ids = {
         stage["id"] for stage in stages if stage.get("enabled") is True
@@ -500,9 +501,6 @@ def compile_editor_document(
         pool_id = pool["id"]
         if pool.get("name"):
             unsupported.append(f"pools[{pool_id}].name")
-        if pool.get("enabled") is not True:
-            unsupported.append(f"pools[{pool_id}].enabled")
-            continue
         mode = {"perTurn": "turn", "perStage": "cycle"}.get(pool.get("mode"))
         if mode is None:
             errors.append(f"pool {pool_id}: unsupported draw mode")
@@ -525,7 +523,7 @@ def compile_editor_document(
             errors.append(f"pool {pool_id}: enabled entries exceed runtime limit 160")
         runtime["pools"].append({
             "id": pool_id,
-            "enabled": True,
+            "enabled": bool(pool.get("enabled")),
             "drawMode": mode,
             "drawCount": count,
             "entries": entries,
@@ -566,8 +564,8 @@ def compile_editor_document(
         if stage.get("terminal") is True and (next_stage is not None or stage.get("continueTarget")):
             errors.append(f"stage {stage_id}: terminal stage cannot continue")
         pool_refs = stage.get("poolIds") or []
-        if any(pool_id not in enabled_pool_ids for pool_id in pool_refs):
-            errors.append(f"stage {stage_id}: references a disabled or missing pool")
+        if any(pool_id not in existing_pool_ids for pool_id in pool_refs):
+            errors.append(f"stage {stage_id}: references a missing pool")
         runtime["stages"].append({
             "id": stage_id,
             "enabled": True,
@@ -608,8 +606,8 @@ def compile_editor_document(
             errors.append(f"cue {cue_id}: duplicate enabled key")
         enabled_cue_keys.add(folded)
         refs = cue.get("poolIds") or []
-        if any(pool_id not in enabled_pool_ids for pool_id in refs):
-            errors.append(f"cue {cue_id}: references a disabled or missing pool")
+        if any(pool_id not in existing_pool_ids for pool_id in refs):
+            errors.append(f"cue {cue_id}: references a missing pool")
         runtime["cues"].append({
             "id": cue_id,
             "key": key,
