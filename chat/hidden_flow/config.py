@@ -48,7 +48,7 @@ def _normalize_pools(raw_pools: Any) -> tuple[PoolSpec, ...]:
         if not isinstance(raw, Mapping):
             continue
         pool_id = _text(raw.get("id", raw.get("poolId")))
-        if not pool_id or pool_id in seen or not _enabled(raw.get("enabled"), False):
+        if not pool_id or pool_id in seen:
             continue
         mode = _text(raw.get("drawMode", raw.get("draw_mode"))).lower()
         if mode not in {"turn", "cycle"}:
@@ -72,7 +72,7 @@ def _normalize_pools(raw_pools: Any) -> tuple[PoolSpec, ...]:
         result.append(
             PoolSpec(
                 pool_id=pool_id,
-                enabled=True,
+                enabled=_enabled(raw.get("enabled"), False),
                 draw_mode=mode,
                 draw_count=_bounded_int(raw.get("drawCount", raw.get("draw_count")), low=1, high=5, default=1),
                 entries=tuple(entries),
@@ -178,7 +178,7 @@ def _is_normalized_config(config: FlowConfig) -> bool:
     if len(pool_ids) != len(set(pool_ids)):
         return False
     for pool in config.pools:
-        if not pool.enabled or not pool.pool_id or pool.draw_mode not in {"turn", "cycle"}:
+        if type(pool.enabled) is not bool or not pool.pool_id or pool.draw_mode not in {"turn", "cycle"}:
             return False
         if not 1 <= pool.draw_count <= 5 or len(pool.entries) > 160:
             return False

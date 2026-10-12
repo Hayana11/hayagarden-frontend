@@ -461,8 +461,18 @@ class HiddenFlowDrawTests(unittest.TestCase):
         self.assertEqual(first, retry)
         self.assertNotEqual(first.draws[0].seed, next_cycle.draws[0].seed)
 
-    def test_disabled_items_and_shared_pools_are_excluded_or_deduped(self) -> None:
-        self.assertIsNone(self.config.pool("off-pool"))
+    def test_disabled_pools_are_retained_but_skipped_and_shared_pools_deduped(self) -> None:
+        disabled_pool = self.config.pool("off-pool")
+        self.assertIsNotNone(disabled_pool)
+        self.assertFalse(disabled_pool.enabled)
+        self.assertEqual(
+            draw_pool(
+                disabled_pool,
+                source_message_id="m1",
+                flow_id="demo-flow",
+            ).draws,
+            (),
+        )
         shared = self.config.pool("shared")
         self.assertEqual({item.entry_id for item in shared.entries}, {"a", "b"})
         result = draw_for_guide(self.config, self.state, source_message_id="m1", cue_keys=["KEY-A"])
