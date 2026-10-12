@@ -1119,10 +1119,10 @@ def _active_runtime_status(
 def apply_saved_editor_document_if_safe(
     flow_id: str,
     *,
-    db_path: str = DEFAULT_DB_PATH,
+    db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """Apply the latest saved editor revision after all Flow blockers clear."""
-    connection = _connect(db_path)
+    connection = _connect(db_path or DEFAULT_DB_PATH)
     try:
         connection.execute("BEGIN IMMEDIATE")
         runtime, document, editor_row = _load_bundle(connection, flow_id)
