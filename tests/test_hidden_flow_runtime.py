@@ -785,8 +785,25 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
                     "advanced": True,
                 }
 
+            apply_order = []
+
+            def fake_release(_plan):
+                apply_order.append("lease")
+
+            def fake_deferred_apply(*_args, **_kwargs):
+                apply_order.append("apply")
+                raise RuntimeError("deferred apply test failure")
+
             with mock.patch.object(daily_runtime, "verify_epoch_token"), \
-                    mock.patch.object(daily_runtime, "_release_lease"), \
+                    mock.patch.object(
+                        daily_runtime,
+                        "_release_lease",
+                        side_effect=fake_release,
+                    ), \
+                    mock.patch(
+                        "flow_studio_editor.apply_saved_editor_document_if_safe",
+                        side_effect=fake_deferred_apply,
+                    ), \
                     mock.patch.object(
                         daily_runtime.dc,
                         "finalize_daily_assistant_and_advance_cursor",
@@ -803,6 +820,8 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
                 (100,),
             ).fetchone()[0]
             conn.close()
+            self.assertEqual(apply_order, ["lease", "apply"])
+            self.assertEqual(plan.manifest["hidden_flow_deferred_apply"]["status"], "failed")
             self.assertEqual(status, runtime_store.SNAPSHOT_COMMITTED)
             self.assertEqual(
                 runtime_store.load_runtime("default", db_path=self.db_path)["version"],

@@ -431,6 +431,206 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(runtime_conflict.get_json()["code"], "RUNTIME_VERSION_CONFLICT")
         self.assertEqual(runtime_conflict.get_json()["currentRuntimeVersion"], 7)
 
+    def test_deferred_apply_uses_latest_saved_revision_after_active_flow_ends(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            """
+            INSERT INTO hidden_flow_runtime
+                (chat_id, schema_version, flow_id, state_json,
+                 pending_guide_json, config_version, version, updated_at)
+            VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                "chat-active",
+                1,
+                "intimacy-v1",
+                json.dumps({
+                    "schemaVersion": 1,
+                    "flowId": "intimacy-v1",
+                    "active": True,
+                    "stage": "s1",
+                    "cycle": 1,
+                    "stageTurn": 1,
+                    "contextKeys": [],
+                    "fixedDraws": {},
+                    "startedAt": "2026-10-11T10:00:00Z",
+                }),
+                None,
+                7,
+                1,
+                "2026-10-11 10:00:00",
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        first = self._get()
+        latest = self._publishable_document(first["document"])
+        latest["stages"][0]["minTurns"] = 2
+        saved = self._save(latest, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        latest = saved.get_json()["document"]
+        latest["stages"][0]["minTurns"] = 3
+        saved_again = self._save(latest, saved.get_json()["editorRevision"])
+        self.assertEqual(saved_again.status_code, 200)
+        self.assertTrue(saved_again.get_json()["runtime"]["applyPending"])
+
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            "UPDATE hidden_flow_runtime SET flow_id=?, state_json=? WHERE chat_id=?",
+            (
+                "",
+                json.dumps({
+                    "schemaVersion": 1,
+                    "flowId": "",
+                    "active": False,
+                    "stage": "",
+                    "cycle": 0,
+                    "stageTurn": 0,
+                    "contextKeys": [],
+                    "fixedDraws": {},
+                    "startedAt": "",
+                }),
+                "chat-active",
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        result = flow_studio_editor.apply_saved_editor_document_if_safe(
+            "intimacy-v1",
+            db_path=self.db_path,
+        )
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["runtimeVersion"], 8)
+        reloaded = self._get()
+        self.assertFalse(reloaded["runtime"]["applyPending"])
+        self.assertTrue(reloaded["runtime"]["published"])
+        connection = sqlite3.connect(self.db_path)
+        runtime_config = json.loads(
+            connection.execute(
+                "SELECT config_json FROM hidden_flow_configs WHERE flow_id=?",
+                ("intimacy-v1",),
+            ).fetchone()[0]
+        )
+        connection.close()
+        self.assertEqual(runtime_config["stages"][0]["minTurns"], 3)
+
+
+    def test_deferred_apply_does_not_fallback_when_latest_revision_is_invalid(self):
+        first = self._get()
+        valid = self._publishable_document(first["document"])
+        valid["stages"][0]["minTurns"] = 2
+        saved = self._save(valid, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+
+        invalid = saved.get_json()["document"]
+        invalid["stages"][0]["minTurns"] = 99
+        invalid_saved = self._save(invalid, saved.get_json()["editorRevision"])
+        self.assertEqual(invalid_saved.status_code, 200)
+
+        result = flow_studio_editor.apply_saved_editor_document_if_safe(
+            "intimacy-v1",
+            db_path=self.db_path,
+        )
+        self.assertEqual(result["status"], "blocked_validation")
+        connection = sqlite3.connect(self.db_path)
+        runtime_row = connection.execute(
+            "SELECT version, config_json FROM hidden_flow_configs WHERE flow_id=?",
+            ("intimacy-v1",),
+        ).fetchone()
+        connection.close()
+        self.assertEqual(runtime_row[0], 7)
+        self.assertEqual(json.loads(runtime_row[1]), self.runtime_raw)
+        reloaded = self._get()
+        self.assertFalse(reloaded["runtime"]["applyPending"])
+        self.assertTrue(reloaded["runtime"]["applyBlocked"])
+        self.assertFalse(reloaded["runtime"]["published"])
+
+    def test_deferred_apply_waits_for_all_active_chats_sharing_flow(self):
+        active_state = {
+            "schemaVersion": 1,
+            "flowId": "intimacy-v1",
+            "active": True,
+            "stage": "s1",
+            "cycle": 1,
+            "stageTurn": 1,
+            "contextKeys": [],
+            "fixedDraws": {},
+            "startedAt": "2026-10-11T10:00:00Z",
+        }
+        connection = sqlite3.connect(self.db_path)
+        for chat_id in ("chat-a", "chat-b"):
+            connection.execute(
+                """
+                INSERT INTO hidden_flow_runtime
+                    (chat_id, schema_version, flow_id, state_json,
+                     pending_guide_json, config_version, version, updated_at)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (
+                    chat_id,
+                    1,
+                    "intimacy-v1",
+                    json.dumps(active_state),
+                    None,
+                    7,
+                    1,
+                    "2026-10-11 10:00:00",
+                ),
+            )
+        connection.commit()
+        connection.close()
+
+        first = self._get()
+        document = self._publishable_document(first["document"])
+        document["stages"][0]["minTurns"] = 2
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+
+        result = flow_studio_editor.apply_saved_editor_document_if_safe(
+            "intimacy-v1",
+            db_path=self.db_path,
+        )
+        self.assertEqual(result["status"], "deferred")
+
+        connection = sqlite3.connect(self.db_path)
+        inactive_state = {
+            **active_state,
+            "flowId": "",
+            "active": False,
+            "stage": "",
+            "cycle": 0,
+            "stageTurn": 0,
+            "startedAt": "",
+        }
+        connection.execute(
+            "UPDATE hidden_flow_runtime SET flow_id=?, state_json=? WHERE chat_id=?",
+            ("", json.dumps(inactive_state), "chat-a"),
+        )
+        connection.commit()
+        connection.close()
+        result = flow_studio_editor.apply_saved_editor_document_if_safe(
+            "intimacy-v1",
+            db_path=self.db_path,
+        )
+        self.assertEqual(result["status"], "deferred")
+
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            "UPDATE hidden_flow_runtime SET flow_id=?, state_json=? WHERE chat_id=?",
+            ("", json.dumps(inactive_state), "chat-b"),
+        )
+        connection.commit()
+        connection.close()
+        result = flow_studio_editor.apply_saved_editor_document_if_safe(
+            "intimacy-v1",
+            db_path=self.db_path,
+        )
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["runtimeVersion"], 8)
+
+
     def test_publish_blocks_active_flow_without_changing_runtime(self):
         connection = sqlite3.connect(self.db_path)
         connection.execute(
@@ -468,6 +668,8 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         document = self._publishable_document(first["document"])
         saved = self._save(document, first["editorRevision"])
         self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.get_json()["runtime"]["applyPending"])
+        self.assertTrue(self._get()["runtime"]["applyPending"])
         response = self._publish(
             saved.get_json()["document"],
             saved.get_json()["editorRevision"],

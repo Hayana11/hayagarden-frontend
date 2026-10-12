@@ -7333,6 +7333,39 @@ def complete_daily_turn(
         ) from exc
 
     _release_lease(plan)
+    transition = getattr(plan, '_hidden_flow_transition', None)
+    if transition is not None:
+        flow_id = str(
+            getattr(getattr(transition, 'config', None), 'flow_id', '')
+            or ''
+        )
+        if flow_id:
+            try:
+                from flow_studio_editor import apply_saved_editor_document_if_safe
+
+                deferred_result = apply_saved_editor_document_if_safe(
+                    flow_id,
+                    db_path=plan.db_path,
+                )
+                plan.manifest['hidden_flow_deferred_apply'] = deferred_result
+                if deferred_result.get('status') in {
+                    'failed',
+                    'blocked_validation',
+                }:
+                    logger.warning(
+                        'hidden flow deferred auto apply blocked flow_id=%s status=%s',
+                        flow_id,
+                        deferred_result.get('status'),
+                    )
+            except Exception as exc:
+                logger.exception(
+                    'hidden flow deferred auto apply failed flow_id=%s',
+                    flow_id,
+                )
+                plan.manifest['hidden_flow_deferred_apply'] = {
+                    'status': 'failed',
+                    'code': type(exc).__name__,
+                }
     plan.manifest.update({
         'assistant_message_id': aid,
         'cursor_after': int(cursor_after) if cursor_result_valid else None,

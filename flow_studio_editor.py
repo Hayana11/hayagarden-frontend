@@ -846,12 +846,69 @@ def _classify_publish_fields(
     return sorted(display_only), sorted(unsafe)
 
 
+def _publish_analysis(
+    document: Mapping[str, Any],
+) -> tuple[
+    Optional[dict[str, Any]],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+]:
+    compiled, compile_errors, unsupported = compile_editor_document(document)
+    display_only, unsafe = _classify_publish_fields(document, unsupported)
+    return compiled, compile_errors, unsupported, display_only, unsafe
+
+
+def _apply_compiled_runtime_config(
+    connection: sqlite3.Connection,
+    flow_id: str,
+    runtime: Mapping[str, Any],
+    compiled: Mapping[str, Any],
+) -> tuple[dict[str, Any], int, bool]:
+    current_config = _decode_runtime(runtime)
+    current_version = int(runtime.get("version", 0))
+    if _canonical(current_config) == _canonical(compiled):
+        return dict(runtime), current_version, False
+    next_version = current_version + 1
+    stamp = _now()
+    updated = connection.execute(
+        """
+        UPDATE hidden_flow_configs
+        SET schema_version=?, enabled=?, config_json=?,
+            version=?, updated_at=?
+        WHERE flow_id=? AND version=?
+        """,
+        (
+            RUNTIME_SCHEMA_VERSION,
+            int(bool(compiled.get("enabled"))),
+            _json(compiled),
+            next_version,
+            stamp,
+            flow_id,
+            current_version,
+        ),
+    )
+    if int(updated.rowcount or 0) != 1:
+        raise sqlite3.OperationalError("runtime configuration CAS failed")
+    updated_runtime = dict(runtime)
+    updated_runtime.update(
+        {
+            "schema_version": RUNTIME_SCHEMA_VERSION,
+            "enabled": int(bool(compiled.get("enabled"))),
+            "config_json": _json(compiled),
+            "version": next_version,
+            "updated_at": stamp,
+        }
+    )
+    return updated_runtime, next_version, True
+
+
 def _is_published(
     runtime_row: Mapping[str, Any],
     document: Mapping[str, Any],
 ) -> bool:
-    compiled, errors, unsupported = compile_editor_document(document)
-    _, unsafe = _classify_publish_fields(document, unsupported)
+    compiled, errors, _unsupported, _display_only, unsafe = _publish_analysis(document)
     if errors or unsafe or compiled is None:
         return False
     try:
@@ -871,16 +928,30 @@ def _runtime_meta(
         ).hexdigest()
     except (TypeError, ValueError, json.JSONDecodeError):
         config_digest = ""
+    published = (
+        _is_published(runtime, document)
+        if document is not None
+        else False
+    )
+    apply_pending = False
+    apply_blocked = False
+    apply_blocked_reason: Optional[str] = None
+    if document is not None and editor_row is not None and not published:
+        _compiled, compile_errors, _unsupported, _display_only, unsafe = _publish_analysis(document)
+        if compile_errors or unsafe or _compiled is None:
+            apply_blocked = True
+            apply_blocked_reason = "validation"
+        else:
+            apply_pending = True
     return {
         "schemaVersion": RUNTIME_SCHEMA_VERSION,
         "version": int(runtime.get("version", 0)),
         "configDigest": config_digest,
         "engineEnabled": bool(config_store.get_bool("HIDDEN_FLOW_ENGINE_ENABLED", False)),
-        "published": (
-            _is_published(runtime, document)
-            if document is not None
-            else False
-        ),
+        "published": published,
+        "applyPending": apply_pending,
+        "applyBlocked": apply_blocked,
+        "applyBlockedReason": apply_blocked_reason,
         "editorRevision": int(editor_row["revision"]) if editor_row else 0,
     }
 
@@ -911,6 +982,8 @@ def _active_runtime_status(
     active = False
     lease_active = False
     pending = False
+    active_chat_ids: set[str] = set()
+    pending_chat_ids: set[str] = set()
     now = _datetime.datetime.utcnow() + _datetime.timedelta(hours=8)
 
     try:
@@ -952,11 +1025,12 @@ def _active_runtime_status(
             continue
         if state.active:
             active = True
+            active_chat_ids.add(str(row["chat_id"]))
 
     try:
         snapshot_rows = connection.execute(
             """
-            SELECT flow_id, status, config_version, state_before_json,
+            SELECT chat_id, flow_id, status, config_version, state_before_json,
                    state_after_json, next_guide_json
             FROM hidden_flow_message_snapshots
             WHERE status=?
@@ -990,6 +1064,8 @@ def _active_runtime_status(
                 if guide.status != "pending" or guide.flow.to_dict() != after.to_dict():
                     raise ValueError("snapshot pending guide is invalid")
             pending = True
+            if row["chat_id"] is not None:
+                pending_chat_ids.add(str(row["chat_id"]))
             _ = before
         except (TypeError, ValueError, json.JSONDecodeError):
             unknown = True
@@ -1038,6 +1114,83 @@ def _active_runtime_status(
     if pending:
         return "pending"
     return "inactive"
+
+
+def apply_saved_editor_document_if_safe(
+    flow_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """Apply the latest saved editor revision after all Flow blockers clear."""
+    connection = _connect(db_path or DEFAULT_DB_PATH)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        runtime, document, editor_row = _load_bundle(connection, flow_id)
+        if editor_row is None:
+            connection.rollback()
+            return {"status": "no_editor", "flowId": flow_id}
+        document = _materialize_stage_order(document)
+        normalized, validation_errors = _validate_editor_document(document, flow_id)
+        if validation_errors or normalized is None:
+            connection.rollback()
+            return {
+                "status": "blocked_validation",
+                "reason": "validation",
+                "errors": validation_errors,
+                "editorRevision": int(editor_row["revision"]),
+            }
+        compiled, compile_errors, unsupported, display_only, unsafe = _publish_analysis(
+            normalized
+        )
+        if compile_errors or unsafe or compiled is None:
+            connection.rollback()
+            return {
+                "status": "blocked_validation",
+                "reason": "validation",
+                "errors": compile_errors,
+                "unsupportedFields": unsupported,
+                "displayOnlyFields": display_only,
+                "unsafeFields": unsafe,
+                "editorRevision": int(editor_row["revision"]),
+            }
+        active_status = _active_runtime_status(connection, flow_id)
+        if active_status != "inactive":
+            connection.rollback()
+            return {
+                "status": "deferred",
+                "activeStatus": active_status,
+                "editorRevision": int(editor_row["revision"]),
+            }
+        runtime, runtime_version, changed = _apply_compiled_runtime_config(
+            connection,
+            flow_id,
+            runtime,
+            compiled,
+        )
+        connection.commit()
+        return {
+            "status": "applied" if changed else "already_applied",
+            "flowId": flow_id,
+            "editorRevision": int(editor_row["revision"]),
+            "runtimeVersion": runtime_version,
+            "displayOnlyFields": display_only,
+        }
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        connection.rollback()
+        return {
+            "status": "blocked_validation",
+            "reason": "validation",
+            "errors": [str(exc)],
+        }
+    except sqlite3.Error as exc:
+        connection.rollback()
+        return {
+            "status": "failed",
+            "code": "RUNTIME_AUTO_APPLY_FAILED",
+            "error": str(exc),
+        }
+    finally:
+        connection.close()
 
 
 def create_flow_studio_blueprint(
@@ -1325,8 +1478,9 @@ def create_flow_studio_blueprint(
                     currentDocument=current_document,
                 )
 
-            compiled, compile_errors, unsupported = compile_editor_document(document)
-            display_only, unsafe = _classify_publish_fields(document, unsupported)
+            compiled, compile_errors, unsupported, display_only, unsafe = _publish_analysis(
+                document
+            )
             if compile_errors or unsafe or compiled is None:
                 connection.rollback()
                 return _error(
@@ -1379,42 +1533,12 @@ def create_flow_studio_blueprint(
                     currentRuntimeVersion=current_runtime_version,
                 )
 
-            current_config = _decode_runtime(runtime)
-            next_version = current_runtime_version
-            if _canonical(current_config) != _canonical(compiled):
-                next_version += 1
-                stamp = _now()
-                updated = connection.execute(
-                    """
-                    UPDATE hidden_flow_configs
-                    SET schema_version=?, enabled=?, config_json=?,
-                        version=?, updated_at=?
-                    WHERE flow_id=? AND version=?
-                    """,
-                    (
-                        RUNTIME_SCHEMA_VERSION,
-                        int(bool(compiled.get("enabled"))),
-                        _json(compiled),
-                        next_version,
-                        stamp,
-                        flow_id,
-                        current_runtime_version,
-                    ),
-                )
-                if int(updated.rowcount or 0) != 1:
-                    raise sqlite3.OperationalError(
-                        "runtime configuration CAS failed"
-                    )
-                runtime = dict(runtime)
-                runtime.update(
-                    {
-                        "schema_version": RUNTIME_SCHEMA_VERSION,
-                        "enabled": int(bool(compiled.get("enabled"))),
-                        "config_json": _json(compiled),
-                        "version": next_version,
-                        "updated_at": stamp,
-                    }
-                )
+            runtime, next_version, _changed = _apply_compiled_runtime_config(
+                connection,
+                flow_id,
+                runtime,
+                compiled,
+            )
             connection.commit()
             editor_row = (
                 {
@@ -1451,5 +1575,6 @@ __all__ = [
     "EDITOR_SCHEMA_VERSION",
     "RUNTIME_SCHEMA_VERSION",
     "compile_editor_document",
+    "apply_saved_editor_document_if_safe",
     "create_flow_studio_blueprint",
 ]
