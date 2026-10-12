@@ -594,20 +594,21 @@ def compile_editor_document(
         cue_id = cue["id"]
         if cue.get("kind"):
             unsupported.append(f"cues[{cue_id}].kind")
-        if cue.get("enabled") is not True:
-            unsupported.append(f"cues[{cue_id}].enabled")
-            continue
         key = cue.get("key")
         if not isinstance(key, str) or not key.strip():
             errors.append(f"cue {cue_id}: key is empty")
             continue
         folded = key.casefold()
-        if folded in enabled_cue_keys:
-            errors.append(f"cue {cue_id}: duplicate enabled key")
-        enabled_cue_keys.add(folded)
+        if cue.get("enabled") is True:
+            if folded in enabled_cue_keys:
+                errors.append(f"cue {cue_id}: duplicate enabled key")
+            enabled_cue_keys.add(folded)
         refs = cue.get("poolIds") or []
         if any(pool_id not in existing_pool_ids for pool_id in refs):
             errors.append(f"cue {cue_id}: references a missing pool")
+        if cue.get("enabled") is not True:
+            # Disabled cues remain editor-owned, but are not part of Runtime v1 matching.
+            continue
         runtime["cues"].append({
             "id": cue_id,
             "key": key,

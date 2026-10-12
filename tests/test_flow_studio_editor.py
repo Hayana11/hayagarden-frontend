@@ -1212,5 +1212,134 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertNotIn("@blueprint.before_request", editor_source)
         self.assertNotIn("def _ensure_schema", editor_source)
 
+
+    def test_disabled_cues_are_valid_filtered_and_revision_28_publishes(self):
+        first = self._get()
+        document = self._publishable_document(first["document"])
+        document["pools"].append({
+            "id": "disabled-cue-pool",
+            "name": "停用 Cue 专用池",
+            "enabled": False,
+            "mode": "perTurn",
+            "count": 1,
+            "entries": [{"id": "disabled-cue-entry", "text": "停用池条目", "enabled": True}],
+        })
+        document["cues"] = [
+            {
+                "id": cue_id,
+                "key": key,
+                "kind": "氛围",
+                "enabled": False,
+                "poolIds": ["disabled-cue-pool"],
+            }
+            for cue_id, key in (
+                ("cue-cuddle", "cuddle"),
+                ("cue-flirty", "flirty"),
+                ("cue-spoiled", "spoiled"),
+                ("cue-sticky", "sticky"),
+            )
+        ]
+
+        compiled, errors, unsupported = flow_studio_editor.compile_editor_document(document)
+        self.assertEqual(errors, [])
+        self.assertIsNotNone(compiled)
+        assert compiled is not None
+        self.assertEqual(compiled["cues"], [])
+        self.assertFalse(
+            any(
+                field.startswith("cues[") and field.endswith(".enabled")
+                for field in unsupported
+            )
+        )
+        self.assertEqual(
+            [cue["poolIds"] for cue in document["cues"]],
+            [["disabled-cue-pool"]] * 4,
+        )
+
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        saved_body = saved.get_json()
+        self.assertTrue(saved_body["runtime"]["applyPending"])
+        self.assertFalse(saved_body["runtime"]["applyBlocked"])
+
+        published = self._publish(
+            saved_body["document"],
+            saved_body["editorRevision"],
+            saved_body["runtime"]["version"],
+        )
+        self.assertEqual(published.status_code, 200)
+        published_body = published.get_json()
+        self.assertTrue(published_body["runtime"]["published"])
+        connection = sqlite3.connect(self.db_path)
+        runtime_config = json.loads(
+            connection.execute(
+                "SELECT config_json FROM hidden_flow_configs WHERE flow_id=?",
+                ("intimacy-v1",),
+            ).fetchone()[0]
+        )
+        connection.close()
+        self.assertEqual(runtime_config["cues"], [])
+
+        reloaded = self._get()
+        self.assertEqual(
+            [
+                (cue["id"], cue["enabled"], cue["key"], cue["poolIds"])
+                for cue in reloaded["document"]["cues"]
+            ],
+            [
+                (cue["id"], False, cue["key"], ["disabled-cue-pool"])
+                for cue in document["cues"]
+            ],
+        )
+
+        reenabled = json.loads(json.dumps(reloaded["document"]))
+        reenabled["cues"][0]["enabled"] = True
+        recompiled, reenable_errors, _ = flow_studio_editor.compile_editor_document(reenabled)
+        self.assertEqual(reenable_errors, [])
+        self.assertIsNotNone(recompiled)
+        assert recompiled is not None
+        self.assertEqual(recompiled["cues"][0]["key"], "cuddle")
+        self.assertEqual(recompiled["cues"][0]["poolIds"], ["disabled-cue-pool"])
+
+    def test_disabled_cue_missing_pool_fails_closed_and_duplicate_only_checks_enabled(self):
+        first = self._get()
+        document = self._publishable_document(first["document"])
+        document["cues"] = [
+            {
+                "id": "cue-enabled",
+                "key": "shared-key",
+                "kind": "氛围",
+                "enabled": True,
+                "poolIds": ["p1"],
+            },
+            {
+                "id": "cue-disabled",
+                "key": "shared-key",
+                "kind": "氛围",
+                "enabled": False,
+                "poolIds": ["p1"],
+            },
+        ]
+
+        _, errors, unsupported = flow_studio_editor.compile_editor_document(document)
+        self.assertEqual(errors, [])
+        self.assertFalse(any("duplicate enabled key" in error for error in errors))
+        self.assertFalse(
+            any(
+                field.startswith("cues[") and field.endswith(".enabled")
+                for field in unsupported
+            )
+        )
+
+        reenabled = json.loads(json.dumps(document))
+        reenabled["cues"][1]["enabled"] = True
+        _, duplicate_errors, _ = flow_studio_editor.compile_editor_document(reenabled)
+        self.assertIn("cue cue-disabled: duplicate enabled key", duplicate_errors)
+
+        missing = json.loads(json.dumps(document))
+        missing["cues"][1]["poolIds"] = ["missing-cue-pool"]
+        _, missing_errors, _ = flow_studio_editor.compile_editor_document(missing)
+        self.assertIn("cue cue-disabled: references a missing pool", missing_errors)
+
 if __name__ == "__main__":
     unittest.main()
