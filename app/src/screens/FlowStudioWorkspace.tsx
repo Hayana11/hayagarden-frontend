@@ -138,7 +138,6 @@ export function FlowStudioWorkspace({
   const [saving, setSaving] = useState(false);
   const [runtimeApplyPending, setRuntimeApplyPending] = useState(false);
   const [runtimeApplyBlocked, setRuntimeApplyBlocked] = useState(false);
-  const [runtimeApplyBlockedReason, setRuntimeApplyBlockedReason] = useState<string | null>(null);
 
   const currentRuntimeApplyState = (): FlowStudioRuntimeApplyState => (
     dataAdapter.getRuntimeApplyState?.() ?? {
@@ -151,7 +150,6 @@ export function FlowStudioWorkspace({
   const setRuntimeApplyState = (state: FlowStudioRuntimeApplyState) => {
     setRuntimeApplyPending(state.applyPending);
     setRuntimeApplyBlocked(state.applyBlocked);
-    setRuntimeApplyBlockedReason(state.applyBlockedReason);
   };
 
   useEffect(() => {
