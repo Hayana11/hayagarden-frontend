@@ -13,7 +13,7 @@ from chat.hidden_flow import runtime, runtime_store
 from chat.hidden_flow.config import normalize_flow_config
 from chat.hidden_flow.control import parse_hidden_flow_control, sanitize_hidden_flow_text
 from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
-from chat.hidden_flow.types import AppliedGuide, FlowState
+from chat.hidden_flow.types import AppliedGuide, FlowControl, FlowState
 import chat.daily_runtime as daily_runtime
 
 
@@ -133,11 +133,13 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
         self.assertEqual(transition.state_after.context_keys, ("a",))
 
     def test_active_private_guide_defines_control_semantics_and_stays_private(self) -> None:
-        config = normalize_flow_config(_raw_config())
+        raw = _raw_config()
+        raw["flowId"] = "intimacy-v1"
+        config = normalize_flow_config(raw)
         assert config is not None
         state = FlowState(
             active=True,
-            flow_id="demo-flow",
+            flow_id="intimacy-v1",
             stage="s1",
             cycle=1,
             stage_turn=1,
@@ -164,6 +166,7 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
         rendered = runtime._render_applied_guide(config, state, guide)
         for phrase in (
             "Private protocol",
+            "Stay:",
             "Remain in the current stage by default",
             "never advances automatically",
             'action="advance"',
@@ -182,6 +185,31 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
             self.assertNotIn(old_phrase, rendered)
         self.assertLessEqual(len(rendered), 8000)
 
+        self.assertIn(
+            '<hidden_flow_control flow="intimacy-v1" action="advance"/>',
+            rendered,
+        )
+        self.assertIn(
+            '<hidden_flow_control flow="intimacy-v1" action="stop"/>',
+            rendered,
+        )
+        self.assertIn("at most one control tag", rendered)
+        self.assertIn("final token/block", rendered)
+        self.assertIn("no text after it", rendered)
+        self.assertIn("do not invent another format", rendered)
+        self.assertEqual(
+            parse_hidden_flow_control(
+                '<hidden_flow_control flow="intimacy-v1" action="advance"/>'
+            ),
+            FlowControl("intimacy-v1", "advance", ()),
+        )
+        self.assertEqual(
+            parse_hidden_flow_control(
+                '<hidden_flow_control flow="intimacy-v1" action="stop"/>'
+            ),
+            FlowControl("intimacy-v1", "stop", ()),
+        )
+
         self.assertEqual(
             sanitize_hidden_flow_text("visible" + rendered + "tail"),
             "visibletail",
@@ -193,6 +221,69 @@ class HiddenFlowRuntimeTests(unittest.TestCase):
             'action="stop"',
         ):
             self.assertNotIn(phrase, persisted)
+
+    def test_active_guidance_uses_dynamic_flow_id_and_escapes_attributes(self) -> None:
+        normal = _raw_config()
+        normal["flowId"] = "custom-flow"
+        normal_config = normalize_flow_config(normal)
+        self.assertIsNotNone(normal_config)
+        assert normal_config is not None
+        normal_state = FlowState(
+            active=True,
+            flow_id="custom-flow",
+            stage="s1",
+            cycle=1,
+            stage_turn=1,
+        )
+        normal_guide = AppliedGuide(
+            status="pending",
+            source_message_id="assistant-custom",
+            created_at="t0",
+            flow=normal_state,
+        )
+        normal_rendered = runtime._render_applied_guide(
+            normal_config,
+            normal_state,
+            normal_guide,
+        )
+        for action in ("advance", "stop"):
+            tag = f'<hidden_flow_control flow="custom-flow" action="{action}"/>'
+            self.assertIn(tag, normal_rendered)
+            self.assertEqual(
+                parse_hidden_flow_control(tag),
+                FlowControl("custom-flow", action, ()),
+            )
+
+        raw = _raw_config()
+        raw["flowId"] = 'custom-flow"&<unsafe>'
+        config = normalize_flow_config(raw)
+        self.assertIsNotNone(config)
+        assert config is not None
+        state = FlowState(
+            active=True,
+            flow_id=config.flow_id,
+            stage="s1",
+            cycle=1,
+            stage_turn=1,
+        )
+        guide = AppliedGuide(
+            status="pending",
+            source_message_id="assistant-escaped",
+            created_at="t0",
+            flow=state,
+        )
+
+        rendered = runtime._render_applied_guide(config, state, guide)
+        expected_flow = "custom-flow&quot;&amp;&lt;unsafe&gt;"
+        self.assertIn(
+            f'<hidden_flow_control flow="{expected_flow}" action="advance"/>',
+            rendered,
+        )
+        self.assertIn(
+            f'<hidden_flow_control flow="{expected_flow}" action="stop"/>',
+            rendered,
+        )
+        self.assertNotIn('flow="custom-flow"&<unsafe>', rendered)
 
 
     def test_preterminal_and_terminal_guidance_use_mechanical_rules(self) -> None:
