@@ -12,6 +12,7 @@ from chat.hidden_flow import runtime, runtime_store
 from chat.hidden_flow.config import normalize_flow_config
 from chat.hidden_flow.draw import render_private_guide
 from chat.hidden_flow.stream_filter import HiddenFlowStreamFilter
+from relay.adapter import adapt_request
 from chat.hidden_flow.types import (
     AppliedGuide,
     DrawItem,
@@ -183,6 +184,85 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
             self.assertEqual(json.loads(encoded)["guidancePrompt"], "DISABLED_GLOBAL")
         finally:
             os.unlink(db_path)
+
+    def test_prepared_nonempty_plan_keeps_global_guide_out_of_user_tail(self) -> None:
+        raw = _raw_config(global_guidance="PREPARED_GLOBAL")
+        config = normalize_flow_config(raw)
+        self.assertIsNotNone(config)
+        assert config is not None
+        runtime_store.upsert_flow_config(
+            config.to_dict(),
+            db_path=self.db_path,
+        )
+        plan = runtime.prepare_hidden_flow_turn(
+            enabled=True,
+            eligible=True,
+            chat_id="default",
+            user_message_id=10,
+            db_path=self.db_path,
+        )
+        self.assertIn(
+            "<global_flow_guide>PREPARED_GLOBAL</global_flow_guide>",
+            plan.global_guide_system_carrier,
+        )
+        self.assertNotIn("PREPARED_GLOBAL", plan.private_request_block)
+        request = runtime.render_plan_request(plan, "USER")
+        self.assertNotIn("PREPARED_GLOBAL", request)
+        self.assertIn("<available_hidden_flows>", request)
+        self.assertEqual(plan.global_guide_carrier, "system_stable")
+
+    def test_stable_guide_digest_ignores_stage_and_anchor_variation(self) -> None:
+        config = normalize_flow_config(
+            _raw_config(global_guidance="SAME_GUIDE")
+        )
+        self.assertIsNotNone(config)
+        assert config is not None
+        pair = ((config, 1),)
+        first = runtime.build_global_guide_system_block(pair)
+        second = runtime.build_global_guide_system_block(pair)
+        self.assertEqual(first, second)
+        self.assertEqual(runtime._guide_digest(pair), runtime._guide_digest(pair))
+        changed = normalize_flow_config(
+            _raw_config(global_guidance="CHANGED_GUIDE")
+        )
+        self.assertIsNotNone(changed)
+        assert changed is not None
+        self.assertNotEqual(
+            runtime._guide_digest(pair),
+            runtime._guide_digest(((changed, 2),)),
+        )
+
+    def test_relay_adapter_preserves_global_system_cache_semantics(self) -> None:
+        marker = {"type": "ephemeral"}
+        payload = {
+            "system": [
+                {"type": "text", "text": "BP1", "cache_control": dict(marker)},
+                {"type": "text", "text": "stable", "cache_control": dict(marker)},
+                {
+                    "type": "text",
+                    "text": "GLOBAL GUIDE",
+                    "cache_control": dict(marker),
+                },
+            ],
+            "messages": [
+                {"role": "user", "content": "old"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": "volatile"},
+            ],
+        }
+        upgraded, _headers = adapt_request(
+            payload, {}, {"cache": True, "cache_1h": True}
+        )
+        self.assertEqual(
+            upgraded["system"][-1]["cache_control"]["ttl"],
+            "1h",
+        )
+        flattened, _headers = adapt_request(
+            payload, {}, {"cache": False, "cache_1h": False}
+        )
+        self.assertIsInstance(flattened["system"], str)
+        self.assertIn("GLOBAL GUIDE", flattened["system"])
+        self.assertNotIn("cache_control", flattened["system"])
 
     def test_private_order_empty_global_and_inactive_injection(self) -> None:
         config = normalize_flow_config(
