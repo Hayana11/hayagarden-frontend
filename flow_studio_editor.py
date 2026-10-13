@@ -22,7 +22,7 @@ import config_store
 from daily_context_bff import same_origin_mutation_ok
 from moments_auth import OwnerAuthError, require_owner
 from chat.hidden_flow.config import normalize_flow_config
-from chat.hidden_flow.types import AppliedGuide, FlowState, MAX_STAGE_GUIDANCE_CHARS
+from chat.hidden_flow.types import AppliedGuide, FlowState, MAX_GLOBAL_GUIDANCE_CHARS, MAX_STAGE_GUIDANCE_CHARS
 
 EDITOR_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 1
@@ -165,6 +165,9 @@ def _decode_runtime(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _ensure_stage_transition_modes(document: Mapping[str, Any]) -> dict[str, Any]:
     result = _copy(dict(document))
+    if "guidancePrompt" not in result:
+        result["guidancePrompt"] = result.get("guidance_prompt", "")
+    result.pop("guidance_prompt", None)
     stages = result.get("stages") or []
     enabled = [stage for stage in stages if stage.get("enabled") is True]
     enabled_ids = [stage.get("id") for stage in enabled]
@@ -198,6 +201,9 @@ def _runtime_to_editor(flow_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     document["schemaVersion"] = EDITOR_SCHEMA_VERSION
     document["flowId"] = flow_id
     document["enabled"] = bool(raw.get("enabled", False))
+    document["guidancePrompt"] = _text(
+        raw.get("guidancePrompt", raw.get("guidance_prompt", ""))
+    )
     document["initialStage"] = _text(raw.get("initialStage")) or None
 
     stages: list[dict[str, Any]] = []
@@ -307,6 +313,13 @@ def _validate_editor_document(
         errors.append("flowId must match the requested flow")
     if not _is_bool(document.get("enabled")):
         errors.append("enabled must be boolean")
+    guidance_prompt = document.get("guidancePrompt", "")
+    if not isinstance(guidance_prompt, str):
+        errors.append("guidancePrompt must be a string")
+    elif len(guidance_prompt) > MAX_GLOBAL_GUIDANCE_CHARS:
+        errors.append(
+            f"guidancePrompt is too long (maximum {MAX_GLOBAL_GUIDANCE_CHARS} characters)"
+        )
     initial_stage = document.get("initialStage")
     if initial_stage is not None and (
         not isinstance(initial_stage, str) or not initial_stage.strip()
@@ -434,6 +447,9 @@ def _validate_editor_document(
 
     if not errors:
         normalized_document = _copy(document)
+        normalized_document["guidancePrompt"] = _text(
+            normalized_document.get("guidancePrompt")
+        )
         for stage in normalized_document.get("stages") or []:
             if isinstance(stage, dict):
                 stage["guidancePrompt"] = _text(stage.get("guidancePrompt"))
@@ -471,6 +487,7 @@ def compile_editor_document(
         "schemaVersion": RUNTIME_SCHEMA_VERSION,
         "flowId": document.get("flowId"),
         "enabled": bool(document.get("enabled")),
+        "guidancePrompt": "",
         "initialStage": document.get("initialStage"),
         "stages": [],
         "cues": [],
@@ -478,6 +495,16 @@ def compile_editor_document(
     }
     errors: list[str] = []
     unsupported: list[str] = []
+
+    guidance_prompt = document.get("guidancePrompt", "")
+    if not isinstance(guidance_prompt, str) or len(guidance_prompt) > MAX_GLOBAL_GUIDANCE_CHARS:
+        errors.append(
+            f"guidancePrompt must be at most {MAX_GLOBAL_GUIDANCE_CHARS} characters"
+        )
+        guidance_prompt = ""
+    else:
+        guidance_prompt = _text(guidance_prompt)
+    runtime["guidancePrompt"] = guidance_prompt
 
     stages = document.get("stages") or []
     pools = document.get("pools") or []
@@ -641,6 +668,7 @@ _EDITOR_DOCUMENT_FIELDS = frozenset({
     "schemaVersion",
     "flowId",
     "enabled",
+    "guidancePrompt",
     "initialStage",
     "stages",
     "pools",
@@ -816,6 +844,14 @@ def _canonical(value: Any) -> str:
     )
 
 
+def _canonical_runtime_config(value: Any) -> str:
+    try:
+        normalized = normalize_flow_config(value)
+    except (TypeError, ValueError):
+        normalized = None
+    return _canonical(normalized.to_dict() if normalized is not None else value)
+
+
 def _classify_publish_fields(
     document: Mapping[str, Any],
     unsupported: list[str],
@@ -869,7 +905,7 @@ def _apply_compiled_runtime_config(
 ) -> tuple[dict[str, Any], int, bool]:
     current_config = _decode_runtime(runtime)
     current_version = int(runtime.get("version", 0))
-    if _canonical(current_config) == _canonical(compiled):
+    if _canonical_runtime_config(current_config) == _canonical_runtime_config(compiled):
         return dict(runtime), current_version, False
     next_version = current_version + 1
     stamp = _now()
@@ -913,7 +949,7 @@ def _is_published(
     if errors or unsafe or compiled is None:
         return False
     try:
-        return _canonical(compiled) == _canonical(_decode_runtime(runtime_row))
+        return _canonical_runtime_config(compiled) == _canonical_runtime_config(_decode_runtime(runtime_row))
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
 
@@ -925,7 +961,7 @@ def _runtime_meta(
 ) -> dict[str, Any]:
     try:
         config_digest = hashlib.sha256(
-            _canonical(_decode_runtime(runtime)).encode("utf-8")
+            _canonical_runtime_config(_decode_runtime(runtime)).encode("utf-8")
         ).hexdigest()
     except (TypeError, ValueError, json.JSONDecodeError):
         config_digest = ""
