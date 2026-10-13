@@ -107,7 +107,7 @@ class StageSpec:
     terminal_without_continue: bool = False
     holdable: bool = False
     pool_ids: tuple[str, ...] = ()
-    # Global Hidden Flow execution guide; editor root is guidancePrompt.
+    # Per-stage guidance applied only while this stage is active.
     guidance_prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -130,6 +130,7 @@ class StageSpec:
 class FlowConfig:
     flow_id: str
     enabled: bool = False
+    # Global Hidden Flow execution guide shared across the flow lifecycle.
     guidance_prompt: str = ""
     initial_stage: Optional[str] = None
     stages: tuple[StageSpec, ...] = ()
