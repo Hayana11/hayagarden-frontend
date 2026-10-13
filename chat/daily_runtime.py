@@ -6693,6 +6693,7 @@ def ensure_resident_and_stream(
     _registry_reprep_depth: int = 0,
 ) -> Iterator[tuple[str, Any]]:
     """Prepare resident process, handle hot→cold mismatch, stream one turn."""
+    static_system = _effective_hidden_flow_static_system(plan, static_system)
     verify_epoch_token(plan)
     if (plan.is_cold or plan.is_respawn) and resident is not None:
         binding = get_local_binding()
