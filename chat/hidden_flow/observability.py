@@ -354,6 +354,10 @@ class HiddenFlowObservation:
         outcome: str,
         available_config_count: int = 0,
         private_guidance_nonempty: bool = False,
+        global_guide_source: str = "none",
+        global_guide_digest: str = "",
+        global_guide_carrier: str = "none",
+        volatile_runtime_attached: bool = False,
         error_code: Optional[str] = None,
     ) -> None:
         result = str(outcome or "unknown").strip().lower()
@@ -364,6 +368,10 @@ class HiddenFlowObservation:
             prepare=result,
             available_config_count=max(0, int(available_config_count or 0)),
             private_guidance_nonempty=bool(private_guidance_nonempty),
+            global_guide_source=_safe_code(global_guide_source, "none"),
+            global_guide_digest=_safe_code(global_guide_digest, "none"),
+            global_guide_carrier=_safe_code(global_guide_carrier, "none"),
+            volatile_runtime_attached=bool(volatile_runtime_attached),
             **({"error_code": _safe_code(error_code)} if error_code else {}),
         )
 
