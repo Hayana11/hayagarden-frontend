@@ -6665,21 +6665,20 @@ def _effective_hidden_flow_static_system(
     base = str(static_system or "")
     if carrier and carrier not in base:
         base = (base + "\n\n" + carrier).strip()
-    if carrier:
-        plan.hidden_flow_static_system = carrier
-        plan.manifest["global_guide_source"] = str(
-            getattr(hidden_plan, "global_guide_source", "none") or "none"
-        )
-        plan.manifest["global_guide_digest"] = str(
-            getattr(hidden_plan, "global_guide_digest", "") or ""
-        )[:64]
-        plan.manifest["global_guide_carrier"] = str(
-            getattr(hidden_plan, "global_guide_carrier", "none") or "none"
-        )
-        plan.manifest["volatile_runtime_attached"] = bool(
-            getattr(hidden_plan, "volatile_runtime_attached", False)
-        )
-        plan.manifest["static_system_sha256"] = _sha256_text(base)
+    plan.hidden_flow_static_system = carrier
+    plan.manifest["global_guide_source"] = str(
+        getattr(hidden_plan, "global_guide_source", "none") or "none"
+    )
+    plan.manifest["global_guide_digest"] = str(
+        getattr(hidden_plan, "global_guide_digest", "") or ""
+    )[:64]
+    plan.manifest["global_guide_carrier"] = str(
+        getattr(hidden_plan, "global_guide_carrier", "none") or "none"
+    )
+    plan.manifest["volatile_runtime_attached"] = bool(
+        getattr(hidden_plan, "volatile_runtime_attached", False)
+    )
+    plan.manifest["static_system_sha256"] = _sha256_text(base)
     return base
 
 
