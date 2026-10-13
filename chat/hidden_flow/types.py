@@ -107,6 +107,7 @@ class StageSpec:
     terminal_without_continue: bool = False
     holdable: bool = False
     pool_ids: tuple[str, ...] = ()
+    # Global Hidden Flow execution guide; editor root is guidancePrompt.
     guidance_prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
