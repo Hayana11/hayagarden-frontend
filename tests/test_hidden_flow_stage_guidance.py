@@ -3,6 +3,8 @@ import unittest
 from chat.hidden_flow.config import normalize_flow_config
 from chat.hidden_flow.draw import render_private_guide
 from chat.hidden_flow.types import FlowState, MAX_STAGE_GUIDANCE_CHARS
+# Keep the root-level global-guide contract in the existing focused Hidden Flow CI slice.
+from tests.test_hidden_flow_global_guidance import HiddenFlowGlobalGuidanceTests
 from flow_studio_editor import compile_editor_document
 
 
