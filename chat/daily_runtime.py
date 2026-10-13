@@ -212,6 +212,7 @@ class DailyTurnPlan:
     hidden_flow_eligible: bool = field(default=False, repr=False)
     hidden_flow_plan: Any = field(default=None, repr=False)
     hidden_flow_observation: Any = field(default=None, repr=False)
+    hidden_flow_static_system: str = field(default="", repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -3631,6 +3632,18 @@ def _prepare_hidden_flow_plan(
                 private_guidance_nonempty=bool(
                     getattr(plan, "private_request_block", "")
                 ),
+                global_guide_source=str(
+                    getattr(plan, "global_guide_source", "none") or "none"
+                ),
+                global_guide_digest=str(
+                    getattr(plan, "global_guide_digest", "") or ""
+                ),
+                global_guide_carrier=str(
+                    getattr(plan, "global_guide_carrier", "none") or "none"
+                ),
+                volatile_runtime_attached=bool(
+                    getattr(plan, "volatile_runtime_attached", False)
+                ),
             )
         return plan
     except Exception as exc:
@@ -6638,6 +6651,37 @@ def _hidden_flow_runtime_enabled(plan: Any) -> bool:
     )
 
 
+def _effective_hidden_flow_static_system(
+    plan: DailyTurnPlan,
+    static_system: str,
+) -> str:
+    """Attach one stable system carrier, never the volatile request tail."""
+    if not _hidden_flow_runtime_enabled(plan):
+        return str(static_system or "")
+    hidden_plan = getattr(plan, "hidden_flow_plan", None)
+    carrier = str(
+        getattr(hidden_plan, "global_guide_system_carrier", "") or ""
+    )
+    base = str(static_system or "")
+    if carrier and carrier not in base:
+        base = (base + "\n\n" + carrier).strip()
+    plan.hidden_flow_static_system = carrier
+    plan.manifest["global_guide_source"] = str(
+        getattr(hidden_plan, "global_guide_source", "none") or "none"
+    )
+    plan.manifest["global_guide_digest"] = str(
+        getattr(hidden_plan, "global_guide_digest", "") or ""
+    )[:64]
+    plan.manifest["global_guide_carrier"] = str(
+        getattr(hidden_plan, "global_guide_carrier", "none") or "none"
+    )
+    plan.manifest["volatile_runtime_attached"] = bool(
+        getattr(hidden_plan, "volatile_runtime_attached", False)
+    )
+    plan.manifest["static_system_sha256"] = _sha256_text(base)
+    return base
+
+
 def ensure_resident_and_stream(
     plan: DailyTurnPlan,
     *,
@@ -6648,6 +6692,7 @@ def ensure_resident_and_stream(
     _registry_reprep_depth: int = 0,
 ) -> Iterator[tuple[str, Any]]:
     """Prepare resident process, handle hot→cold mismatch, stream one turn."""
+    static_system = _effective_hidden_flow_static_system(plan, static_system)
     verify_epoch_token(plan)
     if (plan.is_cold or plan.is_respawn) and resident is not None:
         binding = get_local_binding()

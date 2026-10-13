@@ -376,6 +376,7 @@ def render_private_guide(
     draw_result: Optional[DrawResult] = None,
     protocol_hints: Iterable[str] = (),
     trusted_protocol_tags: Iterable[str] = (),
+    include_global: bool = True,
 ) -> str:
     """Render bounded private guidance with protocol budget reserved first."""
     if not config.enabled or not state.active or config.stage(state.stage) is None:
@@ -427,14 +428,14 @@ def render_private_guide(
         content_blocks.append(block)
         remaining -= len(block)
 
-    # The order is global -> stage -> anchors -> hints. Budget allocation is
-    # deliberately calculated with hints already reserved, so control format
-    # and tail protocol cannot be displaced by user-authored guidance.
-    append_guidance(
-        "global_flow_guide",
-        str(getattr(config, "guidance_prompt", "") or "").strip(),
-        MAX_GLOBAL_GUIDANCE_CHARS,
-    )
+    # The stable carrier owns the global guide in runtime paths that pass
+    # include_global=False. Direct callers retain the legacy default.
+    if include_global:
+        append_guidance(
+            "global_flow_guide",
+            str(getattr(config, "guidance_prompt", "") or "").strip(),
+            MAX_GLOBAL_GUIDANCE_CHARS,
+        )
     append_guidance(
         "stage_guidance",
         str(stage.guidance_prompt or "").strip(),
