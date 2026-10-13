@@ -284,23 +284,23 @@ def build_global_guide_system_block(
     limit = max(0, int(max_chars))
     prefix = "<hidden_flow_system_carrier>"
     suffix = "</hidden_flow_system_carrier>"
-    skeletons: list[tuple[str, str, str]] = []
+    skeletons: list[tuple[str, str, str, str]] = []
     for config, _version in selected:
         safe_flow = escape(str(config.flow_id)[:256], quote=True)
         before = (
             '<flow id="%s"><global_flow_guide>' % safe_flow
         )
         after = "</global_flow_guide></flow>"
-        skeletons.append((before, after, _guide_text(config)))
+        skeletons.append((before, after, _guide_text(config), safe_flow))
     used = len(prefix) + len(suffix) + sum(
         len(before) + len(after)
-        for before, after, _guide in skeletons
+        for before, after, _guide, _safe_flow in skeletons
     )
     if used > limit:
         return ""
     remaining = limit - used
     rows: list[str] = []
-    for index, (before, after, guide) in enumerate(skeletons):
+    for index, (before, after, guide, safe_flow) in enumerate(skeletons):
         rows_left = len(skeletons) - index
         share = remaining if rows_left == 1 else remaining // rows_left
         encoded = _restore_trusted_global_control_tags(
@@ -308,7 +308,7 @@ def build_global_guide_system_block(
                 guide[:MAX_GLOBAL_GUIDANCE_CHARS],
                 max(0, share),
             ),
-            skeletons[index][0].split('id="', 2)[1].split('"', 1)[0],
+            safe_flow,
         )
         block = before + encoded + after
         rows.append(block)
