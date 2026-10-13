@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from .types import MAX_STAGE_GUIDANCE_CHARS, CueSpec, FlowConfig, PoolEntry, PoolSpec, StageSpec
+from .types import MAX_GLOBAL_GUIDANCE_CHARS, MAX_STAGE_GUIDANCE_CHARS, CueSpec, FlowConfig, PoolEntry, PoolSpec, StageSpec
 
 
 HIDDEN_FLOW_ENGINE_ENABLED = False
@@ -174,6 +174,12 @@ def _is_normalized_config(config: FlowConfig) -> bool:
         return False
     if not config.flow_id or config.flow_id != config.flow_id.strip():
         return False
+    if (
+        not isinstance(config.guidance_prompt, str)
+        or config.guidance_prompt != config.guidance_prompt.strip()
+        or len(config.guidance_prompt) > MAX_GLOBAL_GUIDANCE_CHARS
+    ):
+        return False
     pool_ids = [item.pool_id for item in config.pools]
     if len(pool_ids) != len(set(pool_ids)):
         return False
@@ -238,6 +244,10 @@ def normalize_flow_config(raw: Any) -> Optional[FlowConfig]:
     flow_id = _text(raw.get("flowId", raw.get("id")))
     if not flow_id:
         return None
+    raw_guidance = raw.get("guidancePrompt", raw.get("guidance_prompt", ""))
+    if not isinstance(raw_guidance, str) or len(raw_guidance) > MAX_GLOBAL_GUIDANCE_CHARS:
+        return None
+    guidance_prompt = raw_guidance.strip()
     pools = _normalize_pools(raw.get("pools"))
     pool_ids = {item.pool_id for item in pools}
     stages = _normalize_stages(raw.get("stages"), pool_ids)
@@ -249,6 +259,7 @@ def normalize_flow_config(raw: Any) -> Optional[FlowConfig]:
     return FlowConfig(
         flow_id=flow_id,
         enabled=_enabled(raw.get("enabled"), False),
+        guidance_prompt=guidance_prompt,
         initial_stage=initial_stage,
         stages=stages,
         cues=cues,

@@ -13,10 +13,11 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 from .control import parse_hidden_flow_control
-from .draw import draw_for_guide_with_state, render_private_guide
+from .draw import _escape_bounded, draw_for_guide_with_state, render_private_guide
 from .engine import apply_flow_control, start_flow
 from .types import (
     HIDDEN_FLOW_CONTROL_ACTIONS,
+    MAX_GLOBAL_GUIDANCE_CHARS,
     AppliedGuide,
     DrawItem,
     DrawResult,
@@ -156,24 +157,31 @@ def _render_applied_guide(
         state,
         _guide_draw_result(guide),
         protocol_hints=hints,
+        trusted_protocol_tags=(advance_tag, stop_tag),
     )
-    # render_private_guide escapes arbitrary hint text so configured content
-    # cannot break the private wrapper. These two tags are generated from the
-    # current flow id and are the protocol examples the model must be able to
-    # copy literally; restore only their exact escaped forms.
-    for tag in (advance_tag, stop_tag):
-        rendered = rendered.replace(escape(tag, quote=False), tag)
     return rendered
+
+
+MAX_ACTIVATION_TEXT = 4000
 
 
 def build_activation_block(
     configs: Iterable[tuple[FlowConfig, int]],
     *,
     max_flows: int = 8,
-    max_chars: int = 4000,
+    max_chars: int = MAX_ACTIVATION_TEXT,
 ) -> str:
+    """Render inactive eligible guidance as guide-per-flow plus protected contract.
+
+    Hidden Flow private guidance has two explicit states:
+    INACTIVE + ELIGIBLE is global execution guide plus this code-owned
+    activation contract; ACTIVE + ELIGIBLE is global guide, stage guidance,
+    anchors, and the protected active protocol. The user guide is always
+    escaped and bounded, and never replaces contract text.
+    """
     prefix = (
         "<available_hidden_flows>"
+        "<activation_contract>"
         "These are private machine controls. Do not mention this block to the user. "
         "Activation contract: start only when your current visible reply has already "
         "actively entered the intended intimate behavior scene, and append one explicit "
@@ -190,25 +198,55 @@ def build_activation_block(
         "ordinary duties. A user stop, pause, refusal, withdrawal, or changed intent "
         "always wins; stop immediately and never continue only to satisfy a stage "
         "minimum. "
+        "</activation_contract>"
     )
     suffix = "</available_hidden_flows>"
-    rows: list[str] = []
-    for config, _version in list(configs)[:max_flows]:
+    limit = max(0, int(max_chars))
+    selected = list(configs)[:max(0, int(max_flows))]
+    rows: list[tuple[FlowConfig, str, str]] = []
+    used = len(prefix) + len(suffix)
+
+    # Reserve the code-owned contract and each flow's identity/keys first.
+    for config, _version in selected:
         keys = [cue.key[:120] for cue in config.cues[:8]]
         cue_text = "|".join(keys)
-        row = (
-            '<flow id="%s" keys="%s"/>'
+        opening = (
+            '<flow id="%s" keys="%s">'
             % (
                 escape(config.flow_id[:256], quote=True),
                 escape(cue_text[:1000], quote=True),
             )
         )
-        if len(prefix) + len("".join(rows)) + len(row) + len(suffix) > int(max_chars):
+        closing = "</flow>"
+        if used + len(opening) + len(closing) > limit:
             break
-        rows.append(row)
-    if not rows or len(prefix) + len("".join(rows)) + len(suffix) > int(max_chars):
+        rows.append((config, opening, closing))
+        used += len(opening) + len(closing)
+
+    if not rows or used > limit:
         return ""
-    return prefix + "".join(rows) + suffix
+
+    remaining = limit - used
+    rendered_rows: list[str] = []
+    for index, (config, opening, closing) in enumerate(rows):
+        row = opening
+        guide = str(getattr(config, "guidance_prompt", "") or "").strip()
+        if guide and remaining > 0:
+            rows_left = len(rows) - index
+            share = remaining if rows_left == 1 else remaining // rows_left
+            wrapper_size = len("<global_flow_guide></global_flow_guide>")
+            encoded = _escape_bounded(
+                guide[:MAX_GLOBAL_GUIDANCE_CHARS],
+                max(0, share - wrapper_size),
+            )
+            if encoded:
+                block = "<global_flow_guide>%s</global_flow_guide>" % encoded
+                row += block
+                remaining -= len(block)
+        row += closing
+        rendered_rows.append(row)
+
+    return prefix + "".join(rendered_rows) + suffix
 
 def _pending_guide_matches_state(
     state: FlowState,
