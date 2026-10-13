@@ -159,7 +159,7 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
             "global-guidance-test",
         )
         self.assertTrue(any("guidancePrompt" in error for error in errors))
-        _, errors, _ = _validate_editor_document(
+        _, errors = _validate_editor_document(
             _editor_document(42),
             "global-guidance-test",
         )
