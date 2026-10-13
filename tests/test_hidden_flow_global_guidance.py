@@ -592,6 +592,8 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
             )
             carrier = runtime.build_global_guide_system_block(((config, 1),))
             self.assertNotIn("<global_flow_guide>", rendered)
+            self.assertNotIn("<hidden_flow_control", rendered)
+            self.assertNotIn("<control_tail>", rendered)
             self.assertIn("SHARED_EXECUTION_GUIDE", carrier)
             self.assertIn("STAGE_" + stage_id, rendered)
 
