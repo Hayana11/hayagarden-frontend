@@ -167,6 +167,7 @@ def upsert_flow_config(
         config = FlowConfig(
             flow_id=config.flow_id,
             enabled=False,
+            guidance_prompt=config.guidance_prompt,
             initial_stage=config.initial_stage,
             stages=config.stages,
             cues=config.cues,
