@@ -431,7 +431,7 @@ def render_private_guide(
     # deliberately calculated with hints already reserved, so control format
     # and tail protocol cannot be displaced by user-authored guidance.
     append_guidance(
-        "global_guidance",
+        "global_flow_guide",
         str(getattr(config, "guidance_prompt", "") or "").strip(),
         MAX_GLOBAL_GUIDANCE_CHARS,
     )
