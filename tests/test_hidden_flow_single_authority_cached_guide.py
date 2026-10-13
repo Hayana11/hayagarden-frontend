@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 
-from chat.hidden_flow import runtime
+from chat.hidden_flow import runtime, runtime_store
 from chat.hidden_flow.config import normalize_flow_config
 from chat.hidden_flow.types import AppliedGuide, DrawItem, DrawResult, FlowState
 from relay.adapter import adapt_request
@@ -92,6 +94,34 @@ class HiddenFlowSingleAuthorityTests(unittest.TestCase):
         self.assertNotIn("Remain in the current stage by default", active)
         self.assertIn("<stage_guidance>STAGE GUIDE</stage_guidance>", active)
         self.assertIn("<anchor ", active)
+
+    def test_prepared_inactive_plan_keeps_global_guide_out_of_user_tail(self) -> None:
+        config = _config(guide="PREPARED GLOBAL")
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            runtime_store.upsert_flow_config(
+                config.to_dict(),
+                db_path=db_path,
+            )
+            plan = runtime.prepare_hidden_flow_turn(
+                enabled=True,
+                eligible=True,
+                chat_id="default",
+                user_message_id=10,
+                db_path=db_path,
+            )
+            self.assertIn(
+                "<global_flow_guide>PREPARED GLOBAL</global_flow_guide>",
+                plan.global_guide_system_carrier,
+            )
+            self.assertNotIn("PREPARED GLOBAL", plan.private_request_block)
+            request = runtime.render_plan_request(plan, "USER")
+            self.assertNotIn("PREPARED GLOBAL", request)
+            self.assertIn("<available_hidden_flows>", request)
+            self.assertEqual(plan.global_guide_carrier, "system_stable")
+        finally:
+            os.unlink(db_path)
 
     def test_empty_guide_uses_one_legacy_fallback_authority(self) -> None:
         config = _config(guide="")
