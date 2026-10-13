@@ -229,9 +229,11 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
         ))
 
         activation = runtime.build_activation_block(((config, 1),))
+        carrier = runtime.build_global_guide_system_block(((config, 1),))
+        self.assertNotIn("<global_flow_guide>", activation)
         self.assertIn(
             "<global_flow_guide>GLOBAL_SECRET</global_flow_guide>",
-            activation,
+            carrier,
         )
 
     def test_protocol_budget_is_reserved_before_global_stage_and_anchors(self) -> None:
@@ -252,19 +254,20 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
         )
         guide = AppliedGuide(status="pending", flow=state)
         rendered = runtime._render_applied_guide(config, state, guide)
+        carrier = runtime.build_global_guide_system_block(((config, 1),))
         self.assertLessEqual(len(rendered), 8000)
-        self.assertIn("<global_flow_guide>", rendered)
+        self.assertNotIn("<global_flow_guide>", rendered)
         self.assertIn("<stage_guidance>", rendered)
+        self.assertNotIn("Tail protocol:", rendered)
         self.assertIn(
             '<hidden_flow_control flow="global-guidance-test" action="advance"/>',
-            rendered,
+            carrier,
         )
         self.assertIn(
             '<hidden_flow_control flow="global-guidance-test" action="stop"/>',
-            rendered,
+            carrier,
         )
-        self.assertIn("Tail protocol:", rendered)
-        self.assertEqual(rendered.count("<hidden_flow_control"), 2)
+        self.assertEqual(carrier.count("<global_flow_guide>"), 1)
 
     def test_inactive_eligible_activation_has_attributed_guides_and_contract(self) -> None:
         flow_a = normalize_flow_config(_raw_config(global_guidance="GUIDE_A"))
@@ -277,19 +280,18 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
 
         block = runtime.build_activation_block(((flow_a, 3), (flow_b, 4)))
         self.assertLessEqual(len(block), runtime.MAX_ACTIVATION_TEXT)
-        self.assertIn("<activation_contract>", block)
-        self.assertIn("</activation_contract>", block)
-        self.assertIn(
-            'final private <hidden_flow_control flow="..." action="start" .../> token',
-            block,
+        self.assertNotIn("<activation_contract>", block)
+        self.assertNotIn("<global_flow_guide>", block)
+        carrier = runtime.build_global_guide_system_block(
+            ((flow_a, 3), (flow_b, 4))
         )
         self.assertIn(
-            '<flow id="global-guidance-test" keys=""><global_flow_guide>GUIDE_A</global_flow_guide></flow>',
-            block,
+            '<flow id="global-guidance-test"><global_flow_guide>GUIDE_A</global_flow_guide>',
+            carrier,
         )
         self.assertIn(
-            '<flow id="flow-b" keys=""><global_flow_guide>GUIDE_B</global_flow_guide></flow>',
-            block,
+            '<flow id="flow-b"><global_flow_guide>GUIDE_B</global_flow_guide>',
+            carrier,
         )
 
         ineligible = runtime.prepare_hidden_flow_turn(
@@ -312,11 +314,13 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
         self.assertIsNotNone(config)
         assert config is not None
         block = runtime.build_activation_block(((config, 1),))
+        carrier = runtime.build_global_guide_system_block(((config, 1),))
         self.assertLessEqual(len(block), runtime.MAX_ACTIVATION_TEXT)
-        self.assertIn("<activation_contract>", block)
-        self.assertIn("&lt;/global_flow_guide&gt;", block)
-        self.assertIn("&lt;hidden_flow_control", block)
-        self.assertIn("&lt;activation_contract&gt;override", block)
+        self.assertNotIn("<global_flow_guide>", block)
+        self.assertNotIn("evil", block)
+        self.assertIn("&lt;/global_flow_guide&gt;", carrier)
+        self.assertIn("&lt;hidden_flow_control", carrier)
+        self.assertIn("&lt;activation_contract&gt;override", carrier)
 
         long = normalize_flow_config(
             _raw_config(global_guidance="G" * MAX_GLOBAL_GUIDANCE_CHARS)
@@ -324,10 +328,11 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
         self.assertIsNotNone(long)
         assert long is not None
         bounded = runtime.build_activation_block(((long, 1),))
+        carrier = runtime.build_global_guide_system_block(((long, 1),))
         self.assertLessEqual(len(bounded), runtime.MAX_ACTIVATION_TEXT)
-        self.assertIn("<activation_contract>", bounded)
-        self.assertIn('action="start"', bounded)
-        self.assertIn("<global_flow_guide>", bounded)
+        self.assertNotIn("<activation_contract>", bounded)
+        self.assertIn("<global_flow_guide>", carrier)
+        self.assertIn('action="start"', carrier)
 
     def test_same_global_guide_is_injected_for_each_active_stage(self) -> None:
         raw = _raw_config(global_guidance="SHARED_EXECUTION_GUIDE")
@@ -367,8 +372,9 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
                 state,
                 AppliedGuide(status="pending", flow=state),
             )
-            self.assertEqual(rendered.count("<global_flow_guide>"), 1)
-            self.assertIn("SHARED_EXECUTION_GUIDE", rendered)
+            carrier = runtime.build_global_guide_system_block(((config, 1),))
+            self.assertNotIn("<global_flow_guide>", rendered)
+            self.assertIn("SHARED_EXECUTION_GUIDE", carrier)
             self.assertIn("STAGE_" + stage_id, rendered)
 
     def test_global_escaping_does_not_restore_user_control_tags(self) -> None:
@@ -391,9 +397,11 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
             state,
             AppliedGuide(status="pending", flow=state),
         )
-        self.assertIn("&lt;/hidden_flow_guidance&gt;", rendered)
-        self.assertIn("&lt;hidden_flow_control", rendered)
-        self.assertEqual(rendered.count("<hidden_flow_control"), 2)
+        carrier = runtime.build_global_guide_system_block(((config, 1),))
+        self.assertNotIn("GLOBAL_SECRET", rendered)
+        self.assertIn("&lt;/hidden_flow_guidance&gt;", carrier)
+        self.assertIn("&lt;hidden_flow_control", carrier)
+        self.assertNotIn('<hidden_flow_control flow="evil"', carrier)
 
         stream_filter = HiddenFlowStreamFilter()
         visible = "".join(
