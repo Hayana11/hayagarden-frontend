@@ -90,6 +90,8 @@ export type FlowStudioWorkspaceProps = {
   backPath: string;
   /** Accessible name of the surface; never rendered as visible chrome. */
   surfaceLabel: string;
+  /** Kept for the existing Preview entry; formal page uses surfaceLabel. */
+  modeLabel?: string;
   persistenceLabel?: string;
 };
 
