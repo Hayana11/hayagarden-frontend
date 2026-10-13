@@ -186,30 +186,31 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
             os.unlink(db_path)
 
     def test_prepared_nonempty_plan_keeps_global_guide_out_of_user_tail(self) -> None:
-        raw = _raw_config(global_guidance="PREPARED_GLOBAL")
-        config = normalize_flow_config(raw)
-        self.assertIsNotNone(config)
-        assert config is not None
-        runtime_store.upsert_flow_config(
-            config.to_dict(),
-            db_path=self.db_path,
-        )
-        plan = runtime.prepare_hidden_flow_turn(
-            enabled=True,
-            eligible=True,
-            chat_id="default",
-            user_message_id=10,
-            db_path=self.db_path,
-        )
-        self.assertIn(
-            "<global_flow_guide>PREPARED_GLOBAL</global_flow_guide>",
-            plan.global_guide_system_carrier,
-        )
-        self.assertNotIn("PREPARED_GLOBAL", plan.private_request_block)
-        request = runtime.render_plan_request(plan, "USER")
-        self.assertNotIn("PREPARED_GLOBAL", request)
-        self.assertIn("<available_hidden_flows>", request)
-        self.assertEqual(plan.global_guide_carrier, "system_stable")
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            runtime_store.upsert_flow_config(
+                _raw_config(global_guidance="PREPARED_GLOBAL"),
+                db_path=db_path,
+            )
+            plan = runtime.prepare_hidden_flow_turn(
+                enabled=True,
+                eligible=True,
+                chat_id="default",
+                user_message_id=10,
+                db_path=db_path,
+            )
+            self.assertIn(
+                "<global_flow_guide>PREPARED_GLOBAL</global_flow_guide>",
+                plan.global_guide_system_carrier,
+            )
+            self.assertNotIn("PREPARED_GLOBAL", plan.private_request_block)
+            request = runtime.render_plan_request(plan, "USER")
+            self.assertNotIn("PREPARED_GLOBAL", request)
+            self.assertIn("<available_hidden_flows>", request)
+            self.assertEqual(plan.global_guide_carrier, "system_stable")
+        finally:
+            os.unlink(db_path)
 
     def test_stable_guide_digest_ignores_stage_and_anchor_variation(self) -> None:
         config = normalize_flow_config(
