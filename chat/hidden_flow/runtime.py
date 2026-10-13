@@ -156,13 +156,8 @@ def _render_applied_guide(
         state,
         _guide_draw_result(guide),
         protocol_hints=hints,
+        trusted_protocol_tags=(advance_tag, stop_tag),
     )
-    # render_private_guide escapes arbitrary hint text so configured content
-    # cannot break the private wrapper. These two tags are generated from the
-    # current flow id and are the protocol examples the model must be able to
-    # copy literally; restore only their exact escaped forms.
-    for tag in (advance_tag, stop_tag):
-        rendered = rendered.replace(escape(tag, quote=False), tag)
     return rendered
 
 
