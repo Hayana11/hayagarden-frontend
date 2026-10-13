@@ -139,8 +139,8 @@ const MOCK_DATA: FlowStudioData = {
   ],
   stages: [
     { id: 'stage-1', name: '试探', minTurns: 1, terminal: false, poolIds: ['pool-a'], nextStageId: null, guidancePrompt: '' },
-    { id: 'stage-2', name: '靠近', minTurns: 3, terminal: false, poolIds: ['pool-a', 'pool-b'], nextStageId: null, guidancePrompt: '' },
-    { id: 'stage-3', name: '渐深', minTurns: 3, terminal: false, poolIds: ['pool-b', 'pool-c'], nextStageId: null, guidancePrompt: '' },
+    { id: 'stage-2', name: '靠近', minTurns: 3, terminal: false, poolIds: ['pool-e', 'pool-a', 'pool-b'], nextStageId: null, guidancePrompt: '' },
+    { id: 'stage-3', name: '渐深', minTurns: 3, terminal: false, poolIds: ['pool-e', 'pool-b', 'pool-c'], nextStageId: null, guidancePrompt: '' },
     { id: 'stage-4', name: '临界', minTurns: 2, terminal: false, poolIds: ['pool-b', 'pool-c'], nextStageId: null, guidancePrompt: '' },
     { id: 'stage-5', name: '终章', minTurns: 1, terminal: true, poolIds: ['pool-d'], nextStageId: null, guidancePrompt: '' },
   ],
@@ -183,6 +183,18 @@ const MOCK_DATA: FlowStudioData = {
         { id: 'entry-c2', text: '基调：带一点玩笑的亲昵', enabled: true },
         { id: 'entry-c3', text: '基调：安静，像深夜的长谈', enabled: true },
       ],
+    },
+    {
+      id: 'pool-e',
+      name: '场景',
+      enabled: true,
+      mode: 'perTurn',
+      count: 1,
+      entries: ['书房', '窗边', '厨房', '镜子前', '阳台', '沙发', '雨夜', '楼梯间', '车里', '浴室'].map((text, index) => ({
+        id: `entry-e${index + 1}`,
+        text,
+        enabled: true,
+      })),
     },
     {
       id: 'pool-d',

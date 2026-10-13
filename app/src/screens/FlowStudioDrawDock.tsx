@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import type { FlowStudioData } from '../lib/flowStudio/flowStudioMock';
 import {
   clampDockTop,
   clampDragLeft,
   defaultDockPosition,
   defaultPreviewStageId,
+  buildReelStrip,
   dockedLeft,
   DRAW_DOCK_STORAGE_KEY,
   enabledStagesOf,
@@ -17,8 +18,8 @@ import {
   type PreviewDrawResult,
 } from '../lib/flowStudio/flowStudioPreviewDraw';
 
-const CHIP_WIDTH = 64;
-const CHIP_HEIGHT = 40;
+const CHIP_WIDTH = 48;
+const CHIP_HEIGHT = 48;
 const DRAG_THRESHOLD = 6;
 const SAVE_BAR_RESERVE = 92;
 
@@ -57,7 +58,7 @@ function currentBounds(saveBarVisible: boolean): DockBounds {
     safeTop: safe.top,
     safeBottom: safe.bottom,
     reservedBottom: saveBarVisible ? measuredSaveBarReserve(safe.bottom) : 16,
-    margin: 10,
+    margin: 8,
   };
 }
 
@@ -104,6 +105,21 @@ export function FlowStudioDrawDock({ draft, activeStageId, saveBarVisible }: Dra
   const [drag, setDrag] = useState<{ left: number; top: number } | null>(null);
   const pointerRef = useRef<{ id: number; startX: number; startY: number; originLeft: number; originTop: number; moved: boolean } | null>(null);
   const [open, setOpen] = useState(false);
+  const [rolling, setRolling] = useState(false);
+
+  // A short tumble before the dialog opens; skipped when motion is reduced.
+  const openWithRoll = () => {
+    if (rolling) return;
+    if (prefersReducedMotion()) {
+      setOpen(true);
+      return;
+    }
+    setRolling(true);
+    window.setTimeout(() => {
+      setRolling(false);
+      setOpen(true);
+    }, 420);
+  };
 
   useEffect(() => {
     const update = () => {
@@ -155,7 +171,7 @@ export function FlowStudioDrawDock({ draft, activeStageId, saveBarVisible }: Dra
     pointerRef.current = null;
     if (!pointer.moved) {
       setDrag(null);
-      if (!cancelled) setOpen(true);
+      if (!cancelled) openWithRoll();
       return;
     }
     const left = clampDragLeft(pointer.originLeft + (event.clientX - pointer.startX), bounds);
@@ -174,7 +190,7 @@ export function FlowStudioDrawDock({ draft, activeStageId, saveBarVisible }: Dra
     <>
       <button
         type="button"
-        className={`flow-draw-chip is-${dock.side} ${drag ? 'is-dragging' : ''}`}
+        className={`flow-draw-chip is-${dock.side} ${drag ? 'is-dragging' : ''} ${rolling ? 'is-rolling' : ''}`}
         style={chipStyle}
         aria-label="试抽一次（可拖动）"
         aria-haspopup="dialog"
@@ -185,91 +201,106 @@ export function FlowStudioDrawDock({ draft, activeStageId, saveBarVisible }: Dra
         onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
-            setOpen(true);
+            openWithRoll();
           }
         }}
       >
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z" /></svg>
-        <span>试抽</span>
+        <svg className="flow-dice" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="3.5" y="3.5" width="25" height="25" rx="7" />
+          <circle cx="9.5" cy="9.5" r="2.5" />
+          <circle cx="22.5" cy="9.5" r="2.5" />
+          <circle cx="16" cy="16" r="2.5" />
+          <circle cx="9.5" cy="22.5" r="2.5" />
+          <circle cx="22.5" cy="22.5" r="2.5" />
+        </svg>
       </button>
       {open ? <FlowStudioDrawModal draft={draft} activeStageId={activeStageId} onClose={() => setOpen(false)} /> : null}
     </>
   );
 }
 
-type ReelState = { spinning: boolean; frame: string[] };
+const TILE_WIDTH = 78;
+const TILE_GAP = 8;
+const TILE_STEP = TILE_WIDTH + TILE_GAP;
 
-/** Neighbour lines shown faded above/below the result, like a slot window. */
-function ghostAround(candidates: string[], frame: string[], slot: 0 | 1): string | null {
-  const others = candidates.filter((text) => !frame.includes(text));
-  if (!others.length) return null;
-  const anchor = candidates.indexOf(frame[0] ?? '');
-  const base = anchor < 0 ? 0 : anchor;
-  const above = others[base % others.length] ?? null;
-  if (slot === 0) return above;
-  const below = others[(base + 1) % others.length] ?? null;
-  return below === above ? null : below;
+type Reel = {
+  key: string;
+  items: string[];
+  target: number;
+  phase: 'start' | 'run' | 'done';
+  duration: number;
+};
+
+function reelOffset(index: number, windowWidth: number): number {
+  return windowWidth / 2 - (index * TILE_STEP + TILE_WIDTH / 2);
 }
 
 function FlowStudioDrawModal({ draft, activeStageId, onClose }: { draft: FlowStudioData; activeStageId: string | null; onClose: () => void }) {
   const stages = useMemo(() => enabledStagesOf(draft), [draft]);
   const [stageId, setStageId] = useState<string | null>(() => defaultPreviewStageId(draft, activeStageId));
-  const [result, setResult] = useState<PreviewDrawResult>(() => previewDraw(draft, defaultPreviewStageId(draft, activeStageId), nextPreviewSeed()));
-  const [reels, setReels] = useState<ReelState[]>([]);
+  const [result, setResult] = useState<PreviewDrawResult>({ stageId: null, groups: [] });
+  const [reels, setReels] = useState<Reel[]>([]);
+  const [windowWidth, setWindowWidth] = useState(300);
   const timersRef = useRef<number[]>([]);
   const dialogRef = useRef<HTMLElement | null>(null);
+  const measureRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const width = measureRef.current?.clientWidth;
+      if (width) setWindowWidth(width);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
 
   const clearTimers = () => {
     timersRef.current.forEach((timer) => window.clearTimeout(timer));
-    timersRef.current.forEach((timer) => window.clearInterval(timer));
     timersRef.current = [];
   };
 
   const roll = useCallback((targetStageId: string | null) => {
     clearTimers();
-    const next = previewDraw(draft, targetStageId, nextPreviewSeed());
+    const seed = nextPreviewSeed();
+    const next = previewDraw(draft, targetStageId, seed);
     setResult(next);
-    if (prefersReducedMotion() || !next.groups.length) {
-      setReels(next.groups.map((group) => ({ spinning: false, frame: group.picks })));
-      return;
-    }
-    setReels(next.groups.map((group) => ({ spinning: true, frame: group.picks })));
-    next.groups.forEach((group, index) => {
-      const ticker = window.setInterval(() => {
-        setReels((current) => current.map((reel, reelIndex) => (
-          reelIndex === index && reel.spinning
-            ? {
-                spinning: true,
-                frame: group.picks.map(() => group.candidates[Math.floor(Math.random() * group.candidates.length)]),
-              }
-            : reel
-        )));
-      }, 70);
-      const stop = window.setTimeout(() => {
-        window.clearInterval(ticker);
-        setReels((current) => current.map((reel, reelIndex) => (
-          reelIndex === index ? { spinning: false, frame: group.picks } : reel
-        )));
-      }, Math.min(1000, 620 + index * 120));
-      timersRef.current.push(ticker, stop);
+    const reduced = prefersReducedMotion();
+    let order = 0;
+    const built: Reel[] = next.groups.flatMap((group) => group.picks.map((pick, pickIndex) => {
+      const strip = buildReelStrip(group.candidates, pick, `${seed}:${group.poolId}:${pickIndex}`, 16 + order * 3);
+      const reel: Reel = {
+        key: `${group.poolId}:${pickIndex}`,
+        items: strip.items,
+        target: strip.targetIndex,
+        phase: reduced ? 'done' : 'start',
+        duration: 1100 + order * 260,
+      };
+      order += 1;
+      return reel;
+    }));
+    setReels(built);
+    if (reduced || !built.length) return;
+    // Two frames so the start offset paints before the transition begins.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      setReels((current) => current.map((reel) => ({ ...reel, phase: 'run' })));
+    }));
+    built.forEach((reel) => {
+      timersRef.current.push(window.setTimeout(() => {
+        setReels((current) => current.map((item) => (item.key === reel.key ? { ...item, phase: 'done' } : item)));
+      }, reel.duration + 40));
     });
   }, [draft]);
 
-  // Roll once when the dialog opens; later rolls are explicit user actions.
-  const openedRef = useRef(false);
+  // Roll on open and whenever the stage changes; cleanup cancels pending stops.
   useEffect(() => {
-    if (openedRef.current) return;
-    openedRef.current = true;
     roll(stageId);
-  }, [roll, stageId]);
-
-  useEffect(() => {
     const timers = timersRef;
     return () => {
-      timers.current.forEach((timer) => { window.clearTimeout(timer); window.clearInterval(timer); });
+      timers.current.forEach((timer) => window.clearTimeout(timer));
       timers.current = [];
     };
-  }, []);
+  }, [roll, stageId]);
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -279,11 +310,12 @@ function FlowStudioDrawModal({ draft, activeStageId, onClose }: { draft: FlowStu
   }, [onClose]);
 
   const selectStage = (id: string) => {
-    setStageId(id);
-    roll(id);
+    if (id !== stageId) setStageId(id);
+    else roll(id);
   };
 
-  const stageName = stages.find((stage) => stage.id === stageId)?.name || '未选择阶段';
+  const spinning = reels.some((reel) => reel.phase !== 'done');
+  let reelCursor = 0;
 
   return (
     <div className="flow-slot-layer">
@@ -314,31 +346,47 @@ function FlowStudioDrawModal({ draft, activeStageId, onClose }: { draft: FlowStu
             </button>
           ))}
         </div>
-        <div className="flow-slot-window" aria-live="polite">
-          {result.groups.length ? result.groups.map((group, index) => {
-            const reel = reels[index] ?? { spinning: false, frame: group.picks };
-            return (
-              <article className={`flow-slot-reel ${reel.spinning ? 'is-spinning' : 'is-settled'}`} key={group.poolId}>
-                <div className="flow-slot-reel-head">
-                  <strong>{group.poolName}</strong>
-                  <small>{group.mode === 'perStage' ? '整段固定' : '每轮重抽'}</small>
-                </div>
-                <div className="flow-slot-reel-body">
-                  {ghostAround(group.candidates, reel.frame, 0) ? <p className="flow-slot-ghost" aria-hidden="true">{ghostAround(group.candidates, reel.frame, 0)}</p> : null}
-                  {reel.frame.map((text, itemIndex) => (
-                    <p className="flow-slot-pick" key={`${group.poolId}-${itemIndex}`}>{text}</p>
-                  ))}
-                  {ghostAround(group.candidates, reel.frame, 1) ? <p className="flow-slot-ghost" aria-hidden="true">{ghostAround(group.candidates, reel.frame, 1)}</p> : null}
-                </div>
-              </article>
-            );
-          }) : (
+        <div className="flow-slot-scroll">
+          <div className="flow-slot-measure" ref={measureRef} aria-hidden="true" />
+          {result.groups.length ? result.groups.map((group) => (
+            <section className="flow-slot-group" key={group.poolId} aria-label={group.poolName}>
+              <div className="flow-slot-group-head">
+                <strong>{group.poolName}</strong>
+                <small>{group.mode === 'perStage' ? '整段固定' : '每轮重抽'}</small>
+              </div>
+              {group.picks.map((pick) => {
+                const reel = reels[reelCursor];
+                reelCursor += 1;
+                if (!reel) return null;
+                const index = reel.phase === 'start' ? 2 : reel.target;
+                const style: CSSProperties = {
+                  transform: `translate3d(${reelOffset(index, windowWidth)}px,0,0)`,
+                  transition: reel.phase === 'run' ? `transform ${reel.duration}ms cubic-bezier(.12,.72,.16,1)` : 'none',
+                };
+                return (
+                  <div className={`flow-reel is-${reel.phase}`} key={reel.key}>
+                    <div className="flow-reel-frame" aria-hidden="true" />
+                    <div className="flow-reel-strip" style={style} aria-hidden="true">
+                      {reel.items.map((text, itemIndex) => (
+                        <span className={`flow-reel-tile ${reel.phase === 'done' && itemIndex === reel.target ? 'is-hit' : ''}`} key={itemIndex}><em>{text}</em></span>
+                      ))}
+                    </div>
+                    <span className="flow-reel-ticks" aria-hidden="true" />
+                    <span className="flow-sr-only">{reel.phase === 'done' ? pick : ''}</span>
+                  </div>
+                );
+              })}
+            </section>
+          )) : (
             <div className="flow-slot-empty">这个阶段目前没有可抽取的灵感</div>
           )}
         </div>
         <footer className="flow-slot-footer">
-          <span>{stageName} · 使用当前编辑稿</span>
-          <button type="button" className="flow-slot-roll" onClick={() => roll(stageId)} disabled={!result.groups.length && !stageId}>再抽一次</button>
+          <span>使用当前编辑稿</span>
+          <button type="button" className="flow-slot-roll" onClick={() => roll(stageId)} disabled={spinning || !stageId}>
+            <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="4" y="4" width="24" height="24" rx="7" /><circle cx="11" cy="11" r="2" /><circle cx="21" cy="21" r="2" /><circle cx="16" cy="16" r="2" /></svg>
+            {spinning ? '转动中…' : '再抽一次'}
+          </button>
         </footer>
       </section>
     </div>

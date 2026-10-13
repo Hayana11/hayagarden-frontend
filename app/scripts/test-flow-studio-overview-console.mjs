@@ -6,6 +6,7 @@ import {
   FLOW_STUDIO_GLOBAL_GUIDANCE_MAX_CHARS,
 } from '../src/lib/flowStudio/flowStudioMock.ts';
 import {
+  buildReelStrip,
   clampDockTop,
   clampDragLeft,
   defaultDockPosition,
@@ -62,6 +63,20 @@ assert.equal(defaultPreviewStageId(draft, null), 's1', 'idle → initial stage')
 assert.equal(defaultPreviewStageId(draft, 's3'), 's3', 'active → active stage');
 assert.equal(defaultPreviewStageId(draft, 's0'), 's1', 'disabled active stage falls back');
 assert.equal(defaultPreviewStageId({ ...draft, initialStage: null }, null), 's1');
+
+// ── Slot reel strip ──
+const words = ['书房', '窗边', '厨房', '阳台'];
+for (let round = 0; round < 40; round += 1) {
+  const strip = buildReelStrip(words, '厨房', `reel-${round}`, 12);
+  assert.equal(strip.items[strip.targetIndex], '厨房', 'reel lands on the pick');
+  assert.equal(strip.items.length, strip.targetIndex + 3, 'two tiles trail the pick');
+  assert.notEqual(strip.items[strip.targetIndex - 1], '厨房', 'left neighbour differs');
+  assert.notEqual(strip.items[strip.targetIndex + 1], '厨房', 'right neighbour differs');
+  assert.ok(strip.items.every((item) => words.includes(item)), 'filler only uses the pool');
+}
+assert.deepEqual(buildReelStrip(words, '阳台', 'same'), buildReelStrip(words, '阳台', 'same'));
+const single = buildReelStrip(['唯一'], '唯一', 'x', 4);
+assert.equal(single.items[single.targetIndex], '唯一');
 
 // ── Dock math ──
 const bounds = {
@@ -188,6 +203,10 @@ assert.match(dock, /prefers-reduced-motion/);
 assert.match(dock, /仅预览 · 不影响真实 Flow/);
 assert.match(dock, /这个阶段目前没有可抽取的灵感/);
 assert.match(dock, /setPointerCapture/);
+assert.match(dock, /className="flow-dice"/, 'trigger is a die');
+assert.doesNotMatch(dock, /<span>试抽<\/span>/, 'no visible 试抽 label on the trigger');
+assert.match(dock, /buildReelStrip/);
+assert.match(dock, /cubic-bezier/, 'reels decelerate into place');
 assert.match(styles, /prefers-reduced-motion:reduce/);
 assert.match(styles, /\.flow-draw-chip\{position:fixed/);
 const consoleCss = styles.slice(styles.indexOf('Overview Console R1'));

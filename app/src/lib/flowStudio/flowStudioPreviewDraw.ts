@@ -183,3 +183,39 @@ export function parseStoredDock(raw: string | null, bounds: DockBounds): DockPos
     return null;
   }
 }
+
+export type ReelStrip = {
+  /** Tiles that scroll past the window, ending on the pick. */
+  items: string[];
+  /** Index of the tile that lands in the centre frame. */
+  targetIndex: number;
+};
+
+/**
+ * Builds a slot-machine strip for one pick: random filler from the pool's own
+ * candidates, the pick near the end, and two trailing tiles so the window never
+ * shows an empty edge. Pure and seedable so tests can pin it.
+ */
+export function buildReelStrip(
+  candidates: string[],
+  pick: string,
+  seed: string,
+  spins = 18,
+): ReelStrip {
+  const pool = candidates.length ? candidates : [pick];
+  const random = previewRandom(seed);
+  const filler = (count: number) => Array.from(
+    { length: count },
+    () => pool[Math.floor(random() * pool.length)],
+  );
+  const lead = filler(Math.max(4, spins));
+  const tail = filler(2);
+  // Neighbours of the result never repeat it when the pool has alternatives.
+  const others = pool.filter((text) => text !== pick);
+  if (others.length) {
+    const swap = () => others[Math.floor(random() * others.length)];
+    if (lead[lead.length - 1] === pick) lead[lead.length - 1] = swap();
+    if (tail[0] === pick) tail[0] = swap();
+  }
+  return { items: [...lead, pick, ...tail], targetIndex: lead.length };
+}
