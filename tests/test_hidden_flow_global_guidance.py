@@ -154,7 +154,7 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
         self.assertEqual(compiled["guidancePrompt"], "EDITOR_GLOBAL")
         self.assertEqual(compiled["schemaVersion"], 1)
 
-        _, errors, _ = _validate_editor_document(
+        _, errors = _validate_editor_document(
             _editor_document("x" * (MAX_GLOBAL_GUIDANCE_CHARS + 1)),
             "global-guidance-test",
         )
@@ -184,7 +184,7 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
         finally:
             os.unlink(db_path)
 
-    def test_private_order_empty_global_and_activation_isolation(self) -> None:
+    def test_private_order_empty_global_and_inactive_injection(self) -> None:
         config = normalize_flow_config(
             _raw_config(global_guidance="GLOBAL_SECRET", stage_guidance="STAGE_SECRET")
         )
@@ -229,7 +229,10 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
         ))
 
         activation = runtime.build_activation_block(((config, 1),))
-        self.assertNotIn("GLOBAL_SECRET", activation)
+        self.assertIn(
+            "<global_flow_guide>GLOBAL_SECRET</global_flow_guide>",
+            activation,
+        )
 
     def test_protocol_budget_is_reserved_before_global_stage_and_anchors(self) -> None:
         config = normalize_flow_config(
