@@ -302,7 +302,15 @@ def build_activation_block(
     limit = max(0, int(max_chars))
     suffix = "</available_hidden_flows>"
     prefix = '<available_hidden_flows>'
-    used = len(prefix) + len(suffix)
+    all_empty = all(not _guide_text(config) for config, _version in selected)
+    contract = ""
+    if all_empty:
+        contract = (
+            "<activation_contract>"
+            + LEGACY_EMPTY_GUIDE_FALLBACK["activation_contract"]
+            + "</activation_contract>"
+        )
+    used = len(prefix) + len(contract) + len(suffix)
     if used > limit:
         return ""
     rendered_rows: list[str] = []
@@ -317,7 +325,7 @@ def build_activation_block(
                 escape(cue_text[:1000], quote=True),
             )
         )
-        if not _guide_text(config):
+        if not all_empty and not _guide_text(config):
             row += (
                 "<activation_contract>"
                 + LEGACY_EMPTY_GUIDE_FALLBACK["activation_contract"]
@@ -330,7 +338,7 @@ def build_activation_block(
         remaining -= len(row)
     if not rendered_rows:
         return ""
-    return prefix + "".join(rendered_rows) + suffix
+    return prefix + contract + "".join(rendered_rows) + suffix
 
 def _pending_guide_matches_state(
     state: FlowState,
