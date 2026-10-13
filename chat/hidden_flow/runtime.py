@@ -51,6 +51,11 @@ class HiddenFlowTurnPlan:
     selected_config: Optional[FlowConfig] = None
     available_configs: tuple[tuple[FlowConfig, int], ...] = ()
     private_request_block: str = ""
+    global_guide_digest: str = ""
+    global_guide_source: str = "none"
+    global_guide_carrier: str = "none"
+    global_guide_system_carrier: str = ""
+    volatile_runtime_attached: bool = False
     transition: Optional[HiddenFlowTransition] = None
 
 
@@ -257,7 +262,7 @@ def build_global_guide_system_block(
         safe_flow = escape(str(config.flow_id)[:256], quote=True)
         encoded = _escape_bounded(
             guide[:MAX_GLOBAL_GUIDANCE_CHARS],
-            MAX_GLOBAL_GUIDANCE_CHARS * 2,
+            MAX_GLOBAL_GUIDANCE_CHARS * 6,
         )
         rows.append(
             '<flow id="%s">'
@@ -393,8 +398,36 @@ def prepare_hidden_flow_turn(
         state,
         pending,
     )
+    carrier_configs = (
+        [selected]
+        if state.active and selected is not None
+        else list(data["configs"])
+    )
+    system_carrier = build_global_guide_system_block(
+        carrier_configs,
+        active_flow_id=(state.flow_id if state.active else None),
+    )
     if not state.active:
         block = build_activation_block(data["configs"])
+    relevant_configs = carrier_configs or list(data["configs"])
+    has_guide = any(
+        bool(_guide_text(config))
+        for config, _version in relevant_configs
+    )
+    has_empty = any(
+        not _guide_text(config)
+        for config, _version in relevant_configs
+    )
+    guide_source = (
+        "runtime_config"
+        if has_guide
+        else ("legacy_empty_fallback" if has_empty else "none")
+    )
+    guide_carrier = (
+        "system_stable"
+        if system_carrier
+        else ("legacy_user_tail" if has_empty and block else "none")
+    )
     return HiddenFlowTurnPlan(
         enabled=True,
         eligible=True,
@@ -414,6 +447,11 @@ def prepare_hidden_flow_turn(
         selected_config=selected[0] if selected is not None else None,
         available_configs=tuple(data["configs"]),
         private_request_block=block,
+        global_guide_digest=_guide_digest(relevant_configs),
+        global_guide_source=guide_source,
+        global_guide_carrier=guide_carrier,
+        global_guide_system_carrier=system_carrier,
+        volatile_runtime_attached=bool(block),
     )
 def append_private_request_block(content: Any, block: str) -> Any:
     """Return a new request carrier without stringifying multimodal content."""
