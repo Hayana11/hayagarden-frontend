@@ -274,6 +274,41 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(body["currentRevision"], 1)
         self.assertEqual(body["currentDocument"]["stages"][0]["name"], "先保存")
 
+    def test_global_guidance_save_conflict_publish_round_trip(self):
+        first = self._get()
+        document = self._publishable_document(first["document"])
+        document["guidancePrompt"] = "  ABC  "
+        saved = self._save(document, first["editorRevision"])
+        self.assertEqual(saved.status_code, 200)
+        saved_payload = saved.get_json()
+        self.assertEqual(saved_payload["document"]["guidancePrompt"], "ABC")
+
+        reloaded = self._get()
+        self.assertEqual(reloaded["document"]["guidancePrompt"], "ABC")
+
+        stale = json.loads(json.dumps(first["document"]))
+        stale["guidancePrompt"] = "STALE"
+        conflict = self._save(stale, first["editorRevision"])
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(
+            conflict.get_json()["currentDocument"]["guidancePrompt"],
+            "ABC",
+        )
+
+        published = self._publish(
+            saved_payload["document"],
+            saved_payload["editorRevision"],
+            7,
+        )
+        self.assertEqual(published.status_code, 200)
+        runtime_config = json.loads(
+            sqlite3.connect(self.db_path).execute(
+                "SELECT config_json FROM hidden_flow_configs WHERE flow_id=?",
+                ("intimacy-v1",),
+            ).fetchone()[0]
+        )
+        self.assertEqual(runtime_config["guidancePrompt"], "ABC")
+
     def test_reorder_disable_delete_and_reenable_round_trip(self):
         first = self._get()
         document = first["document"]
@@ -466,6 +501,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
 
         first = self._get()
         latest = self._publishable_document(first["document"])
+        latest["guidancePrompt"] = "DEFERRED_GLOBAL"
         latest["stages"][0]["minTurns"] = 2
         saved = self._save(latest, first["editorRevision"])
         self.assertEqual(saved.status_code, 200)
@@ -515,6 +551,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         )
         connection.close()
         self.assertEqual(runtime_config["stages"][0]["minTurns"], 3)
+        self.assertEqual(runtime_config["guidancePrompt"], "DEFERRED_GLOBAL")
 
 
     def test_deferred_apply_does_not_fallback_when_latest_revision_is_invalid(self):
