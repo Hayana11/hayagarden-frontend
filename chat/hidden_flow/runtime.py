@@ -240,6 +240,25 @@ def _selected_guide_configs(
     ]
 
 
+def _trusted_global_control_tags(flow_id: str) -> tuple[str, ...]:
+    safe_flow = escape(str(flow_id)[:256], quote=True)
+    return tuple(
+        '<hidden_flow_control flow="%s" action="%s"/>'
+        % (safe_flow, action)
+        for action in ("start", "advance", "stop")
+    )
+
+
+def _restore_trusted_global_control_tags(
+    escaped_guide: str,
+    flow_id: str,
+) -> str:
+    rendered = str(escaped_guide)
+    for tag in _trusted_global_control_tags(flow_id):
+        rendered = rendered.replace(escape(tag, quote=False), tag)
+    return rendered
+
+
 def build_global_guide_system_block(
     configs: Iterable[tuple[FlowConfig, int]],
     *,
@@ -248,10 +267,10 @@ def build_global_guide_system_block(
 ) -> str:
     """Build the bounded stable private/system carrier for global guides.
 
-    The code-owned control wrappers are reserved before user-authored guide
-    text, and the whole carrier has a fixed upper bound for multi-flow
-    inactive turns. The carrier is independent of stage, turn, anchors, and
-    current user content.
+    Non-empty user-authored guidance is the only natural-language authority.
+    The carrier adds only stable structural attribution; runtime control
+    parsing and validation remain code-owned outside this prompt. The carrier
+    is independent of stage, turn, anchors, and current user content.
     """
     selected = [
         item for item in _selected_guide_configs(
@@ -271,19 +290,7 @@ def build_global_guide_system_block(
         before = (
             '<flow id="%s"><global_flow_guide>' % safe_flow
         )
-        after = (
-            "</global_flow_guide>"
-            "<protected_activation_protocol>"
-            '<hidden_flow_control flow="%s" action="start"/>'
-            "</protected_activation_protocol>"
-            "<protected_active_protocol>"
-            '<hidden_flow_control flow="%s" action="advance"/>'
-            '<hidden_flow_control flow="%s" action="stop"/>'
-            "<control_tail>max one control; final token/block; nothing after it"
-            "</control_tail>"
-            "</protected_active_protocol></flow>"
-            % (safe_flow, safe_flow, safe_flow)
-        )
+        after = "</global_flow_guide></flow>"
         skeletons.append((before, after, _guide_text(config)))
     used = len(prefix) + len(suffix) + sum(
         len(before) + len(after)
@@ -296,9 +303,12 @@ def build_global_guide_system_block(
     for index, (before, after, guide) in enumerate(skeletons):
         rows_left = len(skeletons) - index
         share = remaining if rows_left == 1 else remaining // rows_left
-        encoded = _escape_bounded(
-            guide[:MAX_GLOBAL_GUIDANCE_CHARS],
-            max(0, share),
+        encoded = _restore_trusted_global_control_tags(
+            _escape_bounded(
+                guide[:MAX_GLOBAL_GUIDANCE_CHARS],
+                max(0, share),
+            ),
+            skeletons[index][0].split('id="', 2)[1].split('"', 1)[0],
         )
         block = before + encoded + after
         rows.append(block)
