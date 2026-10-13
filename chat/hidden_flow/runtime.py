@@ -293,8 +293,8 @@ def build_activation_block(
     """Render only volatile inactive facts plus empty-guide fallback.
 
     Non-empty Global Execution Guides live in the stable system carrier.
-    Legacy activation prose is emitted only for flows whose runtime guide is
-    empty, and is concentrated in LEGACY_EMPTY_GUIDE_FALLBACK.
+    Legacy activation prose is emitted only inside the flow row whose runtime
+    guide is empty, and is concentrated in LEGACY_EMPTY_GUIDE_FALLBACK.
     """
     selected = list(configs)[:max(0, int(max_flows))]
     if not selected:
@@ -302,15 +302,7 @@ def build_activation_block(
     limit = max(0, int(max_chars))
     suffix = "</available_hidden_flows>"
     prefix = '<available_hidden_flows mode="inactive">'
-    needs_legacy = any(not _guide_text(config) for config, _version in selected)
-    contract = ""
-    if needs_legacy:
-        contract = (
-            "<activation_contract>"
-            + LEGACY_EMPTY_GUIDE_FALLBACK["activation_contract"]
-            + "</activation_contract>"
-        )
-    used = len(prefix) + len(contract) + len(suffix)
+    used = len(prefix) + len(suffix)
     if used > limit:
         return ""
     rendered_rows: list[str] = []
@@ -319,19 +311,26 @@ def build_activation_block(
         keys = [cue.key[:120] for cue in config.cues[:8]]
         cue_text = "|".join(keys)
         row = (
-            '<flow id="%s" keys="%s"/>'
+            '<flow id="%s" keys="%s">'
             % (
                 escape(config.flow_id[:256], quote=True),
                 escape(cue_text[:1000], quote=True),
             )
         )
+        if not _guide_text(config):
+            row += (
+                "<activation_contract>"
+                + LEGACY_EMPTY_GUIDE_FALLBACK["activation_contract"]
+                + "</activation_contract>"
+            )
+        row += "</flow>"
         if len(row) > remaining:
             break
         rendered_rows.append(row)
         remaining -= len(row)
     if not rendered_rows:
         return ""
-    return prefix + contract + "".join(rendered_rows) + suffix
+    return prefix + "".join(rendered_rows) + suffix
 
 def _pending_guide_matches_state(
     state: FlowState,
