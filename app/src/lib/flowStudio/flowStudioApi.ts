@@ -1,9 +1,13 @@
 import {
   cloneFlowStudioData,
+  UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS,
+  type FlowStudioActiveFlow,
   type FlowStudioData,
   type FlowStudioDataAdapter,
   type FlowStudioPublishResult,
   type FlowStudioRuntimeApplyState,
+  type FlowStudioRuntimeStatus,
+  type FlowStudioSaveOptions,
 } from './flowStudioMock';
 
 export class FlowStudioApiError extends Error {
@@ -37,6 +41,9 @@ export class FlowStudioConflictError extends FlowStudioApiError {
     this.currentDocument = isFlowStudioData(payload.currentDocument)
       ? {
           ...cloneFlowStudioData(payload.currentDocument),
+          guidancePrompt: typeof (payload.currentDocument as FlowStudioData).guidancePrompt === 'string'
+            ? (payload.currentDocument as FlowStudioData).guidancePrompt
+            : '',
           version: 0,
           savedAt: typeof (payload.currentDocument as FlowStudioData).savedAt === 'string'
             ? (payload.currentDocument as FlowStudioData).savedAt
@@ -78,6 +85,44 @@ function runtimeApplyStateForPayload(
   };
 }
 
+function activeFlowForPayload(value: unknown): FlowStudioActiveFlow {
+  if (!value || typeof value !== 'object') {
+    return { ...UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS.activeFlow };
+  }
+  const record = value as Record<string, unknown>;
+  if (record.state === 'active' && typeof record.stage === 'string' && record.stage) {
+    return {
+      state: 'active',
+      stage: record.stage,
+      stageTurn: typeof record.stageTurn === 'number' && Number.isInteger(record.stageTurn)
+        ? record.stageTurn
+        : null,
+    };
+  }
+  if (record.state === 'idle') {
+    return { state: 'idle', stage: null, stageTurn: null };
+  }
+  return { ...UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS.activeFlow };
+}
+
+function runtimeStatusForPayload(
+  payload: Record<string, unknown>,
+  previous: FlowStudioRuntimeStatus,
+): FlowStudioRuntimeStatus {
+  const runtime = payload.runtime && typeof payload.runtime === 'object'
+    ? payload.runtime as Record<string, unknown>
+    : {};
+  return {
+    engineEnabled: typeof runtime.engineEnabled === 'boolean'
+      ? runtime.engineEnabled
+      : previous.engineEnabled,
+    // Only the editor GET carries the Flow summary; keep the last reading otherwise.
+    activeFlow: 'activeFlow' in runtime
+      ? activeFlowForPayload(runtime.activeFlow)
+      : { ...previous.activeFlow },
+  };
+}
+
 function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData {
   if (!isFlowStudioData(payload.document)) {
     throw new FlowStudioApiError(
@@ -93,6 +138,7 @@ function documentForWorkspace(payload: Record<string, unknown>): FlowStudioData 
     : {};
   return {
     ...document,
+    guidancePrompt: typeof document.guidancePrompt === 'string' ? document.guidancePrompt : '',
     // Runtime config version is not the editable draft revision.
     version: 0,
     editorRevision: typeof payload.editorRevision === 'number' ? payload.editorRevision : 0,
@@ -163,6 +209,10 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
     applyPending: false,
     applyBlocked: false,
     applyBlockedReason: null,
+  };
+  let runtimeStatus: FlowStudioRuntimeStatus = {
+    ...UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS,
+    activeFlow: { ...UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS.activeFlow },
   };
 
   const validateEditorDocument = async (next: FlowStudioData) => {
@@ -251,6 +301,7 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
       ? confirmed.editorRevision
       : revision;
     runtimeApplyState = runtimeApplyStateForPayload(confirmed);
+    runtimeStatus = runtimeStatusForPayload(confirmed, runtimeStatus);
     return {
       document: confirmedDocument,
       displayOnlyFields: Array.isArray(payload.displayOnlyFields)
@@ -261,7 +312,10 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
     };
   };
 
-  const saveEditorDocument = async (next: FlowStudioData): Promise<FlowStudioData> => {
+  const saveEditorDocument = async (
+    next: FlowStudioData,
+    options?: FlowStudioSaveOptions,
+  ): Promise<FlowStudioData> => {
     const payload = await requestJson(
       '/api/flow-studio/editor/' + encodeURIComponent(flowId),
       {
@@ -284,6 +338,13 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
     revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : revision + 1;
     const savedDocument = documentForWorkspace(payload);
     runtimeApplyState = runtimeApplyStateForPayload(payload);
+    runtimeStatus = runtimeStatusForPayload(payload, runtimeStatus);
+    // Presentation only: the editor is durable now; apply continues below.
+    try {
+      options?.onProgress?.('editorSaved');
+    } catch {
+      // A UI callback must never break the save/apply chain.
+    }
 
     try {
       const validation = await validateEditorDocument(savedDocument);
@@ -311,6 +372,7 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
       );
       revision = typeof payload.editorRevision === 'number' ? payload.editorRevision : 0;
       runtimeApplyState = runtimeApplyStateForPayload(payload);
+      runtimeStatus = runtimeStatusForPayload(payload, runtimeStatus);
       return documentForWorkspace(payload);
     },
 
@@ -320,6 +382,10 @@ export function createFlowStudioApiAdapter(flowId: string): FlowStudioDataAdapte
 
     getRuntimeApplyState() {
       return { ...runtimeApplyState };
+    },
+
+    getRuntimeStatus() {
+      return { ...runtimeStatus, activeFlow: { ...runtimeStatus.activeFlow } };
     },
 
     acceptRevision(nextRevision) {
