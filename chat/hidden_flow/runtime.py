@@ -286,12 +286,13 @@ def build_global_guide_system_block(
     suffix = "</hidden_flow_system_carrier>"
     skeletons: list[tuple[str, str, str, str]] = []
     for config, _version in selected:
-        safe_flow = escape(str(config.flow_id)[:256], quote=True)
+        flow_id = str(config.flow_id)[:256]
+        safe_flow = escape(flow_id, quote=True)
         before = (
             '<flow id="%s"><global_flow_guide>' % safe_flow
         )
         after = "</global_flow_guide></flow>"
-        skeletons.append((before, after, _guide_text(config), safe_flow))
+        skeletons.append((before, after, _guide_text(config), flow_id))
     used = len(prefix) + len(suffix) + sum(
         len(before) + len(after)
         for before, after, _guide, _safe_flow in skeletons
