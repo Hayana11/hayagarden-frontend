@@ -7,7 +7,7 @@ import json
 from html import escape
 from typing import Any, Iterable, Mapping, Optional
 
-from .types import MAX_STAGE_GUIDANCE_CHARS, DrawItem, DrawResult, FlowConfig, FlowState, PoolSpec
+from .types import MAX_GLOBAL_GUIDANCE_CHARS, MAX_STAGE_GUIDANCE_CHARS, DrawItem, DrawResult, FlowConfig, FlowState, PoolSpec
 
 
 MAX_DRAWS = 12
@@ -360,13 +360,24 @@ def _escape_bounded(value: str, max_chars: int) -> str:
     return escape(value[:low], quote=False)
 
 
+def _private_hint_block(
+    value: object,
+    trusted_protocol_tags: tuple[str, ...],
+) -> str:
+    rendered = escape(str(value or "")[:1200], quote=False)
+    for tag in trusted_protocol_tags:
+        rendered = rendered.replace(escape(tag, quote=False), tag)
+    return "<hint>%s</hint>" % rendered
+
+
 def render_private_guide(
     config: FlowConfig,
     state: FlowState,
     draw_result: Optional[DrawResult] = None,
     protocol_hints: Iterable[str] = (),
+    trusted_protocol_tags: Iterable[str] = (),
 ) -> str:
-    """Render only bounded normalized state and selected anchors."""
+    """Render bounded private guidance with protocol budget reserved first."""
     if not config.enabled or not state.active or config.stage(state.stage) is None:
         return ""
     result = draw_result or DrawResult()
@@ -377,7 +388,7 @@ def render_private_guide(
     safe_flow = escape(str(config.flow_id)[:256], quote=True)
     safe_stage = escape(str(state.stage)[:256], quote=True)
     safe_next_stage = escape(str(stage.next_stage or "")[:256], quote=True)
-    chunks = [
+    prefix = (
         '<hidden_flow_guidance flow="%s" stage="%s" cycle="%d" turn="%d" '
         'minimum="%d" terminal="%s" next_stage="%s" next_terminal="%s">'
         % (
@@ -390,38 +401,61 @@ def render_private_guide(
             safe_next_stage,
             str(bool(next_stage and next_stage.terminal)).lower(),
         )
+    )
+    suffix = "</hidden_flow_guidance>"
+    trusted_tags = tuple(trusted_protocol_tags)
+    hint_blocks = [
+        _private_hint_block(hint, trusted_tags)
+        for hint in list(protocol_hints)[:8]
     ]
-    used = len(chunks[0])
-    if stage.guidance_prompt:
-        wrapper_size = len("<stage_guidance></stage_guidance>")
-        remaining = MAX_PRIVATE_TEXT - used - len("</hidden_flow_guidance>") - wrapper_size
-        escaped_prompt = _escape_bounded(
-            stage.guidance_prompt[:MAX_STAGE_GUIDANCE_CHARS],
-            remaining,
+    reserved = len(prefix) + len(suffix) + sum(len(block) for block in hint_blocks)
+    remaining = max(0, MAX_PRIVATE_TEXT - reserved)
+    content_blocks: list[str] = []
+
+    def append_guidance(tag: str, value: str, max_chars: int) -> None:
+        nonlocal remaining
+        if not value or remaining <= len(tag) + 2:
+            return
+        wrapper_size = len(tag) * 2 + 5
+        escaped_value = _escape_bounded(
+            value[:max_chars],
+            remaining - wrapper_size,
         )
-        if escaped_prompt:
-            block = "<stage_guidance>%s</stage_guidance>" % escaped_prompt
-            chunks.append(block)
-            used += len(block)
+        if not escaped_value:
+            return
+        block = "<%s>%s</%s>" % (tag, escaped_value, tag)
+        content_blocks.append(block)
+        remaining -= len(block)
+
+    # The order is global -> stage -> anchors -> hints. Budget allocation is
+    # deliberately calculated with hints already reserved, so control format
+    # and tail protocol cannot be displaced by user-authored guidance.
+    append_guidance(
+        "global_guidance",
+        str(getattr(config, "guidance_prompt", "") or "").strip(),
+        MAX_GLOBAL_GUIDANCE_CHARS,
+    )
+    append_guidance(
+        "stage_guidance",
+        str(stage.guidance_prompt or "").strip(),
+        MAX_STAGE_GUIDANCE_CHARS,
+    )
+
     for item in result.draws[:MAX_DRAWS]:
         pool = config.pool(item.pool_id)
-        if pool is None or not any(entry.entry_id == item.entry_id and entry.text == item.text for entry in pool.entries):
+        if pool is None or not any(
+            entry.entry_id == item.entry_id and entry.text == item.text
+            for entry in pool.entries
+        ):
             continue
-        value = escape(item.text, quote=False)
-        block = "<anchor pool=\"%s\" id=\"%s\">%s</anchor>" % (
+        block = '<anchor pool="%s" id="%s">%s</anchor>' % (
             escape(str(item.pool_id)[:256], quote=True),
             escape(str(item.entry_id)[:256], quote=True),
-            value,
+            escape(item.text, quote=False),
         )
-        if used + len(block) + len("</hidden_flow_guidance>") > MAX_PRIVATE_TEXT:
+        if len(block) > remaining:
             break
-        chunks.append(block)
-        used += len(block)
-    for hint in list(protocol_hints)[:4]:
-        block = "<hint>%s</hint>" % escape(str(hint or "")[:1200], quote=False)
-        if used + len(block) + len("</hidden_flow_guidance>") > MAX_PRIVATE_TEXT:
-            break
-        chunks.append(block)
-        used += len(block)
-    chunks.append("</hidden_flow_guidance>")
-    return "".join(chunks)
+        content_blocks.append(block)
+        remaining -= len(block)
+
+    return prefix + "".join(content_blocks) + "".join(hint_blocks) + suffix
