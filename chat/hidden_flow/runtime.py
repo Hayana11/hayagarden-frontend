@@ -301,7 +301,7 @@ def build_activation_block(
         return ""
     limit = max(0, int(max_chars))
     suffix = "</available_hidden_flows>"
-    prefix = '<available_hidden_flows mode="inactive">'
+    prefix = '<available_hidden_flows>'
     used = len(prefix) + len(suffix)
     if used > limit:
         return ""
