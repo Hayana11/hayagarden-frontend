@@ -211,11 +211,11 @@ class HiddenFlowGlobalGuidanceTests(unittest.TestCase):
             request = runtime.render_plan_request(plan, "USER")
             self.assertNotIn("PREPARED_GLOBAL", request)
             self.assertIn("<available_hidden_flows>", request)
-        self.assertNotIn("<hidden_flow_control", request)
-        self.assertNotIn("<protected_activation_protocol>", request)
-        self.assertNotIn("<protected_active_protocol>", request)
-        self.assertNotIn("<control_tail>", request)
-        self.assertEqual(plan.global_guide_carrier, "system_stable")
+            self.assertNotIn("<hidden_flow_control", request)
+            self.assertNotIn("<protected_activation_protocol>", request)
+            self.assertNotIn("<protected_active_protocol>", request)
+            self.assertNotIn("<control_tail>", request)
+            self.assertEqual(plan.global_guide_carrier, "system_stable")
         finally:
             os.unlink(db_path)
 
