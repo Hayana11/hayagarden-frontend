@@ -147,6 +147,7 @@ def _render_applied_guide(
 
 
 MAX_ACTIVATION_TEXT = 4000
+MAX_GLOBAL_SYSTEM_CARRIER_CHARS = 40000
 
 # Migration bridge: when guidancePrompt is empty, keep the old code-owned
 # natural-language contract in one removable location. A non-empty
@@ -243,31 +244,36 @@ def build_global_guide_system_block(
     configs: Iterable[tuple[FlowConfig, int]],
     *,
     active_flow_id: Optional[str] = None,
+    max_chars: int = MAX_GLOBAL_SYSTEM_CARRIER_CHARS,
 ) -> str:
-    """Build the stable private/system carrier for non-empty global guides.
+    """Build the bounded stable private/system carrier for global guides.
 
-    This carrier is deliberately independent of stage, turn, anchors, and
-    current user content. The exact control syntax remains code-owned here;
-    user-authored guidance is escaped as text and cannot create XML/control
-    structure.
+    The code-owned control wrappers are reserved before user-authored guide
+    text, and the whole carrier has a fixed upper bound for multi-flow
+    inactive turns. The carrier is independent of stage, turn, anchors, and
+    current user content.
     """
-    rows: list[str] = []
-    for config, _version in _selected_guide_configs(
-        configs,
-        active_flow_id=active_flow_id,
-    ):
-        guide = _guide_text(config)
-        if not guide:
-            continue
-        safe_flow = escape(str(config.flow_id)[:256], quote=True)
-        encoded = _escape_bounded(
-            guide[:MAX_GLOBAL_GUIDANCE_CHARS],
-            MAX_GLOBAL_GUIDANCE_CHARS * 6,
+    selected = [
+        item for item in _selected_guide_configs(
+            configs,
+            active_flow_id=active_flow_id,
         )
-        rows.append(
-            '<flow id="%s">'
-            '<global_flow_guide>%s</global_flow_guide>'
-            '<protected_activation_protocol>'
+        if _guide_text(item[0])
+    ]
+    if not selected:
+        return ""
+    limit = max(0, int(max_chars))
+    prefix = "<hidden_flow_system_carrier>"
+    suffix = "</hidden_flow_system_carrier>"
+    skeletons: list[tuple[str, str, str]] = []
+    for config, _version in selected:
+        safe_flow = escape(str(config.flow_id)[:256], quote=True)
+        before = (
+            '<flow id="%s"><global_flow_guide>' % safe_flow
+        )
+        after = (
+            "</global_flow_guide>"
+            "<protected_activation_protocol>"
             '<hidden_flow_control flow="%s" action="start"/>'
             "</protected_activation_protocol>"
             "<protected_active_protocol>"
@@ -275,13 +281,29 @@ def build_global_guide_system_block(
             '<hidden_flow_control flow="%s" action="stop"/>'
             "<control_tail>max one control; final token/block; nothing after it"
             "</control_tail>"
-            "</protected_active_protocol>"
-            "</flow>"
-            % (safe_flow, encoded, safe_flow, safe_flow, safe_flow)
+            "</protected_active_protocol></flow>"
+            % (safe_flow, safe_flow, safe_flow)
         )
-    if not rows:
+        skeletons.append((before, after, _guide_text(config)))
+    used = len(prefix) + len(suffix) + sum(
+        len(before) + len(after)
+        for before, after, _guide in skeletons
+    )
+    if used > limit:
         return ""
-    return "<hidden_flow_system_carrier>" + "".join(rows) + "</hidden_flow_system_carrier>"
+    remaining = limit - used
+    rows: list[str] = []
+    for index, (before, after, guide) in enumerate(skeletons):
+        rows_left = len(skeletons) - index
+        share = remaining if rows_left == 1 else remaining // rows_left
+        encoded = _escape_bounded(
+            guide[:MAX_GLOBAL_GUIDANCE_CHARS],
+            max(0, share),
+        )
+        block = before + encoded + after
+        rows.append(block)
+        remaining -= len(encoded)
+    return prefix + "".join(rows) + suffix
 
 
 def build_activation_block(
