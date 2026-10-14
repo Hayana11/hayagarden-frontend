@@ -7093,6 +7093,21 @@ def ensure_resident_and_stream(
                 )
 
         _validate_hot_no_op_payload(plan, content)
+
+        # Capture the exact provider-visible payload for shared post-send accounting.
+        # This is an observation snapshot only; it does not select or rewrite context.
+        plan._provider_prompt_system_snapshot = str(effective_system or '')
+        plan._provider_prompt_content_snapshot = copy.deepcopy(content)
+        plan._provider_prompt_bootstrap_kind = (
+            'capacity'
+            if bool(plan.manifest.get('capacity_swap'))
+            else 'respawn'
+            if bool(plan.is_respawn)
+            else 'cold'
+            if bool(plan.is_cold or actual_cold)
+            else 'hot'
+        )
+
         _observe_continuity_shadow(
             plan=plan,
             resident=resident,
@@ -7247,6 +7262,221 @@ def ensure_resident_and_stream(
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)
 
 
+def _attach_daily_provider_budget_observation(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    static_system: str,
+    usage: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Attach the shared provider-envelope observation to canonical Daily turns.
+
+    The estimator remains an observation of the existing prompt and provider
+    usage. It does not select sources, install receipts, or change budgets.
+    """
+    try:
+        from tools import cc_usage_observability as obs
+
+        provider_system = str(
+            getattr(plan, '_provider_prompt_system_snapshot', None)
+            or static_system
+            or ''
+        )
+        provider_content = getattr(resident, '_last_provider_content', None)
+        if provider_content is None:
+            provider_content = getattr(
+                plan, '_provider_prompt_content_snapshot', None,
+            )
+        if provider_content is None:
+            raise RuntimeError('provider_prompt_snapshot_missing')
+
+        bootstrap_kind = str(
+            getattr(plan, '_provider_prompt_bootstrap_kind', None)
+            or 'hot'
+        )
+        bootstrap_like = bootstrap_kind in {'cold', 'respawn', 'capacity'}
+        assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
+        context_plan = (
+            getattr(plan, 'capacity_context_plan', None)
+            or getattr(plan, 'continuity_plan', None)
+        )
+        representation_blocks = (
+            assembly.get('context_plan_representation_blocks') or []
+        )
+        canonical_history = _format_context_plan_representation_blocks(
+            representation_blocks,
+        )
+        cold_once_parts = []
+        if bootstrap_like:
+            handoff = str(assembly.get('day_handoff') or '').strip()
+            carryover = _format_carryover_messages(
+                assembly.get('carryover_messages') or [],
+            )
+            if handoff:
+                cold_once_parts.append(handoff)
+            if carryover:
+                cold_once_parts.append(carryover)
+        tool_surface = getattr(resident, 'tool_surface_snapshot', None) or {}
+        allowed_tools = getattr(resident, 'allowed_tools', None)
+        allowed_tool_count = (
+            len([item for item in str(allowed_tools or '').split(',') if item.strip()])
+            or None
+        )
+        breakdown = obs.build_context_breakdown(
+            full_system=provider_system,
+            cold_once_text='\n\n'.join(cold_once_parts),
+            history_bootstrap_text=canonical_history,
+            state_text=str(assembly.get('state') or ''),
+            state_mode=str(
+                (assembly.get('manifest') or {}).get('state_mode') or 'none'
+            ),
+            user_text=str(getattr(plan, 'user_content', '') or ''),
+            final_content=provider_content,
+            tool_schema_text=tool_surface.get('tool_schema_text'),
+            tool_schema_source=tool_surface.get('tool_schema_source'),
+            tool_count=tool_surface.get('tool_count'),
+            allowed_tool_count=allowed_tool_count,
+            is_cold=bootstrap_like,
+        )
+        breakdown.update({
+            'bootstrap_kind': bootstrap_kind,
+            'provider_prompt_snapshot_status': 'exact_final_send_payload',
+            'provider_envelope_measurement_status': 'post_send_residual',
+            'provider_envelope_known_visible_complete': False,
+            'provider_envelope_unattributed_components': [
+                'claude_internal_system',
+                'hook_runtime',
+                'tool_protocol_serialization',
+                'provider_tokenizer_or_serialization_difference',
+            ] + (
+                []
+                if breakdown.get('tool_schema_measurement_status') == 'available'
+                else ['tool_schema']
+            ),
+            'accounting_components_are_non_additive': True,
+            'context_plan_id': str(
+                plan.manifest.get('context_plan_id')
+                or getattr(context_plan, 'plan_id', '')
+                or ''
+            ),
+            'context_plan_hash': str(
+                plan.manifest.get('context_plan_hash')
+                or getattr(context_plan, 'plan_hash', '')
+                or ''
+            ),
+            'context_plan_source_hash': str(
+                plan.manifest.get('context_plan_source_hash')
+                or getattr(context_plan, 'source_hash', '')
+                or ''
+            ),
+            'context_plan_selected_token_estimate': (
+                getattr(context_plan, 'selected_token_estimate', None)
+                if context_plan is not None else None
+            ),
+            'context_plan_fixed_section_token_estimate': (
+                getattr(context_plan, 'fixed_section_token_estimate', None)
+                if context_plan is not None else None
+            ),
+            'context_plan_total_token_estimate': (
+                getattr(context_plan, 'total_token_estimate', None)
+                if context_plan is not None else None
+            ),
+            'cold_prompt_estimate': plan.manifest.get('cold_prompt_estimate'),
+            'cold_prompt_target': plan.manifest.get('cold_prompt_target'),
+            'capacity_prompt_target': plan.manifest.get('capacity_prompt_target'),
+        })
+        breakdown = obs.finalize_breakdown_with_usage(
+            breakdown,
+            usage,
+            is_cold=bootstrap_like,
+        )
+        observed_effort = usage.get('_obs_effort')
+        runtime = obs.build_runtime(
+            resident_generation=int(
+                usage.get('_obs_resident_generation')
+                or getattr(resident, 'generation', None)
+                or plan.resident_generation
+                or 0
+            ),
+            resident_pid=usage.get('_obs_resident_pid')
+            or getattr(resident, 'resident_pid', None),
+            resident_turn_count=int(usage.get('resident_turn_count') or 0),
+            respawn_reason=usage.get('respawn_reason'),
+            idle_seconds_before_turn=usage.get(
+                '_obs_idle_seconds_before_turn'
+            ),
+            is_cold=bootstrap_like,
+            static_system=provider_system,
+            mcp_config_path=getattr(resident, 'mcp_config_path', None),
+            allowed_tools=allowed_tools,
+            tool_schema_sha256=(
+                usage.get('_obs_tool_schema_sha256')
+                or tool_surface.get('tool_schema_sha256')
+            ),
+            tool_schema_source=(
+                usage.get('_obs_tool_schema_source')
+                or tool_surface.get('tool_schema_source')
+            ),
+            tool_schema_measurement_status=(
+                usage.get('_obs_tool_schema_measurement_status')
+                or tool_surface.get('tool_schema_measurement_status')
+            ),
+            tool_count=(
+                usage.get('_obs_tool_count')
+                if usage.get('_obs_tool_count') is not None
+                else tool_surface.get('tool_count')
+            ),
+            claude_session_id=(
+                usage.get('_obs_claude_session_id')
+                or getattr(resident, 'session_id', None)
+                or getattr(plan, 'transcript_claude_session_id', None)
+            ),
+            model=(
+                usage.get('_obs_model')
+                or plan.manifest.get('model')
+                or getattr(resident, 'model_identity', None)
+            ),
+            effort=observed_effort,
+            runtime_identity=getattr(resident, '_runtime_identity', None),
+            thinking_config={
+                'thinking_display': 'summarized',
+                'effort': observed_effort,
+            },
+            claude_code_version=obs.detect_claude_code_version(),
+            observed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            keepwarm_lease_expires_at=usage.get(
+                '_obs_keepwarm_lease_expires_at'
+            ),
+            provider='claude_code',
+        )
+        turn_measurement = obs.build_turn_measurement(
+            breakdown=breakdown,
+            usage=usage,
+            runtime=runtime,
+            is_cold=bootstrap_like,
+        )
+        breakdown['turn_tags'] = list(turn_measurement.get('turn_tags') or [])
+        breakdown['turn_measurement'] = turn_measurement
+        observed = obs.attach_observation(
+            usage,
+            context_breakdown=breakdown,
+            runtime=runtime,
+        )
+        for key in list(observed):
+            if str(key).startswith('_obs_'):
+                observed.pop(key, None)
+        if isinstance(usage, dict):
+            usage.clear()
+            usage.update(observed)
+            return usage
+        return observed
+    except Exception:
+        logger.exception(
+            'daily provider budget observation failed; preserving usage'
+        )
+        return usage
+
+
 def stream_daily_resident_turn(
     plan: DailyTurnPlan,
     *,
@@ -7254,9 +7484,25 @@ def stream_daily_resident_turn(
     env: dict[str, str],
     static_system: str,
 ) -> Iterator[tuple[str, Any]]:
-    yield from ensure_resident_and_stream(
+    for event, payload in ensure_resident_and_stream(
         plan, resident=resident, env=env, static_system=static_system,
-    )
+    ):
+        if (
+            event == 'done'
+            and isinstance(payload, tuple)
+            and len(payload) >= 3
+            and isinstance(payload[2], dict)
+        ):
+            observed_usage = _attach_daily_provider_budget_observation(
+                plan,
+                resident=resident,
+                static_system=static_system,
+                usage=payload[2],
+            )
+            payload = tuple(
+                list(payload[:2]) + [observed_usage] + list(payload[3:])
+            )
+        yield event, payload
 
 
 
