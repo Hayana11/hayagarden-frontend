@@ -5485,10 +5485,13 @@ def _attempt_capacity_swap_before_stdin(
                        'scan_offset_invalid', 'transcript_path_mismatch',
                        'chat_id_required'}:
                 err = 'registry_register_failed'
-        target_registry = get_context_claude_session(
-            source_ctx,
-            target_gen,
-            db_path=plan.db_path,
+        target_registry = (
+            get_context_claude_session(
+                source_ctx,
+                target_gen,
+                db_path=plan.db_path,
+            )
+            if generation_bumped else None
         )
         if generation_bumped and target_registry is None and not generation_rollback.get('ok'):
             err = 'capacity_swap_generation_rollback_unproven'
