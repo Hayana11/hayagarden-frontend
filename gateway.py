@@ -4128,17 +4128,25 @@ def _append_reality_to_last_user(messages, reality_context):
 class _RequestRealityResident:
     """Ephemeral resident adapter for one request-scoped Reality snapshot."""
 
-    __slots__ = ('_resident', '_request_reality_context')
+    __slots__ = (
+        '_resident',
+        '_request_reality_context',
+        '_last_provider_content',
+    )
 
     def __init__(self, resident, request_reality_context):
         self._resident = resident
         self._request_reality_context = request_reality_context
+        self._last_provider_content = None
 
     def send_turn(self, content, **kwargs):
         content = _append_reality_context(
             content,
             self._request_reality_context,
         )
+        # Daily budget accounting reads this after send_turn; preserve the
+        # exact adapter-transformed payload without changing its semantics.
+        self._last_provider_content = copy.deepcopy(content)
         return self._resident.send_turn(content, **kwargs)
 
     def __getattr__(self, name):
