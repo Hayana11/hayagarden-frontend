@@ -7405,7 +7405,7 @@ def _attach_daily_provider_budget_observation(
             idle_seconds_before_turn=usage.get(
                 '_obs_idle_seconds_before_turn'
             ),
-            is_cold=bootstrap_like,
+            is_cold=bootstrap_kind in {'cold', 'respawn'},
             static_system=provider_system,
             mcp_config_path=getattr(resident, 'mcp_config_path', None),
             allowed_tools=allowed_tools,
@@ -7449,11 +7449,17 @@ def _attach_daily_provider_budget_observation(
             ),
             provider='claude_code',
         )
+        runtime.update({
+            'bootstrap_kind': bootstrap_kind,
+            'provider_envelope_measurement_status': (
+                'post_send_residual'
+            ),
+        })
         turn_measurement = obs.build_turn_measurement(
             breakdown=breakdown,
             usage=usage,
             runtime=runtime,
-            is_cold=bootstrap_like,
+            is_cold=bootstrap_kind in {'cold', 'respawn'},
         )
         breakdown['turn_tags'] = list(turn_measurement.get('turn_tags') or [])
         breakdown['turn_measurement'] = turn_measurement
