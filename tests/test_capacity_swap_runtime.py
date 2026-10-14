@@ -765,6 +765,8 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         source_key = str(plan.resident_key)
         source_assembly = plan.assembly
         source_close_fn = plan._resident_close_fn
+        source_is_cold = plan.is_cold
+        source_is_respawn = plan.is_respawn
 
         staged = _DoorResident(None, session_id='sid-new-adopt')
         handoff = CapacitySwapRuntimeResult(
@@ -836,8 +838,8 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
         self.assertEqual(str(plan.resident_key), source_key)
         self.assertIs(plan.assembly, source_assembly)
         self.assertIs(plan._resident_close_fn, source_close_fn)
-        self.assertFalse(plan.is_cold)
-        self.assertFalse(plan.is_respawn)
+        self.assertEqual(plan.is_cold, source_is_cold)
+        self.assertEqual(plan.is_respawn, source_is_respawn)
 
     def test_install_defers_old_proc_kill_until_explicit_close(self):
         """Old last-good proc must survive install; only deferred close kills it."""
@@ -1582,7 +1584,6 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
 
     def test_context_plan_mapping_duplicate_offset_fails_closed(self):
         graph, round_item, rows = self._strict_mapping_fixture(2)
-        graph.by_uuid['a2'].byte_offset = 200
         rows = [dict(row) for row in rows]
         rows[2]['jsonl_byte_offset'] = 200
         with self.assertRaises(CapacitySwapRuntimeError) as raised:
