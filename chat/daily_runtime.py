@@ -15,7 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 import cc_resident
 import config_store
