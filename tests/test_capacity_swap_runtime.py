@@ -45,6 +45,7 @@ from chat.capacity_swap_runtime import (
     prepare_capacity_swap_for_context_plan,
     resolve_finalize_registry_source,
     try_restore_same_context_last_good,
+    _validate_context_plan_round_mapping,
     with_capacity_boundary_suffix,
 )
 from chat.session_registry import (
@@ -1378,6 +1379,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 event_type=event_type,
                 raw=raw,
                 line_number=line,
+                byte_offset=line * 10,
             )
 
         source_events = [
@@ -1398,11 +1400,20 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 2,
             ),
             event(
+                'a1b', EventRole.ASSISTANT, EventType.ASSISTANT,
+                {'type': 'assistant', 'message': {
+                    'role': 'assistant', 'content': [{
+                        'type': 'text', 'text': 'answer-one-followup',
+                    }],
+                }},
+                3,
+            ),
+            event(
                 'u2', EventRole.CANDIDATE_USER, EventType.USER,
                 {'type': 'user', 'message': {
                     'role': 'user', 'content': 'old-two',
                 }},
-                3,
+                4,
             ),
             event(
                 'a2', EventRole.ASSISTANT, EventType.ASSISTANT,
@@ -1411,14 +1422,14 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                         'type': 'text', 'text': 'answer-two',
                     }],
                 }},
-                4,
+                5,
             ),
             event(
                 'u3', EventRole.CANDIDATE_USER, EventType.USER,
                 {'type': 'user', 'message': {
                     'role': 'user', 'content': 'old-tool-user',
                 }},
-                5,
+                6,
             ),
             event(
                 'a3', EventRole.ASSISTANT, EventType.ASSISTANT,
@@ -1430,7 +1441,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                         'input': {'q': 'x'},
                     }],
                 }},
-                6,
+                7,
             ),
             event(
                 't3', EventRole.TOOL_RESULT_USER, EventType.USER,
@@ -1441,7 +1452,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                         'content': 'TOOL_OUTCOME',
                     }],
                 }, 'sourceToolUseID': 'tool-3'},
-                7,
+                8,
             ),
         ]
         graph = TranscriptGraph(
@@ -1451,7 +1462,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             candidate_rounds=[
                 CandidateConversationRound(
                     candidate_user_event_uuid='u1',
-                    event_uuids=('u1', 'a1'),
+                    event_uuids=('u1', 'a1', 'a1b'),
                     has_assistant=True,
                 ),
                 CandidateConversationRound(
@@ -1522,9 +1533,31 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         }
         mid_to_event = {1: 'u1', 3: 'u2', 5: 'u3'}
         event_to_mid = {
-            'u1': 1, 'a1': 2, 'u2': 3, 'a2': 4,
+            'u1': 1, 'a1': 2, 'a1b': 2, 'u2': 3, 'a2': 4,
             'u3': 5, 'a3': 6, 't3': 7,
         }
+        mapping_rows = tuple(
+            {
+                'event_uuid': event_uuid,
+                'message_id': message_id,
+                'role': role,
+                'claude_session_id': 'source-session',
+                'context_id': 7,
+                'context_epoch': 3,
+                'resident_generation': 1,
+                'jsonl_byte_offset': graph.by_uuid[event_uuid].byte_offset,
+            }
+            for event_uuid, message_id, role in (
+                ('u1', 1, 'user'),
+                ('a1', 2, 'assistant'),
+                ('a1b', 2, 'assistant'),
+                ('u2', 3, 'user'),
+                ('a2', 4, 'assistant'),
+                ('u3', 5, 'user'),
+                ('a3', 6, 'assistant'),
+                ('t3', 7, 'tool_result_user'),
+            )
+        )
         source_members = {
             'turn:1:2': member_one,
             'turn:5:6': member_tool,
@@ -1554,6 +1587,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             'chat.capacity_swap_runtime._load_mapping_for_messages',
             return_value=(canonical, mid_to_event, event_to_mid),
         ), mock.patch(
+            'chat.capacity_swap_runtime._load_mapping_rows_for_messages',
+            return_value=mapping_rows,
+        ), mock.patch(
             'chat.capacity_swap_runtime._capacity_context_source_member_from_db',
             side_effect=lambda **kwargs: source_members[
                 'turn:%d:%d' % (kwargs['user_id'], kwargs['assistant_id'])
@@ -1580,6 +1616,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
             (1, 2, 5, 6, 7),
         )
         self.assertIn('CANONICAL_ONE', candidate.serialized_jsonl)
+        self.assertIn('answer-one-followup', candidate.serialized_jsonl)
         self.assertIn('CANONICAL_TOOL_USER', candidate.serialized_jsonl)
         self.assertIn('TOOL_OUTCOME', candidate.serialized_jsonl)
         self.assertNotIn('CANONICAL_TWO', candidate.serialized_jsonl)
@@ -1604,6 +1641,266 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         self.assertEqual(request.summary_policy, SummaryPolicy.DROP)
         legacy_prepare.assert_not_called()
 
+    def _raw_mapping_fixture(
+        self,
+        *,
+        assistant_count=1,
+        assistant_sessions=None,
+        duplicate_offset=False,
+        sidechain=False,
+        mapping_rows=None,
+    ):
+        from chat.claude_transcript_model import (
+            CandidateConversationRound,
+            EventRole,
+            EventType,
+            TranscriptEvent,
+            TranscriptGraph,
+        )
+
+        sessions = tuple(assistant_sessions or ('source-session',) * assistant_count)
+        self.assertEqual(len(sessions), assistant_count)
+        events = [TranscriptEvent(
+            event_uuid='u1',
+            parent_uuid=None,
+            session_id='source-session',
+            event_role=EventRole.CANDIDATE_USER,
+            event_type=EventType.USER,
+            raw={'type': 'user', 'message': {'role': 'user', 'content': 'old'}},
+            line_number=1,
+            byte_offset=100,
+        )]
+        for index in range(assistant_count):
+            offset = 200 + index * 100
+            if duplicate_offset and index:
+                offset = 200
+            events.append(TranscriptEvent(
+                event_uuid='a%d' % (index + 1),
+                parent_uuid=None,
+                session_id=sessions[index],
+                event_role=EventRole.ASSISTANT,
+                event_type=EventType.ASSISTANT,
+                raw={
+                    'type': 'assistant',
+                    'message': {
+                        'role': 'assistant',
+                        'content': [{'type': 'text', 'text': 'answer-%d' % index}],
+                    },
+                },
+                line_number=index + 2,
+                byte_offset=offset,
+            ))
+        event_uuids = tuple(event.event_uuid for event in events)
+        round_item = CandidateConversationRound(
+            candidate_user_event_uuid='u1',
+            event_uuids=event_uuids,
+            has_assistant=True,
+            sidechain_impact_uuids=('side-1',) if sidechain else (),
+        )
+        graph = TranscriptGraph(
+            session_id='source-session',
+            events=events,
+            by_uuid={event.event_uuid: event for event in events},
+            candidate_rounds=[round_item],
+        )
+        rows = list(mapping_rows or [
+            {
+                'event_uuid': event.event_uuid,
+                'message_id': 1 if event.event_uuid == 'u1' else 2,
+                'role': 'user' if event.event_uuid == 'u1' else 'assistant',
+                'claude_session_id': 'source-session',
+                'context_id': 7,
+                'context_epoch': 3,
+                'resident_generation': 1,
+                'jsonl_byte_offset': event.byte_offset,
+            }
+            for event in events
+        ])
+        return graph, round_item, rows
+
+    def _validate_raw_mapping(self, **kwargs):
+        graph, round_item, rows = self._raw_mapping_fixture(**kwargs)
+        return _validate_context_plan_round_mapping(
+            graph=graph,
+            round_item=round_item,
+            user_id=1,
+            assistant_id=2,
+            claude_session_id='source-session',
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            scan_offset=400,
+            mapping_rows=rows,
+        )
+
+    def test_raw_mapping_accepts_single_and_multi_assistant_events(self):
+        self.assertEqual(len(self._validate_raw_mapping()), 2)
+        planned = self._validate_raw_mapping(assistant_count=2)
+        self.assertEqual(
+            [row['event_uuid'] for row in planned],
+            ['u1', 'a1', 'a2'],
+        )
+
+    def test_raw_mapping_rejects_session_offset_mapping_role_and_missing_rows(self):
+        with self.assertRaises(CapacitySwapRuntimeError):
+            self._validate_raw_mapping(assistant_count=2, assistant_sessions=(
+                'source-session', 'other-session',
+            ))
+        with self.assertRaises(CapacitySwapRuntimeError):
+            self._validate_raw_mapping(assistant_count=2, duplicate_offset=True)
+
+        _graph, _round, rows = self._raw_mapping_fixture(assistant_count=2)
+        with self.assertRaises(CapacitySwapRuntimeError):
+            self._validate_raw_mapping(
+                assistant_count=2,
+                mapping_rows=rows[:-1],
+            )
+
+        _graph, _round, rows = self._raw_mapping_fixture(assistant_count=1)
+        rows[1] = dict(rows[1], role='user')
+        with self.assertRaises(CapacitySwapRuntimeError):
+            self._validate_raw_mapping(mapping_rows=rows)
+
+    def test_raw_mapping_rejects_sidechain_round(self):
+        with self.assertRaises(CapacitySwapRuntimeError) as ctx:
+            self._validate_raw_mapping(sidechain=True)
+        self.assertEqual(
+            ctx.exception.error_code,
+            'context_plan_capacity_raw_sidechain_invalid',
+        )
+
+    def test_raw_mapping_failure_does_not_commit(self):
+        graph, round_item, rows = self._raw_mapping_fixture(assistant_count=2)
+        fake_conn = mock.Mock()
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            user_message_id=99,
+            cursor_before=10,
+            db_path='db',
+            chat_id='default',
+            transcript_cwd='/tmp',
+        )
+        member = types.SimpleNamespace(
+            seq=1,
+            source_ref='turn:1:2',
+            source_revision='rev',
+            source_kind='completed_turn',
+            content_hash='hash',
+            span_start=None,
+            span_end=None,
+            branch_id='active',
+        )
+        context_plan = types.SimpleNamespace(
+            plan_hash='plan',
+            representations=(types.SimpleNamespace(
+                kind='raw', source_members=(member,),
+            ),),
+        )
+        with mock.patch(
+            'chat.capacity_swap_runtime.get_context_claude_session',
+            return_value={
+                'scan_status': 'ready',
+                'transcript_path': '/tmp/source.jsonl',
+                'claude_session_id': 'source-session',
+                'scan_offset': 400,
+                'last_mapped_message_id': 2,
+            },
+        ), mock.patch(
+            'chat.capacity_swap_runtime.latest_complete_assistant_watermark',
+            return_value=2,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.registry_mapping_lags_watermark',
+            return_value=False,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._snapshot_prefix_sha256',
+            return_value='a' * 64,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.read_transcript_range',
+            return_value=graph,
+        ), mock.patch.object(dc, '_connect', return_value=fake_conn), mock.patch(
+            'chat.capacity_swap_runtime._load_formal_messages_excluding_current',
+            return_value=[{'id': 1}, {'id': 2}],
+        ), mock.patch(
+            'chat.capacity_swap_runtime._load_mapping_for_messages',
+            return_value=({'u1': 'canonical'}, {1: 'u1'}, {
+                row['event_uuid']: row['message_id'] for row in rows
+            }),
+        ), mock.patch(
+            'chat.capacity_swap_runtime._load_mapping_rows_for_messages',
+            return_value=tuple(rows[:-1]),
+        ), mock.patch(
+            'chat.capacity_swap_runtime._capacity_context_source_member_from_db',
+            return_value=member,
+        ):
+            result = prepare_capacity_swap_for_context_plan(
+                plan=plan,
+                context_plan=context_plan,
+                trigger_reason='soft_context',
+                static_system='STATIC_PERSONA',
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_raw_mapping_missing',
+        )
+        fake_conn.commit.assert_not_called()
+
+    def test_raw_corrupt_transcript_fails_closed_before_mapping(self):
+        member = types.SimpleNamespace(
+            seq=1,
+            source_ref='turn:1:2',
+            source_revision='rev',
+            source_kind='completed_turn',
+            content_hash='hash',
+            span_start=None,
+            span_end=None,
+            branch_id='active',
+        )
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            user_message_id=99,
+            db_path='db',
+        )
+        context_plan = types.SimpleNamespace(
+            representations=(types.SimpleNamespace(
+                kind='raw', source_members=(member,),
+            ),),
+        )
+        with mock.patch(
+            'chat.capacity_swap_runtime.get_context_claude_session',
+            return_value={
+                'scan_status': 'ready',
+                'transcript_path': '/tmp/source.jsonl',
+                'claude_session_id': 'source-session',
+                'scan_offset': 400,
+            },
+        ), mock.patch(
+            'chat.capacity_swap_runtime.latest_complete_assistant_watermark',
+            return_value=2,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.registry_mapping_lags_watermark',
+            return_value=False,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._snapshot_prefix_sha256',
+            return_value='a' * 64,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.read_transcript_range',
+            side_effect=ValueError('corrupt transcript'),
+        ):
+            result = prepare_capacity_swap_for_context_plan(
+                plan=plan,
+                context_plan=context_plan,
+                trigger_reason='soft_context',
+                static_system='STATIC_PERSONA',
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, 'source_transcript_unreadable')
+
 
 if __name__ == '__main__':
     unittest.main()
+
