@@ -754,6 +754,91 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
             src_gen,
         )
 
+
+    def test_registry_failure_after_adopt_restores_source_plan(self):
+        """Post-adopt Registry failure restores DB and in-memory source identity."""
+        from dataclasses import replace
+
+        uid = _insert(self.db, 'hayana', 'registry-fail', '2026-07-27 10:00:00')
+        plan = _prepare(self.db, uid)
+        source_gen = int(plan.resident_generation)
+        source_key = str(plan.resident_key)
+        source_assembly = plan.assembly
+        source_close_fn = plan._resident_close_fn
+
+        staged = _DoorResident(None, session_id='sid-new-adopt')
+        handoff = CapacitySwapRuntimeResult(
+            ok=True,
+            candidate=_candidate(
+                source_context_id=int(plan.context_id),
+                source_context_epoch=int(plan.context_epoch),
+                source_resident_generation=source_gen,
+                target_resident_generation=source_gen + 1,
+                candidate_session_id='sid-new-adopt',
+            ),
+            source_context_id=int(plan.context_id),
+            source_context_epoch=int(plan.context_epoch),
+            source_resident_generation=source_gen,
+            target_resident_generation=source_gen + 1,
+            candidate_session_id='sid-new-adopt',
+            effective_system=with_capacity_boundary_suffix('STATIC_PERSONA'),
+        )
+        setattr(handoff, 'staged_resident', staged)
+        target_close_fn = lambda: None
+        replacement = replace(
+            plan,
+            resident_generation=source_gen + 1,
+            resident_key='default:%d:%d' % (
+                int(plan.context_epoch), source_gen + 1,
+            ),
+            assembly={'target_generation': source_gen + 1},
+            is_cold=True,
+            is_respawn=False,
+            _resident_close_fn=target_close_fn,
+        )
+        resident = _DoorResident('soft_context', session_id='sid-old-adopt')
+
+        with mock.patch.object(config_store, 'get_bool', return_value=False), \
+             mock.patch.object(dr, 'is_epoch_token_current', return_value=True), \
+             mock.patch.object(dr, 'run_capacity_swap_handoff', return_value=handoff), \
+             mock.patch.object(
+                 dr,
+                 'install_capacity_swap_into_live_resident',
+                 return_value={'old_proc': None, 'old_binding': None, 'old_attrs': {}},
+             ), \
+             mock.patch.object(
+                 dr,
+                 'reprepare_after_capacity_swap',
+                 return_value=replacement,
+             ), \
+             mock.patch.object(
+                 dr,
+                 'register_capacity_swap_generation',
+                 side_effect=RuntimeError('registry failed after adopt'),
+             ), \
+             mock.patch.object(dr, 'rollback_capacity_swap_install'):
+            out = dr._attempt_capacity_swap_before_stdin(
+                plan,
+                resident=resident,
+                static_system='STATIC_PERSONA',
+                env={},
+                trigger_reason='soft_context',
+            )
+
+        self.assertFalse(out.get('ok'), out)
+        self.assertTrue(out['generation_rollback']['ok'])
+        self.assertTrue(out['target_generation_unregistered'])
+        current = dc.get_daily_context_by_id(
+            int(plan.context_id), db_path=self.db,
+        ) or {}
+        self.assertEqual(int(current['resident_generation']), source_gen)
+        self.assertEqual(int(plan.resident_generation), source_gen)
+        self.assertEqual(str(plan.resident_key), source_key)
+        self.assertIs(plan.assembly, source_assembly)
+        self.assertIs(plan._resident_close_fn, source_close_fn)
+        self.assertFalse(plan.is_cold)
+        self.assertFalse(plan.is_respawn)
+
     def test_install_defers_old_proc_kill_until_explicit_close(self):
         """Old last-good proc must survive install; only deferred close kills it."""
 

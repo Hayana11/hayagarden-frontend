@@ -5304,6 +5304,16 @@ def _attempt_capacity_swap_before_stdin(
             expected_generation=int(target_generation),
             restore_generation=source_gen,
             owner_worker_id=WORKER_ID,
+            owner_resident_key=make_resident_key(
+                chat_id=plan.chat_id,
+                context_epoch=source_epoch,
+                resident_generation=int(target_generation),
+            ),
+            owner_cursor_message_id=(
+                int(watermark)
+                if watermark is not None
+                else max(0, int(plan.user_message_id) - 1)
+            ),
             db_path=plan.db_path,
         )
         if result.get('ok'):

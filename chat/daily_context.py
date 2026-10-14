@@ -2814,6 +2814,8 @@ def rollback_empty_resident_generation(
     expected_generation: int,
     restore_generation: int,
     owner_worker_id: Optional[str] = None,
+    owner_resident_key: Optional[str] = None,
+    owner_cursor_message_id: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """CAS-restore a generation only while it is provably an empty shell.
@@ -2864,7 +2866,8 @@ def rollback_empty_resident_generation(
                 return {'ok': False, 'reason': reason}
 
         owner = conn.execute(
-            'SELECT worker_id FROM daily_resident_owners '
+            'SELECT worker_id, resident_key, bound_cursor_message_id '
+            'FROM daily_resident_owners '
             'WHERE context_id=? AND resident_generation=?',
             (cid, expected),
         ).fetchone()
@@ -2874,9 +2877,23 @@ def rollback_empty_resident_generation(
             (cid, expected),
         ).fetchone()
         expected_worker = str(owner_worker_id or '').strip()
+        expected_key = str(owner_resident_key or '').strip()
+        expected_cursor = (
+            int(owner_cursor_message_id)
+            if owner_cursor_message_id is not None
+            else None
+        )
         if owner is not None and (
             not expected_worker
             or str(owner['worker_id'] or '').strip() != expected_worker
+            or (
+                expected_key
+                and str(owner['resident_key'] or '').strip() != expected_key
+            )
+            or (
+                expected_cursor is not None
+                and int(owner['bound_cursor_message_id'] or -1) != expected_cursor
+            )
         ):
             conn.rollback()
             return {'ok': False, 'reason': 'owner_identity_unproven'}
