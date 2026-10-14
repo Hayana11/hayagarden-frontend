@@ -1543,6 +1543,28 @@ class ResidentSession:
             if item.strip()
         })
 
+    @staticmethod
+    def _spawn_tools_fingerprint(
+        allowed_tools,
+        tool_schema_sha256,
+        tool_profile,
+        built_in_tools_sha256,
+    ):
+        payload = {
+            "allowed_tools": str(allowed_tools or ""),
+            "tool_schema_sha256": tool_schema_sha256,
+            "tool_profile": str(tool_profile or ""),
+            "built_in_tools_sha256": built_in_tools_sha256,
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+
     def _annotate_spawn_tool_flags(self, tool_flags):
         """Attach only opaque fingerprints from exact spawn flags."""
         flags = dict(tool_flags or {})
