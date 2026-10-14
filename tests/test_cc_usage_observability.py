@@ -2233,12 +2233,12 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
         runtime = types.ModuleType("chat.cc_runtime")
         runtime.ClaudeRuntimeError = RuntimeError
         runtime.require_managed_claude_runtime = lambda **kwargs: "2.1.280"
-        runtime.cc_model_runtime_compatibility = lambda model: (True, "")
         history = types.ModuleType("chat.cc_history_rewrite")
         history.current_history_rewrite_epoch = lambda: ""
         history.sanitize_bound_epoch = lambda value: str(value or "")
         model = types.ModuleType("chat.cc_model")
         model.CC_MODEL_RUNTIME_INCOMPATIBLE = "incompatible"
+        model.cc_model_runtime_compatibility = lambda model: (True, "")
         model.cc_model_snapshot = lambda: ("model", "model-id", [])
         effort = types.ModuleType("chat.cc_effort")
         effort.cc_effort_snapshot = lambda: ("", "effort-id", [])
