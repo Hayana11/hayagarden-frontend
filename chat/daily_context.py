@@ -2808,6 +2808,83 @@ def respawn_daily_resident(
         conn.close()
     return get_daily_context_by_id(context_id, db_path=db_path) or {}
 
+def rollback_empty_resident_generation(
+    context_id: int,
+    *,
+    expected_generation: int,
+    restore_generation: int,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """CAS-restore a generation only while it is provably an empty shell.
+
+    respawn_daily_resident advances the durable generation before the
+    Capacity Swap target can publish its Session Registry row. This narrow
+    compensation closes that window without deleting a registry, message,
+    mapping, owner, lease, or cursor created by a concurrent actor.
+    """
+    cid = int(context_id)
+    expected = int(expected_generation)
+    restore = int(restore_generation)
+    if cid <= 0 or expected <= 0 or restore <= 0 or expected != restore + 1:
+        return {'ok': False, 'reason': 'generation_identity_invalid'}
+
+    conn = _connect(db_path)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute(
+            'SELECT resident_generation FROM daily_contexts WHERE id=?',
+            (cid,),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return {'ok': False, 'reason': 'daily_context_missing'}
+        if int(row['resident_generation']) != expected:
+            conn.rollback()
+            return {
+                'ok': False,
+                'reason': 'generation_changed',
+                'current_generation': int(row['resident_generation']),
+            }
+
+        checks = (
+            ('context_claude_sessions', 'registry_present'),
+            ('daily_message_contexts', 'message_context_present'),
+            ('chat_message_claude_events', 'mapping_present'),
+            ('daily_resident_cursors', 'cursor_present'),
+            ('daily_resident_owners', 'owner_present'),
+            ('daily_resident_turn_leases', 'lease_present'),
+        )
+        for table, reason in checks:
+            found = conn.execute(
+                f'SELECT 1 FROM {table} '
+                'WHERE context_id=? AND resident_generation=? LIMIT 1',
+                (cid, expected),
+            ).fetchone()
+            if found is not None:
+                conn.rollback()
+                return {'ok': False, 'reason': reason}
+
+        cur = conn.execute(
+            '''UPDATE daily_contexts SET resident_generation=?, version=version+1,
+               updated_at=datetime('now','+8 hours')
+               WHERE id=? AND resident_generation=?''',
+            (restore, cid, expected),
+        )
+        if int(cur.rowcount or 0) != 1:
+            conn.rollback()
+            return {'ok': False, 'reason': 'generation_restore_cas_failed'}
+        conn.commit()
+        return {
+            'ok': True,
+            'context_id': cid,
+            'restored_generation': restore,
+            'discarded_generation': expected,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def set_morning_greeting_message_id(
     context_id: int,
