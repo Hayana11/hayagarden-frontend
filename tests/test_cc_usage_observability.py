@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2225,6 +2226,100 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
                 "output_tokens": 1752,
             }],
         }
+
+    def test_all_spawn_paths_capture_successful_argv_hash(self):
+        import cc_resident
+
+        runtime = types.ModuleType("chat.cc_runtime")
+        runtime.ClaudeRuntimeError = RuntimeError
+        runtime.require_managed_claude_runtime = lambda **kwargs: "2.1.280"
+        runtime.cc_model_runtime_compatibility = lambda model: (True, "")
+        history = types.ModuleType("chat.cc_history_rewrite")
+        history.current_history_rewrite_epoch = lambda: ""
+        history.sanitize_bound_epoch = lambda value: str(value or "")
+        model = types.ModuleType("chat.cc_model")
+        model.CC_MODEL_RUNTIME_INCOMPATIBLE = "incompatible"
+        model.cc_model_snapshot = lambda: ("model", "model-id", [])
+        effort = types.ModuleType("chat.cc_effort")
+        effort.cc_effort_snapshot = lambda: ("", "effort-id", [])
+
+        class Proc:
+            pid = 4242
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def poll(self):
+                return None
+
+        flags = {
+            "tools": "Read",
+            "surface_allowed": "mcp__one",
+            "mcp_path": None,
+            "tool_profile": "legacy",
+        }
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "chat.cc_runtime": runtime,
+                "chat.cc_history_rewrite": history,
+                "chat.cc_model": model,
+                "chat.cc_effort": effort,
+            },
+        ), mock.patch.object(
+            cc_resident.ResidentSession,
+            "_prepare_spawn_env",
+            return_value={},
+        ), mock.patch.object(
+            cc_resident.ResidentSession,
+            "_build_spawn_tool_flags",
+            return_value=flags,
+        ), mock.patch.object(
+            cc_resident,
+            "compose_spawn_argv",
+            return_value=["claude", "--observed"],
+        ), mock.patch.object(
+            cc_resident.subprocess,
+            "Popen",
+            return_value=Proc(),
+        ), mock.patch.object(
+            cc_resident.time,
+            "sleep",
+        ), mock.patch(
+            "tools.cc_tool_surface.capture_tool_surface_snapshot",
+            return_value={},
+        ):
+            sessions = [
+                cc_resident.ResidentSession("/tmp", "", ""),
+                cc_resident.ResidentSession("/tmp", "", ""),
+                cc_resident.ResidentSession("/tmp", "", ""),
+            ]
+            sessions[0]._spawn("system")
+            sessions[1].spawn_resumable(
+                "system",
+                None,
+                resume_session_id="session-1",
+            )
+            sessions[2].spawn_fresh_named(
+                "system",
+                None,
+                session_id="12345678-1234-5678-1234-567812345678",
+            )
+
+        expected = cc_resident.ResidentSession._sha256_spawn_argv(
+            ["claude", "--observed"],
+        )
+        self.assertEqual(
+            [s.tool_surface_snapshot["spawn_argv_sha256"] for s in sessions],
+            [expected, expected, expected],
+        )
+        self.assertEqual(
+            [
+                s.tool_surface_snapshot["spawn_tool_flags_observation_status"]
+                for s in sessions
+            ],
+            ["COMPLETE", "COMPLETE", "COMPLETE"],
+        )
 
     def test_first_send_receipt_binds_plan_spawn_and_usage_without_plaintext(self):
         components = [
