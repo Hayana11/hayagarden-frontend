@@ -1525,6 +1525,44 @@ class ResidentSession:
                                 error_code='claude_runtime_invalid') from exc
         return 'claude-code:%s' % version
 
+    @staticmethod
+    def _sha256_spawn_file(path):
+        if not path:
+            return None
+        try:
+            with open(str(path), "rb") as handle:
+                return hashlib.sha256(handle.read()).hexdigest()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _spawn_allowed_tool_count(surface_allowed):
+        return len({
+            item.strip()
+            for item in str(surface_allowed or "").split(",")
+            if item.strip()
+        })
+
+    def _annotate_spawn_tool_flags(self, tool_flags):
+        """Attach only opaque fingerprints from exact spawn flags."""
+        flags = dict(tool_flags or {})
+        surface_allowed = str(flags.get("surface_allowed") or "")
+        built_in_tools = str(flags.get("tools") or "")
+        flags["tool_profile"] = self._tool_profile
+        flags["mcp_config_sha256"] = self._sha256_spawn_file(
+            flags.get("mcp_path"),
+        )
+        flags["allowed_surface_sha256"] = hashlib.sha256(
+            surface_allowed.encode("utf-8"),
+        ).hexdigest()
+        flags["allowed_tool_count"] = self._spawn_allowed_tool_count(
+            surface_allowed,
+        )
+        flags["built_in_tools_sha256"] = hashlib.sha256(
+            built_in_tools.encode("utf-8"),
+        ).hexdigest()
+        return flags
+
     def _build_spawn_tool_flags(self, *, env=None, write_mcp_config=True, write_settings=True):
         """Split built-in availability (--tools) from MCP permission args.
 
