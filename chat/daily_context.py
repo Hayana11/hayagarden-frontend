@@ -2813,6 +2813,7 @@ def rollback_empty_resident_generation(
     *,
     expected_generation: int,
     restore_generation: int,
+    owner_worker_id: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """CAS-restore a generation only while it is provably an empty shell.
@@ -2850,8 +2851,6 @@ def rollback_empty_resident_generation(
             ('context_claude_sessions', 'registry_present'),
             ('daily_message_contexts', 'message_context_present'),
             ('chat_message_claude_events', 'mapping_present'),
-            ('daily_resident_cursors', 'cursor_present'),
-            ('daily_resident_owners', 'owner_present'),
             ('daily_resident_turn_leases', 'lease_present'),
         )
         for table, reason in checks:
@@ -2863,6 +2862,38 @@ def rollback_empty_resident_generation(
             if found is not None:
                 conn.rollback()
                 return {'ok': False, 'reason': reason}
+
+        owner = conn.execute(
+            'SELECT worker_id FROM daily_resident_owners '
+            'WHERE context_id=? AND resident_generation=?',
+            (cid, expected),
+        ).fetchone()
+        cursor = conn.execute(
+            'SELECT 1 FROM daily_resident_cursors '
+            'WHERE context_id=? AND resident_generation=?',
+            (cid, expected),
+        ).fetchone()
+        expected_worker = str(owner_worker_id or '').strip()
+        if owner is not None and (
+            not expected_worker
+            or str(owner['worker_id'] or '').strip() != expected_worker
+        ):
+            conn.rollback()
+            return {'ok': False, 'reason': 'owner_identity_unproven'}
+        if owner is None and cursor is not None:
+            conn.rollback()
+            return {'ok': False, 'reason': 'cursor_identity_unproven'}
+        if owner is not None:
+            conn.execute(
+                'DELETE FROM daily_resident_cursors '
+                'WHERE context_id=? AND resident_generation=?',
+                (cid, expected),
+            )
+            conn.execute(
+                'DELETE FROM daily_resident_owners '
+                'WHERE context_id=? AND resident_generation=?',
+                (cid, expected),
+            )
 
         cur = conn.execute(
             '''UPDATE daily_contexts SET resident_generation=?, version=version+1,
@@ -2879,6 +2910,7 @@ def rollback_empty_resident_generation(
             'context_id': cid,
             'restored_generation': restore,
             'discarded_generation': expected,
+            'metadata_cleaned': bool(owner is not None),
         }
     except Exception:
         conn.rollback()

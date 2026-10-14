@@ -5294,6 +5294,7 @@ def _attempt_capacity_swap_before_stdin(
             source_ctx,
             expected_generation=int(target_generation),
             restore_generation=source_gen,
+            owner_worker_id=WORKER_ID,
             db_path=plan.db_path,
         )
         if result.get('ok'):
