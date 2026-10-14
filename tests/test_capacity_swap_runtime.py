@@ -637,6 +637,169 @@ class CapacitySwapRuntimeContractTests(unittest.TestCase):
 
     # ----- Narrow-fix regressions (Owner review blockers) -----
 
+    def _seed_empty_target_owner(self, *, process_generation: int):
+        uid = _insert(self.db, 'hayana', 'rollback-owner', '2026-07-27 10:00:00')
+        plan = _prepare(self.db, uid)
+        source_generation = int(plan.resident_generation)
+        target = dc.respawn_daily_resident(plan.context_id, db_path=self.db)
+        target_generation = int(target['resident_generation'])
+        worker_id = 'capacity-owner-test'
+        owner_key = dc.make_resident_key(
+            chat_id=plan.chat_id,
+            context_epoch=int(plan.context_epoch),
+            resident_generation=target_generation,
+        )
+        dc.set_resident_history_cursor(
+            plan.context_id,
+            target_generation,
+            uid,
+            db_path=self.db,
+        )
+        dc.upsert_resident_owner(
+            plan.context_id,
+            target_generation,
+            worker_id=worker_id,
+            resident_key=owner_key,
+            bound_cursor_message_id=uid,
+            process_generation=process_generation,
+            db_path=self.db,
+        )
+        return (
+            plan,
+            source_generation,
+            target_generation,
+            worker_id,
+            owner_key,
+            uid,
+        )
+
+    def test_owner_present_matching_identity_rolls_back_empty_generation(self):
+        (
+            plan,
+            source_generation,
+            target_generation,
+            worker_id,
+            owner_key,
+            cursor_message_id,
+        ) = self._seed_empty_target_owner(process_generation=7)
+
+        result = dc.rollback_empty_resident_generation(
+            plan.context_id,
+            expected_generation=target_generation,
+            restore_generation=source_generation,
+            owner_worker_id=worker_id,
+            owner_resident_key=owner_key,
+            owner_cursor_message_id=cursor_message_id,
+            owner_process_generation=7,
+            db_path=self.db,
+        )
+
+        self.assertTrue(result['ok'], result)
+        current = dc.get_daily_context_by_id(plan.context_id, db_path=self.db) or {}
+        self.assertEqual(int(current['resident_generation']), source_generation)
+        self.assertIsNone(
+            dc.get_resident_owner(
+                plan.context_id, target_generation, db_path=self.db,
+            ),
+        )
+        self.assertIsNone(
+            dc.get_resident_history_cursor(
+                plan.context_id, target_generation, db_path=self.db,
+            ),
+        )
+
+    def test_owner_process_generation_mismatch_fails_closed_without_db_change(self):
+        (
+            plan,
+            source_generation,
+            target_generation,
+            worker_id,
+            owner_key,
+            cursor_message_id,
+        ) = self._seed_empty_target_owner(process_generation=8)
+
+        result = dc.rollback_empty_resident_generation(
+            plan.context_id,
+            expected_generation=target_generation,
+            restore_generation=source_generation,
+            owner_worker_id=worker_id,
+            owner_resident_key=owner_key,
+            owner_cursor_message_id=cursor_message_id,
+            owner_process_generation=7,
+            db_path=self.db,
+        )
+
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(result['reason'], 'owner_identity_unproven')
+        current = dc.get_daily_context_by_id(plan.context_id, db_path=self.db) or {}
+        self.assertEqual(int(current['resident_generation']), target_generation)
+        owner = dc.get_resident_owner(
+            plan.context_id, target_generation, db_path=self.db,
+        )
+        self.assertIsNotNone(owner)
+        self.assertEqual(int(owner['process_generation']), 8)
+        self.assertEqual(
+            dc.get_resident_history_cursor(
+                plan.context_id, target_generation, db_path=self.db,
+            ),
+            cursor_message_id,
+        )
+
+    def test_committed_registry_blocks_owner_cursor_and_generation_rollback(self):
+        (
+            plan,
+            source_generation,
+            target_generation,
+            worker_id,
+            owner_key,
+            cursor_message_id,
+        ) = self._seed_empty_target_owner(process_generation=7)
+        register_context_claude_session(
+            context_id=plan.context_id,
+            context_epoch=plan.context_epoch,
+            resident_generation=target_generation,
+            chat_id=plan.chat_id,
+            claude_session_id='sid-committed-registry',
+            cwd=self.tmp,
+            source='daily_runtime',
+            scan_offset=0,
+            process_generation=7,
+            db_path=self.db,
+        )
+
+        result = dc.rollback_empty_resident_generation(
+            plan.context_id,
+            expected_generation=target_generation,
+            restore_generation=source_generation,
+            owner_worker_id=worker_id,
+            owner_resident_key=owner_key,
+            owner_cursor_message_id=cursor_message_id,
+            owner_process_generation=7,
+            db_path=self.db,
+        )
+
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(result['reason'], 'registry_present')
+        current = dc.get_daily_context_by_id(plan.context_id, db_path=self.db) or {}
+        self.assertEqual(int(current['resident_generation']), target_generation)
+        self.assertIsNotNone(
+            dc.get_resident_owner(
+                plan.context_id, target_generation, db_path=self.db,
+            ),
+        )
+        self.assertEqual(
+            dc.get_resident_history_cursor(
+                plan.context_id, target_generation, db_path=self.db,
+            ),
+            cursor_message_id,
+        )
+        self.assertIsNotNone(
+            get_context_claude_session(
+                plan.context_id, target_generation, db_path=self.db,
+            ),
+        )
+
+
     def test_cursor_seed_failure_fail_closed(self):
         """Cursor/owner seed failure must not continue into hot-like reprepare."""
         uid = _insert(self.db, 'hayana', 'seed-fail', '2026-07-27 10:00:00')

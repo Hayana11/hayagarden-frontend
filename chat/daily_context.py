@@ -2867,7 +2867,8 @@ def rollback_empty_resident_generation(
                 return {'ok': False, 'reason': reason}
 
         owner = conn.execute(
-            'SELECT worker_id, resident_key, bound_cursor_message_id '
+            'SELECT worker_id, resident_key, bound_cursor_message_id, '
+            'process_generation '
             'FROM daily_resident_owners '
             'WHERE context_id=? AND resident_generation=?',
             (cid, expected),
