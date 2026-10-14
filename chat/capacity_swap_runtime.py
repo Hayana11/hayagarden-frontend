@@ -496,6 +496,13 @@ def _validate_context_plan_round_mapping(
                 'ContextPlan raw assistant mapping is not exact',
                 error_code='context_plan_capacity_raw_mapping_invalid',
             ) from exc
+        persisted_message_ids: dict[str, int] = {}
+        for raw_mapping in mapping_rows:
+            raw_uuid = str(raw_mapping.get('event_uuid') or '').strip()
+            try:
+                persisted_message_ids[raw_uuid] = int(raw_mapping['message_id'])
+            except (KeyError, TypeError, ValueError):
+                continue
         planned_events = []
         planned_rows = []
         for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ()):
@@ -517,7 +524,16 @@ def _validate_context_plan_round_mapping(
             planned_rows.append({
                 'event_uuid': str(event_uuid),
                 'message_id': (
-                    int(user_id) if role == 'user' else int(assistant_id)
+                    int(user_id)
+                    if role == 'user'
+                    else (
+                        int(assistant_id)
+                        if event.event_role is EventRole.ASSISTANT
+                        else int(persisted_message_ids.get(
+                            str(event_uuid),
+                            int(assistant_id),
+                        ))
+                    )
                 ),
                 'role': role,
                 'claude_session_id': str(event.session_id or ''),
