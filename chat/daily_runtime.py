@@ -5188,8 +5188,9 @@ def _attempt_capacity_swap_before_stdin(
     Commit order (frozen for failure safety):
       generation +1 → install staged (keep old) → cursor/reprepare → identity
       → register Registry source=capacity_swap → success
-    Registry is the pre-stdin commit flag; failures before it leave no target
-    Registry row. Old last-good proc stays until CURRENT user stdin flush.
+    Registry is the pre-stdin commit flag. If publication fails, an empty
+    target generation is CAS-restored before returning; old last-good proc
+    stays until CURRENT user stdin flush.
     """
     for attr in (
         '_continuity_shadow_capacity_pending',
@@ -5277,6 +5278,61 @@ def _attempt_capacity_swap_before_stdin(
     source_gen = int(plan.resident_generation)
     watermark = plan.cursor_before
     install_state: Optional[dict[str, Any]] = None
+    generation_bumped = False
+    target_process_generation: Optional[int] = None
+    plan_fields = (
+        tuple(fields(plan))
+        if getattr(plan, '__dataclass_fields__', None)
+        else ()
+    )
+    source_plan_state = {
+        item.name: getattr(plan, item.name)
+        for item in plan_fields
+    }
+
+    def _restore_empty_generation(target_generation: int) -> dict[str, Any]:
+        if not generation_bumped:
+            return {'ok': False, 'reason': 'generation_not_bumped'}
+        target_registry = get_context_claude_session(
+            source_ctx,
+            int(target_generation),
+            db_path=plan.db_path,
+        )
+        if target_registry is not None:
+            return {'ok': False, 'reason': 'registry_present'}
+        result = dc.rollback_empty_resident_generation(
+            source_ctx,
+            expected_generation=int(target_generation),
+            restore_generation=source_gen,
+            owner_worker_id=WORKER_ID,
+            owner_resident_key=make_resident_key(
+                chat_id=plan.chat_id,
+                context_epoch=source_epoch,
+                resident_generation=int(target_generation),
+            ),
+            owner_cursor_message_id=(
+                int(watermark)
+                if watermark is not None
+                else max(0, int(plan.user_message_id) - 1)
+            ),
+            owner_process_generation=target_process_generation,
+            db_path=plan.db_path,
+        )
+        if result.get('ok'):
+            for field_name, source_value in source_plan_state.items():
+                setattr(plan, field_name, source_value)
+            plan.resident_generation = source_gen
+            if source_plan_state:
+                plan.epoch_token = dict(source_plan_state['epoch_token'])
+                plan.epoch_token['resident_generation'] = source_gen
+                plan.manifest = dict(source_plan_state['manifest'] or {})
+            else:
+                plan.epoch_token = dict(getattr(plan, 'epoch_token', {}) or {})
+                plan.epoch_token['resident_generation'] = source_gen
+                plan.manifest = dict(getattr(plan, 'manifest', {}) or {})
+            plan.manifest['capacity_swap_generation_rolled_back'] = True
+            plan.manifest['capacity_swap_generation_rollback'] = dict(result)
+        return dict(result)
 
     def _fail_kill_staged(code: str, **extra: Any) -> dict[str, Any]:
         try:
@@ -5284,13 +5340,25 @@ def _attempt_capacity_swap_before_stdin(
                 staged._kill(quiet=True)
         except Exception:
             pass
+        rollback = _restore_empty_generation(
+            int(extra.get('target_generation') or (source_gen + 1)),
+        )
         out = {'ok': False, 'error_code': code}
+        if (
+            generation_bumped
+            and rollback.get('reason') not in {'registry_present', 'generation_not_bumped'}
+            and not rollback.get('ok')
+        ):
+            out['error_code'] = 'capacity_swap_generation_rollback_unproven'
+        out['generation_rollback'] = rollback
+        out['target_generation_unregistered'] = bool(rollback.get('ok'))
         out.update(extra)
         return out
 
     # Generation bump (same context_id / epoch). Registry not yet published.
     if is_epoch_token_current(plan):
         dc.respawn_daily_resident(plan.context_id, db_path=plan.db_path)
+        generation_bumped = True
     refreshed = dc.get_daily_context_by_id(plan.context_id, db_path=plan.db_path) or {}
     target_gen = int(refreshed.get('resident_generation') or 0)
     if target_gen != int(handoff.target_resident_generation):
@@ -5306,12 +5374,20 @@ def _attempt_capacity_swap_before_stdin(
 
     cwd = str(getattr(resident, 'cwd', '') or plan.transcript_cwd or '')
 
-    # Transfer staged → live WITHOUT killing old last-good process.
-    install_state = install_capacity_swap_into_live_resident(
-        live_resident=resident, staged_resident=staged,
-    )
-
+    # Transfer staged → live WITHOUT killing old last-good process. Keep a
+    # snapshot so a partial adoption failure is still recoverable.
     try:
+        install_state = {
+            'old_proc': getattr(resident, '_proc', None),
+            'old_attrs': _snapshot_capacity_swap_live_resident(resident),
+            'old_binding': get_local_binding(),
+        }
+        install_state = install_capacity_swap_into_live_resident(
+            live_resident=resident, staged_resident=staged,
+        )
+        target_process_generation = int(
+            getattr(resident, 'generation', 0) or 0
+        )
         effective = str(handoff.effective_system or with_capacity_boundary_suffix(static_system))
         replacement = reprepare_after_capacity_swap(
             plan,
@@ -5420,6 +5496,12 @@ def _attempt_capacity_swap_before_stdin(
         rollback_capacity_swap_install(
             live_resident=resident, install_state=install_state,
         )
+        try:
+            if hasattr(staged, '_kill'):
+                staged._kill(quiet=True)
+        except Exception:
+            pass
+        generation_rollback = _restore_empty_generation(target_gen)
         err = str(getattr(exc, 'error_code', None) or '')
         if not err and 'registry' in type(exc).__name__.lower():
             err = 'registry_register_failed'
@@ -5436,12 +5518,28 @@ def _attempt_capacity_swap_before_stdin(
                        'scan_offset_invalid', 'transcript_path_mismatch',
                        'chat_id_required'}:
                 err = 'registry_register_failed'
+        target_registry = (
+            get_context_claude_session(
+                source_ctx,
+                target_gen,
+                db_path=plan.db_path,
+            )
+            if generation_bumped else None
+        )
+        if generation_bumped and target_registry is None and not generation_rollback.get('ok'):
+            err = 'capacity_swap_generation_rollback_unproven'
         return {
             'ok': False,
             'error_code': err,
             'detail': str(exc),
-            'rolled_back_to_last_good': True,
-            'target_generation_unregistered': True,
+            'rolled_back_to_last_good': bool(generation_rollback.get('ok')),
+            'generation_rollback': generation_rollback,
+            'target_generation_unregistered': bool(
+                generation_bumped
+                and target_registry is None
+                and generation_rollback.get('ok')
+            ),
+            'target_generation_registered': bool(target_registry is not None),
             'target_generation': target_gen,
         }
 

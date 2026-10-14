@@ -50,7 +50,11 @@ from chat.cold_bootstrap_budget import (
 from chat.context_window_forge import atomic_write_jsonl_fsync
 from chat.claude_event_mapping import (
     ERROR_MAPPING_LAG,
+    MappingRejected,
+    _assert_planned_event_sessions,
+    _plan_one_round_from_graph,
     attempt_mapping_catchup_through,
+    mapping_role_for_event,
     latest_complete_assistant_watermark,
     registry_mapping_lags_watermark,
 )
@@ -443,6 +447,231 @@ def _load_mapping_for_messages(
 
 
 
+def _load_mapping_rows_for_messages(
+    conn: Any,
+    message_ids: Sequence[int],
+) -> tuple[dict[str, Any], ...]:
+    """Read the canonical mapping rows for strict ContextPlan proof."""
+    from chat.context_window_preview import _mapping_rows_for_messages_conn
+
+    return tuple(_mapping_rows_for_messages_conn(conn, list(message_ids)))
+
+
+def _validate_context_plan_round_mapping(
+    *,
+    graph: Any,
+    round_item: Any,
+    user_id: int,
+    assistant_id: int,
+    claude_session_id: str,
+    context_id: int,
+    context_epoch: int,
+    resident_generation: int,
+    scan_offset: int,
+    mapping_rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Bind the shared mapping planner to persisted rows and ContextPlan ids.
+
+    The shared planner remains the authority for candidate/role/session/terminal
+    semantics. This adapter only proves persisted DB rows, source offsets, and
+    ContextPlan message identities are the same events.
+    """
+    try:
+        planned = tuple(_plan_one_round_from_graph(
+            graph,
+            round_item,
+            user_message_id=int(user_id),
+            assistant_message_id=int(assistant_id),
+            claude_session_id=str(claude_session_id),
+            context_id=int(context_id),
+            context_epoch=int(context_epoch),
+            resident_generation=int(resident_generation),
+        ))
+    except MappingRejected as exc:
+        # Existing Capacity raw rounds may end with a tool result after a
+        # provider tool_use event. Reuse the shared role/session authority for
+        # that shape; all other planner rejections remain fail-closed.
+        if str(getattr(exc, 'error_code', '')) != 'incomplete_round_not_terminal_assistant':
+            raise CapacitySwapRuntimeError(
+                'ContextPlan raw assistant mapping is not exact',
+                error_code='context_plan_capacity_raw_mapping_invalid',
+            ) from exc
+        persisted_message_ids: dict[str, int] = {}
+        for raw_mapping in mapping_rows:
+            raw_uuid = str(raw_mapping.get('event_uuid') or '').strip()
+            try:
+                persisted_message_ids[raw_uuid] = int(raw_mapping['message_id'])
+            except (KeyError, TypeError, ValueError):
+                continue
+        planned_events = []
+        planned_rows = []
+        for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ()):
+            event = graph.by_uuid.get(str(event_uuid))
+            if event is None:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan raw mapping event is missing',
+                    error_code='context_plan_capacity_raw_mapping_missing',
+                ) from exc
+            role = mapping_role_for_event(
+                event,
+                is_canonical_user=str(event_uuid) == str(
+                    getattr(round_item, 'candidate_user_event_uuid', ''),
+                ),
+            )
+            if role is None:
+                continue
+            planned_events.append(event)
+            planned_rows.append({
+                'event_uuid': str(event_uuid),
+                'message_id': (
+                    int(user_id)
+                    if role == 'user'
+                    else (
+                        int(assistant_id)
+                        if event.event_role is EventRole.ASSISTANT
+                        else int(persisted_message_ids.get(
+                            str(event_uuid),
+                            int(assistant_id),
+                        ))
+                    )
+                ),
+                'role': role,
+                'claude_session_id': str(event.session_id or ''),
+                'context_id': int(context_id),
+                'context_epoch': int(context_epoch),
+                'resident_generation': int(resident_generation),
+                'jsonl_byte_offset': event.byte_offset,
+            })
+        try:
+            _assert_planned_event_sessions(
+                planned_events,
+                registry_session_id=str(claude_session_id),
+            )
+        except MappingRejected as session_exc:
+            raise CapacitySwapRuntimeError(
+                'ContextPlan raw assistant mapping is not exact',
+                error_code='context_plan_capacity_raw_mapping_invalid',
+            ) from session_exc
+        planned = tuple(planned_rows)
+
+    if sum(str(row.get('role') or '') == 'user' for row in planned) != 1:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw user mapping is not exact',
+            error_code='context_plan_capacity_raw_mapping_invalid',
+        )
+    if not any(
+        graph.by_uuid[str(row['event_uuid'])].event_role is EventRole.ASSISTANT
+        for row in planned
+    ):
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw assistant mapping is incomplete',
+            error_code='context_plan_capacity_raw_mapping_missing',
+        )
+
+    rows_by_uuid: dict[str, dict[str, Any]] = {}
+    user_rows_by_message: dict[int, list[str]] = {}
+    assistant_rows_for_message: set[str] = set()
+    for raw in mapping_rows:
+        uid = str(raw.get('event_uuid') or '').strip()
+        if not uid:
+            raise CapacitySwapRuntimeError(
+                'ContextPlan mapping event UUID is missing',
+                error_code='context_plan_capacity_raw_mapping_invalid',
+            )
+        if uid in rows_by_uuid:
+            raise CapacitySwapRuntimeError(
+                'ContextPlan mapping event UUID is duplicated',
+                error_code='context_plan_capacity_raw_mapping_invalid',
+            )
+        rows_by_uuid[uid] = dict(raw)
+        try:
+            mid = int(raw.get('message_id'))
+        except (TypeError, ValueError) as exc:
+            raise CapacitySwapRuntimeError(
+                'ContextPlan mapping message id is invalid',
+                error_code='context_plan_capacity_raw_mapping_invalid',
+            ) from exc
+        role = str(raw.get('role') or '')
+        if role == 'user':
+            user_rows_by_message.setdefault(mid, []).append(uid)
+        if role in {'assistant', 'tool_use'} and mid == int(assistant_id):
+            assistant_rows_for_message.add(uid)
+
+    user_rows = user_rows_by_message.get(int(user_id), [])
+    if len(user_rows) == 0:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw user mapping is missing',
+            error_code='context_plan_capacity_raw_mapping_missing',
+        )
+    if len(user_rows) != 1:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw user mapping is ambiguous',
+            error_code='context_plan_capacity_raw_mapping_invalid',
+        )
+
+    expected_assistant_uuids = {
+        str(row['event_uuid'])
+        for row in planned
+        if graph.by_uuid[str(row['event_uuid'])].event_role is EventRole.ASSISTANT
+    }
+    if assistant_rows_for_message != expected_assistant_uuids:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw assistant mapping set is not exact',
+            error_code='context_plan_capacity_raw_mapping_invalid',
+        )
+
+    offsets: list[int] = []
+    for expected in planned:
+        uid = str(expected['event_uuid'])
+        actual = rows_by_uuid.get(uid)
+        event = graph.by_uuid.get(uid)
+        if actual is None or event is None:
+            raise CapacitySwapRuntimeError(
+                'ContextPlan raw mapping event is missing',
+                error_code='context_plan_capacity_raw_mapping_missing',
+            )
+        try:
+            actual_mid = int(actual['message_id'])
+            actual_offset = actual['jsonl_byte_offset']
+            event_offset = getattr(event, 'byte_offset', None)
+            if (
+                isinstance(actual_offset, bool)
+                or not isinstance(actual_offset, int)
+                or isinstance(event_offset, bool)
+                or not isinstance(event_offset, int)
+            ):
+                raise ValueError('mapping offset is not an integer')
+            if int(actual_offset) != int(event_offset):
+                raise ValueError('mapping offset differs from transcript')
+            if actual_offset < 0 or actual_offset >= int(scan_offset):
+                raise ValueError('mapping offset outside source prefix')
+            offsets.append(int(actual_offset))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CapacitySwapRuntimeError(
+                'ContextPlan raw mapping offset is invalid',
+                error_code='context_plan_capacity_raw_mapping_invalid',
+            ) from exc
+        if (
+            actual_mid != int(expected['message_id'])
+            or str(actual.get('role') or '') != str(expected['role'] or '')
+            or str(actual.get('claude_session_id') or '') != str(claude_session_id)
+            or int(actual.get('context_id') or 0) != int(context_id)
+            or int(actual.get('context_epoch') or 0) != int(context_epoch)
+            or int(actual.get('resident_generation') or 0) != int(resident_generation)
+        ):
+            raise CapacitySwapRuntimeError(
+                'ContextPlan raw mapping identity differs from transcript',
+                error_code='context_plan_capacity_raw_mapping_invalid',
+            )
+
+    if len(set(offsets)) != len(offsets) or tuple(sorted(offsets)) != tuple(offsets):
+        raise CapacitySwapRuntimeError(
+            'ContextPlan raw mapping offsets are not strictly ordered',
+            error_code='context_plan_capacity_raw_mapping_invalid',
+        )
+    return planned
+
+
 def _context_plan_raw_members(context_plan: Any) -> list[tuple[Any, int, int]]:
     """Return exact completed-turn members selected by one ContextPlan."""
     raw_members: list[tuple[Any, int, int]] = []
@@ -702,6 +931,7 @@ def prepare_capacity_swap_for_context_plan(
         )
         mids = [int(m['id']) for m in formal]
         canonical, mid_to_event, event_to_mid = _load_mapping_for_messages(conn, mids)
+        mapping_rows = _load_mapping_rows_for_messages(conn, mids)
 
         round_by_user: dict[str, Any] = {}
         for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ()):
@@ -749,20 +979,18 @@ def prepare_capacity_swap_for_context_plan(
                     'ContextPlan raw round is duplicated',
                     error_code='context_plan_capacity_raw_source_duplicated',
                 )
-            assistant_events = [
-                str(event_uuid)
-                for event_uuid in tuple(getattr(round_item, 'event_uuids', ()) or ())
-                if (
-                    graph.by_uuid.get(str(event_uuid)) is not None
-                    and graph.by_uuid[str(event_uuid)].event_role == EventRole.ASSISTANT
-                    and int(event_to_mid.get(str(event_uuid), 0) or 0) == int(assistant_id)
-                )
-            ]
-            if len(assistant_events) != 1:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan raw assistant mapping is not exact',
-                    error_code='context_plan_capacity_raw_mapping_invalid',
-                )
+            _validate_context_plan_round_mapping(
+                graph=graph,
+                round_item=round_item,
+                user_id=int(user_id),
+                assistant_id=int(assistant_id),
+                claude_session_id=str(registry['claude_session_id']),
+                context_id=source_ctx,
+                context_epoch=source_epoch,
+                resident_generation=source_gen,
+                scan_offset=int(registry['scan_offset']),
+                mapping_rows=mapping_rows,
+            )
             source_member = _capacity_context_source_member_from_db(
                 conn=conn,
                 context_id=source_ctx,
