@@ -1540,10 +1540,12 @@ class ProviderBudgetReplayTests(unittest.TestCase):
                 - finalized["tool_schema_tokens_estimate"],
             ),
         )
-        self.assertLess(
+        # The canonical history is already inside final_content. It must not
+        # be added again through the explanatory history component.
+        self.assertNotEqual(
             finalized["known_visible_context_tokens_estimate"],
             expected_known
-            + obs.estimate_tokens_heuristic_cjk1_ascii4_v1(user),
+            + obs.estimate_tokens_heuristic_cjk1_ascii4_v1(canonical),
         )
         self.assertEqual(
             finalized["provider_first_round_context_tokens"],
@@ -1624,6 +1626,258 @@ class DailyProviderBudgetWiringTests(unittest.TestCase):
             observed["context_breakdown"]["provider_first_round_context_tokens"],
             1002,
         )
+
+
+class DailyProviderBudgetContractTests(unittest.TestCase):
+    @staticmethod
+    def _plan(kind):
+        plan = type("Plan", (), {})()
+        plan.manifest = {
+            "capacity_swap": kind == "capacity",
+            "context_plan_id": "plan-1",
+            "context_plan_hash": "hash-1",
+            "context_plan_source_hash": "source-1",
+            "model": "claude-opus-5-5",
+        }
+        plan.assembly = {
+            "context_plan_representation_blocks": [
+                {"body": "CANONICAL_HISTORY"},
+            ],
+            "state": "STATE",
+        }
+        plan.user_content = "CURRENT_USER"
+        plan.resident_generation = 48
+        plan.is_cold = kind == "cold"
+        plan.is_respawn = kind == "respawn"
+        plan._provider_prompt_system_snapshot = "STATIC_SYSTEM"
+        plan._provider_prompt_content_snapshot = (
+            "CANONICAL_HISTORY\nCURRENT_USER"
+        )
+        plan._provider_prompt_bootstrap_kind = kind
+        return plan
+
+    @staticmethod
+    def _resident():
+        resident = type("Resident", (), {})()
+        resident.generation = 48
+        resident.resident_pid = 4242
+        resident.session_id = "session-1"
+        resident.model_identity = "claude-opus-5-5"
+        resident.tool_surface_snapshot = {}
+        resident.allowed_tools = ""
+        resident.mcp_config_path = None
+        resident._last_provider_content = "REALITY_VISIBLE_PAYLOAD"
+        return resident
+
+    @staticmethod
+    def _usage(receipt):
+        from cc_resident import ResidentTurnUsage
+
+        return ResidentTurnUsage(
+            {
+                "rounds": [{
+                    "index": 1,
+                    "complete": True,
+                    "input_tokens": 2,
+                    "output_tokens": 1,
+                    "cache_read": 0,
+                    "cache_creation": 1000,
+                    "context_tokens": 1002,
+                }],
+                "num_rounds": 1,
+                "input_tokens": 2,
+                "output_tokens": 1,
+                "cache_read": 0,
+                "cache_creation": 1000,
+                "resident_turn_count": 1,
+                "_obs_effort": "high",
+            },
+            terminal_receipt=receipt,
+            candidate_cache_refresh_at=12.5,
+            candidate_cache_refresh_monotonic=22.5,
+        )
+
+    def test_presend_snapshot_failure_does_not_gate_provider_send(self):
+        from chat import daily_runtime
+
+        plan = self._plan("hot")
+        from tools import cc_usage_observability as obs
+        with mock.patch.object(
+            obs,
+            "snapshot_prompt_content",
+            side_effect=RuntimeError("isolated snapshot failure"),
+        ):
+            daily_runtime._capture_daily_provider_prompt_snapshot(
+                plan,
+                content=[{"type": "text", "text": "USER_SECRET"}],
+                effective_system="SYSTEM_SECRET",
+                actual_cold=False,
+            )
+
+        self.assertIsNone(plan._provider_prompt_content_snapshot)
+        self.assertEqual(plan._provider_prompt_bootstrap_kind, "hot")
+        sent = []
+
+        def fake_send_turn(content, **kwargs):
+            sent.append((content, kwargs))
+            return iter([("done", ("ok", "", {}, {}))])
+
+        fake_send_turn("USER_SECRET", turn_lease={"turn_id": "t1"})
+        self.assertEqual(sent[0][0], "USER_SECRET")
+        self.assertEqual(sent[0][1]["turn_lease"], {"turn_id": "t1"})
+
+    def test_done_keeps_terminal_receipt_cache_candidate_and_cleans_snapshots(self):
+        from chat import daily_runtime
+
+        for kind in ("cold", "respawn", "capacity", "hot"):
+            plan = self._plan(kind)
+            resident = self._resident()
+            receipt = object()
+            usage = self._usage(receipt)
+
+            def fake_ensure(*args, **kwargs):
+                yield ("text", "partial")
+                yield ("done", ("final", "thinking", usage, {"claim": kind}))
+
+            with mock.patch.object(
+                daily_runtime,
+                "ensure_resident_and_stream",
+                side_effect=fake_ensure,
+            ):
+                events = list(daily_runtime.stream_daily_resident_turn(
+                    plan,
+                    resident=resident,
+                    env={},
+                    static_system="STATIC_SYSTEM",
+                ))
+
+            self.assertEqual([event for event, _ in events], ["text", "done"])
+            done = events[-1][1]
+            self.assertEqual(done[0:2], ("final", "thinking"))
+            self.assertEqual(done[3], {"claim": kind})
+            self.assertIs(done[2], usage)
+            self.assertIs(usage.terminal_receipt, receipt)
+            self.assertEqual(usage._candidate_cache_refresh_at, 12.5)
+            self.assertEqual(usage._candidate_cache_refresh_monotonic, 22.5)
+            self.assertNotIn("_obs_effort", usage)
+            self.assertIsNone(plan._provider_prompt_content_snapshot)
+            self.assertIsNone(plan._provider_prompt_system_snapshot)
+            self.assertIsNone(resident._last_provider_content)
+            self.assertEqual(
+                done[2]["context_breakdown"]["bootstrap_kind"],
+                kind,
+            )
+            self.assertEqual(
+                done[2]["runtime"]["is_cold"],
+                kind in ("cold", "respawn"),
+            )
+
+    def test_failed_observation_returns_original_usage_and_receipt(self):
+        from chat import daily_runtime
+        from cc_resident import ResidentTurnUsage
+
+        receipt = object()
+        usage = ResidentTurnUsage(
+            {"input_tokens": 3},
+            terminal_receipt=receipt,
+        )
+        plan = type("Plan", (), {})()
+        plan.manifest = {}
+        resident = type("Resident", (), {})()
+
+        returned = daily_runtime._attach_daily_provider_budget_observation(
+            plan,
+            resident=resident,
+            static_system="STATIC_SYSTEM",
+            usage=usage,
+        )
+
+        self.assertIs(returned, usage)
+        self.assertIs(usage.terminal_receipt, receipt)
+        self.assertEqual(dict(usage), {"input_tokens": 3})
+
+    def test_generator_close_releases_snapshots_without_done(self):
+        from chat import daily_runtime
+
+        plan = self._plan("hot")
+        resident = self._resident()
+
+        def fake_ensure(*args, **kwargs):
+            yield ("text", "partial")
+
+        with mock.patch.object(
+            daily_runtime,
+            "ensure_resident_and_stream",
+            side_effect=fake_ensure,
+        ):
+            stream = daily_runtime.stream_daily_resident_turn(
+                plan,
+                resident=resident,
+                env={},
+                static_system="STATIC_SYSTEM",
+            )
+            next(stream)
+            stream.close()
+
+        self.assertIsNone(plan._provider_prompt_content_snapshot)
+        self.assertIsNone(plan._provider_prompt_system_snapshot)
+        self.assertIsNone(resident._last_provider_content)
+
+    def test_observation_persistence_contains_no_raw_payload(self):
+        from chat import daily_runtime
+
+        plan = self._plan("cold")
+        plan._provider_prompt_system_snapshot = "SYSTEM_SECRET"
+        plan._provider_prompt_content_snapshot = "USER_SECRET"
+        resident = self._resident()
+        resident.tool_surface_snapshot = {
+            "tool_schema_text": "TOOL_SECRET",
+            "tool_schema_source": "static_registry",
+            "tool_schema_sha256": "tool-hash",
+            "tool_schema_measurement_status": "available",
+            "tool_count": 1,
+        }
+        usage = self._usage(object())
+
+        observed = daily_runtime._attach_daily_provider_budget_observation(
+            plan,
+            resident=resident,
+            static_system="STATIC_SYSTEM",
+            usage=usage,
+        )
+        serialized = json.dumps(dict(observed), ensure_ascii=False)
+        self.assertNotIn("SYSTEM_SECRET", serialized)
+        self.assertNotIn("USER_SECRET", serialized)
+        self.assertNotIn("TOOL_SECRET", serialized)
+        self.assertFalse(
+            observed["context_breakdown"]["provider_envelope_known_visible_complete"],
+        )
+
+
+class RealityAdapterContractTests(unittest.TestCase):
+    def test_reality_adapter_preserves_visible_payload_and_kwargs(self):
+        with mock.patch("tools.ombre_adapter.warmup_async"):
+            import gateway
+
+        class FakeResident:
+            def __init__(self):
+                self.received = None
+
+            def send_turn(self, content, **kwargs):
+                self.received = (content, kwargs)
+                return iter([("done", ("ok", "", {}, {}))])
+
+        base = [{"type": "text", "text": "USER"}]
+        lease = {"turn_id": "lease-1"}
+        fake = FakeResident()
+        adapter = gateway._RequestRealityResident(fake, "REALITY")
+        stream = adapter.send_turn(base, turn_lease=lease)
+        list(stream)
+
+        self.assertEqual(fake.received[0], adapter._last_provider_content)
+        self.assertIs(fake.received[1]["turn_lease"], lease)
+        self.assertEqual(fake.received[0][0], {"type": "text", "text": "USER"})
+        self.assertIn("REALITY", fake.received[0][-1]["text"])
 
 
 if __name__ == "__main__":
