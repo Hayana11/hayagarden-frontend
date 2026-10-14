@@ -7954,6 +7954,183 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+    def test_fixed_section_set_failure_records_hash_only_diagnostic(self):
+        sentinel = 'FIXED_SECTION_SET_SENTINEL'
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture(sentinel)
+        )
+        try:
+            plan.capacity_context_plan.ordered_sections = (
+                plan.capacity_context_plan.ordered_sections[1:]
+            )
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_fixed_section_parity_failed',
+            )
+            diagnostic = plan.manifest['context_plan_fixed_section_diagnostic']
+            self.assertEqual(diagnostic['scope'], 'fixed_sections')
+            self.assertEqual(diagnostic['mismatch_type'], 'section_set')
+            self.assertNotIn(sentinel, json.dumps(diagnostic, ensure_ascii=False))
+            self.assertEqual(plan.manifest['context_plan_fixed_section_parity'], 'FAILED')
+        finally:
+            os.unlink(db)
+
+    def test_fixed_section_source_ref_mismatch_is_classified(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('SOURCE_REF_DIAGNOSTIC_SENTINEL')
+        )
+        try:
+            sections = list(plan.capacity_context_plan.ordered_sections)
+            original = sections[0]
+            sections[0] = types.SimpleNamespace(
+                kind=original.kind,
+                source_ref='different-source-ref',
+                content_hash=original.content_hash,
+                estimated_tokens=original.estimated_tokens,
+            )
+            plan.capacity_context_plan.ordered_sections = tuple(sections)
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_fixed_section_parity_failed',
+            )
+            diagnostic = plan.manifest['context_plan_fixed_section_diagnostic']
+            self.assertEqual(diagnostic['mismatch_type'], 'source_ref')
+            self.assertEqual(
+                diagnostic['identity_field_mismatches'],
+                ['source_ref'],
+            )
+            self.assertNotIn(
+                'different-source-ref',
+                json.dumps(diagnostic, ensure_ascii=False),
+            )
+        finally:
+            os.unlink(db)
+
+    def test_fixed_section_estimated_tokens_mismatch_is_classified(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('ESTIMATED_TOKENS_DIAGNOSTIC_SENTINEL')
+        )
+        try:
+            sections = list(plan.capacity_context_plan.ordered_sections)
+            original = sections[0]
+            sections[0] = types.SimpleNamespace(
+                kind=original.kind,
+                source_ref=original.source_ref,
+                content_hash=original.content_hash,
+                estimated_tokens=int(original.estimated_tokens) + 1,
+            )
+            plan.capacity_context_plan.ordered_sections = tuple(sections)
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_fixed_section_parity_failed',
+            )
+            diagnostic = plan.manifest['context_plan_fixed_section_diagnostic']
+            self.assertEqual(
+                diagnostic['mismatch_type'],
+                'estimated_tokens',
+            )
+            self.assertEqual(
+                diagnostic['identity_field_mismatches'],
+                ['estimated_tokens'],
+            )
+        finally:
+            os.unlink(db)
+
+    def test_fixed_body_hash_failure_records_hash_only_diagnostic(self):
+        sentinel = 'FIXED_BODY_HASH_SENTINEL'
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture(sentinel)
+        )
+        try:
+            plan.assembly['_context_install_render_receipt'][
+                'fixed_section_body_hashes'
+            ] = ['0' * 64]
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_fixed_section_parity_failed',
+            )
+            diagnostic = plan.manifest['context_plan_fixed_section_diagnostic']
+            self.assertEqual(diagnostic['scope'], 'fixed_carrier')
+            self.assertEqual(diagnostic['mismatch_type'], 'body_hash')
+            self.assertEqual(diagnostic['actual_hashes'], ['0' * 64])
+            self.assertNotIn(sentinel, json.dumps(diagnostic, ensure_ascii=False))
+        finally:
+            os.unlink(db)
+
+    def test_accepted_state_and_open_loops_presence_failures_are_hash_only(self):
+        cases = (
+            ('accepted_state', 'state', 'ACCEPTED_STATE_SENTINEL'),
+            ('accepted_open_loops', 'open_loops', 'ACCEPTED_OPEN_LOOPS_SENTINEL'),
+        )
+        for scope, field, sentinel in cases:
+            with self.subTest(scope=scope):
+                db, plan, resident, target_system, content = (
+                    self._capacity_install_fixture(sentinel)
+                )
+                try:
+                    if field == 'state':
+                        plan.assembly['state'] = sentinel
+                    else:
+                        plan.assembly['context_plan_accepted_open_loops'] = []
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._validate_production_context_install(
+                            plan=plan,
+                            resident=resident,
+                            static_system=target_system,
+                            content=content,
+                        )
+                    self.assertEqual(
+                        raised.exception.error_code,
+                        'context_plan_fixed_section_parity_failed',
+                    )
+                    diagnostic = plan.manifest[
+                        'context_plan_fixed_section_diagnostic'
+                    ]
+                    self.assertEqual(diagnostic['scope'], scope)
+                    self.assertEqual(
+                        diagnostic['mismatch_type'],
+                        'section_presence',
+                    )
+                    self.assertEqual(
+                        diagnostic['expected_section_kinds'],
+                        [scope] if field == 'state' else [],
+                    )
+                    self.assertNotIn(
+                        sentinel,
+                        json.dumps(diagnostic, ensure_ascii=False),
+                    )
+                finally:
+                    os.unlink(db)
+
+
     def test_capacity_render_proof_1_chunk_omission_fails_closed(self):
         """RENDER-PROOF-1: omitted chunk is rejected before provider send."""
         db, plan, resident, target_system, content = (
