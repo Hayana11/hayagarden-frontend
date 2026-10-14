@@ -1617,17 +1617,70 @@ class ResidentSession:
         return fingerprint
 
     def _capture_tool_surface(self, tool_flags):
+        """Bind observation metadata to the successful generation spawn flags."""
+        actual_allowed = str((tool_flags or {}).get("surface_allowed") or "")
+        profile = str(
+            (tool_flags or {}).get("tool_profile") or self._tool_profile or ""
+        )
+        metadata = {
+            "tool_profile": profile,
+            "mcp_config_sha256": (tool_flags or {}).get("mcp_config_sha256"),
+            "allowed_surface_sha256": (
+                (tool_flags or {}).get("allowed_surface_sha256")
+            ),
+            "allowed_tool_count": int(
+                (tool_flags or {}).get(
+                    "allowed_tool_count",
+                    self._spawn_allowed_tool_count(actual_allowed),
+                )
+            ),
+            "built_in_tools_sha256": (
+                (tool_flags or {}).get("built_in_tools_sha256")
+            ),
+        }
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-            self._tool_surface_snapshot = {}
+            snapshot = {
+                "tool_schema_text": None,
+                "tool_schema_sha256": None,
+                "tool_schema_source": None,
+                "tool_schema_measurement_status": "unavailable",
+                "tool_count": 0,
+                "allowed_tool_count": 0,
+            }
+            snapshot.update(metadata)
+            snapshot["tools_sha256"] = self._spawn_tools_fingerprint(
+                actual_allowed,
+                None,
+                profile,
+                metadata["built_in_tools_sha256"],
+            )
+            self._tool_surface_snapshot = snapshot
             return
         try:
             from tools.cc_tool_surface import capture_tool_surface_snapshot
-            self._tool_surface_snapshot = capture_tool_surface_snapshot(
-                tool_flags.get('surface_allowed') or '',
-                mcp_config_path=tool_flags.get('mcp_path') or self._mcp_config_path,
+            snapshot = capture_tool_surface_snapshot(
+                actual_allowed,
+                mcp_config_path=(tool_flags or {}).get("mcp_path"),
             )
+            if not isinstance(snapshot, dict):
+                raise TypeError("tool surface snapshot must be a dict")
         except Exception:
-            self._tool_surface_snapshot = {}
+            snapshot = {
+                "tool_schema_text": None,
+                "tool_schema_sha256": None,
+                "tool_schema_source": None,
+                "tool_schema_measurement_status": "unavailable",
+                "tool_count": metadata["allowed_tool_count"],
+                "allowed_tool_count": metadata["allowed_tool_count"],
+            }
+        snapshot.update(metadata)
+        snapshot["tools_sha256"] = self._spawn_tools_fingerprint(
+            actual_allowed,
+            snapshot.get("tool_schema_sha256"),
+            profile,
+            metadata["built_in_tools_sha256"],
+        )
+        self._tool_surface_snapshot = snapshot
 
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot
