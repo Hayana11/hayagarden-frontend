@@ -2297,7 +2297,8 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
                 "rounds": [self._usage()["rounds"][0]],
             },
         )
-        self.assertIsNone(unknown)
+        self.assertEqual(unknown["first_send"], "UNKNOWN")
+        self.assertEqual(unknown["observation_status"], "UNKNOWN")
         self.assertIsNone(
             obs.build_first_send_accounting_receipt(
                 identity=self._identity(),
