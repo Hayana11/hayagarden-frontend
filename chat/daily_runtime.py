@@ -7339,11 +7339,19 @@ def _build_first_send_observation_inputs(
                 ),
             })
     policy = getattr(context_plan, 'budget_policy', None)
-    plan_hash = str(
-        plan.manifest.get('context_plan_hash')
-        or getattr(context_plan, 'plan_hash', '')
-        or ''
-    )
+    manifest_plan_id = str(
+        plan.manifest.get('context_plan_id') or ''
+    ).strip() or None
+    materialized_plan_id = str(
+        getattr(context_plan, 'plan_id', '') if context_plan is not None else ''
+    ).strip() or None
+    manifest_plan_hash = str(
+        plan.manifest.get('context_plan_hash') or ''
+    ).strip() or None
+    materialized_plan_hash = str(
+        getattr(context_plan, 'plan_hash', '') if context_plan is not None else ''
+    ).strip() or None
+    plan_hash = manifest_plan_hash or materialized_plan_hash or ''
     first = obs.first_round(usage)
     provider_session_id = str(
         getattr(resident, 'session_id', None)
@@ -7372,12 +7380,19 @@ def _build_first_send_observation_inputs(
         ) or None,
         'provider_session_id': provider_session_id,
         'provider_request_id': provider_request_id,
-        'context_plan_id': str(
-            plan.manifest.get('context_plan_id')
-            or getattr(context_plan, 'plan_id', '')
-            or ''
-        ) or None,
+        'transcript_claude_session_id': (
+            str(getattr(plan, 'transcript_claude_session_id', '') or '').strip()
+            or None
+        ),
+        'transcript_process_generation': getattr(
+            plan, 'transcript_process_generation', None
+        ),
+        'context_plan_id': manifest_plan_id or materialized_plan_id,
         'context_plan_hash': plan_hash or None,
+        'manifest_context_plan_id': manifest_plan_id,
+        'materialized_context_plan_id': materialized_plan_id,
+        'manifest_context_plan_hash': manifest_plan_hash,
+        'materialized_context_plan_hash': materialized_plan_hash,
         'source_hash': str(
             plan.manifest.get('context_plan_source_hash')
             or getattr(context_plan, 'source_hash', '')
