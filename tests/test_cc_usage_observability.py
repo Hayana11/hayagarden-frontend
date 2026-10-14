@@ -1823,6 +1823,34 @@ class DailyProviderBudgetContractTests(unittest.TestCase):
         self.assertIsNone(plan._provider_prompt_system_snapshot)
         self.assertIsNone(resident._last_provider_content)
 
+    def test_generator_error_releases_snapshots_without_replacing_exception(self):
+        from chat import daily_runtime
+
+        plan = self._plan("hot")
+        resident = self._resident()
+
+        def fake_ensure(*args, **kwargs):
+            yield ("text", "partial")
+            raise ValueError("provider stream failed")
+
+        with mock.patch.object(
+            daily_runtime,
+            "ensure_resident_and_stream",
+            side_effect=fake_ensure,
+        ):
+            stream = daily_runtime.stream_daily_resident_turn(
+                plan,
+                resident=resident,
+                env={},
+                static_system="STATIC_SYSTEM",
+            )
+            with self.assertRaisesRegex(ValueError, "provider stream failed"):
+                list(stream)
+
+        self.assertIsNone(plan._provider_prompt_content_snapshot)
+        self.assertIsNone(plan._provider_prompt_system_snapshot)
+        self.assertIsNone(resident._last_provider_content)
+
     def test_observation_persistence_contains_no_raw_payload(self):
         from chat import daily_runtime
 
@@ -1855,6 +1883,37 @@ class DailyProviderBudgetContractTests(unittest.TestCase):
 
 
 class RealityAdapterContractTests(unittest.TestCase):
+    def test_reality_snapshot_failure_does_not_fallback_to_pre_reality_payload(self):
+        with mock.patch("tools.ombre_adapter.warmup_async"):
+            import gateway
+
+        from tools import cc_usage_observability as obs
+
+        class FakeResident:
+            def __init__(self):
+                self.received = None
+
+            def send_turn(self, content, **kwargs):
+                self.received = (content, kwargs)
+                return iter([("done", ("ok", "", {}, {}))])
+
+        base = [{"type": "text", "text": "USER"}]
+        lease = {"turn_id": "lease-1"}
+        fake = FakeResident()
+        adapter = gateway._RequestRealityResident(fake, "REALITY")
+        with mock.patch.object(
+            obs,
+            "snapshot_prompt_content",
+            side_effect=RuntimeError("isolated Reality snapshot failure"),
+        ):
+            list(adapter.send_turn(base, turn_lease=lease))
+
+        self.assertIsNone(adapter._last_provider_content)
+        self.assertTrue(adapter._provider_prompt_snapshot_failed)
+        self.assertIsNotNone(fake.received)
+        self.assertIs(fake.received[1]["turn_lease"], lease)
+        self.assertIn("REALITY", fake.received[0][-1]["text"])
+
     def test_reality_adapter_preserves_visible_payload_and_kwargs(self):
         with mock.patch("tools.ombre_adapter.warmup_async"):
             import gateway
