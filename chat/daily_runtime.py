@@ -5279,6 +5279,7 @@ def _attempt_capacity_swap_before_stdin(
     watermark = plan.cursor_before
     install_state: Optional[dict[str, Any]] = None
     generation_bumped = False
+    target_process_generation: Optional[int] = None
     plan_fields = (
         tuple(fields(plan))
         if getattr(plan, '__dataclass_fields__', None)
@@ -5314,6 +5315,7 @@ def _attempt_capacity_swap_before_stdin(
                 if watermark is not None
                 else max(0, int(plan.user_message_id) - 1)
             ),
+            owner_process_generation=target_process_generation,
             db_path=plan.db_path,
         )
         if result.get('ok'):
@@ -5382,6 +5384,9 @@ def _attempt_capacity_swap_before_stdin(
         }
         install_state = install_capacity_swap_into_live_resident(
             live_resident=resident, staged_resident=staged,
+        )
+        target_process_generation = int(
+            getattr(resident, 'generation', 0) or 0
         )
         effective = str(handoff.effective_system or with_capacity_boundary_suffix(static_system))
         replacement = reprepare_after_capacity_swap(

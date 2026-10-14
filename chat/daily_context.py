@@ -2816,6 +2816,7 @@ def rollback_empty_resident_generation(
     owner_worker_id: Optional[str] = None,
     owner_resident_key: Optional[str] = None,
     owner_cursor_message_id: Optional[int] = None,
+    owner_process_generation: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """CAS-restore a generation only while it is provably an empty shell.
@@ -2872,7 +2873,7 @@ def rollback_empty_resident_generation(
             (cid, expected),
         ).fetchone()
         cursor = conn.execute(
-            'SELECT 1 FROM daily_resident_cursors '
+            'SELECT history_cursor_message_id FROM daily_resident_cursors '
             'WHERE context_id=? AND resident_generation=?',
             (cid, expected),
         ).fetchone()
@@ -2881,6 +2882,11 @@ def rollback_empty_resident_generation(
         expected_cursor = (
             int(owner_cursor_message_id)
             if owner_cursor_message_id is not None
+            else None
+        )
+        expected_process_generation = (
+            int(owner_process_generation)
+            if owner_process_generation is not None
             else None
         )
         if owner is not None and (
@@ -2894,10 +2900,20 @@ def rollback_empty_resident_generation(
                 expected_cursor is not None
                 and int(owner['bound_cursor_message_id'] or -1) != expected_cursor
             )
+            or (
+                expected_process_generation is not None
+                and int(owner['process_generation'] or -1) != expected_process_generation
+            )
         ):
             conn.rollback()
             return {'ok': False, 'reason': 'owner_identity_unproven'}
         if owner is None and cursor is not None:
+            conn.rollback()
+            return {'ok': False, 'reason': 'cursor_identity_unproven'}
+        if owner is not None and cursor is not None and (
+            expected_cursor is None
+            or int(cursor['history_cursor_message_id'] or -1) != expected_cursor
+        ):
             conn.rollback()
             return {'ok': False, 'reason': 'cursor_identity_unproven'}
         if owner is not None:
