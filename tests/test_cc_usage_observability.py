@@ -1555,5 +1555,75 @@ class ProviderBudgetReplayTests(unittest.TestCase):
         )
 
 
+class DailyProviderBudgetWiringTests(unittest.TestCase):
+    def test_capacity_keeps_bootstrap_identity_without_cold_tag(self):
+        from chat import daily_runtime
+
+        plan = type("Plan", (), {})()
+        plan.manifest = {
+            "capacity_swap": True,
+            "context_plan_id": "plan-1",
+            "context_plan_hash": "hash-1",
+            "context_plan_source_hash": "source-1",
+            "model": "claude-opus-5-5",
+        }
+        plan.assembly = {
+            "context_plan_representation_blocks": [
+                {"body": "CANONICAL_HISTORY"},
+            ],
+            "state": "STATE",
+        }
+        plan.user_content = "CURRENT_USER"
+        plan.resident_generation = 48
+        plan.is_cold = False
+        plan.is_respawn = False
+        plan._provider_prompt_system_snapshot = "STATIC_SYSTEM"
+        plan._provider_prompt_content_snapshot = (
+            "CANONICAL_HISTORY\nCURRENT_USER"
+        )
+        resident = type("Resident", (), {})()
+        resident.generation = 48
+        resident.resident_pid = 1
+        resident.session_id = "session-1"
+        resident.tool_surface_snapshot = {}
+        resident.allowed_tools = ""
+        resident.mcp_config_path = None
+        usage = {
+            "rounds": [{
+                "index": 1,
+                "complete": True,
+                "input_tokens": 2,
+                "output_tokens": 1,
+                "cache_read": 0,
+                "cache_creation": 1000,
+                "context_tokens": 1002,
+            }],
+            "num_rounds": 1,
+            "input_tokens": 2,
+            "output_tokens": 1,
+            "cache_read": 0,
+            "cache_creation": 1000,
+            "resident_turn_count": 1,
+        }
+
+        observed = daily_runtime._attach_daily_provider_budget_observation(
+            plan,
+            resident=resident,
+            static_system="STATIC_SYSTEM",
+            usage=usage,
+        )
+
+        self.assertEqual(
+            observed["context_breakdown"]["bootstrap_kind"],
+            "capacity",
+        )
+        self.assertEqual(observed["runtime"]["bootstrap_kind"], "capacity")
+        self.assertFalse(observed["runtime"]["is_cold"])
+        self.assertEqual(
+            observed["context_breakdown"]["provider_first_round_context_tokens"],
+            1002,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
