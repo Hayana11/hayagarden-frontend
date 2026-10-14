@@ -1674,9 +1674,12 @@ class ResidentSession:
             ),
             "spawn_tool_flags_observation_status": (
                 "COMPLETE"
-                if all(
-                    key in (tool_flags or {})
-                    for key in ("tools", "surface_allowed", "mcp_path")
+                if (
+                    all(
+                        key in (tool_flags or {})
+                        for key in ("tools", "surface_allowed", "mcp_path")
+                    )
+                    and bool(str(spawn_argv_sha256 or "").strip())
                 )
                 else "UNKNOWN"
             ),
@@ -2120,6 +2123,7 @@ class ResidentSession:
                 effort_args=effort_args,
                 session_args=('--resume', resume_session_id),
             )
+            spawn_argv_sha256 = self._sha256_spawn_argv(args)
             try:
                 self._proc = subprocess.Popen(
                     args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2152,7 +2156,10 @@ class ResidentSession:
             self._cold = False
             self._generation += 1
             self._reset_session_meta(respawn_reason=reason)
-            self._capture_tool_surface(tool_flags)
+            self._capture_tool_surface(
+                tool_flags,
+                spawn_argv_sha256=spawn_argv_sha256,
+            )
             return self
 
     def _capture_authoritative_deferred(self, result):
@@ -2344,6 +2351,7 @@ class ResidentSession:
                 effort_args=effort_args,
                 session_args=('--session-id', session_id),
             )
+            spawn_argv_sha256 = self._sha256_spawn_argv(args)
             if '--resume' in args:
                 raise ResidentError('fresh_named must not carry --resume')
             try:
@@ -2365,7 +2373,10 @@ class ResidentSession:
             self._cold = True
             self._generation += 1
             self._reset_session_meta(respawn_reason=reason)
-            self._capture_tool_surface(tool_flags)
+            self._capture_tool_surface(
+                tool_flags,
+                spawn_argv_sha256=spawn_argv_sha256,
+            )
             return self
 
     def wait_staged_health(
