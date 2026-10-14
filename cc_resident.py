@@ -1362,7 +1362,7 @@ def normalize_cache_info(raw):
         usage['num_rounds'] = int(raw.get('num_rounds') or len(raw.get('rounds') or []) or 1)
         usage['rounds'] = list(raw.get('rounds') or [])
         # 阶段 1A：成功回复可选观测字段（缺省保持缺失，不写成 0/false）
-        for key in ('observation_version', 'context_breakdown', 'runtime', 'jsonl_usage'):
+        for key in ('observation_version', 'context_breakdown', 'runtime', 'jsonl_usage', 'first_send_accounting'):
             if key in raw:
                 usage[key] = raw[key]
         return usage
@@ -1565,6 +1565,26 @@ class ResidentSession:
             ).encode("utf-8"),
         ).hexdigest()
 
+    @staticmethod
+    def _spawn_tool_names(value):
+        names = []
+        for raw in str(value or "").split(","):
+            name = raw.strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    @staticmethod
+    def _sha256_spawn_argv(args):
+        payload = [str(item) for item in (args or ())]
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+
     def _annotate_spawn_tool_flags(self, tool_flags):
         """Attach only opaque fingerprints from exact spawn flags."""
         flags = dict(tool_flags or {})
@@ -1638,14 +1658,35 @@ class ResidentSession:
             raise ResidentError('uh_a0_surface_fingerprint_missing')
         return fingerprint
 
-    def _capture_tool_surface(self, tool_flags):
+    def _capture_tool_surface(self, tool_flags, *, spawn_argv_sha256=None):
         """Bind observation metadata to the successful generation spawn flags."""
         actual_allowed = str((tool_flags or {}).get("surface_allowed") or "")
+        built_in_tools = str((tool_flags or {}).get("tools") or "")
+        allowed_names = self._spawn_tool_names(actual_allowed)
+        built_in_names = self._spawn_tool_names(built_in_tools)
         profile = str(
             (tool_flags or {}).get("tool_profile") or self._tool_profile or ""
         )
         metadata = {
             "tool_profile": profile,
+            "spawn_tool_flags_source": (
+                "cc_resident.ResidentSession._spawn._build_spawn_tool_flags"
+            ),
+            "spawn_tool_flags_observation_status": (
+                "COMPLETE"
+                if all(
+                    key in (tool_flags or {})
+                    for key in ("tools", "surface_allowed", "mcp_path")
+                )
+                else "UNKNOWN"
+            ),
+            "spawn_argv_sha256": spawn_argv_sha256,
+            "surface_fingerprint": (tool_flags or {}).get("surface_fingerprint"),
+            "effective_builtin_tool_names": built_in_names,
+            "effective_allowed_tool_names": allowed_names,
+            "effective_mcp_tool_names": [
+                name for name in allowed_names if name.startswith("mcp__")
+            ],
             "mcp_config_sha256": (tool_flags or {}).get("mcp_config_sha256"),
             "allowed_surface_sha256": (
                 (tool_flags or {}).get("allowed_surface_sha256")
@@ -1743,6 +1784,7 @@ class ResidentSession:
             model_args=model_args,
             effort_args=effort_args,
         )
+        spawn_argv_sha256 = self._sha256_spawn_argv(args)
         try:
             self._proc = subprocess.Popen(
                 args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1784,7 +1826,10 @@ class ResidentSession:
         self._generation += 1
         self._next_spawn_reason = None
         self._reset_session_meta(respawn_reason=reason)
-        self._capture_tool_surface(tool_flags)
+        self._capture_tool_surface(
+            tool_flags,
+            spawn_argv_sha256=spawn_argv_sha256,
+        )
 
     def _kill(self, quiet=False):
         proc, self._proc = self._proc, None

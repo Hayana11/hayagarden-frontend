@@ -7307,6 +7307,210 @@ def _clear_daily_provider_prompt_snapshots(
         pass
 
 
+
+def _build_first_send_observation_inputs(
+    plan: DailyTurnPlan,
+    *,
+    context_plan: Any,
+    assembly: Mapping[str, Any],
+    provider_system: str,
+    provider_content: Any,
+    canonical_history: str,
+    cold_once_parts: list[str],
+    state_text: str,
+    tool_surface: Mapping[str, Any],
+    breakdown: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    resident: Any,
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Build redacted first-send inputs from the actual materialized turn."""
+    from tools import cc_usage_observability as obs
+
+    ordered_sections = []
+    if context_plan is not None:
+        for section in getattr(context_plan, 'ordered_sections', ()) or ():
+            ordered_sections.append({
+                'kind': str(getattr(section, 'kind', '') or ''),
+                'source_ref': str(getattr(section, 'source_ref', '') or ''),
+                'content_hash': str(getattr(section, 'content_hash', '') or ''),
+                'estimated_tokens': int(getattr(section, 'estimated_tokens', 0) or 0),
+                'representation_id': str(
+                    getattr(section, 'representation_id', '') or ''
+                ),
+            })
+    policy = getattr(context_plan, 'budget_policy', None)
+    plan_hash = str(
+        plan.manifest.get('context_plan_hash')
+        or getattr(context_plan, 'plan_hash', '')
+        or ''
+    )
+    first = obs.first_round(usage)
+    provider_session_id = str(
+        getattr(resident, 'session_id', None)
+        or getattr(plan, 'transcript_claude_session_id', None)
+        or ''
+    ).strip() or None
+    provider_request_id = (
+        str(first.get('request_id') or '').strip()
+        if isinstance(first, Mapping) and first.get('request_id')
+        else None
+    )
+    started_at = getattr(plan, 'turn_started_at', None)
+    identity = {
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+        'resident_generation': int(plan.resident_generation),
+        'resident_key': str(plan.resident_key),
+        'provider': str(
+            plan.manifest.get('provider') or 'claude_code'
+        ),
+        'model_identity': str(
+            usage.get('_obs_model')
+            or plan.manifest.get('model')
+            or getattr(resident, 'model_identity', None)
+            or ''
+        ) or None,
+        'provider_session_id': provider_session_id,
+        'provider_request_id': provider_request_id,
+        'context_plan_id': str(
+            plan.manifest.get('context_plan_id')
+            or getattr(context_plan, 'plan_id', '')
+            or ''
+        ) or None,
+        'context_plan_hash': plan_hash or None,
+        'source_hash': str(
+            plan.manifest.get('context_plan_source_hash')
+            or getattr(context_plan, 'source_hash', '')
+            or ''
+        ) or None,
+        'transcript_path_sha256': (
+            obs.sha256_text(plan.transcript_path)
+            if plan.transcript_path else None
+        ),
+        'transcript_start_offset': plan.transcript_start_offset,
+        'transcript_end_offset': plan.transcript_end_offset,
+        'first_send_started_at': (
+            started_at.isoformat()
+            if hasattr(started_at, 'isoformat') else None
+        ),
+    }
+    materialized_receipt = assembly.get('_context_install_render_receipt') or {}
+    plan_accounting = {
+        'plan_id': identity['context_plan_id'],
+        'plan_hash': identity['context_plan_hash'],
+        'source_hash': identity['source_hash'],
+        'selected_token_estimate': (
+            getattr(context_plan, 'selected_token_estimate', None)
+            if context_plan is not None else None
+        ),
+        'fixed_section_token_estimate': (
+            getattr(context_plan, 'fixed_section_token_estimate', None)
+            if context_plan is not None else None
+        ),
+        'reserve_budget': (
+            getattr(policy, 'reserve_budget', None)
+            if policy is not None else None
+        ),
+        'total_token_estimate': (
+            getattr(context_plan, 'total_token_estimate', None)
+            if context_plan is not None else None
+        ),
+        'budget_status': (
+            str(getattr(context_plan, 'budget_status', '') or '')
+            if context_plan is not None else None
+        ),
+        'recent_raw_source_seqs': list(
+            getattr(context_plan, 'recent_raw_source_seqs', ()) or ()
+        ) if context_plan is not None else [],
+        'ordered_sections': ordered_sections,
+        'materialized_install_receipt': {
+            key: materialized_receipt.get(key)
+            for key in (
+                'representation_ids',
+                'representation_body_hashes',
+                'fixed_section_kinds',
+                'fixed_section_body_hashes',
+                'current_request_slots',
+                'current_request_carrier',
+                'final_payload_hash',
+                'final_payload_token_estimate',
+                'final_payload_kind',
+            )
+            if key in materialized_receipt
+        },
+    }
+    components = [
+        obs.observe_provider_component(
+            'invariant_system',
+            provider_system,
+            measurement_source='daily_runtime.effective_provider_system',
+            represented_in_context_plan=any(
+                item.get('kind') == 'invariant_system'
+                for item in ordered_sections
+            ),
+        ),
+        obs.observe_provider_component(
+            'history_bootstrap',
+            canonical_history or None,
+            measurement_source='daily_runtime.context_plan_representation_blocks',
+            represented_in_context_plan=bool(
+                any(item.get('kind') in ('raw', 'chunk', 'older_continuity', 'recent_raw')
+                    for item in ordered_sections)
+            ),
+        ),
+        obs.observe_provider_component(
+            'state',
+            state_text or None,
+            measurement_source='daily_runtime.assembly.state',
+            represented_in_context_plan=any(
+                item.get('kind') == 'accepted_state'
+                for item in ordered_sections
+            ),
+        ),
+        obs.observe_provider_component(
+            'current_request',
+            str(getattr(plan, 'user_content', '') or ''),
+            measurement_source='daily_runtime.plan.user_content',
+            represented_in_context_plan=any(
+                item.get('kind') == 'current_request'
+                for item in ordered_sections
+            ),
+        ),
+        obs.observe_provider_component(
+            'tool_schema',
+            tool_surface.get('tool_schema_text'),
+            measurement_source=str(
+                tool_surface.get('tool_schema_source')
+                or 'actual_spawn_tool_surface'
+            ),
+            represented_in_context_plan=False,
+            accounting_role='provider_envelope_non_additive',
+        ),
+        obs.observe_provider_component(
+            'visible_payload',
+            provider_content,
+            measurement_source='daily_runtime.actual_resident_send_content',
+            represented_in_context_plan=False,
+            accounting_role='container_non_additive',
+        ),
+        obs.observe_provider_component(
+            'provider_envelope_boundary',
+            None,
+            measurement_source='outside_claude_resident_observation_boundary',
+            represented_in_context_plan=False,
+            accounting_role='unknown_non_additive',
+        ),
+    ]
+    if cold_once_parts:
+        components.append(obs.observe_provider_component(
+            'cold_once',
+            '\n\n'.join(cold_once_parts),
+            measurement_source='daily_runtime.cold_once_carrier',
+            represented_in_context_plan=False,
+        ))
+    return identity, plan_accounting, components
+
+
 def _attach_daily_provider_budget_observation(
     plan: DailyTurnPlan,
     *,
@@ -7504,6 +7708,9 @@ def _attach_daily_provider_budget_observation(
                 '_obs_keepwarm_lease_expires_at'
             ),
             provider='claude_code',
+            spawn_tool_surface=obs.build_spawn_tool_surface_observation(
+                tool_surface if snapshot_has_authority else None
+            ),
         )
         runtime.update({
             'bootstrap_kind': bootstrap_kind,
@@ -7519,10 +7726,41 @@ def _attach_daily_provider_budget_observation(
         )
         breakdown['turn_tags'] = list(turn_measurement.get('turn_tags') or [])
         breakdown['turn_measurement'] = turn_measurement
+        first_send_accounting = None
+        try:
+            identity, plan_accounting, provider_bound_components = (
+                _build_first_send_observation_inputs(
+                    plan,
+                    context_plan=context_plan,
+                    assembly=assembly,
+                    provider_system=provider_system,
+                    provider_content=provider_content,
+                    canonical_history=canonical_history,
+                    cold_once_parts=cold_once_parts,
+                    state_text=str(assembly.get('state') or ''),
+                    tool_surface=tool_surface,
+                    breakdown=breakdown,
+                    usage=usage,
+                    resident=resident,
+                )
+            )
+            first_send_accounting = obs.build_first_send_accounting_receipt(
+                identity=identity,
+                plan_accounting=plan_accounting,
+                provider_bound_components=provider_bound_components,
+                runtime=runtime,
+                breakdown=breakdown,
+                usage=usage,
+            )
+        except Exception:
+            logger.exception(
+                'daily first-send accounting observation failed; preserving usage'
+            )
         observed = obs.attach_observation(
             usage,
             context_breakdown=breakdown,
             runtime=runtime,
+            first_send_accounting=first_send_accounting,
         )
         for key in list(observed):
             if str(key).startswith('_obs_'):

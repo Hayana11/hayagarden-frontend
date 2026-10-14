@@ -17,7 +17,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-OBSERVATION_VERSION = 3
+OBSERVATION_VERSION = 4
 CONTEXT_LAYOUT_VERSION = 2
 ESTIMATION_METHOD = "heuristic_cjk1_ascii4_v1"
 TZ_NAME = "Asia/Shanghai"
@@ -117,6 +117,213 @@ def content_to_text(content: Any) -> tuple[str, int]:
     return str(content), 0
 
 
+def _serialize_component(value: Any) -> tuple[Optional[str], str, int]:
+    """Serialize only for measurement; callers persist hashes and sizes only."""
+    if value is None:
+        return None, "", 0
+    if isinstance(value, str):
+        return value, value, 0
+    serialized = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    text, non_text = content_to_text(value)
+    return serialized, text, non_text
+
+
+def observe_provider_component(
+    kind: str,
+    value: Any,
+    *,
+    measurement_source: str,
+    represented_in_context_plan: Optional[bool],
+    accounting_role: str = "component",
+) -> dict[str, Any]:
+    """Return redacted provider-bound component evidence."""
+    serialized, text, non_text = _serialize_component(value)
+    if serialized is None:
+        return {
+            "kind": str(kind),
+            "observation_status": "UNKNOWN",
+            "identity_sha256": None,
+            "serialized_character_count": None,
+            "serialized_byte_count": None,
+            "token_estimate": None,
+            "measurement_source": str(measurement_source),
+            "represented_in_context_plan": represented_in_context_plan,
+            "accounting_role": str(accounting_role),
+            "non_text_block_count": 0,
+        }
+    return {
+        "kind": str(kind),
+        "observation_status": "COMPLETE",
+        "identity_sha256": sha256_text(serialized),
+        "serialized_character_count": len(serialized),
+        "serialized_byte_count": len(serialized.encode("utf-8")),
+        "token_estimate": estimate_tokens_heuristic_cjk1_ascii4_v1(text),
+        "measurement_source": str(measurement_source),
+        "represented_in_context_plan": represented_in_context_plan,
+        "accounting_role": str(accounting_role),
+        "non_text_block_count": int(non_text or 0),
+    }
+
+
+def build_spawn_tool_surface_observation(
+    snapshot: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Redact the generation-scoped snapshot captured from actual spawn flags."""
+    if not isinstance(snapshot, Mapping) or not snapshot:
+        return {
+            "observation_status": "UNKNOWN",
+            "source": "actual_spawn_tool_flags",
+            "tool_schema_measurement_status": "unavailable",
+        }
+    fields = (
+        "tool_profile",
+        "spawn_argv_sha256",
+        "surface_fingerprint",
+        "mcp_config_sha256",
+        "allowed_surface_sha256",
+        "built_in_tools_sha256",
+        "allowed_tool_count",
+        "tool_count",
+        "tool_schema_sha256",
+        "tool_schema_source",
+        "tool_schema_measurement_status",
+        "effective_builtin_tool_names",
+        "effective_allowed_tool_names",
+        "effective_mcp_tool_names",
+    )
+    out = {
+        "observation_status": str(
+            snapshot.get("spawn_tool_flags_observation_status")
+            or snapshot.get("observation_status")
+            or "PARTIAL"
+        ),
+        "source": str(
+            snapshot.get("spawn_tool_flags_source")
+            or "actual_spawn_tool_flags"
+        ),
+    }
+    for key in fields:
+        value = snapshot.get(key)
+        if value is not None:
+            out[key] = list(value) if key.endswith("_names") else value
+    return out
+
+
+def build_first_send_accounting_receipt(
+    *,
+    identity: Mapping[str, Any],
+    plan_accounting: Mapping[str, Any],
+    provider_bound_components: Sequence[Mapping[str, Any]],
+    runtime: Mapping[str, Any],
+    breakdown: Mapping[str, Any],
+    usage: Mapping[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Build one immutable redacted receipt for a generation's first send."""
+    runtime = dict(runtime or {})
+    usage = usage or {}
+    turn_count = usage.get("resident_turn_count")
+    if turn_count is None:
+        turn_count = runtime.get("resident_turn_count")
+    try:
+        turn_count = int(turn_count) if turn_count is not None else None
+    except (TypeError, ValueError):
+        turn_count = None
+    if turn_count is not None and turn_count > 1:
+        return None
+
+    first = first_round(usage)
+    request_id = (
+        first.get("request_id")
+        if isinstance(first, Mapping) else None
+    )
+    jsonl_usage = usage.get("jsonl_usage") or {}
+    jsonl_requests = jsonl_usage.get("jsonl_requests") or []
+    if not request_id and jsonl_requests and isinstance(jsonl_requests[0], Mapping):
+        request_id = jsonl_requests[0].get("request_id")
+    marker = True if turn_count == 1 else "UNKNOWN"
+    if marker == "UNKNOWN":
+        status = "UNKNOWN"
+    elif not isinstance(first, Mapping):
+        status = "PARTIAL"
+    else:
+        spawn = runtime.get("spawn_tool_surface") or {}
+        schema_status = str(
+            breakdown.get("tool_schema_measurement_status") or "unavailable"
+        )
+        required_identity = (
+            "context_id",
+            "context_epoch",
+            "resident_generation",
+            "resident_key",
+            "provider",
+            "model_identity",
+            "context_plan_id",
+            "context_plan_hash",
+            "source_hash",
+        )
+        identity_complete = all(
+            identity.get(key) not in (None, "") for key in required_identity
+        )
+        transcript_complete = (
+            identity.get("transcript_start_offset") is not None
+            and identity.get("transcript_end_offset") is not None
+        )
+        if not identity_complete or not request_id:
+            status = "UNKNOWN"
+        elif (
+            str(spawn.get("observation_status") or "UNKNOWN") != "COMPLETE"
+            or schema_status != "available"
+            or not transcript_complete
+            or any(
+                item.get("observation_status") != "COMPLETE"
+                and item.get("accounting_role") != "unknown_non_additive"
+                for item in provider_bound_components
+            )
+        ):
+            status = "PARTIAL"
+        else:
+            status = "COMPLETE"
+
+    first_usage = {
+        "input_tokens": int(first.get("input_tokens") or 0) if isinstance(first, Mapping) else None,
+        "cache_read_input_tokens": int(first.get("cache_read") or 0) if isinstance(first, Mapping) else None,
+        "cache_creation_input_tokens": int(first.get("cache_creation") or 0) if isinstance(first, Mapping) else None,
+        "context_tokens": round_context_tokens(first) if isinstance(first, Mapping) else None,
+        "output_tokens": int(first.get("output_tokens") or 0) if isinstance(first, Mapping) else None,
+        "request_id": str(request_id) if request_id else None,
+    }
+    return {
+        "schema_version": 1,
+        "observation_status": status,
+        "first_send": marker,
+        "first_send_timestamp": runtime.get("observed_at"),
+        "identity": dict(identity or {}),
+        "plan_accounting": dict(plan_accounting or {}),
+        "spawn_tool_surface": dict(runtime.get("spawn_tool_surface") or {}),
+        "tool_schema_accounting": {
+            key: breakdown.get(key)
+            for key in (
+                "tool_schema_sha256",
+                "tool_schema_source",
+                "tool_schema_measurement_status",
+                "tool_schema_tokens_estimate",
+                "tool_schema_serialized_character_count",
+                "tool_schema_serialized_byte_count",
+            )
+        },
+        "provider_bound_components": [
+            dict(item) for item in provider_bound_components
+        ],
+        "provider_usage": first_usage,
+    }
+
+
 def measure_static_parts(
     *,
     persona: str = "",
@@ -162,55 +369,46 @@ def resolve_tool_schema(
     text = str(tool_schema_text) if tool_schema_text is not None else ""
     has_text = bool(text.strip())
     valid_source = source in ("mcp_list_tools", "static_registry")
+    size = {
+        "tool_schema_serialized_character_count": len(text) if has_text else None,
+        "tool_schema_serialized_byte_count": (
+            len(text.encode("utf-8")) if has_text else None
+        ),
+    }
 
-    # A producer-supplied status is authoritative for coverage. In particular,
-    # a partial schema may still be estimated, but it must never become
-    # available and therefore must not be deducted from provider residuals.
-    if hinted in ("partial", "unavailable"):
-        can_estimate = hinted == "partial" and has_text and valid_source
+    def result(status: str, estimate: Optional[int], digest: Optional[str]) -> dict[str, Any]:
         return {
-            "tool_schema_tokens_estimate": (
-                estimate_tokens_heuristic_cjk1_ascii4_v1(text)
-                if can_estimate else None
-            ),
-            "tool_schema_measurement_status": hinted,
-            "tool_schema_source": source,
-            "tool_count": int(tool_count) if tool_count is not None else None,
-            "allowed_tool_count": allowed,
-            "tool_schema_sha256": sha256_text(text) if can_estimate else None,
-        }
-
-    if not has_text:
-        status = "unavailable"
-        if valid_source and tool_count is not None:
-            status = "partial"
-        return {
-            "tool_schema_tokens_estimate": None,
+            "tool_schema_tokens_estimate": estimate,
             "tool_schema_measurement_status": status,
             "tool_schema_source": source,
             "tool_count": int(tool_count) if tool_count is not None else None,
             "allowed_tool_count": allowed,
-            "tool_schema_sha256": None,
+            "tool_schema_sha256": digest,
+            **size,
         }
+
+    # Producer-supplied status is authoritative. Partial text may be measured,
+    # but is never deducted from provider residuals.
+    if hinted in ("partial", "unavailable"):
+        can_estimate = hinted == "partial" and has_text and valid_source
+        return result(
+            hinted,
+            estimate_tokens_heuristic_cjk1_ascii4_v1(text) if can_estimate else None,
+            sha256_text(text) if can_estimate else None,
+        )
+
+    if not has_text:
+        status = "partial" if valid_source and tool_count is not None else "unavailable"
+        return result(status, None, None)
 
     if not valid_source:
-        return {
-            "tool_schema_tokens_estimate": None,
-            "tool_schema_measurement_status": "unavailable",
-            "tool_schema_source": source,
-            "tool_count": int(tool_count) if tool_count is not None else None,
-            "allowed_tool_count": allowed,
-            "tool_schema_sha256": None,
-        }
+        return result("unavailable", None, None)
 
-    return {
-        "tool_schema_tokens_estimate": estimate_tokens_heuristic_cjk1_ascii4_v1(text),
-        "tool_schema_measurement_status": "available",
-        "tool_schema_source": source,
-        "tool_count": int(tool_count) if tool_count is not None else None,
-        "allowed_tool_count": allowed,
-        "tool_schema_sha256": sha256_text(text),
-    }
+    return result(
+        "available",
+        estimate_tokens_heuristic_cjk1_ascii4_v1(text),
+        sha256_text(text),
+    )
 
 
 def build_context_breakdown(
@@ -335,6 +533,9 @@ def build_context_breakdown(
         "tool_schema_tokens_estimate": tools["tool_schema_tokens_estimate"],
         "tool_schema_measurement_status": tools["tool_schema_measurement_status"],
         "tool_schema_source": tools["tool_schema_source"],
+        "tool_schema_sha256": tools["tool_schema_sha256"],
+        "tool_schema_serialized_character_count": tools["tool_schema_serialized_character_count"],
+        "tool_schema_serialized_byte_count": tools["tool_schema_serialized_byte_count"],
         "tool_count": tools["tool_count"],
         "allowed_tool_count": tools["allowed_tool_count"],
         "tool_result_tokens_estimate": tool_result_est,
@@ -378,6 +579,7 @@ def build_runtime(
     observed_at: Optional[str] = None,
     keepwarm_lease_expires_at: Optional[str] = None,
     provider: str = "claude_code",
+    spawn_tool_surface: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     if mcp_config_sha256 is not None:
         mcp_sha = str(mcp_config_sha256)
@@ -440,6 +642,9 @@ def build_runtime(
         "model_sha256": model_sha,
         "provider": provider_s,
         "provider_sha256": provider_sha,
+        "spawn_tool_surface": (
+            dict(spawn_tool_surface) if isinstance(spawn_tool_surface, Mapping) else None
+        ),
         "effort": effort,
         "thinking_sha256": thinking_sha,
         "runtime_identity": runtime_identity,
@@ -454,6 +659,7 @@ def attach_observation(
     *,
     context_breakdown: Mapping[str, Any],
     runtime: Mapping[str, Any],
+    first_send_accounting: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """给成功回复的 Usage v2 增加可选观测字段；旧字段语义不变。"""
     out = dict(usage or {})
@@ -462,6 +668,8 @@ def attach_observation(
     out["observation_version"] = OBSERVATION_VERSION
     out["context_breakdown"] = dict(context_breakdown or {})
     out["runtime"] = dict(runtime or {})
+    if first_send_accounting is not None:
+        out["first_send_accounting"] = dict(first_send_accounting)
     if context_breakdown.get("turn_tags") is not None:
         out["turn_tags"] = list(context_breakdown.get("turn_tags") or [])
     if isinstance(context_breakdown.get("turn_measurement"), dict):
