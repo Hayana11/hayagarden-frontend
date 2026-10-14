@@ -4132,12 +4132,14 @@ class _RequestRealityResident:
         '_resident',
         '_request_reality_context',
         '_last_provider_content',
+        '_provider_prompt_snapshot_failed',
     )
 
     def __init__(self, resident, request_reality_context):
         self._resident = resident
         self._request_reality_context = request_reality_context
         self._last_provider_content = None
+        self._provider_prompt_snapshot_failed = False
 
     def send_turn(self, content, **kwargs):
         content = _append_reality_context(
@@ -4149,9 +4151,14 @@ class _RequestRealityResident:
         try:
             from tools import cc_usage_observability as obs
 
-            self._last_provider_content = obs.snapshot_prompt_content(content)
+            snapshot = obs.snapshot_prompt_content(content)
+            if snapshot is None:
+                raise RuntimeError('provider_prompt_snapshot_unavailable')
+            self._last_provider_content = snapshot
+            self._provider_prompt_snapshot_failed = False
         except Exception:
             self._last_provider_content = None
+            self._provider_prompt_snapshot_failed = True
         return self._resident.send_turn(content, **kwargs)
 
     def __getattr__(self, name):
