@@ -8393,6 +8393,10 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
                         diagnostic['mismatch_type'],
                         'section_presence',
                     )
+                    self.assertEqual(
+                        diagnostic['expected_section_kinds'],
+                        [scope] if field == 'state' else [],
+                    )
                     self.assertNotIn(
                         sentinel,
                         json.dumps(diagnostic, ensure_ascii=False),
