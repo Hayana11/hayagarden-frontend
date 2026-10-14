@@ -7366,6 +7366,7 @@ def _attach_daily_provider_budget_observation(
         # The generation-scoped snapshot is the sole source for tool coverage.
         # An absent snapshot remains unknown; never fall back to constructor state.
         tool_surface = getattr(resident, 'tool_surface_snapshot', None) or {}
+        snapshot_has_authority = bool(tool_surface)
         allowed_tool_count = tool_surface.get('allowed_tool_count')
         breakdown = obs.build_context_breakdown(
             full_system=provider_system,
@@ -7464,22 +7465,22 @@ def _attach_daily_provider_budget_observation(
             tools_sha256=tool_surface.get('tools_sha256'),
             built_in_tools_sha256=tool_surface.get('built_in_tools_sha256'),
             tool_profile=tool_surface.get('tool_profile'),
+            observed_spawn_surface=snapshot_has_authority,
             tool_schema_sha256=(
-                usage.get('_obs_tool_schema_sha256')
-                or tool_surface.get('tool_schema_sha256')
+                tool_surface.get('tool_schema_sha256')
+                if snapshot_has_authority else None
             ),
             tool_schema_source=(
-                usage.get('_obs_tool_schema_source')
-                or tool_surface.get('tool_schema_source')
+                tool_surface.get('tool_schema_source')
+                if snapshot_has_authority else None
             ),
             tool_schema_measurement_status=(
-                usage.get('_obs_tool_schema_measurement_status')
-                or tool_surface.get('tool_schema_measurement_status')
+                tool_surface.get('tool_schema_measurement_status')
+                if snapshot_has_authority else None
             ),
             tool_count=(
-                usage.get('_obs_tool_count')
-                if usage.get('_obs_tool_count') is not None
-                else tool_surface.get('tool_count')
+                tool_surface.get('tool_count')
+                if snapshot_has_authority else None
             ),
             claude_session_id=(
                 usage.get('_obs_claude_session_id')
