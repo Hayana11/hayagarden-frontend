@@ -263,9 +263,13 @@ def build_first_send_accounting_receipt(
             "resident_key",
             "provider",
             "model_identity",
+            "provider_session_id",
             "context_plan_id",
             "context_plan_hash",
             "source_hash",
+            "transcript_claude_session_id",
+            "transcript_process_generation",
+            "transcript_path_sha256",
         )
         identity_complete = all(
             identity.get(key) not in (None, "") for key in required_identity
@@ -274,10 +278,28 @@ def build_first_send_accounting_receipt(
             identity.get("transcript_start_offset") is not None
             and identity.get("transcript_end_offset") is not None
         )
+        plan_identity_complete = all(
+            identity.get(key) not in (None, "")
+            for key in (
+                "manifest_context_plan_id",
+                "materialized_context_plan_id",
+                "manifest_context_plan_hash",
+                "materialized_context_plan_hash",
+            )
+        )
+        plan_identity_matches = (
+            identity.get("manifest_context_plan_id")
+            == identity.get("materialized_context_plan_id")
+            and identity.get("manifest_context_plan_hash")
+            == identity.get("materialized_context_plan_hash")
+        )
         if not identity_complete or not request_id:
+            status = "UNKNOWN"
+        elif not plan_identity_complete or not plan_identity_matches:
             status = "UNKNOWN"
         elif (
             str(spawn.get("observation_status") or "UNKNOWN") != "COMPLETE"
+            or not str(spawn.get("spawn_argv_sha256") or "").strip()
             or schema_status != "available"
             or not transcript_complete
             or any(
@@ -668,7 +690,12 @@ def attach_observation(
     out["observation_version"] = OBSERVATION_VERSION
     out["context_breakdown"] = dict(context_breakdown or {})
     out["runtime"] = dict(runtime or {})
-    if first_send_accounting is not None:
+    # The first-send receipt is immutable on the existing Usage v2 path:
+    # preserve an earlier UNKNOWN/PARTIAL/COMPLETE record on every later attach.
+    if (
+        first_send_accounting is not None
+        and "first_send_accounting" not in out
+    ):
         out["first_send_accounting"] = dict(first_send_accounting)
     if context_breakdown.get("turn_tags") is not None:
         out["turn_tags"] = list(context_breakdown.get("turn_tags") or [])
