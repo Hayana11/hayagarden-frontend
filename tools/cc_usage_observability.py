@@ -362,6 +362,7 @@ def build_runtime(
     tools_sha256: Optional[str] = None,
     built_in_tools_sha256: Optional[str] = None,
     tool_profile: Optional[str] = None,
+    observed_spawn_surface: Optional[bool] = None,
     tool_schema_sha256: Optional[str] = None,
     tool_schema_source: Optional[str] = None,
     tool_schema_measurement_status: Optional[str] = None,
@@ -402,6 +403,11 @@ def build_runtime(
             "tool_schema_sha256": tool_schema_sha256,
         })
     )
+    if observed_spawn_surface is False:
+        # No generation-scoped snapshot means no historical spawn authority.
+        mcp_sha = None
+        allowed_sha = None
+        tools_sha = None
     model_sha = sha256_text(model) if model else None
     provider_s = str(provider or "claude_code").strip() or "claude_code"
     provider_sha = sha256_text(provider_s)
