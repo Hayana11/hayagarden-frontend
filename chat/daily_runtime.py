@@ -7351,6 +7351,12 @@ def _build_first_send_observation_inputs(
     materialized_plan_hash = str(
         getattr(context_plan, 'plan_hash', '') if context_plan is not None else ''
     ).strip() or None
+    manifest_source_hash = str(
+        plan.manifest.get('context_plan_source_hash') or ''
+    ).strip() or None
+    materialized_source_hash = str(
+        getattr(context_plan, 'source_hash', '') if context_plan is not None else ''
+    ).strip() or None
     plan_hash = manifest_plan_hash or materialized_plan_hash or ''
     first = obs.first_round(usage)
     provider_session_id = str(
@@ -7393,6 +7399,8 @@ def _build_first_send_observation_inputs(
         'materialized_context_plan_id': materialized_plan_id,
         'manifest_context_plan_hash': manifest_plan_hash,
         'materialized_context_plan_hash': materialized_plan_hash,
+        'manifest_context_plan_source_hash': manifest_source_hash,
+        'materialized_context_plan_source_hash': materialized_source_hash,
         'source_hash': str(
             plan.manifest.get('context_plan_source_hash')
             or getattr(context_plan, 'source_hash', '')
