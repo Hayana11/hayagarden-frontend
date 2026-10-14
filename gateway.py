@@ -4144,9 +4144,14 @@ class _RequestRealityResident:
             content,
             self._request_reality_context,
         )
-        # Daily budget accounting reads this after send_turn; preserve the
-        # exact adapter-transformed payload without changing its semantics.
-        self._last_provider_content = copy.deepcopy(content)
+        # Keep only a best-effort copy of the visible payload passed to the
+        # resident. This is not Claude's internal provider envelope.
+        try:
+            from tools import cc_usage_observability as obs
+
+            self._last_provider_content = obs.snapshot_prompt_content(content)
+        except Exception:
+            self._last_provider_content = None
         return self._resident.send_turn(content, **kwargs)
 
     def __getattr__(self, name):
