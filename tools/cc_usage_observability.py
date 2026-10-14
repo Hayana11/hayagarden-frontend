@@ -234,7 +234,9 @@ def build_first_send_accounting_receipt(
         turn_count = int(turn_count) if turn_count is not None else None
     except (TypeError, ValueError):
         turn_count = None
-    if turn_count is not None and turn_count > 1:
+    # Without a generation turn marker this evidence cannot be attributed to
+    # the first send; fail open by omitting a receipt rather than inventing one.
+    if turn_count is None or turn_count > 1:
         return None
 
     first = first_round(usage)
@@ -246,10 +248,8 @@ def build_first_send_accounting_receipt(
     jsonl_requests = jsonl_usage.get("jsonl_requests") or []
     if not request_id and jsonl_requests and isinstance(jsonl_requests[0], Mapping):
         request_id = jsonl_requests[0].get("request_id")
-    marker = True if turn_count == 1 else "UNKNOWN"
-    if marker == "UNKNOWN":
-        status = "UNKNOWN"
-    elif not isinstance(first, Mapping):
+    marker = True
+    if not isinstance(first, Mapping):
         status = "PARTIAL"
     else:
         spawn = runtime.get("spawn_tool_surface") or {}
@@ -270,6 +270,8 @@ def build_first_send_accounting_receipt(
             "transcript_claude_session_id",
             "transcript_process_generation",
             "transcript_path_sha256",
+            "manifest_context_plan_source_hash",
+            "materialized_context_plan_source_hash",
         )
         identity_complete = all(
             identity.get(key) not in (None, "") for key in required_identity
@@ -293,9 +295,24 @@ def build_first_send_accounting_receipt(
             and identity.get("manifest_context_plan_hash")
             == identity.get("materialized_context_plan_hash")
         )
+        provider_transcript_matches = (
+            str(identity.get("provider_session_id"))
+            == str(identity.get("transcript_claude_session_id"))
+            and str(identity.get("transcript_process_generation"))
+            == str(identity.get("resident_generation"))
+        )
+        source_hash_matches = (
+            identity.get("manifest_context_plan_source_hash")
+            == identity.get("materialized_context_plan_source_hash")
+        )
         if not identity_complete or not request_id:
             status = "UNKNOWN"
-        elif not plan_identity_complete or not plan_identity_matches:
+        elif (
+            not plan_identity_complete
+            or not plan_identity_matches
+            or not provider_transcript_matches
+            or not source_hash_matches
+        ):
             status = "UNKNOWN"
         elif (
             str(spawn.get("observation_status") or "UNKNOWN") != "COMPLETE"
