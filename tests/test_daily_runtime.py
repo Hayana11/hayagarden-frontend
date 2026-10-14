@@ -7700,6 +7700,11 @@ class CapacityContextPlanSplitCarrierTests(unittest.TestCase):
             ordered_sections=tuple(fixed_sections) + (current_section,),
         )
         plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            is_cold=False,
+            is_respawn=False,
             capacity_context_plan=context_plan,
             continuity_plan=None,
             hot_desired_plan=None,
