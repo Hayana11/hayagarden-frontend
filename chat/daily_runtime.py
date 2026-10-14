@@ -5279,6 +5279,15 @@ def _attempt_capacity_swap_before_stdin(
     watermark = plan.cursor_before
     install_state: Optional[dict[str, Any]] = None
     generation_bumped = False
+    plan_fields = (
+        tuple(fields(plan))
+        if getattr(plan, '__dataclass_fields__', None)
+        else ()
+    )
+    source_plan_state = {
+        item.name: getattr(plan, item.name)
+        for item in plan_fields
+    }
 
     def _restore_empty_generation(target_generation: int) -> dict[str, Any]:
         if not generation_bumped:
@@ -5298,10 +5307,19 @@ def _attempt_capacity_swap_before_stdin(
             db_path=plan.db_path,
         )
         if result.get('ok'):
+            for field_name, source_value in source_plan_state.items():
+                setattr(plan, field_name, source_value)
             plan.resident_generation = source_gen
-            plan.epoch_token = dict(getattr(plan, 'epoch_token', {}) or {})
-            plan.epoch_token['resident_generation'] = source_gen
+            if source_plan_state:
+                plan.epoch_token = dict(source_plan_state['epoch_token'])
+                plan.epoch_token['resident_generation'] = source_gen
+                plan.manifest = dict(source_plan_state['manifest'] or {})
+            else:
+                plan.epoch_token = dict(getattr(plan, 'epoch_token', {}) or {})
+                plan.epoch_token['resident_generation'] = source_gen
+                plan.manifest = dict(getattr(plan, 'manifest', {}) or {})
             plan.manifest['capacity_swap_generation_rolled_back'] = True
+            plan.manifest['capacity_swap_generation_rollback'] = dict(result)
         return dict(result)
 
     def _fail_kill_staged(code: str, **extra: Any) -> dict[str, Any]:
