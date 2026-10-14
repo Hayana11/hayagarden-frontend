@@ -1566,18 +1566,18 @@ class ResidentSession:
     def _build_spawn_tool_flags(self, *, env=None, write_mcp_config=True, write_settings=True):
         """Split built-in availability (--tools) from MCP permission args.
 
-        UH-A0 uses a fixed physical surface from ``cc_capability_adapter``.
-        Legacy keeps ``--tools ''`` and the constructor allowlist. text_only
-        keeps both built-ins and MCP executable surfaces empty.
+        UH-A0 uses a fixed physical surface from the capability adapter.
+        Legacy keeps the constructor allowlist. text_only keeps both built-ins
+        and MCP executable surfaces empty.
         """
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-            return {
-                'tools': '',
-                'extra': ['--allowedTools', ''],
-                'surface_allowed': '',
-                'mcp_path': None,
-                'surface_fingerprint': None,
-            }
+            return self._annotate_spawn_tool_flags({
+                "tools": "",
+                "extra": ["--allowedTools", ""],
+                "surface_allowed": "",
+                "mcp_path": None,
+                "surface_fingerprint": None,
+            })
         if self._tool_profile == TOOL_PROFILE_UH_A0:
             from tools.cc_capability_adapter import build_uh_a0_spawn_plan
             spawn_env = self._prepare_spawn_env(env)
@@ -1588,24 +1588,24 @@ class ResidentSession:
                 write_mcp_config=write_mcp_config,
                 write_settings=write_settings,
             )
-            return {
-                'tools': plan['built_in_tools_csv'],
-                'extra': list(plan['spawn_extra_args']),
-                'surface_allowed': plan['surface_allowlist_csv'],
-                'mcp_path': plan['mcp_config_path'],
-                'surface_fingerprint': plan['physical_surface_fingerprint'],
-            }
-        return {
-            'tools': '',
-            'extra': [
-                '--mcp-config', self._mcp_config_path,
-                '--strict-mcp-config',
-                '--allowedTools', self._allowed_tools,
+            return self._annotate_spawn_tool_flags({
+                "tools": plan["built_in_tools_csv"],
+                "extra": list(plan["spawn_extra_args"]),
+                "surface_allowed": plan["surface_allowlist_csv"],
+                "mcp_path": plan["mcp_config_path"],
+                "surface_fingerprint": plan["physical_surface_fingerprint"],
+            })
+        return self._annotate_spawn_tool_flags({
+            "tools": "",
+            "extra": [
+                "--mcp-config", self._mcp_config_path,
+                "--strict-mcp-config",
+                "--allowedTools", self._allowed_tools,
             ],
-            'surface_allowed': self._allowed_tools,
-            'mcp_path': self._mcp_config_path,
-            'surface_fingerprint': None,
-        }
+            "surface_allowed": self._allowed_tools,
+            "mcp_path": self._mcp_config_path,
+            "surface_fingerprint": None,
+        })
 
     def _require_spawn_surface_fingerprint(self, tool_flags):
         """Validate the surface identity before creating a UH-A0 process."""
