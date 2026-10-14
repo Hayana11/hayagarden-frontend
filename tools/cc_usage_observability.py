@@ -234,9 +234,10 @@ def build_first_send_accounting_receipt(
         turn_count = int(turn_count) if turn_count is not None else None
     except (TypeError, ValueError):
         turn_count = None
-    # Without a generation turn marker this evidence cannot be attributed to
-    # the first send; fail open by omitting a receipt rather than inventing one.
-    if turn_count is None or turn_count > 1:
+    # A missing marker is itself evidence loss: preserve an UNKNOWN receipt.
+    # Later turns and replays are prevented from overwriting an existing one
+    # by attach_observation below.
+    if turn_count is not None and turn_count > 1:
         return None
 
     first = first_round(usage)
@@ -248,8 +249,10 @@ def build_first_send_accounting_receipt(
     jsonl_requests = jsonl_usage.get("jsonl_requests") or []
     if not request_id and jsonl_requests and isinstance(jsonl_requests[0], Mapping):
         request_id = jsonl_requests[0].get("request_id")
-    marker = True
-    if not isinstance(first, Mapping):
+    marker = True if turn_count == 1 else "UNKNOWN"
+    if marker == "UNKNOWN":
+        status = "UNKNOWN"
+    elif not isinstance(first, Mapping):
         status = "PARTIAL"
     else:
         spawn = runtime.get("spawn_tool_surface") or {}
