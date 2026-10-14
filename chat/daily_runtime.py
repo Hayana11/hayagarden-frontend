@@ -7094,18 +7094,11 @@ def ensure_resident_and_stream(
 
         _validate_hot_no_op_payload(plan, content)
 
-        # Capture the exact provider-visible payload for shared post-send accounting.
-        # This is an observation snapshot only; it does not select or rewrite context.
-        plan._provider_prompt_system_snapshot = str(effective_system or '')
-        plan._provider_prompt_content_snapshot = copy.deepcopy(content)
-        plan._provider_prompt_bootstrap_kind = (
-            'capacity'
-            if bool(plan.manifest.get('capacity_swap'))
-            else 'respawn'
-            if bool(plan.is_respawn)
-            else 'cold'
-            if bool(plan.is_cold or actual_cold)
-            else 'hot'
+        _capture_daily_provider_prompt_snapshot(
+            plan,
+            content=content,
+            effective_system=effective_system,
+            actual_cold=actual_cold,
         )
 
         _observe_continuity_shadow(
@@ -7262,6 +7255,56 @@ def ensure_resident_and_stream(
             close_local_resident_if_bound(resident, expected_key=plan.resident_key)
 
 
+def _capture_daily_provider_prompt_snapshot(
+    plan: DailyTurnPlan,
+    *,
+    content: Any,
+    effective_system: str,
+    actual_cold: bool,
+) -> None:
+    """Capture only an in-memory visible payload snapshot; never gate send."""
+    plan._provider_prompt_system_snapshot = str(effective_system or '')
+    try:
+        from tools import cc_usage_observability as obs
+
+        plan._provider_prompt_content_snapshot = obs.snapshot_prompt_content(
+            content,
+        )
+    except Exception:
+        # Observation is best-effort: the original content still goes to send_turn.
+        plan._provider_prompt_content_snapshot = None
+    plan._provider_prompt_bootstrap_kind = (
+        'capacity'
+        if bool(plan.manifest.get('capacity_swap'))
+        else 'respawn'
+        if bool(plan.is_respawn)
+        else 'cold'
+        if bool(plan.is_cold or actual_cold)
+        else 'hot'
+    )
+
+
+def _clear_daily_provider_prompt_snapshots(
+    plan: DailyTurnPlan,
+    resident: Any,
+) -> None:
+    """Release raw in-memory observation copies without changing turn state."""
+    for attr in (
+        '_provider_prompt_system_snapshot',
+        '_provider_prompt_content_snapshot',
+        '_provider_prompt_bootstrap_kind',
+    ):
+        try:
+            setattr(plan, attr, None)
+        except Exception:
+            pass
+    try:
+        if hasattr(resident, '_last_provider_content'):
+            resident._last_provider_content = None
+    except Exception:
+        pass
+
+
 def _attach_daily_provider_budget_observation(
     plan: DailyTurnPlan,
     *,
@@ -7340,7 +7383,7 @@ def _attach_daily_provider_budget_observation(
         )
         breakdown.update({
             'bootstrap_kind': bootstrap_kind,
-            'provider_prompt_snapshot_status': 'exact_final_send_payload',
+            'provider_prompt_snapshot_status': 'exact_visible_resident_send_payload',
             'provider_envelope_measurement_status': 'post_send_residual',
             'provider_envelope_known_visible_complete': False,
             'provider_envelope_unattributed_components': [
@@ -7490,25 +7533,29 @@ def stream_daily_resident_turn(
     env: dict[str, str],
     static_system: str,
 ) -> Iterator[tuple[str, Any]]:
-    for event, payload in ensure_resident_and_stream(
-        plan, resident=resident, env=env, static_system=static_system,
-    ):
-        if (
-            event == 'done'
-            and isinstance(payload, tuple)
-            and len(payload) >= 3
-            and isinstance(payload[2], dict)
+    try:
+        for event, payload in ensure_resident_and_stream(
+            plan, resident=resident, env=env, static_system=static_system,
         ):
-            observed_usage = _attach_daily_provider_budget_observation(
-                plan,
-                resident=resident,
-                static_system=static_system,
-                usage=payload[2],
-            )
-            payload = tuple(
-                list(payload[:2]) + [observed_usage] + list(payload[3:])
-            )
-        yield event, payload
+            if event == 'done':
+                if (
+                    isinstance(payload, tuple)
+                    and len(payload) >= 3
+                    and isinstance(payload[2], dict)
+                ):
+                    observed_usage = _attach_daily_provider_budget_observation(
+                        plan,
+                        resident=resident,
+                        static_system=static_system,
+                        usage=payload[2],
+                    )
+                    payload = tuple(
+                        list(payload[:2]) + [observed_usage] + list(payload[3:])
+                    )
+                _clear_daily_provider_prompt_snapshots(plan, resident)
+            yield event, payload
+    finally:
+        _clear_daily_provider_prompt_snapshots(plan, resident)
 
 
 
