@@ -1581,6 +1581,7 @@ class DailyProviderBudgetWiringTests(unittest.TestCase):
         plan._provider_prompt_content_snapshot = (
             "CANONICAL_HISTORY\nCURRENT_USER"
         )
+        plan._provider_prompt_bootstrap_kind = "capacity"
         resident = type("Resident", (), {})()
         resident.generation = 48
         resident.resident_pid = 1
