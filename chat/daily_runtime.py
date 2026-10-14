@@ -3135,6 +3135,48 @@ def _section_install_identity(section: Any) -> tuple[str, str, str, int]:
     )
 
 
+def _record_fixed_section_parity_failure(
+    plan: DailyTurnPlan,
+    *,
+    scope: str,
+    mismatch_type: str,
+    expected_sections: Any = (),
+    actual_sections: Any = (),
+    expected_hashes: Any = (),
+    actual_hashes: Any = (),
+    capacity_split: bool = False,
+) -> None:
+    """Record a hash-only fixed-section failure before the fail-closed raise."""
+    diagnostic = {
+        'scope': str(scope),
+        'mismatch_type': str(mismatch_type),
+        'expected_section_kinds': [
+            str(getattr(section, 'kind', section) or '')
+            for section in (expected_sections or ())
+        ],
+        'actual_section_kinds': [
+            str(getattr(section, 'kind', section) or '')
+            for section in (actual_sections or ())
+        ],
+        'expected_hashes': [str(value or '') for value in (expected_hashes or ())],
+        'actual_hashes': [str(value or '') for value in (actual_hashes or ())],
+        'context_id': int(plan.context_id),
+        'context_epoch': int(plan.context_epoch),
+        'resident_generation': int(plan.resident_generation),
+        'cold': bool(getattr(plan, 'is_cold', False)),
+        'respawn': bool(getattr(plan, 'is_respawn', False)),
+        'capacity': bool(capacity_split),
+    }
+    plan.manifest.update({
+        'context_plan_fixed_section_parity': 'FAILED',
+        'context_plan_fixed_section_diagnostic': diagnostic,
+    })
+    logger.warning(
+        'context_plan_fixed_section_parity_failed %s',
+        _continuity_shadow_canonical(diagnostic),
+    )
+
+
 def _validate_production_context_install(
     *,
     plan: DailyTurnPlan,
@@ -3181,6 +3223,22 @@ def _validate_production_context_install(
     if tuple(map(_section_install_identity, expected_fixed)) != tuple(
         map(_section_install_identity, actual_fixed)
     ):
+        _record_fixed_section_parity_failure(
+            plan,
+            scope='fixed_sections',
+            mismatch_type='section_set',
+            expected_sections=expected_fixed,
+            actual_sections=actual_fixed,
+            expected_hashes=[
+                str(getattr(section, 'content_hash', '') or '')
+                for section in expected_fixed
+            ],
+            actual_hashes=[
+                str(getattr(section, 'content_hash', '') or '')
+                for section in actual_fixed
+            ],
+            capacity_split=capacity_split,
+        )
         raise DailyRuntimeError(
             'ContextPlan fixed-section proof does not match install',
             error_code='context_plan_fixed_section_parity_failed',
@@ -3423,6 +3481,25 @@ def _validate_production_context_install(
         for section in actual_fixed
     )
     if bool(state_text) != has_state_section:
+        actual_state_sections = tuple(
+            section for section in actual_fixed
+            if str(getattr(section, 'kind', '') or '') == 'accepted_state'
+        )
+        _record_fixed_section_parity_failure(
+            plan,
+            scope='accepted_state',
+            mismatch_type='section_presence',
+            expected_sections=(('accepted_state',) if state_text else ()),
+            expected_hashes=(
+                [_sha256_text(state_text)] if state_text else []
+            ),
+            actual_sections=actual_state_sections,
+            actual_hashes=[
+                str(getattr(section, 'content_hash', '') or '')
+                for section in actual_state_sections
+            ],
+            capacity_split=capacity_split,
+        )
         raise DailyRuntimeError(
             'accepted state install does not match ContextPlan proof',
             error_code='context_plan_fixed_section_parity_failed',
@@ -3435,6 +3512,20 @@ def _validate_production_context_install(
                 if str(getattr(section, 'kind', '') or '') == 'accepted_state'
             ).content_hash or '')
     ):
+        actual_state_section = next(
+            section for section in actual_fixed
+            if str(getattr(section, 'kind', '') or '') == 'accepted_state'
+        )
+        _record_fixed_section_parity_failure(
+            plan,
+            scope='accepted_state',
+            mismatch_type='body_hash',
+            expected_sections=('accepted_state',),
+            expected_hashes=[_sha256_text(state_text)],
+            actual_sections=(actual_state_section,),
+            actual_hashes=[str(actual_state_section.content_hash or '')],
+            capacity_split=capacity_split,
+        )
         raise DailyRuntimeError(
             'accepted state content does not match ContextPlan proof',
             error_code='context_plan_fixed_section_parity_failed',
@@ -3448,6 +3539,27 @@ def _validate_production_context_install(
         for section in actual_fixed
     )
     if bool(open_loops_text) != has_open_loops_section:
+        actual_open_loops_sections = tuple(
+            section for section in actual_fixed
+            if str(getattr(section, 'kind', '') or '') == 'accepted_open_loops'
+        )
+        _record_fixed_section_parity_failure(
+            plan,
+            scope='accepted_open_loops',
+            mismatch_type='section_presence',
+            expected_sections=(
+                ('accepted_open_loops',) if open_loops_text else ()
+            ),
+            expected_hashes=(
+                [_sha256_text(open_loops_text)] if open_loops_text else []
+            ),
+            actual_sections=actual_open_loops_sections,
+            actual_hashes=[
+                str(getattr(section, 'content_hash', '') or '')
+                for section in actual_open_loops_sections
+            ],
+            capacity_split=capacity_split,
+        )
         raise DailyRuntimeError(
             'accepted open-loops install does not match ContextPlan proof',
             error_code='context_plan_fixed_section_parity_failed',
@@ -3460,25 +3572,45 @@ def _validate_production_context_install(
         )
         if value
     )
-    installed_fixed_carrier_kinds = tuple(
-        str(value or '')
-        for value in (receipt.get('fixed_section_kinds') or ())
-    )
-    if installed_fixed_carrier_kinds != expected_fixed_carrier_kinds:
-        raise DailyRuntimeError(
-            'ContextPlan fixed carrier identity does not match render',
-            error_code='context_plan_fixed_section_parity_failed',
-        )
     expected_fixed_body_hashes = tuple(
         _sha256_text(str(value))
         for value in (open_loops_text, state_text)
         if value
     )
+    installed_fixed_carrier_kinds = tuple(
+        str(value or '')
+        for value in (receipt.get('fixed_section_kinds') or ())
+    )
+    if installed_fixed_carrier_kinds != expected_fixed_carrier_kinds:
+        _record_fixed_section_parity_failure(
+            plan,
+            scope='fixed_carrier',
+            mismatch_type='section_kind_set',
+            expected_sections=expected_fixed_carrier_kinds,
+            actual_sections=installed_fixed_carrier_kinds,
+            expected_hashes=expected_fixed_body_hashes,
+            actual_hashes=receipt.get('fixed_section_body_hashes') or (),
+            capacity_split=capacity_split,
+        )
+        raise DailyRuntimeError(
+            'ContextPlan fixed carrier identity does not match render',
+            error_code='context_plan_fixed_section_parity_failed',
+        )
     installed_fixed_body_hashes = tuple(
         str(value or '')
         for value in (receipt.get('fixed_section_body_hashes') or ())
     )
     if installed_fixed_body_hashes != expected_fixed_body_hashes:
+        _record_fixed_section_parity_failure(
+            plan,
+            scope='fixed_carrier',
+            mismatch_type='body_hash',
+            expected_sections=expected_fixed_carrier_kinds,
+            actual_sections=installed_fixed_carrier_kinds,
+            expected_hashes=expected_fixed_body_hashes,
+            actual_hashes=installed_fixed_body_hashes,
+            capacity_split=capacity_split,
+        )
         raise DailyRuntimeError(
             'ContextPlan fixed carrier body proof does not match render',
             error_code='context_plan_fixed_section_parity_failed',
