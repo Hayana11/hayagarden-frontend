@@ -58,6 +58,7 @@ jobs:
             tests.test_context_window_bff \
             tests.test_context_window_resident \
             tests.test_manual_context_runtime \
+            tests.test_capacity_swap_runtime \
             tests.test_daily_soft_window \
             tests.test_daily_runtime \
             tests.test_daily_context_bff \
