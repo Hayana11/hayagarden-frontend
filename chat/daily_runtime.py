@@ -7301,6 +7301,8 @@ def _clear_daily_provider_prompt_snapshots(
     try:
         if hasattr(resident, '_last_provider_content'):
             resident._last_provider_content = None
+        if hasattr(resident, '_provider_prompt_snapshot_failed'):
+            resident._provider_prompt_snapshot_failed = False
     except Exception:
         pass
 
@@ -7327,6 +7329,8 @@ def _attach_daily_provider_budget_observation(
         )
         provider_content = getattr(resident, '_last_provider_content', None)
         if provider_content is None:
+            if bool(getattr(resident, '_provider_prompt_snapshot_failed', False)):
+                raise RuntimeError('provider_prompt_snapshot_unavailable')
             provider_content = getattr(
                 plan, '_provider_prompt_content_snapshot', None,
             )
