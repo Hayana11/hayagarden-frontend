@@ -3489,7 +3489,7 @@ def _validate_production_context_install(
             plan,
             scope='accepted_state',
             mismatch_type='section_presence',
-            expected_sections=(('accepted_state',) if state_text else ()),
+            expected_sections=('accepted_state',) if state_text else (),
             expected_hashes=(
                 [_sha256_text(state_text)] if state_text else []
             ),
