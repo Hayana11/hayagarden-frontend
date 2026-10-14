@@ -8303,5 +8303,338 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
                 self.assertEqual(raised.exception.error_code, expected)
 
 
+    def test_fixed_section_set_failure_records_hash_only_diagnostic(self):
+        sentinel = 'FIXED_SECTION_SET_SENTINEL'
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture(sentinel)
+        )
+        try:
+            plan.capacity_context_plan.ordered_sections = (
+                plan.capacity_context_plan.ordered_sections[1:]
+            )
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_fixed_section_parity_failed',
+            )
+            diagnostic = plan.manifest['context_plan_fixed_section_diagnostic']
+            self.assertEqual(diagnostic['scope'], 'fixed_sections')
+            self.assertEqual(diagnostic['mismatch_type'], 'section_set')
+            self.assertNotIn(sentinel, json.dumps(diagnostic, ensure_ascii=False))
+            self.assertEqual(plan.manifest['context_plan_fixed_section_parity'], 'FAILED')
+        finally:
+            os.unlink(db)
+
+    def test_fixed_body_hash_failure_records_hash_only_diagnostic(self):
+        sentinel = 'FIXED_BODY_HASH_SENTINEL'
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture(sentinel)
+        )
+        try:
+            plan.assembly['_context_install_render_receipt'][
+                'fixed_section_body_hashes'
+            ] = ['0' * 64]
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_fixed_section_parity_failed',
+            )
+            diagnostic = plan.manifest['context_plan_fixed_section_diagnostic']
+            self.assertEqual(diagnostic['scope'], 'fixed_carrier')
+            self.assertEqual(diagnostic['mismatch_type'], 'body_hash')
+            self.assertEqual(diagnostic['actual_hashes'], ['0' * 64])
+            self.assertNotIn(sentinel, json.dumps(diagnostic, ensure_ascii=False))
+        finally:
+            os.unlink(db)
+
+    def test_accepted_state_and_open_loops_presence_failures_are_hash_only(self):
+        cases = (
+            ('accepted_state', 'state', 'ACCEPTED_STATE_SENTINEL'),
+            ('accepted_open_loops', 'open_loops', 'ACCEPTED_OPEN_LOOPS_SENTINEL'),
+        )
+        for scope, field, sentinel in cases:
+            with self.subTest(scope=scope):
+                db, plan, resident, target_system, content = (
+                    self._capacity_install_fixture(sentinel)
+                )
+                try:
+                    if field == 'state':
+                        plan.assembly['state'] = sentinel
+                    else:
+                        plan.assembly['context_plan_accepted_open_loops'] = []
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._validate_production_context_install(
+                            plan=plan,
+                            resident=resident,
+                            static_system=target_system,
+                            content=content,
+                        )
+                    self.assertEqual(
+                        raised.exception.error_code,
+                        'context_plan_fixed_section_parity_failed',
+                    )
+                    diagnostic = plan.manifest[
+                        'context_plan_fixed_section_diagnostic'
+                    ]
+                    self.assertEqual(diagnostic['scope'], scope)
+                    self.assertEqual(
+                        diagnostic['mismatch_type'],
+                        'section_presence',
+                    )
+                    self.assertNotIn(
+                        sentinel,
+                        json.dumps(diagnostic, ensure_ascii=False),
+                    )
+                finally:
+                    os.unlink(db)
+
+    def test_capacity_render_proof_1_chunk_omission_fails_closed(self):
+        """RENDER-PROOF-1: omitted chunk is rejected before provider send."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_CHUNK')
+        )
+        try:
+            chunk_body = plan.capacity_context_chunk_bodies['chunk:one']
+            self.assertEqual(content.count(chunk_body), 1)
+            omitted = content.replace(chunk_body, '', 1)
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=omitted,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_2_current_omission_or_duplication_fails_closed(self):
+        """RENDER-PROOF-2: CURRENT is absent or installed twice."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_SLOT')
+        )
+        try:
+            current_text = plan.user_content
+            self.assertTrue(content.endswith(current_text))
+            actual_payloads = (
+                content[:-len(current_text)],
+                content + current_text,
+            )
+            for actual in actual_payloads:
+                with self.subTest(payload=actual):
+                    plan.manifest['capacity_context_install_parity'] = 'PENDING'
+                    with self.assertRaises(dr.DailyRuntimeError) as raised:
+                        dr._validate_production_context_install(
+                            plan=plan,
+                            resident=resident,
+                            static_system=target_system,
+                            content=actual,
+                        )
+                    self.assertEqual(
+                        raised.exception.error_code,
+                        'context_plan_render_receipt_mismatch',
+                    )
+                    self.assertNotEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PASS',
+                    )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_render_proof_3_post_receipt_payload_mutation_fails_closed(self):
+        """RENDER-PROOF-3: a frozen receipt rejects later payload mutation."""
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('CURRENT_REQUEST')
+        )
+        try:
+            mutated = content + '\nPOST_RENDER_MUTATION'
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=mutated,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_render_receipt_mismatch',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_current_request_structural_proof_allows_literal_collisions(self):
+        """Short and repeated prose do not look like duplicate carriers."""
+        for current_text in ('好', '重复请求文本'):
+            with self.subTest(current_text=current_text):
+                db, plan, resident, target_system, content = (
+                    self._capacity_install_fixture(current_text)
+                )
+                try:
+                    self.assertGreaterEqual(content.count(current_text), 5)
+                    self.assertEqual(
+                        plan.assembly['_context_install_render_receipt'][
+                            'current_request_slots'
+                        ],
+                        1,
+                    )
+                    self.assertEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PENDING',
+                    )
+                    dr._validate_production_context_install(
+                        plan=plan,
+                        resident=resident,
+                        static_system=target_system,
+                        content=content,
+                    )
+                    self.assertEqual(
+                        plan.manifest['capacity_context_install_parity'],
+                        'PASS',
+                    )
+                finally:
+                    os.unlink(db)
+
+    def test_capacity_current_source_cannot_be_a_second_forged_carrier(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('重复请求文本')
+        )
+        try:
+            plan.manifest['capacity_context_current_user_in_candidate'] = True
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertEqual(
+                raised.exception.error_code,
+                'context_plan_capacity_current_user_in_candidate',
+            )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_install_parity_failure_never_reaches_pass(self):
+        db, plan, resident, target_system, content = (
+            self._capacity_install_fixture('好')
+        )
+        try:
+            self.assertEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PENDING',
+            )
+            plan.assembly['_context_install_render_receipt'][
+                'current_request_slots'
+            ] = 2
+            with self.assertRaises(dr.DailyRuntimeError):
+                dr._validate_production_context_install(
+                    plan=plan,
+                    resident=resident,
+                    static_system=target_system,
+                    content=content,
+                )
+            self.assertNotEqual(
+                plan.manifest['capacity_context_install_parity'],
+                'PASS',
+            )
+        finally:
+            os.unlink(db)
+
+    def test_capacity_source_receipt_supersession_uses_frozen_revision_once(self):
+        from chat import context_receipt as receipt_store
+
+        db = _tmp_db()
+        try:
+            _init_chat_messages(db)
+            conn = sqlite3.connect(db)
+            receipt_store.ensure_context_receipt_schema(conn)
+            source = receipt_store.ContextReceipt.build(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=1,
+                resident_key='default:e3:g1',
+                provider='claude_code',
+                model_identity='model-1',
+                session_id='source-session',
+                process_generation=1,
+                plan_id='plan:source',
+                plan_hash='source-hash',
+                budget_policy_version='continuity_context_budget_v1',
+                measurement_semantics='heuristic_cjk1_ascii4_v1',
+                installed_source_watermark=2,
+                members=(),
+            )
+            receipt_store.create_receipt(conn, source, ())
+            conn.close()
+
+            plan = types.SimpleNamespace(
+                context_id=7,
+                context_epoch=3,
+                resident_generation=2,
+                db_path=db,
+                manifest={},
+                capacity_source_receipt_frozen={
+                    'context_id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 1,
+                    'receipt': source,
+                    'expected_receipt_revision': 0,
+                },
+            )
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+            self.assertEqual(
+                plan.manifest['capacity_source_receipt_supersession'],
+                'COMMITTED',
+            )
+            conn = sqlite3.connect(db)
+            row = conn.execute(
+                'SELECT receipt_revision, result, superseded_by_generation '
+                'FROM context_receipts '
+                'WHERE context_id=7 AND context_epoch=3 AND resident_generation=1',
+            ).fetchone()
+            conn.close()
+            self.assertEqual(row, (1, 'superseded', 2))
+            self.assertTrue(
+                dr._commit_capacity_source_receipt_supersession(
+                    plan,
+                    target_receipt_committed=True,
+                )
+            )
+        finally:
+            os.unlink(db)
+
+
 if __name__ == '__main__':
     unittest.main()
