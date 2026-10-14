@@ -7363,12 +7363,10 @@ def _attach_daily_provider_budget_observation(
                 cold_once_parts.append(handoff)
             if carryover:
                 cold_once_parts.append(carryover)
+        # The generation-scoped snapshot is the sole source for tool coverage.
+        # An absent snapshot remains unknown; never fall back to constructor state.
         tool_surface = getattr(resident, 'tool_surface_snapshot', None) or {}
-        allowed_tools = getattr(resident, 'allowed_tools', None)
-        allowed_tool_count = (
-            len([item for item in str(allowed_tools or '').split(',') if item.strip()])
-            or None
-        )
+        allowed_tool_count = tool_surface.get('allowed_tool_count')
         breakdown = obs.build_context_breakdown(
             full_system=provider_system,
             cold_once_text='\n\n'.join(cold_once_parts),
@@ -7383,6 +7381,9 @@ def _attach_daily_provider_budget_observation(
             tool_schema_source=tool_surface.get('tool_schema_source'),
             tool_count=tool_surface.get('tool_count'),
             allowed_tool_count=allowed_tool_count,
+            tool_schema_measurement_status=tool_surface.get(
+                'tool_schema_measurement_status'
+            ),
             is_cold=bootstrap_like,
         )
         breakdown.update({
@@ -7454,8 +7455,15 @@ def _attach_daily_provider_budget_observation(
             ),
             is_cold=bootstrap_kind in {'cold', 'respawn'},
             static_system=provider_system,
-            mcp_config_path=getattr(resident, 'mcp_config_path', None),
-            allowed_tools=allowed_tools,
+            # Runtime fingerprints come from the successful generation's
+            # actual spawn flags, never from resident constructor defaults.
+            mcp_config_path=None,
+            mcp_config_sha256=tool_surface.get('mcp_config_sha256'),
+            allowed_tools=None,
+            allowed_tools_sha256=tool_surface.get('allowed_surface_sha256'),
+            tools_sha256=tool_surface.get('tools_sha256'),
+            built_in_tools_sha256=tool_surface.get('built_in_tools_sha256'),
+            tool_profile=tool_surface.get('tool_profile'),
             tool_schema_sha256=(
                 usage.get('_obs_tool_schema_sha256')
                 or tool_surface.get('tool_schema_sha256')
