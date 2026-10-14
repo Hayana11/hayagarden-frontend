@@ -2120,6 +2120,10 @@ class SpawnAuthorityContractTests(unittest.TestCase):
             )
             self.assertNotIn("mcp", str(snapshot.get("tool_schema_text")))
             self.assertEqual(snapshot["tool_profile"], TOOL_PROFILE_LEGACY)
+            self.assertEqual(
+                snapshot["spawn_tool_flags_observation_status"],
+                "UNKNOWN",
+            )
         finally:
             os.unlink(mcp_path)
 
@@ -2182,7 +2186,13 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
             "context_plan_id": "plan:abc",
             "context_plan_hash": "hash-abc",
             "source_hash": "source-abc",
+            "transcript_claude_session_id": "session-1",
+            "transcript_process_generation": 51,
             "transcript_path_sha256": "path-hash",
+            "manifest_context_plan_id": "plan:abc",
+            "materialized_context_plan_id": "plan:abc",
+            "manifest_context_plan_hash": "hash-abc",
+            "materialized_context_plan_hash": "hash-abc",
             "transcript_start_offset": 0,
             "transcript_end_offset": 100,
         }
@@ -2196,6 +2206,7 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
             "spawn_tool_surface": {
                 "observation_status": status,
                 "source": "actual_spawn_tool_flags",
+                "spawn_argv_sha256": "argv-hash",
             },
         }
 
@@ -2319,6 +2330,72 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(receipt["observation_status"], "PARTIAL")
 
+    def test_first_send_complete_requires_argv_and_linkage(self):
+        runtime = self._runtime()
+        runtime["spawn_tool_surface"].pop("spawn_argv_sha256")
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=self._identity(),
+            plan_accounting={},
+            provider_bound_components=[
+                obs.observe_provider_component(
+                    "visible_payload",
+                    "VISIBLE",
+                    measurement_source="test",
+                    represented_in_context_plan=False,
+                ),
+            ],
+            runtime=runtime,
+            breakdown={"tool_schema_measurement_status": "available"},
+            usage=self._usage(),
+        )
+        self.assertNotEqual(receipt["observation_status"], "COMPLETE")
+
+        identity = self._identity()
+        identity["transcript_claude_session_id"] = None
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=identity,
+            plan_accounting={},
+            provider_bound_components=[],
+            runtime=self._runtime(),
+            breakdown={"tool_schema_measurement_status": "available"},
+            usage=self._usage(),
+        )
+        self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_first_send_plan_identity_mismatch_is_unknown(self):
+        identity = self._identity()
+        identity["materialized_context_plan_hash"] = "different"
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=identity,
+            plan_accounting={},
+            provider_bound_components=[],
+            runtime=self._runtime(),
+            breakdown={"tool_schema_measurement_status": "available"},
+            usage=self._usage(),
+        )
+        self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_attach_observation_preserves_existing_first_send_receipt(self):
+        previous = {
+            "schema_version": 1,
+            "observation_status": "PARTIAL",
+            "first_send": "UNKNOWN",
+        }
+        attached = obs.attach_observation(
+            {
+                "v": 2,
+                "first_send_accounting": previous,
+            },
+            context_breakdown={},
+            runtime={},
+            first_send_accounting={
+                "schema_version": 1,
+                "observation_status": "COMPLETE",
+                "first_send": True,
+            },
+        )
+        self.assertEqual(attached["first_send_accounting"], previous)
+
     def test_normalize_cache_info_preserves_first_send_receipt(self):
         expected = {"observation_status": "PARTIAL", "schema_version": 1}
         normalized = normalize_cache_info({
@@ -2339,6 +2416,8 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
         plan.transcript_start_offset = 0
         plan.transcript_end_offset = 100
         plan.transcript_path = "/tmp/claude-session.jsonl"
+        plan.transcript_claude_session_id = "session-1"
+        plan.transcript_process_generation = 51
         plan.turn_started_at = NOW
         plan.manifest.update({
             "context_id": 32,
@@ -2347,6 +2426,8 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
             "resident_key": "daily:default:30:51",
             "provider": "claude_code",
             "model": "claude-opus-5-5",
+            "context_plan_id": "plan-1",
+            "context_plan_hash": "hash-1",
             "context_plan_source_hash": "source-1",
         })
         section = type("Section", (), {
