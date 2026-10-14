@@ -2193,6 +2193,8 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
             "materialized_context_plan_id": "plan:abc",
             "manifest_context_plan_hash": "hash-abc",
             "materialized_context_plan_hash": "hash-abc",
+            "manifest_context_plan_source_hash": "source-abc",
+            "materialized_context_plan_source_hash": "source-abc",
             "transcript_start_offset": 0,
             "transcript_end_offset": 100,
         }
@@ -2295,8 +2297,7 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
                 "rounds": [self._usage()["rounds"][0]],
             },
         )
-        self.assertEqual(unknown["first_send"], "UNKNOWN")
-        self.assertEqual(unknown["observation_status"], "UNKNOWN")
+        self.assertIsNone(unknown)
         self.assertIsNone(
             obs.build_first_send_accounting_receipt(
                 identity=self._identity(),
@@ -2361,6 +2362,28 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
             usage=self._usage(),
         )
         self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_first_send_provider_transcript_linkage_mismatch_is_unknown(self):
+        cases = [
+            ("provider_session_id", "other-session"),
+            ("transcript_claude_session_id", "other-session"),
+            ("transcript_process_generation", 52),
+            ("manifest_context_plan_source_hash", "other-source"),
+            ("materialized_context_plan_source_hash", "other-source"),
+        ]
+        for key, value in cases:
+            with self.subTest(key=key):
+                identity = self._identity()
+                identity[key] = value
+                receipt = obs.build_first_send_accounting_receipt(
+                    identity=identity,
+                    plan_accounting={},
+                    provider_bound_components=[],
+                    runtime=self._runtime(),
+                    breakdown={"tool_schema_measurement_status": "available"},
+                    usage=self._usage(),
+                )
+                self.assertEqual(receipt["observation_status"], "UNKNOWN")
 
     def test_first_send_plan_identity_mismatch_is_unknown(self):
         identity = self._identity()
