@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1692,6 +1693,16 @@ class DailyProviderBudgetContractTests(unittest.TestCase):
                 "cache_creation": 1000,
                 "resident_turn_count": 1,
                 "_obs_effort": "high",
+                "jsonl_usage": {
+                    "stream_totals_match": True,
+                    "jsonl_requests": [{
+                        "request_id": "req-1",
+                        "input_tokens": 2,
+                        "output_tokens": 1,
+                        "cache_read": 0,
+                        "cache_creation": 1000,
+                    }],
+                },
             },
             terminal_receipt=receipt,
             candidate_cache_refresh_at=12.5,
@@ -2032,6 +2043,51 @@ class SpawnAuthorityContractTests(unittest.TestCase):
         finally:
             os.unlink(mcp_path)
 
+
+    def test_snapshot_records_actual_effective_flags_and_argv_hash(self):
+        from cc_resident import ResidentSession, TOOL_PROFILE_LEGACY
+
+        session = ResidentSession(
+            "/tmp",
+            "constructor_surface",
+            "/tmp/constructor-mcp.json",
+        )
+        session._tool_profile = TOOL_PROFILE_LEGACY
+        flags = session._annotate_spawn_tool_flags({
+            "tools": "Read,Glob",
+            "surface_allowed": "mcp__one,NativeTool",
+            "mcp_path": None,
+            "surface_fingerprint": "surface-fp",
+        })
+        with mock.patch(
+            "tools.cc_tool_surface.capture_tool_surface_snapshot",
+            return_value={
+                "tool_schema_text": '{"name":"mcp__one"}',
+                "tool_schema_source": "mcp_list_tools",
+                "tool_schema_sha256": obs.sha256_text('{"name":"mcp__one"}'),
+                "tool_schema_measurement_status": "available",
+                "tool_count": 2,
+                "allowed_tool_count": 2,
+            },
+        ):
+            session._capture_tool_surface(flags, spawn_argv_sha256="argv-hash")
+
+        snapshot = session.tool_surface_snapshot
+        self.assertEqual(snapshot["spawn_tool_flags_observation_status"], "COMPLETE")
+        self.assertEqual(snapshot["spawn_argv_sha256"], "argv-hash")
+        self.assertEqual(snapshot["surface_fingerprint"], "surface-fp")
+        self.assertEqual(snapshot["effective_builtin_tool_names"], ["Read", "Glob"])
+        self.assertEqual(
+            snapshot["effective_allowed_tool_names"],
+            ["mcp__one", "NativeTool"],
+        )
+        self.assertEqual(snapshot["effective_mcp_tool_names"], ["mcp__one"])
+        self.assertNotIn("tool_schema_text", json.dumps({
+            key: value
+            for key, value in snapshot.items()
+            if key != "tool_schema_text"
+        }))
+
     def test_snapshot_failure_keeps_spawn_hashes_and_no_raw_surface(self):
         from cc_resident import ResidentSession, TOOL_PROFILE_LEGACY
 
@@ -2069,8 +2125,16 @@ class SpawnAuthorityContractTests(unittest.TestCase):
                 snapshot["mcp_config_sha256"],
                 hashlib.sha256(b"mcp").hexdigest(),
             )
-            self.assertNotIn(actual_surface, json.dumps(snapshot))
+            self.assertEqual(
+                snapshot["effective_allowed_tool_names"],
+                ["actual_one", "actual_two"],
+            )
+            self.assertNotIn("mcp", str(snapshot.get("tool_schema_text")))
             self.assertEqual(snapshot["tool_profile"], TOOL_PROFILE_LEGACY)
+            self.assertEqual(
+                snapshot["spawn_tool_flags_observation_status"],
+                "UNKNOWN",
+            )
         finally:
             os.unlink(mcp_path)
 
@@ -2116,6 +2180,501 @@ class SpawnAuthorityContractTests(unittest.TestCase):
             "partial",
         )
 
+
+
+class FirstSendAccountingEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def _identity():
+        return {
+            "context_id": 32,
+            "context_epoch": 30,
+            "resident_generation": 51,
+            "resident_key": "daily:default:30:51",
+            "provider": "claude_code",
+            "model_identity": "claude-opus-5-5",
+            "provider_session_id": "session-1",
+            "provider_request_id": "req-1",
+            "context_plan_id": "plan:abc",
+            "context_plan_hash": "hash-abc",
+            "source_hash": "source-abc",
+            "transcript_claude_session_id": "session-1",
+            "transcript_process_generation": 51,
+            "transcript_path_sha256": "path-hash",
+            "manifest_context_plan_id": "plan:abc",
+            "materialized_context_plan_id": "plan:abc",
+            "manifest_context_plan_hash": "hash-abc",
+            "materialized_context_plan_hash": "hash-abc",
+            "manifest_context_plan_source_hash": "source-abc",
+            "materialized_context_plan_source_hash": "source-abc",
+            "transcript_start_offset": 0,
+            "transcript_end_offset": 100,
+        }
+
+    @staticmethod
+    def _runtime(status="COMPLETE"):
+        return {
+            "resident_generation": 2,
+            "resident_turn_count": 1,
+            "observed_at": "2026-10-15T00:00:00+00:00",
+            "spawn_tool_surface": {
+                "observation_status": status,
+                "source": "actual_spawn_tool_flags",
+                "spawn_argv_sha256": "argv-hash",
+            },
+        }
+
+    @staticmethod
+    def _usage(turn_count=1):
+        return {
+            "resident_turn_count": turn_count,
+            "rounds": [{
+                "request_id": "req-1",
+                "input_tokens": 2,
+                "cache_read": 43104,
+                "cache_creation": 55750,
+                "context_tokens": 98856,
+                "output_tokens": 1752,
+            }],
+            "jsonl_usage": {
+                "stream_totals_match": True,
+                "jsonl_requests": [{
+                    "request_id": "req-1",
+                    "input_tokens": 2,
+                    "output_tokens": 1752,
+                    "cache_read": 43104,
+                    "cache_creation": 55750,
+                }],
+            },
+        }
+
+    def test_all_spawn_paths_capture_successful_argv_hash(self):
+        import cc_resident
+
+        runtime = types.ModuleType("chat.cc_runtime")
+        runtime.ClaudeRuntimeError = RuntimeError
+        runtime.MINIMUM_CLAUDE_CODE_VERSION = "2.0.0"
+        runtime.version_tuple = lambda value: tuple(
+            int(part) for part in str(value).split(".")[:3]
+        )
+        runtime.require_managed_claude_runtime = lambda **kwargs: "2.1.280"
+        history = types.ModuleType("chat.cc_history_rewrite")
+        history.current_history_rewrite_epoch = lambda: ""
+        history.sanitize_bound_epoch = lambda value: str(value or "")
+        model = types.ModuleType("chat.cc_model")
+        model.CC_MODEL_RUNTIME_INCOMPATIBLE = "incompatible"
+        model.cc_model_runtime_compatibility = lambda model: (True, "")
+        model.cc_model_snapshot = lambda: ("model", "model-id", [])
+        effort = types.ModuleType("chat.cc_effort")
+        effort.cc_effort_snapshot = lambda: ("", "effort-id", [])
+
+        class Proc:
+            pid = 4242
+            stdin = None
+            stdout = None
+            stderr = None
+
+            def poll(self):
+                return None
+
+        flags = {
+            "tools": "Read",
+            "surface_allowed": "mcp__one",
+            "mcp_path": None,
+            "tool_profile": "legacy",
+        }
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "chat.cc_runtime": runtime,
+                "chat.cc_history_rewrite": history,
+                "chat.cc_model": model,
+                "chat.cc_effort": effort,
+            },
+        ), mock.patch.object(
+            cc_resident.ResidentSession,
+            "_prepare_spawn_env",
+            return_value={},
+        ), mock.patch.object(
+            cc_resident.ResidentSession,
+            "_build_spawn_tool_flags",
+            return_value=flags,
+        ), mock.patch.object(
+            cc_resident,
+            "compose_spawn_argv",
+            return_value=["claude", "--observed"],
+        ), mock.patch.object(
+            cc_resident.subprocess,
+            "Popen",
+            return_value=Proc(),
+        ), mock.patch.object(
+            cc_resident.time,
+            "sleep",
+        ), mock.patch(
+            "tools.cc_tool_surface.capture_tool_surface_snapshot",
+            return_value={},
+        ):
+            sessions = [
+                cc_resident.ResidentSession("/tmp", "", ""),
+                cc_resident.ResidentSession("/tmp", "", ""),
+                cc_resident.ResidentSession("/tmp", "", ""),
+            ]
+            sessions[0]._spawn("system", None)
+            sessions[1].spawn_resumable(
+                "system",
+                None,
+                resume_session_id="session-1",
+            )
+            sessions[2].spawn_fresh_named(
+                "system",
+                None,
+                session_id="12345678-1234-5678-1234-567812345678",
+            )
+
+        expected = cc_resident.ResidentSession._sha256_spawn_argv(
+            ["claude", "--observed"],
+        )
+        self.assertEqual(
+            [s.tool_surface_snapshot["spawn_argv_sha256"] for s in sessions],
+            [expected, expected, expected],
+        )
+        self.assertEqual(
+            [
+                s.tool_surface_snapshot["spawn_tool_flags_observation_status"]
+                for s in sessions
+            ],
+            ["COMPLETE", "COMPLETE", "COMPLETE"],
+        )
+
+    def test_first_send_receipt_binds_plan_spawn_and_usage_without_plaintext(self):
+        components = [
+            obs.observe_provider_component(
+                "visible_payload",
+                "SECRET_VISIBLE_PAYLOAD",
+                measurement_source="test",
+                represented_in_context_plan=False,
+            ),
+            obs.observe_provider_component(
+                "provider_envelope_boundary",
+                None,
+                measurement_source="outside",
+                represented_in_context_plan=False,
+                accounting_role="unknown_non_additive",
+            ),
+        ]
+        breakdown = {
+            "tool_schema_sha256": "schema-hash",
+            "tool_schema_source": "mcp_list_tools",
+            "tool_schema_measurement_status": "available",
+            "tool_schema_tokens_estimate": 12,
+            "tool_schema_serialized_character_count": 48,
+            "tool_schema_serialized_byte_count": 48,
+        }
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=self._identity(),
+            plan_accounting={
+                "plan_hash": "hash-abc",
+                "selected_token_estimate": 49065,
+                "fixed_section_token_estimate": 17025,
+                "reserve_budget": 8000,
+            },
+            provider_bound_components=components,
+            runtime=self._runtime(),
+            breakdown=breakdown,
+            usage=self._usage(),
+        )
+        self.assertEqual(receipt["observation_status"], "COMPLETE")
+        self.assertEqual(receipt["provider_usage"]["context_tokens"], 98856)
+        self.assertEqual(
+            receipt["spawn_tool_surface"]["source"],
+            "actual_spawn_tool_flags",
+        )
+        serialized = json.dumps(receipt, ensure_ascii=False)
+        self.assertNotIn("SECRET_VISIBLE_PAYLOAD", serialized)
+
+    def test_first_send_requires_matching_first_jsonl_usage(self):
+        components = [
+            obs.observe_provider_component(
+                "visible_payload",
+                "VISIBLE",
+                measurement_source="test",
+                represented_in_context_plan=False,
+            ),
+        ]
+        breakdown = {"tool_schema_measurement_status": "available"}
+
+        def build(usage):
+            return obs.build_first_send_accounting_receipt(
+                identity=self._identity(),
+                plan_accounting={},
+                provider_bound_components=components,
+                runtime=self._runtime(),
+                breakdown=breakdown,
+                usage=usage,
+            )
+
+        missing = self._usage()
+        missing.pop("jsonl_usage")
+        self.assertEqual(build(missing)["observation_status"], "UNKNOWN")
+
+        mismatch = self._usage()
+        mismatch["jsonl_usage"]["jsonl_requests"][0]["input_tokens"] += 1
+        self.assertEqual(build(mismatch)["observation_status"], "UNKNOWN")
+
+        partial = self._usage()
+        partial["jsonl_usage"]["stream_totals_match"] = False
+        self.assertEqual(build(partial)["observation_status"], "PARTIAL")
+
+    def test_missing_first_send_marker_is_unknown_and_later_turn_is_not_receipt(self):
+        components = [
+            obs.observe_provider_component(
+                "visible_payload",
+                "VISIBLE",
+                measurement_source="test",
+                represented_in_context_plan=False,
+            ),
+        ]
+        breakdown = {
+            "tool_schema_measurement_status": "available",
+            "tool_schema_tokens_estimate": 1,
+        }
+        runtime = self._runtime()
+        runtime.pop("resident_turn_count")
+        unknown = obs.build_first_send_accounting_receipt(
+            identity=self._identity(),
+            plan_accounting={},
+            provider_bound_components=components,
+            runtime=runtime,
+            breakdown=breakdown,
+            usage={
+                "rounds": [self._usage()["rounds"][0]],
+            },
+        )
+        self.assertEqual(unknown["first_send"], "UNKNOWN")
+        self.assertEqual(unknown["observation_status"], "UNKNOWN")
+        self.assertIsNone(
+            obs.build_first_send_accounting_receipt(
+                identity=self._identity(),
+                plan_accounting={},
+                provider_bound_components=components,
+                runtime=self._runtime(),
+                breakdown=breakdown,
+                usage=self._usage(turn_count=2),
+            )
+        )
+
+    def test_partial_spawn_or_schema_never_becomes_complete(self):
+        runtime = self._runtime(status="PARTIAL")
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=self._identity(),
+            plan_accounting={},
+            provider_bound_components=[
+                obs.observe_provider_component(
+                    "visible_payload",
+                    "VISIBLE",
+                    measurement_source="test",
+                    represented_in_context_plan=False,
+                ),
+            ],
+            runtime=runtime,
+            breakdown={
+                "tool_schema_measurement_status": "partial",
+                "tool_schema_tokens_estimate": 9,
+            },
+            usage=self._usage(),
+        )
+        self.assertEqual(receipt["observation_status"], "PARTIAL")
+
+    def test_first_send_complete_requires_argv_and_linkage(self):
+        runtime = self._runtime()
+        runtime["spawn_tool_surface"].pop("spawn_argv_sha256")
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=self._identity(),
+            plan_accounting={},
+            provider_bound_components=[
+                obs.observe_provider_component(
+                    "visible_payload",
+                    "VISIBLE",
+                    measurement_source="test",
+                    represented_in_context_plan=False,
+                ),
+            ],
+            runtime=runtime,
+            breakdown={"tool_schema_measurement_status": "available"},
+            usage=self._usage(),
+        )
+        self.assertNotEqual(receipt["observation_status"], "COMPLETE")
+
+        identity = self._identity()
+        identity["transcript_claude_session_id"] = None
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=identity,
+            plan_accounting={},
+            provider_bound_components=[],
+            runtime=self._runtime(),
+            breakdown={"tool_schema_measurement_status": "available"},
+            usage=self._usage(),
+        )
+        self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_first_send_provider_transcript_linkage_mismatch_is_unknown(self):
+        cases = [
+            ("provider_session_id", "other-session"),
+            ("transcript_claude_session_id", "other-session"),
+            ("transcript_process_generation", 52),
+            ("manifest_context_plan_source_hash", "other-source"),
+            ("materialized_context_plan_source_hash", "other-source"),
+        ]
+        for key, value in cases:
+            with self.subTest(key=key):
+                identity = self._identity()
+                identity[key] = value
+                receipt = obs.build_first_send_accounting_receipt(
+                    identity=identity,
+                    plan_accounting={},
+                    provider_bound_components=[],
+                    runtime=self._runtime(),
+                    breakdown={"tool_schema_measurement_status": "available"},
+                    usage=self._usage(),
+                )
+                self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_first_send_plan_identity_mismatch_is_unknown(self):
+        identity = self._identity()
+        identity["materialized_context_plan_hash"] = "different"
+        receipt = obs.build_first_send_accounting_receipt(
+            identity=identity,
+            plan_accounting={},
+            provider_bound_components=[],
+            runtime=self._runtime(),
+            breakdown={"tool_schema_measurement_status": "available"},
+            usage=self._usage(),
+        )
+        self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_attach_observation_preserves_existing_first_send_receipt(self):
+        previous = {
+            "schema_version": 1,
+            "observation_status": "PARTIAL",
+            "first_send": "UNKNOWN",
+        }
+        attached = obs.attach_observation(
+            {
+                "v": 2,
+                "first_send_accounting": previous,
+            },
+            context_breakdown={},
+            runtime={},
+            first_send_accounting={
+                "schema_version": 1,
+                "observation_status": "COMPLETE",
+                "first_send": True,
+            },
+        )
+        self.assertEqual(attached["first_send_accounting"], previous)
+
+    def test_normalize_cache_info_preserves_first_send_receipt(self):
+        expected = {"observation_status": "PARTIAL", "schema_version": 1}
+        normalized = normalize_cache_info({
+            "v": 2,
+            "rounds": [],
+            "first_send_accounting": expected,
+        })
+        self.assertEqual(normalized["first_send_accounting"], expected)
+
+    def test_daily_runtime_persists_first_send_receipt_alongside_existing_usage(self):
+        from chat import daily_runtime
+
+        plan = DailyProviderBudgetContractTests._plan("cold")
+        plan.context_id = 32
+        plan.context_epoch = 30
+        plan.resident_generation = 51
+        plan.resident_key = "daily:default:30:51"
+        plan.transcript_start_offset = 0
+        plan.transcript_end_offset = 100
+        plan.transcript_path = "/tmp/claude-session.jsonl"
+        plan.transcript_claude_session_id = "session-1"
+        plan.transcript_process_generation = 51
+        plan.turn_started_at = NOW
+        plan.manifest.update({
+            "context_id": 32,
+            "context_epoch": 30,
+            "resident_generation": 51,
+            "resident_key": "daily:default:30:51",
+            "provider": "claude_code",
+            "model": "claude-opus-5-5",
+            "context_plan_id": "plan-1",
+            "context_plan_hash": "hash-1",
+            "context_plan_source_hash": "source-1",
+        })
+        section = type("Section", (), {
+            "kind": "invariant_system",
+            "source_ref": "fixed",
+            "content_hash": "fixed-hash",
+            "estimated_tokens": 10,
+            "representation_id": "fixed",
+        })()
+        policy = type("Policy", (), {"reserve_budget": 8000})()
+        plan.continuity_plan = type("ContextPlan", (), {
+            "plan_id": "plan-1",
+            "plan_hash": "hash-1",
+            "source_hash": "source-1",
+            "selected_token_estimate": 49065,
+            "fixed_section_token_estimate": 17025,
+            "total_token_estimate": 74090,
+            "budget_status": "fit",
+            "budget_policy": policy,
+            "ordered_sections": (section,),
+            "recent_raw_source_seqs": (10, 11),
+        })()
+        plan.assembly["_context_install_render_receipt"] = {
+            "representation_ids": ["chunk:1"],
+            "representation_body_hashes": ["body-hash"],
+            "fixed_section_kinds": ["invariant_system"],
+            "fixed_section_body_hashes": ["fixed-hash"],
+            "current_request_slots": 1,
+            "current_request_carrier": "tail",
+        }
+        resident = DailyProviderBudgetContractTests._resident()
+        resident.session_id = "session-1"
+        resident.tool_surface_snapshot = {
+            "spawn_tool_flags_observation_status": "COMPLETE",
+            "spawn_tool_flags_source": "actual_spawn_tool_flags",
+            "spawn_argv_sha256": "argv-hash",
+            "surface_fingerprint": "surface-hash",
+            "effective_builtin_tool_names": ["Read"],
+            "effective_allowed_tool_names": ["mcp__one"],
+            "effective_mcp_tool_names": ["mcp__one"],
+            "mcp_config_sha256": "mcp-hash",
+            "allowed_surface_sha256": "allowed-hash",
+            "built_in_tools_sha256": "builtins-hash",
+            "tools_sha256": "tools-hash",
+            "tool_schema_text": '{"name":"mcp__one"}',
+            "tool_schema_sha256": obs.sha256_text('{"name":"mcp__one"}'),
+            "tool_schema_source": "mcp_list_tools",
+            "tool_schema_measurement_status": "available",
+            "tool_count": 1,
+            "allowed_tool_count": 1,
+            "tool_profile": "uh_a0",
+        }
+        usage = DailyProviderBudgetContractTests._usage(object())
+        usage["rounds"][0]["request_id"] = "req-1"
+        observed = daily_runtime._attach_daily_provider_budget_observation(
+            plan,
+            resident=resident,
+            static_system="SYSTEM_SECRET",
+            usage=usage,
+        )
+        receipt = observed["first_send_accounting"]
+        self.assertEqual(receipt["observation_status"], "COMPLETE")
+        self.assertEqual(receipt["provider_usage"]["request_id"], "req-1")
+        self.assertEqual(receipt["plan_accounting"]["selected_token_estimate"], 49065)
+        self.assertEqual(
+            receipt["spawn_tool_surface"]["effective_mcp_tool_names"],
+            ["mcp__one"],
+        )
+        serialized = json.dumps(observed, ensure_ascii=False)
+        self.assertNotIn("SYSTEM_SECRET", serialized)
+        self.assertNotIn('{"name":"mcp__one"}', serialized)
 
 
 if __name__ == "__main__":
