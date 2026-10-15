@@ -2185,6 +2185,75 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
         self.assertEqual(receipt["jsonl_binding"]["cursor_status"], "PARTIAL")
         self.assertEqual(receipt["binding_status"], "PARTIAL")
 
+    def test_incomplete_jsonl_cursor_metadata_never_binds_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["jsonl_usage"].pop("requested_start_offset")
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["cursor_status"], "UNKNOWN")
+        self.assertEqual(receipt["binding_status"], "UNKNOWN")
+
+    def test_inconsistent_jsonl_cursor_offsets_never_bind_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["jsonl_usage"]["requested_start_offset"] = 1
+            usage["jsonl_usage"]["effective_start_offset"] = 0
+            usage["jsonl_usage"]["scan_cursor_valid"] = True
+            usage["jsonl_usage"]["scan_cursor_reset"] = False
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["cursor_status"], "PARTIAL")
+        self.assertEqual(receipt["binding_status"], "PARTIAL")
+
+    def test_second_jsonl_event_outside_scan_never_binds_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["_obs_live_request_ids"] = ["req-1", "req-2"]
+            usage["jsonl_usage"]["jsonl_requests"].append({
+                "request_id": "req-2",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read": 0,
+                "cache_creation": 0,
+                "event_start_offset": 999999,
+                "event_end_offset": 1000000,
+            })
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertFalse(receipt["jsonl_binding"]["all_event_ranges_within_effective_scan"])
+        self.assertEqual(receipt["binding_status"], "PARTIAL")
+
     def test_exact_replay_is_idempotent(self):
         first = {"observation_status": "PARTIAL", "plan_identity": {"plan_id": "one"}}
         observed = obs.attach_observation(
