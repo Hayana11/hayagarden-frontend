@@ -17,7 +17,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-OBSERVATION_VERSION = 4
+OBSERVATION_VERSION = 3
 CONTEXT_LAYOUT_VERSION = 2
 ESTIMATION_METHOD = "heuristic_cjk1_ascii4_v1"
 TZ_NAME = "Asia/Shanghai"
