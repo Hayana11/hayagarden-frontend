@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +20,7 @@ if ROOT not in sys.path:
 
 from tools import cc_usage_observability as obs
 from cc_resident import empty_usage, normalize_cache_info, summarize_rounds
-from tools.cc_jsonl_usage import replay_jsonl_lines
+from tools.cc_jsonl_usage import attach_jsonl_usage, replay_jsonl_lines, replay_jsonl_path
 
 TZ = timezone(timedelta(hours=8))
 NOW = datetime(2026, 7, 18, 12, 0, 0, tzinfo=TZ)
@@ -1880,6 +1881,270 @@ class DailyProviderBudgetContractTests(unittest.TestCase):
         self.assertFalse(
             observed["context_breakdown"]["provider_envelope_known_visible_complete"],
         )
+
+
+class FirstSendAccountingR2Tests(unittest.TestCase):
+    @staticmethod
+    def _receipt_fixture(path):
+        payload = json.dumps({
+            "type": "assistant",
+            "requestId": "req-1",
+            "message": {
+                "model": "claude-opus-5-5",
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 10,
+                    "cache_creation_input_tokens": 100,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 0,
+                        "ephemeral_1h_input_tokens": 100,
+                    },
+                },
+            },
+        })
+        path.write_text(payload + "\n", encoding="utf-8")
+        replay = replay_jsonl_path(path)
+        usage = {
+            "rounds": [{
+                "index": 1,
+                "request_id": "req-1",
+                "complete": True,
+                "input_tokens": 2,
+                "output_tokens": 1,
+                "cache_read": 10,
+                "cache_creation": 100,
+                "context_tokens": 112,
+            }],
+            "input_tokens": 2,
+            "output_tokens": 1,
+            "cache_read": 10,
+            "cache_creation": 100,
+            "resident_turn_count": 1,
+            "_obs_resident_generation": 7,
+            "_obs_claude_session_id": "session-1",
+        }
+        usage = attach_jsonl_usage(usage, replay)
+        path_hash = obs.sha256_text(str(path))
+        turn = {
+            "context_id": 1,
+            "context_epoch": 2,
+            "resident_generation": 3,
+            "current_user_message_id": 99,
+            "resident_turn_count": 1,
+            "spawn_generation": 7,
+            "provider_session_id": "session-1",
+            "transcript_claude_session_id": "session-1",
+            "transcript_process_generation": 7,
+            "transcript_path_sha256": path_hash,
+            "transcript_start_offset": 0,
+            "transcript_end_offset": replay["end_offset"],
+        }
+        spawn = {
+            "actual_spawn": True,
+            "spawn_generation": 7,
+            "spawn_identity_sha256": "spawn-hash",
+            "spawn_argv_sha256": "argv-hash",
+            "spawn_tool_flags_observation_status": "COMPLETE",
+        }
+        plan = {
+            "source": "materialized_context_plan",
+            "plan_id": "plan-1",
+            "plan_hash": "plan-hash",
+            "source_hash": "source-hash",
+            "selected_token_estimate": 10,
+            "fixed_token_estimate": 20,
+            "reserve_budget": 8,
+        }
+        return usage, turn, spawn, plan
+
+    def test_exact_jsonl_range_binds_but_unobservable_boundary_stays_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[{
+                    "kind": "invariant_system",
+                    "observation_status": "COMPLETE",
+                    "identity_sha256": "system-hash",
+                    "token_estimate": 10,
+                }, {
+                    "kind": "tool_schema",
+                    "observation_status": "PARTIAL",
+                    "identity_sha256": "schema-hash",
+                    "token_estimate": None,
+                }],
+                known_context_tokens=30,
+                manifest_assertions={"manifest_plan_hash_matches": False},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["binding_status"], "COMPLETE")
+        self.assertEqual(receipt["coverage_status"], "PARTIAL")
+        self.assertEqual(receipt["observation_status"], "PARTIAL")
+        self.assertIsNotNone(receipt["jsonl_binding"]["event_start_offset"])
+        self.assertIsNotNone(receipt["jsonl_binding"]["event_end_offset"])
+        self.assertFalse(receipt["manifest_assertions"]["manifest_plan_hash_matches"])
+
+    def test_missing_materialized_identity_is_unknown_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity={},
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=None,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["binding_status"], "UNKNOWN")
+        self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_generation_or_request_mismatch_never_binds_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            turn["transcript_process_generation"] = 8
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertNotEqual(receipt["binding_status"], "COMPLETE")
+
+    def test_request_id_or_event_range_mismatch_downgrades(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["rounds"][0]["request_id"] = "wrong-request"
+            turn["transcript_start_offset"] = 1
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertNotEqual(receipt["binding_status"], "COMPLETE")
+
+    def test_exact_replay_is_idempotent(self):
+        first = {"observation_status": "PARTIAL", "plan_identity": {"plan_id": "one"}}
+        observed = obs.attach_observation(
+            {"first_send_accounting": first},
+            context_breakdown={},
+            runtime={},
+            first_send_accounting=first,
+        )
+        self.assertEqual(observed["first_send_accounting"], first)
+
+    def test_unknown_child_prevents_complete_even_with_complete_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[{
+                    "kind": "provider_internal",
+                    "observation_status": "UNKNOWN",
+                }],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["binding_status"], "COMPLETE")
+        self.assertEqual(receipt["coverage_status"], "UNKNOWN")
+        self.assertEqual(receipt["observation_status"], "UNKNOWN")
+
+    def test_materialized_plan_is_selected_without_manifest_or_receipt_fallback(self):
+        from chat import daily_runtime
+
+        materialized = object()
+        plan = types.SimpleNamespace(
+            manifest={"context_plan_consumer": "canonical"},
+            continuity_plan=materialized,
+            capacity_context_plan=object(),
+            hot_desired_plan=object(),
+        )
+        self.assertIs(
+            daily_runtime._materialized_context_plan_for_first_send(plan),
+            materialized,
+        )
+
+    def test_conflicting_replay_downgrades_without_replacing_evidence(self):
+        first = {"observation_status": "PARTIAL", "plan_identity": {"plan_id": "one"}}
+        second = {"observation_status": "COMPLETE", "plan_identity": {"plan_id": "two"}}
+        observed = obs.attach_observation(
+            {"first_send_accounting": first},
+            context_breakdown={},
+            runtime={},
+            first_send_accounting=second,
+        )
+        self.assertEqual(
+            observed["first_send_accounting"]["plan_identity"]["plan_id"],
+            "one",
+        )
+        self.assertEqual(observed["first_send_accounting"]["observation_status"], "UNKNOWN")
+        self.assertEqual(
+            observed["first_send_accounting"]["conflict_code"],
+            "conflicting_first_send_evidence",
+        )
+
+    def test_observer_and_logger_failure_preserve_usage(self):
+        from chat import daily_runtime
+
+        plan = types.SimpleNamespace(
+            manifest={},
+            assembly={},
+            _provider_prompt_system_snapshot="SYSTEM",
+            _provider_prompt_content_snapshot="CONTENT",
+        )
+        resident = types.SimpleNamespace(
+            _last_provider_content="CONTENT",
+            _provider_prompt_snapshot_failed=False,
+            tool_surface_snapshot={},
+            allowed_tools="",
+            mcp_config_path=None,
+        )
+        usage = {"resident_turn_count": 1}
+        with mock.patch.object(
+            obs,
+            "build_context_breakdown",
+            side_effect=RuntimeError("observer failure"),
+        ), mock.patch.object(
+            daily_runtime.logger,
+            "exception",
+            side_effect=RuntimeError("logger failure"),
+        ):
+            returned = daily_runtime._attach_daily_provider_budget_observation(
+                plan,
+                resident=resident,
+                static_system="SYSTEM",
+                usage=usage,
+            )
+        self.assertIs(returned, usage)
+        self.assertEqual(returned, {"resident_turn_count": 1})
 
 
 class RealityAdapterContractTests(unittest.TestCase):
