@@ -4514,7 +4514,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
             )
             self.assertEqual(
                 sections[0].content_hash,
-                hashlib.sha256(b'EFFECTIVE SYSTEM').hexdigest(),
+                hashlib.sha256(b'FALLBACK SYSTEM').hexdigest(),
             )
             self.assertEqual(plan.manifest, before)
             log = mock.Mock()
@@ -4541,6 +4541,109 @@ class ContinuityShadowObservationTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+
+    def test_g53_targeted_replay_uses_static_system_after_ensure_alive(self):
+        # These are the two production g53 invariant_system hashes.  The
+        # bodies stay out of the test and diagnostic output.
+        expected_hash = (
+            '93b524bd76e67914ed2fffde52a0ebc7a8ffc51ba3d1ce124b20da02c2b423e4'
+        )
+        stale_hash = (
+            'aca178b61cdbb361614edf2eec4e7a32a00c6ae8f9225343238d852ebd0fad0b'
+        )
+        static_system = 'G53_EXPLICIT_SYSTEM_SOURCE'
+        stale_system = 'G53_PRIOR_RESIDENT_SYSTEM'
+
+        class _G53Resident:
+            def __init__(self):
+                self._system_text = stale_system
+                self.calls = []
+
+            def ensure_alive(self, system_text, _env, **_kwargs):
+                self.calls.append(system_text)
+                self._system_text = system_text
+                return True
+
+        resident = _G53Resident()
+        plan = types.SimpleNamespace(
+            assembly={
+                'state_snapshot': {},
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+
+        def replay_hash(value):
+            if value == static_system:
+                return expected_hash
+            if value == stale_system:
+                return stale_hash
+            return hashlib.sha256(str(value).encode()).hexdigest()
+
+        with mock.patch.object(dr, '_sha256_text', side_effect=replay_hash):
+            before = dr._sha256_text(resident._system_text)
+            resident.ensure_alive(static_system, {})
+            after = dr._sha256_text(resident._system_text)
+            sections = dr._build_continuity_shadow_fixed_sections(
+                plan=plan,
+                resident=resident,
+                static_system=static_system,
+                require_full_state_snapshot=True,
+            )
+
+        self.assertEqual(resident.calls, [static_system])
+        self.assertEqual(before, stale_hash)
+        self.assertEqual(after, expected_hash)
+        invariant = next(
+            section for section in sections if section.kind == 'invariant_system'
+        )
+        self.assertEqual(invariant.content_hash, expected_hash)
+        self.assertEqual(invariant.source_ref, 'system:%s' % expected_hash[:32])
+
+    def test_g53_real_sha256_replay_uses_explicit_system_authority(self):
+        static_system = 'G53_REAL_EXPLICIT_SYSTEM'
+        stale_system = 'G53_REAL_STALE_RESIDENT'
+
+        class _Resident:
+            def __init__(self):
+                self._system_text = stale_system
+
+            def ensure_alive(self, system_text, _env):
+                self._system_text = system_text
+                return True
+
+        resident = _Resident()
+        plan = types.SimpleNamespace(
+            assembly={
+                'state_snapshot': {},
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        resident.ensure_alive(static_system, {})
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=resident,
+            static_system=static_system,
+            require_full_state_snapshot=True,
+        )
+        invariant = next(
+            section for section in sections if section.kind == 'invariant_system'
+        )
+        self.assertEqual(
+            invariant.content_hash,
+            hashlib.sha256(static_system.encode()).hexdigest(),
+        )
+        self.assertNotEqual(
+            invariant.content_hash,
+            hashlib.sha256(stale_system.encode()).hexdigest(),
+        )
+        self.assertEqual(
+            invariant.source_ref,
+            'system:%s' % hashlib.sha256(
+                static_system.encode()
+            ).hexdigest()[:32],
+        )
 
     def test_fixed_sections_use_full_semantic_state_snapshot_not_hot_delta(self):
         from chat.persona_state_semantic import (
@@ -6012,6 +6115,322 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 {'ab': 'body-ab', 'c': 'body-c', 'd': 'body-d'},
                 mode,
             )
+
+    def _assemble_identity_plan(
+        self,
+        *,
+        static_system,
+        hidden_plan,
+        resident=None,
+        is_cold=True,
+        is_respawn=False,
+    ):
+        assembly = {'manifest': {}, 'current_day_history': []}
+        chunk_plan = types.SimpleNamespace(
+            plan_id='plan:system-identity',
+            plan_hash='plan-hash-system-identity',
+            source_hash='source-hash-system-identity',
+            valid=True,
+            budget_status='fit',
+        )
+        captured = {}
+
+        def _build(plan, *, resident, static_system, mode='hot'):
+            captured.update({
+                'plan': plan,
+                'resident': resident,
+                'static_system': static_system,
+                'mode': mode,
+            })
+            return chunk_plan, {'chunk:one': 'compressed'}
+
+        with mock.patch.object(
+            dr,
+            '_context_plan_consumer_enabled',
+            return_value=True,
+        ), mock.patch.object(
+            dh,
+            'build_daily_window_context',
+            return_value=assembly,
+        ), mock.patch.object(
+            dr,
+            '_prepare_hidden_flow_plan',
+            return_value=hidden_plan,
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=_build,
+        ), mock.patch.object(
+            dr,
+            '_project_context_plan_history',
+            return_value=assembly,
+        ):
+            plan = dr._assemble_plan(
+                req_id='request-system-identity',
+                owner='owner-1',
+                chat_id='default',
+                local_day='2026-07-27',
+                refreshed={
+                    'id': 7,
+                    'context_epoch': 3,
+                    'resident_generation': 2,
+                },
+                user_message_id=3,
+                user_content='current',
+                is_cold=is_cold,
+                is_respawn=is_respawn,
+                turn_kind='respawn' if is_respawn else 'cold',
+                cursor_before=None,
+                resident=resident,
+                static_system=static_system,
+                static_system_sha256='',
+                persona_sha256='',
+                provider='claude_code',
+                model='model-1',
+                db_path='production.db',
+                lease_acquired=True,
+                turn_lease={},
+            )
+        return plan, captured
+
+    @staticmethod
+    def _hidden_plan_for_system_identity(*, enabled, eligible, carrier):
+        return types.SimpleNamespace(
+            enabled=enabled,
+            eligible=eligible,
+            private_request_block='',
+            global_guide_system_carrier=carrier,
+            global_guide_source='global_guide' if carrier else 'none',
+            global_guide_digest='guide-digest' if carrier else '',
+            global_guide_carrier='system_stable' if carrier else 'none',
+            volatile_runtime_attached=bool(carrier),
+        )
+
+    def test_global_guide_effective_system_identity_modes_use_real_sha256(self):
+        raw = 'RAW COLD STATIC SYSTEM'
+        carrier = '<global_flow_guide>GUIDE</global_flow_guide>'
+        cases = (
+            ('disabled', False, False, '', raw),
+            ('empty-carrier', True, True, '', raw),
+            ('nonempty-carrier', True, True, carrier, raw + '\n\n' + carrier),
+            (
+                'carrier-already-present',
+                True,
+                True,
+                carrier,
+                raw + '\n\n' + carrier,
+            ),
+        )
+        for name, enabled, eligible, guide, expected in cases:
+            with self.subTest(name=name):
+                source = raw + '\n\n' + guide if name == 'carrier-already-present' else raw
+                hidden_plan = self._hidden_plan_for_system_identity(
+                    enabled=enabled,
+                    eligible=eligible,
+                    carrier=guide,
+                )
+                plan, captured = self._assemble_identity_plan(
+                    static_system=source,
+                    hidden_plan=hidden_plan,
+                )
+                expected_hash = hashlib.sha256(expected.encode()).hexdigest()
+                self.assertEqual(captured['static_system'], expected)
+                self.assertEqual(
+                    plan.manifest['static_system_sha256'],
+                    expected_hash,
+                )
+                self.assertEqual(expected.count(guide) if guide else 0, 1 if guide else 0)
+
+    def test_global_guide_cold_spawn_and_parity_share_effective_system(self):
+        raw = 'COLD STATIC SYSTEM'
+        carrier = '<global_flow_guide>GUIDE</global_flow_guide>'
+        resident = _FakeResident()
+        resident._system_text = 'STALE RESIDENT SYSTEM'
+        hidden_plan = self._hidden_plan_for_system_identity(
+            enabled=True,
+            eligible=True,
+            carrier=carrier,
+        )
+        plan, captured = self._assemble_identity_plan(
+            static_system=raw,
+            hidden_plan=hidden_plan,
+            resident=resident,
+        )
+        plan.turn_lease = {'lease_id': 'isolated-test'}
+        observed = {}
+
+        class _Heartbeat:
+            failed = False
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def start(self):
+                return None
+
+            def stop(self):
+                return False
+
+        def _observe(**kwargs):
+            observed['static_system'] = kwargs['static_system']
+            observed['fixed_sections'] = (
+                dr._build_continuity_shadow_fixed_sections(
+                    plan=kwargs['plan'],
+                    resident=kwargs['resident'],
+                    static_system=kwargs['static_system'],
+                    require_full_state_snapshot=True,
+                )
+            )
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(dr, 'LeaseHeartbeat', _Heartbeat))
+            stack.enter_context(mock.patch.object(dr, 'verify_epoch_token'))
+            stack.enter_context(
+                mock.patch.object(dr, 'get_local_binding', return_value=None)
+            )
+            stack.enter_context(
+                mock.patch.object(dr, '_resident_is_alive', return_value=False)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    dr,
+                    'peek_registered_respawn_decision',
+                    return_value={},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    dr,
+                    'format_resident_turn_content',
+                    return_value='body',
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    dr,
+                    '_apply_daily_cold_prompt_fence',
+                    side_effect=lambda _plan, **kwargs: kwargs['content'],
+                )
+            )
+            stack.enter_context(mock.patch.object(dr, 'set_local_binding'))
+            stack.enter_context(
+                mock.patch.object(
+                    dr.dc,
+                    'get_resident_history_cursor',
+                    return_value=0,
+                )
+            )
+            stack.enter_context(mock.patch.object(dr.dc, 'upsert_resident_owner'))
+            stack.enter_context(mock.patch.object(dr, '_capture_transcript_start'))
+            stack.enter_context(mock.patch.object(dr, '_capture_transcript_end'))
+            stack.enter_context(
+                mock.patch.object(dr, '_validate_hot_no_op_payload')
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    dr,
+                    '_observe_continuity_shadow',
+                    side_effect=_observe,
+                )
+            )
+            events = list(dr.ensure_resident_and_stream(
+                plan,
+                resident=resident,
+                env={},
+                static_system=raw,
+            ))
+
+        effective = raw + '\n\n' + carrier
+        expected_hash = hashlib.sha256(effective.encode()).hexdigest()
+        self.assertEqual(captured['static_system'], effective)
+        self.assertEqual(resident._spawn_args[0][0], effective)
+        self.assertEqual(observed['static_system'], effective)
+        self.assertEqual(
+            observed['fixed_sections'][0].content_hash,
+            expected_hash,
+        )
+        self.assertEqual(plan.manifest['static_system_sha256'], expected_hash)
+        self.assertEqual(plan._provider_prompt_system_snapshot, effective)
+        self.assertEqual(effective.count(carrier), 1)
+        self.assertTrue(any(evt == 'done' for evt, _payload in events))
+        self.assertEqual(resident._system_text, 'STALE RESIDENT SYSTEM')
+
+    def test_respawn_uses_same_effective_system_authority_as_cold(self):
+        raw = 'RESPAWN STATIC SYSTEM'
+        carrier = '<global_flow_guide>RESPAWN GUIDE</global_flow_guide>'
+        hidden_plan = self._hidden_plan_for_system_identity(
+            enabled=True,
+            eligible=True,
+            carrier=carrier,
+        )
+        cold_plan, cold_capture = self._assemble_identity_plan(
+            static_system=raw,
+            hidden_plan=hidden_plan,
+            is_cold=True,
+            is_respawn=False,
+        )
+        respawn_plan, respawn_capture = self._assemble_identity_plan(
+            static_system=raw,
+            hidden_plan=hidden_plan,
+            is_cold=False,
+            is_respawn=True,
+        )
+        expected = raw + '\n\n' + carrier
+        expected_hash = hashlib.sha256(expected.encode()).hexdigest()
+        self.assertEqual(cold_capture['static_system'], expected)
+        self.assertEqual(respawn_capture['static_system'], expected)
+        self.assertEqual(
+            cold_plan.manifest['static_system_sha256'],
+            expected_hash,
+        )
+        self.assertEqual(
+            respawn_plan.manifest['static_system_sha256'],
+            expected_hash,
+        )
+
+    def test_inconsistent_global_guide_fixed_section_still_fails_closed(self):
+        raw = 'COLD STATIC SYSTEM'
+        carrier = '<global_flow_guide>GUIDE</global_flow_guide>'
+        hidden_plan = self._hidden_plan_for_system_identity(
+            enabled=True,
+            eligible=True,
+            carrier=carrier,
+        )
+        resident = _FakeResident()
+        plan, _captured = self._assemble_identity_plan(
+            static_system=raw,
+            hidden_plan=hidden_plan,
+            resident=resident,
+        )
+        effective = raw + '\n\n' + carrier
+        stale_sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=resident,
+            static_system=raw,
+            require_full_state_snapshot=True,
+        )
+        plan.continuity_plan = types.SimpleNamespace(
+            ordered_sections=stale_sections,
+        )
+        with self.assertRaises(dr.DailyRuntimeError) as raised:
+            dr._validate_production_context_install(
+                plan=plan,
+                resident=resident,
+                static_system=effective,
+                content='body',
+            )
+        self.assertEqual(
+            raised.exception.error_code,
+            'context_plan_fixed_section_parity_failed',
+        )
+        self.assertEqual(
+            plan.manifest['context_plan_fixed_section_parity'],
+            'FAILED',
+        )
+        self.assertEqual(
+            plan.manifest['context_plan_fixed_section_diagnostic']['mismatch_type'],
+            'section_set',
+        )
 
     def test_cold_rebuild_uses_latest_ready_chunk_plan(self):
         assembly = {'manifest': {}, 'current_day_history': []}
