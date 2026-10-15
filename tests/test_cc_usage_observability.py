@@ -2163,6 +2163,28 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
             )
         self.assertNotEqual(receipt["binding_status"], "COMPLETE")
 
+    def test_invalid_jsonl_cursor_never_binds_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["jsonl_usage"]["scan_cursor_valid"] = False
+            usage["jsonl_usage"]["scan_cursor_reset"] = True
+            usage["jsonl_usage"]["requested_start_offset"] = 999999
+            usage["jsonl_usage"]["effective_start_offset"] = 0
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["cursor_status"], "PARTIAL")
+        self.assertEqual(receipt["binding_status"], "PARTIAL")
+
     def test_exact_replay_is_idempotent(self):
         first = {"observation_status": "PARTIAL", "plan_identity": {"plan_id": "one"}}
         observed = obs.attach_observation(
