@@ -7163,8 +7163,9 @@ def ensure_resident_and_stream(
         )
         # Hash-only snapshot from the already successful process spawn.  This
         # is evidence for the optional observer, never a lifecycle authority.
-        plan._first_send_spawn_identity = dict(
-            getattr(resident, 'tool_surface_snapshot', None) or {}
+        snapshot = getattr(resident, 'tool_surface_snapshot', None)
+        plan._first_send_spawn_identity = (
+            dict(snapshot) if isinstance(snapshot, Mapping) else {}
         )
         from chat.display_thinking import (
             authored_thinking_instruction_suffix,
