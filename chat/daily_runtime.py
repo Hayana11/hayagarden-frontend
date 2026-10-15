@@ -7800,7 +7800,7 @@ def _attach_daily_provider_budget_observation(
             keepwarm_lease_expires_at=usage.get('_obs_keepwarm_lease_expires_at'),
             provider='claude_code',
         )
-        breakdown.update({
+        runtime.update({
             'bootstrap_kind': bootstrap_kind,
             'provider_envelope_measurement_status': 'post_send_residual',
         })
