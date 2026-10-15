@@ -475,6 +475,14 @@ def _first_send_jsonl_binding(
         jsonl.get("scan_end_offset")
         if isinstance(jsonl, Mapping) else None
     )
+    requested_cursor_supplied = (
+        jsonl.get("requested_cursor_supplied")
+        if isinstance(jsonl, Mapping) else None
+    )
+    requested_cursor_valid = (
+        jsonl.get("requested_cursor_valid")
+        if isinstance(jsonl, Mapping) else None
+    )
     def _nonnegative_offset(value):
         try:
             value = int(value)
@@ -494,8 +502,12 @@ def _first_send_jsonl_binding(
         and "requested_start_offset" in jsonl
         and "effective_start_offset" in jsonl
         and "scan_end_offset" in jsonl
+        and "requested_cursor_supplied" in jsonl
+        and "requested_cursor_valid" in jsonl
         and "scan_cursor_valid" in jsonl
         and "scan_cursor_reset" in jsonl
+        and isinstance(requested_cursor_supplied, bool)
+        and isinstance(requested_cursor_valid, bool)
         and requested_start is not None
         and scan_start is not None
         and scan_end is not None
@@ -507,6 +519,7 @@ def _first_send_jsonl_binding(
     )
     cursor_valid = bool(
         cursor_consistent
+        and requested_cursor_valid is True
         and isinstance(jsonl, Mapping)
         and jsonl.get("scan_cursor_valid") is True
         and scan_cursor_reset is False
@@ -561,6 +574,8 @@ def _first_send_jsonl_binding(
         "requested_start_offset": requested_start,
         "effective_start_offset": scan_start,
         "scan_end_offset": scan_end,
+        "requested_cursor_supplied": requested_cursor_supplied,
+        "requested_cursor_valid": requested_cursor_valid,
         "scan_cursor_valid": (
             jsonl.get("scan_cursor_valid")
             if isinstance(jsonl, Mapping) else None
@@ -736,6 +751,7 @@ def attach_observation(
         elif sha256_canonical_json(existing) != sha256_canonical_json(first_send_accounting):
             conflict = dict(existing)
             conflict["observation_status"] = "UNKNOWN"
+            conflict["binding_status"] = "UNKNOWN"
             conflict["conflict_code"] = "conflicting_first_send_evidence"
             out["first_send_accounting"] = conflict
     return out
