@@ -303,6 +303,20 @@ def attach_jsonl_usage(
         for record in records
         if record.get("event_end_offset") is not None
     ]
+    jsonl_requests = []
+    for record in records:
+        request = {
+            "request_id": record.get("request_id"),
+            "input_tokens": _as_int(record.get("input_tokens")),
+            "output_tokens": _as_int(record.get("output_tokens")),
+            "cache_read": _as_int(record.get("cache_read")),
+            "cache_creation": _as_int(record.get("cache_creation")),
+        }
+        for key in ("event_start_offset", "event_end_offset"):
+            if record.get(key) is not None:
+                request[key] = record.get(key)
+        jsonl_requests.append(request)
+
     out["jsonl_usage"] = {
         "source": "claude_session_jsonl",
         "path_sha256": hashlib.sha256(
@@ -320,18 +334,7 @@ def attach_jsonl_usage(
         "cache_creation_1h": out["cache_creation_1h"],
         "stream_totals": stream_totals,
         "jsonl_totals": jsonl_totals,
-        "jsonl_requests": [
-            {
-                "request_id": record.get("request_id"),
-                "input_tokens": _as_int(record.get("input_tokens")),
-                "output_tokens": _as_int(record.get("output_tokens")),
-                "cache_read": _as_int(record.get("cache_read")),
-                "cache_creation": _as_int(record.get("cache_creation")),
-                "event_start_offset": record.get("event_start_offset"),
-                "event_end_offset": record.get("event_end_offset"),
-            }
-            for record in records
-        ],
+        "jsonl_requests": jsonl_requests,
         "stream_totals_match": stream_totals == jsonl_totals,
     }
     models = list(replay.get("models") or [])
