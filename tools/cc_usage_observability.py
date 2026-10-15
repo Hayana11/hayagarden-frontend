@@ -426,15 +426,30 @@ def _first_send_jsonl_binding(
         if isinstance(jsonl, Mapping) else []
     )
     record = records[0] if records and isinstance(records[0], Mapping) else None
-    request_id = (
-        str(first.get("request_id") or "").strip()
-        if isinstance(first, Mapping) else ""
-    )
+    raw_live_ids = usage.get("_obs_live_request_ids")
+    live_ids = []
+    for value in raw_live_ids if isinstance(raw_live_ids, (list, tuple)) else ():
+        value = str(value or "").strip()
+        if value and value not in live_ids:
+            live_ids.append(value)
+    live_request_id = live_ids[0] if live_ids else ""
     jsonl_request_id = (
         str(record.get("request_id") or "").strip()
         if record is not None else ""
     )
-    ids_match = bool(request_id and jsonl_request_id and request_id == jsonl_request_id)
+    if not live_ids:
+        request_id_status = "UNKNOWN"
+    elif not records or len(live_ids) != len(records):
+        request_id_status = "PARTIAL"
+    else:
+        request_id_status = (
+            "COMPLETE"
+            if all(
+                live_id == str(row.get("request_id") or "").strip()
+                for live_id, row in zip(live_ids, records)
+            )
+            else "PARTIAL"
+        )
     numeric_match = bool(
         isinstance(first, Mapping)
         and record is not None
@@ -464,8 +479,13 @@ def _first_send_jsonl_binding(
         if isinstance(jsonl, Mapping) else None
     )
     evidence = {
-        "request_id": request_id or None,
+        "request_id": live_request_id or None,
         "jsonl_request_id": jsonl_request_id or None,
+        "request_id_status": request_id_status,
+        "request_id_source": (
+            "resident_live_stdout" if live_ids else None
+        ),
+        "jsonl_request_id_source": "jsonl_replay" if jsonl_request_id else None,
         "event_start_offset": start,
         "event_end_offset": end,
         "jsonl_path_matches": bool(
@@ -477,7 +497,9 @@ def _first_send_jsonl_binding(
     }
     if not isinstance(jsonl, Mapping) or record is None or stream_match not in (True, False):
         return "UNKNOWN", evidence
-    if not ids_match or not numeric_match or not range_match:
+    if request_id_status == "UNKNOWN":
+        return "UNKNOWN", evidence
+    if request_id_status != "COMPLETE" or not numeric_match or not range_match:
         return "PARTIAL", evidence
     return ("COMPLETE" if stream_match is True else "PARTIAL"), evidence
 
