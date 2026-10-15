@@ -6,6 +6,7 @@ sum raw JSONL rows directly.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -133,7 +134,7 @@ def pick_authoritative_duplicate_record(
 
 
 def replay_jsonl_lines(
-    lines: Iterable[str],
+    lines: Iterable[Any],
     *,
     known_request_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
@@ -144,7 +145,13 @@ def replay_jsonl_lines(
     duplicate_rows = 0
     conflicting_duplicates = 0
 
-    for raw in lines:
+    for item in lines:
+        start_offset = None
+        end_offset = None
+        if isinstance(item, tuple) and len(item) == 3:
+            raw, start_offset, end_offset = item
+        else:
+            raw = item
         try:
             row = json.loads(raw)
         except Exception:
@@ -156,6 +163,9 @@ def replay_jsonl_lines(
         record = _request_record(row)
         if record is None:
             continue
+        if start_offset is not None and end_offset is not None:
+            record["event_start_offset"] = int(start_offset)
+            record["event_end_offset"] = int(end_offset)
         assistant_usage_rows += 1
         request_id = record["request_id"]
         if request_id in known:
@@ -205,7 +215,16 @@ def replay_jsonl_path(
         if start > size:
             start = 0
         handle.seek(start)
-        result = replay_jsonl_lines(handle, known_request_ids=known_request_ids)
+
+        def _rows():
+            while True:
+                row_start = handle.tell()
+                raw = handle.readline()
+                if not raw:
+                    break
+                yield raw, row_start, handle.tell()
+
+        result = replay_jsonl_lines(_rows(), known_request_ids=known_request_ids)
         result["path"] = str(p)
         result["start_offset"] = start
         result["end_offset"] = handle.tell()
@@ -274,8 +293,25 @@ def attach_jsonl_usage(
         for key in ("input_tokens", "output_tokens", "cache_read", "cache_creation")
     }
     jsonl_totals = {key: _as_int(totals.get(key)) for key in stream_totals}
+    event_starts = [
+        int(record["event_start_offset"])
+        for record in records
+        if record.get("event_start_offset") is not None
+    ]
+    event_ends = [
+        int(record["event_end_offset"])
+        for record in records
+        if record.get("event_end_offset") is not None
+    ]
     out["jsonl_usage"] = {
         "source": "claude_session_jsonl",
+        "path_sha256": hashlib.sha256(
+            str(replay.get("path") or "").encode("utf-8")
+        ).hexdigest() if replay.get("path") else None,
+        "scan_start_offset": replay.get("start_offset"),
+        "scan_end_offset": replay.get("end_offset"),
+        "event_start_offset": min(event_starts) if event_starts else None,
+        "event_end_offset": max(event_ends) if event_ends else None,
         "request_count": len(request_ids),
         "duplicate_rows_ignored": _as_int(replay.get("duplicate_rows_ignored")),
         "conflicting_duplicate_rows": _as_int(replay.get("conflicting_duplicate_rows")),
@@ -291,6 +327,8 @@ def attach_jsonl_usage(
                 "output_tokens": _as_int(record.get("output_tokens")),
                 "cache_read": _as_int(record.get("cache_read")),
                 "cache_creation": _as_int(record.get("cache_creation")),
+                "event_start_offset": record.get("event_start_offset"),
+                "event_end_offset": record.get("event_end_offset"),
             }
             for record in records
         ],
