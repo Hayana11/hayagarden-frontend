@@ -4600,6 +4600,51 @@ class ContinuityShadowObservationTests(unittest.TestCase):
         self.assertEqual(invariant.content_hash, expected_hash)
         self.assertEqual(invariant.source_ref, 'system:%s' % expected_hash[:32])
 
+    def test_g53_real_sha256_replay_uses_explicit_system_authority(self):
+        static_system = 'G53_REAL_EXPLICIT_SYSTEM'
+        stale_system = 'G53_REAL_STALE_RESIDENT'
+
+        class _Resident:
+            def __init__(self):
+                self._system_text = stale_system
+
+            def ensure_alive(self, system_text, _env):
+                self._system_text = system_text
+                return True
+
+        resident = _Resident()
+        plan = types.SimpleNamespace(
+            assembly={
+                'state_snapshot': {},
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+        resident.ensure_alive(static_system, {})
+        sections = dr._build_continuity_shadow_fixed_sections(
+            plan=plan,
+            resident=resident,
+            static_system=static_system,
+            require_full_state_snapshot=True,
+        )
+        invariant = next(
+            section for section in sections if section.kind == 'invariant_system'
+        )
+        self.assertEqual(
+            invariant.content_hash,
+            hashlib.sha256(static_system.encode()).hexdigest(),
+        )
+        self.assertNotEqual(
+            invariant.content_hash,
+            hashlib.sha256(stale_system.encode()).hexdigest(),
+        )
+        self.assertEqual(
+            invariant.source_ref,
+            'system:%s' % hashlib.sha256(
+                static_system.encode()
+            ).hexdigest()[:32],
+        )
+
     def test_fixed_sections_use_full_semantic_state_snapshot_not_hot_delta(self):
         from chat.persona_state_semantic import (
             format_persona_semantic_snapshot,
