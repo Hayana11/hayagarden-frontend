@@ -2026,6 +2026,24 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
             )
         self.assertNotEqual(receipt["binding_status"], "COMPLETE")
 
+    def test_non_first_resident_turn_never_binds_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            turn["resident_turn_count"] = 2
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertNotEqual(receipt["binding_status"], "COMPLETE")
+
     def test_request_id_or_event_range_mismatch_downgrades(self):
         with tempfile.TemporaryDirectory() as directory:
             usage, turn, spawn, plan = self._receipt_fixture(
