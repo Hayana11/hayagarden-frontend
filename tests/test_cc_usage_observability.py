@@ -2026,6 +2026,35 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
             )
         self.assertNotEqual(receipt["binding_status"], "COMPLETE")
 
+    def test_request_id_or_event_range_mismatch_downgrades(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["rounds"][0]["request_id"] = "wrong-request"
+            turn["transcript_start_offset"] = 1
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertNotEqual(receipt["binding_status"], "COMPLETE")
+
+    def test_exact_replay_is_idempotent(self):
+        first = {"observation_status": "PARTIAL", "plan_identity": {"plan_id": "one"}}
+        observed = obs.attach_observation(
+            {"first_send_accounting": first},
+            context_breakdown={},
+            runtime={},
+            first_send_accounting=first,
+        )
+        self.assertEqual(observed["first_send_accounting"], first)
+
     def test_unknown_child_prevents_complete_even_with_complete_binding(self):
         with tempfile.TemporaryDirectory() as directory:
             usage, turn, spawn, plan = self._receipt_fixture(
