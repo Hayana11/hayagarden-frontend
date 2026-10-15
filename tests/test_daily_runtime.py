@@ -6194,7 +6194,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     plan.manifest['static_system_sha256'],
                     expected_hash,
                 )
-                self.assertEqual(expected.count(carrier), 1 if carrier else 0)
+                self.assertEqual(expected.count(guide), 1 if guide else 0)
 
     def test_global_guide_cold_spawn_and_parity_share_effective_system(self):
         raw = 'COLD STATIC SYSTEM'
@@ -6384,7 +6384,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         self.assertEqual(
             plan.manifest['context_plan_fixed_section_diagnostic']['mismatch_type'],
-            'content_hash',
+            'section_set',
         )
 
     def test_cold_rebuild_uses_latest_ready_chunk_plan(self):
