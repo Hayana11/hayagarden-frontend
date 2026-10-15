@@ -1581,6 +1581,18 @@ class ResidentSession:
             raise ResidentError('uh_a0_surface_fingerprint_missing')
         return fingerprint
 
+    @staticmethod
+    def _sha256_spawn_argv(args):
+        """Hash the exact successful spawn argv without persisting prompt text."""
+        values = [str(item) for item in (args or ())]
+        return hashlib.sha256(
+            json.dumps(
+                values,
+                ensure_ascii=False,
+                separators=(',', ':'),
+            ).encode('utf-8')
+        ).hexdigest()
+
     def _capture_tool_surface(self, tool_flags, *, spawn_argv_sha256=None):
         """Capture opaque evidence from the successful spawn, never constructor state."""
         flags = dict(tool_flags or {})
