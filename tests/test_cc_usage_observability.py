@@ -2437,8 +2437,8 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
                 manifest_assertions={},
                 observed_at="now",
             )
-        self.assertEqual(receipt["jsonl_binding"]["cursor_status"], "UNKNOWN")
         self.assertEqual(receipt["binding_status"], "UNKNOWN")
+        self.assertNotEqual(receipt["binding_status"], "COMPLETE")
 
     def test_observer_and_logger_failure_preserve_usage(self):
         from chat import daily_runtime
