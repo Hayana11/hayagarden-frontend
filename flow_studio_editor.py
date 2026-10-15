@@ -958,6 +958,7 @@ def _runtime_meta(
     runtime: Mapping[str, Any],
     editor_row: Optional[Mapping[str, Any]],
     document: Optional[Mapping[str, Any]] = None,
+    active_flow: Mapping[str, Any] = _UNKNOWN_ACTIVE_FLOW,
 ) -> dict[str, Any]:
     try:
         config_digest = hashlib.sha256(
@@ -985,6 +986,7 @@ def _runtime_meta(
         "version": int(runtime.get("version", 0)),
         "configDigest": config_digest,
         "engineEnabled": bool(config_store.get_bool("HIDDEN_FLOW_ENGINE_ENABLED", False)),
+        "activeFlow": dict(active_flow),
         "published": published,
         "applyPending": apply_pending,
         "applyBlocked": apply_blocked,
@@ -998,6 +1000,7 @@ def _bundle_payload(
     runtime_row: Mapping[str, Any],
     document: Mapping[str, Any],
     editor_row: Optional[Mapping[str, Any]],
+    active_flow: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "ok": True,
@@ -1006,7 +1009,75 @@ def _bundle_payload(
         "editorRevision": int(editor_row["revision"]) if editor_row else 0,
         "savedAt": editor_row["updated_at"] if editor_row else None,
         "source": "editor" if editor_row else "runtime-import",
-        "runtime": _runtime_meta(runtime_row, editor_row, document),
+        "runtime": _runtime_meta(runtime_row, editor_row, document, active_flow),
+    }
+
+
+
+_UNKNOWN_ACTIVE_FLOW = {"state": "unknown", "stage": None, "stageTurn": None}
+_IDLE_ACTIVE_FLOW = {"state": "idle", "stage": None, "stageTurn": None}
+
+
+def _active_runtime_flow(
+    connection: sqlite3.Connection,
+    flow_id: str,
+) -> dict[str, Any]:
+    """Read the committed Hidden Flow state for a read-only editor summary."""
+    active_states: list[tuple[str, int]] = []
+    unknown = False
+    try:
+        config_row = connection.execute(
+            "SELECT version FROM hidden_flow_configs WHERE flow_id=?",
+            (flow_id,),
+        ).fetchone()
+        if config_row is None or type(config_row["version"]) is not int:
+            return dict(_UNKNOWN_ACTIVE_FLOW)
+        runtime_rows = connection.execute(
+            """
+            SELECT chat_id, schema_version, flow_id, state_json,
+                   pending_guide_json, config_version, version, updated_at
+            FROM hidden_flow_runtime
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return dict(_UNKNOWN_ACTIVE_FLOW)
+
+    for row in runtime_rows:
+        row_flow_id = row["flow_id"]
+        try:
+            state = _decode_verified_flow_state(
+                json.loads(str(row["state_json"]))
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            if row_flow_id == flow_id:
+                unknown = True
+            continue
+        relevant = row_flow_id == flow_id or (
+            state.active and state.flow_id == flow_id
+        )
+        if not relevant:
+            continue
+        try:
+            _verify_runtime_row(row, state, flow_id)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            unknown = True
+            continue
+        if state.active:
+            active_states.append((state.stage, state.stage_turn))
+
+    if unknown:
+        return dict(_UNKNOWN_ACTIVE_FLOW)
+    if not active_states:
+        return dict(_IDLE_ACTIVE_FLOW)
+    # The endpoint has no chat selector. Never pick one of several active
+    # sessions, even if their current stage happens to match.
+    if len(active_states) != 1:
+        return dict(_UNKNOWN_ACTIVE_FLOW)
+    stage, stage_turn = active_states[0]
+    return {
+        "state": "active",
+        "stage": stage,
+        "stageTurn": stage_turn,
     }
 
 
@@ -1250,7 +1321,13 @@ def create_flow_studio_blueprint(
                 return _error("FLOW_NOT_FOUND", "flow configuration was not found", 404)
             except (ValueError, json.JSONDecodeError):
                 return _error("FLOW_STORAGE_INVALID", "stored flow configuration is invalid", 500)
-            return _response(_bundle_payload(flow_id, runtime, document, editor_row))
+            return _response(_bundle_payload(
+                flow_id,
+                runtime,
+                document,
+                editor_row,
+                _active_runtime_flow(connection, flow_id),
+            ))
         finally:
             connection.close()
 
@@ -1331,7 +1408,13 @@ def create_flow_studio_blueprint(
                 "revision": next_revision,
                 "updated_at": stamp,
             }
-            return _response(_bundle_payload(flow_id, runtime, document, editor_row))
+            return _response(_bundle_payload(
+                flow_id,
+                runtime,
+                document,
+                editor_row,
+                _active_runtime_flow(connection, flow_id),
+            ))
         except sqlite3.Error:
             connection.rollback()
             return _error("EDITOR_STORAGE_ERROR", "editor document could not be saved", 500)
@@ -1590,6 +1673,7 @@ def create_flow_studio_blueprint(
                 runtime,
                 document,
                 editor_row,
+                _active_runtime_flow(connection, flow_id),
             )
             response_payload["runtime"]["version"] = next_version
             response_payload["runtime"]["published"] = True
