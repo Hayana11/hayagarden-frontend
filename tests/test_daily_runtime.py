@@ -6194,7 +6194,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     plan.manifest['static_system_sha256'],
                     expected_hash,
                 )
-                self.assertEqual(expected.count(guide), 1 if guide else 0)
+                self.assertEqual(expected.count(guide) if guide else 0, 1 if guide else 0)
 
     def test_global_guide_cold_spawn_and_parity_share_effective_system(self):
         raw = 'COLD STATIC SYSTEM'
