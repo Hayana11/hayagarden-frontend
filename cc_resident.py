@@ -2768,6 +2768,7 @@ class ResidentSession:
         # the live accumulator; Daily canonicalization still reads transcript.
         provider_text_acc = []
         rounds = []
+        live_request_ids = []
         current_round = None
         provider_error = None
         provider_refusal_seen = False
@@ -2813,6 +2814,11 @@ class ResidentSession:
                 yield value
             finally:
                 _set_reader_state('PROCESS_EVENT')
+
+        def _record_live_request_id(value):
+            value = str(value or '').strip()
+            if value and value not in live_request_ids:
+                live_request_ids.append(value)
 
         def _transcript_timeout_snapshot():
             """Inspect bounded current-cursor metadata without sidechain finality."""
@@ -3315,6 +3321,7 @@ class ResidentSession:
                         except Exception:
                             pass
                     t = d.get('type')
+                    _record_live_request_id(_diagnostic_request_id(d))
                     if t == 'system' and d.get('subtype') == 'init':
                         self._session_id = d.get('session_id') or self._session_id
                     elif t == 'system' and d.get('subtype') == 'model_refusal_no_fallback':
@@ -3323,6 +3330,7 @@ class ResidentSession:
                         break
                     elif t == 'stream_event':
                         ev = d.get('event') or {}
+                        _record_live_request_id(_diagnostic_request_id(ev))
                         ev_type = ev.get('type')
                         if ev_type == 'message_start':
                             before_round = _diagnostic_round_snapshot(current_round)
@@ -3599,6 +3607,13 @@ class ResidentSession:
         usage['_obs_resident_generation'] = self._generation
         usage['_obs_resident_pid'] = getattr(proc, 'pid', None)
         usage['_obs_claude_session_id'] = self._session_id
+        usage['_obs_live_request_ids'] = list(live_request_ids)
+        usage['_obs_live_request_id_status'] = (
+            'AVAILABLE' if live_request_ids else 'UNKNOWN'
+        )
+        usage['_obs_live_request_id_source'] = (
+            'resident_live_stdout' if live_request_ids else None
+        )
         usage['_obs_runtime_identity'] = self._runtime_identity
         usage['_obs_last_provider_event_type'] = terminal.last_provider_event_type
         usage['_obs_last_provider_activity_at'] = terminal.last_provider_activity_at
