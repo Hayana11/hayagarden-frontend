@@ -7326,6 +7326,16 @@ def _build_first_send_observation_inputs(
     """Build redacted first-send inputs from the actual materialized turn."""
     from tools import cc_usage_observability as obs
 
+    manifest = getattr(plan, 'manifest', None)
+    if not isinstance(manifest, Mapping):
+        manifest = {}
+
+    def _optional_int(value):
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     ordered_sections = []
     if context_plan is not None:
         for section in getattr(context_plan, 'ordered_sections', ()) or ():
@@ -7340,19 +7350,19 @@ def _build_first_send_observation_inputs(
             })
     policy = getattr(context_plan, 'budget_policy', None)
     manifest_plan_id = str(
-        plan.manifest.get('context_plan_id') or ''
+        manifest.get('context_plan_id') or ''
     ).strip() or None
     materialized_plan_id = str(
         getattr(context_plan, 'plan_id', '') if context_plan is not None else ''
     ).strip() or None
     manifest_plan_hash = str(
-        plan.manifest.get('context_plan_hash') or ''
+        manifest.get('context_plan_hash') or ''
     ).strip() or None
     materialized_plan_hash = str(
         getattr(context_plan, 'plan_hash', '') if context_plan is not None else ''
     ).strip() or None
     manifest_source_hash = str(
-        plan.manifest.get('context_plan_source_hash') or ''
+        manifest.get('context_plan_source_hash') or ''
     ).strip() or None
     materialized_source_hash = str(
         getattr(context_plan, 'source_hash', '') if context_plan is not None else ''
@@ -7360,9 +7370,7 @@ def _build_first_send_observation_inputs(
     plan_hash = manifest_plan_hash or materialized_plan_hash or ''
     first = obs.first_round(usage)
     provider_session_id = str(
-        getattr(resident, 'session_id', None)
-        or getattr(plan, 'transcript_claude_session_id', None)
-        or ''
+        getattr(resident, 'session_id', None) or ''
     ).strip() or None
     provider_request_id = (
         str(first.get('request_id') or '').strip()
@@ -7371,16 +7379,23 @@ def _build_first_send_observation_inputs(
     )
     started_at = getattr(plan, 'turn_started_at', None)
     identity = {
-        'context_id': int(plan.context_id),
-        'context_epoch': int(plan.context_epoch),
-        'resident_generation': int(plan.resident_generation),
-        'resident_key': str(plan.resident_key),
+        'context_id': _optional_int(getattr(plan, 'context_id', None)),
+        'context_epoch': _optional_int(
+            getattr(plan, 'context_epoch', None)
+        ),
+        'resident_generation': _optional_int(
+            getattr(plan, 'resident_generation', None)
+        ),
+        'resident_key': (
+            str(getattr(plan, 'resident_key', '') or '').strip()
+            or None
+        ),
         'provider': str(
-            plan.manifest.get('provider') or 'claude_code'
+            manifest.get('provider') or 'claude_code'
         ),
         'model_identity': str(
             usage.get('_obs_model')
-            or plan.manifest.get('model')
+            or manifest.get('model')
             or getattr(resident, 'model_identity', None)
             or ''
         ) or None,
@@ -7390,8 +7405,8 @@ def _build_first_send_observation_inputs(
             str(getattr(plan, 'transcript_claude_session_id', '') or '').strip()
             or None
         ),
-        'transcript_process_generation': getattr(
-            plan, 'transcript_process_generation', None
+        'transcript_process_generation': _optional_int(
+            getattr(plan, 'transcript_process_generation', None)
         ),
         'context_plan_id': manifest_plan_id or materialized_plan_id,
         'context_plan_hash': plan_hash or None,
@@ -7402,16 +7417,20 @@ def _build_first_send_observation_inputs(
         'manifest_context_plan_source_hash': manifest_source_hash,
         'materialized_context_plan_source_hash': materialized_source_hash,
         'source_hash': str(
-            plan.manifest.get('context_plan_source_hash')
+            manifest.get('context_plan_source_hash')
             or getattr(context_plan, 'source_hash', '')
             or ''
         ) or None,
         'transcript_path_sha256': (
-            obs.sha256_text(plan.transcript_path)
-            if plan.transcript_path else None
+            obs.sha256_text(getattr(plan, 'transcript_path', None))
+            if getattr(plan, 'transcript_path', None) else None
         ),
-        'transcript_start_offset': plan.transcript_start_offset,
-        'transcript_end_offset': plan.transcript_end_offset,
+        'transcript_start_offset': getattr(
+            plan, 'transcript_start_offset', None
+        ),
+        'transcript_end_offset': getattr(
+            plan, 'transcript_end_offset', None
+        ),
         'first_send_started_at': (
             started_at.isoformat()
             if hasattr(started_at, 'isoformat') else None
@@ -7778,6 +7797,16 @@ def _attach_daily_provider_budget_observation(
         except Exception:
             logger.exception(
                 'daily first-send accounting observation failed; preserving usage'
+            )
+            first_send_accounting = (
+                obs.build_first_send_accounting_receipt(
+                    identity={},
+                    plan_accounting={},
+                    provider_bound_components=[],
+                    runtime=runtime,
+                    breakdown=breakdown,
+                    usage=usage,
+                )
             )
         observed = obs.attach_observation(
             usage,
