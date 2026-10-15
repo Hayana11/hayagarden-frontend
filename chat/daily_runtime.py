@@ -3981,10 +3981,14 @@ def _assemble_plan(
     daily_plan.hidden_flow_eligible = bool(getattr(hidden_plan, "eligible", False))
     daily_plan.hidden_flow_plan = hidden_plan
     if context_plan_consumer:
+        effective_static_system = _effective_hidden_flow_static_system(
+            daily_plan,
+            static_system,
+        )
         context_plan, chunk_bodies = _build_production_context_plan(
             daily_plan,
             resident=resident,
-            static_system=static_system,
+            static_system=effective_static_system,
             mode='cold',
         )
         daily_plan.continuity_plan = context_plan
