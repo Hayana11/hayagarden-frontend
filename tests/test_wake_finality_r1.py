@@ -149,7 +149,7 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
         self.assertEqual(event['current_round_after']['output_tokens'], 7)
 
     def test_assistant_usage_is_recorded(self):
-        _, logs, _ = self._run([
+        output, logs, _ = self._run([
             _stream_event('message_start', _usage(1, 0)),
             _assistant('req-r1', _usage(1, 9)),
             {'type': 'result', 'stop_reason': 'end_turn'},
@@ -160,6 +160,8 @@ class ResidentUsageProvenanceTests(unittest.TestCase):
             and row.get('event_source') == 'assistant'
         )
         self.assertEqual(event['provider_request_id'], 'req-r1')
+        done = next(payload for kind, payload in output if kind == 'done')
+        self.assertEqual(done[2]['_obs_live_request_ids'], ['req-r1'])
         self.assertEqual(event['output_tokens'], 9)
         self.assertEqual(event['current_round_after']['output_tokens'], 9)
 
