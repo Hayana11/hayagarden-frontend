@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:flow-studio-status": "vite-node scripts/test-flow-studio-status-semantics.mjs",
     "lint": "oxlint",
     "preview": "vite preview",
     "test:daily-soft-window": "vite-node scripts/test-daily-soft-window.mjs",
