@@ -159,8 +159,63 @@ class JsonlReplayTests(unittest.TestCase):
             result = replay.replay_jsonl_path(path, offset=0)
         self.assertEqual(result["requested_start_offset"], 0)
         self.assertEqual(result["effective_start_offset"], 0)
+        self.assertTrue(result["requested_cursor_supplied"])
+        self.assertTrue(result["requested_cursor_valid"])
         self.assertTrue(result["scan_cursor_valid"])
         self.assertFalse(result["scan_cursor_reset"])
+
+    def test_default_cursor_is_absent_but_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(_assistant_line("req-1") + "\n", encoding="utf-8")
+            result = replay.replay_jsonl_path(path)
+        self.assertFalse(result["requested_cursor_supplied"])
+        self.assertTrue(result["requested_cursor_valid"])
+        self.assertEqual(result["requested_start_offset"], 0)
+        self.assertEqual(result["effective_start_offset"], 0)
+        self.assertTrue(result["scan_cursor_valid"])
+        self.assertFalse(result["scan_cursor_reset"])
+
+    def test_negative_integer_cursor_fails_closed_after_safe_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(_assistant_line("req-1") + "\n", encoding="utf-8")
+            result = replay.replay_jsonl_path(path, offset=-1)
+        self.assertTrue(result["requested_cursor_supplied"])
+        self.assertFalse(result["requested_cursor_valid"])
+        self.assertFalse(result["scan_cursor_valid"])
+        self.assertTrue(result["scan_cursor_reset"])
+        self.assertEqual(result["effective_start_offset"], 0)
+
+    def test_negative_string_cursor_fails_closed_after_safe_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(_assistant_line("req-1") + "\n", encoding="utf-8")
+            result = replay.replay_jsonl_path(path, offset="-1")
+        self.assertTrue(result["requested_cursor_supplied"])
+        self.assertFalse(result["requested_cursor_valid"])
+        self.assertFalse(result["scan_cursor_valid"])
+        self.assertTrue(result["scan_cursor_reset"])
+
+    def test_malformed_cursor_fails_closed_after_safe_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(_assistant_line("req-1") + "\n", encoding="utf-8")
+            result = replay.replay_jsonl_path(path, offset="bad")
+        self.assertTrue(result["requested_cursor_supplied"])
+        self.assertFalse(result["requested_cursor_valid"])
+        self.assertFalse(result["scan_cursor_valid"])
+        self.assertTrue(result["scan_cursor_reset"])
+
+    def test_explicit_none_cursor_is_not_defaulted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text(_assistant_line("req-1") + "\n", encoding="utf-8")
+            result = replay.replay_jsonl_path(path, offset=None)
+        self.assertTrue(result["requested_cursor_supplied"])
+        self.assertFalse(result["requested_cursor_valid"])
+        self.assertFalse(result["scan_cursor_valid"])
+        self.assertTrue(result["scan_cursor_reset"])
 
     def test_valid_nonzero_cursor_preserves_effective_scan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +225,8 @@ class JsonlReplayTests(unittest.TestCase):
             result = replay.replay_jsonl_path(path, offset=len(first.encode("utf-8")))
         self.assertEqual(result["requested_start_offset"], result["effective_start_offset"])
         self.assertEqual(result["request_ids"], ["req-new"])
+        self.assertTrue(result["requested_cursor_supplied"])
+        self.assertTrue(result["requested_cursor_valid"])
         self.assertTrue(result["scan_cursor_valid"])
         self.assertFalse(result["scan_cursor_reset"])
         self.assertTrue(
@@ -185,6 +242,8 @@ class JsonlReplayTests(unittest.TestCase):
             result = replay.replay_jsonl_path(path, offset=requested)
         self.assertEqual(result["requested_start_offset"], requested)
         self.assertEqual(result["effective_start_offset"], 0)
+        self.assertTrue(result["requested_cursor_supplied"])
+        self.assertTrue(result["requested_cursor_valid"])
         self.assertFalse(result["scan_cursor_valid"])
         self.assertTrue(result["scan_cursor_reset"])
         self.assertEqual(result["request_ids"], ["req-1"])
@@ -198,9 +257,24 @@ class JsonlReplayTests(unittest.TestCase):
                 replay.replay_jsonl_path(path, offset=0),
             )
         jsonl = result["jsonl_usage"]
+        self.assertTrue(jsonl["requested_cursor_supplied"])
+        self.assertTrue(jsonl["requested_cursor_valid"])
         self.assertTrue(jsonl["scan_cursor_valid"])
         self.assertFalse(jsonl["scan_cursor_reset"])
         self.assertEqual(jsonl["effective_start_offset"], 0)
+
+    def test_empty_or_truncated_jsonl_has_no_complete_request_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            path.write_text("", encoding="utf-8")
+            empty = replay.replay_jsonl_path(path)
+            path.write_text('{"type":"assistant"', encoding="utf-8")
+            truncated = replay.replay_jsonl_path(path)
+        self.assertEqual(empty["request_count"], 0)
+        self.assertEqual(truncated["request_count"], 0)
+        self.assertEqual(truncated["invalid_json_rows"], 1)
+        self.assertFalse(truncated["requested_cursor_supplied"])
+        self.assertTrue(truncated["requested_cursor_valid"])
 
     def test_history_replay_dedups_across_files(self):
         with tempfile.TemporaryDirectory() as tmp:
