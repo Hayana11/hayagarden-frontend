@@ -206,13 +206,15 @@ def replay_jsonl_path(
     known_request_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     p = Path(path)
-    start = max(0, int(offset or 0))
+    requested_start = max(0, int(offset or 0))
+    start = requested_start
     with p.open("r", encoding="utf-8", errors="replace") as handle:
         try:
             size = p.stat().st_size
         except OSError:
             size = 0
-        if start > size:
+        cursor_valid = start <= size
+        if not cursor_valid:
             start = 0
         handle.seek(start)
 
@@ -228,6 +230,10 @@ def replay_jsonl_path(
         result["path"] = str(p)
         result["start_offset"] = start
         result["end_offset"] = handle.tell()
+        result["requested_start_offset"] = requested_start
+        result["effective_start_offset"] = start
+        result["scan_cursor_valid"] = bool(cursor_valid)
+        result["scan_cursor_reset"] = bool(start != requested_start)
         return result
 
 
@@ -281,7 +287,9 @@ def attach_jsonl_usage(
     rounds = [dict(row) for row in (out.get("rounds") or []) if isinstance(row, Mapping)]
     if len(rounds) == len(records):
         for round_row, record in zip(rounds, records):
-            round_row["request_id"] = record.get("request_id")
+            if not round_row.get("request_id"):
+                round_row["request_id"] = record.get("request_id")
+                round_row["request_id_source"] = "jsonl_replay"
             round_row["cache_creation_5m"] = _as_int(record.get("cache_creation_5m"))
             round_row["cache_creation_1h"] = _as_int(record.get("cache_creation_1h"))
             if record.get("model"):
@@ -324,6 +332,10 @@ def attach_jsonl_usage(
         ).hexdigest() if replay.get("path") else None,
         "scan_start_offset": replay.get("start_offset"),
         "scan_end_offset": replay.get("end_offset"),
+        "requested_start_offset": replay.get("requested_start_offset"),
+        "effective_start_offset": replay.get("effective_start_offset", replay.get("start_offset")),
+        "scan_cursor_valid": replay.get("scan_cursor_valid"),
+        "scan_cursor_reset": replay.get("scan_cursor_reset"),
         "event_start_offset": min(event_starts) if event_starts else None,
         "event_end_offset": max(event_ends) if event_ends else None,
         "request_count": len(request_ids),
