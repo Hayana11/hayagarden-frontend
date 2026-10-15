@@ -1624,7 +1624,7 @@ class ResidentSession:
             'tool_profile': self._tool_profile,
             'spawn_argv_sha256': str(spawn_argv_sha256 or '') or None,
             'spawn_generation': int(self._generation),
-            'surface_fingerprint': flags.get('surface_fingerprint'),
+            'surface_fingerprint': str(flags.get('surface_fingerprint') or '') or None,
             'allowed_surface_sha256': hashlib.sha256(
                 allowed.encode('utf-8')
             ).hexdigest(),
@@ -1647,7 +1647,7 @@ class ResidentSession:
         snapshot['spawn_identity_sha256'] = hashlib.sha256(
             json.dumps({
                 'generation': snapshot.get('spawn_generation'),
-                'pid': self.resident_pid,
+                'pid': str(self.resident_pid or '') or None,
                 'argv': snapshot.get('spawn_argv_sha256'),
                 'surface': snapshot.get('surface_fingerprint'),
                 'allowed': snapshot.get('allowed_surface_sha256'),
