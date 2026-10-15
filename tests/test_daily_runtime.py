@@ -4514,7 +4514,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
             )
             self.assertEqual(
                 sections[0].content_hash,
-                hashlib.sha256(b'EFFECTIVE SYSTEM').hexdigest(),
+                hashlib.sha256(b'FALLBACK SYSTEM').hexdigest(),
             )
             self.assertEqual(plan.manifest, before)
             log = mock.Mock()
@@ -4541,6 +4541,64 @@ class ContinuityShadowObservationTests(unittest.TestCase):
         finally:
             os.unlink(db)
 
+
+    def test_g53_targeted_replay_uses_static_system_after_ensure_alive(self):
+        # These are the two production g53 invariant_system hashes.  The
+        # bodies stay out of the test and diagnostic output.
+        expected_hash = (
+            '93b524bd76e67914ed2fffde52a0ebc7a8ffc51ba3d1ce124b20da02c2b423e4'
+        )
+        stale_hash = (
+            'aca178b61cdbb361614edf2eec4e7a32a00c6ae8f9225343238d852ebd0fad0b'
+        )
+        static_system = 'G53_EXPLICIT_SYSTEM_SOURCE'
+        stale_system = 'G53_PRIOR_RESIDENT_SYSTEM'
+
+        class _G53Resident:
+            def __init__(self):
+                self._system_text = stale_system
+                self.calls = []
+
+            def ensure_alive(self, system_text, _env, **_kwargs):
+                self.calls.append(system_text)
+                self._system_text = system_text
+                return True
+
+        resident = _G53Resident()
+        plan = types.SimpleNamespace(
+            assembly={
+                'state_snapshot': {},
+                'day_handoff_content': None,
+            },
+            manifest={},
+        )
+
+        def replay_hash(value):
+            if value == static_system:
+                return expected_hash
+            if value == stale_system:
+                return stale_hash
+            return hashlib.sha256(str(value).encode()).hexdigest()
+
+        with mock.patch.object(dr, '_sha256_text', side_effect=replay_hash):
+            before = dr._sha256_text(resident._system_text)
+            resident.ensure_alive(static_system, {})
+            after = dr._sha256_text(resident._system_text)
+            sections = dr._build_continuity_shadow_fixed_sections(
+                plan=plan,
+                resident=resident,
+                static_system=static_system,
+                require_full_state_snapshot=True,
+            )
+
+        self.assertEqual(resident.calls, [static_system])
+        self.assertEqual(before, stale_hash)
+        self.assertEqual(after, expected_hash)
+        invariant = next(
+            section for section in sections if section.kind == 'invariant_system'
+        )
+        self.assertEqual(invariant.content_hash, expected_hash)
+        self.assertEqual(invariant.source_ref, 'system:%s' % expected_hash[:32])
 
     def test_fixed_sections_use_full_semantic_state_snapshot_not_hot_delta(self):
         from chat.persona_state_semantic import (
