@@ -148,13 +148,41 @@ def resolve_tool_schema(
     tool_schema_source: Optional[str] = None,
     tool_count: Optional[int] = None,
     allowed_tool_count: Optional[int] = None,
+    tool_schema_measurement_status: Optional[str] = None,
 ) -> dict[str, Any]:
-    """只有真实 mcp_list_tools / static_registry schema 才能估算。"""
+    """Resolve schema coverage without upgrading an upstream partial/missing result."""
     source = (tool_schema_source or "").strip() or None
     allowed = int(allowed_tool_count) if allowed_tool_count is not None else None
-    if tool_schema_text is None or not str(tool_schema_text).strip():
+    hinted = str(tool_schema_measurement_status or "").strip().lower() or None
+    if hinted == "missing":
+        hinted = "unavailable"
+    if hinted not in ("available", "partial", "unavailable"):
+        hinted = None
+
+    text = str(tool_schema_text) if tool_schema_text is not None else ""
+    has_text = bool(text.strip())
+    valid_source = source in ("mcp_list_tools", "static_registry")
+
+    # A producer-supplied status is authoritative for coverage. In particular,
+    # a partial schema may still be estimated, but it must never become
+    # available and therefore must not be deducted from provider residuals.
+    if hinted in ("partial", "unavailable"):
+        can_estimate = hinted == "partial" and has_text and valid_source
+        return {
+            "tool_schema_tokens_estimate": (
+                estimate_tokens_heuristic_cjk1_ascii4_v1(text)
+                if can_estimate else None
+            ),
+            "tool_schema_measurement_status": hinted,
+            "tool_schema_source": source,
+            "tool_count": int(tool_count) if tool_count is not None else None,
+            "allowed_tool_count": allowed,
+            "tool_schema_sha256": sha256_text(text) if can_estimate else None,
+        }
+
+    if not has_text:
         status = "unavailable"
-        if source in ("mcp_list_tools", "static_registry") and tool_count is not None:
+        if valid_source and tool_count is not None:
             status = "partial"
         return {
             "tool_schema_tokens_estimate": None,
@@ -164,7 +192,8 @@ def resolve_tool_schema(
             "allowed_tool_count": allowed,
             "tool_schema_sha256": None,
         }
-    if source not in ("mcp_list_tools", "static_registry"):
+
+    if not valid_source:
         return {
             "tool_schema_tokens_estimate": None,
             "tool_schema_measurement_status": "unavailable",
@@ -173,7 +202,7 @@ def resolve_tool_schema(
             "allowed_tool_count": allowed,
             "tool_schema_sha256": None,
         }
-    text = str(tool_schema_text)
+
     return {
         "tool_schema_tokens_estimate": estimate_tokens_heuristic_cjk1_ascii4_v1(text),
         "tool_schema_measurement_status": "available",
@@ -214,6 +243,7 @@ def build_context_breakdown(
     tool_schema_source: Optional[str] = None,
     tool_count: Optional[int] = None,
     allowed_tool_count: Optional[int] = None,
+    tool_schema_measurement_status: Optional[str] = None,
     is_cold: bool = False,
     first_round_context_tokens: Optional[int] = None,
 ) -> dict[str, Any]:
@@ -268,6 +298,7 @@ def build_context_breakdown(
         tool_schema_source=tool_schema_source,
         tool_count=tool_count,
         allowed_tool_count=allowed_tool_count,
+        tool_schema_measurement_status=tool_schema_measurement_status,
     )
 
     unattributed = None
@@ -325,7 +356,13 @@ def build_runtime(
     static_system: str,
     mcp_config_path: Optional[str] = None,
     mcp_config_text: Optional[str] = None,
+    mcp_config_sha256: Optional[str] = None,
     allowed_tools: Optional[str] = None,
+    allowed_tools_sha256: Optional[str] = None,
+    tools_sha256: Optional[str] = None,
+    built_in_tools_sha256: Optional[str] = None,
+    tool_profile: Optional[str] = None,
+    observed_spawn_surface: Optional[bool] = None,
     tool_schema_sha256: Optional[str] = None,
     tool_schema_source: Optional[str] = None,
     tool_schema_measurement_status: Optional[str] = None,
@@ -342,7 +379,9 @@ def build_runtime(
     keepwarm_lease_expires_at: Optional[str] = None,
     provider: str = "claude_code",
 ) -> dict[str, Any]:
-    if mcp_config_text is not None:
+    if mcp_config_sha256 is not None:
+        mcp_sha = str(mcp_config_sha256)
+    elif mcp_config_text is not None:
         mcp_sha = sha256_text(mcp_config_text)
     else:
         mcp_sha = sha256_file(mcp_config_path)
@@ -351,11 +390,24 @@ def build_runtime(
         idle = float(idle_seconds_before_turn)
         if idle < 0:
             idle = 0.0
-    allowed_sha = sha256_text(allowed_tools if allowed_tools is not None else "")
-    tools_sha = sha256_canonical_json({
-        "allowed_tools": allowed_tools if allowed_tools is not None else "",
-        "tool_schema_sha256": tool_schema_sha256,
-    })
+    allowed_sha = (
+        str(allowed_tools_sha256)
+        if allowed_tools_sha256 is not None
+        else sha256_text(allowed_tools if allowed_tools is not None else "")
+    )
+    tools_sha = (
+        str(tools_sha256)
+        if tools_sha256 is not None
+        else sha256_canonical_json({
+            "allowed_tools": allowed_tools if allowed_tools is not None else "",
+            "tool_schema_sha256": tool_schema_sha256,
+        })
+    )
+    if observed_spawn_surface is False:
+        # No generation-scoped snapshot means no historical spawn authority.
+        mcp_sha = None
+        allowed_sha = None
+        tools_sha = None
     model_sha = sha256_text(model) if model else None
     provider_s = str(provider or "claude_code").strip() or "claude_code"
     provider_sha = sha256_text(provider_s)
@@ -377,6 +429,8 @@ def build_runtime(
         "mcp_config_sha256": mcp_sha,
         "allowed_tools_sha256": allowed_sha,
         "tools_sha256": tools_sha,
+        "built_in_tools_sha256": built_in_tools_sha256,
+        "tool_profile": tool_profile,
         "tool_schema_sha256": tool_schema_sha256,
         "tool_schema_source": tool_schema_source,
         "tool_schema_measurement_status": tool_schema_measurement_status,

@@ -1525,21 +1525,81 @@ class ResidentSession:
                                 error_code='claude_runtime_invalid') from exc
         return 'claude-code:%s' % version
 
+    @staticmethod
+    def _sha256_spawn_file(path):
+        if not path:
+            return None
+        try:
+            with open(str(path), "rb") as handle:
+                return hashlib.sha256(handle.read()).hexdigest()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _spawn_allowed_tool_count(surface_allowed):
+        return len({
+            item.strip()
+            for item in str(surface_allowed or "").split(",")
+            if item.strip()
+        })
+
+    @staticmethod
+    def _spawn_tools_fingerprint(
+        allowed_tools,
+        tool_schema_sha256,
+        tool_profile,
+        built_in_tools_sha256,
+    ):
+        payload = {
+            "allowed_tools": str(allowed_tools or ""),
+            "tool_schema_sha256": tool_schema_sha256,
+            "tool_profile": str(tool_profile or ""),
+            "built_in_tools_sha256": built_in_tools_sha256,
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()
+
+    def _annotate_spawn_tool_flags(self, tool_flags):
+        """Attach only opaque fingerprints from exact spawn flags."""
+        flags = dict(tool_flags or {})
+        surface_allowed = str(flags.get("surface_allowed") or "")
+        built_in_tools = str(flags.get("tools") or "")
+        flags["tool_profile"] = self._tool_profile
+        flags["mcp_config_sha256"] = self._sha256_spawn_file(
+            flags.get("mcp_path"),
+        )
+        flags["allowed_surface_sha256"] = hashlib.sha256(
+            surface_allowed.encode("utf-8"),
+        ).hexdigest()
+        flags["allowed_tool_count"] = self._spawn_allowed_tool_count(
+            surface_allowed,
+        )
+        flags["built_in_tools_sha256"] = hashlib.sha256(
+            built_in_tools.encode("utf-8"),
+        ).hexdigest()
+        return flags
+
     def _build_spawn_tool_flags(self, *, env=None, write_mcp_config=True, write_settings=True):
         """Split built-in availability (--tools) from MCP permission args.
 
-        UH-A0 uses a fixed physical surface from ``cc_capability_adapter``.
-        Legacy keeps ``--tools ''`` and the constructor allowlist. text_only
-        keeps both built-ins and MCP executable surfaces empty.
+        UH-A0 uses a fixed physical surface from the capability adapter.
+        Legacy keeps the constructor allowlist. text_only keeps both built-ins
+        and MCP executable surfaces empty.
         """
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-            return {
-                'tools': '',
-                'extra': ['--allowedTools', ''],
-                'surface_allowed': '',
-                'mcp_path': None,
-                'surface_fingerprint': None,
-            }
+            return self._annotate_spawn_tool_flags({
+                "tools": "",
+                "extra": ["--allowedTools", ""],
+                "surface_allowed": "",
+                "mcp_path": None,
+                "surface_fingerprint": None,
+            })
         if self._tool_profile == TOOL_PROFILE_UH_A0:
             from tools.cc_capability_adapter import build_uh_a0_spawn_plan
             spawn_env = self._prepare_spawn_env(env)
@@ -1550,24 +1610,24 @@ class ResidentSession:
                 write_mcp_config=write_mcp_config,
                 write_settings=write_settings,
             )
-            return {
-                'tools': plan['built_in_tools_csv'],
-                'extra': list(plan['spawn_extra_args']),
-                'surface_allowed': plan['surface_allowlist_csv'],
-                'mcp_path': plan['mcp_config_path'],
-                'surface_fingerprint': plan['physical_surface_fingerprint'],
-            }
-        return {
-            'tools': '',
-            'extra': [
-                '--mcp-config', self._mcp_config_path,
-                '--strict-mcp-config',
-                '--allowedTools', self._allowed_tools,
+            return self._annotate_spawn_tool_flags({
+                "tools": plan["built_in_tools_csv"],
+                "extra": list(plan["spawn_extra_args"]),
+                "surface_allowed": plan["surface_allowlist_csv"],
+                "mcp_path": plan["mcp_config_path"],
+                "surface_fingerprint": plan["physical_surface_fingerprint"],
+            })
+        return self._annotate_spawn_tool_flags({
+            "tools": "",
+            "extra": [
+                "--mcp-config", self._mcp_config_path,
+                "--strict-mcp-config",
+                "--allowedTools", self._allowed_tools,
             ],
-            'surface_allowed': self._allowed_tools,
-            'mcp_path': self._mcp_config_path,
-            'surface_fingerprint': None,
-        }
+            "surface_allowed": self._allowed_tools,
+            "mcp_path": self._mcp_config_path,
+            "surface_fingerprint": None,
+        })
 
     def _require_spawn_surface_fingerprint(self, tool_flags):
         """Validate the surface identity before creating a UH-A0 process."""
@@ -1579,17 +1639,70 @@ class ResidentSession:
         return fingerprint
 
     def _capture_tool_surface(self, tool_flags):
+        """Bind observation metadata to the successful generation spawn flags."""
+        actual_allowed = str((tool_flags or {}).get("surface_allowed") or "")
+        profile = str(
+            (tool_flags or {}).get("tool_profile") or self._tool_profile or ""
+        )
+        metadata = {
+            "tool_profile": profile,
+            "mcp_config_sha256": (tool_flags or {}).get("mcp_config_sha256"),
+            "allowed_surface_sha256": (
+                (tool_flags or {}).get("allowed_surface_sha256")
+            ),
+            "allowed_tool_count": int(
+                (tool_flags or {}).get(
+                    "allowed_tool_count",
+                    self._spawn_allowed_tool_count(actual_allowed),
+                )
+            ),
+            "built_in_tools_sha256": (
+                (tool_flags or {}).get("built_in_tools_sha256")
+            ),
+        }
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-            self._tool_surface_snapshot = {}
+            snapshot = {
+                "tool_schema_text": None,
+                "tool_schema_sha256": None,
+                "tool_schema_source": None,
+                "tool_schema_measurement_status": "unavailable",
+                "tool_count": 0,
+                "allowed_tool_count": 0,
+            }
+            snapshot.update(metadata)
+            snapshot["tools_sha256"] = self._spawn_tools_fingerprint(
+                actual_allowed,
+                None,
+                profile,
+                metadata["built_in_tools_sha256"],
+            )
+            self._tool_surface_snapshot = snapshot
             return
         try:
             from tools.cc_tool_surface import capture_tool_surface_snapshot
-            self._tool_surface_snapshot = capture_tool_surface_snapshot(
-                tool_flags.get('surface_allowed') or '',
-                mcp_config_path=tool_flags.get('mcp_path') or self._mcp_config_path,
+            snapshot = capture_tool_surface_snapshot(
+                actual_allowed,
+                mcp_config_path=(tool_flags or {}).get("mcp_path"),
             )
+            if not isinstance(snapshot, dict):
+                raise TypeError("tool surface snapshot must be a dict")
         except Exception:
-            self._tool_surface_snapshot = {}
+            snapshot = {
+                "tool_schema_text": None,
+                "tool_schema_sha256": None,
+                "tool_schema_source": None,
+                "tool_schema_measurement_status": "unavailable",
+                "tool_count": metadata["allowed_tool_count"],
+                "allowed_tool_count": metadata["allowed_tool_count"],
+            }
+        snapshot.update(metadata)
+        snapshot["tools_sha256"] = self._spawn_tools_fingerprint(
+            actual_allowed,
+            snapshot.get("tool_schema_sha256"),
+            profile,
+            metadata["built_in_tools_sha256"],
+        )
+        self._tool_surface_snapshot = snapshot
 
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot

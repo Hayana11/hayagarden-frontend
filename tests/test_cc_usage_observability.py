@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -1937,6 +1938,184 @@ class RealityAdapterContractTests(unittest.TestCase):
         self.assertIs(fake.received[1]["turn_lease"], lease)
         self.assertEqual(fake.received[0][0], {"type": "text", "text": "USER"})
         self.assertIn("REALITY", fake.received[0][-1]["text"])
+
+class SpawnAuthorityContractTests(unittest.TestCase):
+    def test_partial_and_missing_coverage_stay_unknown_for_residuals(self):
+        partial = obs.resolve_tool_schema(
+            tool_schema_text='{"name":"tool","inputSchema":{}}',
+            tool_schema_source="mcp_list_tools",
+            tool_count=3,
+            allowed_tool_count=3,
+            tool_schema_measurement_status="partial",
+        )
+        self.assertEqual(partial["tool_schema_measurement_status"], "partial")
+        self.assertIsInstance(partial["tool_schema_tokens_estimate"], int)
+
+        missing = obs.resolve_tool_schema(
+            tool_schema_text='{"name":"tool","inputSchema":{}}',
+            tool_schema_source="mcp_list_tools",
+            tool_count=3,
+            tool_schema_measurement_status="missing",
+        )
+        self.assertEqual(missing["tool_schema_measurement_status"], "unavailable")
+        self.assertIsNone(missing["tool_schema_tokens_estimate"])
+
+        partial_bd = obs.build_context_breakdown(
+            full_system="S",
+            final_content="C",
+            tool_schema_text='{"name":"tool","inputSchema":{}}',
+            tool_schema_source="mcp_list_tools",
+            tool_count=3,
+            allowed_tool_count=3,
+            tool_schema_measurement_status="partial",
+            is_cold=True,
+            first_round_context_tokens=100,
+        )
+        available_bd = obs.build_context_breakdown(
+            full_system="S",
+            final_content="C",
+            tool_schema_text='{"name":"tool","inputSchema":{}}',
+            tool_schema_source="mcp_list_tools",
+            tool_count=3,
+            allowed_tool_count=3,
+            tool_schema_measurement_status="available",
+            is_cold=True,
+            first_round_context_tokens=100,
+        )
+        self.assertEqual(
+            partial_bd["tool_schema_measurement_status"],
+            "partial",
+        )
+        self.assertGreater(
+            partial_bd["unattributed_bootstrap_tokens_estimate"],
+            available_bd["unattributed_bootstrap_tokens_estimate"],
+        )
+
+    def test_uh_a0_snapshot_uses_actual_spawn_plan_surface(self):
+        from cc_resident import ResidentSession, TOOL_PROFILE_UH_A0
+
+        with tempfile.NamedTemporaryFile("wb", delete=False) as handle:
+            handle.write(b'{"actual":"mcp"}')
+            mcp_path = handle.name
+        try:
+            session = ResidentSession(
+                "/tmp",
+                "constructor_surface",
+                "/tmp/constructor-mcp.json",
+            )
+            session._tool_profile = TOOL_PROFILE_UH_A0
+            actual_surface = "actual_one,actual_two"
+            with mock.patch.object(session, "_prepare_spawn_env", return_value={}),                  mock.patch(
+                     "tools.cc_capability_adapter.build_uh_a0_spawn_plan",
+                     return_value={
+                         "built_in_tools_csv": "Read,Glob",
+                         "spawn_extra_args": [
+                             "--mcp-config", mcp_path,
+                             "--allowedTools", actual_surface,
+                         ],
+                         "surface_allowlist_csv": actual_surface,
+                         "mcp_config_path": mcp_path,
+                         "physical_surface_fingerprint": "physical-fp",
+                     },
+                 ):
+                flags = session._build_spawn_tool_flags(env={})
+            self.assertEqual(flags["surface_allowed"], actual_surface)
+            self.assertEqual(
+                flags["allowed_surface_sha256"],
+                obs.sha256_text(actual_surface),
+            )
+            self.assertEqual(
+                flags["mcp_config_sha256"],
+                hashlib.sha256(b'{"actual":"mcp"}').hexdigest(),
+            )
+            self.assertEqual(flags["tool_profile"], TOOL_PROFILE_UH_A0)
+        finally:
+            os.unlink(mcp_path)
+
+    def test_snapshot_failure_keeps_spawn_hashes_and_no_raw_surface(self):
+        from cc_resident import ResidentSession, TOOL_PROFILE_LEGACY
+
+        with tempfile.NamedTemporaryFile("wb", delete=False) as handle:
+            handle.write(b"mcp")
+            mcp_path = handle.name
+        try:
+            session = ResidentSession(
+                "/tmp",
+                "constructor_surface",
+                "/tmp/constructor-mcp.json",
+            )
+            session._tool_profile = TOOL_PROFILE_LEGACY
+            actual_surface = "actual_one,actual_two"
+            flags = session._annotate_spawn_tool_flags({
+                "tools": "",
+                "surface_allowed": actual_surface,
+                "mcp_path": mcp_path,
+            })
+            with mock.patch(
+                "tools.cc_tool_surface.capture_tool_surface_snapshot",
+                side_effect=RuntimeError("isolated snapshot failure"),
+            ):
+                session._capture_tool_surface(flags)
+            snapshot = session.tool_surface_snapshot
+            self.assertEqual(
+                snapshot["tool_schema_measurement_status"],
+                "unavailable",
+            )
+            self.assertEqual(
+                snapshot["allowed_surface_sha256"],
+                obs.sha256_text(actual_surface),
+            )
+            self.assertEqual(
+                snapshot["mcp_config_sha256"],
+                hashlib.sha256(b"mcp").hexdigest(),
+            )
+            self.assertNotIn(actual_surface, json.dumps(snapshot))
+            self.assertEqual(snapshot["tool_profile"], TOOL_PROFILE_LEGACY)
+        finally:
+            os.unlink(mcp_path)
+
+    def test_daily_runtime_uses_generation_snapshot_for_cache_fingerprint(self):
+        from chat import daily_runtime
+
+        plan = DailyProviderBudgetContractTests._plan("cold")
+        resident = DailyProviderBudgetContractTests._resident()
+        resident.allowed_tools = "constructor_surface"
+        resident.mcp_config_path = "/tmp/constructor-mcp.json"
+        actual_surface = "actual_one,actual_two"
+        snapshot = {
+            "tool_schema_text": '{"name":"partial"}',
+            "tool_schema_source": "mcp_list_tools",
+            "tool_schema_sha256": "schema-hash",
+            "tool_schema_measurement_status": "partial",
+            "tool_count": 2,
+            "allowed_tool_count": 2,
+            "tool_profile": "uh_a0",
+            "mcp_config_sha256": "actual-mcp-hash",
+            "allowed_surface_sha256": obs.sha256_text(actual_surface),
+            "built_in_tools_sha256": obs.sha256_text("Read,Glob"),
+            "tools_sha256": "actual-tools-hash",
+        }
+        resident.tool_surface_snapshot = snapshot
+        usage = DailyProviderBudgetContractTests._usage(object())
+        observed = daily_runtime._attach_daily_provider_budget_observation(
+            plan,
+            resident=resident,
+            static_system="STATIC_SYSTEM",
+            usage=usage,
+        )
+        runtime = observed["runtime"]
+        self.assertEqual(runtime["mcp_config_sha256"], "actual-mcp-hash")
+        self.assertEqual(
+            runtime["allowed_tools_sha256"],
+            obs.sha256_text(actual_surface),
+        )
+        self.assertEqual(runtime["tools_sha256"], "actual-tools-hash")
+        self.assertEqual(runtime["tool_profile"], "uh_a0")
+        self.assertEqual(
+            observed["context_breakdown"]["tool_schema_measurement_status"],
+            "partial",
+        )
+
 
 
 if __name__ == "__main__":
