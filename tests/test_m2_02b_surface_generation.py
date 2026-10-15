@@ -311,6 +311,38 @@ class SurfaceGenerationTests(unittest.TestCase):
                 )
                 self.assertEqual(session.generation, 1)
 
+    def test_successful_spawn_snapshot_is_generation_bound(self):
+        session = cc_resident.ResidentSession(
+            self._tmp.name,
+            "constructor-only",
+            str(Path(self._tmp.name) / "mcp.json"),
+        )
+        session._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
+        session._build_spawn_tool_flags = mock.Mock(
+            return_value=self._tool_flags("surface-success")
+        )
+        process = _FakeProcess()
+        with self._spawn_patches(process), mock.patch(
+            "tools.cc_tool_surface.capture_tool_surface_snapshot",
+            return_value={
+                "tool_schema_measurement_status": "partial",
+                "tool_schema_sha256": "schema-hash",
+            },
+        ):
+            session._spawn(
+                "SYSTEM_NOT_PERSISTED",
+                {},
+                tool_profile=cc_resident.TOOL_PROFILE_UH_A0,
+            )
+        snapshot = session.tool_surface_snapshot
+        self.assertTrue(snapshot["actual_spawn"])
+        self.assertEqual(snapshot["spawn_generation"], session.generation)
+        self.assertEqual(snapshot["spawn_tool_flags_observation_status"], "COMPLETE")
+        self.assertTrue(snapshot["spawn_argv_sha256"])
+        self.assertTrue(snapshot["spawn_identity_sha256"])
+        self.assertEqual(snapshot["effective_allowed_tool_names"], ["Read"])
+        self.assertNotIn("constructor-only", snapshot["effective_allowed_tool_names"])
+
     def test_failed_spawn_does_not_overwrite_previous_binding(self):
         session = cc_resident.ResidentSession(
             self._tmp.name,
