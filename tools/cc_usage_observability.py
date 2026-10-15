@@ -395,11 +395,343 @@ def build_runtime(
     }
 
 
+def _first_send_value(row: Any, key: str) -> Optional[int]:
+    aliases = {
+        "input_tokens": ("input_tokens",),
+        "cache_read": ("cache_read", "cache_read_input_tokens"),
+        "cache_creation": ("cache_creation", "cache_creation_input_tokens"),
+        "output_tokens": ("output_tokens",),
+    }
+    if not isinstance(row, Mapping):
+        return None
+    for candidate in aliases.get(key, (key,)):
+        value = row.get(candidate)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _first_send_jsonl_binding(
+    usage: Mapping[str, Any],
+    turn: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    first = first_round(usage)
+    jsonl = usage.get("jsonl_usage")
+    records = (
+        list(jsonl.get("jsonl_requests") or [])
+        if isinstance(jsonl, Mapping) else []
+    )
+    record = records[0] if records and isinstance(records[0], Mapping) else None
+    raw_live_ids = usage.get("_obs_live_request_ids")
+    live_ids = []
+    for value in raw_live_ids if isinstance(raw_live_ids, (list, tuple)) else ():
+        value = str(value or "").strip()
+        if value and value not in live_ids:
+            live_ids.append(value)
+    live_request_id = live_ids[0] if live_ids else ""
+    jsonl_request_id = (
+        str(record.get("request_id") or "").strip()
+        if record is not None else ""
+    )
+    if not live_ids:
+        request_id_status = "UNKNOWN"
+    elif not records or len(live_ids) != len(records):
+        request_id_status = "PARTIAL"
+    else:
+        request_id_status = (
+            "COMPLETE"
+            if all(
+                live_id == str(row.get("request_id") or "").strip()
+                for live_id, row in zip(live_ids, records)
+            )
+            else "PARTIAL"
+        )
+    numeric_match = bool(
+        isinstance(first, Mapping)
+        and record is not None
+        and all(
+            _first_send_value(first, key) is not None
+            and _first_send_value(first, key) == _first_send_value(record, key)
+            for key in ("input_tokens", "cache_read", "cache_creation", "output_tokens")
+        )
+    )
+    start = record.get("event_start_offset") if record is not None else None
+    end = record.get("event_end_offset") if record is not None else None
+    transcript_start = turn.get("transcript_start_offset")
+    transcript_end = turn.get("transcript_end_offset")
+    requested_start = (
+        jsonl.get("requested_start_offset")
+        if isinstance(jsonl, Mapping) else None
+    )
+    scan_start = (
+        jsonl.get("effective_start_offset")
+        if isinstance(jsonl, Mapping) else None
+    )
+    scan_end = (
+        jsonl.get("scan_end_offset")
+        if isinstance(jsonl, Mapping) else None
+    )
+    requested_cursor_supplied = (
+        jsonl.get("requested_cursor_supplied")
+        if isinstance(jsonl, Mapping) else None
+    )
+    requested_cursor_valid = (
+        jsonl.get("requested_cursor_valid")
+        if isinstance(jsonl, Mapping) else None
+    )
+    def _nonnegative_offset(value):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    requested_start = _nonnegative_offset(requested_start)
+    scan_start = _nonnegative_offset(scan_start)
+    scan_end = _nonnegative_offset(scan_end)
+    scan_cursor_reset = (
+        jsonl.get("scan_cursor_reset")
+        if isinstance(jsonl, Mapping) else None
+    )
+    cursor_metadata_present = (
+        isinstance(jsonl, Mapping)
+        and "requested_start_offset" in jsonl
+        and "effective_start_offset" in jsonl
+        and "scan_end_offset" in jsonl
+        and "requested_cursor_supplied" in jsonl
+        and "requested_cursor_valid" in jsonl
+        and "scan_cursor_valid" in jsonl
+        and "scan_cursor_reset" in jsonl
+        and isinstance(requested_cursor_supplied, bool)
+        and isinstance(requested_cursor_valid, bool)
+        and requested_start is not None
+        and scan_start is not None
+        and scan_end is not None
+    )
+    cursor_consistent = bool(
+        cursor_metadata_present
+        and scan_end >= scan_start
+        and bool(scan_cursor_reset) == (requested_start != scan_start)
+    )
+    cursor_valid = bool(
+        cursor_consistent
+        and requested_cursor_valid is True
+        and isinstance(jsonl, Mapping)
+        and jsonl.get("scan_cursor_valid") is True
+        and scan_cursor_reset is False
+    )
+    cursor_status = (
+        "COMPLETE" if cursor_metadata_present and cursor_valid
+        else "PARTIAL" if cursor_metadata_present
+        else "UNKNOWN"
+    )
+    all_event_ranges_match = bool(records)
+    for row in records:
+        if not isinstance(row, Mapping):
+            all_event_ranges_match = False
+            break
+        row_start = _nonnegative_offset(row.get("event_start_offset"))
+        row_end = _nonnegative_offset(row.get("event_end_offset"))
+        if (
+            row_start is None
+            or row_end is None
+            or row_start >= row_end
+            or scan_start is None
+            or scan_end is None
+            or not (scan_start <= row_start < row_end <= scan_end)
+        ):
+            all_event_ranges_match = False
+            break
+    scan_range_match = bool(cursor_valid and all_event_ranges_match)
+    range_match = (
+        start is not None
+        and end is not None
+        and transcript_start is not None
+        and transcript_end is not None
+        and int(transcript_start) <= int(start) < int(end) <= int(transcript_end)
+        and scan_range_match
+        and turn.get("transcript_path_sha256")
+        and turn.get("transcript_path_sha256") == (
+            jsonl.get("path_sha256") if isinstance(jsonl, Mapping) else None
+        )
+    )
+    stream_match = (
+        jsonl.get("stream_totals_match")
+        if isinstance(jsonl, Mapping) else None
+    )
+    evidence = {
+        "request_id": live_request_id or None,
+        "jsonl_request_id": jsonl_request_id or None,
+        "request_id_status": request_id_status,
+        "request_id_source": (
+            "resident_live_stdout" if live_ids else None
+        ),
+        "jsonl_request_id_source": "jsonl_replay" if jsonl_request_id else None,
+        "requested_start_offset": requested_start,
+        "effective_start_offset": scan_start,
+        "scan_end_offset": scan_end,
+        "requested_cursor_supplied": requested_cursor_supplied,
+        "requested_cursor_valid": requested_cursor_valid,
+        "scan_cursor_valid": (
+            jsonl.get("scan_cursor_valid")
+            if isinstance(jsonl, Mapping) else None
+        ),
+        "scan_cursor_reset": (
+            jsonl.get("scan_cursor_reset")
+            if isinstance(jsonl, Mapping) else None
+        ),
+        "cursor_status": cursor_status,
+        "event_start_offset": start,
+        "event_end_offset": end,
+        "event_within_effective_scan": scan_range_match,
+        "all_event_ranges_within_effective_scan": all_event_ranges_match,
+        "jsonl_path_matches": bool(
+            turn.get("transcript_path_sha256")
+            and isinstance(jsonl, Mapping)
+            and turn.get("transcript_path_sha256") == jsonl.get("path_sha256")
+        ),
+        "stream_totals_match": stream_match,
+    }
+    if not isinstance(jsonl, Mapping) or record is None or stream_match not in (True, False):
+        return "UNKNOWN", evidence
+    if request_id_status == "UNKNOWN" or cursor_status == "UNKNOWN":
+        return "UNKNOWN", evidence
+    if (
+        request_id_status != "COMPLETE"
+        or cursor_status != "COMPLETE"
+        or not numeric_match
+        or not range_match
+    ):
+        return "PARTIAL", evidence
+    return ("COMPLETE" if stream_match is True else "PARTIAL"), evidence
+
+
+def build_first_send_accounting_receipt(
+    *,
+    plan_identity: Mapping[str, Any],
+    spawn_identity: Mapping[str, Any],
+    turn_identity: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    known_components: Sequence[Mapping[str, Any]],
+    known_context_tokens: Optional[int],
+    manifest_assertions: Mapping[str, Any],
+    observed_at: Optional[str],
+) -> dict[str, Any]:
+    """Build one redacted first-send receipt from one materialized plan."""
+    plan = dict(plan_identity or {})
+    spawn = dict(spawn_identity or {})
+    turn = dict(turn_identity or {})
+    first = first_round(usage)
+    plan_complete = all(
+        plan.get(key) not in (None, "")
+        for key in ("plan_id", "plan_hash", "source_hash",
+                    "selected_token_estimate", "fixed_token_estimate",
+                    "reserve_budget")
+    )
+    spawn_complete = (
+        bool(spawn.get("actual_spawn"))
+        and str(spawn.get("spawn_identity_sha256") or "").strip() != ""
+        and str(spawn.get("spawn_argv_sha256") or "").strip() != ""
+        and str(spawn.get("spawn_tool_flags_observation_status") or "") == "COMPLETE"
+    )
+    spawn_generation = spawn.get("spawn_generation")
+    provider_generation = usage.get("_obs_resident_generation")
+    turn_complete = (
+        all(turn.get(key) not in (None, "") for key in (
+            "context_id", "context_epoch", "resident_generation",
+            "current_user_message_id", "resident_turn_count",
+            "transcript_process_generation",
+            "provider_session_id", "transcript_claude_session_id",
+            "transcript_path_sha256", "transcript_start_offset",
+            "transcript_end_offset",
+        ))
+        and int(turn.get("resident_generation")) > 0
+        and int(turn.get("resident_turn_count")) == 1
+        and int(turn.get("transcript_process_generation")) == int(spawn_generation or 0)
+        and int(provider_generation or 0) == int(spawn_generation or 0)
+        and str(turn.get("provider_session_id")) == str(
+            turn.get("transcript_claude_session_id")
+        )
+    )
+    jsonl_status, jsonl_evidence = _first_send_jsonl_binding(usage, turn)
+    if not plan_complete:
+        binding_status = "UNKNOWN"
+    elif not spawn_complete or not turn_complete or jsonl_status == "UNKNOWN":
+        binding_status = "UNKNOWN"
+    elif jsonl_status != "COMPLETE":
+        binding_status = "PARTIAL"
+    else:
+        binding_status = "COMPLETE"
+
+    components = [dict(item) for item in (known_components or ())]
+    child_statuses = {
+        str(item.get("kind") or ""): str(item.get("observation_status") or "UNKNOWN")
+        for item in components
+    }
+    if any(status == "UNKNOWN" for status in child_statuses.values()):
+        coverage_status = "UNKNOWN"
+    elif any(status == "PARTIAL" for status in child_statuses.values()):
+        coverage_status = "PARTIAL"
+    else:
+        # Claude CLI/provider serialization is outside this observer boundary.
+        coverage_status = "PARTIAL"
+    if binding_status == "COMPLETE" and coverage_status == "COMPLETE":
+        overall = "COMPLETE"
+    elif "UNKNOWN" in (binding_status, coverage_status):
+        overall = "UNKNOWN"
+    else:
+        overall = "PARTIAL"
+    return {
+        "schema_version": 2,
+        "observation_status": overall,
+        "binding_status": binding_status,
+        "coverage_status": coverage_status,
+        "first_send": True,
+        "first_send_timestamp": observed_at,
+        "plan_identity": plan,
+        "spawn_identity": {
+            key: spawn.get(key)
+            for key in (
+                "spawn_generation",
+                "spawn_identity_sha256",
+                "spawn_argv_sha256",
+                "spawn_tool_flags_observation_status",
+            )
+        },
+        "turn_identity": turn,
+        "jsonl_binding": jsonl_evidence,
+        "provider_usage": {
+            "request_id": (
+                str(first.get("request_id") or "").strip()
+                if isinstance(first, Mapping) else None
+            ),
+            "input_tokens": _first_send_value(first, "input_tokens"),
+            "cache_read": _first_send_value(first, "cache_read"),
+            "cache_creation": _first_send_value(first, "cache_creation"),
+            "output_tokens": _first_send_value(first, "output_tokens"),
+        },
+        "known_pre_cli": {
+            "context_tokens_estimate": known_context_tokens,
+            "components": components,
+        },
+        "unobservable_boundary": {
+            "capture_boundary": "before_claude_cli_provider_handoff",
+            "claude_internal_envelope_observable": False,
+        },
+        "manifest_assertions": dict(manifest_assertions or {}),
+    }
+
+
 def attach_observation(
     usage: Mapping[str, Any],
     *,
     context_breakdown: Mapping[str, Any],
     runtime: Mapping[str, Any],
+    first_send_accounting: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """给成功回复的 Usage v2 增加可选观测字段；旧字段语义不变。"""
     out = dict(usage or {})
@@ -412,6 +744,16 @@ def attach_observation(
         out["turn_tags"] = list(context_breakdown.get("turn_tags") or [])
     if isinstance(context_breakdown.get("turn_measurement"), dict):
         out["turn_measurement"] = dict(context_breakdown.get("turn_measurement") or {})
+    if first_send_accounting is not None:
+        existing = out.get("first_send_accounting")
+        if existing is None:
+            out["first_send_accounting"] = dict(first_send_accounting)
+        elif sha256_canonical_json(existing) != sha256_canonical_json(first_send_accounting):
+            conflict = dict(existing)
+            conflict["observation_status"] = "UNKNOWN"
+            conflict["binding_status"] = "UNKNOWN"
+            conflict["conflict_code"] = "conflicting_first_send_evidence"
+            out["first_send_accounting"] = conflict
     return out
 
 
