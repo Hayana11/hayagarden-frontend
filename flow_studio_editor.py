@@ -1032,6 +1032,7 @@ def _active_runtime_flow(
         ).fetchone()
         if config_row is None or type(config_row["version"]) is not int:
             return dict(_UNKNOWN_ACTIVE_FLOW)
+        config_version = int(config_row["version"])
         runtime_rows = connection.execute(
             """
             SELECT chat_id, schema_version, flow_id, state_json,
@@ -1063,7 +1064,30 @@ def _active_runtime_flow(
             unknown = True
             continue
         if state.active:
+            if row["config_version"] != config_version:
+                unknown = True
+                continue
+            # An active state without its pending guide is a stale transition,
+            # not proof that the flow is currently readable.
+            if row["pending_guide_json"] is None:
+                unknown = True
+                continue
             active_states.append((state.stage, state.stage_turn))
+
+    try:
+        pending_rows = connection.execute(
+            """
+            SELECT flow_id
+            FROM hidden_flow_message_snapshots
+            WHERE status=?
+            """,
+            ("PENDING",),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return dict(_UNKNOWN_ACTIVE_FLOW)
+    for row in pending_rows:
+        if row["flow_id"] is None or row["flow_id"] == flow_id:
+            unknown = True
 
     if unknown:
         return dict(_UNKNOWN_ACTIVE_FLOW)

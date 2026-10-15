@@ -258,7 +258,26 @@ class FlowStudioEditorApiTests(unittest.TestCase):
                     "fixedDraws": {},
                     "startedAt": "2026-10-11T10:00:00Z",
                 }),
-                None,
+                json.dumps({
+                    "schemaVersion": 1,
+                    "status": "pending",
+                    "sourceMessageId": "assistant-1",
+                    "consumedByUserMessageId": None,
+                    "keys": [],
+                    "draws": [],
+                    "createdAt": "2026-10-11T10:00:00Z",
+                    "flow": {
+                        "schemaVersion": 1,
+                        "flowId": "intimacy-v1",
+                        "active": True,
+                        "stage": "s1",
+                        "cycle": 1,
+                        "stageTurn": 2,
+                        "contextKeys": [],
+                        "fixedDraws": {},
+                        "startedAt": "2026-10-11T10:00:00Z",
+                    },
+                }),
                 7,
                 1,
                 "2026-10-11 10:00:00",
@@ -1093,6 +1112,55 @@ class FlowStudioEditorApiTests(unittest.TestCase):
                 None,
                 7,
                 1,
+                "2026-10-11 10:00:00",
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        payload = self._get()
+        self.assertEqual(
+            payload["runtime"]["activeFlow"],
+            {"state": "unknown", "stage": None, "stageTurn": None},
+        )
+
+
+    def test_runtime_active_flow_fails_closed_for_pending_transition(self):
+        state = {
+            "schemaVersion": 1,
+            "flowId": "",
+            "active": False,
+            "stage": "",
+            "cycle": 0,
+            "stageTurn": 0,
+            "contextKeys": [],
+            "fixedDraws": {},
+            "startedAt": "",
+        }
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            """
+            INSERT INTO hidden_flow_message_snapshots
+                (assistant_message_id, user_message_id, chat_id, flow_id, status,
+                 runtime_version_before, config_version, applied_guide_json,
+                 control_json, state_before_json, state_after_json, next_guide_json,
+                 created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                300,
+                299,
+                "chat-pending",
+                "intimacy-v1",
+                "PENDING",
+                0,
+                7,
+                None,
+                None,
+                json.dumps(state),
+                json.dumps(state),
+                None,
+                "2026-10-11 10:00:00",
                 "2026-10-11 10:00:00",
             ),
         )
