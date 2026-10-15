@@ -220,6 +220,10 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(payload["runtime"]["version"], 7)
         self.assertFalse(payload["runtime"]["engineEnabled"])
         self.assertEqual(
+            payload["runtime"]["activeFlow"],
+            {"state": "idle", "stage": None, "stageTurn": None},
+        )
+        self.assertEqual(
             [stage["id"] for stage in payload["document"]["stages"]],
             ["s1", "s2", "disabled-stage"],
         )
@@ -228,6 +232,65 @@ class FlowStudioEditorApiTests(unittest.TestCase):
             ["e1", "e-disabled"],
         )
         self.assertEqual(payload["document"]["cues"][1]["enabled"], False)
+
+
+    def test_runtime_active_flow_summary_comes_from_committed_hidden_flow_state(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            """
+            INSERT INTO hidden_flow_runtime
+                (chat_id, schema_version, flow_id, state_json,
+                 pending_guide_json, config_version, version, updated_at)
+            VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                "chat-active",
+                1,
+                "intimacy-v1",
+                json.dumps({
+                    "schemaVersion": 1,
+                    "flowId": "intimacy-v1",
+                    "active": True,
+                    "stage": "s1",
+                    "cycle": 1,
+                    "stageTurn": 2,
+                    "contextKeys": [],
+                    "fixedDraws": {},
+                    "startedAt": "2026-10-11T10:00:00Z",
+                }),
+                json.dumps({
+                    "schemaVersion": 1,
+                    "status": "pending",
+                    "sourceMessageId": "assistant-1",
+                    "consumedByUserMessageId": None,
+                    "keys": [],
+                    "draws": [],
+                    "createdAt": "2026-10-11T10:00:00Z",
+                    "flow": {
+                        "schemaVersion": 1,
+                        "flowId": "intimacy-v1",
+                        "active": True,
+                        "stage": "s1",
+                        "cycle": 1,
+                        "stageTurn": 2,
+                        "contextKeys": [],
+                        "fixedDraws": {},
+                        "startedAt": "2026-10-11T10:00:00Z",
+                    },
+                }),
+                7,
+                1,
+                "2026-10-11 10:00:00",
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        payload = self._get()
+        self.assertEqual(
+            payload["runtime"]["activeFlow"],
+            {"state": "active", "stage": "s1", "stageTurn": 2},
+        )
 
     def test_save_reload_and_disabled_entry_round_trip(self):
         first = self._get()
@@ -1031,6 +1094,85 @@ class FlowStudioEditorApiTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.get_json()["code"], "FLOW_NOT_FOUND")
 
+
+    def test_runtime_active_flow_fails_closed_when_state_is_unreadable(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            """
+            INSERT INTO hidden_flow_runtime
+                (chat_id, schema_version, flow_id, state_json,
+                 pending_guide_json, config_version, version, updated_at)
+            VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (
+                "chat-corrupt",
+                1,
+                "intimacy-v1",
+                json.dumps({"schemaVersion": 1, "active": "true"}),
+                None,
+                7,
+                1,
+                "2026-10-11 10:00:00",
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        payload = self._get()
+        self.assertEqual(
+            payload["runtime"]["activeFlow"],
+            {"state": "unknown", "stage": None, "stageTurn": None},
+        )
+
+
+    def test_runtime_active_flow_fails_closed_for_pending_transition(self):
+        state = {
+            "schemaVersion": 1,
+            "flowId": "",
+            "active": False,
+            "stage": "",
+            "cycle": 0,
+            "stageTurn": 0,
+            "contextKeys": [],
+            "fixedDraws": {},
+            "startedAt": "",
+        }
+        connection = sqlite3.connect(self.db_path)
+        connection.execute(
+            """
+            INSERT INTO hidden_flow_message_snapshots
+                (assistant_message_id, user_message_id, chat_id, flow_id, status,
+                 runtime_version_before, config_version, applied_guide_json,
+                 control_json, state_before_json, state_after_json, next_guide_json,
+                 created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                300,
+                299,
+                "chat-pending",
+                "intimacy-v1",
+                "PENDING",
+                0,
+                7,
+                None,
+                None,
+                json.dumps(state),
+                json.dumps(state),
+                None,
+                "2026-10-11 10:00:00",
+                "2026-10-11 10:00:00",
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        payload = self._get()
+        self.assertEqual(
+            payload["runtime"]["activeFlow"],
+            {"state": "unknown", "stage": None, "stageTurn": None},
+        )
+
     def test_owner_cookie_session_allows_editor_get_and_missing_cookie_is_401(self):
         from moments_auth import owner_session_digest, require_owner
 
@@ -1054,6 +1196,7 @@ class FlowStudioEditorApiTests(unittest.TestCase):
             self.assertIn("document", body)
             self.assertIn("editorRevision", body)
             self.assertIn("runtime", body)
+            self.assertIn("activeFlow", body["runtime"])
 
     def test_owner_auth_error_is_explicit_for_get_put_and_validate(self):
         from moments_auth import OwnerAuthError
