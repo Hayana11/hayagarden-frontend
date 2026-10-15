@@ -954,6 +954,10 @@ def _is_published(
         return False
 
 
+_UNKNOWN_ACTIVE_FLOW = {"state": "unknown", "stage": None, "stageTurn": None}
+_IDLE_ACTIVE_FLOW = {"state": "idle", "stage": None, "stageTurn": None}
+
+
 def _runtime_meta(
     runtime: Mapping[str, Any],
     editor_row: Optional[Mapping[str, Any]],
@@ -1012,10 +1016,6 @@ def _bundle_payload(
         "runtime": _runtime_meta(runtime_row, editor_row, document, active_flow),
     }
 
-
-
-_UNKNOWN_ACTIVE_FLOW = {"state": "unknown", "stage": None, "stageTurn": None}
-_IDLE_ACTIVE_FLOW = {"state": "idle", "stage": None, "stageTurn": None}
 
 
 def _active_runtime_flow(
