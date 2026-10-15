@@ -463,12 +463,46 @@ def _first_send_jsonl_binding(
     end = record.get("event_end_offset") if record is not None else None
     transcript_start = turn.get("transcript_start_offset")
     transcript_end = turn.get("transcript_end_offset")
+    scan_start = (
+        jsonl.get("effective_start_offset")
+        if isinstance(jsonl, Mapping) else None
+    )
+    scan_end = (
+        jsonl.get("scan_end_offset")
+        if isinstance(jsonl, Mapping) else None
+    )
+    cursor_valid = (
+        isinstance(jsonl, Mapping)
+        and jsonl.get("scan_cursor_valid") is True
+        and jsonl.get("scan_cursor_reset") is False
+    )
+    cursor_metadata_present = (
+        isinstance(jsonl, Mapping)
+        and "scan_cursor_valid" in jsonl
+        and "scan_cursor_reset" in jsonl
+        and scan_start is not None
+        and scan_end is not None
+    )
+    cursor_status = (
+        "COMPLETE" if cursor_metadata_present and cursor_valid
+        else "PARTIAL" if cursor_metadata_present
+        else "UNKNOWN"
+    )
+    scan_range_match = bool(
+        cursor_valid
+        and start is not None
+        and end is not None
+        and scan_start is not None
+        and scan_end is not None
+        and int(scan_start) <= int(start) < int(end) <= int(scan_end)
+    )
     range_match = (
         start is not None
         and end is not None
         and transcript_start is not None
         and transcript_end is not None
         and int(transcript_start) <= int(start) < int(end) <= int(transcript_end)
+        and scan_range_match
         and turn.get("transcript_path_sha256")
         and turn.get("transcript_path_sha256") == (
             jsonl.get("path_sha256") if isinstance(jsonl, Mapping) else None
@@ -486,8 +520,24 @@ def _first_send_jsonl_binding(
             "resident_live_stdout" if live_ids else None
         ),
         "jsonl_request_id_source": "jsonl_replay" if jsonl_request_id else None,
+        "requested_start_offset": (
+            jsonl.get("requested_start_offset")
+            if isinstance(jsonl, Mapping) else None
+        ),
+        "effective_start_offset": scan_start,
+        "scan_end_offset": scan_end,
+        "scan_cursor_valid": (
+            jsonl.get("scan_cursor_valid")
+            if isinstance(jsonl, Mapping) else None
+        ),
+        "scan_cursor_reset": (
+            jsonl.get("scan_cursor_reset")
+            if isinstance(jsonl, Mapping) else None
+        ),
+        "cursor_status": cursor_status,
         "event_start_offset": start,
         "event_end_offset": end,
+        "event_within_effective_scan": scan_range_match,
         "jsonl_path_matches": bool(
             turn.get("transcript_path_sha256")
             and isinstance(jsonl, Mapping)
@@ -497,9 +547,14 @@ def _first_send_jsonl_binding(
     }
     if not isinstance(jsonl, Mapping) or record is None or stream_match not in (True, False):
         return "UNKNOWN", evidence
-    if request_id_status == "UNKNOWN":
+    if request_id_status == "UNKNOWN" or cursor_status == "UNKNOWN":
         return "UNKNOWN", evidence
-    if request_id_status != "COMPLETE" or not numeric_match or not range_match:
+    if (
+        request_id_status != "COMPLETE"
+        or cursor_status != "COMPLETE"
+        or not numeric_match
+        or not range_match
+    ):
         return "PARTIAL", evidence
     return ("COMPLETE" if stream_match is True else "PARTIAL"), evidence
 
