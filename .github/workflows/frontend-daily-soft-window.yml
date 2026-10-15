@@ -66,6 +66,7 @@ jobs:
           npm run test:task-timer-real-data-wiring
           npm run test:memory-cold-start
           npm run test:flow-studio-persistence
+          npm run test:flow-studio-runtime-status
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
