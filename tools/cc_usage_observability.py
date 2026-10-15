@@ -246,9 +246,82 @@ def build_first_send_accounting_receipt(
         if isinstance(first, Mapping) else None
     )
     jsonl_usage = usage.get("jsonl_usage") or {}
-    jsonl_requests = jsonl_usage.get("jsonl_requests") or []
-    if not request_id and jsonl_requests and isinstance(jsonl_requests[0], Mapping):
-        request_id = jsonl_requests[0].get("request_id")
+    jsonl_requests = (
+        jsonl_usage.get("jsonl_requests")
+        if isinstance(jsonl_usage, Mapping)
+        else None
+    ) or []
+    jsonl_first = (
+        jsonl_requests[0]
+        if jsonl_requests and isinstance(jsonl_requests[0], Mapping)
+        else None
+    )
+
+    def _usage_value(row: Any, key: str) -> Optional[int]:
+        aliases = {
+            "input_tokens": ("input_tokens",),
+            "cache_read": ("cache_read", "cache_read_input_tokens"),
+            "cache_creation": (
+                "cache_creation",
+                "cache_creation_input_tokens",
+            ),
+            "output_tokens": ("output_tokens",),
+        }
+        if not isinstance(row, Mapping):
+            return None
+        for candidate in aliases.get(key, (key,)):
+            value = row.get(candidate)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    jsonl_request_id = (
+        str(jsonl_first.get("request_id") or "").strip()
+        if isinstance(jsonl_first, Mapping)
+        else None
+    ) or None
+    jsonl_request_matches = bool(
+        request_id
+        and jsonl_request_id
+        and str(request_id).strip() == jsonl_request_id
+    )
+    jsonl_numeric_matches = bool(
+        isinstance(first, Mapping)
+        and isinstance(jsonl_first, Mapping)
+        and all(
+            _usage_value(first, key) is not None
+            and _usage_value(first, key) == _usage_value(jsonl_first, key)
+            for key in (
+                "input_tokens",
+                "cache_read",
+                "cache_creation",
+                "output_tokens",
+            )
+        )
+    )
+    stream_totals_match = (
+        jsonl_usage.get("stream_totals_match")
+        if isinstance(jsonl_usage, Mapping)
+        else None
+    )
+    if (
+        not isinstance(jsonl_usage, Mapping)
+        or not jsonl_usage
+        or not isinstance(jsonl_first, Mapping)
+        or not jsonl_request_matches
+        or not jsonl_numeric_matches
+        or stream_totals_match not in (True, False)
+    ):
+        jsonl_binding_status = "UNKNOWN"
+    elif stream_totals_match is True:
+        jsonl_binding_status = "COMPLETE"
+    else:
+        jsonl_binding_status = "PARTIAL"
+
     marker = True if turn_count == 1 else "UNKNOWN"
     if marker == "UNKNOWN":
         status = "UNKNOWN"
@@ -308,7 +381,9 @@ def build_first_send_accounting_receipt(
             identity.get("manifest_context_plan_source_hash")
             == identity.get("materialized_context_plan_source_hash")
         )
-        if not identity_complete or not request_id:
+        if jsonl_binding_status == "UNKNOWN":
+            status = "UNKNOWN"
+        elif not identity_complete or not request_id:
             status = "UNKNOWN"
         elif (
             not plan_identity_complete
@@ -317,6 +392,8 @@ def build_first_send_accounting_receipt(
             or not source_hash_matches
         ):
             status = "UNKNOWN"
+        elif jsonl_binding_status == "PARTIAL":
+            status = "PARTIAL"
         elif (
             str(spawn.get("observation_status") or "UNKNOWN") != "COMPLETE"
             or not str(spawn.get("spawn_argv_sha256") or "").strip()
@@ -332,13 +409,33 @@ def build_first_send_accounting_receipt(
         else:
             status = "COMPLETE"
 
+    usage_row = (
+        jsonl_first
+        if jsonl_binding_status in {"COMPLETE", "PARTIAL"}
+        else None
+    )
+    context_row = (
+        first
+        if isinstance(first, Mapping)
+        and first.get("context_tokens") is not None
+        else usage_row
+    )
     first_usage = {
-        "input_tokens": int(first.get("input_tokens") or 0) if isinstance(first, Mapping) else None,
-        "cache_read_input_tokens": int(first.get("cache_read") or 0) if isinstance(first, Mapping) else None,
-        "cache_creation_input_tokens": int(first.get("cache_creation") or 0) if isinstance(first, Mapping) else None,
-        "context_tokens": round_context_tokens(first) if isinstance(first, Mapping) else None,
-        "output_tokens": int(first.get("output_tokens") or 0) if isinstance(first, Mapping) else None,
+        "input_tokens": _usage_value(usage_row, "input_tokens"),
+        "cache_read_input_tokens": _usage_value(usage_row, "cache_read"),
+        "cache_creation_input_tokens": _usage_value(
+            usage_row,
+            "cache_creation",
+        ),
+        "context_tokens": (
+            round_context_tokens(context_row)
+            if isinstance(context_row, Mapping)
+            else None
+        ),
+        "output_tokens": _usage_value(usage_row, "output_tokens"),
         "request_id": str(request_id) if request_id else None,
+        "jsonl_binding_status": jsonl_binding_status,
+        "jsonl_request_id": jsonl_request_id,
     }
     return {
         "schema_version": 1,
