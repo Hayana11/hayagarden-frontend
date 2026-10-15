@@ -17,25 +17,36 @@ object AutoSyncSchedule {
 
     fun restore() {
         scope.launch {
-            rescheduleIfEnabledSuspend()
+            AutoSyncScheduleRestorer(
+                autoSyncEnabled = {
+                    KoinPlatform.getKoin().get<SyncPreferences>().autoSync.first()
+                },
+                schedule = AutoSyncPlatform::scheduleBackgroundRefresh,
+                cancel = AutoSyncPlatform::cancelBackgroundRefresh,
+            ).restore()
         }
     }
 
-    /** Same as [restore] — for iOS scenePhase / after BG task. */
     fun rescheduleIfEnabled() {
         restore()
     }
+}
 
-    private suspend fun rescheduleIfEnabledSuspend() {
+/**
+ * Small policy seam for deterministic tests. The Android implementation still
+ * owns the unique WorkManager request and UPDATE policy.
+ */
+class AutoSyncScheduleRestorer(
+    private val autoSyncEnabled: suspend () -> Boolean,
+    private val schedule: () -> Unit,
+    private val cancel: () -> Unit,
+) {
+    suspend fun restore() {
         val enabled = try {
-            KoinPlatform.getKoin().get<SyncPreferences>().autoSync.first()
+            autoSyncEnabled()
         } catch (_: Exception) {
             false
         }
-        if (enabled) {
-            AutoSyncPlatform.scheduleBackgroundRefresh()
-        } else {
-            AutoSyncPlatform.cancelBackgroundRefresh()
-        }
+        if (enabled) schedule() else cancel()
     }
 }

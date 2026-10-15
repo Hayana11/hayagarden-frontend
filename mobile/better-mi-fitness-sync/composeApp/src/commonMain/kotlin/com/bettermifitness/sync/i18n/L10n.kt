@@ -233,4 +233,26 @@ object L10n {
     val backgroundRestricted get() = MR.strings.background_restricted
     val backgroundUnknown get() = MR.strings.background_unknown
     val backgroundUnknownStatus get() = MR.strings.background_unknown_status
+    val settingsBackgroundDiagnostics get() = MR.strings.settings_background_diagnostics
+    val settingsAutoSyncDisabled get() = MR.strings.settings_auto_sync_disabled
+    val settingsBatteryOptimization get() = MR.strings.settings_battery_optimization
+    val settingsBatteryExempt get() = MR.strings.settings_battery_exempt
+    val settingsBatteryNotExempt get() = MR.strings.settings_battery_not_exempt
+    val settingsBatteryUnavailable get() = MR.strings.settings_battery_unavailable
+    val settingsRequestBatteryExemption get() = MR.strings.settings_request_battery_exemption
+    val settingsWorkManagerState get() = MR.strings.settings_work_manager_state
+    val settingsWorkerLastStarted get() = MR.strings.settings_worker_last_started
+    val settingsWorkerLastFinished get() = MR.strings.settings_worker_last_finished
+    val settingsWorkerLastResult get() = MR.strings.settings_worker_last_result
+    val settingsWorkerLastError get() = MR.strings.settings_worker_last_error
+    val settingsWorkerRetrying get() = MR.strings.settings_worker_retrying
+    val settingsWorkerUnknown get() = MR.strings.settings_worker_unknown
+    val settingsWorkerStateUnknown get() = MR.strings.settings_worker_state_unknown
+    val settingsWorkerStateEnqueued get() = MR.strings.settings_worker_state_enqueued
+    val settingsWorkerStateRunning get() = MR.strings.settings_worker_state_running
+    val settingsWorkerStateBlocked get() = MR.strings.settings_worker_state_blocked
+    val settingsWorkerStateSucceeded get() = MR.strings.settings_worker_state_succeeded
+    val settingsWorkerStateFailed get() = MR.strings.settings_worker_state_failed
+    val settingsWorkerStateCancelled get() = MR.strings.settings_worker_state_cancelled
+    val settingsWorkerStateNotScheduled get() = MR.strings.settings_worker_state_not_scheduled
 }
