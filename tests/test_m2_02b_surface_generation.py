@@ -95,10 +95,12 @@ class SurfaceGenerationTests(unittest.TestCase):
 
     def _spawn_patches(self, process):
         stack = ExitStack()
+        popen_mock = mock.Mock(return_value=process)
+        self._popen_mock = popen_mock
         stack.enter_context(
             mock.patch(
                 "cc_resident.subprocess.Popen",
-                return_value=process,
+                new=popen_mock,
             )
         )
         stack.enter_context(
@@ -311,6 +313,58 @@ class SurfaceGenerationTests(unittest.TestCase):
                     "surface-success",
                 )
                 self.assertEqual(session.generation, 1)
+                capture_call = session._capture_tool_surface.call_args
+                self.assertIsNotNone(capture_call)
+                actual_args = self._popen_mock.call_args.args[0]
+                self.assertEqual(
+                    capture_call.kwargs["spawn_argv_sha256"],
+                    session._sha256_spawn_argv(actual_args),
+                )
+
+    def test_spawn_argv_hash_is_stable_and_order_sensitive(self):
+        args = ["claude", "--session-id", "session-1"]
+        self.assertEqual(
+            cc_resident.ResidentSession._sha256_spawn_argv(args),
+            cc_resident.ResidentSession._sha256_spawn_argv(list(args)),
+        )
+        self.assertNotEqual(
+            cc_resident.ResidentSession._sha256_spawn_argv(args),
+            cc_resident.ResidentSession._sha256_spawn_argv(
+                ["claude", "--session-id", "session-2"]
+            ),
+        )
+
+    def test_named_spawn_failure_does_not_capture_success_identity(self):
+        for method_name, kwargs in (
+            ("spawn_resumable", {"resume_session_id": "resume-session"}),
+            ("spawn_fresh_named", {"session_id": "11111111-1111-4111-8111-111111111111"}),
+        ):
+            with self.subTest(method=method_name):
+                session = cc_resident.ResidentSession(
+                    self._tmp.name,
+                    "",
+                    str(Path(self._tmp.name) / "mcp.json"),
+                )
+                session._build_spawn_tool_flags = mock.Mock(
+                    return_value=self._tool_flags("surface-failure"),
+                )
+                capture = mock.Mock()
+                session._capture_tool_surface = capture
+                with self._spawn_patches(None) as stack:
+                    stack.enter_context(
+                        mock.patch(
+                            "cc_resident.subprocess.Popen",
+                            side_effect=OSError("spawn failed"),
+                        )
+                    )
+                    with self.assertRaises(cc_resident.ResidentError):
+                        getattr(session, method_name)(
+                            "SYS",
+                            {},
+                            tool_profile=cc_resident.TOOL_PROFILE_UH_A0,
+                            **kwargs,
+                        )
+                capture.assert_not_called()
 
     def test_successful_spawn_snapshot_is_generation_bound(self):
         session = cc_resident.ResidentSession(
