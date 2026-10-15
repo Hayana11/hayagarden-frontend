@@ -1923,6 +1923,9 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
             "resident_turn_count": 1,
             "_obs_resident_generation": 7,
             "_obs_claude_session_id": "session-1",
+            "_obs_live_request_ids": ["req-1"],
+            "_obs_live_request_id_status": "AVAILABLE",
+            "_obs_live_request_id_source": "resident_live_stdout",
         }
         usage = attach_jsonl_usage(usage, replay)
         path_hash = obs.sha256_text(str(path))
@@ -1989,6 +1992,103 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
         self.assertIsNotNone(receipt["jsonl_binding"]["event_start_offset"])
         self.assertIsNotNone(receipt["jsonl_binding"]["event_end_offset"])
         self.assertFalse(receipt["manifest_assertions"]["manifest_plan_hash_matches"])
+
+    def test_jsonl_only_request_id_cannot_prove_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage.pop("_obs_live_request_ids", None)
+            usage.pop("_obs_live_request_id_status", None)
+            usage.pop("_obs_live_request_id_source", None)
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["request_id_status"], "UNKNOWN")
+        self.assertEqual(receipt["binding_status"], "UNKNOWN")
+
+    def test_attach_jsonl_usage_cannot_manufacture_live_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            usage, turn, spawn, plan = self._receipt_fixture(path)
+            usage.pop("_obs_live_request_ids", None)
+            usage.pop("_obs_live_request_id_status", None)
+            usage.pop("_obs_live_request_id_source", None)
+            self.assertEqual(usage["rounds"][0]["request_id_source"], "jsonl_replay")
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["binding_status"], "UNKNOWN")
+
+    def test_matching_live_request_id_is_independently_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["request_id_status"], "COMPLETE")
+        self.assertEqual(receipt["binding_status"], "COMPLETE")
+
+    def test_live_request_id_mismatch_is_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["_obs_live_request_ids"] = ["wrong-live-request"]
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["request_id_status"], "PARTIAL")
+        self.assertEqual(receipt["binding_status"], "PARTIAL")
+
+    def test_live_request_id_absent_stays_unknown_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["_obs_live_request_ids"] = []
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["request_id_status"], "UNKNOWN")
+        self.assertEqual(receipt["binding_status"], "UNKNOWN")
 
     def test_missing_materialized_identity_is_unknown_without_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
