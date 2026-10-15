@@ -2057,7 +2057,10 @@ class ResidentSession:
             self._cold = False
             self._generation += 1
             self._reset_session_meta(respawn_reason=reason)
-            self._capture_tool_surface(tool_flags)
+            self._capture_tool_surface(
+                tool_flags,
+                spawn_argv_sha256=self._sha256_spawn_argv(args),
+            )
             return self
 
     def _capture_authoritative_deferred(self, result):
@@ -2270,7 +2273,10 @@ class ResidentSession:
             self._cold = True
             self._generation += 1
             self._reset_session_meta(respawn_reason=reason)
-            self._capture_tool_surface(tool_flags)
+            self._capture_tool_surface(
+                tool_flags,
+                spawn_argv_sha256=self._sha256_spawn_argv(args),
+            )
             return self
 
     def wait_staged_health(
