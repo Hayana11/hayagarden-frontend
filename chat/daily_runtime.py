@@ -5998,9 +5998,10 @@ def _build_continuity_shadow_fixed_sections(
     )
     from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v1
 
-    resident_system = getattr(resident, '_system_text', '')
-    if not isinstance(resident_system, str) or not resident_system.strip():
-        resident_system = str(static_system or '')
+    # Fixed-section identity follows the explicit system authority used by the
+    # resident call.  A mutable resident cache may still contain the prior
+    # generation's prompt during a cold/respawn install.
+    resident_system = str(static_system or '')
     sections = []
     system_hash = _sha256_text(resident_system)
     sections.append(ContextSection(
