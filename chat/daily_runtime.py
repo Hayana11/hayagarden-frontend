@@ -7161,6 +7161,11 @@ def ensure_resident_and_stream(
         actual_cold = bool(
             resident.ensure_alive(effective_system, env, tool_profile=plan.tool_profile)
         )
+        # Hash-only snapshot from the already successful process spawn.  This
+        # is evidence for the optional observer, never a lifecycle authority.
+        plan._first_send_spawn_identity = dict(
+            getattr(resident, 'tool_surface_snapshot', None) or {}
+        )
         from chat.display_thinking import (
             authored_thinking_instruction_suffix,
             normalize_display_thinking_mode,
@@ -7585,6 +7590,47 @@ def _clear_daily_provider_prompt_snapshots(
         pass
 
 
+def _materialized_context_plan_for_first_send(plan: DailyTurnPlan) -> Any:
+    """Select the one ContextPlan object consumed by this runtime path."""
+    manifest = getattr(plan, 'manifest', None)
+    consumer = str(
+        manifest.get('context_plan_consumer') if isinstance(manifest, dict) else ''
+    ).strip()
+    attr = {
+        'canonical': 'continuity_plan',
+        'canonical_capacity': 'capacity_context_plan',
+        'canonical_hot': 'hot_desired_plan',
+    }.get(consumer)
+    return getattr(plan, attr, None) if attr else None
+
+
+def _first_send_component(obs: Any, kind: str, value: Any) -> dict[str, Any]:
+    if value is None:
+        return {
+            'kind': kind,
+            'observation_status': 'UNKNOWN',
+            'identity_sha256': None,
+            'token_estimate': None,
+        }
+    text, non_text = obs.content_to_text(value)
+    return {
+        'kind': kind,
+        'observation_status': 'COMPLETE',
+        'identity_sha256': obs.sha256_text(text),
+        'token_estimate': obs.estimate_tokens_heuristic_cjk1_ascii4_v1(text),
+        'serialized_character_count': len(text),
+        'serialized_byte_count': len(text.encode('utf-8')),
+        'non_text_block_count': int(non_text or 0),
+    }
+
+
+def _safe_daily_observation_log(level: str, message: str, *args: Any) -> None:
+    try:
+        getattr(logger, level)(message, *args)
+    except Exception:
+        pass
+
+
 def _attach_daily_provider_budget_observation(
     plan: DailyTurnPlan,
     *,
@@ -7592,11 +7638,7 @@ def _attach_daily_provider_budget_observation(
     static_system: str,
     usage: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Attach the shared provider-envelope observation to canonical Daily turns.
-
-    The estimator remains an observation of the existing prompt and provider
-    usage. It does not select sources, install receipts, or change budgets.
-    """
+    """Attach optional redacted observation without changing the send contract."""
     try:
         from tools import cc_usage_observability as obs
 
@@ -7616,15 +7658,11 @@ def _attach_daily_provider_budget_observation(
             raise RuntimeError('provider_prompt_snapshot_missing')
 
         bootstrap_kind = str(
-            getattr(plan, '_provider_prompt_bootstrap_kind', None)
-            or 'hot'
+            getattr(plan, '_provider_prompt_bootstrap_kind', None) or 'hot'
         )
         bootstrap_like = bootstrap_kind in {'cold', 'respawn', 'capacity'}
         assembly = plan.assembly if isinstance(plan.assembly, dict) else {}
-        context_plan = (
-            getattr(plan, 'capacity_context_plan', None)
-            or getattr(plan, 'continuity_plan', None)
-        )
+        context_plan = _materialized_context_plan_for_first_send(plan)
         representation_blocks = (
             assembly.get('context_plan_representation_blocks') or []
         )
@@ -7641,7 +7679,12 @@ def _attach_daily_provider_budget_observation(
                 cold_once_parts.append(handoff)
             if carryover:
                 cold_once_parts.append(carryover)
-        tool_surface = getattr(resident, 'tool_surface_snapshot', None) or {}
+
+        tool_surface = dict(
+            getattr(plan, '_first_send_spawn_identity', None)
+            or getattr(resident, 'tool_surface_snapshot', None)
+            or {}
+        )
         allowed_tools = getattr(resident, 'allowed_tools', None)
         allowed_tool_count = (
             len([item for item in str(allowed_tools or '').split(',') if item.strip()])
@@ -7679,21 +7722,9 @@ def _attach_daily_provider_budget_observation(
                 else ['tool_schema']
             ),
             'accounting_components_are_non_additive': True,
-            'context_plan_id': str(
-                plan.manifest.get('context_plan_id')
-                or getattr(context_plan, 'plan_id', '')
-                or ''
-            ),
-            'context_plan_hash': str(
-                plan.manifest.get('context_plan_hash')
-                or getattr(context_plan, 'plan_hash', '')
-                or ''
-            ),
-            'context_plan_source_hash': str(
-                plan.manifest.get('context_plan_source_hash')
-                or getattr(context_plan, 'source_hash', '')
-                or ''
-            ),
+            'context_plan_id': str(getattr(context_plan, 'plan_id', '') or ''),
+            'context_plan_hash': str(getattr(context_plan, 'plan_hash', '') or ''),
+            'context_plan_source_hash': str(getattr(context_plan, 'source_hash', '') or ''),
             'context_plan_selected_token_estimate': (
                 getattr(context_plan, 'selected_token_estimate', None)
                 if context_plan is not None else None
@@ -7711,9 +7742,7 @@ def _attach_daily_provider_budget_observation(
             'capacity_prompt_target': plan.manifest.get('capacity_prompt_target'),
         })
         breakdown = obs.finalize_breakdown_with_usage(
-            breakdown,
-            usage,
-            is_cold=bootstrap_like,
+            breakdown, usage, is_cold=bootstrap_like,
         )
         observed_effort = usage.get('_obs_effort')
         runtime = obs.build_runtime(
@@ -7727,9 +7756,7 @@ def _attach_daily_provider_budget_observation(
             or getattr(resident, 'resident_pid', None),
             resident_turn_count=int(usage.get('resident_turn_count') or 0),
             respawn_reason=usage.get('respawn_reason'),
-            idle_seconds_before_turn=usage.get(
-                '_obs_idle_seconds_before_turn'
-            ),
+            idle_seconds_before_turn=usage.get('_obs_idle_seconds_before_turn'),
             is_cold=bootstrap_kind in {'cold', 'respawn'},
             static_system=provider_system,
             mcp_config_path=getattr(resident, 'mcp_config_path', None),
@@ -7769,16 +7796,12 @@ def _attach_daily_provider_budget_observation(
             },
             claude_code_version=obs.detect_claude_code_version(),
             observed_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            keepwarm_lease_expires_at=usage.get(
-                '_obs_keepwarm_lease_expires_at'
-            ),
+            keepwarm_lease_expires_at=usage.get('_obs_keepwarm_lease_expires_at'),
             provider='claude_code',
         )
-        runtime.update({
+        breakdown.update({
             'bootstrap_kind': bootstrap_kind,
-            'provider_envelope_measurement_status': (
-                'post_send_residual'
-            ),
+            'provider_envelope_measurement_status': 'post_send_residual',
         })
         turn_measurement = obs.build_turn_measurement(
             breakdown=breakdown,
@@ -7788,10 +7811,132 @@ def _attach_daily_provider_budget_observation(
         )
         breakdown['turn_tags'] = list(turn_measurement.get('turn_tags') or [])
         breakdown['turn_measurement'] = turn_measurement
+
+        first_send_accounting = None
+        turn_count = usage.get('resident_turn_count')
+        try:
+            turn_count = int(turn_count) if turn_count is not None else 0
+        except (TypeError, ValueError):
+            turn_count = 0
+        stored = getattr(resident, '_first_send_accounting_observation', None)
+        if stored is None and turn_count <= 1:
+            materialized = context_plan
+            materialized_manifest = plan.manifest if isinstance(plan.manifest, dict) else {}
+            plan_identity = {
+                'source': 'materialized_context_plan',
+                'plan_id': str(getattr(materialized, 'plan_id', '') or ''),
+                'plan_hash': str(getattr(materialized, 'plan_hash', '') or ''),
+                'source_hash': str(getattr(materialized, 'source_hash', '') or ''),
+                'selected_token_estimate': (
+                    getattr(materialized, 'selected_token_estimate', None)
+                    if materialized is not None else None
+                ),
+                'fixed_token_estimate': (
+                    getattr(materialized, 'fixed_section_token_estimate', None)
+                    if materialized is not None else None
+                ),
+                'reserve_budget': (
+                    getattr(materialized, 'reserve_budget', None)
+                    if materialized is not None else None
+                ),
+            }
+            manifest_assertions = {
+                'manifest_plan_id_present': bool(
+                    materialized_manifest.get('context_plan_id')
+                ),
+                'manifest_plan_hash_present': bool(
+                    materialized_manifest.get('context_plan_hash')
+                ),
+                'manifest_source_hash_present': bool(
+                    materialized_manifest.get('context_plan_source_hash')
+                ),
+                'manifest_plan_id_matches': (
+                    bool(materialized)
+                    and str(materialized_manifest.get('context_plan_id') or '')
+                    == plan_identity['plan_id']
+                ),
+                'manifest_plan_hash_matches': (
+                    bool(materialized)
+                    and str(materialized_manifest.get('context_plan_hash') or '')
+                    == plan_identity['plan_hash']
+                ),
+                'manifest_source_hash_matches': (
+                    bool(materialized)
+                    and str(materialized_manifest.get('context_plan_source_hash') or '')
+                    == plan_identity['source_hash']
+                ),
+            }
+            spawn_identity = dict(
+                getattr(plan, '_first_send_spawn_identity', None) or {}
+            )
+            provider_session_id = str(
+                usage.get('_obs_claude_session_id') or ''
+            ).strip() or None
+            turn_identity = {
+                'context_id': getattr(plan, 'context_id', None),
+                'context_epoch': getattr(plan, 'context_epoch', None),
+                'resident_generation': getattr(plan, 'resident_generation', None),
+                'current_user_message_id': getattr(plan, 'user_message_id', None),
+                'resident_turn_count': turn_count or None,
+                'spawn_generation': spawn_identity.get('spawn_generation'),
+                'provider_session_id': provider_session_id,
+                'transcript_claude_session_id': (
+                    str(getattr(plan, 'transcript_claude_session_id', '') or '').strip()
+                    or None
+                ),
+                'transcript_process_generation': getattr(
+                    plan, 'transcript_process_generation', None
+                ),
+                'transcript_path_sha256': (
+                    obs.sha256_text(getattr(plan, 'transcript_path', None))
+                    if getattr(plan, 'transcript_path', None) else None
+                ),
+                'transcript_start_offset': getattr(plan, 'transcript_start_offset', None),
+                'transcript_end_offset': getattr(plan, 'transcript_end_offset', None),
+            }
+            schema_status = str(
+                spawn_identity.get('tool_schema_measurement_status') or 'unavailable'
+            )
+            known_components = [
+                _first_send_component(obs, 'invariant_system', provider_system),
+                _first_send_component(obs, 'history_bootstrap', canonical_history),
+                _first_send_component(obs, 'state', str(assembly.get('state') or '')),
+                _first_send_component(
+                    obs, 'current_request', str(getattr(plan, 'user_content', '') or '')
+                ),
+                {
+                    'kind': 'tool_schema',
+                    'observation_status': (
+                        'COMPLETE' if schema_status == 'available'
+                        else 'PARTIAL' if schema_status == 'partial'
+                        else 'UNKNOWN'
+                    ),
+                    'identity_sha256': spawn_identity.get('tool_schema_sha256'),
+                    'token_estimate': breakdown.get('tool_schema_tokens_estimate'),
+                },
+            ]
+            first_send_accounting = obs.build_first_send_accounting_receipt(
+                plan_identity=plan_identity,
+                spawn_identity=spawn_identity,
+                turn_identity=turn_identity,
+                usage=usage,
+                known_components=known_components,
+                known_context_tokens=breakdown.get(
+                    'known_visible_context_tokens_estimate'
+                ),
+                manifest_assertions=manifest_assertions,
+                observed_at=runtime.get('observed_at'),
+            )
+            try:
+                setattr(resident, '_first_send_accounting_observation', first_send_accounting)
+            except Exception:
+                pass
+
         observed = obs.attach_observation(
             usage,
             context_breakdown=breakdown,
             runtime=runtime,
+            first_send_accounting=first_send_accounting,
         )
         for key in list(observed):
             if str(key).startswith('_obs_'):
@@ -7802,8 +7947,9 @@ def _attach_daily_provider_budget_observation(
             return usage
         return observed
     except Exception:
-        logger.exception(
-            'daily provider budget observation failed; preserving usage'
+        _safe_daily_observation_log(
+            'exception',
+            'daily provider budget observation failed; preserving usage',
         )
         return usage
 
