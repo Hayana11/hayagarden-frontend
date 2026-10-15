@@ -515,12 +515,14 @@ def build_first_send_accounting_receipt(
     turn_complete = (
         all(turn.get(key) not in (None, "") for key in (
             "context_id", "context_epoch", "resident_generation",
-            "current_user_message_id", "transcript_process_generation",
+            "current_user_message_id", "resident_turn_count",
+            "transcript_process_generation",
             "provider_session_id", "transcript_claude_session_id",
             "transcript_path_sha256", "transcript_start_offset",
             "transcript_end_offset",
         ))
         and int(turn.get("resident_generation")) > 0
+        and int(turn.get("resident_turn_count")) == 1
         and int(turn.get("transcript_process_generation")) == int(spawn_generation or 0)
         and int(provider_generation or 0) == int(spawn_generation or 0)
         and str(turn.get("provider_session_id")) == str(
