@@ -1510,6 +1510,9 @@ class ResidentSession:
         self._last_cache_refresh_at = None
         self._last_cache_refresh_monotonic = None
         self._tool_surface_snapshot = {}
+        # Optional first-send accounting is scoped to this successful process
+        # generation and is never carried across a respawn.
+        self._first_send_accounting_observation = None
 
     @staticmethod
     def _managed_runtime_identity(version):
@@ -1578,18 +1581,68 @@ class ResidentSession:
             raise ResidentError('uh_a0_surface_fingerprint_missing')
         return fingerprint
 
-    def _capture_tool_surface(self, tool_flags):
+    def _capture_tool_surface(self, tool_flags, *, spawn_argv_sha256=None):
+        """Capture opaque evidence from the successful spawn, never constructor state."""
+        flags = dict(tool_flags or {})
         if self._tool_profile == TOOL_PROFILE_TEXT_ONLY:
-            self._tool_surface_snapshot = {}
-            return
-        try:
-            from tools.cc_tool_surface import capture_tool_surface_snapshot
-            self._tool_surface_snapshot = capture_tool_surface_snapshot(
-                tool_flags.get('surface_allowed') or '',
-                mcp_config_path=tool_flags.get('mcp_path') or self._mcp_config_path,
+            snapshot = {
+                'tool_schema_measurement_status': 'unavailable',
+                'tool_count': 0,
+                'allowed_tool_count': 0,
+            }
+        else:
+            try:
+                from tools.cc_tool_surface import capture_tool_surface_snapshot
+                snapshot = dict(capture_tool_surface_snapshot(
+                    flags.get('surface_allowed') or '',
+                    mcp_config_path=flags.get('mcp_path') or self._mcp_config_path,
+                ) or {})
+            except Exception:
+                snapshot = {}
+        allowed = str(flags.get('surface_allowed') or '')
+        tools = str(flags.get('tools') or '')
+        allowed_names = sorted({
+            item.strip() for item in allowed.split(',') if item.strip()
+        })
+        built_in_names = sorted({
+            item.strip() for item in tools.split(',') if item.strip()
+        })
+        snapshot.update({
+            'actual_spawn': True,
+            'tool_profile': self._tool_profile,
+            'spawn_argv_sha256': str(spawn_argv_sha256 or '') or None,
+            'spawn_generation': int(self._generation),
+            'surface_fingerprint': flags.get('surface_fingerprint'),
+            'allowed_surface_sha256': hashlib.sha256(
+                allowed.encode('utf-8')
+            ).hexdigest(),
+            'built_in_tools_sha256': hashlib.sha256(
+                tools.encode('utf-8')
+            ).hexdigest(),
+            'allowed_tool_count': len(allowed_names),
+            'effective_allowed_tool_names': allowed_names,
+            'effective_builtin_tool_names': built_in_names,
+        })
+        snapshot['spawn_tool_flags_observation_status'] = (
+            'COMPLETE'
+            if (
+                snapshot.get('spawn_argv_sha256')
+                and snapshot.get('spawn_generation')
+                and self.resident_pid
             )
-        except Exception:
-            self._tool_surface_snapshot = {}
+            else 'PARTIAL'
+        )
+        snapshot['spawn_identity_sha256'] = hashlib.sha256(
+            json.dumps({
+                'generation': snapshot.get('spawn_generation'),
+                'pid': self.resident_pid,
+                'argv': snapshot.get('spawn_argv_sha256'),
+                'surface': snapshot.get('surface_fingerprint'),
+                'allowed': snapshot.get('allowed_surface_sha256'),
+                'built_in': snapshot.get('built_in_tools_sha256'),
+            }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
+        self._tool_surface_snapshot = snapshot
 
     def _spawn(self, system_text, env, *, reason='process_dead', tool_profile=TOOL_PROFILE_LEGACY):
         from chat.cc_model import cc_model_snapshot
@@ -1671,7 +1724,10 @@ class ResidentSession:
         self._generation += 1
         self._next_spawn_reason = None
         self._reset_session_meta(respawn_reason=reason)
-        self._capture_tool_surface(tool_flags)
+        self._capture_tool_surface(
+            tool_flags,
+            spawn_argv_sha256=self._sha256_spawn_argv(args),
+        )
 
     def _kill(self, quiet=False):
         proc, self._proc = self._proc, None
