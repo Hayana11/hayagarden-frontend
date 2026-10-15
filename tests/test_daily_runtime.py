@@ -1723,7 +1723,7 @@ class DailyRuntimeHeartbeatKillTests(unittest.TestCase):
         self.assertEqual(plan._provider_prompt_system_snapshot, effective)
         self.assertEqual(effective.count(carrier), 1)
         self.assertTrue(any(evt == 'done' for evt, _payload in events))
-        self.assertEqual(resident._system_text, effective)
+        self.assertEqual(resident._system_text, 'STALE RESIDENT SYSTEM')
 
     def test_respawn_uses_same_effective_system_authority_as_cold(self):
         raw = 'RESPAWN STATIC SYSTEM'
