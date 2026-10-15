@@ -199,21 +199,34 @@ def replay_jsonl_lines(
     }
 
 
+_CURSOR_UNSET = object()
+
+
+def _parse_replay_cursor_offset(raw: Any) -> tuple[bool, int, bool]:
+    """Keep supplied cursor provenance while accepting only non-negative ints."""
+    if raw is _CURSOR_UNSET:
+        return False, 0, True
+    valid = isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0
+    return True, int(raw) if valid else 0, bool(valid)
+
+
 def replay_jsonl_path(
     path: os.PathLike[str] | str,
     *,
-    offset: int = 0,
+    offset: Any = _CURSOR_UNSET,
     known_request_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     p = Path(path)
-    requested_start = max(0, int(offset or 0))
+    cursor_supplied, requested_start, requested_cursor_valid = (
+        _parse_replay_cursor_offset(offset)
+    )
     start = requested_start
     with p.open("r", encoding="utf-8", errors="replace") as handle:
         try:
             size = p.stat().st_size
         except OSError:
             size = 0
-        cursor_valid = start <= size
+        cursor_valid = bool(requested_cursor_valid and start <= size)
         if not cursor_valid:
             start = 0
         handle.seek(start)
@@ -232,8 +245,12 @@ def replay_jsonl_path(
         result["end_offset"] = handle.tell()
         result["requested_start_offset"] = requested_start
         result["effective_start_offset"] = start
+        result["requested_cursor_supplied"] = cursor_supplied
+        result["requested_cursor_valid"] = requested_cursor_valid
         result["scan_cursor_valid"] = bool(cursor_valid)
-        result["scan_cursor_reset"] = bool(start != requested_start)
+        result["scan_cursor_reset"] = bool(
+            (not requested_cursor_valid) or (start != requested_start)
+        )
         return result
 
 
@@ -247,10 +264,10 @@ def replay_session_jsonl(
     path = session_jsonl_path(cwd, session_id, claude_home=claude_home)
     if path is None or not path.is_file():
         return None
-    offset = 0
     if cursor and str(cursor.get("path") or "") == str(path):
-        offset = _as_int(cursor.get("offset"))
-    return replay_jsonl_path(path, offset=offset)
+        if "offset" in cursor:
+            return replay_jsonl_path(path, offset=cursor.get("offset"))
+    return replay_jsonl_path(path)
 
 
 def replay_jsonl_paths(paths: Sequence[os.PathLike[str] | str]) -> dict[str, Any]:
@@ -334,6 +351,8 @@ def attach_jsonl_usage(
         "scan_end_offset": replay.get("end_offset"),
         "requested_start_offset": replay.get("requested_start_offset"),
         "effective_start_offset": replay.get("effective_start_offset", replay.get("start_offset")),
+        "requested_cursor_supplied": replay.get("requested_cursor_supplied"),
+        "requested_cursor_valid": replay.get("requested_cursor_valid"),
         "scan_cursor_valid": replay.get("scan_cursor_valid"),
         "scan_cursor_reset": replay.get("scan_cursor_reset"),
         "event_start_offset": min(event_starts) if event_starts else None,
