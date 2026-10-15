@@ -2255,7 +2255,11 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
         self.assertEqual(receipt["binding_status"], "PARTIAL")
 
     def test_exact_replay_is_idempotent(self):
-        first = {"observation_status": "PARTIAL", "plan_identity": {"plan_id": "one"}}
+        first = {
+            "observation_status": "COMPLETE",
+            "binding_status": "COMPLETE",
+            "plan_identity": {"plan_id": "one"},
+        }
         observed = obs.attach_observation(
             {"first_send_accounting": first},
             context_breakdown={},
@@ -2302,8 +2306,16 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
         )
 
     def test_conflicting_replay_downgrades_without_replacing_evidence(self):
-        first = {"observation_status": "PARTIAL", "plan_identity": {"plan_id": "one"}}
-        second = {"observation_status": "COMPLETE", "plan_identity": {"plan_id": "two"}}
+        first = {
+            "observation_status": "COMPLETE",
+            "binding_status": "COMPLETE",
+            "plan_identity": {"plan_id": "one"},
+        }
+        second = {
+            "observation_status": "COMPLETE",
+            "binding_status": "COMPLETE",
+            "plan_identity": {"plan_id": "two"},
+        }
         observed = obs.attach_observation(
             {"first_send_accounting": first},
             context_breakdown={},
@@ -2315,10 +2327,118 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
             "one",
         )
         self.assertEqual(observed["first_send_accounting"]["observation_status"], "UNKNOWN")
+        self.assertEqual(observed["first_send_accounting"]["binding_status"], "UNKNOWN")
         self.assertEqual(
             observed["first_send_accounting"]["conflict_code"],
             "conflicting_first_send_evidence",
         )
+
+    def test_conflicting_replay_downgrades_partial_and_unknown_bindings(self):
+        for original_status in ("PARTIAL", "UNKNOWN"):
+            first = {
+                "observation_status": original_status,
+                "binding_status": original_status,
+                "plan_identity": {"plan_id": "one"},
+            }
+            second = {
+                "observation_status": "COMPLETE",
+                "binding_status": "COMPLETE",
+                "plan_identity": {"plan_id": "two"},
+            }
+            observed = obs.attach_observation(
+                {"first_send_accounting": first},
+                context_breakdown={},
+                runtime={},
+                first_send_accounting=second,
+            )
+            self.assertEqual(
+                observed["first_send_accounting"]["binding_status"],
+                "UNKNOWN",
+            )
+            self.assertEqual(
+                observed["first_send_accounting"]["observation_status"],
+                "UNKNOWN",
+            )
+
+    def test_conflict_cannot_be_repaired_by_a_later_normal_turn(self):
+        first = {
+            "observation_status": "COMPLETE",
+            "binding_status": "COMPLETE",
+            "plan_identity": {"plan_id": "one"},
+        }
+        conflicting = {
+            "observation_status": "COMPLETE",
+            "binding_status": "COMPLETE",
+            "plan_identity": {"plan_id": "two"},
+        }
+        normal_later = {
+            "observation_status": "COMPLETE",
+            "binding_status": "COMPLETE",
+            "plan_identity": {"plan_id": "three"},
+        }
+        conflicted = obs.attach_observation(
+            {"first_send_accounting": first},
+            context_breakdown={},
+            runtime={},
+            first_send_accounting=conflicting,
+        )
+        replayed = obs.attach_observation(
+            conflicted,
+            context_breakdown={},
+            runtime={},
+            first_send_accounting=normal_later,
+        )
+        self.assertEqual(
+            replayed["first_send_accounting"]["plan_identity"]["plan_id"],
+            "one",
+        )
+        self.assertEqual(replayed["first_send_accounting"]["binding_status"], "UNKNOWN")
+        self.assertEqual(replayed["first_send_accounting"]["observation_status"], "UNKNOWN")
+
+    def test_invalid_raw_cursor_matching_evidence_stays_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["jsonl_usage"]["requested_cursor_supplied"] = True
+            usage["jsonl_usage"]["requested_cursor_valid"] = False
+            usage["jsonl_usage"]["requested_start_offset"] = 0
+            usage["jsonl_usage"]["effective_start_offset"] = 0
+            usage["jsonl_usage"]["scan_cursor_valid"] = False
+            usage["jsonl_usage"]["scan_cursor_reset"] = True
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["cursor_status"], "PARTIAL")
+        self.assertEqual(receipt["binding_status"], "PARTIAL")
+
+    def test_empty_jsonl_cannot_bind_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            usage, turn, spawn, plan = self._receipt_fixture(
+                Path(directory) / "session.jsonl"
+            )
+            usage["jsonl_usage"]["jsonl_requests"] = []
+            usage["jsonl_usage"]["request_count"] = 0
+            usage["jsonl_usage"]["stream_totals_match"] = None
+            receipt = obs.build_first_send_accounting_receipt(
+                plan_identity=plan,
+                spawn_identity=spawn,
+                turn_identity=turn,
+                usage=usage,
+                known_components=[],
+                known_context_tokens=30,
+                manifest_assertions={},
+                observed_at="now",
+            )
+        self.assertEqual(receipt["jsonl_binding"]["cursor_status"], "UNKNOWN")
+        self.assertEqual(receipt["binding_status"], "UNKNOWN")
 
     def test_observer_and_logger_failure_preserve_usage(self):
         from chat import daily_runtime
