@@ -1693,6 +1693,16 @@ class DailyProviderBudgetContractTests(unittest.TestCase):
                 "cache_creation": 1000,
                 "resident_turn_count": 1,
                 "_obs_effort": "high",
+                "jsonl_usage": {
+                    "stream_totals_match": True,
+                    "jsonl_requests": [{
+                        "request_id": "req-1",
+                        "input_tokens": 2,
+                        "output_tokens": 1,
+                        "cache_read": 0,
+                        "cache_creation": 1000,
+                    }],
+                },
             },
             terminal_receipt=receipt,
             candidate_cache_refresh_at=12.5,
@@ -2242,6 +2252,10 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
 
         runtime = types.ModuleType("chat.cc_runtime")
         runtime.ClaudeRuntimeError = RuntimeError
+        runtime.MINIMUM_CLAUDE_CODE_VERSION = "2.0.0"
+        runtime.version_tuple = lambda value: tuple(
+            int(part) for part in str(value).split(".")[:3]
+        )
         runtime.require_managed_claude_runtime = lambda **kwargs: "2.1.280"
         history = types.ModuleType("chat.cc_history_rewrite")
         history.current_history_rewrite_epoch = lambda: ""
