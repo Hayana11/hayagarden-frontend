@@ -14,6 +14,7 @@ import {
   UNKNOWN_FLOW_STUDIO_RUNTIME_STATUS,
 } from '../lib/flowStudio/flowStudioMock';
 import { hasEditableFlowStudioChanges } from '../lib/flowStudio/flowStudioDocument';
+import { flowStudioStatusTone, flowSwitchClassName, type FlowSwitchTone } from '../lib/flowStudio/flowStudioStatus';
 import {
   mergeFlowStudioDocuments,
   type FlowStudioMergeConflict,
@@ -61,9 +62,9 @@ function syncSequenceStageLinks(data: FlowStudioData): void {
   });
 }
 
-function Switch({ checked, onChange, label }: { checked: boolean; onChange: () => void; label: string }) {
+function Switch({ checked, onChange, label, tone = 'default' }: { checked: boolean; onChange: () => void; label: string; tone?: FlowSwitchTone }) {
   return (
-    <button type="button" className={`flow-switch ${checked ? 'is-on' : ''}`} role="switch" aria-checked={checked} aria-label={label} onClick={onChange}>
+    <button type="button" className={flowSwitchClassName(checked, tone)} role="switch" aria-checked={checked} aria-label={label} onClick={onChange}>
       <span />
     </button>
   );
@@ -693,14 +694,9 @@ export function FlowStudioWorkspace({
   const activeStageName = flowRunning
     ? (draft.stages.find((stage) => stage.id === activeFlow.stage)?.name || activeFlow.stage || '')
     : '';
-  // Status reflects what is saved/applied, not the unsaved draft toggle.
+  // Runtime status is independent from the editor toggle; the toggle has its own enabled styling.
   const engineOff = runtimeStatus.engineEnabled === false;
-  const featureOff = engineOff || !saved.enabled;
-  const statusTone: 'off' | 'idle' | 'running' | 'unknown' = featureOff
-    ? 'off'
-    : flowRunning
-      ? 'running'
-      : activeFlow.state === 'idle' ? 'idle' : 'unknown';
+  const statusTone = flowStudioStatusTone(runtimeStatus);
   const statusText = statusTone === 'off'
     ? '已关闭'
     : statusTone === 'running'
@@ -867,7 +863,7 @@ export function FlowStudioWorkspace({
                   </div>
                   {statusHint ? <small className="flow-console-hint">{statusHint}</small> : null}
                 </div>
-                <Switch checked={draft.enabled} label="启用 Hidden Flow 配置（保存后生效）" onChange={() => mutate(draft.enabled ? 'Hidden Flow 将在保存后关闭' : 'Hidden Flow 将在保存后启用', (next) => { next.enabled = !next.enabled; })} />
+                <Switch checked={draft.enabled} tone="enabled" label="启用 Hidden Flow 配置（保存后生效）" onChange={() => mutate(draft.enabled ? 'Hidden Flow 将在保存后关闭' : 'Hidden Flow 将在保存后启用', (next) => { next.enabled = !next.enabled; })} />
               </div>
               {flowSummary}
             </article>
