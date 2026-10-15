@@ -1616,9 +1616,6 @@ class ResidentSession:
         allowed_names = sorted({
             item.strip() for item in allowed.split(',') if item.strip()
         })
-        built_in_names = sorted({
-            item.strip() for item in tools.split(',') if item.strip()
-        })
         snapshot.update({
             'actual_spawn': True,
             'tool_profile': self._tool_profile,
@@ -1632,8 +1629,6 @@ class ResidentSession:
                 tools.encode('utf-8')
             ).hexdigest(),
             'allowed_tool_count': len(allowed_names),
-            'effective_allowed_tool_names': allowed_names,
-            'effective_builtin_tool_names': built_in_names,
         })
         snapshot['spawn_tool_flags_observation_status'] = (
             'COMPLETE'
