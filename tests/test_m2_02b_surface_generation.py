@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import tempfile
 import time
+import hashlib
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -340,8 +341,11 @@ class SurfaceGenerationTests(unittest.TestCase):
         self.assertEqual(snapshot["spawn_tool_flags_observation_status"], "COMPLETE")
         self.assertTrue(snapshot["spawn_argv_sha256"])
         self.assertTrue(snapshot["spawn_identity_sha256"])
-        self.assertEqual(snapshot["effective_allowed_tool_names"], ["Read"])
-        self.assertNotIn("constructor-only", snapshot["effective_allowed_tool_names"])
+        self.assertEqual(snapshot["allowed_tool_count"], 1)
+        self.assertEqual(
+            snapshot["allowed_surface_sha256"],
+            hashlib.sha256(b"Read").hexdigest(),
+        )
 
     def test_failed_spawn_does_not_overwrite_previous_binding(self):
         session = cc_resident.ResidentSession(
