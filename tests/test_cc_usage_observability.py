@@ -2225,6 +2225,16 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
                 "context_tokens": 98856,
                 "output_tokens": 1752,
             }],
+            "jsonl_usage": {
+                "stream_totals_match": True,
+                "jsonl_requests": [{
+                    "request_id": "req-1",
+                    "input_tokens": 2,
+                    "output_tokens": 1752,
+                    "cache_read": 43104,
+                    "cache_creation": 55750,
+                }],
+            },
         }
 
     def test_all_spawn_paths_capture_successful_argv_hash(self):
@@ -2294,7 +2304,7 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
                 cc_resident.ResidentSession("/tmp", "", ""),
                 cc_resident.ResidentSession("/tmp", "", ""),
             ]
-            sessions[0]._spawn("system")
+            sessions[0]._spawn("system", None)
             sessions[1].spawn_resumable(
                 "system",
                 None,
@@ -2366,6 +2376,39 @@ class FirstSendAccountingEvidenceTests(unittest.TestCase):
         )
         serialized = json.dumps(receipt, ensure_ascii=False)
         self.assertNotIn("SECRET_VISIBLE_PAYLOAD", serialized)
+
+    def test_first_send_requires_matching_first_jsonl_usage(self):
+        components = [
+            obs.observe_provider_component(
+                "visible_payload",
+                "VISIBLE",
+                measurement_source="test",
+                represented_in_context_plan=False,
+            ),
+        ]
+        breakdown = {"tool_schema_measurement_status": "available"}
+
+        def build(usage):
+            return obs.build_first_send_accounting_receipt(
+                identity=self._identity(),
+                plan_accounting={},
+                provider_bound_components=components,
+                runtime=self._runtime(),
+                breakdown=breakdown,
+                usage=usage,
+            )
+
+        missing = self._usage()
+        missing.pop("jsonl_usage")
+        self.assertEqual(build(missing)["observation_status"], "UNKNOWN")
+
+        mismatch = self._usage()
+        mismatch["jsonl_usage"]["jsonl_requests"][0]["input_tokens"] += 1
+        self.assertEqual(build(mismatch)["observation_status"], "UNKNOWN")
+
+        partial = self._usage()
+        partial["jsonl_usage"]["stream_totals_match"] = False
+        self.assertEqual(build(partial)["observation_status"], "PARTIAL")
 
     def test_missing_first_send_marker_is_unknown_and_later_turn_is_not_receipt(self):
         components = [
