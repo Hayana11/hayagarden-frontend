@@ -6287,7 +6287,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     '_observe_continuity_shadow',
                     side_effect=_observe,
                 )
-            ):
+            )
             events = list(dr.ensure_resident_and_stream(
                 plan,
                 resident=resident,
