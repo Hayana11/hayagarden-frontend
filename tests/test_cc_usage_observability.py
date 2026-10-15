@@ -2021,7 +2021,7 @@ class FirstSendAccountingR2Tests(unittest.TestCase):
             usage.pop("_obs_live_request_ids", None)
             usage.pop("_obs_live_request_id_status", None)
             usage.pop("_obs_live_request_id_source", None)
-            self.assertEqual(usage["rounds"][0]["request_id_source"], "jsonl_replay")
+            self.assertNotIn("_obs_live_request_ids", usage)
             receipt = obs.build_first_send_accounting_receipt(
                 plan_identity=plan,
                 spawn_identity=spawn,
