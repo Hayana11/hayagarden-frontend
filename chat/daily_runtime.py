@@ -209,6 +209,7 @@ class DailyTurnPlan:
     hot_receipt_frozen: Optional[dict[str, Any]] = field(default=None, repr=False)
     hot_decision: Optional[str] = field(default=None, repr=False)
     hot_decision_reason: Optional[str] = field(default=None, repr=False)
+    hot_scope_diagnostic: Optional[dict[str, Any]] = field(default=None, repr=False)
     capacity_context_plan: Any = field(default=None, repr=False)
     capacity_context_chunk_bodies: dict[str, str] = field(default_factory=dict, repr=False)
     capacity_context_bootstrap: Optional[dict[str, Any]] = field(default=None, repr=False)
@@ -2515,6 +2516,85 @@ def _hot_live_identity_decision(
     return 'PASS', '', registry
 
 
+def _hot_scope_diagnostic(
+    plan: DailyTurnPlan,
+    *,
+    stage: str,
+    reason: str,
+    frozen: Optional[dict[str, Any]] = None,
+    registry: Optional[dict[str, Any]] = None,
+    decision: Optional[str] = None,
+    status: Optional[str] = None,
+    exception_type: Optional[str] = None,
+    exception_stage: Optional[str] = None,
+    cursor_status: str = 'not_checked',
+    last_good_status: str = 'not_checked',
+) -> dict[str, Any]:
+    """Capture safe, request-bound proof state for a blocked Hot scope."""
+    frozen = frozen if isinstance(frozen, dict) else {}
+    receipt = frozen.get('receipt')
+    members = tuple(frozen.get('members') or ())
+    registry = registry if isinstance(registry, dict) else {}
+    try:
+        receipt_revision = int(frozen.get('expected_receipt_revision'))
+    except (TypeError, ValueError):
+        receipt_revision = None
+    try:
+        receipt_watermark = int(frozen.get('installed_source_watermark'))
+    except (TypeError, ValueError):
+        receipt_watermark = None
+    try:
+        registry_last_mapped = int(registry.get('last_mapped_message_id'))
+    except (TypeError, ValueError):
+        registry_last_mapped = None
+    try:
+        registry_process_generation = int(registry.get('process_generation'))
+    except (TypeError, ValueError):
+        registry_process_generation = None
+    diagnostic = {
+        'request_id': str(getattr(plan, 'request_id', '') or ''),
+        'message_id': int(getattr(plan, 'user_message_id', 0) or 0),
+        'context_id': int(getattr(plan, 'context_id', 0) or 0),
+        'context_epoch': int(getattr(plan, 'context_epoch', 0) or 0),
+        'resident_generation': int(getattr(plan, 'resident_generation', 0) or 0),
+        'stage': str(stage or ''),
+        'reason': str(reason or ''),
+        'decision': str(decision or '') or None,
+        'status': str(status or '') or None,
+        'exception_type': str(exception_type or '') or None,
+        'exception_stage': str(exception_stage or '') or None,
+        'receipt': {
+            'present': receipt is not None,
+            'members_complete': bool(frozen.get('receipt_members_complete')),
+            'membership_valid': bool(frozen.get('membership_valid')),
+            'read_error_type': (
+                str(frozen.get('receipt_read_error') or '') or None
+            ),
+            'revision': receipt_revision,
+            'watermark': receipt_watermark,
+            'member_count': len(members),
+        },
+        'registry': {
+            'present': bool(registry),
+            'scan_status': (
+                str(registry.get('scan_status') or '') or None
+            ),
+            'process_generation': registry_process_generation,
+            'last_mapped_message_id': registry_last_mapped,
+            'session_id_present': bool(str(registry.get('claude_session_id') or '').strip()),
+        },
+        'cursor': {
+            'status': str(cursor_status or 'not_checked'),
+            'watermark': receipt_watermark,
+        },
+        'last_good': {
+            'status': str(last_good_status or 'not_checked'),
+        },
+    }
+    plan.hot_scope_diagnostic = diagnostic
+    return diagnostic
+
+
 def _hot_canonical_source_scope(
     plan: DailyTurnPlan,
     *,
@@ -2523,22 +2603,84 @@ def _hot_canonical_source_scope(
 ) -> tuple[tuple[Any, ...], ...] | None:
     """Return only installed history plus one proven native tail, or None."""
     if not _hot_receipt_allows_chunk_filter(frozen):
+        if frozen.get('receipt_read_error'):
+            receipt_reason = 'receipt_read_error'
+        elif frozen.get('receipt') is None:
+            receipt_reason = 'receipt_missing'
+        elif not frozen.get('receipt_members_complete'):
+            receipt_reason = 'receipt_members_incomplete'
+        elif not frozen.get('membership_valid'):
+            receipt_reason = 'receipt_membership_hash_mismatch'
+        else:
+            receipt_reason = 'receipt_gate_failed'
+        _hot_scope_diagnostic(
+            plan,
+            stage='receipt_gate',
+            reason=receipt_reason,
+            frozen=frozen,
+            status='blocked',
+        )
         return None
+
+    stage = 'live_identity'
     try:
-        identity_decision, _identity_reason, registry = _hot_live_identity_decision(
+        identity_decision, identity_reason, registry = _hot_live_identity_decision(
             plan,
             resident=resident,
             frozen=frozen,
         )
         if identity_decision != 'PASS' or registry is None:
+            _hot_scope_diagnostic(
+                plan,
+                stage='live_identity',
+                reason=(
+                    str(identity_reason or '')
+                    or ('session_registry_missing' if registry is None else 'decision_failed')
+                ),
+                frozen=frozen,
+                registry=registry,
+                decision=identity_decision,
+                status='blocked',
+                cursor_status=(
+                    'failed'
+                    if str(identity_reason or '').startswith('resident_cursor_')
+                    else ('pass' if identity_decision == 'PASS' else 'not_checked')
+                ),
+            )
             return None
+
+        stage = 'native_tail'
         tail = _hot_native_tail_proof(
             plan,
             frozen=frozen,
             registry=registry,
         )
-        if tail.get('status') != 'pass' or tail.get('source_member') is None:
+        tail_status = str(tail.get('status') or '') or 'unknown'
+        tail_reason = str(tail.get('reason') or '') or 'native_tail_proof_failed'
+        if tail_status != 'pass' or tail.get('source_member') is None:
+            _hot_scope_diagnostic(
+                plan,
+                stage='native_tail',
+                reason=tail_reason,
+                frozen=frozen,
+                registry=registry,
+                status=tail_status,
+                cursor_status='pass',
+                last_good_status=(
+                    'pass' if tail_status == 'pass'
+                    else (
+                        'failed'
+                        if tail_reason.startswith((
+                            'same_context_last_good',
+                            'native_tail_offset',
+                        ))
+                        else 'not_checked'
+                    )
+                ),
+            )
             return None
+
+        stage = 'tail_identity'
         installed = tuple(
             member for member in tuple(frozen.get('members') or ())
             if str(getattr(member, 'representation_kind', '') or '')
@@ -2548,14 +2690,67 @@ def _hot_canonical_source_scope(
             _receipt_member_source_identity(member) for member in installed
         )
         if len(set(installed_keys)) != len(installed_keys):
+            _hot_scope_diagnostic(
+                plan,
+                stage='tail_identity',
+                reason='installed_historical_member_identity_duplicate',
+                frozen=frozen,
+                registry=registry,
+                status='ambiguous',
+                cursor_status='pass',
+                last_good_status='pass',
+            )
             return None
-        tail_key = _source_member_identity(tail['source_member'])
-        if not tail_key or tail_key in installed_keys:
+        tail_member = tail.get('source_member')
+        if tail_member is None:
+            _hot_scope_diagnostic(
+                plan,
+                stage='tail_identity',
+                reason='native_tail_source_member_missing',
+                frozen=frozen,
+                registry=registry,
+                status='missing',
+                cursor_status='pass',
+                last_good_status='pass',
+            )
+            return None
+        tail_key = _source_member_identity(tail_member)
+        if not tail_key:
+            _hot_scope_diagnostic(
+                plan,
+                stage='tail_identity',
+                reason='native_tail_source_identity_missing',
+                frozen=frozen,
+                registry=registry,
+                status='missing',
+                cursor_status='pass',
+                last_good_status='pass',
+            )
+            return None
+        if tail_key in installed_keys:
+            _hot_scope_diagnostic(
+                plan,
+                stage='tail_identity',
+                reason='native_tail_source_identity_duplicate',
+                frozen=frozen,
+                registry=registry,
+                status='ambiguous',
+                cursor_status='pass',
+                last_good_status='pass',
+            )
             return None
         return installed_keys + (tail_key,)
-    except Exception:
-        # Any inability to prove the receipt/native-tail scope must not fall
-        # back to the full application window.
+    except Exception as exc:
+        _hot_scope_diagnostic(
+            plan,
+            stage='exception',
+            reason='hot_scope_%s_exception' % stage,
+            frozen=frozen,
+            registry=locals().get('registry'),
+            status='exception',
+            exception_type=type(exc).__name__,
+            exception_stage=stage,
+        )
         return None
 
 def _hot_historical_compatibility(
@@ -2780,11 +2975,15 @@ def _prepare_hot_context_plan(
     )
     if canonical_hot_source_scope is None:
         _set_hot_decision(plan, 'BLOCKED', 'hot_source_scope_unproven')
-        raise DailyRuntimeError(
+        error = DailyRuntimeError(
             'hot canonical source scope is not proven',
             error_code='context_plan_hot_source_scope_unavailable',
             retryable=False,
         )
+        error.hot_scope_diagnostic = dict(
+            getattr(plan, 'hot_scope_diagnostic', None) or {}
+        )
+        raise error
     try:
         context_plan, chunk_bodies = _build_production_context_plan(
             plan,
