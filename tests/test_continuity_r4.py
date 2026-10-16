@@ -1015,6 +1015,60 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         self.assertNotEqual(same.plan_hash, changed.plan_hash)
         self.assertNotEqual(same.plan_hash, old_version.plan_hash)
 
+    def test_legacy_identity_shape_omits_optional_history_field_until_v2(self):
+        members = (_member(0, logical_size=10),)
+        policy = ContextBudgetPolicy(
+            token_budget=50,
+            reserve_budget=7,
+            recent_raw_target=5,
+        )
+        unversioned = _identity_payload(
+            members,
+            (),
+            (),
+            (),
+            budget_policy=policy,
+            budget_policy_version='',
+        )
+        v1 = _identity_payload(
+            members,
+            (),
+            (),
+            (),
+            budget_policy=policy,
+            budget_policy_version='continuity_context_budget_v1',
+        )
+        v2 = _identity_payload(
+            members,
+            (),
+            (),
+            (),
+            budget_policy=policy,
+            budget_policy_version=CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION,
+        )
+        legacy_with_limit = _identity_payload(
+            members,
+            (),
+            (),
+            (),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=50,
+                reserve_budget=7,
+                recent_raw_target=5,
+                history_budget_limit=24,
+            ),
+            budget_policy_version='continuity_context_budget_v1',
+        )
+        self.assertNotIn('history_budget_limit', unversioned['budget_policy'])
+        self.assertNotIn('history_budget_limit', v1['budget_policy'])
+        self.assertIn('history_budget_limit', v2['budget_policy'])
+        self.assertIsNone(v2['budget_policy']['history_budget_limit'])
+        self.assertEqual(
+            legacy_with_limit['budget_policy']['history_budget_limit'],
+            24,
+        )
+        self.assertNotEqual(_sha256(unversioned), _sha256(v2))
+
     def test_total_history_cap_bounds_raw_and_older_representations(self):
         members = tuple(_member(index, logical_size=10) for index in range(6))
         fixed = ContextSection(
