@@ -4920,6 +4920,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             static_system='BASE_SYSTEM',
             pending_user_text='CURRENT_USER',
             dynamic_state_text='ACCEPTED_STATE',
+            reserve_anchor=False,
         )
 
 
@@ -4952,6 +4953,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             static_system='STATIC_SYSTEM',
             pending_user_text='CURRENT_USER',
             dynamic_state_text='DYNAMIC_STATE',
+            reserve_anchor=False,
         )
 
     def test_v2_recent_raw_policy_is_independent_of_sealing_authority(self):
@@ -5272,6 +5274,73 @@ class ContextPlanConsumerTests(unittest.TestCase):
             gaps=(),
             exclusions=(),
         )
+
+    def test_capacity_receipt_contains_explicit_window_anchor_proof(self):
+        context_plan = self._fake_context_plan()
+        anchor = types.SimpleNamespace(
+            kind='window_anchor',
+            source_ref='message:1',
+            source_revision='anchor-revision',
+            content_hash='anchor-hash',
+            estimated_tokens=4,
+            status='ANCHOR_RETAINED',
+        )
+        context_plan.window_anchor_status = 'ANCHOR_RETAINED'
+        context_plan.ordered_sections = (anchor,) + context_plan.ordered_sections
+        plan = types.SimpleNamespace(capacity_context_plan=context_plan)
+        members = dr._context_receipt_members(plan)
+        anchor_members = [
+            member for member in members
+            if member.representation_kind == 'anchor'
+        ]
+        self.assertEqual(len(anchor_members), 1)
+        self.assertEqual(anchor_members[0].representation_id,
+                         'window_anchor:ANCHOR_RETAINED')
+        self.assertEqual(anchor_members[0].source_ref, 'message:1')
+        self.assertEqual(anchor_members[0].source_revision,
+                         'anchor-revision')
+        self.assertEqual(anchor_members[0].content_hash, 'anchor-hash')
+
+
+    def test_capacity_receipt_proves_all_anchor_statuses_without_fabrication(self):
+        for status, raw_satisfied in (
+            ('ANCHOR_RETAINED', True),
+            ('ANCHOR_RETAINED', False),
+            ('ANCHOR_IMAGE_DEGRADED', False),
+            ('ANCHOR_TOO_LARGE', False),
+            ('ANCHOR_UNAVAILABLE', False),
+        ):
+            context_plan = self._fake_context_plan()
+            context_plan.window_anchor_status = status
+            context_plan.window_anchor_raw_satisfied = raw_satisfied
+            sections = list(context_plan.ordered_sections)
+            if status != 'ANCHOR_UNAVAILABLE':
+                sections.insert(0, types.SimpleNamespace(
+                    kind='window_anchor',
+                    source_ref='message:1',
+                    source_revision='anchor-revision',
+                    content_hash='anchor-hash',
+                    estimated_tokens=4,
+                    status=status,
+                ))
+            context_plan.ordered_sections = tuple(sections)
+            plan = types.SimpleNamespace(capacity_context_plan=context_plan)
+            anchor_members = [
+                member for member in dr._context_receipt_members(plan)
+                if member.representation_kind == 'anchor'
+            ]
+            self.assertEqual(len(anchor_members), 1, status)
+            member = anchor_members[0]
+            self.assertEqual(
+                member.representation_id,
+                'window_anchor:%s' % status,
+            )
+            if status == 'ANCHOR_UNAVAILABLE':
+                self.assertEqual(member.source_ref, 'window_anchor:%s' % status)
+            else:
+                self.assertEqual(member.source_ref, 'message:1')
+                self.assertEqual(member.source_revision, 'anchor-revision')
+                self.assertEqual(member.content_hash, 'anchor-hash')
 
     def _fake_hot_context_plan(self):
         context_plan = self._fake_context_plan()

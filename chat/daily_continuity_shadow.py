@@ -284,6 +284,67 @@ def _current_request_section(row: dict[str, object]) -> ContextSection:
     )
 
 
+def _window_anchor_section(
+    history_rows: Sequence[dict[str, object]],
+    *,
+    anchor_token_budget: int,
+) -> tuple[ContextSection | None, str]:
+    """Bind the first formal user to its canonical provider payload identity."""
+    first_user = next(
+        (row for row in history_rows if is_formal_user_source_row(row)),
+        None,
+    )
+    if first_user is None:
+        return None, 'ANCHOR_UNAVAILABLE'
+    try:
+        evidence = evidence_ref(first_user, prefix='message')
+        from chat.attachment_contract import provider_current_turn_attachments
+        from chat.capacity_swap import _estimate_canonical_token_count
+        from chat.context_window_preview import _canonical_user_payload_from_db
+
+        canonical = _canonical_user_payload_from_db(
+            content=str(first_user.get('content') or ''),
+            image_url=str(first_user.get('image_url') or ''),
+            file_url=str(first_user.get('file_url') or ''),
+            file_name=str(first_user.get('file_name') or ''),
+            attachments=first_user.get('attachments'),
+        )
+        if (
+            canonical is None
+            or (isinstance(canonical, str) and not canonical.strip())
+            or (isinstance(canonical, list) and not canonical)
+        ):
+            return None, 'ANCHOR_UNAVAILABLE'
+        normalized_attachments = provider_current_turn_attachments(
+            first_user.get('attachments') or [],
+            legacy_image_url=first_user.get('image_url') or '',
+            legacy_file_url=first_user.get('file_url') or '',
+            legacy_file_name=first_user.get('file_name') or '',
+        )
+        has_image_attachment = any(
+            item.get('type') == 'image' for item in normalized_attachments
+        )
+        status = (
+            'ANCHOR_IMAGE_DEGRADED'
+            if has_image_attachment and isinstance(canonical, str)
+            else 'ANCHOR_RETAINED'
+        )
+        provider_tokens = int(_estimate_canonical_token_count(canonical))
+    except Exception:
+        return None, 'ANCHOR_UNAVAILABLE'
+
+    if provider_tokens > int(anchor_token_budget):
+        status = 'ANCHOR_TOO_LARGE'
+    return ContextSection(
+        kind='window_anchor',
+        source_ref=evidence.source_ref,
+        source_revision=evidence.source_revision,
+        content_hash=evidence.content_hash,
+        estimated_tokens=provider_tokens,
+        status=status,
+    ), status
+
+
 def _source_member_scope_identity(member: object) -> tuple[object, ...]:
     return (
         str(getattr(member, 'source_ref', '') or ''),
@@ -384,6 +445,8 @@ def build_daily_continuity_shadow_plan(
     continuity_store_path: str | Path | None = None,
     validated_ready_artifacts: Sequence[Mapping[str, str]] | None = None,
     source_member_scope: Sequence[tuple[object, ...]] | None = None,
+    window_anchor_enabled: bool = False,
+    window_anchor_token_budget: int | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -396,6 +459,13 @@ def build_daily_continuity_shadow_plan(
     """
     if budget_policy is None or not isinstance(budget_policy, ContextBudgetPolicy):
         return _blocked('budget_policy_unmapped')
+    if window_anchor_enabled:
+        if (
+            isinstance(window_anchor_token_budget, bool)
+            or not isinstance(window_anchor_token_budget, int)
+            or window_anchor_token_budget <= 0
+        ):
+            return _blocked('window_anchor_budget_unmapped')
     if isinstance(current_user_message_id, bool) or not isinstance(current_user_message_id, int):
         return _blocked('invalid_current_request')
 
@@ -445,6 +515,24 @@ def build_daily_continuity_shadow_plan(
             current_request = _current_request_section(current_row)
         except (TypeError, ValueError):
             return _blocked('invalid_current_request')
+        window_anchor = None
+        window_anchor_status = ''
+        window_anchor_member_source_refs: tuple[str, ...] = ()
+        if window_anchor_enabled:
+            try:
+                window_anchor, window_anchor_status = _window_anchor_section(
+                    history_rows,
+                    anchor_token_budget=int(window_anchor_token_budget),
+                )
+            except (TypeError, ValueError):
+                return _blocked('window_anchor_unavailable')
+            if window_anchor is not None:
+                window_anchor_member_source_refs = tuple(
+                    str(turn.turn_id)
+                    for turn in turns
+                    if str(getattr(turn.user_input_ref, 'source_ref', '') or '')
+                    == str(window_anchor.source_ref)
+                )
 
         try:
             store_path = (
@@ -474,6 +562,9 @@ def build_daily_continuity_shadow_plan(
                 budget_policy=budget_policy,
                 fixed_sections=accepted + (current_request,),
                 budget_policy_version=str(budget_policy_version or '').strip(),
+                window_anchor=window_anchor,
+                window_anchor_status=window_anchor_status,
+                window_anchor_member_source_refs=window_anchor_member_source_refs,
             )
         except ValueError:
             return _blocked('invalid_fixed_sections')

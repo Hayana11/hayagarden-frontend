@@ -8,8 +8,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import chat.daily_continuity_shadow as dc
 from chat.daily_continuity_shadow import (
     build_daily_continuity_shadow_plan,
 )
@@ -232,6 +234,114 @@ class DailyContinuityShadowTests(unittest.TestCase):
             1,
         )
         self.assertEqual(result.plan.ordered_sections[-1].source_ref, 'message:5')
+
+    def test_capacity_plan_exposes_first_formal_user_anchor(self):
+        result = self._run(
+            window_anchor_enabled=True,
+            window_anchor_token_budget=1000,
+        )
+        self.assertEqual(result.status, 'ready')
+        anchor_sections = [
+            section for section in result.plan.ordered_sections
+            if section.kind == 'window_anchor'
+        ]
+        self.assertEqual(len(anchor_sections), 1)
+        anchor = anchor_sections[0]
+        self.assertEqual(anchor.source_ref, 'message:1')
+        self.assertEqual(anchor.status, 'ANCHOR_RETAINED')
+        self.assertEqual(anchor.source_revision, anchor.content_hash)
+        self.assertEqual(result.plan.window_anchor_status, 'ANCHOR_RETAINED')
+        self.assertEqual(
+            sum(section.kind == 'current_request'
+                for section in result.plan.ordered_sections),
+            1,
+        )
+
+    def test_capacity_plan_marks_anchor_too_large_without_truncating(self):
+        result = self._run(
+            window_anchor_enabled=True,
+            window_anchor_token_budget=1,
+        )
+        self.assertEqual(result.status, 'ready')
+        anchor = next(
+            section for section in result.plan.ordered_sections
+            if section.kind == 'window_anchor'
+        )
+        self.assertEqual(anchor.status, 'ANCHOR_TOO_LARGE')
+        self.assertEqual(result.plan.window_anchor_status, 'ANCHOR_TOO_LARGE')
+        self.assertTrue(result.plan.valid)
+
+    def test_anchor_provider_cost_uses_canonical_payload_not_source_size(self):
+        row = _row(1, 'hayana', 'first request', '2026-09-08 23:59:00')
+        evidence = SimpleNamespace(
+            source_ref='message:1',
+            source_revision='source-revision',
+            content_hash='source-hash',
+            logical_size=10_000,
+        )
+        with patch.object(dc, 'evidence_ref', return_value=evidence),              patch(
+                 'chat.context_window_preview._canonical_user_payload_from_db',
+                 return_value='first request',
+             ),              patch(
+                 'chat.capacity_swap._estimate_canonical_token_count',
+                 return_value=6,
+             ),              patch(
+                 'chat.attachment_contract.provider_current_turn_attachments',
+                 return_value=[],
+             ):
+            section, status = dc._window_anchor_section(
+                [row],
+                anchor_token_budget=6,
+            )
+        self.assertEqual(status, 'ANCHOR_RETAINED')
+        self.assertEqual(section.estimated_tokens, 6)
+        self.assertEqual(section.source_revision, 'source-revision')
+
+    def test_anchor_image_degradation_is_produced_by_source_adapter(self):
+        row = _row(1, 'hayana', 'fallback body', '2026-09-08 23:59:00')
+        with patch(
+            'chat.context_window_preview._canonical_user_payload_from_db',
+            return_value='fallback body',
+        ), patch(
+            'chat.capacity_swap._estimate_canonical_token_count',
+            return_value=4,
+        ), patch(
+            'chat.attachment_contract.provider_current_turn_attachments',
+            return_value=[{'type': 'image', 'url': '/static/uploads/a.png'}],
+        ):
+            section, status = dc._window_anchor_section(
+                [row],
+                anchor_token_budget=4,
+            )
+        self.assertEqual(status, 'ANCHOR_IMAGE_DEGRADED')
+        self.assertEqual(section.status, 'ANCHOR_IMAGE_DEGRADED')
+        self.assertEqual(section.estimated_tokens, 4)
+
+    def test_valid_multimodal_anchor_remains_retained_and_over_budget_is_explicit(self):
+        row = _row(1, 'hayana', 'image prompt', '2026-09-08 23:59:00')
+        with patch(
+            'chat.context_window_preview._canonical_user_payload_from_db',
+            return_value=[{'type': 'text', 'text': 'image prompt'},
+                          {'type': 'image', 'source': {'type': 'url', 'url': 'x'}}],
+        ), patch(
+            'chat.capacity_swap._estimate_canonical_token_count',
+            return_value=5,
+        ), patch(
+            'chat.attachment_contract.provider_current_turn_attachments',
+            return_value=[{'type': 'image', 'url': '/static/uploads/a.png'}],
+        ):
+            retained, retained_status = dc._window_anchor_section(
+                [row],
+                anchor_token_budget=5,
+            )
+            too_large, too_large_status = dc._window_anchor_section(
+                [row],
+                anchor_token_budget=4,
+            )
+        self.assertEqual(retained_status, 'ANCHOR_RETAINED')
+        self.assertEqual(retained.status, 'ANCHOR_RETAINED')
+        self.assertEqual(too_large_status, 'ANCHOR_TOO_LARGE')
+        self.assertEqual(too_large.estimated_tokens, 5)
 
     def test_old_context_is_excluded_even_when_message_id_is_before_current(self):
         rows = _history_rows() + [self.current]
