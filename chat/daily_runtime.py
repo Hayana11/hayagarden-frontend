@@ -71,6 +71,9 @@ DEFAULT_LEASE_TTL = 480
 LEASE_HEARTBEAT_INTERVAL = 50
 WORKER_ID = '%s:%s' % (socket.gethostname(), os.getpid())
 DAILY_TOOL_PROFILE = cc_resident.TOOL_PROFILE_UH_A0
+# Independent v2 product policy for ContextPlan recent raw. This is
+# deliberately separate from chunk sealing and total-history authorities.
+CONTINUITY_RECENT_RAW_TARGET_V2 = 12_000
 _HOT_FIXED_SECTION_KINDS = frozenset({
     'invariant_system',
     'accepted_state',
@@ -1289,13 +1292,14 @@ def _context_plan_policy(
         raise ValueError('unknown_context_plan_mode:%s' % policy_mode)
     reserve = int(cold_safety_margin())
     token_budget = target + reserve
-    # Hot desired history is receipt/native-tail scoped; it has no
-    # independent recent-raw selector or history cap.
+    # v2 recent raw is an independent policy dimension; it is not
+    # derived from HISTORY_TOKEN_BUDGET or chunk-sealing settings.
     recent_raw_target = (
-        0 if policy_mode == 'hot' else int(cc_history_token_budget())
+        0 if policy_mode == 'hot'
+        else CONTINUITY_RECENT_RAW_TARGET_V2
     )
     if policy_mode in ('cold', 'respawn'):
-        history_budget_limit = recent_raw_target
+        history_budget_limit = int(cc_history_token_budget())
     elif policy_mode == 'capacity':
         history_budget_limit = int(compute_retained_transcript_token_budget(
             static_system=str(static_system or ''),
