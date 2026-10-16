@@ -50,7 +50,7 @@ _SECTION_ORDER = (
     'current_request',
 )
 
-CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION = 'continuity_context_budget_v1'
+CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION = 'continuity_context_budget_v2'
 
 
 def _canonical(value: object) -> str:
@@ -205,6 +205,7 @@ class ContextBudgetPolicy:
     token_budget: int
     reserve_budget: int = 0
     recent_raw_target: int = 0
+    history_budget_limit: int | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -220,6 +221,18 @@ class ContextBudgetPolicy:
             raise ValueError('invalid_budget_policy:reserve_budget_must_be_non_negative')
         if self.recent_raw_target < 0:
             raise ValueError('invalid_budget_policy:recent_raw_target_must_be_non_negative')
+        if self.history_budget_limit is not None:
+            if (
+                isinstance(self.history_budget_limit, bool)
+                or not isinstance(self.history_budget_limit, int)
+            ):
+                raise ValueError(
+                    'invalid_budget_policy:history_budget_limit_must_be_integer'
+                )
+            if self.history_budget_limit < 0:
+                raise ValueError(
+                    'invalid_budget_policy:history_budget_limit_must_be_non_negative'
+                )
 
     @property
     def usable_budget(self) -> int:
@@ -526,6 +539,7 @@ def _identity_payload(
                 'token_budget': budget_policy.token_budget,
                 'reserve_budget': budget_policy.reserve_budget,
                 'recent_raw_target': budget_policy.recent_raw_target,
+                'history_budget_limit': budget_policy.history_budget_limit,
             }
             if budget_policy is not None else None
         ),
@@ -638,7 +652,12 @@ def _apply_budget(
         )
         return (), 'blocked'
 
-    history_budget = usable_budget - fixed_token_estimate
+    available_history_budget = usable_budget - fixed_token_estimate
+    history_budget = (
+        min(available_history_budget, budget_policy.history_budget_limit)
+        if budget_policy.history_budget_limit is not None
+        else available_history_budget
+    )
 
     recent = tuple(
         item for item in representations
@@ -650,7 +669,7 @@ def _apply_budget(
     if recent_cost > history_budget:
         exclusions.append(_exclusion(
             'budget_overflow',
-            'recent raw suffix alone exceeds usable budget',
+            'recent raw suffix alone exceeds effective history budget',
         ))
         exclusions.extend(
             _budget_exclusion(item, 'older representation excluded after recent raw overflow')
