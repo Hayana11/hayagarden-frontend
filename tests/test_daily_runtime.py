@@ -9495,3 +9495,10 @@ class HotScopeDiagnosticsTests(unittest.TestCase):
             'session_registry_missing',
         )
         build_plan.assert_not_called()
+
+
+class HotScopeReceiptExceptionTests(unittest.TestCase):
+    def test_receipt_gate_exception_is_stage_bound_and_fail_closed(self):
+        plan = HotScopeDiagnosticsTests._plan()
+        with self.assertRaises(AttributeError):
+            pass

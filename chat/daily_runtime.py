@@ -2602,7 +2602,21 @@ def _hot_canonical_source_scope(
     frozen: dict[str, Any],
 ) -> tuple[tuple[Any, ...], ...] | None:
     """Return only installed history plus one proven native tail, or None."""
-    if not _hot_receipt_allows_chunk_filter(frozen):
+    stage = 'receipt_gate'
+    try:
+        receipt_allowed = _hot_receipt_allows_chunk_filter(frozen)
+    except Exception as exc:
+        _hot_scope_diagnostic(
+            plan,
+            stage='exception',
+            reason='hot_scope_receipt_gate_exception',
+            frozen=frozen,
+            status='exception',
+            exception_type=type(exc).__name__,
+            exception_stage=stage,
+        )
+        return None
+    if not receipt_allowed:
         if frozen.get('receipt_read_error'):
             receipt_reason = 'receipt_read_error'
         elif frozen.get('receipt') is None:
@@ -2674,7 +2688,24 @@ def _hot_canonical_source_scope(
                             'same_context_last_good',
                             'native_tail_offset',
                         ))
-                        else 'not_checked'
+                        else (
+                            'not_checked'
+                            if tail_reason in {
+                                'multiple_current_request_members',
+                                'current_request_proof_missing',
+                                'current_request_source_ambiguous',
+                                'current_request_source_missing',
+                                'current_request_is_not_previous',
+                                'receipt_watermark_invalid',
+                                'receipt_watermark_missing',
+                                'session_registry_missing',
+                                'session_registry_not_ready',
+                                'native_tail_mapping_missing',
+                                'native_tail_mapping_watermark_invalid',
+                                'native_tail_mapping_watermark_mismatch',
+                            }
+                            else 'pass'
+                        )
                     )
                 ),
             )
