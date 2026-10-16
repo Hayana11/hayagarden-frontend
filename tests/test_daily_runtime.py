@@ -4906,12 +4906,15 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(respawn.token_budget, 98000)
         self.assertEqual(cold.usable_budget, 90000)
         self.assertEqual(respawn.usable_budget, 90000)
+        self.assertEqual(cold.recent_raw_target, 12000)
+        self.assertEqual(respawn.recent_raw_target, 12000)
         self.assertEqual(cold.history_budget_limit, 24000)
         self.assertEqual(respawn.history_budget_limit, 24000)
         self.assertEqual(hot.usable_budget, 150000)
         self.assertEqual(hot.recent_raw_target, 0)
         self.assertIsNone(hot.history_budget_limit)
         self.assertEqual(capacity.usable_budget, 90000)
+        self.assertEqual(capacity.recent_raw_target, 12000)
         self.assertEqual(capacity.history_budget_limit, 64000)
         capacity_history.assert_called_once_with(
             static_system='BASE_SYSTEM',
@@ -4943,13 +4946,19 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             )
 
         self.assertEqual(policy.history_budget_limit, 42000)
-        self.assertEqual(policy.recent_raw_target, 24000)
+        self.assertEqual(policy.recent_raw_target, 12000)
         self.assertEqual(version, 'continuity_context_budget_v2')
         retained.assert_called_once_with(
             static_system='STATIC_SYSTEM',
             pending_user_text='CURRENT_USER',
             dynamic_state_text='DYNAMIC_STATE',
         )
+
+    def test_v2_recent_raw_policy_is_independent_of_sealing_authority(self):
+        self.assertEqual(dr.CONTINUITY_RECENT_RAW_TARGET_V2, 12_000)
+        policy_names = dr._context_plan_policy.__code__.co_names
+        self.assertNotIn('target_logical_size', policy_names)
+        self.assertNotIn('target_source_tokens', policy_names)
 
     def test_gate_on_capacity_path_keeps_context_plan_as_single_selector(self):
         names = dr._attempt_capacity_swap_before_stdin.__code__.co_names
