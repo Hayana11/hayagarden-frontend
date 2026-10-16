@@ -5108,7 +5108,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             return_value=8000,
         ), mock.patch(
             'chat.context_lean.cc_history_token_budget',
-            return_value=0,
+            return_value=24000,
         ):
             policy, _version = dr._context_plan_policy(mode='cold')
         plan = build_context_plan(
@@ -6613,7 +6613,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         captured = {}
 
-        def _build(plan_arg, *, resident, static_system, mode='hot'):
+        def _build(
+            plan_arg,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            capacity_budget_static_system=None,
+        ):
             captured['mode'] = mode
             captured['resident'] = resident
             return chunk_plan, {'chunk:one': 'compressed'}
