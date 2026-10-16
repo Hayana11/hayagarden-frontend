@@ -5018,6 +5018,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
 
     def test_cold_planner_accepts_75k_plan_despite_legacy_guard(self):
         from continuity.context_plan import (
+            ContextBudgetPolicy,
             ContextChunkBinding,
             ContextSection,
             build_context_plan,
@@ -5111,6 +5112,14 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             return_value=24000,
         ):
             policy, _version = dr._context_plan_policy(mode='cold')
+            # Isolate the compact-chunk packing contract from the mode-aware
+            # recent-raw priority, which has dedicated coverage elsewhere.
+            policy = ContextBudgetPolicy(
+                token_budget=policy.token_budget,
+                reserve_budget=policy.reserve_budget,
+                recent_raw_target=0,
+                history_budget_limit=policy.history_budget_limit,
+            )
         plan = build_context_plan(
             members,
             raw_members=members,
@@ -5131,7 +5140,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                     estimated_tokens=5000,
                 ),
             ),
-            budget_policy_version='continuity_context_budget_v1',
+            budget_policy_version=_version,
         )
 
         self.assertEqual(sum(member.logical_size for member in members), 80000)
