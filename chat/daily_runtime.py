@@ -1289,7 +1289,11 @@ def _context_plan_policy(
         raise ValueError('unknown_context_plan_mode:%s' % policy_mode)
     reserve = int(cold_safety_margin())
     token_budget = target + reserve
-    recent_raw_target = int(cc_history_token_budget())
+    # Hot desired history is receipt/native-tail scoped; it has no
+    # independent recent-raw selector or history cap.
+    recent_raw_target = (
+        0 if policy_mode == 'hot' else int(cc_history_token_budget())
+    )
     if policy_mode in ('cold', 'respawn'):
         history_budget_limit = recent_raw_target
     elif policy_mode == 'capacity':
@@ -1373,6 +1377,7 @@ def _build_production_context_plan(
     static_system: str,
     mode: str = 'hot',
     capacity_budget_static_system: str | None = None,
+    canonical_hot_source_scope: tuple[tuple[Any, ...], ...] | None = None,
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
     from continuity.store import read_ready_surface
@@ -1429,6 +1434,11 @@ def _build_production_context_plan(
         accepted_fixed_sections=fixed_sections,
         budget_policy_version=policy_version,
         validated_ready_artifacts=validated_ready_artifacts,
+        source_member_scope=(
+            tuple(canonical_hot_source_scope or ())
+            if str(mode or 'hot').strip().lower() == 'hot'
+            else None
+        ),
     )
     if result.plan is None:
         raise DailyRuntimeError(
@@ -2456,6 +2466,43 @@ def _hot_live_identity_decision(
     return 'PASS', '', registry
 
 
+def _hot_canonical_source_scope(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    frozen: dict[str, Any],
+) -> tuple[tuple[Any, ...], ...]:
+    """Return only installed historical members plus one proven native tail."""
+    if not _hot_receipt_allows_chunk_filter(frozen):
+        return ()
+    identity_decision, _identity_reason, registry = _hot_live_identity_decision(
+        plan,
+        resident=resident,
+        frozen=frozen,
+    )
+    if identity_decision != 'PASS' or registry is None:
+        return ()
+    tail = _hot_native_tail_proof(
+        plan,
+        frozen=frozen,
+        registry=registry,
+    )
+    if tail.get('status') != 'pass' or tail.get('source_member') is None:
+        return ()
+    installed = tuple(
+        member for member in tuple(frozen.get('members') or ())
+        if str(getattr(member, 'representation_kind', '') or '')
+            in _HOT_HISTORICAL_REPRESENTATION_KINDS
+    )
+    installed_keys = tuple(_receipt_member_source_identity(member) for member in installed)
+    if len(set(installed_keys)) != len(installed_keys):
+        return ()
+    tail_key = _source_member_identity(tail['source_member'])
+    if not tail_key or tail_key in installed_keys:
+        return ()
+    return installed_keys + (tail_key,)
+
+
 def _hot_historical_compatibility(
     *,
     receipt_members: tuple[Any, ...],
@@ -2670,13 +2717,19 @@ def _prepare_hot_context_plan(
     resident: Any,
     static_system: str,
 ) -> str:
-    _freeze_hot_receipt(plan, resident=resident)
+    frozen = _freeze_hot_receipt(plan, resident=resident)
+    canonical_hot_source_scope = _hot_canonical_source_scope(
+        plan,
+        resident=resident,
+        frozen=frozen,
+    )
     try:
         context_plan, chunk_bodies = _build_production_context_plan(
             plan,
             resident=resident,
             static_system=static_system,
             mode='hot',
+            canonical_hot_source_scope=canonical_hot_source_scope,
         )
     except DailyRuntimeError as exc:
         _set_hot_decision(plan, 'BLOCKED', str(exc.error_code))
