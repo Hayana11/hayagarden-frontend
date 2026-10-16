@@ -9247,9 +9247,6 @@ class HiddenFlowHotNoopParityTests(unittest.TestCase):
                 self.assertEqual(raised.exception.error_code, expected)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class HotScopeDiagnosticsTests(unittest.TestCase):
     """Focused diagnostics coverage for fail-closed Hot source scope proof."""
@@ -9509,3 +9506,6 @@ class HotScopeReceiptExceptionTests(unittest.TestCase):
         self.assertEqual(diag['reason'], 'hot_scope_receipt_gate_exception')
         self.assertEqual(diag['exception_stage'], 'receipt_gate')
         self.assertEqual(diag['exception_type'], 'AttributeError')
+
+if __name__ == '__main__':
+    unittest.main()
