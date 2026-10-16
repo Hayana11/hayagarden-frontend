@@ -1095,6 +1095,30 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         )
         self.assertEqual(plan.recent_raw_token_estimate, 10)
 
+    def test_recent_whole_member_crossing_target_remains_fit(self):
+        members = (
+            _member(0, logical_size=8_000),
+            _member(1, logical_size=5_000),
+        )
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100_000,
+                recent_raw_target=12_000,
+                history_budget_limit=24_000,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(plan.recent_raw_source_seqs, (0, 1))
+        self.assertEqual(plan.recent_raw_token_estimate, 13_000)
+        self.assertEqual(plan.selected_token_estimate, 13_000)
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(0, 1)],
+        )
+
     def test_recent_raw_overflow_keeps_whole_member_and_fails_closed(self):
         members = (_member(0, logical_size=30),)
         plan = build_context_plan(
@@ -1112,19 +1136,20 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         self.assertEqual(plan.representations[0].source_seqs, (0,))
         self.assertTrue(any(item.code == 'budget_overflow' for item in plan.exclusions))
 
-    def test_short_history_is_not_padded_to_total_history_cap(self):
-        members = (_member(0, logical_size=6),)
+    def test_short_history_is_not_padded_to_recent_raw_target(self):
+        members = (_member(0, logical_size=4_000),)
         plan = build_context_plan(
             members,
             budget_policy=ContextBudgetPolicy(
-                token_budget=100,
-                recent_raw_target=24,
-                history_budget_limit=24,
+                token_budget=100_000,
+                recent_raw_target=12_000,
+                history_budget_limit=24_000,
             ),
             budget_policy_version='continuity_context_budget_v2',
         )
         self.assertEqual(plan.budget_status, 'fit')
-        self.assertEqual(plan.selected_token_estimate, 6)
+        self.assertEqual(plan.recent_raw_token_estimate, 4_000)
+        self.assertEqual(plan.selected_token_estimate, 4_000)
 
     def test_fixed_section_pressure_uses_smaller_effective_history_budget(self):
         members = tuple(_member(index, logical_size=10) for index in range(4))
@@ -1149,7 +1174,12 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         self.assertLessEqual(plan.selected_token_estimate, 24)
 
     def test_recent_raw_and_older_chunks_share_one_total_history_cap(self):
-        members = tuple(_member(index, logical_size=10) for index in range(4))
+        members = (
+            _member(0, logical_size=8_000),
+            _member(1, logical_size=8_000),
+            _member(2, logical_size=8_000),
+            _member(3, logical_size=5_000),
+        )
         bindings = tuple(
             _binding(
                 members,
@@ -1157,30 +1187,29 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
                 chunk_id=f'chunk:older-{index}',
                 body='x' * 40,
             )
-            for index in range(3)
+            for index in range(2)
         )
         plan = build_context_plan(
             members,
             chunks=bindings,
             budget_policy=ContextBudgetPolicy(
-                token_budget=100,
-                recent_raw_target=10,
-                history_budget_limit=24,
+                token_budget=100_000,
+                recent_raw_target=12_000,
+                history_budget_limit=24_000,
             ),
             budget_policy_version='continuity_context_budget_v2',
         )
         self.assertEqual(plan.budget_status, 'fit')
-        self.assertEqual(plan.recent_raw_source_seqs, (3,))
-        self.assertEqual(plan.recent_raw_token_estimate, 10)
-        self.assertLessEqual(plan.selected_token_estimate, 24)
+        self.assertEqual(plan.recent_raw_source_seqs, (2, 3))
+        self.assertEqual(plan.recent_raw_token_estimate, 13_000)
+        self.assertEqual(plan.selected_token_estimate, 21_000)
         selected_chunks = [
             item.source_seqs
             for item in plan.representations
             if item.kind == 'chunk'
         ]
-        self.assertEqual(selected_chunks, [(2,)])
+        self.assertEqual(selected_chunks, [(1,)])
         self.assertNotIn((0,), selected_chunks)
-        self.assertNotIn((1,), selected_chunks)
 
     def test_capacity_like_priority_keeps_recent_raw_before_older_representations(self):
         members = tuple(_member(index, logical_size=10) for index in range(5))
