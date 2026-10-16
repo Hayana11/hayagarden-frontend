@@ -2154,6 +2154,240 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         self.assertEqual(request.summary_policy, SummaryPolicy.DROP)
         legacy_prepare.assert_not_called()
 
+    def _run_anchor_case(
+        self,
+        *,
+        status: str,
+        anchor_mapped: bool,
+        raw_anchor: bool = False,
+        actual_revision: str = 'anchor-revision',
+        actual_cost: int = 7,
+    ):
+        from chat.claude_transcript_model import EventRole
+
+        raw_user_id = 1 if raw_anchor else 3
+        raw_assistant_id = 2 if raw_anchor else 4
+        raw_uuid = 'u1' if raw_anchor else 'u2'
+        raw_assistant_uuid = 'a1' if raw_anchor else 'a2'
+        raw_member = types.SimpleNamespace(
+            seq=1,
+            source_ref='turn:%d:%d' % (raw_user_id, raw_assistant_id),
+            source_revision='raw-turn-revision',
+            source_kind='completed_turn',
+            content_hash='raw-turn-hash',
+            span_start=None,
+            span_end=None,
+            branch_id='active',
+        )
+        candidate_events = {
+            uid: types.SimpleNamespace(
+                event_role=role,
+                is_sidechain=False,
+            )
+            for uid, role in (
+                ('u1', EventRole.CANDIDATE_USER),
+                ('a1', EventRole.ASSISTANT),
+                ('u2', EventRole.CANDIDATE_USER),
+                ('a2', EventRole.ASSISTANT),
+            )
+        }
+        round_item = types.SimpleNamespace(
+            candidate_user_event_uuid=raw_uuid,
+            event_uuids=(raw_uuid, raw_assistant_uuid),
+            has_sidechain_impact=False,
+        )
+        graph = types.SimpleNamespace(
+            candidate_rounds=[round_item],
+            by_uuid=candidate_events,
+        )
+        context_plan = types.SimpleNamespace(
+            plan_hash='plan-hash-%s' % status,
+            window_anchor=types.SimpleNamespace(
+                kind='window_anchor',
+                source_ref='message:1',
+                source_revision='anchor-revision',
+                content_hash='anchor-hash',
+                estimated_tokens=7,
+                status=status,
+            ),
+            window_anchor_status=status,
+            window_anchor_raw_satisfied=raw_anchor,
+            representations=(types.SimpleNamespace(
+                kind='raw',
+                source_members=(raw_member,),
+            ),),
+        )
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            user_message_id=99,
+            cursor_before=10,
+            db_path='db',
+            chat_id='default',
+            transcript_cwd='/tmp',
+        )
+        registry = {
+            'scan_status': 'ready',
+            'transcript_path': '/tmp/source.jsonl',
+            'claude_session_id': 'source-session',
+            'scan_offset': 123,
+            'last_mapped_message_id': 10,
+        }
+        transformed = types.SimpleNamespace(
+            selected_round_count=1,
+            dropped_sidechain_round_user_uuids=(),
+            dropped_unconfirmed_user_uuids=(),
+            uuid_map={raw_uuid: 'new-' + raw_uuid,
+                      raw_assistant_uuid: 'new-' + raw_assistant_uuid},
+            events=[{'type': 'user', 'message': {'content': 'RAW'}}],
+        )
+        formal = [
+            {'id': 1, 'content': 'ANCHOR'},
+            {'id': 3, 'content': 'RAW'},
+        ]
+        canonical = {'u2': 'RAW'}
+        mid_to_event = {3: 'u2'}
+        event_to_mid = {'u2': 3, 'a2': 4}
+        if anchor_mapped:
+            canonical['u1'] = 'ANCHOR'
+            mid_to_event[1] = 'u1'
+            event_to_mid.update({'u1': 1, 'a1': 2})
+        mapping_rows = ()
+        with mock.patch(
+            'chat.capacity_swap_runtime.get_context_claude_session',
+            return_value=registry,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.latest_complete_assistant_watermark',
+            return_value=10,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.registry_mapping_lags_watermark',
+            return_value=False,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._snapshot_prefix_sha256',
+            return_value='a' * 64,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.read_transcript_range',
+            return_value=graph,
+        ), mock.patch.object(
+            dc, '_connect',
+            return_value=types.SimpleNamespace(close=lambda: None),
+        ), mock.patch(
+            'chat.capacity_swap_runtime._load_formal_messages_excluding_current',
+            return_value=formal,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._load_mapping_for_messages',
+            return_value=(canonical, mid_to_event, event_to_mid),
+        ), mock.patch(
+            'chat.capacity_swap_runtime._load_mapping_rows_for_messages',
+            return_value=mapping_rows,
+        ), mock.patch(
+            'continuity.sources.evidence_ref',
+            return_value=types.SimpleNamespace(
+                source_ref='message:1',
+                source_revision=actual_revision,
+                content_hash='anchor-hash',
+            ),
+        ), mock.patch(
+            'chat.context_window_preview._canonical_user_payload_from_db',
+            return_value='ANCHOR',
+        ), mock.patch(
+            'chat.capacity_swap._estimate_canonical_token_count',
+            return_value=actual_cost,
+        ), mock.patch(
+            'chat.capacity_swap_runtime._validate_context_plan_round_mapping',
+            return_value=(),
+        ) as validate_mapping, mock.patch(
+            'chat.capacity_swap_runtime._capacity_context_source_member_from_db',
+            return_value=raw_member,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.transform_transcript',
+            return_value=transformed,
+        ), mock.patch(
+            'chat.capacity_swap_runtime.emit_anchor_user_event',
+        ) as emit_anchor, mock.patch(
+            'chat.capacity_swap_runtime.validate_transcript_events',
+            return_value=types.SimpleNamespace(ok=True, errors=()),
+        ), mock.patch(
+            'chat.capacity_swap_runtime.serialize_events',
+            return_value='serialized-raw',
+        ), mock.patch(
+            'chat.capacity_swap_runtime.estimate_serialized_token_count',
+            return_value=4,
+        ):
+            result = prepare_capacity_swap_for_context_plan(
+                plan=plan,
+                context_plan=context_plan,
+                trigger_reason='soft_context',
+                static_system='STATIC_PERSONA',
+            )
+        return result, emit_anchor, validate_mapping
+
+    def test_context_plan_too_large_anchor_does_not_require_event_mapping(self):
+        result, emit_anchor, _validate_mapping = self._run_anchor_case(
+            status='ANCHOR_TOO_LARGE',
+            anchor_mapped=False,
+        )
+        self.assertTrue(result.ok, result.warnings)
+        self.assertEqual(result.candidate.anchor_status, AnchorStatus.ANCHOR_TOO_LARGE)
+        self.assertIsNone(result.candidate.anchor_event_uuid)
+        self.assertNotIn('context_plan_anchor_emitted', result.candidate.warnings)
+        self.assertIn('context_plan_anchor_too_large', result.candidate.warnings)
+        self.assertNotIn('ANCHOR', result.candidate.serialized_jsonl)
+        emit_anchor.assert_not_called()
+
+    def test_context_plan_too_large_raw_anchor_uses_normal_raw_mapping(self):
+        result, emit_anchor, validate_mapping = self._run_anchor_case(
+            status='ANCHOR_TOO_LARGE',
+            anchor_mapped=True,
+            raw_anchor=True,
+        )
+        self.assertTrue(result.ok, result.warnings)
+        self.assertEqual(result.candidate.anchor_status, AnchorStatus.ANCHOR_TOO_LARGE)
+        self.assertEqual(result.candidate.anchor_event_uuid, 'u1')
+        self.assertIn('context_plan_anchor_raw_satisfied', result.candidate.warnings)
+        self.assertNotIn('context_plan_anchor_emitted', result.candidate.warnings)
+        self.assertEqual(result.candidate.selected_message_ids, (1, 2))
+        emit_anchor.assert_not_called()
+        validate_mapping.assert_called_once()
+
+    def test_context_plan_too_large_anchor_source_drift_fails_closed(self):
+        result, emit_anchor, _validate_mapping = self._run_anchor_case(
+            status='ANCHOR_TOO_LARGE',
+            anchor_mapped=False,
+            actual_revision='drifted-revision',
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_anchor_identity_mismatch',
+        )
+        emit_anchor.assert_not_called()
+
+    def test_context_plan_retained_anchor_missing_mapping_stays_fail_closed(self):
+        result, emit_anchor, _validate_mapping = self._run_anchor_case(
+            status='ANCHOR_RETAINED',
+            anchor_mapped=False,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_anchor_mapping_missing',
+        )
+        emit_anchor.assert_not_called()
+
+    def test_context_plan_image_degraded_anchor_missing_mapping_stays_fail_closed(self):
+        result, emit_anchor, _validate_mapping = self._run_anchor_case(
+            status='ANCHOR_IMAGE_DEGRADED',
+            anchor_mapped=False,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.error_code,
+            'context_plan_capacity_anchor_mapping_missing',
+        )
+        emit_anchor.assert_not_called()
+
     def test_context_plan_emits_standalone_anchor_before_selected_raw(self):
         from chat.claude_transcript_model import EventRole
 

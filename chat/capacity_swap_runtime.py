@@ -1012,11 +1012,6 @@ def prepare_capacity_swap_for_context_plan(
                     'current user is the ContextPlan window anchor',
                     error_code='context_plan_capacity_current_user_in_candidate',
                 )
-            if not anchor_event_uuid or anchor_canonical is None:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan window anchor mapping is unavailable',
-                    error_code='context_plan_capacity_anchor_mapping_missing',
-                )
             anchor_row = next(
                 (
                     row for row in formal
@@ -1031,6 +1026,7 @@ def prepare_capacity_swap_for_context_plan(
                 )
             from chat.attachment_contract import provider_current_turn_attachments
             from chat.capacity_swap import _estimate_canonical_token_count
+            from chat.context_window_preview import _canonical_user_payload_from_db
             from continuity.sources import evidence_ref
             actual_anchor = evidence_ref(anchor_row, prefix='message')
             expected_anchor = (
@@ -1039,50 +1035,75 @@ def prepare_capacity_swap_for_context_plan(
                 str(getattr(anchor_section, 'content_hash', '') or ''),
                 int(getattr(anchor_section, 'estimated_tokens', 0) or 0),
             )
-            actual_anchor_identity = (
-                str(actual_anchor.source_ref),
-                str(actual_anchor.source_revision),
-                str(actual_anchor.content_hash),
-                int(_estimate_canonical_token_count(anchor_canonical)),
-            )
-            if actual_anchor_identity != expected_anchor:
-                raise CapacitySwapRuntimeError(
-                    'ContextPlan window anchor source identity or cost changed',
-                    error_code='context_plan_capacity_anchor_identity_mismatch',
+            if anchor_status == AnchorStatus.ANCHOR_TOO_LARGE:
+                db_anchor_canonical = _canonical_user_payload_from_db(
+                    content=str(anchor_row.get('content') or ''),
+                    image_url=str(anchor_row.get('image_url') or ''),
+                    file_url=str(anchor_row.get('file_url') or ''),
+                    file_name=str(anchor_row.get('file_name') or ''),
+                    attachments=anchor_row.get('attachments'),
                 )
-            if anchor_status in {
-                AnchorStatus.ANCHOR_RETAINED,
-                AnchorStatus.ANCHOR_IMAGE_DEGRADED,
-            }:
-                normalized_attachments = provider_current_turn_attachments(
-                    anchor_row.get('attachments') or [],
-                    legacy_image_url=anchor_row.get('image_url') or '',
-                    legacy_file_url=anchor_row.get('file_url') or '',
-                    legacy_file_name=anchor_row.get('file_name') or '',
+                actual_anchor_identity = (
+                    str(actual_anchor.source_ref),
+                    str(actual_anchor.source_revision),
+                    str(actual_anchor.content_hash),
+                    int(_estimate_canonical_token_count(db_anchor_canonical)),
                 )
-                has_image_attachment = any(
-                    item.get('type') == 'image'
-                    for item in normalized_attachments
-                )
-                expected_status = (
-                    AnchorStatus.ANCHOR_IMAGE_DEGRADED
-                    if has_image_attachment and isinstance(anchor_canonical, str)
-                    else AnchorStatus.ANCHOR_RETAINED
-                )
-                if anchor_status != expected_status:
+                if actual_anchor_identity != expected_anchor:
                     raise CapacitySwapRuntimeError(
-                        'ContextPlan window anchor status changed',
+                        'ContextPlan window anchor source identity or cost changed',
                         error_code='context_plan_capacity_anchor_identity_mismatch',
                     )
-                anchor_event = graph.by_uuid.get(anchor_event_uuid)
-                if (
-                    anchor_event is None
-                    or anchor_event.event_role != EventRole.CANDIDATE_USER
-                ):
+            else:
+                if not anchor_event_uuid or anchor_canonical is None:
                     raise CapacitySwapRuntimeError(
-                        'ContextPlan window anchor is not a candidate user event',
-                        error_code='context_plan_capacity_anchor_mapping_invalid',
+                        'ContextPlan window anchor mapping is unavailable',
+                        error_code='context_plan_capacity_anchor_mapping_missing',
                     )
+                actual_anchor_identity = (
+                    str(actual_anchor.source_ref),
+                    str(actual_anchor.source_revision),
+                    str(actual_anchor.content_hash),
+                    int(_estimate_canonical_token_count(anchor_canonical)),
+                )
+                if actual_anchor_identity != expected_anchor:
+                    raise CapacitySwapRuntimeError(
+                        'ContextPlan window anchor source identity or cost changed',
+                        error_code='context_plan_capacity_anchor_identity_mismatch',
+                    )
+                if anchor_status in {
+                    AnchorStatus.ANCHOR_RETAINED,
+                    AnchorStatus.ANCHOR_IMAGE_DEGRADED,
+                }:
+                    normalized_attachments = provider_current_turn_attachments(
+                        anchor_row.get('attachments') or [],
+                        legacy_image_url=anchor_row.get('image_url') or '',
+                        legacy_file_url=anchor_row.get('file_url') or '',
+                        legacy_file_name=anchor_row.get('file_name') or '',
+                    )
+                    has_image_attachment = any(
+                        item.get('type') == 'image'
+                        for item in normalized_attachments
+                    )
+                    expected_status = (
+                        AnchorStatus.ANCHOR_IMAGE_DEGRADED
+                        if has_image_attachment and isinstance(anchor_canonical, str)
+                        else AnchorStatus.ANCHOR_RETAINED
+                    )
+                    if anchor_status != expected_status:
+                        raise CapacitySwapRuntimeError(
+                            'ContextPlan window anchor status changed',
+                            error_code='context_plan_capacity_anchor_identity_mismatch',
+                        )
+                    anchor_event = graph.by_uuid.get(anchor_event_uuid)
+                    if (
+                        anchor_event is None
+                        or anchor_event.event_role != EventRole.CANDIDATE_USER
+                    ):
+                        raise CapacitySwapRuntimeError(
+                            'ContextPlan window anchor is not a candidate user event',
+                            error_code='context_plan_capacity_anchor_mapping_invalid',
+                        )
 
         round_by_user: dict[str, Any] = {}
         for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ()):
