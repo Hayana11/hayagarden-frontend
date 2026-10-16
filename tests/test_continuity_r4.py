@@ -961,6 +961,156 @@ class ContextPlanTests(unittest.TestCase):
         self.assertNotEqual(versioned.plan_hash, changed_policy.plan_hash)
 
 
+
+class ContextPlanHistoryBudgetTests(unittest.TestCase):
+    def test_history_budget_limit_validation_and_identity(self):
+        self.assertIsNone(ContextBudgetPolicy(token_budget=10).history_budget_limit)
+        self.assertEqual(
+            ContextBudgetPolicy(token_budget=10, history_budget_limit=0).history_budget_limit,
+            0,
+        )
+        self.assertEqual(
+            ContextBudgetPolicy(token_budget=10, history_budget_limit=24).history_budget_limit,
+            24,
+        )
+        for value in (-1, True, '24'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    ContextBudgetPolicy(
+                        token_budget=10,
+                        history_budget_limit=value,
+                    )
+
+        members = tuple(_member(index, logical_size=10) for index in range(3))
+        policy = ContextBudgetPolicy(
+            token_budget=50,
+            recent_raw_target=10,
+            history_budget_limit=24,
+        )
+        same = build_context_plan(
+            members,
+            budget_policy=policy,
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        repeated = build_context_plan(
+            members,
+            budget_policy=policy,
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        changed = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=50,
+                recent_raw_target=10,
+                history_budget_limit=25,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        old_version = build_context_plan(
+            members,
+            budget_policy=policy,
+            budget_policy_version='continuity_context_budget_v1',
+        )
+        self.assertEqual(same.plan_hash, repeated.plan_hash)
+        self.assertNotEqual(same.plan_hash, changed.plan_hash)
+        self.assertNotEqual(same.plan_hash, old_version.plan_hash)
+
+    def test_total_history_cap_bounds_raw_and_older_representations(self):
+        members = tuple(_member(index, logical_size=10) for index in range(6))
+        fixed = ContextSection(
+            kind='invariant_system',
+            source_ref='system:test',
+            content_hash='f' * 64,
+            estimated_tokens=17,
+        )
+        plan = build_context_plan(
+            members,
+            fixed_sections=(fixed,),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=77,
+                recent_raw_target=10,
+                history_budget_limit=24,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertLessEqual(plan.selected_token_estimate, 24)
+        self.assertLessEqual(
+            plan.fixed_section_token_estimate + plan.selected_token_estimate,
+            60,
+        )
+        self.assertEqual(plan.recent_raw_token_estimate, 10)
+
+    def test_recent_raw_overflow_keeps_whole_member_and_fails_closed(self):
+        members = (_member(0, logical_size=30),)
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=30,
+                history_budget_limit=24,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        self.assertEqual(plan.budget_status, 'overflow')
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.selected_token_estimate, 30)
+        self.assertEqual(plan.representations[0].source_seqs, (0,))
+        self.assertTrue(any(item.code == 'budget_overflow' for item in plan.exclusions))
+
+    def test_short_history_is_not_padded_to_total_history_cap(self):
+        members = (_member(0, logical_size=6),)
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=24,
+                history_budget_limit=24,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(plan.selected_token_estimate, 6)
+
+    def test_fixed_section_pressure_uses_smaller_effective_history_budget(self):
+        members = tuple(_member(index, logical_size=10) for index in range(4))
+        fixed = ContextSection(
+            kind='invariant_system',
+            source_ref='system:pressure',
+            content_hash='p' * 64,
+            estimated_tokens=17,
+        )
+        plan = build_context_plan(
+            members,
+            fixed_sections=(fixed,),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=30,
+                recent_raw_target=10,
+                history_budget_limit=24,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertLessEqual(plan.selected_token_estimate, 13)
+        self.assertLessEqual(plan.selected_token_estimate, 24)
+
+    def test_capacity_like_priority_keeps_recent_raw_before_older_representations(self):
+        members = tuple(_member(index, logical_size=10) for index in range(5))
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=10,
+                history_budget_limit=24,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (4,))
+        self.assertEqual(plan.recent_raw_token_estimate, 10)
+        self.assertLessEqual(plan.selected_token_estimate, 24)
+        self.assertEqual(plan.representations[-1].source_seqs, (3,))
+
+
 if __name__ == '__main__':
     unittest.main()
 
