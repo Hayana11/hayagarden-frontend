@@ -2471,10 +2471,10 @@ def _hot_canonical_source_scope(
     *,
     resident: Any,
     frozen: dict[str, Any],
-) -> tuple[tuple[Any, ...], ...]:
-    """Return only installed historical members plus one proven native tail."""
+) -> tuple[tuple[Any, ...], ...] | None:
+    """Return only installed history plus one proven native tail, or None."""
     if not _hot_receipt_allows_chunk_filter(frozen):
-        return ()
+        return None
     try:
         identity_decision, _identity_reason, registry = _hot_live_identity_decision(
             plan,
@@ -2482,14 +2482,14 @@ def _hot_canonical_source_scope(
             frozen=frozen,
         )
         if identity_decision != 'PASS' or registry is None:
-            return ()
+            return None
         tail = _hot_native_tail_proof(
             plan,
             frozen=frozen,
             registry=registry,
         )
         if tail.get('status') != 'pass' or tail.get('source_member') is None:
-            return ()
+            return None
         installed = tuple(
             member for member in tuple(frozen.get('members') or ())
             if str(getattr(member, 'representation_kind', '') or '')
@@ -2499,16 +2499,15 @@ def _hot_canonical_source_scope(
             _receipt_member_source_identity(member) for member in installed
         )
         if len(set(installed_keys)) != len(installed_keys):
-            return ()
+            return None
         tail_key = _source_member_identity(tail['source_member'])
         if not tail_key or tail_key in installed_keys:
-            return ()
+            return None
         return installed_keys + (tail_key,)
     except Exception:
         # Any inability to prove the receipt/native-tail scope must not fall
         # back to the full application window.
-        return ()
-
+        return None
 
 def _hot_historical_compatibility(
     *,
@@ -2730,6 +2729,13 @@ def _prepare_hot_context_plan(
         resident=resident,
         frozen=frozen,
     )
+    if canonical_hot_source_scope is None:
+        _set_hot_decision(plan, 'BLOCKED', 'hot_source_scope_unproven')
+        raise DailyRuntimeError(
+            'hot canonical source scope is not proven',
+            error_code='context_plan_hot_source_scope_unavailable',
+            retryable=False,
+        )
     try:
         context_plan, chunk_bodies = _build_production_context_plan(
             plan,
