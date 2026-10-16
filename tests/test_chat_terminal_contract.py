@@ -101,6 +101,116 @@ class ChatTerminalContractTests(unittest.TestCase):
         )
         self.assertTrue(event['partial_rescue'])
 
+    def test_hot_scope_diagnostic_reaches_terminal_contract_log_without_model(self):
+        from chat import context_window
+        from chat import daily_context
+        from chat import daily_runtime
+        import moments_turn
+
+        request_id = 'req-hot-scope-gateway-test'
+        message_id = 11972
+        secret = 'provider-token-secret-do-not-log'
+        error = daily_runtime.DailyRuntimeError(
+            'hot canonical source scope is not proven',
+            error_code='context_plan_hot_source_scope_unavailable',
+        )
+        error.hot_scope_diagnostic = {
+            'request_id': request_id,
+            'message_id': message_id,
+            'context_id': 32,
+            'context_epoch': 30,
+            'resident_generation': 65,
+            'stage': 'native_tail',
+            'reason': 'same_context_last_good_missing',
+            'receipt': {
+                'present': True,
+                'complete': True,
+                'membership_valid': True,
+            },
+            'registry': {
+                'scan_status': 'READY',
+                'process_generation': 1,
+                'last_mapped_message_id': 11971,
+                'session_id_present': True,
+            },
+            'cursor': {'status': 'pass', 'watermark': 11971},
+            'last_good': {'status': 'failed'},
+        }
+        error.private_provider_detail = secret
+        turn_data = {
+            'content': 'hot scope diagnostic trigger',
+            'user_message_id': message_id,
+            'turn_key': 'turn-hot-scope-gateway',
+            'request_id': request_id,
+            'rewrite_id': '',
+        }
+
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                gateway, '_get_provider', return_value='claude_code',
+            ))
+            stack.enter_context(mock.patch.object(
+                gateway, '_gen_acquire_or_wait', return_value=('own', None),
+            ))
+            stack.enter_context(mock.patch.object(gateway, '_gen_release'))
+            stack.enter_context(mock.patch.object(
+                gateway.cc_history_rewrite,
+                'guard_cc_generation',
+                side_effect=lambda events: events,
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'prepare_turn', return_value=dict(turn_data),
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'insert_user_message', return_value=dict(turn_data),
+            ))
+            stack.enter_context(mock.patch.object(
+                moments_turn, 'activate_turn', return_value=dict(turn_data),
+            ))
+            release_turn = stack.enter_context(mock.patch.object(
+                moments_turn, 'release_turn',
+            ))
+            stack.enter_context(mock.patch.object(
+                daily_context, 'enabled', return_value=True,
+            ))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_active_switch_intent', return_value=None,
+            ))
+            stack.enter_context(mock.patch.object(
+                context_window, 'get_first_turn_finalize_pending', return_value=None,
+            ))
+            prepare_daily = stack.enter_context(mock.patch.object(
+                daily_runtime, 'prepare_daily_turn', side_effect=error,
+            ))
+
+            with self.assertLogs('gateway', level='WARNING') as captured:
+                with gateway.app.test_client() as client:
+                    response = client.post(
+                        '/chat/stream',
+                        json={'content': turn_data['content']},
+                    )
+                    body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('context_plan_hot_source_scope_unavailable', body)
+        self.assertNotIn(secret, body)
+        self.assertEqual(prepare_daily.call_count, 1)
+        self.assertEqual(release_turn.call_count, 1)
+
+        terminal_line = next(
+            line for line in captured.output
+            if 'chat_terminal_contract ' in line
+        )
+        terminal_diag = json.loads(
+            terminal_line.split('chat_terminal_contract ', 1)[1],
+        )
+        hot_scope = terminal_diag['hot_scope']
+        self.assertEqual(hot_scope['request_id'], request_id)
+        self.assertEqual(hot_scope['message_id'], message_id)
+        self.assertEqual(hot_scope['stage'], 'native_tail')
+        self.assertEqual(hot_scope['reason'], 'same_context_last_good_missing')
+        self.assertNotIn(secret, '\n'.join(captured.output))
+
     def test_t6b_terminal_wrapper_releases_lock_and_stops_at_first_terminal(self):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
         start = source.index('if _daily_ctx.enabled() and not _rewrite_id:')

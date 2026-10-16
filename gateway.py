@@ -7318,6 +7318,11 @@ def _stream_cc_daily_soft_window(
         error_code = str(getattr(exc, 'error_code', None) or type(exc).__name__)
         cleanup = _rescue_and_abort(error_code, respawn=True)
         diagnostics = dict(getattr(exc, 'diagnostics', {}) or {})
+        hot_scope_diagnostic = getattr(exc, 'hot_scope_diagnostic', None)
+        if not isinstance(hot_scope_diagnostic, dict) and _daily_plan is not None:
+            hot_scope_diagnostic = getattr(_daily_plan, 'hot_scope_diagnostic', None)
+        if isinstance(hot_scope_diagnostic, dict) and hot_scope_diagnostic:
+            diagnostics['hot_scope'] = dict(hot_scope_diagnostic)
         diagnostics.update({
             'partial_rescue_performed': bool(cleanup.get('partial_rescue_performed')),
             'lock_released': False,
