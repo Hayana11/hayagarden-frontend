@@ -669,7 +669,7 @@ def _apply_budget(
     if recent_cost > history_budget:
         exclusions.append(_exclusion(
             'budget_overflow',
-            'recent raw suffix alone exceeds effective history budget',
+            'recent raw suffix alone exceeds usable budget',
         ))
         exclusions.extend(
             _budget_exclusion(item, 'older representation excluded after recent raw overflow')
