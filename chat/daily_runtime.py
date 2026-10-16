@@ -2657,7 +2657,7 @@ def _hot_canonical_source_scope(
         )
         tail_status = str(tail.get('status') or '') or 'unknown'
         tail_reason = str(tail.get('reason') or '') or 'native_tail_proof_failed'
-        if tail_status != 'pass' or tail.get('source_member') is None:
+        if tail_status != 'pass':
             _hot_scope_diagnostic(
                 plan,
                 stage='native_tail',
