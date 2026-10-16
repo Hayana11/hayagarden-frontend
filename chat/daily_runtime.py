@@ -2617,16 +2617,28 @@ def _hot_canonical_source_scope(
         )
         return None
     if not receipt_allowed:
-        if frozen.get('receipt_read_error'):
-            receipt_reason = 'receipt_read_error'
-        elif frozen.get('receipt') is None:
-            receipt_reason = 'receipt_missing'
-        elif not frozen.get('receipt_members_complete'):
-            receipt_reason = 'receipt_members_incomplete'
-        elif not frozen.get('membership_valid'):
-            receipt_reason = 'receipt_membership_hash_mismatch'
-        else:
-            receipt_reason = 'receipt_gate_failed'
+        try:
+            if frozen.get('receipt_read_error'):
+                receipt_reason = 'receipt_read_error'
+            elif frozen.get('receipt') is None:
+                receipt_reason = 'receipt_missing'
+            elif not frozen.get('receipt_members_complete'):
+                receipt_reason = 'receipt_members_incomplete'
+            elif not frozen.get('membership_valid'):
+                receipt_reason = 'receipt_membership_hash_mismatch'
+            else:
+                receipt_reason = 'receipt_gate_failed'
+        except Exception as exc:
+            _hot_scope_diagnostic(
+                plan,
+                stage='exception',
+                reason='hot_scope_receipt_gate_exception',
+                frozen=frozen,
+                status='exception',
+                exception_type=type(exc).__name__,
+                exception_stage=stage,
+            )
+            return None
         _hot_scope_diagnostic(
             plan,
             stage='receipt_gate',

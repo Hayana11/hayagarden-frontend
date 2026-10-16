@@ -9500,5 +9500,12 @@ class HotScopeDiagnosticsTests(unittest.TestCase):
 class HotScopeReceiptExceptionTests(unittest.TestCase):
     def test_receipt_gate_exception_is_stage_bound_and_fail_closed(self):
         plan = HotScopeDiagnosticsTests._plan()
-        with self.assertRaises(AttributeError):
-            pass
+        result = dr._hot_canonical_source_scope(
+            plan, resident=object(), frozen=object(),
+        )
+        self.assertIsNone(result)
+        diag = plan.hot_scope_diagnostic
+        self.assertEqual(diag['stage'], 'exception')
+        self.assertEqual(diag['reason'], 'hot_scope_receipt_gate_exception')
+        self.assertEqual(diag['exception_stage'], 'receipt_gate')
+        self.assertEqual(diag['exception_type'], 'AttributeError')
