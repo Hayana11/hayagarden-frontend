@@ -4781,12 +4781,12 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(policy.token_budget, 98000)
         self.assertEqual(policy.reserve_budget, 8000)
         self.assertEqual(policy.usable_budget, 90000)
-        self.assertEqual(policy.recent_raw_target, 24000)
+        self.assertEqual(policy.recent_raw_target, 0)
         self.assertIsNone(policy.history_budget_limit)
         self.assertEqual(version, 'continuity_context_budget_v2')
         target.assert_called_once_with()
         reserve.assert_called_once_with()
-        recent_raw.assert_called_once_with()
+        recent_raw.assert_not_called()
 
     def test_policy_tracks_dynamic_canonical_authority(self):
         cases = (
@@ -4818,7 +4818,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                     policy.recent_raw_target,
                     policy.history_budget_limit,
                 ),
-                (token_budget, reserve_value, target_value, recent_value, None),
+                (token_budget, reserve_value, target_value, 0, None),
             )
 
     def test_legacy_context_plan_budget_keys_are_not_read_or_authoritative(self):
@@ -4855,7 +4855,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                 policy.recent_raw_target,
                 policy.history_budget_limit,
             ),
-            (76000, 6000, 70000, 18000, None),
+            (76000, 6000, 70000, 0, None),
         )
         self.assertFalse(
             any(
@@ -4909,6 +4909,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(cold.history_budget_limit, 24000)
         self.assertEqual(respawn.history_budget_limit, 24000)
         self.assertEqual(hot.usable_budget, 150000)
+        self.assertEqual(hot.recent_raw_target, 0)
         self.assertIsNone(hot.history_budget_limit)
         self.assertEqual(capacity.usable_budget, 90000)
         self.assertEqual(capacity.history_budget_limit, 64000)
@@ -6007,7 +6008,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
             order.append('freeze')
             return plan_arg.hot_receipt_frozen
 
-        def _build(plan_arg, *, resident, static_system, mode='hot'):
+        def _build(
+            plan_arg,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            canonical_hot_source_scope=None,
+        ):
             order.append('build')
             self.assertIsNotNone(getattr(plan_arg, 'hot_receipt_frozen', None))
             return context_plan, {}
