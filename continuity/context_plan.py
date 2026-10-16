@@ -532,17 +532,27 @@ def _identity_payload(
     recent_raw_source_seqs: Sequence[int] = (),
     budget_policy_version: str = '',
 ) -> dict[str, Any]:
+    normalized_version = str(budget_policy_version or '').strip()
+    budget_identity = None
+    if budget_policy is not None:
+        budget_identity = {
+            'token_budget': budget_policy.token_budget,
+            'reserve_budget': budget_policy.reserve_budget,
+            'recent_raw_target': budget_policy.recent_raw_target,
+        }
+        # Preserve the pre-v2 payload shape for legacy/unversioned policies.
+        # A non-None limit is always semantic, while v2 makes even explicit
+        # None part of the new policy identity.
+        if (
+            budget_policy.history_budget_limit is not None
+            or normalized_version == CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION
+        ):
+            budget_identity['history_budget_limit'] = (
+                budget_policy.history_budget_limit
+            )
     payload = {
         'measurement_semantics': MEASUREMENT_SEMANTICS,
-        'budget_policy': (
-            {
-                'token_budget': budget_policy.token_budget,
-                'reserve_budget': budget_policy.reserve_budget,
-                'recent_raw_target': budget_policy.recent_raw_target,
-                'history_budget_limit': budget_policy.history_budget_limit,
-            }
-            if budget_policy is not None else None
-        ),
+        'budget_policy': budget_identity,
         'budget_status': budget_status,
         'recent_raw_source_seqs': [int(seq) for seq in recent_raw_source_seqs],
         'source_members': [_member_identity(member) for member in expected],
@@ -568,13 +578,9 @@ def _identity_payload(
         ),
         'gaps': sorted((item.code, item.source_ref) for item in gaps),
     }
-    # Empty is the backwards-compatible pre-R5 identity shape. An explicit
-    # version becomes part of identity so policy semantics cannot drift silently.
-    normalized_version = str(budget_policy_version or '').strip()
     if normalized_version:
         payload['budget_policy_version'] = normalized_version
     return payload
-
 
 def _member_overlap(left: SourceMember, right: SourceMember) -> bool:
     if left.source_ref != right.source_ref:
