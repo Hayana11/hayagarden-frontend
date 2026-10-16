@@ -1094,6 +1094,40 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         self.assertLessEqual(plan.selected_token_estimate, 13)
         self.assertLessEqual(plan.selected_token_estimate, 24)
 
+    def test_recent_raw_and_older_chunks_share_one_total_history_cap(self):
+        members = tuple(_member(index, logical_size=10) for index in range(4))
+        bindings = tuple(
+            _binding(
+                members,
+                seqs=(index,),
+                chunk_id=f'chunk:older-{index}',
+                body='x' * 40,
+            )
+            for index in range(3)
+        )
+        plan = build_context_plan(
+            members,
+            chunks=bindings,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=10,
+                history_budget_limit=24,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(plan.recent_raw_source_seqs, (3,))
+        self.assertEqual(plan.recent_raw_token_estimate, 10)
+        self.assertLessEqual(plan.selected_token_estimate, 24)
+        selected_chunks = [
+            item.source_seqs
+            for item in plan.representations
+            if item.kind == 'chunk'
+        ]
+        self.assertEqual(selected_chunks, [(2,)])
+        self.assertNotIn((0,), selected_chunks)
+        self.assertNotIn((1,), selected_chunks)
+
     def test_capacity_like_priority_keeps_recent_raw_before_older_representations(self):
         members = tuple(_member(index, logical_size=10) for index in range(5))
         plan = build_context_plan(
@@ -1108,7 +1142,11 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         self.assertEqual(plan.recent_raw_source_seqs, (4,))
         self.assertEqual(plan.recent_raw_token_estimate, 10)
         self.assertLessEqual(plan.selected_token_estimate, 24)
-        self.assertEqual(plan.representations[-1].source_seqs, (3,))
+        selected_source_seqs = [
+            item.source_seqs for item in plan.representations
+        ]
+        self.assertIn((3,), selected_source_seqs)
+        self.assertEqual(plan.representations[-1].source_seqs, (4,))
 
 
 if __name__ == '__main__':
