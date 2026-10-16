@@ -5536,7 +5536,7 @@ class ContextPlanConsumerTests(unittest.TestCase):
                     resident=object(),
                     frozen=frozen,
                 ),
-                (),
+                None,
             )
 
     def test_prepare_hot_passes_receipt_scoped_source_to_builder(self):
@@ -6179,6 +6179,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
             side_effect=_freeze,
         ), mock.patch.object(
             dr,
+            '_hot_canonical_source_scope',
+            return_value=(('installed',), ('native-tail',)),
+        ), mock.patch.object(
+            dr,
             '_build_production_context_plan',
             side_effect=_build,
         ), mock.patch.object(
@@ -6193,6 +6197,33 @@ class ContextPlanConsumerTests(unittest.TestCase):
         self.assertEqual(decision, 'NO_OP')
         self.assertEqual(plan.manifest['context_plan_id'], 'plan:one')
         self.assertEqual(plan.manifest['context_plan_hash'], 'plan-hash-one')
+
+    def test_prepare_hot_blocks_without_proven_source_scope(self):
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=None,
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as build:
+            with self.assertRaisesRegex(
+                dr.DailyRuntimeError,
+                'hot canonical source scope is not proven',
+            ):
+                dr._prepare_hot_context_plan(
+                    plan,
+                    resident=object(),
+                    static_system='STATIC',
+                )
+        build.assert_not_called()
+        self.assertEqual(plan.hot_decision, 'BLOCKED')
+        self.assertEqual(plan.hot_decision_reason, 'hot_source_scope_unproven')
 
     def test_hot_receipt_commit_uses_this_turn_plan_identity(self):
         from chat import context_receipt as receipt_store
