@@ -2330,7 +2330,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
         )
         self.assertTrue(result.ok, result.warnings)
         self.assertEqual(result.candidate.anchor_status, AnchorStatus.ANCHOR_TOO_LARGE)
-        self.assertIsNone(result.candidate.anchor_event_uuid)
+        self.assertFalse(result.candidate.anchor_event_uuid)
         self.assertNotIn('context_plan_anchor_emitted', result.candidate.warnings)
         self.assertIn('context_plan_anchor_too_large', result.candidate.warnings)
         self.assertNotIn('ANCHOR', result.candidate.serialized_jsonl)
