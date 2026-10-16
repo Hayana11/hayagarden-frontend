@@ -233,6 +233,42 @@ class DailyContinuityShadowTests(unittest.TestCase):
         )
         self.assertEqual(result.plan.ordered_sections[-1].source_ref, 'message:5')
 
+    def test_capacity_plan_exposes_first_formal_user_anchor(self):
+        result = self._run(
+            window_anchor_enabled=True,
+            window_anchor_token_budget=1000,
+        )
+        self.assertEqual(result.status, 'ready')
+        anchor_sections = [
+            section for section in result.plan.ordered_sections
+            if section.kind == 'window_anchor'
+        ]
+        self.assertEqual(len(anchor_sections), 1)
+        anchor = anchor_sections[0]
+        self.assertEqual(anchor.source_ref, 'message:1')
+        self.assertEqual(anchor.status, 'ANCHOR_RETAINED')
+        self.assertEqual(anchor.source_revision, anchor.content_hash)
+        self.assertEqual(result.plan.window_anchor_status, 'ANCHOR_RETAINED')
+        self.assertEqual(
+            sum(section.kind == 'current_request'
+                for section in result.plan.ordered_sections),
+            1,
+        )
+
+    def test_capacity_plan_marks_anchor_too_large_without_truncating(self):
+        result = self._run(
+            window_anchor_enabled=True,
+            window_anchor_token_budget=1,
+        )
+        self.assertEqual(result.status, 'ready')
+        anchor = next(
+            section for section in result.plan.ordered_sections
+            if section.kind == 'window_anchor'
+        )
+        self.assertEqual(anchor.status, 'ANCHOR_TOO_LARGE')
+        self.assertEqual(result.plan.window_anchor_status, 'ANCHOR_TOO_LARGE')
+        self.assertTrue(result.plan.valid)
+
     def test_old_context_is_excluded_even_when_message_id_is_before_current(self):
         rows = _history_rows() + [self.current]
         contexts = {

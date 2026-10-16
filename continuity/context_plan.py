@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from continuity.contracts import (
@@ -25,10 +25,17 @@ from tools.cc_usage_observability import estimate_tokens_heuristic_cjk1_ascii4_v
 
 RepresentationKind = Literal['raw', 'chunk']
 BudgetStatus = Literal['unbounded', 'fit', 'overflow', 'blocked']
+WindowAnchorStatus = Literal[
+    'ANCHOR_RETAINED',
+    'ANCHOR_UNAVAILABLE',
+    'ANCHOR_TOO_LARGE',
+    'ANCHOR_IMAGE_DEGRADED',
+]
 SectionKind = Literal[
     'invariant_system',
     'accepted_state',
     'accepted_open_loops',
+    'window_anchor',
     'older_continuity',
     'recent_raw',
     'current_request',
@@ -41,10 +48,22 @@ _FIXED_SECTION_KINDS = frozenset({
     'current_request',
 })
 _HISTORY_SECTION_KINDS = frozenset({'older_continuity', 'recent_raw'})
+_WINDOW_ANCHOR_SECTION_KINDS = frozenset({'window_anchor'})
+_WINDOW_ANCHOR_STATUSES = frozenset({
+    'ANCHOR_RETAINED',
+    'ANCHOR_UNAVAILABLE',
+    'ANCHOR_TOO_LARGE',
+    'ANCHOR_IMAGE_DEGRADED',
+})
+_WINDOW_ANCHOR_RETAINED_STATUSES = frozenset({
+    'ANCHOR_RETAINED',
+    'ANCHOR_IMAGE_DEGRADED',
+})
 _SECTION_ORDER = (
     'invariant_system',
     'accepted_state',
     'accepted_open_loops',
+    'window_anchor',
     'older_continuity',
     'recent_raw',
     'current_request',
@@ -253,6 +272,8 @@ class ContextSection:
     content_hash: str
     estimated_tokens: int
     representation_id: str | None = None
+    source_revision: str = ''
+    status: str = ''
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, str) or self.kind not in _SECTION_ORDER:
@@ -269,6 +290,15 @@ class ContextSection:
             raise ValueError('invalid_context_section:fixed_section_cannot_reference_representation')
         if self.kind in _HISTORY_SECTION_KINDS and not str(self.representation_id or '').strip():
             raise ValueError('invalid_context_section:history_section_requires_representation')
+        if self.kind in _WINDOW_ANCHOR_SECTION_KINDS:
+            if self.representation_id is not None:
+                raise ValueError('invalid_context_section:anchor_cannot_reference_representation')
+            if not str(self.source_revision or '').strip():
+                raise ValueError('invalid_context_section:anchor_source_revision_required')
+            if str(self.status or '').strip() not in _WINDOW_ANCHOR_STATUSES:
+                raise ValueError('invalid_context_section:anchor_status_invalid')
+        elif str(self.status or '').strip():
+            raise ValueError('invalid_context_section:status_only_allowed_for_anchor')
 
 
 @dataclass(frozen=True)
@@ -313,6 +343,8 @@ class ContextPlan:
     budget_status: BudgetStatus = 'unbounded'
     recent_raw_source_seqs: tuple[int, ...] = ()
     budget_policy_version: str = ''
+    window_anchor: ContextSection | None = None
+    window_anchor_status: str = ''
 
     @property
     def valid(self) -> bool:
@@ -335,6 +367,13 @@ class ContextPlan:
         return sum(int(item.estimated_tokens) for item in self.representations)
 
     @property
+    def window_anchor_token_estimate(self) -> int:
+        section = self.window_anchor
+        if section is None or str(self.window_anchor_status or '') not in _WINDOW_ANCHOR_RETAINED_STATUSES:
+            return 0
+        return int(section.estimated_tokens)
+
+    @property
     def fixed_section_token_estimate(self) -> int:
         return sum(
             int(section.estimated_tokens)
@@ -344,7 +383,15 @@ class ContextPlan:
 
     @property
     def ordered_section_token_estimate(self) -> int:
-        return sum(int(section.estimated_tokens) for section in self.ordered_sections)
+        return sum(
+            int(section.estimated_tokens)
+            for section in self.ordered_sections
+            if (
+                section.kind not in _WINDOW_ANCHOR_SECTION_KINDS
+                or str(getattr(section, 'status', '') or '')
+                    in _WINDOW_ANCHOR_RETAINED_STATUSES
+            )
+        )
 
     @property
     def total_token_estimate(self) -> int:
@@ -373,6 +420,7 @@ class ContextPlan:
             self.usable_budget
             - self.fixed_section_token_estimate
             - self.selected_token_estimate
+            - self.window_anchor_token_estimate
         )
 
     @property
@@ -488,12 +536,16 @@ def _build_ordered_sections(
     fixed_sections: dict[str, ContextSection],
     representations: Sequence[ContextRepresentation],
     recent_raw_keys: set[tuple[Any, ...]],
+    window_anchor: ContextSection | None = None,
 ) -> tuple[ContextSection, ...]:
     sections: list[ContextSection] = []
     for kind in ('invariant_system', 'accepted_state', 'accepted_open_loops'):
         section = fixed_sections.get(kind)
         if section is not None:
             sections.append(section)
+
+    if window_anchor is not None:
+        sections.append(window_anchor)
 
     for representation in representations:
         member_keys = {_member_key(member) for member in representation.source_members}
@@ -517,6 +569,8 @@ def _section_identity(section: ContextSection) -> dict[str, Any]:
         'content_hash': section.content_hash,
         'estimated_tokens': int(section.estimated_tokens),
         'representation_id': section.representation_id,
+        'source_revision': str(section.source_revision or ''),
+        'status': str(section.status or ''),
     }
 
 
@@ -531,6 +585,7 @@ def _identity_payload(
     budget_status: BudgetStatus = 'unbounded',
     recent_raw_source_seqs: Sequence[int] = (),
     budget_policy_version: str = '',
+    window_anchor_status: str = '',
 ) -> dict[str, Any]:
     normalized_version = str(budget_policy_version or '').strip()
     budget_identity = None
@@ -580,6 +635,8 @@ def _identity_payload(
     }
     if normalized_version:
         payload['budget_policy_version'] = normalized_version
+    if str(window_anchor_status or '').strip():
+        payload['window_anchor_status'] = str(window_anchor_status).strip()
     return payload
 
 def _member_overlap(left: SourceMember, right: SourceMember) -> bool:
@@ -712,11 +769,25 @@ def build_context_plan(
     budget_policy: ContextBudgetPolicy | None = None,
     fixed_sections: Sequence[ContextSection] = (),
     budget_policy_version: str = '',
+    window_anchor: ContextSection | None = None,
+    window_anchor_status: WindowAnchorStatus | str = '',
 ) -> ContextPlan:
     """Select exact raw/chunk representations for one required source set."""
     expected = _ordered(expected_members)
     accepted_fixed_sections = _validated_fixed_sections(fixed_sections)
     budget_policy_version = str(budget_policy_version or '').strip()
+    normalized_anchor_status = str(window_anchor_status or '').strip()
+    if window_anchor is not None:
+        if not isinstance(window_anchor, ContextSection):
+            raise ValueError('invalid_context_section:anchor_expected_context_section')
+        if window_anchor.kind != 'window_anchor':
+            raise ValueError('invalid_context_section:anchor_kind_required')
+        section_status = str(window_anchor.status or '').strip()
+        if normalized_anchor_status and normalized_anchor_status != section_status:
+            raise ValueError('invalid_context_section:anchor_status_mismatch')
+        normalized_anchor_status = section_status
+    if normalized_anchor_status and normalized_anchor_status not in _WINDOW_ANCHOR_STATUSES:
+        raise ValueError('invalid_context_section:anchor_status_invalid')
     raw = _ordered(expected if raw_members is None else raw_members)
     expected_by_key = {_member_key(member): member for member in expected}
     expected_by_stable = _index_expected_by_stable_identity(expected)
@@ -895,6 +966,32 @@ def build_context_plan(
         if _member_key(member) not in selected_keys
     ]
 
+    anchor_cost = (
+        int(window_anchor.estimated_tokens)
+        if (
+            window_anchor is not None
+            and normalized_anchor_status in _WINDOW_ANCHOR_RETAINED_STATUSES
+        )
+        else 0
+    )
+    if (
+        window_anchor is not None
+        and normalized_anchor_status in _WINDOW_ANCHOR_RETAINED_STATUSES
+        and budget_policy is not None
+        and anchor_cost + sum(
+            int(section.estimated_tokens)
+            for section in accepted_fixed_sections.values()
+        ) > budget_policy.usable_budget
+    ):
+        window_anchor = replace(window_anchor, status='ANCHOR_TOO_LARGE')
+        normalized_anchor_status = 'ANCHOR_TOO_LARGE'
+        anchor_cost = 0
+        exclusions.append(_exclusion(
+            'window_anchor_too_large',
+            'window anchor does not fit beside accepted fixed sections',
+            source_ref=window_anchor.source_ref,
+        ))
+
     selected, budget_status = _apply_budget(
         coverage_selected,
         budget_policy=budget_policy,
@@ -902,7 +999,7 @@ def build_context_plan(
         fixed_token_estimate=sum(
             int(section.estimated_tokens)
             for section in accepted_fixed_sections.values()
-        ),
+        ) + anchor_cost,
         exclusions=exclusions,
     )
     selected = tuple(sorted(
@@ -918,6 +1015,7 @@ def build_context_plan(
         accepted_fixed_sections,
         selected,
         recent_raw_keys,
+        window_anchor=window_anchor,
     )
     identity = _identity_payload(
         expected,
@@ -928,6 +1026,7 @@ def build_context_plan(
         budget_policy=budget_policy,
         budget_status=budget_status,
         budget_policy_version=budget_policy_version,
+        window_anchor_status=normalized_anchor_status,
         recent_raw_source_seqs=tuple(
             sorted(int(member.seq) for member in expected if _member_key(member) in recent_raw_keys)
         ),
@@ -951,6 +1050,8 @@ def build_context_plan(
             sorted(int(member.seq) for member in expected if _member_key(member) in recent_raw_keys)
         ),
         budget_policy_version=budget_policy_version,
+        window_anchor=window_anchor,
+        window_anchor_status=normalized_anchor_status,
     )
 
 
@@ -963,6 +1064,7 @@ __all__ = [
     'ContextRepresentation',
     'ContextSection',
     'SectionKind',
+    'WindowAnchorStatus',
     'parse_context_budget_policy',
     'build_context_plan',
 ]

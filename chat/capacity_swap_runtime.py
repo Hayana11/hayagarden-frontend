@@ -35,7 +35,9 @@ from chat.claude_transcript_transform import (
     SelectionPolicy,
     TransformError,
     TransformRequest,
+    emit_anchor_user_event,
     estimate_serialized_token_count,
+    merge_prepended_user_and_tail,
     serialize_events,
     sha256_text,
     transform_transcript,
@@ -255,6 +257,7 @@ def compute_retained_transcript_token_budget(
     static_system: str,
     pending_user_text: str = '',
     dynamic_state_text: str = '',
+    reserve_anchor: bool = True,
 ) -> int:
     """Dynamic retained-transcript budget using existing estimators (no new tokenizer)."""
     target = int(capacity_swap_prompt_target())
@@ -266,8 +269,8 @@ def compute_retained_transcript_token_budget(
         + estimate_text_tokens(pending_user_text)
         + margin
     )
-    # Anchor gets a separate budget in Step 8-A; keep a conservative slice for it.
-    anchor_reserve = max(256, margin // 4)
+    # Gate-on ContextPlan owns the anchor cost; legacy callers retain the reserve.
+    anchor_reserve = max(256, margin // 4) if reserve_anchor else 0
     budget = target - reserved - anchor_reserve
     return max(512, int(budget))
 
@@ -375,6 +378,13 @@ def _load_formal_messages_excluding_current(
             'id': mid,
             'author': str(row['author'] or ''),
             'content': str(row['content'] or ''),
+            'created_at': str(row['created_at'] or '') if hasattr(row, 'keys') and 'created_at' in row.keys() else '',
+            'source_kind': str(row['source_kind'] or '') if hasattr(row, 'keys') and 'source_kind' in row.keys() else '',
+            'thinking': str(row['thinking'] or '') if hasattr(row, 'keys') and 'thinking' in row.keys() else '',
+            'tool_calls': row['tool_calls'] if hasattr(row, 'keys') and 'tool_calls' in row.keys() else '',
+            'branches': row['branches'] if hasattr(row, 'keys') and 'branches' in row.keys() else '',
+            'branch_idx': row['branch_idx'] if hasattr(row, 'keys') and 'branch_idx' in row.keys() else 0,
+            'cache_info': row['cache_info'] if hasattr(row, 'keys') and 'cache_info' in row.keys() else '',
             'image_url': '',
             'file_url': '',
             'file_name': '',
@@ -824,6 +834,53 @@ def _capacity_context_emitted_event_uuids(
     return out
 
 
+def _context_plan_window_anchor(context_plan: Any) -> tuple[Any | None, AnchorStatus, int]:
+    """Read the plan-owned anchor; never select a different candidate here."""
+    section = getattr(context_plan, 'window_anchor', None)
+    if not isinstance(getattr(section, 'kind', None), str):
+        section = None
+    raw_status = getattr(context_plan, 'window_anchor_status', '')
+    status_text = raw_status if isinstance(raw_status, str) else ''
+    if not status_text and section is not None:
+        section_status = getattr(section, 'status', '')
+        status_text = section_status if isinstance(section_status, str) else ''
+    status_text = str(status_text or '').strip() or AnchorStatus.ANCHOR_UNAVAILABLE.value
+    try:
+        status = AnchorStatus(status_text)
+    except ValueError as exc:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan window anchor status is invalid',
+            error_code='context_plan_capacity_anchor_status_invalid',
+        ) from exc
+    if section is None:
+        return None, status, 0
+    if str(getattr(section, 'kind', '') or '') != 'window_anchor':
+        raise CapacitySwapRuntimeError(
+            'ContextPlan window anchor section kind is invalid',
+            error_code='context_plan_capacity_anchor_identity_mismatch',
+        )
+    source_ref = str(getattr(section, 'source_ref', '') or '')
+    parts = source_ref.split(':')
+    if len(parts) != 2 or parts[0] != 'message':
+        raise CapacitySwapRuntimeError(
+            'ContextPlan window anchor source reference is invalid',
+            error_code='context_plan_capacity_anchor_identity_mismatch',
+        )
+    try:
+        message_id = int(parts[1])
+    except (TypeError, ValueError) as exc:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan window anchor message identity is invalid',
+            error_code='context_plan_capacity_anchor_identity_mismatch',
+        ) from exc
+    if message_id <= 0:
+        raise CapacitySwapRuntimeError(
+            'ContextPlan window anchor message identity is invalid',
+            error_code='context_plan_capacity_anchor_identity_mismatch',
+        )
+    return section, status, message_id
+
+
 def prepare_capacity_swap_for_context_plan(
     *,
     plan: Any,
@@ -858,6 +915,9 @@ def prepare_capacity_swap_for_context_plan(
 
     try:
         raw_members = _context_plan_raw_members(context_plan)
+        anchor_section, anchor_status, anchor_message_id = (
+            _context_plan_window_anchor(context_plan)
+        )
     except CapacitySwapRuntimeError as exc:
         return _failure(exc.error_code, [str(exc)])
 
@@ -932,6 +992,69 @@ def prepare_capacity_swap_for_context_plan(
         mids = [int(m['id']) for m in formal]
         canonical, mid_to_event, event_to_mid = _load_mapping_for_messages(conn, mids)
         mapping_rows = _load_mapping_rows_for_messages(conn, mids)
+
+        anchor_event_uuid = (
+            str(mid_to_event.get(int(anchor_message_id)) or '').strip()
+            if int(anchor_message_id) > 0
+            else ''
+        )
+        anchor_canonical = (
+            canonical.get(anchor_event_uuid)
+            if anchor_event_uuid
+            else None
+        )
+        if anchor_status in {
+            AnchorStatus.ANCHOR_RETAINED,
+            AnchorStatus.ANCHOR_IMAGE_DEGRADED,
+        }:
+            if int(anchor_message_id) == int(plan.user_message_id):
+                raise CapacitySwapRuntimeError(
+                    'current user is the ContextPlan window anchor',
+                    error_code='context_plan_capacity_current_user_in_candidate',
+                )
+            if not anchor_event_uuid or anchor_canonical is None:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan window anchor mapping is unavailable',
+                    error_code='context_plan_capacity_anchor_mapping_missing',
+                )
+            anchor_row = next(
+                (
+                    row for row in formal
+                    if int(row.get('id') or 0) == int(anchor_message_id)
+                ),
+                None,
+            )
+            if anchor_row is None:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan window anchor source row is unavailable',
+                    error_code='context_plan_capacity_anchor_identity_mismatch',
+                )
+            from continuity.sources import evidence_ref
+            actual_anchor = evidence_ref(anchor_row, prefix='message')
+            expected_anchor = (
+                str(getattr(anchor_section, 'source_ref', '') or ''),
+                str(getattr(anchor_section, 'source_revision', '') or ''),
+                str(getattr(anchor_section, 'content_hash', '') or ''),
+            )
+            actual_anchor_identity = (
+                str(actual_anchor.source_ref),
+                str(actual_anchor.source_revision),
+                str(actual_anchor.content_hash),
+            )
+            if actual_anchor_identity != expected_anchor:
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan window anchor source identity changed',
+                    error_code='context_plan_capacity_anchor_identity_mismatch',
+                )
+            anchor_event = graph.by_uuid.get(anchor_event_uuid)
+            if (
+                anchor_event is None
+                or anchor_event.event_role != EventRole.CANDIDATE_USER
+            ):
+                raise CapacitySwapRuntimeError(
+                    'ContextPlan window anchor is not a candidate user event',
+                    error_code='context_plan_capacity_anchor_mapping_invalid',
+                )
 
         round_by_user: dict[str, Any] = {}
         for round_item in tuple(getattr(graph, 'candidate_rounds', ()) or ()):
@@ -1009,6 +1132,13 @@ def prepare_capacity_swap_for_context_plan(
             selected_rounds.append(round_item)
             selected_round_users.add(user_event_uuid)
 
+        anchor_raw_satisfied = bool(
+            int(anchor_message_id) > 0
+            and any(
+                int(user_id) == int(anchor_message_id)
+                for _member, user_id, _assistant_id in raw_members
+            )
+        )
         selected_uuids = {
             str(getattr(round_item, 'candidate_user_event_uuid', '') or '')
             for round_item in selected_rounds
@@ -1090,16 +1220,53 @@ def prepare_capacity_swap_for_context_plan(
             ['native event set differs from exact ContextPlan rounds'],
         )
 
-    serialized = serialize_events(transformed.events)
+    events: list[dict[str, Any]] = list(transformed.events)
+    anchor_standalone = bool(
+        anchor_status in {
+            AnchorStatus.ANCHOR_RETAINED,
+            AnchorStatus.ANCHOR_IMAGE_DEGRADED,
+        }
+        and not anchor_raw_satisfied
+    )
+    anchor_output_event_uuid = None
+    if anchor_standalone:
+        if not anchor_event_uuid or anchor_canonical is None:
+            return _failure(
+                'context_plan_capacity_anchor_mapping_missing',
+                ['standalone anchor payload is unavailable'],
+            )
+        source_event = graph.by_uuid.get(anchor_event_uuid)
+        if source_event is None:
+            return _failure(
+                'context_plan_capacity_anchor_mapping_missing',
+                ['standalone anchor event is unavailable'],
+            )
+        anchor_output_event_uuid = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f'{cid}:anchor:{anchor_event_uuid}')
+        )
+        anchor_event = emit_anchor_user_event(
+            source_event,
+            new_session_id=cid,
+            cwd=cwd_guess,
+            version=request.version,
+            new_event_uuid=anchor_output_event_uuid,
+            canonical=anchor_canonical,
+        )
+        events = merge_prepended_user_and_tail(anchor_event, transformed.events)
+    serialized = serialize_events(events)
     validation = validate_transcript_events(
-        transformed.events,
+        events,
         ValidatorOptions(
             session_id=cid,
             thinking_policy=ThinkingPolicy.DROP,
             forbid_sidechain=True,
             forbid_summary=True,
-            expected_round_count=len(selected_rounds),
-            max_round_count=len(selected_rounds),
+            expected_round_count=(
+                None if anchor_standalone else len(selected_rounds)
+            ),
+            max_round_count=(
+                None if anchor_standalone else len(selected_rounds)
+            ),
             old_uuids=set(graph.by_uuid.keys()),
             unknown_event_mode='reject',
         ),
@@ -1111,6 +1278,8 @@ def prepare_capacity_swap_for_context_plan(
         )
 
     selected_message_ids: list[int] = []
+    if anchor_standalone and int(anchor_message_id) > 0:
+        selected_message_ids.append(int(anchor_message_id))
     for event_uuid in expected_events:
         event = graph.by_uuid.get(event_uuid)
         message_id = int(event_to_mid.get(event_uuid, 0) or 0)
@@ -1129,6 +1298,18 @@ def prepare_capacity_swap_for_context_plan(
             selected_message_ids.append(message_id)
 
     serialized_bytes = len(serialized.encode('utf-8'))
+    anchor_warnings = [
+        'context_plan_exact_raw',
+        'context_plan_anchor_status:%s' % anchor_status.value,
+    ]
+    if anchor_raw_satisfied:
+        anchor_warnings.append('context_plan_anchor_raw_satisfied')
+    elif anchor_standalone:
+        anchor_warnings.append('context_plan_anchor_emitted')
+    elif anchor_status == AnchorStatus.ANCHOR_TOO_LARGE:
+        anchor_warnings.append('context_plan_anchor_too_large')
+    elif anchor_status == AnchorStatus.ANCHOR_UNAVAILABLE:
+        anchor_warnings.append('context_plan_anchor_unavailable')
     candidate = CapacitySwapCandidate(
         source_context_id=source_ctx,
         source_context_epoch=source_epoch,
@@ -1140,18 +1321,18 @@ def prepare_capacity_swap_for_context_plan(
         target_resident_generation=source_gen + 1,
         candidate_session_id=cid,
         trigger_reason=reason,
-        anchor_status=AnchorStatus.ANCHOR_UNAVAILABLE,
-        anchor_message_id=0,
-        anchor_event_uuid=None,
+        anchor_status=anchor_status,
+        anchor_message_id=int(anchor_message_id),
+        anchor_event_uuid=anchor_event_uuid,
         selected_round_count=len(selected_rounds),
         selected_message_ids=tuple(selected_message_ids),
-        estimated_tokens=estimate_serialized_token_count(transformed.events),
+        estimated_tokens=estimate_serialized_token_count(events),
         serialized_bytes=serialized_bytes,
-        event_count=len(transformed.events),
+        event_count=len(events),
         output_sha256=sha256_text(serialized),
         serialized_jsonl=serialized,
         boundary_required=True,
-        warnings=('context_plan_exact_raw',),
+        warnings=tuple(anchor_warnings),
     )
     return CapacitySwapRuntimeResult(
         ok=True,
@@ -1162,7 +1343,7 @@ def prepare_capacity_swap_for_context_plan(
         target_resident_generation=source_gen + 1,
         candidate_session_id=cid,
         effective_system=with_capacity_boundary_suffix(static_system),
-        warnings=['context_plan_exact_raw'],
+        warnings=anchor_warnings,
     )
 
 def prepare_capacity_swap_for_plan(

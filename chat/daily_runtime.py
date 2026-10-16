@@ -48,6 +48,7 @@ from chat.capacity_swap_runtime import (
     CAPACITY_BOUNDARY_REPRESENTATION,
     CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1,
     CapacitySwapStagedHooks,
+    compute_anchor_token_budget,
     compute_retained_transcript_token_budget,
     effective_static_system_for_registry,
     get_same_context_last_good,
@@ -1305,6 +1306,7 @@ def _context_plan_policy(
             static_system=str(static_system or ''),
             pending_user_text=str(pending_user_text or ''),
             dynamic_state_text=str(dynamic_state_text or ''),
+            reserve_anchor=False,
         ))
     else:
         history_budget_limit = None
@@ -1438,6 +1440,14 @@ def _build_production_context_plan(
         accepted_fixed_sections=fixed_sections,
         budget_policy_version=policy_version,
         validated_ready_artifacts=validated_ready_artifacts,
+        window_anchor_enabled=(
+            str(mode or 'hot').strip().lower() == 'capacity'
+        ),
+        window_anchor_token_budget=(
+            compute_anchor_token_budget()
+            if str(mode or 'hot').strip().lower() == 'capacity'
+            else None
+        ),
         source_member_scope=(
             tuple(canonical_hot_source_scope or ())
             if str(mode or 'hot').strip().lower() == 'hot'
@@ -1835,6 +1845,41 @@ def _context_receipt_members(plan: DailyTurnPlan) -> tuple[Any, ...]:
             source_revision=str(section.content_hash),
             source_kind=kind,
             content_hash=str(section.content_hash),
+            branch_id='',
+        ))
+        order += 1
+    anchor_status = str(
+        getattr(context_plan, 'window_anchor_status', '') or ''
+    ).strip()
+    if anchor_status:
+        anchor_section = next(
+            (
+                section for section in context_plan.ordered_sections
+                if str(getattr(section, 'kind', '') or '') == 'window_anchor'
+            ),
+            None,
+        )
+        if anchor_section is not None:
+            anchor_source_ref = str(anchor_section.source_ref or '')
+            anchor_source_revision = str(
+                getattr(anchor_section, 'source_revision', '')
+                or ''
+            )
+            anchor_content_hash = str(anchor_section.content_hash or '')
+        else:
+            anchor_source_ref = 'window_anchor:%s' % anchor_status
+            anchor_source_revision = str(
+                getattr(context_plan, 'plan_hash', '') or ''
+            )
+            anchor_content_hash = anchor_source_revision
+        members.append(ContextReceiptMember(
+            installed_order=order,
+            representation_id='window_anchor:%s' % anchor_status,
+            representation_kind='anchor',
+            source_ref=anchor_source_ref,
+            source_revision=anchor_source_revision,
+            source_kind='window_anchor',
+            content_hash=anchor_content_hash,
             branch_id='',
         ))
         order += 1
@@ -3443,6 +3488,91 @@ def _validate_production_context_install(
         )
 
     if capacity_split:
+        anchor_status = str(
+            getattr(context_plan, 'window_anchor_status', '') or ''
+        ).strip()
+        if anchor_status:
+            if anchor_status not in {
+                'ANCHOR_RETAINED',
+                'ANCHOR_UNAVAILABLE',
+                'ANCHOR_TOO_LARGE',
+                'ANCHOR_IMAGE_DEGRADED',
+            }:
+                raise DailyRuntimeError(
+                    'ContextPlan window anchor status is invalid',
+                    error_code='context_plan_capacity_anchor_parity_failed',
+                )
+            installed_anchor_status = str(
+                plan.manifest.get('capacity_context_anchor_status') or ''
+            )
+            if (
+                installed_anchor_status
+                and installed_anchor_status != anchor_status
+            ):
+                raise DailyRuntimeError(
+                    'Capacity anchor status differs from ContextPlan',
+                    error_code='context_plan_capacity_anchor_parity_failed',
+                )
+            anchor_sections = tuple(
+                section for section in context_plan.ordered_sections
+                if str(getattr(section, 'kind', '') or '') == 'window_anchor'
+            )
+            if anchor_status in {
+                'ANCHOR_RETAINED',
+                'ANCHOR_IMAGE_DEGRADED',
+            }:
+                if len(anchor_sections) != 1:
+                    raise DailyRuntimeError(
+                        'retained ContextPlan anchor section is missing',
+                        error_code='context_plan_capacity_anchor_parity_failed',
+                    )
+                if not bool(
+                    plan.manifest.get('capacity_context_anchor_satisfied')
+                ):
+                    raise DailyRuntimeError(
+                        'Capacity anchor was neither raw-satisfied nor emitted',
+                        error_code='context_plan_capacity_anchor_parity_failed',
+                    )
+                try:
+                    from continuity.sources import evidence_ref
+                    anchor_mid = _message_id_from_source_ref(
+                        anchor_sections[0].source_ref
+                    )
+                    anchor_row = (
+                        _load_context_source_rows(
+                            {int(anchor_mid)},
+                            db_path=_production_continuity_store_path(plan),
+                        ).get(int(anchor_mid))
+                        if anchor_mid is not None
+                        else None
+                    )
+                    if anchor_row is None:
+                        raise ValueError('anchor source row is unavailable')
+                    anchor_evidence = evidence_ref(anchor_row, prefix='message')
+                    actual_anchor_identity = (
+                        str(anchor_sections[0].source_ref),
+                        str(getattr(anchor_sections[0], 'source_revision', '') or ''),
+                        str(anchor_sections[0].content_hash),
+                        int(anchor_sections[0].estimated_tokens or 0),
+                    )
+                    expected_anchor_identity = (
+                        str(anchor_evidence.source_ref),
+                        str(anchor_evidence.source_revision),
+                        str(anchor_evidence.content_hash),
+                        int(anchor_evidence.logical_size),
+                    )
+                    if actual_anchor_identity != expected_anchor_identity:
+                        raise ValueError('anchor source identity differs')
+                except Exception as exc:
+                    raise DailyRuntimeError(
+                        'ContextPlan window anchor proof does not match source',
+                        error_code='context_plan_capacity_anchor_parity_failed',
+                    ) from exc
+            elif len(anchor_sections) > 1:
+                raise DailyRuntimeError(
+                    'Capacity ContextPlan has duplicate anchor sections',
+                    error_code='context_plan_capacity_anchor_parity_failed',
+                )
         if not assembly.get('capacity_context_bootstrap'):
             raise DailyRuntimeError(
                 'Capacity first-stdin bootstrap is missing',
@@ -5509,6 +5639,16 @@ def _attempt_capacity_swap_before_stdin(
                 'context_plan_capacity_source_receipt_revision': (
                     frozen.get('expected_receipt_revision')
                 ),
+                'context_plan_window_anchor_status': str(
+                    getattr(context_plan, 'window_anchor_status', '') or ''
+                ),
+                'context_plan_window_anchor_source_ref': str(
+                    getattr(
+                        getattr(context_plan, 'window_anchor', None),
+                        'source_ref',
+                        '',
+                    ) or ''
+                ),
             })
             prepare_result = prepare_capacity_swap_for_context_plan(
                 plan=plan,
@@ -5722,6 +5862,30 @@ def _attempt_capacity_swap_before_stdin(
                     handoff.jsonl_sha256
                     or getattr(handoff.candidate, 'output_sha256', '')
                     or ''
+                ),
+                'capacity_context_anchor_status': str(
+                    getattr(
+                        getattr(handoff.candidate, 'anchor_status', None),
+                        'value',
+                        getattr(handoff.candidate, 'anchor_status', ''),
+                    ) or ''
+                ),
+                'capacity_context_anchor_message_id': int(
+                    getattr(handoff.candidate, 'anchor_message_id', 0) or 0
+                ),
+                'capacity_context_anchor_event_uuid': str(
+                    getattr(handoff.candidate, 'anchor_event_uuid', '') or ''
+                ),
+                'capacity_context_anchor_satisfied': bool(
+                    any(
+                        warning in {
+                            'context_plan_anchor_raw_satisfied',
+                            'context_plan_anchor_emitted',
+                        }
+                        for warning in tuple(
+                            getattr(handoff.candidate, 'warnings', ()) or ()
+                        )
+                    )
                 ),
                 'capacity_context_current_user_in_candidate': False,
                 'capacity_context_install_parity': 'PENDING',
