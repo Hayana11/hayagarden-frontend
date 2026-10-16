@@ -4906,6 +4906,8 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(respawn.token_budget, 98000)
         self.assertEqual(cold.usable_budget, 90000)
         self.assertEqual(respawn.usable_budget, 90000)
+        self.assertEqual(cold.history_budget_limit, 24000)
+        self.assertEqual(respawn.history_budget_limit, 24000)
         self.assertEqual(hot.usable_budget, 150000)
         self.assertIsNone(hot.history_budget_limit)
         self.assertEqual(capacity.usable_budget, 90000)
