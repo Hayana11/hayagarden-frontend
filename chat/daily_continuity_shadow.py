@@ -284,6 +284,42 @@ def _current_request_section(row: dict[str, object]) -> ContextSection:
     )
 
 
+def _source_member_scope_identity(member: object) -> tuple[object, ...]:
+    return (
+        str(getattr(member, 'source_ref', '') or ''),
+        str(getattr(member, 'source_revision', '') or ''),
+        str(getattr(member, 'source_kind', '') or ''),
+        str(getattr(member, 'content_hash', '') or ''),
+        getattr(member, 'span_start', None),
+        getattr(member, 'span_end', None),
+        str(getattr(member, 'branch_id', '') or ''),
+    )
+
+
+def _restrict_expected_members(
+    expected_members: Sequence[object],
+    source_member_scope: Sequence[tuple[object, ...]],
+) -> tuple[object, ...]:
+    try:
+        scope_keys = tuple(tuple(item) for item in source_member_scope)
+    except (TypeError, ValueError):
+        raise _SourceScopeUnavailable('canonical source scope is malformed')
+    if any(len(key) != 7 for key in scope_keys):
+        raise _SourceScopeUnavailable('canonical source scope identity is malformed')
+    if len(set(scope_keys)) != len(scope_keys):
+        raise _SourceScopeUnavailable('canonical source scope identity is ambiguous')
+    expected_by_key = {
+        _source_member_scope_identity(member): member
+        for member in tuple(expected_members)
+    }
+    if any(key not in expected_by_key for key in scope_keys):
+        raise _SourceScopeUnavailable('canonical source scope member is unavailable')
+    return tuple(
+        expected_by_key[key]
+        for key in sorted(scope_keys, key=lambda item: int(getattr(expected_by_key[item], 'seq', 0)))
+    )
+
+
 def _bindings(
     conn: sqlite3.Connection,
     *,
@@ -347,12 +383,16 @@ def build_daily_continuity_shadow_plan(
     budget_policy_version: str = '',
     continuity_store_path: str | Path | None = None,
     validated_ready_artifacts: Sequence[Mapping[str, str]] | None = None,
+    source_member_scope: Sequence[tuple[object, ...]] | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
     The caller supplies accepted metadata-only fixed sections.  The adapter
     owns the durable current-request section and refuses a caller-supplied
-    duplicate.  The pure R4 planner remains the only selection authority.
+    duplicate.  A supplied source_member_scope is a proven canonical hot
+    receipt/native-tail scope; it restricts the expected source universe before
+    the pure R4 planner runs.  The pure R4 planner remains the only selection
+    authority.
     """
     if budget_policy is None or not isinstance(budget_policy, ContextBudgetPolicy):
         return _blocked('budget_policy_unmapped')
@@ -391,6 +431,14 @@ def build_daily_continuity_shadow_plan(
             expected_members = build_source_members(turns, events)
         except (TypeError, ValueError):
             return _blocked('source_rows_unavailable')
+        if source_member_scope is not None:
+            try:
+                expected_members = _restrict_expected_members(
+                    expected_members,
+                    source_member_scope,
+                )
+            except _SourceScopeUnavailable:
+                return _blocked('source_scope_unavailable')
         if not is_formal_user_source_row(current_row):
             return _blocked('invalid_current_request')
         try:

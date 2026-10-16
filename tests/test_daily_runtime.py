@@ -4765,7 +4765,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
 
 
 class ContextPlanBudgetAuthorityTests(unittest.TestCase):
-    def test_policy_maps_canonical_authority_without_semantic_version_change(self):
+    def test_policy_maps_canonical_authority_with_semantic_version_v2(self):
         with mock.patch(
             'chat.cold_bootstrap_budget.cold_prompt_target',
             return_value=90000,
@@ -4781,11 +4781,12 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(policy.token_budget, 98000)
         self.assertEqual(policy.reserve_budget, 8000)
         self.assertEqual(policy.usable_budget, 90000)
-        self.assertEqual(policy.recent_raw_target, 24000)
-        self.assertEqual(version, 'continuity_context_budget_v1')
+        self.assertEqual(policy.recent_raw_target, 0)
+        self.assertIsNone(policy.history_budget_limit)
+        self.assertEqual(version, 'continuity_context_budget_v2')
         target.assert_called_once_with()
         reserve.assert_called_once_with()
-        recent_raw.assert_called_once_with()
+        recent_raw.assert_not_called()
 
     def test_policy_tracks_dynamic_canonical_authority(self):
         cases = (
@@ -4815,8 +4816,9 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                     policy.reserve_budget,
                     policy.usable_budget,
                     policy.recent_raw_target,
+                    policy.history_budget_limit,
                 ),
-                (token_budget, reserve_value, target_value, recent_value),
+                (token_budget, reserve_value, target_value, 0, None),
             )
 
     def test_legacy_context_plan_budget_keys_are_not_read_or_authoritative(self):
@@ -4851,8 +4853,9 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                 policy.reserve_budget,
                 policy.usable_budget,
                 policy.recent_raw_target,
+                policy.history_budget_limit,
             ),
-            (76000, 6000, 70000, 18000),
+            (76000, 6000, 70000, 0, None),
         )
         self.assertFalse(
             any(
@@ -4885,19 +4888,83 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         ), mock.patch(
             'chat.context_lean.cc_history_token_budget',
             return_value=24000,
-        ):
+        ), mock.patch(
+            'chat.daily_runtime.compute_retained_transcript_token_budget',
+            return_value=64000,
+        ) as capacity_history:
             cold, _ = dr._context_plan_policy(mode='cold')
             respawn, _ = dr._context_plan_policy(mode='respawn')
             hot, _ = dr._context_plan_policy(mode='hot')
-            capacity, _ = dr._context_plan_policy(mode='capacity')
+            capacity, _ = dr._context_plan_policy(
+                mode='capacity',
+                static_system='BASE_SYSTEM',
+                pending_user_text='CURRENT_USER',
+                dynamic_state_text='ACCEPTED_STATE',
+            )
 
         self.assertEqual(cold.token_budget, 98000)
         self.assertEqual(respawn.token_budget, 98000)
         self.assertEqual(cold.usable_budget, 90000)
         self.assertEqual(respawn.usable_budget, 90000)
+        self.assertEqual(cold.recent_raw_target, 12000)
+        self.assertEqual(respawn.recent_raw_target, 12000)
+        self.assertEqual(cold.history_budget_limit, 24000)
+        self.assertEqual(respawn.history_budget_limit, 24000)
         self.assertEqual(hot.usable_budget, 150000)
+        self.assertEqual(hot.recent_raw_target, 0)
+        self.assertIsNone(hot.history_budget_limit)
         self.assertEqual(capacity.usable_budget, 90000)
+        self.assertEqual(capacity.recent_raw_target, 12000)
+        self.assertEqual(capacity.history_budget_limit, 64000)
+        capacity_history.assert_called_once_with(
+            static_system='BASE_SYSTEM',
+            pending_user_text='CURRENT_USER',
+            dynamic_state_text='ACCEPTED_STATE',
+        )
 
+
+
+    def test_capacity_policy_uses_existing_dynamic_history_budget_inputs(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.capacity_swap_prompt_target',
+            return_value=90000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ), mock.patch(
+            'chat.daily_runtime.compute_retained_transcript_token_budget',
+            return_value=42000,
+        ) as retained:
+            policy, version = dr._context_plan_policy(
+                mode='capacity',
+                static_system='STATIC_SYSTEM',
+                pending_user_text='CURRENT_USER',
+                dynamic_state_text='DYNAMIC_STATE',
+            )
+
+        self.assertEqual(policy.history_budget_limit, 42000)
+        self.assertEqual(policy.recent_raw_target, 12000)
+        self.assertEqual(version, 'continuity_context_budget_v2')
+        retained.assert_called_once_with(
+            static_system='STATIC_SYSTEM',
+            pending_user_text='CURRENT_USER',
+            dynamic_state_text='DYNAMIC_STATE',
+        )
+
+    def test_v2_recent_raw_policy_is_independent_of_sealing_authority(self):
+        self.assertEqual(dr.CONTINUITY_RECENT_RAW_TARGET_V2, 12_000)
+        policy_names = dr._context_plan_policy.__code__.co_names
+        self.assertNotIn('target_logical_size', policy_names)
+        self.assertNotIn('target_source_tokens', policy_names)
+
+    def test_gate_on_capacity_path_keeps_context_plan_as_single_selector(self):
+        names = dr._attempt_capacity_swap_before_stdin.__code__.co_names
+        self.assertIn('prepare_capacity_swap_for_context_plan', names)
+        self.assertNotIn('prepare_capacity_swap_for_plan', names)
+        self.assertNotIn('TOKEN_BUDGET_TAIL', names)
 
     def test_cold_rebuild_guard_does_not_change_rebuild_packing_policy(self):
         for guard_value in (60000, 70000, 80000):
@@ -4961,6 +5028,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
 
     def test_cold_planner_accepts_75k_plan_despite_legacy_guard(self):
         from continuity.context_plan import (
+            ContextBudgetPolicy,
             ContextChunkBinding,
             ContextSection,
             build_context_plan,
@@ -5051,9 +5119,17 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
             return_value=8000,
         ), mock.patch(
             'chat.context_lean.cc_history_token_budget',
-            return_value=0,
+            return_value=24000,
         ):
             policy, _version = dr._context_plan_policy(mode='cold')
+            # Isolate the compact-chunk packing contract from the mode-aware
+            # recent-raw priority, which has dedicated coverage elsewhere.
+            policy = ContextBudgetPolicy(
+                token_budget=policy.token_budget,
+                reserve_budget=policy.reserve_budget,
+                recent_raw_target=0,
+                history_budget_limit=policy.history_budget_limit,
+            )
         plan = build_context_plan(
             members,
             raw_members=members,
@@ -5074,7 +5150,7 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                     estimated_tokens=5000,
                 ),
             ),
-            budget_policy_version='continuity_context_budget_v1',
+            budget_policy_version=_version,
         )
 
         self.assertEqual(sum(member.logical_size for member in members), 80000)
@@ -5363,6 +5439,159 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         self.assertEqual(binding.claude_session_id, 'session-1')
         self.assertEqual(resident.generation, 1)
+
+    def test_v1_receipt_vs_v2_desired_plan_fails_closed(self):
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        plan.db_path = 'identity-test.db'
+        plan.user_message_id = 3
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        plan.hot_desired_plan.budget_policy_version = (
+            'continuity_context_budget_v2'
+        )
+        resident = types.SimpleNamespace(
+            session_id='session-1',
+            generation=1,
+            model_identity='model-1',
+            provider='claude_code',
+            bound_tool_surface_fingerprint='surface',
+        )
+        self.assertEqual(self._run_identity_reconcile(plan, resident), 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'budget_policy_version_mismatch')
+
+    def test_hot_source_scope_is_installed_history_plus_proven_native_tail(self):
+        from chat.context_receipt import ContextReceiptMember
+
+        installed = (
+            self._historical_receipt_member(
+                0, 'turn:old-a',
+                representation_kind='chunk',
+                representation_id='chunk:installed',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:old-b',
+                representation_kind='chunk',
+                representation_id='chunk:installed',
+            ),
+        )
+        current_request = ContextReceiptMember(
+            installed_order=2,
+            representation_id='current_request',
+            representation_kind='fixed',
+            source_ref='message:2',
+            source_revision='revision-message-2',
+            source_kind='current_request',
+            content_hash='content-message-2',
+            branch_id='active-transcript',
+        )
+        frozen = {
+            'receipt': object(),
+            'members': installed + (current_request,),
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'receipt_read_error': None,
+        }
+        plan = types.SimpleNamespace()
+        tail = self._historical_source('turn:native-tail')
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {'ready': True}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'pass', 'source_member': tail},
+        ):
+            scope = dr._hot_canonical_source_scope(
+                plan,
+                resident=object(),
+                frozen=frozen,
+            )
+        self.assertEqual(
+            scope,
+            tuple(dr._receipt_member_source_identity(item) for item in installed)
+            + (dr._source_member_identity(tail),),
+        )
+
+    def test_hot_source_scope_never_falls_back_to_full_window(self):
+        from chat.context_receipt import ContextReceiptMember
+
+        frozen = {
+            'receipt': object(),
+            'members': (
+                self._historical_receipt_member(0, 'turn:installed'),
+                ContextReceiptMember(
+                    installed_order=1,
+                    representation_id='current_request',
+                    representation_kind='fixed',
+                    source_ref='message:2',
+                    source_revision='revision-message-2',
+                    source_kind='current_request',
+                    content_hash='content-message-2',
+                    branch_id='active-transcript',
+                ),
+            ),
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'receipt_read_error': None,
+        }
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('RESPAWN', 'receipt_invalid', None),
+        ):
+            self.assertEqual(
+                dr._hot_canonical_source_scope(
+                    types.SimpleNamespace(),
+                    resident=object(),
+                    frozen=frozen,
+                ),
+                None,
+            )
+
+    def test_prepare_hot_passes_receipt_scoped_source_to_builder(self):
+        plan, context_plan, _desired = self._fake_hot_reconcile_plan()
+        captured = {}
+
+        def _build(
+            plan_arg,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            canonical_hot_source_scope=None,
+        ):
+            captured['scope'] = canonical_hot_source_scope
+            return context_plan, {}
+
+        with mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=(('installed',), ('native-tail',)),
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=_build,
+        ), mock.patch.object(
+            dr,
+            '_reconcile_hot_context_plan',
+            return_value='NO_OP',
+        ):
+            self.assertEqual(
+                dr._prepare_hot_context_plan(
+                    plan,
+                    resident=object(),
+                    static_system='STATIC',
+                ),
+                'NO_OP',
+            )
+        self.assertEqual(
+            captured['scope'],
+            (('installed',), ('native-tail',)),
+        )
 
     def test_hot_canonical_identity_change_respawns_with_identity_reason(self):
         canonical = 'explicit:claude-opus-5-5'
@@ -5941,7 +6170,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
             order.append('freeze')
             return plan_arg.hot_receipt_frozen
 
-        def _build(plan_arg, *, resident, static_system, mode='hot'):
+        def _build(
+            plan_arg,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            canonical_hot_source_scope=None,
+        ):
             order.append('build')
             self.assertIsNotNone(getattr(plan_arg, 'hot_receipt_frozen', None))
             return context_plan, {}
@@ -5950,6 +6186,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
             dr,
             '_freeze_hot_receipt',
             side_effect=_freeze,
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=(('installed',), ('native-tail',)),
         ), mock.patch.object(
             dr,
             '_build_production_context_plan',
@@ -5966,6 +6206,33 @@ class ContextPlanConsumerTests(unittest.TestCase):
         self.assertEqual(decision, 'NO_OP')
         self.assertEqual(plan.manifest['context_plan_id'], 'plan:one')
         self.assertEqual(plan.manifest['context_plan_hash'], 'plan-hash-one')
+
+    def test_prepare_hot_blocks_without_proven_source_scope(self):
+        plan, _context_plan, _desired = self._fake_hot_reconcile_plan()
+        with mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=None,
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as build:
+            with self.assertRaisesRegex(
+                dr.DailyRuntimeError,
+                'hot canonical source scope is not proven',
+            ):
+                dr._prepare_hot_context_plan(
+                    plan,
+                    resident=object(),
+                    static_system='STATIC',
+                )
+        build.assert_not_called()
+        self.assertEqual(plan.hot_decision, 'BLOCKED')
+        self.assertEqual(plan.hot_decision_reason, 'hot_source_scope_unproven')
 
     def test_hot_receipt_commit_uses_this_turn_plan_identity(self):
         from chat import context_receipt as receipt_store
@@ -6556,7 +6823,14 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         captured = {}
 
-        def _build(plan_arg, *, resident, static_system, mode='hot'):
+        def _build(
+            plan_arg,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            capacity_budget_static_system=None,
+        ):
             captured['mode'] = mode
             captured['resident'] = resident
             return chunk_plan, {'chunk:one': 'compressed'}

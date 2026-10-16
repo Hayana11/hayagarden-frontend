@@ -48,6 +48,7 @@ from chat.capacity_swap_runtime import (
     CAPACITY_BOUNDARY_REPRESENTATION,
     CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1,
     CapacitySwapStagedHooks,
+    compute_retained_transcript_token_budget,
     effective_static_system_for_registry,
     get_same_context_last_good,
     is_capacity_swap_reason,
@@ -70,6 +71,9 @@ DEFAULT_LEASE_TTL = 480
 LEASE_HEARTBEAT_INTERVAL = 50
 WORKER_ID = '%s:%s' % (socket.gethostname(), os.getpid())
 DAILY_TOOL_PROFILE = cc_resident.TOOL_PROFILE_UH_A0
+# Independent v2 product policy for ContextPlan recent raw. This is
+# deliberately separate from chunk sealing and total-history authorities.
+CONTINUITY_RECENT_RAW_TARGET_V2 = 12_000
 _HOT_FIXED_SECTION_KINDS = frozenset({
     'invariant_system',
     'accepted_state',
@@ -1258,7 +1262,13 @@ def _context_plan_consumer_enabled() -> bool:
         return False
 
 
-def _context_plan_policy(mode: str = 'hot') -> tuple[Any, str]:
+def _context_plan_policy(
+    mode: str = 'hot',
+    *,
+    static_system: str = '',
+    pending_user_text: str = '',
+    dynamic_state_text: str = '',
+) -> tuple[Any, str]:
     from chat.cold_bootstrap_budget import (
         capacity_swap_prompt_target,
         cold_prompt_target,
@@ -1282,11 +1292,27 @@ def _context_plan_policy(mode: str = 'hot') -> tuple[Any, str]:
         raise ValueError('unknown_context_plan_mode:%s' % policy_mode)
     reserve = int(cold_safety_margin())
     token_budget = target + reserve
-    recent_raw_target = int(cc_history_token_budget())
+    # v2 recent raw is an independent policy dimension; it is not
+    # derived from HISTORY_TOKEN_BUDGET or chunk-sealing settings.
+    recent_raw_target = (
+        0 if policy_mode == 'hot'
+        else CONTINUITY_RECENT_RAW_TARGET_V2
+    )
+    if policy_mode in ('cold', 'respawn'):
+        history_budget_limit = int(cc_history_token_budget())
+    elif policy_mode == 'capacity':
+        history_budget_limit = int(compute_retained_transcript_token_budget(
+            static_system=str(static_system or ''),
+            pending_user_text=str(pending_user_text or ''),
+            dynamic_state_text=str(dynamic_state_text or ''),
+        ))
+    else:
+        history_budget_limit = None
     policy = ContextBudgetPolicy(
         token_budget=token_budget,
         reserve_budget=reserve,
         recent_raw_target=recent_raw_target,
+        history_budget_limit=history_budget_limit,
     )
     return policy, CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION
 
@@ -1354,10 +1380,21 @@ def _build_production_context_plan(
     resident: Any,
     static_system: str,
     mode: str = 'hot',
+    capacity_budget_static_system: str | None = None,
+    canonical_hot_source_scope: tuple[tuple[Any, ...], ...] | None = None,
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
     from continuity.store import read_ready_surface
-    policy, policy_version = _context_plan_policy(mode=mode)
+    policy, policy_version = _context_plan_policy(
+        mode=mode,
+        static_system=(
+            capacity_budget_static_system
+            if capacity_budget_static_system is not None
+            else static_system
+        ),
+        pending_user_text=str(getattr(plan, 'user_content', '') or ''),
+        dynamic_state_text=str(_accepted_state_text(plan.assembly) or ''),
+    )
     store_path = _production_continuity_store_path(plan)
     surface = read_ready_surface(store_path)
     if surface.status == 'unavailable':
@@ -1401,6 +1438,11 @@ def _build_production_context_plan(
         accepted_fixed_sections=fixed_sections,
         budget_policy_version=policy_version,
         validated_ready_artifacts=validated_ready_artifacts,
+        source_member_scope=(
+            tuple(canonical_hot_source_scope or ())
+            if str(mode or 'hot').strip().lower() == 'hot'
+            else None
+        ),
     )
     if result.plan is None:
         raise DailyRuntimeError(
@@ -2428,6 +2470,49 @@ def _hot_live_identity_decision(
     return 'PASS', '', registry
 
 
+def _hot_canonical_source_scope(
+    plan: DailyTurnPlan,
+    *,
+    resident: Any,
+    frozen: dict[str, Any],
+) -> tuple[tuple[Any, ...], ...] | None:
+    """Return only installed history plus one proven native tail, or None."""
+    if not _hot_receipt_allows_chunk_filter(frozen):
+        return None
+    try:
+        identity_decision, _identity_reason, registry = _hot_live_identity_decision(
+            plan,
+            resident=resident,
+            frozen=frozen,
+        )
+        if identity_decision != 'PASS' or registry is None:
+            return None
+        tail = _hot_native_tail_proof(
+            plan,
+            frozen=frozen,
+            registry=registry,
+        )
+        if tail.get('status') != 'pass' or tail.get('source_member') is None:
+            return None
+        installed = tuple(
+            member for member in tuple(frozen.get('members') or ())
+            if str(getattr(member, 'representation_kind', '') or '')
+                in _HOT_HISTORICAL_REPRESENTATION_KINDS
+        )
+        installed_keys = tuple(
+            _receipt_member_source_identity(member) for member in installed
+        )
+        if len(set(installed_keys)) != len(installed_keys):
+            return None
+        tail_key = _source_member_identity(tail['source_member'])
+        if not tail_key or tail_key in installed_keys:
+            return None
+        return installed_keys + (tail_key,)
+    except Exception:
+        # Any inability to prove the receipt/native-tail scope must not fall
+        # back to the full application window.
+        return None
+
 def _hot_historical_compatibility(
     *,
     receipt_members: tuple[Any, ...],
@@ -2642,13 +2727,26 @@ def _prepare_hot_context_plan(
     resident: Any,
     static_system: str,
 ) -> str:
-    _freeze_hot_receipt(plan, resident=resident)
+    frozen = _freeze_hot_receipt(plan, resident=resident)
+    canonical_hot_source_scope = _hot_canonical_source_scope(
+        plan,
+        resident=resident,
+        frozen=frozen,
+    )
+    if canonical_hot_source_scope is None:
+        _set_hot_decision(plan, 'BLOCKED', 'hot_source_scope_unproven')
+        raise DailyRuntimeError(
+            'hot canonical source scope is not proven',
+            error_code='context_plan_hot_source_scope_unavailable',
+            retryable=False,
+        )
     try:
         context_plan, chunk_bodies = _build_production_context_plan(
             plan,
             resident=resident,
             static_system=static_system,
             mode='hot',
+            canonical_hot_source_scope=canonical_hot_source_scope,
         )
     except DailyRuntimeError as exc:
         _set_hot_decision(plan, 'BLOCKED', str(exc.error_code))
@@ -5393,6 +5491,7 @@ def _attempt_capacity_swap_before_stdin(
                 resident=None,
                 static_system=target_system,
                 mode='capacity',
+                capacity_budget_static_system=static_system,
             )
             plan.capacity_context_plan = context_plan
             plan.capacity_context_chunk_bodies = dict(chunk_bodies)
@@ -6841,6 +6940,7 @@ def _observe_continuity_shadow(
                         token_budget=target + reserve,
                         reserve_budget=reserve,
                         recent_raw_target=recent_raw_target,
+                        history_budget_limit=recent_raw_target,
                     )
                     fixed_sections = _build_continuity_shadow_fixed_sections(
                         plan=plan,
