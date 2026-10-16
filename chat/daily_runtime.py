@@ -48,6 +48,7 @@ from chat.capacity_swap_runtime import (
     CAPACITY_BOUNDARY_REPRESENTATION,
     CAPACITY_BOUNDARY_SYSTEM_SUFFIX_V1,
     CapacitySwapStagedHooks,
+    compute_retained_transcript_token_budget,
     effective_static_system_for_registry,
     get_same_context_last_good,
     is_capacity_swap_reason,
@@ -1258,7 +1259,13 @@ def _context_plan_consumer_enabled() -> bool:
         return False
 
 
-def _context_plan_policy(mode: str = 'hot') -> tuple[Any, str]:
+def _context_plan_policy(
+    mode: str = 'hot',
+    *,
+    static_system: str = '',
+    pending_user_text: str = '',
+    dynamic_state_text: str = '',
+) -> tuple[Any, str]:
     from chat.cold_bootstrap_budget import (
         capacity_swap_prompt_target,
         cold_prompt_target,
@@ -1283,10 +1290,21 @@ def _context_plan_policy(mode: str = 'hot') -> tuple[Any, str]:
     reserve = int(cold_safety_margin())
     token_budget = target + reserve
     recent_raw_target = int(cc_history_token_budget())
+    if policy_mode in ('cold', 'respawn'):
+        history_budget_limit = recent_raw_target
+    elif policy_mode == 'capacity':
+        history_budget_limit = int(compute_retained_transcript_token_budget(
+            static_system=str(static_system or ''),
+            pending_user_text=str(pending_user_text or ''),
+            dynamic_state_text=str(dynamic_state_text or ''),
+        ))
+    else:
+        history_budget_limit = None
     policy = ContextBudgetPolicy(
         token_budget=token_budget,
         reserve_budget=reserve,
         recent_raw_target=recent_raw_target,
+        history_budget_limit=history_budget_limit,
     )
     return policy, CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION
 
@@ -1354,10 +1372,20 @@ def _build_production_context_plan(
     resident: Any,
     static_system: str,
     mode: str = 'hot',
+    capacity_budget_static_system: str | None = None,
 ) -> tuple[Any, dict[str, str]]:
     """Build exactly one canonical plan from the explicit production DB."""
     from continuity.store import read_ready_surface
-    policy, policy_version = _context_plan_policy(mode=mode)
+    policy, policy_version = _context_plan_policy(
+        mode=mode,
+        static_system=(
+            capacity_budget_static_system
+            if capacity_budget_static_system is not None
+            else static_system
+        ),
+        pending_user_text=str(getattr(plan, 'user_content', '') or ''),
+        dynamic_state_text=str(_accepted_state_text(plan.assembly) or ''),
+    )
     store_path = _production_continuity_store_path(plan)
     surface = read_ready_surface(store_path)
     if surface.status == 'unavailable':
@@ -5393,6 +5421,7 @@ def _attempt_capacity_swap_before_stdin(
                 resident=None,
                 static_system=target_system,
                 mode='capacity',
+                capacity_budget_static_system=static_system,
             )
             plan.capacity_context_plan = context_plan
             plan.capacity_context_chunk_bodies = dict(chunk_bodies)
@@ -6841,6 +6870,7 @@ def _observe_continuity_shadow(
                         token_budget=target + reserve,
                         reserve_budget=reserve,
                         recent_raw_target=recent_raw_target,
+                        history_budget_limit=recent_raw_target,
                     )
                     fixed_sections = _build_continuity_shadow_fixed_sections(
                         plan=plan,
