@@ -1142,11 +1142,10 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         self.assertEqual(plan.recent_raw_source_seqs, (4,))
         self.assertEqual(plan.recent_raw_token_estimate, 10)
         self.assertLessEqual(plan.selected_token_estimate, 24)
-        selected_source_seqs = [
-            item.source_seqs for item in plan.representations
-        ]
-        self.assertIn((3,), selected_source_seqs)
-        self.assertEqual(plan.representations[-1].source_seqs, (4,))
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(4,)],
+        )
 
 
 if __name__ == '__main__':
