@@ -5431,6 +5431,159 @@ class ContextPlanConsumerTests(unittest.TestCase):
         self.assertEqual(binding.claude_session_id, 'session-1')
         self.assertEqual(resident.generation, 1)
 
+    def test_v1_receipt_vs_v2_desired_plan_fails_closed(self):
+        plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan()
+        plan.db_path = 'identity-test.db'
+        plan.user_message_id = 3
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        plan.hot_desired_plan.budget_policy_version = (
+            'continuity_context_budget_v2'
+        )
+        resident = types.SimpleNamespace(
+            session_id='session-1',
+            generation=1,
+            model_identity='model-1',
+            provider='claude_code',
+            bound_tool_surface_fingerprint='surface',
+        )
+        self.assertEqual(self._run_identity_reconcile(plan, resident), 'RESPAWN')
+        self.assertEqual(plan.hot_decision_reason, 'budget_policy_version_mismatch')
+
+    def test_hot_source_scope_is_installed_history_plus_proven_native_tail(self):
+        from chat.context_receipt import ContextReceiptMember
+
+        installed = (
+            self._historical_receipt_member(
+                0, 'turn:old-a',
+                representation_kind='chunk',
+                representation_id='chunk:installed',
+            ),
+            self._historical_receipt_member(
+                1, 'turn:old-b',
+                representation_kind='chunk',
+                representation_id='chunk:installed',
+            ),
+        )
+        current_request = ContextReceiptMember(
+            installed_order=2,
+            representation_id='current_request',
+            representation_kind='fixed',
+            source_ref='message:2',
+            source_revision='revision-message-2',
+            source_kind='current_request',
+            content_hash='content-message-2',
+            branch_id='active-transcript',
+        )
+        frozen = {
+            'receipt': object(),
+            'members': installed + (current_request,),
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'receipt_read_error': None,
+        }
+        plan = types.SimpleNamespace()
+        tail = self._historical_source('turn:native-tail')
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('PASS', '', {'ready': True}),
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'pass', 'source_member': tail},
+        ):
+            scope = dr._hot_canonical_source_scope(
+                plan,
+                resident=object(),
+                frozen=frozen,
+            )
+        self.assertEqual(
+            scope,
+            tuple(dr._receipt_member_source_identity(item) for item in installed)
+            + (dr._source_member_identity(tail),),
+        )
+
+    def test_hot_source_scope_never_falls_back_to_full_window(self):
+        from chat.context_receipt import ContextReceiptMember
+
+        frozen = {
+            'receipt': object(),
+            'members': (
+                self._historical_receipt_member(0, 'turn:installed'),
+                ContextReceiptMember(
+                    installed_order=1,
+                    representation_id='current_request',
+                    representation_kind='fixed',
+                    source_ref='message:2',
+                    source_revision='revision-message-2',
+                    source_kind='current_request',
+                    content_hash='content-message-2',
+                    branch_id='active-transcript',
+                ),
+            ),
+            'receipt_members_complete': True,
+            'membership_valid': True,
+            'receipt_read_error': None,
+        }
+        with mock.patch.object(
+            dr,
+            '_hot_live_identity_decision',
+            return_value=('RESPAWN', 'receipt_invalid', None),
+        ):
+            self.assertEqual(
+                dr._hot_canonical_source_scope(
+                    types.SimpleNamespace(),
+                    resident=object(),
+                    frozen=frozen,
+                ),
+                (),
+            )
+
+    def test_prepare_hot_passes_receipt_scoped_source_to_builder(self):
+        plan, context_plan, _desired = self._fake_hot_reconcile_plan()
+        captured = {}
+
+        def _build(
+            plan_arg,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            canonical_hot_source_scope=None,
+        ):
+            captured['scope'] = canonical_hot_source_scope
+            return context_plan, {}
+
+        with mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value=plan.hot_receipt_frozen,
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=(('installed',), ('native-tail',)),
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=_build,
+        ), mock.patch.object(
+            dr,
+            '_reconcile_hot_context_plan',
+            return_value='NO_OP',
+        ):
+            self.assertEqual(
+                dr._prepare_hot_context_plan(
+                    plan,
+                    resident=object(),
+                    static_system='STATIC',
+                ),
+                'NO_OP',
+            )
+        self.assertEqual(
+            captured['scope'],
+            (('installed',), ('native-tail',)),
+        )
+
     def test_hot_canonical_identity_change_respawns_with_identity_reason(self):
         canonical = 'explicit:claude-opus-5-5'
         plan, _context_plan, _desired_members = self._fake_hot_reconcile_plan(
