@@ -209,7 +209,7 @@ class ChatTerminalContractTests(unittest.TestCase):
         self.assertEqual(hot_scope['message_id'], message_id)
         self.assertEqual(hot_scope['stage'], 'native_tail')
         self.assertEqual(hot_scope['reason'], 'same_context_last_good_missing')
-        self.assertNotIn(secret, '\\n'.join(captured.output))
+        self.assertNotIn(secret, '\n'.join(captured.output))
 
     def test_t6b_terminal_wrapper_releases_lock_and_stops_at_first_terminal(self):
         source = (pathlib.Path(__file__).resolve().parents[1] / 'gateway.py').read_text(encoding='utf-8')
