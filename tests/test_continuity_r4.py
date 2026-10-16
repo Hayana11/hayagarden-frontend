@@ -1185,7 +1185,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
                 members,
                 seqs=(index,),
                 chunk_id=f'chunk:older-{index}',
-                body='x' * 40,
+                body='x' * 32_000,
             )
             for index in range(2)
         )
