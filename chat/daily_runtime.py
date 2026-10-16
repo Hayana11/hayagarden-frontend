@@ -2475,32 +2475,39 @@ def _hot_canonical_source_scope(
     """Return only installed historical members plus one proven native tail."""
     if not _hot_receipt_allows_chunk_filter(frozen):
         return ()
-    identity_decision, _identity_reason, registry = _hot_live_identity_decision(
-        plan,
-        resident=resident,
-        frozen=frozen,
-    )
-    if identity_decision != 'PASS' or registry is None:
+    try:
+        identity_decision, _identity_reason, registry = _hot_live_identity_decision(
+            plan,
+            resident=resident,
+            frozen=frozen,
+        )
+        if identity_decision != 'PASS' or registry is None:
+            return ()
+        tail = _hot_native_tail_proof(
+            plan,
+            frozen=frozen,
+            registry=registry,
+        )
+        if tail.get('status') != 'pass' or tail.get('source_member') is None:
+            return ()
+        installed = tuple(
+            member for member in tuple(frozen.get('members') or ())
+            if str(getattr(member, 'representation_kind', '') or '')
+                in _HOT_HISTORICAL_REPRESENTATION_KINDS
+        )
+        installed_keys = tuple(
+            _receipt_member_source_identity(member) for member in installed
+        )
+        if len(set(installed_keys)) != len(installed_keys):
+            return ()
+        tail_key = _source_member_identity(tail['source_member'])
+        if not tail_key or tail_key in installed_keys:
+            return ()
+        return installed_keys + (tail_key,)
+    except Exception:
+        # Any inability to prove the receipt/native-tail scope must not fall
+        # back to the full application window.
         return ()
-    tail = _hot_native_tail_proof(
-        plan,
-        frozen=frozen,
-        registry=registry,
-    )
-    if tail.get('status') != 'pass' or tail.get('source_member') is None:
-        return ()
-    installed = tuple(
-        member for member in tuple(frozen.get('members') or ())
-        if str(getattr(member, 'representation_kind', '') or '')
-            in _HOT_HISTORICAL_REPRESENTATION_KINDS
-    )
-    installed_keys = tuple(_receipt_member_source_identity(member) for member in installed)
-    if len(set(installed_keys)) != len(installed_keys):
-        return ()
-    tail_key = _source_member_identity(tail['source_member'])
-    if not tail_key or tail_key in installed_keys:
-        return ()
-    return installed_keys + (tail_key,)
 
 
 def _hot_historical_compatibility(
