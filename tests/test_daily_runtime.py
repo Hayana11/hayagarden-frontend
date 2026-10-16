@@ -4765,7 +4765,7 @@ class ContinuityShadowObservationTests(unittest.TestCase):
 
 
 class ContextPlanBudgetAuthorityTests(unittest.TestCase):
-    def test_policy_maps_canonical_authority_without_semantic_version_change(self):
+    def test_policy_maps_canonical_authority_with_semantic_version_v2(self):
         with mock.patch(
             'chat.cold_bootstrap_budget.cold_prompt_target',
             return_value=90000,
@@ -4782,7 +4782,8 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(policy.reserve_budget, 8000)
         self.assertEqual(policy.usable_budget, 90000)
         self.assertEqual(policy.recent_raw_target, 24000)
-        self.assertEqual(version, 'continuity_context_budget_v1')
+        self.assertIsNone(policy.history_budget_limit)
+        self.assertEqual(version, 'continuity_context_budget_v2')
         target.assert_called_once_with()
         reserve.assert_called_once_with()
         recent_raw.assert_called_once_with()
@@ -4815,8 +4816,9 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                     policy.reserve_budget,
                     policy.usable_budget,
                     policy.recent_raw_target,
+                    policy.history_budget_limit,
                 ),
-                (token_budget, reserve_value, target_value, recent_value),
+                (token_budget, reserve_value, target_value, recent_value, None),
             )
 
     def test_legacy_context_plan_budget_keys_are_not_read_or_authoritative(self):
@@ -4851,8 +4853,9 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
                 policy.reserve_budget,
                 policy.usable_budget,
                 policy.recent_raw_target,
+                policy.history_budget_limit,
             ),
-            (76000, 6000, 70000, 18000),
+            (76000, 6000, 70000, 18000, None),
         )
         self.assertFalse(
             any(
@@ -4885,19 +4888,71 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         ), mock.patch(
             'chat.context_lean.cc_history_token_budget',
             return_value=24000,
-        ):
+        ), mock.patch(
+            'chat.daily_runtime.compute_retained_transcript_token_budget',
+            return_value=64000,
+        ) as capacity_history:
             cold, _ = dr._context_plan_policy(mode='cold')
             respawn, _ = dr._context_plan_policy(mode='respawn')
             hot, _ = dr._context_plan_policy(mode='hot')
-            capacity, _ = dr._context_plan_policy(mode='capacity')
+            capacity, _ = dr._context_plan_policy(
+                mode='capacity',
+                static_system='BASE_SYSTEM',
+                pending_user_text='CURRENT_USER',
+                dynamic_state_text='ACCEPTED_STATE',
+            )
 
         self.assertEqual(cold.token_budget, 98000)
         self.assertEqual(respawn.token_budget, 98000)
         self.assertEqual(cold.usable_budget, 90000)
         self.assertEqual(respawn.usable_budget, 90000)
         self.assertEqual(hot.usable_budget, 150000)
+        self.assertIsNone(hot.history_budget_limit)
         self.assertEqual(capacity.usable_budget, 90000)
+        self.assertEqual(capacity.history_budget_limit, 64000)
+        capacity_history.assert_called_once_with(
+            static_system='BASE_SYSTEM',
+            pending_user_text='CURRENT_USER',
+            dynamic_state_text='ACCEPTED_STATE',
+        )
 
+
+
+    def test_capacity_policy_uses_existing_dynamic_history_budget_inputs(self):
+        with mock.patch(
+            'chat.cold_bootstrap_budget.capacity_swap_prompt_target',
+            return_value=90000,
+        ), mock.patch(
+            'chat.cold_bootstrap_budget.cold_safety_margin',
+            return_value=8000,
+        ), mock.patch(
+            'chat.context_lean.cc_history_token_budget',
+            return_value=24000,
+        ), mock.patch(
+            'chat.daily_runtime.compute_retained_transcript_token_budget',
+            return_value=42000,
+        ) as retained:
+            policy, version = dr._context_plan_policy(
+                mode='capacity',
+                static_system='STATIC_SYSTEM',
+                pending_user_text='CURRENT_USER',
+                dynamic_state_text='DYNAMIC_STATE',
+            )
+
+        self.assertEqual(policy.history_budget_limit, 42000)
+        self.assertEqual(policy.recent_raw_target, 24000)
+        self.assertEqual(version, 'continuity_context_budget_v2')
+        retained.assert_called_once_with(
+            static_system='STATIC_SYSTEM',
+            pending_user_text='CURRENT_USER',
+            dynamic_state_text='DYNAMIC_STATE',
+        )
+
+    def test_gate_on_capacity_path_keeps_context_plan_as_single_selector(self):
+        names = dr._attempt_capacity_swap_before_stdin.__code__.co_names
+        self.assertIn('prepare_capacity_swap_for_context_plan', names)
+        self.assertNotIn('prepare_capacity_swap_for_plan', names)
+        self.assertNotIn('TOKEN_BUDGET_TAIL', names)
 
     def test_cold_rebuild_guard_does_not_change_rebuild_packing_policy(self):
         for guard_value in (60000, 70000, 80000):
