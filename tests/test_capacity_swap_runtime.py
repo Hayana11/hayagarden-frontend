@@ -2099,6 +2099,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 content_hash='anchor-hash',
             ),
         ), mock.patch(
+            'chat.capacity_swap._estimate_canonical_token_count',
+            return_value=1,
+        ), mock.patch(
             'chat.capacity_swap_runtime._capacity_context_source_member_from_db',
             side_effect=lambda **kwargs: source_members[
                 'turn:%d:%d' % (kwargs['user_id'], kwargs['assistant_id'])
@@ -2206,6 +2209,7 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 source_ref='message:1',
                 source_revision='anchor-revision',
                 content_hash='anchor-hash',
+                estimated_tokens=1,
                 status='ANCHOR_RETAINED',
             ),
             window_anchor_status='ANCHOR_RETAINED',
@@ -2277,6 +2281,9 @@ class ContextPlanCapacityCarrierTests(unittest.TestCase):
                 source_revision='anchor-revision',
                 content_hash='anchor-hash',
             ),
+        ), mock.patch(
+            'chat.capacity_swap._estimate_canonical_token_count',
+            return_value=1,
         ), mock.patch(
             'chat.capacity_swap_runtime._validate_context_plan_round_mapping',
             return_value=(),

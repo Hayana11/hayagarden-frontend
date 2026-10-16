@@ -289,7 +289,7 @@ def _window_anchor_section(
     *,
     anchor_token_budget: int,
 ) -> tuple[ContextSection | None, str]:
-    """Bind the first formal user as metadata; no provider payload is built here."""
+    """Bind the first formal user to its canonical provider payload identity."""
     first_user = next(
         (row for row in history_rows if is_formal_user_source_row(row)),
         None,
@@ -298,19 +298,49 @@ def _window_anchor_section(
         return None, 'ANCHOR_UNAVAILABLE'
     try:
         evidence = evidence_ref(first_user, prefix='message')
-    except (TypeError, ValueError, KeyError):
+        from chat.attachment_contract import provider_current_turn_attachments
+        from chat.capacity_swap import _estimate_canonical_token_count
+        from chat.context_window_preview import _canonical_user_payload_from_db
+
+        canonical = _canonical_user_payload_from_db(
+            content=str(first_user.get('content') or ''),
+            image_url=str(first_user.get('image_url') or ''),
+            file_url=str(first_user.get('file_url') or ''),
+            file_name=str(first_user.get('file_name') or ''),
+            attachments=first_user.get('attachments'),
+        )
+        if (
+            canonical is None
+            or (isinstance(canonical, str) and not canonical.strip())
+            or (isinstance(canonical, list) and not canonical)
+        ):
+            return None, 'ANCHOR_UNAVAILABLE'
+        normalized_attachments = provider_current_turn_attachments(
+            first_user.get('attachments') or [],
+            legacy_image_url=first_user.get('image_url') or '',
+            legacy_file_url=first_user.get('file_url') or '',
+            legacy_file_name=first_user.get('file_name') or '',
+        )
+        has_image_attachment = any(
+            item.get('type') == 'image' for item in normalized_attachments
+        )
+        status = (
+            'ANCHOR_IMAGE_DEGRADED'
+            if has_image_attachment and isinstance(canonical, str)
+            else 'ANCHOR_RETAINED'
+        )
+        provider_tokens = int(_estimate_canonical_token_count(canonical))
+    except Exception:
         return None, 'ANCHOR_UNAVAILABLE'
-    status = (
-        'ANCHOR_TOO_LARGE'
-        if int(evidence.logical_size) > int(anchor_token_budget)
-        else 'ANCHOR_RETAINED'
-    )
+
+    if provider_tokens > int(anchor_token_budget):
+        status = 'ANCHOR_TOO_LARGE'
     return ContextSection(
         kind='window_anchor',
         source_ref=evidence.source_ref,
         source_revision=evidence.source_revision,
         content_hash=evidence.content_hash,
-        estimated_tokens=int(evidence.logical_size),
+        estimated_tokens=provider_tokens,
         status=status,
     ), status
 
@@ -487,6 +517,7 @@ def build_daily_continuity_shadow_plan(
             return _blocked('invalid_current_request')
         window_anchor = None
         window_anchor_status = ''
+        window_anchor_member_source_refs: tuple[str, ...] = ()
         if window_anchor_enabled:
             try:
                 window_anchor, window_anchor_status = _window_anchor_section(
@@ -495,6 +526,13 @@ def build_daily_continuity_shadow_plan(
                 )
             except (TypeError, ValueError):
                 return _blocked('window_anchor_unavailable')
+            if window_anchor is not None:
+                window_anchor_member_source_refs = tuple(
+                    str(turn.turn_id)
+                    for turn in turns
+                    if str(getattr(turn.user_input_ref, 'source_ref', '') or '')
+                    == str(window_anchor.source_ref)
+                )
 
         try:
             store_path = (
@@ -526,6 +564,7 @@ def build_daily_continuity_shadow_plan(
                 budget_policy_version=str(budget_policy_version or '').strip(),
                 window_anchor=window_anchor,
                 window_anchor_status=window_anchor_status,
+                window_anchor_member_source_refs=window_anchor_member_source_refs,
             )
         except ValueError:
             return _blocked('invalid_fixed_sections')

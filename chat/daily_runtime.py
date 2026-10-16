@@ -3534,6 +3534,10 @@ def _validate_production_context_install(
                         error_code='context_plan_capacity_anchor_parity_failed',
                     )
                 try:
+                    from chat.capacity_swap import _estimate_canonical_token_count
+                    from chat.context_window_preview import (
+                        _canonical_user_payload_from_db,
+                    )
                     from continuity.sources import evidence_ref
                     anchor_mid = _message_id_from_source_ref(
                         anchor_sections[0].source_ref
@@ -3549,6 +3553,13 @@ def _validate_production_context_install(
                     if anchor_row is None:
                         raise ValueError('anchor source row is unavailable')
                     anchor_evidence = evidence_ref(anchor_row, prefix='message')
+                    anchor_canonical = _canonical_user_payload_from_db(
+                        content=str(anchor_row.get('content') or ''),
+                        image_url=str(anchor_row.get('image_url') or ''),
+                        file_url=str(anchor_row.get('file_url') or ''),
+                        file_name=str(anchor_row.get('file_name') or ''),
+                        attachments=anchor_row.get('attachments'),
+                    )
                     actual_anchor_identity = (
                         str(anchor_sections[0].source_ref),
                         str(getattr(anchor_sections[0], 'source_revision', '') or ''),
@@ -3559,20 +3570,28 @@ def _validate_production_context_install(
                         str(anchor_evidence.source_ref),
                         str(anchor_evidence.source_revision),
                         str(anchor_evidence.content_hash),
-                        int(anchor_evidence.logical_size),
+                        int(_estimate_canonical_token_count(anchor_canonical)),
                     )
                     if actual_anchor_identity != expected_anchor_identity:
-                        raise ValueError('anchor source identity differs')
+                        raise ValueError('anchor source identity or provider cost differs')
                 except Exception as exc:
                     raise DailyRuntimeError(
                         'ContextPlan window anchor proof does not match source',
                         error_code='context_plan_capacity_anchor_parity_failed',
                     ) from exc
-            elif len(anchor_sections) > 1:
-                raise DailyRuntimeError(
-                    'Capacity ContextPlan has duplicate anchor sections',
-                    error_code='context_plan_capacity_anchor_parity_failed',
-                )
+            else:
+                if bool(
+                    plan.manifest.get('capacity_context_anchor_satisfied')
+                ):
+                    raise DailyRuntimeError(
+                        'non-retained Capacity anchor was marked satisfied',
+                        error_code='context_plan_capacity_anchor_parity_failed',
+                    )
+                if len(anchor_sections) > 1:
+                    raise DailyRuntimeError(
+                        'Capacity ContextPlan has duplicate anchor sections',
+                        error_code='context_plan_capacity_anchor_parity_failed',
+                    )
         if not assembly.get('capacity_context_bootstrap'):
             raise DailyRuntimeError(
                 'Capacity first-stdin bootstrap is missing',

@@ -345,6 +345,7 @@ class ContextPlan:
     budget_policy_version: str = ''
     window_anchor: ContextSection | None = None
     window_anchor_status: str = ''
+    window_anchor_raw_satisfied: bool = False
 
     @property
     def valid(self) -> bool:
@@ -369,7 +370,11 @@ class ContextPlan:
     @property
     def window_anchor_token_estimate(self) -> int:
         section = self.window_anchor
-        if section is None or str(self.window_anchor_status or '') not in _WINDOW_ANCHOR_RETAINED_STATUSES:
+        if (
+            section is None
+            or self.window_anchor_raw_satisfied
+            or str(self.window_anchor_status or '') not in _WINDOW_ANCHOR_RETAINED_STATUSES
+        ):
             return 0
         return int(section.estimated_tokens)
 
@@ -388,8 +393,11 @@ class ContextPlan:
             for section in self.ordered_sections
             if (
                 section.kind not in _WINDOW_ANCHOR_SECTION_KINDS
-                or str(getattr(section, 'status', '') or '')
-                    in _WINDOW_ANCHOR_RETAINED_STATUSES
+                or (
+                    not self.window_anchor_raw_satisfied
+                    and str(getattr(section, 'status', '') or '')
+                        in _WINDOW_ANCHOR_RETAINED_STATUSES
+                )
             )
         )
 
@@ -586,6 +594,7 @@ def _identity_payload(
     recent_raw_source_seqs: Sequence[int] = (),
     budget_policy_version: str = '',
     window_anchor_status: str = '',
+    window_anchor_raw_satisfied: bool = False,
 ) -> dict[str, Any]:
     normalized_version = str(budget_policy_version or '').strip()
     budget_identity = None
@@ -637,7 +646,28 @@ def _identity_payload(
         payload['budget_policy_version'] = normalized_version
     if str(window_anchor_status or '').strip():
         payload['window_anchor_status'] = str(window_anchor_status).strip()
+        payload['window_anchor_raw_satisfied'] = bool(window_anchor_raw_satisfied)
     return payload
+
+
+def _raw_satisfies_window_anchor(
+    representations: Sequence[ContextRepresentation],
+    member_source_refs: Sequence[str],
+) -> bool:
+    expected_refs = frozenset(
+        str(ref or '').strip() for ref in member_source_refs if str(ref or '').strip()
+    )
+    if not expected_refs:
+        return False
+    return any(
+        representation.kind == 'raw'
+        and any(
+            str(member.source_ref or '') in expected_refs
+            for member in representation.source_members
+        )
+        for representation in representations
+    )
+
 
 def _member_overlap(left: SourceMember, right: SourceMember) -> bool:
     if left.source_ref != right.source_ref:
@@ -771,6 +801,7 @@ def build_context_plan(
     budget_policy_version: str = '',
     window_anchor: ContextSection | None = None,
     window_anchor_status: WindowAnchorStatus | str = '',
+    window_anchor_member_source_refs: Sequence[str] = (),
 ) -> ContextPlan:
     """Select exact raw/chunk representations for one required source set."""
     expected = _ordered(expected_members)
@@ -992,16 +1023,37 @@ def build_context_plan(
             source_ref=window_anchor.source_ref,
         ))
 
-    selected, budget_status = _apply_budget(
+    fixed_cost = sum(
+        int(section.estimated_tokens)
+        for section in accepted_fixed_sections.values()
+    )
+    probe_exclusions: list[ContextPlanExclusion] = []
+    probe_selected, probe_status = _apply_budget(
         coverage_selected,
         budget_policy=budget_policy,
         recent_raw_keys=recent_raw_keys,
-        fixed_token_estimate=sum(
-            int(section.estimated_tokens)
-            for section in accepted_fixed_sections.values()
-        ) + anchor_cost,
-        exclusions=exclusions,
+        fixed_token_estimate=fixed_cost,
+        exclusions=probe_exclusions,
     )
+    window_anchor_raw_satisfied = _raw_satisfies_window_anchor(
+        probe_selected,
+        window_anchor_member_source_refs,
+    )
+    if (
+        window_anchor is not None
+        and normalized_anchor_status in _WINDOW_ANCHOR_RETAINED_STATUSES
+        and not window_anchor_raw_satisfied
+    ):
+        selected, budget_status = _apply_budget(
+            coverage_selected,
+            budget_policy=budget_policy,
+            recent_raw_keys=recent_raw_keys,
+            fixed_token_estimate=fixed_cost + anchor_cost,
+            exclusions=exclusions,
+        )
+    else:
+        exclusions.extend(probe_exclusions)
+        selected, budget_status = probe_selected, probe_status
     selected = tuple(sorted(
         selected,
         key=lambda representation: (
@@ -1027,6 +1079,7 @@ def build_context_plan(
         budget_status=budget_status,
         budget_policy_version=budget_policy_version,
         window_anchor_status=normalized_anchor_status,
+        window_anchor_raw_satisfied=window_anchor_raw_satisfied,
         recent_raw_source_seqs=tuple(
             sorted(int(member.seq) for member in expected if _member_key(member) in recent_raw_keys)
         ),
@@ -1052,6 +1105,7 @@ def build_context_plan(
         budget_policy_version=budget_policy_version,
         window_anchor=window_anchor,
         window_anchor_status=normalized_anchor_status,
+        window_anchor_raw_satisfied=window_anchor_raw_satisfied,
     )
 
 

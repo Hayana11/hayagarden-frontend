@@ -736,6 +736,102 @@ class ContextPlanTests(unittest.TestCase):
         self.assertEqual(too_large.window_anchor_token_estimate, 0)
         self.assertEqual(too_large.ordered_section_token_estimate, 60)
 
+    def test_raw_satisfied_anchor_has_no_incremental_budget_cost(self):
+        members = (
+            _member(0, ref='turn:1:2', logical_size=10),
+            _member(1, ref='turn:3:4', logical_size=10),
+        )
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=30,
+                reserve_budget=0,
+                recent_raw_target=0,
+            ),
+            fixed_sections=(
+                self._section('invariant_system', estimated_tokens=2),
+                self._section('current_request', estimated_tokens=1),
+            ),
+            window_anchor=self._window_anchor(tokens=7),
+            window_anchor_member_source_refs=('turn:1:2',),
+        )
+        self.assertTrue(plan.window_anchor_raw_satisfied)
+        self.assertEqual(plan.window_anchor_token_estimate, 0)
+        self.assertEqual(plan.selected_token_estimate, 20)
+        self.assertEqual(plan.ordered_section_token_estimate, 23)
+        self.assertEqual(plan.remaining_budget, 7)
+
+    def test_standalone_anchor_cost_is_counted_once(self):
+        members = (
+            _member(0, ref='turn:1:2', logical_size=10),
+            _member(1, ref='turn:3:4', logical_size=10),
+        )
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=40,
+                reserve_budget=0,
+                recent_raw_target=0,
+            ),
+            fixed_sections=(
+                self._section('invariant_system', estimated_tokens=2),
+                self._section('current_request', estimated_tokens=1),
+            ),
+            window_anchor=self._window_anchor(tokens=7),
+        )
+        self.assertFalse(plan.window_anchor_raw_satisfied)
+        self.assertEqual(plan.window_anchor_token_estimate, 7)
+        self.assertEqual(plan.selected_token_estimate, 20)
+        self.assertEqual(plan.ordered_section_token_estimate, 30)
+        self.assertEqual(plan.remaining_budget, 10)
+
+    def test_chunk_does_not_satisfy_exact_window_anchor(self):
+        members = (
+            _member(0, ref='turn:1:2', logical_size=10),
+            _member(1, ref='turn:3:4', logical_size=10),
+        )
+        plan = build_context_plan(
+            members,
+            chunks=(_binding(members, seqs=(0,)),),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=40,
+                reserve_budget=0,
+                recent_raw_target=0,
+            ),
+            fixed_sections=(
+                self._section('invariant_system', estimated_tokens=2),
+                self._section('current_request', estimated_tokens=1),
+            ),
+            window_anchor=self._window_anchor(tokens=7),
+            window_anchor_member_source_refs=('turn:1:2',),
+        )
+        self.assertFalse(plan.window_anchor_raw_satisfied)
+        self.assertEqual(plan.window_anchor_token_estimate, 7)
+        self.assertEqual(
+            [representation.kind for representation in plan.representations],
+            ['chunk', 'raw'],
+        )
+
+    def test_older_exact_raw_with_anchor_survives_without_extra_cost(self):
+        members = tuple(
+            _member(index, ref=f'turn:{index + 1}:{index + 2}', logical_size=3)
+            for index in range(3)
+        )
+        plan = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=40,
+                reserve_budget=0,
+                recent_raw_target=5,
+            ),
+            window_anchor=self._window_anchor(tokens=7),
+            window_anchor_member_source_refs=('turn:1:2',),
+        )
+        self.assertTrue(plan.window_anchor_raw_satisfied)
+        self.assertEqual(plan.window_anchor_token_estimate, 0)
+        self.assertEqual(plan.older_representation_token_estimate, 3)
+        self.assertEqual(plan.recent_raw_token_estimate, 6)
+
     def test_history_sections_reference_selected_representations(self):
         plan = build_context_plan(
             self.members,
