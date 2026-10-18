@@ -807,7 +807,7 @@ def run_targeted_cold_bridge(
                 snapshot,
                 generator_policy_version=GENERATOR_POLICY_VERSION,
                 prompt_policy_version=PROMPT_POLICY_VERSION,
-                measurement_semantics=MEASUREMENT_SEMANTICS,
+                measurement_semantics=str(settings_binding['measurement_semantics']),
                 settings_binding=settings_binding,
                 now=stamp,
             )

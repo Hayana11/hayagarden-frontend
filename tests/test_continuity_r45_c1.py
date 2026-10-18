@@ -648,7 +648,7 @@ class ProducerTests(unittest.TestCase):
             derive_autonomous_events(rows, chat_id='default'),
         )
 
-    def _prepare_target_store(self):
+    def _prepare_target_store(self, *, measurement_semantics=None):
         conn = sqlite3.connect(str(self.store_path))
         conn.row_factory = sqlite3.Row
         try:
@@ -660,12 +660,51 @@ class ProducerTests(unittest.TestCase):
                 persona_text=PERSONA,
                 now='2026-09-14T00:00:00+00:00',
             )
+            if measurement_semantics is not None:
+                active_revision_id = conn.execute(
+                    'SELECT active_revision_id '
+                    'FROM continuity_settings_authority WHERE singleton_id=1'
+                ).fetchone()[0]
+                frozen_revision_id = 'continuity-settings-test-frozen-v9'
+                conn.execute(
+                    'INSERT INTO continuity_settings_revisions ('
+                    'revision_id, revision_seq, created_at, created_by, source, '
+                    'lifecycle, target_logical_size, max_completed_turns, '
+                    'provider, model_identity, prompt_body, prompt_hash, '
+                    'prompt_revision, prompt_policy_version, persona_body, '
+                    'persona_hash, persona_revision, persona_policy_version, '
+                    'measurement_semantics, sealing_policy_version'
+                    ') SELECT ?, 2, ?, ?, ?, lifecycle, target_logical_size, '
+                    'max_completed_turns, provider, model_identity, prompt_body, '
+                    'prompt_hash, prompt_revision, prompt_policy_version, '
+                    'persona_body, persona_hash, persona_revision, '
+                    'persona_policy_version, ?, sealing_policy_version '
+                    'FROM continuity_settings_revisions WHERE revision_id=?',
+                    (
+                        frozen_revision_id,
+                        '2026-09-14T00:00:00+00:00',
+                        'test',
+                        'r2_2_measurement_authority',
+                        measurement_semantics,
+                        active_revision_id,
+                    ),
+                )
+                conn.execute(
+                    'UPDATE continuity_settings_authority SET '
+                    'active_revision_id=?, pending_revision_id=NULL, '
+                    'pending_anchor_json=NULL, updated_at=? '
+                    'WHERE singleton_id=1',
+                    (frozen_revision_id, '2026-09-14T00:00:00+00:00'),
+                )
+                conn.commit()
         finally:
             conn.close()
 
     def test_targeted_cold_bridge_rebases_nonzero_seq_and_replays_ready(self):
         self._write_source(self._turns(3))
-        self._prepare_target_store()
+        self._prepare_target_store(
+            measurement_semantics='test-frozen-measurement-v9',
+        )
         members = tuple(
             replace(member, seq=659 + index)
             for index, member in enumerate(self._canonical_members())
@@ -726,6 +765,21 @@ class ProducerTests(unittest.TestCase):
                 ).fetchone()[0],
                 1,
             )
+            job_semantics, job_settings_revision_id, pending_revision_id = conn.execute(
+                'SELECT job.measurement_semantics, job.settings_revision_id, '
+                'authority.pending_revision_id '
+                'FROM continuity_generation_jobs AS job '
+                'JOIN continuity_settings_authority AS authority '
+                'ON authority.singleton_id=1'
+            ).fetchone()
+            from continuity.chunk_generation import MEASUREMENT_SEMANTICS
+            self.assertEqual(job_semantics, 'test-frozen-measurement-v9')
+            self.assertNotEqual(job_semantics, MEASUREMENT_SEMANTICS)
+            self.assertEqual(
+                job_settings_revision_id,
+                'continuity-settings-test-frozen-v9',
+            )
+            self.assertIsNone(pending_revision_id)
             snapshot_members = conn.execute(
                 'SELECT * FROM continuity_source_members ORDER BY seq'
             ).fetchall()
