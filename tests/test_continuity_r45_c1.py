@@ -8,8 +8,18 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from continuity.producer import run_continuity_producer
+from continuity.producer import (
+    run_continuity_producer,
+    run_targeted_cold_bridge,
+)
 from continuity.sealing import SealingPolicy
+from continuity.settings import ensure_authority
+from continuity.sources import (
+    build_source_members,
+    derive_autonomous_events,
+    derive_completed_turns,
+)
+from continuity.store import ensure_schema
 from tests.test_continuity_settings_routes import ContinuitySettingsRouteTests
 from tests.test_background_generation import BackgroundGenerationTests
 from tests.test_continuity_production_r1 import ContinuityProductionR1Tests
@@ -616,6 +626,155 @@ class ProducerTests(unittest.TestCase):
                 )
             self.assertEqual(fake_generate.call_count, 1)
             self.assertEqual(chunk.status, 'ready')
+        finally:
+            conn.close()
+
+
+    def _canonical_members(self):
+        from chat.daily_continuity_shadow import read_canonical_scope_rows
+
+        conn = sqlite3.connect(str(self.source_path))
+        try:
+            rows = read_canonical_scope_rows(
+                conn,
+                context_id=self.identity['context_id'],
+                context_epoch=self.identity['context_epoch'],
+            )
+        finally:
+            conn.close()
+        return build_source_members(
+            derive_completed_turns(rows, chat_id='default'),
+            derive_autonomous_events(rows, chat_id='default'),
+        )
+
+    def _prepare_target_store(self):
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            ensure_schema(conn)
+            ensure_authority(
+                conn,
+                provider='claude_code',
+                model_identity='model-A',
+                persona_text=PERSONA,
+                now='2026-09-14T00:00:00+00:00',
+            )
+        finally:
+            conn.close()
+
+    def test_targeted_cold_bridge_generates_one_ready_chunk_and_replays_ready(self):
+        self._write_source(self._turns(3))
+        self._prepare_target_store()
+        members = self._canonical_members()
+
+        first = run_targeted_cold_bridge(
+            source_db_path=self.source_path,
+            continuity_store_path=self.store_path,
+            chat_id='default',
+            context_id=self.identity['context_id'],
+            context_epoch=self.identity['context_epoch'],
+            bridge_members=members,
+            capture_authority=self._capture,
+            generate_fn=self._generate,
+            request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+            persona_text=PERSONA,
+            now='2026-09-14T00:01:00+00:00',
+        )
+        second = run_targeted_cold_bridge(
+            source_db_path=self.source_path,
+            continuity_store_path=self.store_path,
+            chat_id='default',
+            context_id=self.identity['context_id'],
+            context_epoch=self.identity['context_epoch'],
+            bridge_members=members,
+            capture_authority=self._capture,
+            generate_fn=self._generate,
+            request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+            persona_text=PERSONA,
+            now='2026-09-14T00:02:00+00:00',
+        )
+
+        self.assertEqual(first.status, 'ready', first)
+        self.assertEqual(second.status, 'ready', second)
+        self.assertEqual(first.generated_chunk_id, second.generated_chunk_id)
+        self.assertEqual(first.materialization_close_reason, 'end_of_snapshot')
+        self.assertEqual(first.model_call_count, 1)
+        self.assertEqual(second.model_call_count, 0)
+        self.assertEqual(self.model_calls, 1)
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_source_snapshots').fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_candidate_blocks').fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_generation_jobs').fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM continuity_chunks WHERE status='ready'"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            conn.close()
+
+    def test_targeted_cold_bridge_claim_without_ready_fails_without_duplicate(self):
+        self._write_source(self._turns(3))
+        self._prepare_target_store()
+        members = self._canonical_members()
+        failing = lambda _request, _authority: (
+            (_ for _ in ()).throw(RuntimeError('temporary'))
+        )
+        first = run_targeted_cold_bridge(
+            source_db_path=self.source_path,
+            continuity_store_path=self.store_path,
+            chat_id='default',
+            context_id=self.identity['context_id'],
+            context_epoch=self.identity['context_epoch'],
+            bridge_members=members,
+            capture_authority=self._capture,
+            generate_fn=failing,
+            request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+            persona_text=PERSONA,
+            now='2026-09-14T00:01:00+00:00',
+        )
+        second = run_targeted_cold_bridge(
+            source_db_path=self.source_path,
+            continuity_store_path=self.store_path,
+            chat_id='default',
+            context_id=self.identity['context_id'],
+            context_epoch=self.identity['context_epoch'],
+            bridge_members=members,
+            capture_authority=self._capture,
+            generate_fn=self._generate,
+            request_factory=lambda **kwargs: SimpleNamespace(**kwargs),
+            persona_text=PERSONA,
+            now='2026-09-14T00:02:00+00:00',
+        )
+
+        self.assertEqual(first.status, 'failed')
+        self.assertEqual(first.error_code, 'generation_error')
+        self.assertEqual(second.status, 'blocked')
+        self.assertEqual(
+            second.error_code,
+            'context_plan_cold_bridge_claimed_not_ready',
+        )
+        self.assertEqual(self.model_calls, 0)
+        conn = sqlite3.connect(str(self.store_path))
+        try:
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_source_snapshots').fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute('SELECT COUNT(*) FROM continuity_candidate_blocks').fetchone()[0],
+                1,
+            )
         finally:
             conn.close()
 

@@ -9507,5 +9507,207 @@ class HotScopeReceiptExceptionTests(unittest.TestCase):
         self.assertEqual(diag['exception_stage'], 'receipt_gate')
         self.assertEqual(diag['exception_type'], 'AttributeError')
 
+
+class ColdConditionalSealRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def _member():
+        return types.SimpleNamespace(
+            seq=12,
+            source_kind='completed_turn',
+            source_ref='turn:120:121',
+            source_revision='revision-bridge',
+            role='conversation',
+            content_hash='content-bridge',
+            span_start=None,
+            span_end=None,
+            branch_id='active-transcript',
+            logical_size=15300,
+            created_at='2026-10-17 12:00:00',
+        )
+
+    @classmethod
+    def _plan(cls, representation):
+        member = cls._member()
+        return types.SimpleNamespace(
+            valid=True,
+            plan_id='plan:' + representation,
+            plan_hash='hash:' + representation,
+            source_members=(member,),
+            representations=(types.SimpleNamespace(
+                kind='chunk',
+                chunk_id=representation,
+                source_members=(member,),
+            ),),
+        )
+
+    def _runtime_plan(self):
+        return types.SimpleNamespace(
+            manifest={},
+            user_message_id=999,
+            chat_id='default',
+            context_id=7,
+            context_epoch=3,
+            db_path='test-continuity.db',
+        )
+
+    def test_required_bridge_runs_one_targeted_generation_and_rebuilds(self):
+        runtime_plan = self._runtime_plan()
+        first = types.SimpleNamespace(
+            valid=True,
+            plan_id='plan:first',
+            plan_hash='hash:first',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='fit',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(self._member(),),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(self._member(),),
+            estimated_tokens=15300,
+            remaining_budget=12000,
+            error_code=None,
+        )
+        rebuilt = self._plan('new')
+        result = types.SimpleNamespace(
+            status='ready',
+            active_settings_revision_id='settings-active',
+            target_logical_size=16000,
+            max_completed_turns=30,
+            materialization_close_reason='end_of_snapshot',
+            model_call_count=1,
+            generated_chunk_id='new',
+        )
+        calls = []
+
+        def build(_plan, *, resident, static_system, mode='hot'):
+            calls.append(mode)
+            return (first, {}) if len(calls) == 1 else (rebuilt, {'new': 'body'})
+
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+            return_value=result,
+        ) as seal, mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=build,
+        ):
+            selected, bodies = dr._conditionally_seal_cold_bridge(
+                runtime_plan,
+                first_plan=first,
+                first_chunk_bodies={},
+                resident=None,
+                static_system='STATIC',
+            )
+
+        self.assertIs(selected, rebuilt)
+        self.assertEqual(bodies, {'new': 'body'})
+        seal.assert_called_once()
+        self.assertEqual(calls, ['cold'])
+        self.assertEqual(
+            runtime_plan.manifest['context_plan_cold_bridge_generation_calls'],
+            1,
+        )
+        self.assertEqual(
+            runtime_plan.manifest['context_plan_cold_bridge_first_plan_id'],
+            'plan:first',
+        )
+        self.assertEqual(
+            runtime_plan.manifest['context_plan_cold_bridge_rebuilt_plan_id'],
+            'plan:new',
+        )
+
+    def test_generation_failure_blocks_rebuild_and_fallback(self):
+        runtime_plan = self._runtime_plan()
+        first = types.SimpleNamespace(
+            valid=True,
+            plan_id='plan:first',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='fit',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(self._member(),),
+        )
+        detection = types.SimpleNamespace(
+            status='required',
+            source_members=(self._member(),),
+            estimated_tokens=15300,
+            remaining_budget=12000,
+            error_code=None,
+        )
+        result = types.SimpleNamespace(
+            status='failed',
+            error_code='generation_error',
+            model_call_count=1,
+        )
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=detection,
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+            return_value=result,
+        ) as seal, mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as rebuild:
+            with self.assertRaises(dr.DailyRuntimeError) as raised:
+                dr._conditionally_seal_cold_bridge(
+                    runtime_plan,
+                    first_plan=first,
+                    first_chunk_bodies={'raw': 'recent'},
+                    resident=None,
+                    static_system='STATIC',
+                )
+
+        self.assertEqual(raised.exception.error_code, 'generation_error')
+        seal.assert_called_once()
+        rebuild.assert_not_called()
+
+    def test_no_required_bridge_does_not_call_producer_or_second_plan(self):
+        runtime_plan = self._runtime_plan()
+        first = types.SimpleNamespace(
+            valid=True,
+            plan_id='plan:first',
+            budget_policy=types.SimpleNamespace(usable_budget=24000),
+            budget_status='fit',
+            recent_raw_source_seqs=(13,),
+            representations=(),
+            exclusions=(),
+            source_members=(self._member(),),
+        )
+        with mock.patch(
+            'continuity.context_plan.find_cold_bridge',
+            return_value=types.SimpleNamespace(
+                status='none',
+                source_members=(),
+                estimated_tokens=0,
+                remaining_budget=None,
+                error_code=None,
+            ),
+        ), mock.patch.object(
+            dr,
+            '_run_targeted_cold_bridge',
+        ) as seal:
+            selected, bodies = dr._conditionally_seal_cold_bridge(
+                runtime_plan,
+                first_plan=first,
+                first_chunk_bodies={'raw': 'recent'},
+                resident=None,
+                static_system='STATIC',
+            )
+
+        self.assertIs(selected, first)
+        self.assertEqual(bodies, {'raw': 'recent'})
+        seal.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
