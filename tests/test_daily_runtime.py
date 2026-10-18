@@ -9584,7 +9584,7 @@ class ColdConditionalSealRuntimeTests(unittest.TestCase):
 
         def build(_plan, *, resident, static_system, mode='hot'):
             calls.append(mode)
-            return (first, {}) if len(calls) == 1 else (rebuilt, {'new': 'body'})
+            return rebuilt, {'new': 'body'}
 
         with mock.patch(
             'continuity.context_plan.find_cold_bridge',

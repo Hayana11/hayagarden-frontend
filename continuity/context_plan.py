@@ -473,10 +473,13 @@ def find_cold_bridge(plan: ContextPlan) -> ColdBridgeDetection:
     policy = getattr(plan, 'budget_policy', None)
     if policy is None or str(getattr(plan, 'budget_status', '')) != 'fit':
         return ColdBridgeDetection('none')
-    expected = tuple(sorted(
-        tuple(getattr(plan, 'source_members', ()) or ()),
-        key=lambda member: int(member.seq),
-    ))
+    try:
+        expected = tuple(sorted(
+            tuple(getattr(plan, 'source_members', ()) or ()),
+            key=lambda member: int(member.seq),
+        ))
+    except (AttributeError, TypeError, ValueError):
+        return ColdBridgeDetection('none')
     if not expected:
         return ColdBridgeDetection('none')
     recent_seqs = {
