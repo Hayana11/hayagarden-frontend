@@ -649,6 +649,7 @@ class ProducerTests(unittest.TestCase):
 
     def _prepare_target_store(self):
         conn = sqlite3.connect(str(self.store_path))
+        conn.row_factory = sqlite3.Row
         try:
             ensure_schema(conn)
             ensure_authority(
