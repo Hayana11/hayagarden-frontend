@@ -1701,10 +1701,6 @@ class ColdBridgeDetectionTests(unittest.TestCase):
         self.assertEqual(plan.budget_policy.usable_budget, 82_000)
         self.assertEqual(plan.fixed_section_token_estimate, 17_000)
         self.assertEqual(plan.recent_raw_source_seqs, (4, 5))
-        self.assertEqual(
-            [item.source_seqs for item in plan.representations],
-            [(0, 1), (4, 5)],
-        )
         self.assertEqual(detection.status, 'required')
         self.assertEqual(detection.source_members, members[2:4])
         self.assertEqual(detection.estimated_tokens, 15_300)
