@@ -1509,6 +1509,180 @@ def _build_production_context_plan(
     return result.plan, bodies
 
 
+
+def _run_targeted_cold_bridge(**kwargs: Any) -> Any:
+    from continuity.producer import run_targeted_cold_bridge
+
+    return run_targeted_cold_bridge(**kwargs)
+
+
+def _cold_bridge_member_identity(member: Any) -> tuple[Any, ...]:
+    return (
+        str(getattr(member, 'source_kind', '') or ''),
+        str(getattr(member, 'source_ref', '') or ''),
+        str(getattr(member, 'source_revision', '') or ''),
+        str(getattr(member, 'content_hash', '') or ''),
+        getattr(member, 'span_start', None),
+        getattr(member, 'span_end', None),
+        str(getattr(member, 'role', '') or ''),
+        str(getattr(member, 'branch_id', '') or ''),
+        int(getattr(member, 'logical_size', 0) or 0),
+        str(getattr(member, 'created_at', '') or ''),
+    )
+
+
+def _selected_exact_cold_bridge(
+    context_plan: Any,
+    *,
+    bridge_members: tuple[Any, ...],
+    chunk_id: str,
+) -> bool:
+    if not bool(getattr(context_plan, 'valid', False)):
+        return False
+    target = tuple(
+        _cold_bridge_member_identity(member)
+        for member in bridge_members
+    )
+    matching = []
+    seen: set[tuple[Any, ...]] = set()
+    for representation in tuple(
+        getattr(context_plan, 'representations', ()) or ()
+    ):
+        members = tuple(getattr(representation, 'source_members', ()) or ())
+        for member in members:
+            identity = _cold_bridge_member_identity(member)
+            if identity in seen:
+                return False
+            seen.add(identity)
+        if (
+            str(getattr(representation, 'kind', '') or '') == 'chunk'
+            and str(getattr(representation, 'chunk_id', '') or '') == str(chunk_id)
+            and tuple(_cold_bridge_member_identity(member) for member in members)
+            == target
+        ):
+            matching.append(representation)
+    return len(matching) == 1
+
+
+def _conditionally_seal_cold_bridge(
+    plan: DailyTurnPlan,
+    *,
+    first_plan: Any,
+    first_chunk_bodies: dict[str, str],
+    resident: Any,
+    static_system: str,
+) -> tuple[Any, dict[str, str]]:
+    from continuity.context_plan import find_cold_bridge
+
+    detection = find_cold_bridge(first_plan)
+    plan.manifest.update({
+        'context_plan_cold_bridge_considered': True,
+        'context_plan_cold_bridge_required': detection.status == 'required',
+        'context_plan_cold_bridge_source_count': len(
+            tuple(detection.source_members or ())
+        ),
+        'context_plan_cold_bridge_logical_size': int(
+            detection.estimated_tokens or 0
+        ),
+        'context_plan_cold_bridge_remaining_budget': detection.remaining_budget,
+        'context_plan_cold_bridge_first_plan_id': str(
+            getattr(first_plan, 'plan_id', '') or ''
+        ),
+    })
+    if detection.status == 'ambiguous':
+        raise DailyRuntimeError(
+            str(
+                detection.error_code
+                or 'context_plan_cold_bridge_identity_ambiguous'
+            ),
+            error_code=str(
+                detection.error_code
+                or 'context_plan_cold_bridge_identity_ambiguous'
+            ),
+            retryable=False,
+        )
+    if detection.status != 'required':
+        return first_plan, first_chunk_bodies
+
+    bridge_members = tuple(detection.source_members)
+    if any(
+        int(plan.user_message_id) in _context_source_message_ids(
+            str(getattr(member, 'source_ref', '') or '')
+        )
+        for member in bridge_members
+    ):
+        raise DailyRuntimeError(
+            'cold bridge contains CURRENT request',
+            error_code='context_plan_cold_bridge_current_forbidden',
+            retryable=False,
+        )
+    result = _run_targeted_cold_bridge(
+        source_db_path=_production_continuity_store_path(plan),
+        continuity_store_path=_production_continuity_store_path(plan),
+        chat_id=str(plan.chat_id),
+        context_id=int(plan.context_id),
+        context_epoch=int(plan.context_epoch),
+        bridge_members=bridge_members,
+    )
+    plan.manifest.update({
+        'context_plan_cold_bridge_active_settings_revision': (
+            getattr(result, 'active_settings_revision_id', None)
+        ),
+        'context_plan_cold_bridge_target_logical_size': (
+            getattr(result, 'target_logical_size', None)
+        ),
+        'context_plan_cold_bridge_target_turns': (
+            getattr(result, 'max_completed_turns', None)
+        ),
+        'context_plan_cold_bridge_materialization_close_reason': (
+            getattr(result, 'materialization_close_reason', None)
+        ),
+        'context_plan_cold_bridge_generation_calls': int(
+            getattr(result, 'model_call_count', 0) or 0
+        ),
+        'context_plan_cold_bridge_chunk_id': (
+            getattr(result, 'generated_chunk_id', None)
+        ),
+    })
+    if str(getattr(result, 'status', '') or '') != 'ready':
+        error_code = str(
+            getattr(result, 'error_code', '') or
+            'context_plan_cold_bridge_generation_failed'
+        )
+        raise DailyRuntimeError(
+            error_code,
+            error_code=error_code,
+            retryable=True,
+        )
+    chunk_id = str(getattr(result, 'generated_chunk_id', '') or '')
+    if not chunk_id:
+        raise DailyRuntimeError(
+            'targeted cold bridge did not return a READY chunk',
+            error_code='context_plan_cold_bridge_ready_missing',
+            retryable=False,
+        )
+    rebuilt_plan, rebuilt_chunk_bodies = _build_production_context_plan(
+        plan,
+        resident=resident,
+        static_system=static_system,
+        mode='cold',
+    )
+    if not _selected_exact_cold_bridge(
+        rebuilt_plan,
+        bridge_members=bridge_members,
+        chunk_id=chunk_id,
+    ):
+        raise DailyRuntimeError(
+            'rebuilt ContextPlan did not select the targeted cold bridge',
+            error_code='context_plan_cold_bridge_not_selected',
+            retryable=False,
+        )
+    plan.manifest['context_plan_cold_bridge_rebuilt_plan_id'] = str(
+        getattr(rebuilt_plan, 'plan_id', '') or ''
+    )
+    return rebuilt_plan, rebuilt_chunk_bodies
+
+
 def _context_source_message_ids(source_ref: str) -> tuple[int, ...]:
     value = str(source_ref or '')
     parts = value.split(':')
@@ -4474,11 +4648,18 @@ def _assemble_plan(
             daily_plan,
             static_system,
         )
-        context_plan, chunk_bodies = _build_production_context_plan(
+        first_plan, first_chunk_bodies = _build_production_context_plan(
             daily_plan,
             resident=resident,
             static_system=effective_static_system,
             mode='cold',
+        )
+        context_plan, chunk_bodies = _conditionally_seal_cold_bridge(
+            daily_plan,
+            first_plan=first_plan,
+            first_chunk_bodies=first_chunk_bodies,
+            resident=resident,
+            static_system=effective_static_system,
         )
         daily_plan.continuity_plan = context_plan
         daily_plan.continuity_chunk_bodies = dict(chunk_bodies)

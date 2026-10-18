@@ -449,6 +449,167 @@ class ContextPlan:
         return tuple(sorted(members, key=lambda member: int(member.seq)))
 
 
+@dataclass(frozen=True)
+class ColdBridgeDetection:
+    """Pure evidence for one exact cold-only uncovered raw bridge."""
+
+    status: Literal['none', 'required', 'ambiguous']
+    source_members: tuple[SourceMember, ...] = ()
+    estimated_tokens: int = 0
+    remaining_budget: int | None = None
+    representation_id: str = ''
+    error_code: str | None = None
+
+
+def find_cold_bridge(plan: ContextPlan) -> ColdBridgeDetection:
+    """Find the raw representation immediately before recent raw when budget excludes it.
+
+    This helper only inspects an already-built plan.  It never reads storage,
+    creates a candidate, calls a provider, or changes selection semantics.
+    """
+
+    if not bool(getattr(plan, 'valid', False)):
+        return ColdBridgeDetection('none')
+    policy = getattr(plan, 'budget_policy', None)
+    if policy is None or str(getattr(plan, 'budget_status', '')) != 'fit':
+        return ColdBridgeDetection('none')
+    try:
+        expected = tuple(sorted(
+            tuple(getattr(plan, 'source_members', ()) or ()),
+            key=lambda member: int(member.seq),
+        ))
+    except (AttributeError, TypeError, ValueError):
+        return ColdBridgeDetection('none')
+    if not expected:
+        return ColdBridgeDetection('none')
+    recent_seqs = {
+        int(seq) for seq in tuple(getattr(plan, 'recent_raw_source_seqs', ()) or ())
+    }
+    if not recent_seqs:
+        return ColdBridgeDetection('none')
+
+    stable_groups: dict[tuple[Any, ...], list[SourceMember]] = {}
+    by_ref: dict[str, list[SourceMember]] = {}
+    for member in expected:
+        if not (
+            str(member.source_ref or '').strip()
+            and str(member.source_revision or '').strip()
+            and str(member.content_hash or '').strip()
+            and str(member.branch_id or '').strip()
+        ):
+            return ColdBridgeDetection(
+                'ambiguous',
+                error_code='context_plan_cold_bridge_identity_ambiguous',
+            )
+        stable_groups.setdefault(_stable_member_identity(member), []).append(member)
+        by_ref.setdefault(str(member.source_ref), []).append(member)
+    if any(len(group) != 1 for group in stable_groups.values()):
+        return ColdBridgeDetection(
+            'ambiguous',
+            error_code='context_plan_cold_bridge_identity_ambiguous',
+        )
+
+    positions = {int(member.seq): index for index, member in enumerate(expected)}
+    if len(positions) != len(expected):
+        return ColdBridgeDetection(
+            'ambiguous',
+            error_code='context_plan_cold_bridge_identity_ambiguous',
+        )
+    recent_positions = [positions.get(seq) for seq in recent_seqs]
+    if any(position is None for position in recent_positions):
+        return ColdBridgeDetection('none')
+    recent_start = min(int(position) for position in recent_positions)
+    expected_recent = {
+        int(member.seq) for member in expected[recent_start:]
+    }
+    if expected_recent != recent_seqs:
+        return ColdBridgeDetection('none')
+    if not any(
+        representation.kind == 'raw'
+        and set(representation.source_seqs).issubset(recent_seqs)
+        for representation in tuple(getattr(plan, 'representations', ()) or ())
+    ):
+        return ColdBridgeDetection('none')
+
+    covered: set[tuple[Any, ...]] = set()
+    for exclusion in tuple(getattr(plan, 'exclusions', ()) or ()):
+        if str(getattr(exclusion, 'code', '') or '') != 'covered_by_chunk':
+            continue
+        source_ref = str(getattr(exclusion, 'source_ref', '') or '').strip()
+        matches = by_ref.get(source_ref, ())
+        if not source_ref or len(matches) != 1:
+            return ColdBridgeDetection(
+                'ambiguous',
+                error_code='context_plan_cold_bridge_identity_ambiguous',
+            )
+        covered.add(_stable_member_identity(matches[0]))
+    for representation in tuple(getattr(plan, 'representations', ()) or ()):
+        if representation.kind != 'chunk':
+            continue
+        for member in tuple(representation.source_members):
+            matches = stable_groups.get(_stable_member_identity(member), ())
+            if len(matches) != 1:
+                return ColdBridgeDetection(
+                    'ambiguous',
+                    error_code='context_plan_cold_bridge_identity_ambiguous',
+                )
+            covered.add(_stable_member_identity(matches[0]))
+
+    if recent_start <= 0:
+        return ColdBridgeDetection('none')
+    previous = expected[recent_start - 1]
+    if int(previous.seq) + 1 != int(expected[recent_start].seq):
+        return ColdBridgeDetection('none')
+    if _stable_member_identity(previous) in covered:
+        return ColdBridgeDetection('none')
+
+    bridge_reversed: list[SourceMember] = []
+    index = recent_start - 1
+    while index >= 0:
+        member = expected[index]
+        if _stable_member_identity(member) in covered:
+            break
+        if bridge_reversed and int(member.seq) + 1 != int(bridge_reversed[-1].seq):
+            break
+        bridge_reversed.append(member)
+        index -= 1
+    bridge = tuple(reversed(bridge_reversed))
+    if not bridge:
+        return ColdBridgeDetection('none')
+    bridge_representation = _raw_representation(bridge)
+    if not any(
+        str(getattr(exclusion, 'code', '') or '') == 'budget_excluded'
+        and str(getattr(exclusion, 'representation_id', '') or '')
+        == bridge_representation.representation_id
+        for exclusion in tuple(getattr(plan, 'exclusions', ()) or ())
+    ):
+        return ColdBridgeDetection('none')
+
+    recent_cost = sum(
+        int(representation.estimated_tokens)
+        for representation in tuple(getattr(plan, 'representations', ()) or ())
+        if representation.kind == 'raw'
+        and set(representation.source_seqs).issubset(recent_seqs)
+    )
+    fixed_cost = int(getattr(plan, 'fixed_section_token_estimate', 0) or 0)
+    history_limit = getattr(policy, 'history_budget_limit', None)
+    effective_history_budget = (
+        min(int(policy.usable_budget) - fixed_cost, int(history_limit))
+        if history_limit is not None
+        else int(policy.usable_budget) - fixed_cost
+    )
+    remaining = effective_history_budget - recent_cost
+    if bridge_representation.estimated_tokens <= remaining:
+        return ColdBridgeDetection('none')
+    return ColdBridgeDetection(
+        'required',
+        source_members=bridge,
+        estimated_tokens=int(bridge_representation.estimated_tokens),
+        remaining_budget=remaining,
+        representation_id=bridge_representation.representation_id,
+    )
+
+
 def _raw_representation(members: Sequence[SourceMember]) -> ContextRepresentation:
     ordered = tuple(members)
     digest = _sha256({'kind': 'raw', 'members': [_member_identity(member) for member in ordered]})
@@ -1168,6 +1329,7 @@ def build_context_plan(
 
 __all__ = [
     'CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION',
+    'ColdBridgeDetection',
     'ContextBudgetPolicy',
     'ContextChunkBinding',
     'ContextPlan',
@@ -1178,6 +1340,7 @@ __all__ = [
     'WindowAnchorStatus',
     'parse_context_budget_policy',
     'build_context_plan',
+    'find_cold_bridge',
 ]
 
 

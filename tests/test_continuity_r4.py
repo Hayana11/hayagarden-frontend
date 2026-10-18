@@ -20,6 +20,7 @@ from continuity.context_plan import (
     _identity_payload,
     _sha256,
     build_context_plan,
+    find_cold_bridge,
     parse_context_budget_policy,
 )
 from continuity.contracts import SourceMember, SourceSnapshot, candidate_source_revision
@@ -1651,6 +1652,213 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         self.assertEqual(
             [item.source_seqs for item in plan.representations],
             [(4,)],
+        )
+
+
+
+class ColdBridgeDetectionTests(unittest.TestCase):
+    def test_production_history_cap_excludes_uncovered_bridge(self):
+        members = tuple(
+            _member(
+                seq,
+                logical_size=(
+                    4_000 if seq in (0, 1)
+                    else 7_650 if seq in (2, 3)
+                    else 6_000
+                ),
+            )
+            for seq in range(6)
+        )
+        plan = build_context_plan(
+            members,
+            chunks=(
+                _binding(
+                    members,
+                    seqs=(0, 1),
+                    chunk_id='chunk:older-ready',
+                    body='x' * 16_000,
+                ),
+            ),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=90_000,
+                reserve_budget=8_000,
+                recent_raw_target=12_000,
+                history_budget_limit=24_000,
+            ),
+            fixed_sections=(
+                ContextSection(
+                    kind='invariant_system',
+                    source_ref='system:fixed',
+                    content_hash='fixed-hash',
+                    estimated_tokens=17_000,
+                ),
+            ),
+        )
+
+        detection = find_cold_bridge(plan)
+
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_policy.usable_budget, 82_000)
+        self.assertEqual(plan.fixed_section_token_estimate, 17_000)
+        self.assertEqual(plan.recent_raw_source_seqs, (4, 5))
+        self.assertEqual(detection.status, 'required')
+        self.assertEqual(detection.source_members, members[2:4])
+        self.assertEqual(detection.estimated_tokens, 15_300)
+        self.assertEqual(detection.remaining_budget, 12_000)
+        self.assertTrue(
+            any(
+                exclusion.code == 'budget_excluded'
+                and exclusion.representation_id == detection.representation_id
+                for exclusion in plan.exclusions
+            )
+        )
+
+    def test_rebuilt_plan_retains_older_new_bridge_and_recent_raw(self):
+        members = tuple(
+            _member(
+                seq,
+                logical_size=(
+                    4_000 if seq in (0, 1)
+                    else 7_650 if seq in (2, 3)
+                    else 6_000
+                ),
+            )
+            for seq in range(6)
+        )
+        policy = ContextBudgetPolicy(
+            token_budget=24_000,
+            recent_raw_target=12_000,
+        )
+        current = ContextSection(
+            kind='current_request',
+            source_ref='message:99',
+            content_hash='current-hash',
+            estimated_tokens=100,
+        )
+        older = _binding(
+            members,
+            seqs=(0, 1),
+            chunk_id='chunk:older-ready',
+            body='x' * 16_000,
+        )
+        first = build_context_plan(
+            members,
+            chunks=(older,),
+            budget_policy=policy,
+            fixed_sections=(current,),
+        )
+        detection = find_cold_bridge(first)
+        bridge = _binding(
+            members,
+            seqs=(2, 3),
+            chunk_id='chunk:new-bridge',
+            body='x' * 4_000,
+        )
+        rebuilt = build_context_plan(
+            members,
+            chunks=(older, bridge),
+            budget_policy=policy,
+            fixed_sections=(current,),
+        )
+
+        self.assertEqual(detection.status, 'required')
+        self.assertTrue(rebuilt.valid)
+        self.assertEqual(
+            [
+                (item.kind, item.source_seqs)
+                for item in rebuilt.representations
+            ],
+            [
+                ('chunk', (0, 1)),
+                ('chunk', (2, 3)),
+                ('raw', (4, 5)),
+            ],
+        )
+        selected_seqs = [
+            seq
+            for item in rebuilt.representations
+            for seq in item.source_seqs
+        ]
+        self.assertEqual(len(selected_seqs), len(set(selected_seqs)))
+        self.assertLessEqual(rebuilt.selected_token_estimate, 24_000)
+        self.assertEqual(
+            [
+                section.kind
+                for section in rebuilt.ordered_sections
+                if section.kind == 'current_request'
+            ],
+            ['current_request'],
+        )
+
+    def test_no_trigger_when_r1_boundary_alignment_solves_crossing(self):
+        members = tuple(_member(seq, logical_size=1) for seq in range(4))
+        plan = build_context_plan(
+            members,
+            chunks=(
+                _binding(
+                    members,
+                    seqs=(1, 2),
+                    chunk_id='chunk:crossing',
+                    body='ready',
+                ),
+            ),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=2,
+            ),
+        )
+
+        self.assertEqual(find_cold_bridge(plan).status, 'none')
+        self.assertEqual(plan.recent_raw_source_seqs, (3,))
+
+    def test_no_trigger_without_older_bridge_or_when_bridge_fits(self):
+        no_bridge = build_context_plan(
+            tuple(_member(seq, logical_size=5) for seq in range(2)),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=100,
+            ),
+        )
+        fits = build_context_plan(
+            tuple(_member(seq, logical_size=2) for seq in range(3)),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=20,
+                recent_raw_target=4,
+            ),
+        )
+
+        self.assertIsNone(fits.budget_policy.history_budget_limit)
+        self.assertEqual(find_cold_bridge(no_bridge).status, 'none')
+        self.assertEqual(find_cold_bridge(fits).status, 'none')
+
+    def test_ambiguous_covered_identity_fails_closed(self):
+        members = (
+            _member(0, ref='turn:dup', revision='rev:a'),
+            _member(1, ref='turn:dup', revision='rev:b'),
+            _member(2, logical_size=10),
+        )
+        plan = build_context_plan(
+            members,
+            chunks=(
+                _binding(
+                    members,
+                    seqs=(0, 1),
+                    chunk_id='chunk:ambiguous',
+                    body='ready',
+                ),
+            ),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=1,
+            ),
+        )
+
+        detection = find_cold_bridge(plan)
+
+        self.assertEqual(detection.status, 'ambiguous')
+        self.assertEqual(
+            detection.error_code,
+            'context_plan_cold_bridge_identity_ambiguous',
         )
 
 
