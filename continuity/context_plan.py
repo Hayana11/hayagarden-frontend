@@ -696,6 +696,56 @@ def _recent_raw_suffix(
     return selected
 
 
+def _align_recent_raw_boundary(
+    expected: Sequence[SourceMember],
+    recent_raw_keys: set[tuple[Any, ...]],
+    valid_chunks: Sequence[tuple[ContextRepresentation, set[tuple[Any, ...]]]],
+    conflicting: set[int],
+) -> set[tuple[Any, ...]]:
+    """Move the raw suffix past valid chunks crossed by its current start."""
+    if not recent_raw_keys:
+        return set()
+    ordered = tuple(expected)
+    positions = {
+        _member_key(member): index
+        for index, member in enumerate(ordered)
+    }
+    boundary_positions = [
+        positions[key]
+        for key in recent_raw_keys
+        if key in positions
+    ]
+    if not boundary_positions:
+        return set(recent_raw_keys)
+    boundary = min(boundary_positions)
+    while boundary < len(ordered):
+        boundary_key = _member_key(ordered[boundary])
+        next_boundary: int | None = None
+        for index, (_representation, member_keys) in enumerate(valid_chunks):
+            if index in conflicting or boundary_key not in member_keys:
+                continue
+            chunk_positions = [
+                positions[key]
+                for key in member_keys
+                if key in positions
+            ]
+            if not chunk_positions:
+                continue
+            candidate_boundary = max(chunk_positions) + 1
+            next_boundary = (
+                candidate_boundary
+                if next_boundary is None
+                else max(next_boundary, candidate_boundary)
+            )
+        if next_boundary is None or next_boundary <= boundary:
+            break
+        boundary = next_boundary
+    return {
+        _member_key(member)
+        for member in ordered[boundary:]
+    }
+
+
 def _budget_exclusion(representation: ContextRepresentation, detail: str) -> ContextPlanExclusion:
     return _exclusion(
         'budget_excluded',
@@ -929,6 +979,13 @@ def build_context_plan(
                         representation_id=right.representation_id,
                     ),
                 ))
+
+    recent_raw_keys = _align_recent_raw_boundary(
+        expected,
+        recent_raw_keys,
+        valid_chunks,
+        conflicting,
+    )
 
     covered_by_chunk: set[tuple[Any, ...]] = set()
     selected_chunks: list[ContextRepresentation] = []

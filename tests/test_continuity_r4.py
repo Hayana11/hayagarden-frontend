@@ -439,6 +439,177 @@ class ContextPlanTests(unittest.TestCase):
         self.assertEqual([item.source_seqs for item in plan.representations], [(0,), (1, 2)])
         self.assertTrue(any(item.code == 'recent_raw_priority' for item in plan.exclusions))
 
+    def test_recent_raw_boundary_moves_past_valid_chunk_cascade(self):
+        members = tuple(
+            _member(
+                seq,
+                logical_size=(
+                    1 if seq <= 658 else
+                    902 if seq <= 674 else
+                    900 if seq == 675 else
+                    1000 if seq in {676, 677} else
+                    800 if seq <= 689 else
+                    590
+                ),
+            )
+            for seq in range(640, 691)
+        )
+        bindings = (
+            _binding(
+                members,
+                seqs=tuple(range(640, 659)),
+                chunk_id='chunk:older-ready',
+                body='x' * (4 * 4000),
+            ),
+            _binding(
+                members,
+                seqs=tuple(range(659, 677)),
+                chunk_id='chunk:boundary-ready',
+                body='x' * (4 * 8000),
+            ),
+            _binding(
+                members,
+                seqs=(677,),
+                chunk_id='chunk:day-boundary-ready',
+                body='x' * (4 * 1000),
+            ),
+        )
+        policy = ContextBudgetPolicy(
+            token_budget=24_000,
+            recent_raw_target=12_000,
+        )
+        first = build_context_plan(members, chunks=bindings, budget_policy=policy)
+        second = build_context_plan(members, chunks=bindings, budget_policy=policy)
+
+        self.assertTrue(first.valid)
+        self.assertEqual(first.recent_raw_source_seqs, tuple(range(678, 691)))
+        self.assertEqual(first.recent_raw_token_estimate, 10_190)
+        self.assertEqual(
+            [
+                (item.kind, item.source_seqs)
+                for item in first.representations
+            ],
+            [
+                ('chunk', tuple(range(640, 659))),
+                ('chunk', tuple(range(659, 677))),
+                ('chunk', (677,)),
+                ('raw', tuple(range(678, 691))),
+            ],
+        )
+        self.assertLessEqual(first.selected_token_estimate, 24_000)
+        selected_seqs = [
+            seq
+            for representation in first.representations
+            for seq in representation.source_seqs
+        ]
+        self.assertEqual(len(selected_seqs), len(set(selected_seqs)))
+        self.assertEqual(first.plan_id, second.plan_id)
+        self.assertEqual(first.plan_hash, second.plan_hash)
+
+    def test_recent_raw_boundary_unchanged_without_intersecting_chunk(self):
+        members = tuple(_member(index, logical_size=3) for index in range(5))
+        plan = build_context_plan(
+            members,
+            chunks=(_binding(members, seqs=(0, 1), chunk_id='chunk:older'),),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=6,
+            ),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (3, 4))
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(0, 1), (2,), (3, 4)],
+        )
+
+    def test_rejected_chunk_does_not_move_recent_raw_boundary(self):
+        members = tuple(_member(index, logical_size=5) for index in range(5))
+        stale = _binding(
+            members,
+            seqs=(2, 3),
+            chunk_id='chunk:stale-boundary',
+            source_revision='stale-candidate',
+        )
+        plan = build_context_plan(
+            members,
+            chunks=(stale,),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=10,
+            ),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (3, 4))
+        self.assertEqual([item.kind for item in plan.representations], ['raw'])
+        self.assertTrue(any(item.code == 'chunk_rejected' for item in plan.exclusions))
+
+    def test_conflicting_chunks_do_not_move_recent_raw_boundary(self):
+        members = tuple(_member(index, logical_size=5) for index in range(5))
+        first = _binding(members, seqs=(2, 3), chunk_id='chunk:first')
+        second = _binding(members, seqs=(3, 4), chunk_id='chunk:second')
+        plan = build_context_plan(
+            members,
+            chunks=(first, second),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=10,
+            ),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (3, 4))
+        self.assertEqual([item.kind for item in plan.representations], ['raw'])
+        self.assertEqual(
+            {item.code for item in plan.exclusions},
+            {'chunk_overlap'},
+        )
+
+    def test_single_valid_crossing_chunk_aligns_once(self):
+        members = tuple(
+            _member(index, logical_size=size)
+            for index, size in enumerate((1, 1, 3, 3, 3))
+        )
+        plan = build_context_plan(
+            members,
+            chunks=(_binding(members, seqs=(2, 3), chunk_id='chunk:crossing'),),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=100,
+                recent_raw_target=6,
+            ),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (4,))
+        self.assertEqual(
+            [(item.kind, item.source_seqs) for item in plan.representations],
+            [('raw', (0, 1)), ('chunk', (2, 3)), ('raw', (4,))],
+        )
+
+    def test_diagnostic_aligned_boundary_can_leave_uncovered_older_bridge(self):
+        members = tuple(
+            _member(index, logical_size=size)
+            for index, size in enumerate((1, 7_666, 7_666, 6_000, 6_000))
+        )
+        old_chunk = _binding(
+            members,
+            seqs=(0,),
+            chunk_id='chunk:old-only',
+            body='x' * (4 * 4000),
+        )
+        plan = build_context_plan(
+            members,
+            chunks=(old_chunk,),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=24_000,
+                recent_raw_target=12_000,
+            ),
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (3, 4))
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(3, 4)],
+        )
+        self.assertFalse(any(
+            item.kind == 'chunk' and set(item.source_seqs) & {1, 2}
+            for item in plan.representations
+        ))
+        self.assertGreater(sum(members[index].logical_size for index in (1, 2)), 12_000)
+
     def test_recent_raw_range_is_expected_driven_when_newest_raw_is_missing(self):
         members = tuple(_member(index, logical_size=10) for index in range(3))
         binding = _binding(members, seqs=(2,), body='x' * 8)
