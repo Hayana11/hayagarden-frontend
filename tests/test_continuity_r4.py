@@ -1694,6 +1694,83 @@ class ColdBridgeDetectionTests(unittest.TestCase):
         self.assertEqual(detection.estimated_tokens, 15_300)
         self.assertEqual(detection.remaining_budget, 12_000)
 
+    def test_rebuilt_plan_retains_older_new_bridge_and_recent_raw(self):
+        members = tuple(
+            _member(
+                seq,
+                logical_size=(
+                    4_000 if seq in (0, 1)
+                    else 7_650 if seq in (2, 3)
+                    else 6_000
+                ),
+            )
+            for seq in range(6)
+        )
+        policy = ContextBudgetPolicy(
+            token_budget=24_000,
+            recent_raw_target=12_000,
+        )
+        current = ContextSection(
+            kind='current_request',
+            source_ref='message:99',
+            content_hash='current-hash',
+            estimated_tokens=100,
+        )
+        older = _binding(
+            members,
+            seqs=(0, 1),
+            chunk_id='chunk:older-ready',
+            body='x' * 16_000,
+        )
+        first = build_context_plan(
+            members,
+            chunks=(older,),
+            budget_policy=policy,
+            fixed_sections=(current,),
+        )
+        detection = find_cold_bridge(first)
+        bridge = _binding(
+            members,
+            seqs=(2, 3),
+            chunk_id='chunk:new-bridge',
+            body='x' * 4_000,
+        )
+        rebuilt = build_context_plan(
+            members,
+            chunks=(older, bridge),
+            budget_policy=policy,
+            fixed_sections=(current,),
+        )
+
+        self.assertEqual(detection.status, 'required')
+        self.assertTrue(rebuilt.valid)
+        self.assertEqual(
+            [
+                (item.kind, item.source_seqs)
+                for item in rebuilt.representations
+            ],
+            [
+                ('chunk', (0, 1)),
+                ('chunk', (2, 3)),
+                ('raw', (4, 5)),
+            ],
+        )
+        selected_seqs = [
+            seq
+            for item in rebuilt.representations
+            for seq in item.source_seqs
+        ]
+        self.assertEqual(len(selected_seqs), len(set(selected_seqs)))
+        self.assertLessEqual(rebuilt.selected_token_estimate, 24_000)
+        self.assertEqual(
+            [
+                section.kind
+                for section in rebuilt.ordered_sections
+                if section.kind == 'current_request'
+            ],
+            ['current_request'],
+        )
+
     def test_no_trigger_when_r1_boundary_alignment_solves_crossing(self):
         members = tuple(_member(seq, logical_size=1) for seq in range(4))
         plan = build_context_plan(
