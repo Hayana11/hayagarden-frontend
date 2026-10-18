@@ -592,7 +592,13 @@ def find_cold_bridge(plan: ContextPlan) -> ColdBridgeDetection:
         and set(representation.source_seqs).issubset(recent_seqs)
     )
     fixed_cost = int(getattr(plan, 'fixed_section_token_estimate', 0) or 0)
-    remaining = int(policy.usable_budget) - fixed_cost - recent_cost
+    history_limit = getattr(policy, 'history_budget_limit', None)
+    effective_history_budget = (
+        min(int(policy.usable_budget) - fixed_cost, int(history_limit))
+        if history_limit is not None
+        else int(policy.usable_budget) - fixed_cost
+    )
+    remaining = effective_history_budget - recent_cost
     if bridge_representation.estimated_tokens <= remaining:
         return ColdBridgeDetection('none')
     return ColdBridgeDetection(

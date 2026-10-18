@@ -36,7 +36,6 @@ from continuity.store import (
     load_candidate,
     load_claimed_source_revisions,
     load_generation_jobs,
-    load_ready_chunks,
     load_snapshot,
     materialize_job,
     read_ready_surface,
@@ -758,8 +757,12 @@ def run_targeted_cold_bridge(
                     **result_base,
                 )
 
+            snapshot_members = tuple(
+                replace(member, seq=index)
+                for index, member in enumerate(target_members)
+            )
             snapshot = _snapshot_for_members(
-                target_members,
+                snapshot_members,
                 identity=identity,
                 created_at=stamp,
             )

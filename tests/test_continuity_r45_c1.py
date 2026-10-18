@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 import tempfile
 import unittest
 from pathlib import Path
@@ -662,10 +663,13 @@ class ProducerTests(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_targeted_cold_bridge_generates_one_ready_chunk_and_replays_ready(self):
+    def test_targeted_cold_bridge_rebases_nonzero_seq_and_replays_ready(self):
         self._write_source(self._turns(3))
         self._prepare_target_store()
-        members = self._canonical_members()
+        members = tuple(
+            replace(member, seq=659 + index)
+            for index, member in enumerate(self._canonical_members())
+        )
 
         first = run_targeted_cold_bridge(
             source_db_path=self.source_path,
@@ -702,6 +706,7 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(second.model_call_count, 0)
         self.assertEqual(self.model_calls, 1)
         conn = sqlite3.connect(str(self.store_path))
+        conn.row_factory = sqlite3.Row
         try:
             self.assertEqual(
                 conn.execute('SELECT COUNT(*) FROM continuity_source_snapshots').fetchone()[0],
@@ -720,6 +725,52 @@ class ProducerTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM continuity_chunks WHERE status='ready'"
                 ).fetchone()[0],
                 1,
+            )
+            snapshot_members = conn.execute(
+                'SELECT * FROM continuity_source_members ORDER BY seq'
+            ).fetchall()
+            candidate_members = conn.execute(
+                'SELECT * FROM continuity_candidate_members ORDER BY ordinal'
+            ).fetchall()
+            self.assertEqual(
+                [row['seq'] for row in snapshot_members],
+                list(range(len(members))),
+            )
+            self.assertEqual(
+                [row['source_seq'] for row in candidate_members],
+                list(range(len(members))),
+            )
+            durable_identity = lambda row: (
+                row['source_kind'],
+                row['source_ref'],
+                row['source_revision'],
+                row['content_hash'],
+                row['span_start'],
+                row['span_end'],
+                row['role'],
+                row['branch_id'],
+                row['logical_size'],
+                row['created_at'],
+            )
+            expected_identity = lambda member: (
+                member.source_kind,
+                member.source_ref,
+                member.source_revision,
+                member.content_hash,
+                member.span_start,
+                member.span_end,
+                member.role,
+                member.branch_id,
+                member.logical_size,
+                member.created_at,
+            )
+            self.assertEqual(
+                [durable_identity(row) for row in snapshot_members],
+                [expected_identity(member) for member in members],
+            )
+            self.assertEqual(
+                [row['source_ref'] for row in candidate_members],
+                [member.source_ref for member in members],
             )
         finally:
             conn.close()

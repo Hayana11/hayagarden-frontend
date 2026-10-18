@@ -1657,7 +1657,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
 
 
 class ColdBridgeDetectionTests(unittest.TestCase):
-    def test_uncovered_budget_excluded_bridge_is_required(self):
+    def test_production_history_cap_excludes_uncovered_bridge(self):
         members = tuple(
             _member(
                 seq,
@@ -1680,19 +1680,42 @@ class ColdBridgeDetectionTests(unittest.TestCase):
                 ),
             ),
             budget_policy=ContextBudgetPolicy(
-                token_budget=24_000,
+                token_budget=90_000,
+                reserve_budget=8_000,
                 recent_raw_target=12_000,
+                history_budget_limit=24_000,
+            ),
+            fixed_sections=(
+                ContextSection(
+                    kind='invariant_system',
+                    source_ref='system:fixed',
+                    content_hash='fixed-hash',
+                    estimated_tokens=17_000,
+                ),
             ),
         )
 
         detection = find_cold_bridge(plan)
 
         self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_policy.usable_budget, 82_000)
+        self.assertEqual(plan.fixed_section_token_estimate, 17_000)
         self.assertEqual(plan.recent_raw_source_seqs, (4, 5))
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(0, 1), (4, 5)],
+        )
         self.assertEqual(detection.status, 'required')
         self.assertEqual(detection.source_members, members[2:4])
         self.assertEqual(detection.estimated_tokens, 15_300)
         self.assertEqual(detection.remaining_budget, 12_000)
+        self.assertTrue(
+            any(
+                exclusion.code == 'budget_excluded'
+                and exclusion.representation_id == detection.representation_id
+                for exclusion in plan.exclusions
+            )
+        )
 
     def test_rebuilt_plan_retains_older_new_bridge_and_recent_raw(self):
         members = tuple(
@@ -1808,6 +1831,7 @@ class ColdBridgeDetectionTests(unittest.TestCase):
             ),
         )
 
+        self.assertIsNone(fits.budget_policy.history_budget_limit)
         self.assertEqual(find_cold_bridge(no_bridge).status, 'none')
         self.assertEqual(find_cold_bridge(fits).status, 'none')
 
