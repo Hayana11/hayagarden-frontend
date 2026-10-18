@@ -482,8 +482,10 @@ class ContextPlanTests(unittest.TestCase):
         second = build_context_plan(members, chunks=bindings, budget_policy=policy)
 
         self.assertTrue(first.valid)
-        self.assertEqual(first.recent_raw_source_seqs, tuple(range(678, 691)))
-        self.assertEqual(first.recent_raw_token_estimate, 10_190)
+        self.assertEqual(first.recent_raw_source_seqs, tuple(range(677, 691)))
+        self.assertEqual(first.recent_raw_token_estimate, 11_190)
+        self.assertGreater(first.recent_raw_token_estimate, 11_000)
+        self.assertLess(first.recent_raw_token_estimate, 11_500)
         self.assertEqual(
             [
                 (item.kind, item.source_seqs)
@@ -492,10 +494,14 @@ class ContextPlanTests(unittest.TestCase):
             [
                 ('chunk', tuple(range(640, 659))),
                 ('chunk', tuple(range(659, 677))),
-                ('chunk', (677,)),
-                ('raw', tuple(range(678, 691))),
+                ('raw', tuple(range(677, 691))),
             ],
         )
+        self.assertTrue(any(
+            item.code == 'recent_raw_priority'
+            and item.representation_id == 'chunk:chunk:day-boundary-ready'
+            for item in first.exclusions
+        ))
         self.assertLessEqual(first.selected_token_estimate, 24_000)
         selected_seqs = [
             seq
@@ -521,6 +527,60 @@ class ContextPlanTests(unittest.TestCase):
             [item.source_seqs for item in plan.representations],
             [(0, 1), (2,), (3, 4)],
         )
+
+    def test_adjacent_ready_chunks_do_not_cascade_after_strict_crossing(self):
+        members = tuple(_member(index, logical_size=1) for index in range(11))
+        bindings = (
+            _binding(
+                members,
+                seqs=(4, 5, 6),
+                chunk_id='chunk:strict-crossing',
+            ),
+            _binding(
+                members,
+                seqs=(7,),
+                chunk_id='chunk:adjacent-one',
+            ),
+            _binding(
+                members,
+                seqs=(8,),
+                chunk_id='chunk:adjacent-two',
+            ),
+        )
+        policy = ContextBudgetPolicy(
+            token_budget=100,
+            recent_raw_target=5,
+        )
+        plan = build_context_plan(members, chunks=bindings, budget_policy=policy)
+
+        self.assertEqual(plan.recent_raw_source_seqs, (7, 8, 9, 10))
+        self.assertGreater(plan.recent_raw_token_estimate, 0)
+        self.assertEqual(
+            [
+                (item.kind, item.source_seqs)
+                for item in plan.representations
+            ],
+            [
+                ('raw', (0, 1, 2, 3)),
+                ('chunk', (4, 5, 6)),
+                ('raw', (7, 8, 9, 10)),
+            ],
+        )
+        recent_priority_ids = {
+            item.representation_id
+            for item in plan.exclusions
+            if item.code == 'recent_raw_priority'
+        }
+        self.assertEqual(
+            recent_priority_ids,
+            {'chunk:chunk:adjacent-one', 'chunk:chunk:adjacent-two'},
+        )
+        selected_seqs = [
+            seq
+            for representation in plan.representations
+            for seq in representation.source_seqs
+        ]
+        self.assertEqual(len(selected_seqs), len(set(selected_seqs)))
 
     def test_rejected_chunk_does_not_move_recent_raw_boundary(self):
         members = tuple(_member(index, logical_size=5) for index in range(5))
