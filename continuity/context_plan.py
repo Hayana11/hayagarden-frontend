@@ -702,7 +702,7 @@ def _align_recent_raw_boundary(
     valid_chunks: Sequence[tuple[ContextRepresentation, set[tuple[Any, ...]]]],
     conflicting: set[int],
 ) -> set[tuple[Any, ...]]:
-    """Move the raw suffix past valid chunks crossed by its current start."""
+    """Move the raw suffix past ready chunks that cross its current boundary."""
     if not recent_raw_keys:
         return set()
     ordered = tuple(expected)
@@ -718,6 +718,7 @@ def _align_recent_raw_boundary(
     if not boundary_positions:
         return set(recent_raw_keys)
     boundary = min(boundary_positions)
+    aligned = False
     while boundary < len(ordered):
         boundary_key = _member_key(ordered[boundary])
         next_boundary: int | None = None
@@ -731,6 +732,8 @@ def _align_recent_raw_boundary(
             ]
             if not chunk_positions:
                 continue
+            if not aligned and min(chunk_positions) >= boundary:
+                continue
             candidate_boundary = max(chunk_positions) + 1
             next_boundary = (
                 candidate_boundary
@@ -740,6 +743,7 @@ def _align_recent_raw_boundary(
         if next_boundary is None or next_boundary <= boundary:
             break
         boundary = next_boundary
+        aligned = True
     return {
         _member_key(member)
         for member in ordered[boundary:]

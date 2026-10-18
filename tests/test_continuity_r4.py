@@ -539,7 +539,10 @@ class ContextPlanTests(unittest.TestCase):
             ),
         )
         self.assertEqual(plan.recent_raw_source_seqs, (3, 4))
-        self.assertEqual([item.kind for item in plan.representations], ['raw'])
+        self.assertEqual(
+            [(item.kind, item.source_seqs) for item in plan.representations],
+            [('raw', (0, 1, 2)), ('raw', (3, 4))],
+        )
         self.assertTrue(any(item.code == 'chunk_rejected' for item in plan.exclusions))
 
     def test_conflicting_chunks_do_not_move_recent_raw_boundary(self):
@@ -555,7 +558,10 @@ class ContextPlanTests(unittest.TestCase):
             ),
         )
         self.assertEqual(plan.recent_raw_source_seqs, (3, 4))
-        self.assertEqual([item.kind for item in plan.representations], ['raw'])
+        self.assertEqual(
+            [(item.kind, item.source_seqs) for item in plan.representations],
+            [('raw', (0, 1, 2)), ('raw', (3, 4))],
+        )
         self.assertEqual(
             {item.code for item in plan.exclusions},
             {'chunk_overlap'},
