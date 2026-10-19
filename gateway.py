@@ -5,7 +5,7 @@ if '/opt/frontend' not in _sys.path:
     _sys.path.insert(0, '/opt/frontend')
 if '/opt/frontend/tools' not in _sys.path:
     _sys.path.append('/opt/frontend/tools')
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, has_request_context
 import urllib.request, urllib.error, urllib.parse
 from codebase.client import CODEBASE_TOOLS, CODEBASE_READ_TOOLS, run_codebase_tool
 from tools import workspace_agent
@@ -23,6 +23,23 @@ from chat.display_segments import (
 app = Flask(__name__)
 DB_PATH    = '/opt/frontend/memories.db'
 _tool_ctx = threading.local()
+
+
+def _memory_runtime_provenance(source, extra=None):
+    """Build bounded request/session provenance without touching chat behavior."""
+    data = {'source': source, 'surface': 'gateway'}
+    if isinstance(extra, dict):
+        data.update({k: v for k, v in extra.items() if v})
+    try:
+        if has_request_context():
+            request_id = request.headers.get('X-Request-ID') or request.headers.get('X-Request-Id')
+            if request_id and not data.get('request_id'):
+                data['request_id'] = request_id
+    except Exception:
+        pass
+    if not data.get('session_id'):
+        data['session_id'] = getattr(_tool_ctx, 'conversation_id', None) or ''
+    return data
 
 
 def _chat_stream_exception_text(exc):
@@ -880,6 +897,16 @@ def _recall_memories(user_msg, limit=None):
             scored.append((score, r['id'], r['type'], c, str(r['created_at'])[:10]))
         scored.sort(key=lambda x: -x[0])
         top = scored[:limit]
+        try:
+            from tools.memory_runtime_bridge import record_legacy_recall
+            record_legacy_recall(
+                DB_PATH,
+                [s[1] for s in top],
+                query=user_msg,
+                provenance=_memory_runtime_provenance('chat_recall'),
+            )
+        except Exception:
+            pass
 
         # ② 渐变脑分支（可关：RECALL_OMBRE=false）
         ombre_hits = []
@@ -1145,47 +1172,75 @@ def _ombre_breath_sync(timeout=6.0, wall_timeout=7.0):
     return ombre_adapter.surface_memories(timeout=timeout, wall_timeout=wall_timeout)
 
 
-def _write_session_memo(user_msg='', assistant_msg=''):
+def _write_session_memo(user_msg='', assistant_msg='', provenance=None):
     """
-    对话结束时，用一句话总结这次交流发生了什么，写进ombre-brain作为memo。
-    在后台线程里跑，不阻塞响应流。
-    只在双方都有内容时才写。
+    Persist a bounded session memo through the runtime bridge.
+
+    The legacy posts write remains authoritative. Ombre is a best-effort
+    projection, and the automatic candidate is shadow-only unless explicitly
+    enabled by both runtime gates.
     """
     import threading as _threading, datetime as _dt, logging as _mlog
 
     if not user_msg.strip() or not assistant_msg.strip():
         return
 
+    session_provenance = _memory_runtime_provenance('session_memo', provenance)
+
     def _worker():
         try:
+            from tools.memory_runtime_bridge import (
+                observe_auto_candidate,
+                persist_memory,
+            )
             now = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%m-%d %H:%M')
             u_clip = user_msg.strip()[:80]
             a_clip = assistant_msg.strip()[:80]
             memo = f'[网页窗口 {now}] 她：{u_clip}… / 我：{a_clip}…'
-            _mlog.getLogger('gateway').info('[memo] 开始写入 ombre-brain: %s', memo[:60])
-            result = ombre_adapter.hold_memory(
-                memo,
+            result = persist_memory(
+                DB_PATH,
+                content=memo,
+                source='session_memo',
+                provenance=session_provenance,
+                type='MEMORY',
+                author='fyodor',
+                layer='recent',
                 tags='memo,网页窗口,跨端',
                 importance=4,
-                pinned=False,
-                timeout=10.0,
-                wall_timeout=11.0,
+                pinned=0,
+                write_ombre=True,
             )
-            if result is None:
-                raise RuntimeError('Ombre hold timed out or failed')
-            _mlog.getLogger('gateway').info('[memo] 写入 ombre-brain 成功: %s', result)
+            candidate = observe_auto_candidate(
+                DB_PATH,
+                user_message=user_msg,
+                assistant_message=assistant_msg,
+                provenance=session_provenance,
+            )
+            _mlog.getLogger('gateway').info(
+                '[memo] runtime persisted status=%s receipt_id=%s '
+                'ombre_status=%s candidate_status=%s candidate_receipt_id=%s',
+                result.get('status'),
+                result.get('receipt_id'),
+                result.get('ombre_status'),
+                candidate.get('status'),
+                candidate.get('receipt_id'),
+            )
         except Exception as _e:
-            _mlog.getLogger('gateway').error('[memo] 写入 ombre-brain 失败: %s', _e, exc_info=True)
+            _mlog.getLogger('gateway').error(
+                '[memo] runtime bridge failed open error_type=%s',
+                type(_e).__name__,
+                exc_info=True,
+            )
 
     try:
-        # 用 daemon thread 而非裸 ThreadPoolExecutor.submit()——
-        # 裸 submit 时 executor 对象没有引用，Python 3.11 的 GC 会立即回收并
-        # cancel_futures=True，导致任务还没跑就被取消。daemon=True 保证不阻塞进程退出。
         t = _threading.Thread(target=_worker, daemon=True, name='session-memo')
         t.start()
-        _mlog.getLogger('gateway').info('[memo] 后台线程已启动')
+        _mlog.getLogger('gateway').info('[memo] runtime bridge thread started')
     except Exception as _e:
-        _mlog.getLogger('gateway').error('[memo] 线程启动失败: %s', _e)
+        _mlog.getLogger('gateway').error(
+            '[memo] runtime bridge thread start failed error_type=%s',
+            type(_e).__name__,
+        )
 
 
 def _ombre_hold_sync(content, tags='', importance=5, pinned=False):
@@ -3463,11 +3518,30 @@ def run_tool(name, args, caller='fyodor_cc'):
             content = args.get('content', '')
             tags = args.get('tags', '').strip().lower()
             layer = tags if tags in ('core', 'long-term') else 'recent'
-            import memory_tool as _mt
-            _mt.save_memory(content, type='MEMORY', author='fyodor', layer=layer, tags=tags)
-            # 同时写入ombre-brain（渐变脑），尽力而为，失败不影响主流程
-            _ombre_hold_sync(content, tags=tags or 'recent', importance=5)
-            return '已存入记忆'
+            try:
+                from tools.memory_runtime_bridge import persist_memory
+                result = persist_memory(
+                    DB_PATH,
+                    content=content,
+                    source='save_memory',
+                    provenance=_memory_runtime_provenance('save_memory'),
+                    type='MEMORY',
+                    author='fyodor',
+                    layer=layer,
+                    tags=tags,
+                    importance=5,
+                    pinned=0,
+                    write_ombre=True,
+                )
+                if result.get('status') in ('CREATED', 'DEDUPLICATED', 'IN_PROGRESS'):
+                    return '已存入记忆'
+                return '记忆写入未完成，但不影响本轮对话'
+            except Exception as _e:
+                logging.getLogger('gateway').warning(
+                    'memory_runtime_save_failed_open error_type=%s',
+                    type(_e).__name__,
+                )
+                return '记忆写入未完成，但不影响本轮对话'
         if name == 'search_memories':
             import memory_tool
             res = memory_tool.search_memories(args.get('keyword', ''))
@@ -5380,19 +5454,37 @@ def _cc_stream_gen(full_system, prompt, env):
         raise RuntimeError('claude code 返回错误: ' + is_err)
     yield ('done', (''.join(text_acc).strip(), ''.join(think_acc), cache_read_total, cache_create_total))
 
-def _cc_save_markers(text):
-    """Extract [[SAVE:...]] markers, persist them, return cleaned text."""
+def _cc_save_markers(text, provenance=None):
+    """Extract [[SAVE:...]] markers through the fail-open runtime bridge."""
     saves = extract_save_markers(text)
     if saves:
         try:
-            import memory_tool
+            from tools.memory_runtime_bridge import persist_memory
             for item in saves:
                 item = item.strip()
                 if item:
-                    memory_tool.save_memory(item)
-        except Exception:
-            pass
+                    persist_memory(
+                        DB_PATH,
+                        content=item,
+                        source='save_marker',
+                        provenance=_memory_runtime_provenance(
+                            'save_marker', provenance
+                        ),
+                        type='MEMORY',
+                        author='fyodor',
+                        layer='recent',
+                        tags='save-marker',
+                        importance=4,
+                        pinned=0,
+                        write_ombre=True,
+                    )
+        except Exception as _e:
+            logging.getLogger('gateway').warning(
+                'memory_runtime_save_marker_failed_open error_type=%s',
+                type(_e).__name__,
+            )
     return strip_save_markers(text).strip()
+
 
 def claude_code_call(system, messages):
     full_system, prompt, env = _cc_prepare(system, messages)
@@ -7164,7 +7256,7 @@ def _stream_cc_daily_soft_window(
             }, ensure_ascii=False) + SSE_END
         yield ('persisted', canonical.content, canonical.thinking)
 
-        _write_session_memo(_uc, _cc_text)
+        _write_session_memo(_uc, _cc_text, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
         try:
             from moments_persistence import after_assistant_persisted
             after_assistant_persisted(
@@ -7681,7 +7773,7 @@ def chat_stream():
                             consume_wake_ids(get_db, _consume_wake_ids)
                             from chat.system_builder import consume_cc_one_shot_claims
                             consume_cc_one_shot_claims(get_db, _cc_one_shot_claims)
-                            _write_session_memo(_uc, _cc_text)
+                            _write_session_memo(_uc, _cc_text, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
                         _persisted[0] = True
                         if assistant_id is not None:
                             try:
@@ -7896,7 +7988,7 @@ def chat_stream():
                 # Candidate durable ≠ active assistant durable.
                 if not _rewrite_id:
                     consume_wake_ids(get_db, _wake_claim_ids)
-                    _write_session_memo(_uc, _pc)
+                    _write_session_memo(_uc, _pc, provenance=_memory_runtime_provenance('session_memo', {'turn_id': assistant_id}))
                 _persisted[0] = True
                 if assistant_id is not None:
                     try:
