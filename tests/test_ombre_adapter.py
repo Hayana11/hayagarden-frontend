@@ -288,6 +288,77 @@ class HoldDiagnosticTests(unittest.TestCase):
         self.assertEqual(observed[0]["final_status"], "WRITTEN")
         self.assertEqual(observed[0]["final_inner_stage"], "hold")
 
+    def test_timeout_completion_between_wait_and_outer_flag_emits_once(self):
+        real_event = threading.Event
+        finish_gate = real_event()
+        completed = real_event()
+        observed = []
+        created = [0]
+
+        class RaceEvent:
+            def __init__(self, role):
+                self.role = role
+                self.event = real_event()
+
+            def set(self):
+                if self.role == "outer":
+                    # Release the worker during outer_timed_out.set(), before
+                    # the caller performs its done recheck.
+                    finish_gate.set()
+                self.event.set()
+
+            def is_set(self):
+                return self.event.is_set()
+
+            def wait(self, timeout=None):
+                if self.role == "done":
+                    return False
+                return self.event.wait(timeout)
+
+        def event_factory():
+            created[0] += 1
+            if created[0] == 1:
+                return RaceEvent("done")
+            if created[0] == 2:
+                return RaceEvent("outer")
+            return RaceEvent("other")
+
+        async def gated_hold(**kwargs):
+            while not finish_gate.is_set():
+                await asyncio.sleep(0.001)
+            return "race-written"
+
+        server = SimpleNamespace(hold=gated_hold)
+
+        def on_late_completion(payload):
+            observed.append(payload)
+            completed.set()
+
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(
+            ombre_adapter, "_load_server", return_value=server
+        ), mock.patch.object(
+            ombre_adapter.threading, "Event", side_effect=event_factory
+        ):
+            result = ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=0.5,
+                wall_timeout=0.05,
+                correlation_id="receipt-race",
+                late_completion_observer=on_late_completion,
+            )
+
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(result["outer_stage"], "wall_timeout")
+        self.assertTrue(completed.wait(1.0))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["correlation_id"], "receipt-race")
+        self.assertEqual(observed[0]["final_status"], "WRITTEN")
+        self.assertEqual(observed[0]["final_inner_stage"], "hold")
+
     def test_cached_server_wall_timeout_preserves_hold_inner_stage(self):
         async def slow_hold(**kwargs):
             await asyncio.sleep(0.12)

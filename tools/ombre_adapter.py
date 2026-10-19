@@ -1024,6 +1024,8 @@ def hold_memory_diagnostic(
     outcome: dict[str, Any] = {}
     done = threading.Event()
     outer_timed_out = threading.Event()
+    late_emit_lock = threading.Lock()
+    late_emitted = False
 
     async def run() -> None:
         try:
@@ -1057,7 +1059,7 @@ def hold_memory_diagnostic(
             state.get("inner_stage") or "unknown"
         )
 
-    def late_completion() -> None:
+    def late_completion_observation() -> None:
         status = str(outcome.get("status") or "EXCEPTION")
         inner_stage = str(
             outcome.get("final_inner_stage")
@@ -1099,6 +1101,14 @@ def hold_memory_diagnostic(
                     exc.__class__.__name__,
                 )
 
+    def late_completion_once() -> None:
+        nonlocal late_emitted
+        with late_emit_lock:
+            if late_emitted:
+                return
+            late_emitted = True
+        late_completion_observation()
+
     def worker() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -1116,7 +1126,7 @@ def hold_memory_diagnostic(
             _close_loop(loop)
             done.set()
             if outer_timed_out.is_set():
-                late_completion()
+                late_completion_once()
 
     thread = threading.Thread(
         target=worker,
@@ -1126,6 +1136,11 @@ def hold_memory_diagnostic(
     thread.start()
     if not done.wait(timeout=max(0.05, effective_wall)):
         outer_timed_out.set()
+        # The worker may have completed in the narrow interval before the
+        # timeout flag was set.  The worker finally block uses the same
+        # exactly-once emitter.
+        if done.is_set():
+            late_completion_once()
         return make_result(
             "TIMEOUT",
             outer_stage="wall_timeout",
