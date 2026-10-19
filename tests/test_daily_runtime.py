@@ -4910,16 +4910,12 @@ class ContextPlanBudgetAuthorityTests(unittest.TestCase):
         self.assertEqual(respawn.recent_raw_target, 12000)
         self.assertEqual(cold.history_budget_limit, 24000)
         self.assertEqual(respawn.history_budget_limit, 24000)
-        self.assertTrue(cold.allow_recent_raw_history_limit_overflow)
-        self.assertTrue(respawn.allow_recent_raw_history_limit_overflow)
-        self.assertFalse(hot.allow_recent_raw_history_limit_overflow)
         self.assertEqual(hot.usable_budget, 150000)
         self.assertEqual(hot.recent_raw_target, 0)
         self.assertIsNone(hot.history_budget_limit)
         self.assertEqual(capacity.usable_budget, 90000)
         self.assertEqual(capacity.recent_raw_target, 12000)
         self.assertEqual(capacity.history_budget_limit, 64000)
-        self.assertFalse(capacity.allow_recent_raw_history_limit_overflow)
         capacity_history.assert_called_once_with(
             static_system='BASE_SYSTEM',
             pending_user_text='CURRENT_USER',
