@@ -6137,7 +6137,15 @@ class ContextPlanConsumerTests(unittest.TestCase):
             },
         )
 
-    def _capture_validated_ready_artifacts(self, plan, artifacts, *, mode='hot'):
+    def _capture_validated_ready_artifacts(
+        self,
+        plan,
+        artifacts,
+        *,
+        mode='hot',
+        canonical_hot_source_scope=None,
+        captured_kwargs=None,
+    ):
         context_plan = types.SimpleNamespace(
             plan_id='plan:' + ('a' * 32),
             plan_hash='a' * 64,
@@ -6168,7 +6176,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 resident=types.SimpleNamespace(),
                 static_system='STATIC',
                 mode=mode,
+                canonical_hot_source_scope=canonical_hot_source_scope,
             )
+        if captured_kwargs is not None:
+            captured_kwargs.update(adapter.call_args.kwargs)
         return adapter.call_args.kwargs['validated_ready_artifacts'], bodies
 
     def test_hot_plan_hides_new_ready_chunks_not_in_receipt(self):
@@ -6429,6 +6440,35 @@ class ContextPlanConsumerTests(unittest.TestCase):
         self._assert_hot_historical_respawn(
             installed, desired, self._historical_source('turn:t'),
         )
+
+    def test_capacity_scope_keeps_ready_surface_and_membership(self):
+        plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
+        artifacts = (
+            self._ready_chunk('ab'),
+            self._ready_chunk('c'),
+            self._ready_chunk('d'),
+        )
+        scope = (
+            ('turn:installed', 'revision-turn:installed', 'raw', 'hash-turn:installed', None, None, 'active-transcript'),
+        )
+        captured = {}
+        validated, bodies = self._capture_validated_ready_artifacts(
+            plan,
+            artifacts,
+            mode='capacity',
+            canonical_hot_source_scope=scope,
+            captured_kwargs=captured,
+        )
+
+        self.assertEqual(
+            [item['chunk_id'] for item in validated],
+            ['ab', 'c', 'd'],
+        )
+        self.assertEqual(
+            bodies,
+            {'ab': 'body-ab', 'c': 'body-c', 'd': 'body-d'},
+        )
+        self.assertEqual(captured['source_member_scope'], scope)
 
     def test_cold_and_capacity_see_all_ready_chunks_despite_installed_receipt(self):
         plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
