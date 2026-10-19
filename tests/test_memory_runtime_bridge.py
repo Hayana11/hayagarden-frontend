@@ -473,7 +473,12 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
 
 
     def _handoff_with_ombre(self, text: str):
-        system_builder = importlib.import_module("chat.system_builder")
+        with mock.patch.dict(
+            sys.modules,
+            {"config_store": types.ModuleType("config_store")},
+            clear=False,
+        ):
+            system_builder = importlib.import_module("chat.system_builder")
         with mock.patch(
             "tools.ombre_adapter.get_handoff",
             return_value=text,
