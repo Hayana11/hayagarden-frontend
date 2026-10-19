@@ -62,8 +62,8 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             }
             with self._env(db_path, receipt_path):
                 with mock.patch(
-                    "tools.ombre_adapter.hold_memory",
-                    return_value={"id": "ombre-shadow"},
+                    "tools.ombre_adapter.hold_memory_diagnostic",
+                    return_value={"status": "WRITTEN", "backend": "legacy_module", "stage": "hold", "error_type": "", "elapsed_ms": 1.0},
                 ):
                     persisted = bridge.persist_memory(
                         db_path,
@@ -279,8 +279,8 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             make_posts_db(db_path)
             with self._env(db_path, receipt_path):
                 with mock.patch(
-                    "tools.ombre_adapter.hold_memory",
-                    return_value={"id": "ombre-session"},
+                    "tools.ombre_adapter.hold_memory_diagnostic",
+                    return_value={"status": "WRITTEN", "backend": "legacy_module", "stage": "hold", "error_type": "", "elapsed_ms": 1.0},
                 ):
                     result = bridge.observe_session_memo(
                         db_path,
@@ -315,7 +315,7 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             make_posts_db(db_path)
             with self._env(db_path, receipt_path):
                 with mock.patch(
-                    "tools.ombre_adapter.hold_memory",
+                    "tools.ombre_adapter.hold_memory_diagnostic",
                     side_effect=RuntimeError("sidecar unavailable"),
                 ):
                     result = bridge.observe_session_memo(
@@ -439,7 +439,7 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             make_posts_db(db_path)
             with self._env(db_path, receipt_path):
                 with mock.patch(
-                    "tools.ombre_adapter.hold_memory",
+                    "tools.ombre_adapter.hold_memory_diagnostic",
                     side_effect=RuntimeError("sidecar unavailable"),
                 ):
                     result = bridge.persist_memory(
@@ -492,7 +492,7 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             make_posts_db(db_path)
             with self._env(db_path, receipt_path):
                 with mock.patch(
-                    "tools.ombre_adapter.hold_memory",
+                    "tools.ombre_adapter.hold_memory_diagnostic",
                     side_effect=RuntimeError("legacy hold failed"),
                 ):
                     result = bridge.persist_memory(
@@ -687,6 +687,63 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 self.assertLessEqual(len(bounded), boundary_budget)
 
 
+
+
+    def test_ombre_diagnostic_is_recorded_after_legacy_commit(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            diagnostic = {
+                "status": "TIMEOUT",
+                "backend": "legacy_module",
+                "stage": "hold",
+                "error_type": "TimeoutError",
+                "elapsed_ms": 42.0,
+            }
+            with self._env(db_path, receipt_path):
+                with mock.patch(
+                    "tools.ombre_adapter.hold_memory_diagnostic",
+                    return_value=diagnostic,
+                ), mock.patch.object(bridge._LOG, "info") as log_info:
+                    result = bridge.persist_memory(
+                        db_path,
+                        content="legacy commit survives Ombre timeout",
+                        source="save_memory",
+                        provenance={"turn_id": "turn-diagnostic-timeout"},
+                        write_ombre=True,
+                    )
+            self.assertEqual(result["status"], "CREATED")
+            self.assertEqual(result["ombre_status"], "FAILED")
+            conn = sqlite3.connect(db_path)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0], 1)
+            conn.close()
+            receipt = sqlite3.connect(receipt_path)
+            metadata_json = receipt.execute(
+                """
+                SELECT metadata_json
+                FROM memory_runtime_receipt_events
+                WHERE receipt_id=? AND stage=?
+                """,
+                (result["receipt_id"], "memory_persisted"),
+            ).fetchone()[0]
+            receipt.close()
+            metadata = json.loads(metadata_json)
+            self.assertEqual(metadata["ombre_diagnostic"], diagnostic)
+            rendered = " ".join(
+                str(call.args)
+                for call in log_info.call_args_list
+                if call.args
+            )
+            for expected in (
+                result["receipt_id"],
+                "legacy_module",
+                "TIMEOUT",
+                "hold",
+                "TimeoutError",
+                "42.0",
+            ):
+                self.assertIn(expected, rendered)
 
 
 if __name__ == "__main__":
