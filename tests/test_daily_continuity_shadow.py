@@ -257,6 +257,55 @@ class DailyContinuityShadowTests(unittest.TestCase):
             1,
         )
 
+    def test_capacity_anchor_stays_inside_proven_scope(self):
+        rows = [
+            _row(1, 'hayana', 'unmapped early request', '2026-09-08 23:59:00'),
+            _row(2, 'assistant', 'early answer', '2026-09-09 00:01:00'),
+            _row(6, 'hayana', 'mapped-scope request', '2026-09-09 01:00:00'),
+            _row(7, 'assistant', 'scope answer', '2026-09-09 01:01:00'),
+            _row(8, 'hayana', 'current request', '2026-09-09 02:00:00'),
+        ]
+        _write_source(self.source_path, rows)
+        members = build_source_members(
+            derive_completed_turns(rows),
+            derive_autonomous_events(rows),
+        )
+        proven_scope = (dc._source_member_scope_identity(members[1]),)
+
+        result = build_daily_continuity_shadow_plan(
+            source_db_path=self.source_path,
+            shadow_store_path=self.store_path,
+            current_user_message_id=8,
+            budget_policy=ContextBudgetPolicy(token_budget=1000, recent_raw_target=1),
+            window_anchor_source_member_scope=proven_scope,
+            window_anchor_enabled=True,
+            window_anchor_token_budget=1000,
+        )
+
+        self.assertEqual(result.status, 'ready')
+        anchor = next(
+            section for section in result.plan.ordered_sections
+            if section.kind == 'window_anchor'
+        )
+        self.assertEqual(anchor.source_ref, 'message:6')
+        self.assertNotEqual(anchor.source_ref, 'message:1')
+        self.assertEqual(result.source_member_count, 2)
+        self.assertEqual(
+            [member.source_ref for member in result.plan.source_members],
+            ['turn:1:2', 'turn:6:7'],
+        )
+
+        full = build_daily_continuity_shadow_plan(
+            source_db_path=self.source_path,
+            shadow_store_path=self.store_path,
+            current_user_message_id=8,
+            budget_policy=ContextBudgetPolicy(token_budget=1000, recent_raw_target=1),
+            window_anchor_enabled=True,
+            window_anchor_token_budget=1000,
+        )
+        self.assertEqual(full.status, 'ready')
+        self.assertEqual(result.plan.source_hash, full.plan.source_hash)
+
     def test_capacity_plan_marks_anchor_too_large_without_truncating(self):
         result = self._run(
             window_anchor_enabled=True,

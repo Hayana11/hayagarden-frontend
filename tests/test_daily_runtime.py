@@ -6137,7 +6137,15 @@ class ContextPlanConsumerTests(unittest.TestCase):
             },
         )
 
-    def _capture_validated_ready_artifacts(self, plan, artifacts, *, mode='hot'):
+    def _capture_validated_ready_artifacts(
+        self,
+        plan,
+        artifacts,
+        *,
+        mode='hot',
+        canonical_hot_source_scope=None,
+        captured_kwargs=None,
+    ):
         context_plan = types.SimpleNamespace(
             plan_id='plan:' + ('a' * 32),
             plan_hash='a' * 64,
@@ -6168,7 +6176,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
                 resident=types.SimpleNamespace(),
                 static_system='STATIC',
                 mode=mode,
+                canonical_hot_source_scope=canonical_hot_source_scope,
             )
+        if captured_kwargs is not None:
+            captured_kwargs.update(adapter.call_args.kwargs)
         return adapter.call_args.kwargs['validated_ready_artifacts'], bodies
 
     def test_hot_plan_hides_new_ready_chunks_not_in_receipt(self):
@@ -6430,6 +6441,52 @@ class ContextPlanConsumerTests(unittest.TestCase):
             installed, desired, self._historical_source('turn:t'),
         )
 
+    def test_capacity_scope_keeps_ready_surface_and_membership(self):
+        plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
+        artifacts = (
+            self._ready_chunk('ab'),
+            self._ready_chunk('c'),
+            self._ready_chunk('d'),
+        )
+        scope = (
+            ('turn:installed', 'revision-turn:installed', 'raw', 'hash-turn:installed', None, None, 'active-transcript'),
+        )
+        captured = {}
+        validated, bodies = self._capture_validated_ready_artifacts(
+            plan,
+            artifacts,
+            mode='capacity',
+            canonical_hot_source_scope=scope,
+            captured_kwargs=captured,
+        )
+
+        self.assertEqual(
+            [item['chunk_id'] for item in validated],
+            ['ab', 'c', 'd'],
+        )
+        self.assertEqual(
+            bodies,
+            {'ab': 'body-ab', 'c': 'body-c', 'd': 'body-d'},
+        )
+        self.assertIsNone(captured['source_member_scope'])
+        self.assertEqual(captured['window_anchor_source_member_scope'], scope)
+
+    def test_hot_scope_stays_on_expected_source_universe(self):
+        plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
+        captured = {}
+        self._capture_validated_ready_artifacts(
+            plan,
+            (self._ready_chunk('c'),),
+            mode='hot',
+            canonical_hot_source_scope=(('turn:installed',),),
+            captured_kwargs=captured,
+        )
+        self.assertEqual(
+            captured['source_member_scope'],
+            (('turn:installed',),),
+        )
+        self.assertIsNone(captured['window_anchor_source_member_scope'])
+
     def test_cold_and_capacity_see_all_ready_chunks_despite_installed_receipt(self):
         plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
         artifacts = (
@@ -6471,7 +6528,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         captured = {}
 
-        def _build(plan, *, resident, static_system, mode='hot'):
+        def _build(
+            plan, *, resident, static_system, mode='hot',
+            canonical_hot_source_scope=None,
+        ):
             captured.update({
                 'plan': plan,
                 'resident': resident,
@@ -6779,7 +6839,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         captured = {}
 
-        def _build(plan, *, resident, static_system, mode='hot'):
+        def _build(
+            plan, *, resident, static_system, mode='hot',
+            canonical_hot_source_scope=None,
+        ):
             captured['mode'] = mode
             return chunk_plan, {'chunk:one': 'compressed'}
 
@@ -6899,9 +6962,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
             static_system,
             mode='hot',
             capacity_budget_static_system=None,
+            canonical_hot_source_scope=None,
         ):
             captured['mode'] = mode
             captured['resident'] = resident
+            captured['scope'] = canonical_hot_source_scope
             return chunk_plan, {'chunk:one': 'compressed'}
 
         with mock.patch.object(
@@ -6912,6 +6977,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
             dr,
             '_freeze_hot_receipt',
             return_value={'expected_receipt_revision': 0},
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=(('installed',), ('native-tail',)),
         ), mock.patch.object(
             dr,
             '_build_production_context_plan',
@@ -6937,8 +7006,51 @@ class ContextPlanConsumerTests(unittest.TestCase):
             )
         self.assertEqual(captured['mode'], 'capacity')
         self.assertIsNone(captured['resident'])
+        self.assertEqual(
+            captured['scope'],
+            (('installed',), ('native-tail',)),
+        )
         self.assertIs(plan.capacity_context_plan, chunk_plan)
         self.assertEqual(result.get('error_code'), 'capacity_test_stop')
+
+    def test_capacity_blocks_without_proven_source_scope(self):
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            cursor_before=2,
+            manifest={},
+            db_path='production.db',
+        )
+        with mock.patch.object(
+            dr,
+            '_context_plan_consumer_enabled',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value={'expected_receipt_revision': 0},
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=None,
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as build_plan:
+            result = dr._attempt_capacity_swap_before_stdin(
+                plan,
+                resident=object(),
+                static_system='STATIC',
+                env={},
+                trigger_reason='hard_context',
+            )
+
+        self.assertEqual(
+            result.get('error_code'),
+            'context_plan_capacity_source_scope_unproven',
+        )
+        build_plan.assert_not_called()
 
     def test_hot_receipt_members_include_fixed_sections_without_body(self):
         from chat.context_receipt import ContextReceiptMember
@@ -9427,6 +9539,178 @@ class HotScopeDiagnosticsTests(unittest.TestCase):
         self.assertEqual(
             plan.hot_scope_diagnostic['reason'],
             'native_tail_source_identity_duplicate',
+        )
+
+    def test_capacity_turn_limit_uses_real_scope_proof(self):
+        plan = self._plan()
+        plan.worker_id = 'worker'
+        plan.resident_key = 'daily:default:30:65'
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        binding = types.SimpleNamespace(
+            context_id=32,
+            process_generation=65,
+            claude_session_id='session-1',
+            bound_cursor_message_id=11971,
+        )
+        receipt = types.SimpleNamespace(
+            context_id=32,
+            context_epoch=30,
+            resident_generation=65,
+            process_generation=65,
+            installed_source_watermark=11971,
+            resident_key=plan.resident_key,
+            provider='claude_code',
+            model_identity='model-1',
+            session_id='session-1',
+        )
+        installed = self._member('turn:installed')
+        tail = self._member('turn:native-tail')
+        frozen = self._frozen(
+            installed,
+            receipt=receipt,
+            session_id='session-1',
+            process_generation=65,
+            provider='claude_code',
+            model_identity='model-1',
+            installed_source_watermark=11971,
+        )
+        resident = types.SimpleNamespace(
+            generation=65,
+            session_id='session-1',
+            model_identity='model-1',
+            provider='claude_code',
+            system_text='',
+            bound_tool_surface_fingerprint='surface',
+            peek_respawn_reason=lambda _system, *, tool_profile: 'turn_limit',
+        )
+        registry = {
+            'context_id': 32,
+            'context_epoch': 30,
+            'resident_generation': 65,
+            'chat_id': 'default',
+            'claude_session_id': 'session-1',
+            'process_generation': 65,
+        }
+        owner = {
+            'context_id': 32,
+            'resident_generation': 65,
+            'worker_id': 'worker',
+            'resident_key': plan.resident_key,
+            'process_generation': 65,
+            'bound_cursor_message_id': 11971,
+        }
+        context_plan = types.SimpleNamespace(
+            plan_id='plan:' + ('a' * 32),
+            plan_hash='a' * 64,
+            source_hash='b' * 64,
+            valid=True,
+            budget_status='fit',
+            window_anchor_status='ANCHOR_RETAINED',
+            window_anchor=None,
+        )
+        captured = {}
+
+        def build(
+            _plan,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            capacity_budget_static_system=None,
+            canonical_hot_source_scope=None,
+        ):
+            captured['scope'] = canonical_hot_source_scope
+            captured['mode'] = mode
+            return context_plan, {}
+
+        with mock.patch.object(
+            dr,
+            '_context_plan_consumer_enabled',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value=frozen,
+        ), mock.patch.object(
+            dr,
+            'is_epoch_token_current',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            'get_local_binding',
+            return_value=binding,
+        ), mock.patch.object(
+            dr,
+            '_binding_matches_plan',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            '_resident_is_alive',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            'get_context_claude_session',
+            return_value=registry,
+        ), mock.patch.object(
+            dr.dc,
+            'get_resident_owner',
+            return_value=owner,
+        ), mock.patch.object(
+            dr.dc,
+            'get_resident_history_cursor',
+            return_value=11971,
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'pass', 'source_member': tail},
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=build,
+        ), mock.patch.object(
+            dr,
+            '_freeze_capacity_context_bootstrap',
+            return_value={'ok': True},
+        ), mock.patch.object(
+            dr,
+            'prepare_capacity_swap_for_context_plan',
+            side_effect=dr.DailyRuntimeError(
+                'stop after real scope proof',
+                error_code='capacity_test_stop',
+            ),
+        ):
+            result = dr._attempt_capacity_swap_before_stdin(
+                plan,
+                resident=resident,
+                static_system='STATIC',
+                env={},
+                trigger_reason='turn_limit',
+            )
+            mismatch_plan = self._plan()
+            mismatch_plan.worker_id = 'worker'
+            mismatch_plan.resident_key = plan.resident_key
+            mismatch_plan.tool_profile = dr.DAILY_TOOL_PROFILE
+            mismatch_plan.manifest = dict(plan.manifest)
+            mismatch_scope = dr._hot_canonical_source_scope(
+                mismatch_plan,
+                resident=resident,
+                frozen=frozen,
+                expected_respawn_reason='hard_context',
+            )
+
+        self.assertEqual(result.get('error_code'), 'capacity_test_stop')
+        self.assertEqual(captured['mode'], 'capacity')
+        self.assertEqual(
+            captured['scope'],
+            (
+                dr._receipt_member_source_identity(installed),
+                dr._source_member_identity(tail),
+            ),
+        )
+        self.assertIsNone(mismatch_scope)
+        self.assertEqual(
+            mismatch_plan.hot_scope_diagnostic['reason'],
+            'live_respawn_reason_mismatch',
         )
 
     def test_exception_records_stage_and_not_exception_message(self):

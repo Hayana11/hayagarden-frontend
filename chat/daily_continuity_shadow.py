@@ -288,10 +288,23 @@ def _window_anchor_section(
     history_rows: Sequence[dict[str, object]],
     *,
     anchor_token_budget: int,
+    allowed_user_source_refs: Sequence[str] | None = None,
 ) -> tuple[ContextSection | None, str]:
-    """Bind the first formal user to its canonical provider payload identity."""
+    """Bind the first proven-scope formal user to its provider payload identity."""
+    allowed_refs = (
+        None
+        if allowed_user_source_refs is None
+        else frozenset(str(ref) for ref in allowed_user_source_refs)
+    )
     first_user = next(
-        (row for row in history_rows if is_formal_user_source_row(row)),
+        (
+            row for row in history_rows
+            if is_formal_user_source_row(row)
+            and (
+                allowed_refs is None
+                or 'message:' + str(row.get('id') or '') in allowed_refs
+            )
+        ),
         None,
     )
     if first_user is None:
@@ -445,6 +458,7 @@ def build_daily_continuity_shadow_plan(
     continuity_store_path: str | Path | None = None,
     validated_ready_artifacts: Sequence[Mapping[str, str]] | None = None,
     source_member_scope: Sequence[tuple[object, ...]] | None = None,
+    window_anchor_source_member_scope: Sequence[tuple[object, ...]] | None = None,
     window_anchor_enabled: bool = False,
     window_anchor_token_budget: int | None = None,
 ) -> DailyContinuityShadowResult:
@@ -452,10 +466,13 @@ def build_daily_continuity_shadow_plan(
 
     The caller supplies accepted metadata-only fixed sections.  The adapter
     owns the durable current-request section and refuses a caller-supplied
-    duplicate.  A supplied source_member_scope is a proven canonical hot
+    duplicate.  A supplied source_member_scope is a proven canonical Hot
     receipt/native-tail scope; it restricts the expected source universe before
-    the pure R4 planner runs.  The pure R4 planner remains the only selection
-    authority.
+    the pure R4 planner runs.  A supplied
+    window_anchor_source_member_scope is validated against that same canonical
+    member identity, but restricts only the window-anchor candidate.  It never
+    removes members from the expected source universe.  The pure R4 planner
+    remains the only selection authority.
     """
     if budget_policy is None or not isinstance(budget_policy, ContextBudgetPolicy):
         return _blocked('budget_policy_unmapped')
@@ -509,6 +526,29 @@ def build_daily_continuity_shadow_plan(
                 )
             except _SourceScopeUnavailable:
                 return _blocked('source_scope_unavailable')
+        allowed_anchor_source_refs: tuple[str, ...] | None = None
+        if (
+            window_anchor_enabled
+            and window_anchor_source_member_scope is not None
+        ):
+            try:
+                anchor_scope_members = _restrict_expected_members(
+                    expected_members,
+                    window_anchor_source_member_scope,
+                )
+            except _SourceScopeUnavailable:
+                return _blocked('source_scope_unavailable')
+            selected_turn_ids = frozenset(
+                str(getattr(member, 'source_ref', '') or '')
+                for member in tuple(anchor_scope_members)
+                if str(getattr(member, 'source_kind', '') or '')
+                == 'completed_turn'
+            )
+            allowed_anchor_source_refs = tuple(
+                str(turn.user_input_ref.source_ref)
+                for turn in tuple(turns)
+                if str(turn.turn_id) in selected_turn_ids
+            )
         if not is_formal_user_source_row(current_row):
             return _blocked('invalid_current_request')
         try:
@@ -523,6 +563,7 @@ def build_daily_continuity_shadow_plan(
                 window_anchor, window_anchor_status = _window_anchor_section(
                     history_rows,
                     anchor_token_budget=int(window_anchor_token_budget),
+                    allowed_user_source_refs=allowed_anchor_source_refs,
                 )
             except (TypeError, ValueError):
                 return _blocked('window_anchor_unavailable')

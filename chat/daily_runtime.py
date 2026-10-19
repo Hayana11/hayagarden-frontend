@@ -1451,7 +1451,18 @@ def _build_production_context_plan(
         ),
         source_member_scope=(
             tuple(canonical_hot_source_scope or ())
-            if str(mode or 'hot').strip().lower() == 'hot'
+            if (
+                canonical_hot_source_scope is not None
+                and str(mode or 'hot').strip().lower() == 'hot'
+            )
+            else None
+        ),
+        window_anchor_source_member_scope=(
+            tuple(canonical_hot_source_scope or ())
+            if (
+                canonical_hot_source_scope is not None
+                and str(mode or 'hot').strip().lower() == 'capacity'
+            )
             else None
         ),
     )
@@ -2489,6 +2500,7 @@ def _hot_live_identity_decision(
     *,
     resident: Any,
     frozen: dict[str, Any],
+    expected_respawn_reason: str | None = None,
 ) -> tuple[str, str, Optional[dict[str, Any]]]:
     if not is_epoch_token_current(plan):
         return 'BLOCKED', 'epoch_invalid', None
@@ -2568,13 +2580,29 @@ def _hot_live_identity_decision(
         if live_persona_hash != expected_persona_hash:
             return 'RESPAWN', 'live_persona_identity_mismatch', None
 
+    expected_reason = (
+        None
+        if expected_respawn_reason is None
+        else str(expected_respawn_reason or '').strip()
+    )
+    if expected_respawn_reason is not None and not is_capacity_swap_reason(
+        expected_reason
+    ):
+        return 'BLOCKED', 'unsupported_capacity_trigger_reason', None
     peek = getattr(resident, 'peek_respawn_reason', None)
+    if expected_respawn_reason is not None and not callable(peek):
+        return 'BLOCKED', 'live_respawn_reason_unavailable', None
     if callable(peek):
         try:
-            live_reason = peek(live_system, tool_profile=plan.tool_profile)
+            live_reason = str(
+                peek(live_system, tool_profile=plan.tool_profile) or ''
+            ).strip()
         except Exception:
             return 'BLOCKED', 'live_tool_surface_identity_unavailable', None
-        if live_reason:
+        if expected_respawn_reason is not None:
+            if live_reason != expected_reason:
+                return 'RESPAWN', 'live_respawn_reason_mismatch', None
+        elif live_reason:
             return 'RESPAWN', 'live_provider_identity_mismatch', None
     if plan.tool_profile == DAILY_TOOL_PROFILE:
         tool_surface = str(
@@ -2774,6 +2802,7 @@ def _hot_canonical_source_scope(
     *,
     resident: Any,
     frozen: dict[str, Any],
+    expected_respawn_reason: str | None = None,
 ) -> tuple[tuple[Any, ...], ...] | None:
     """Return only installed history plus one proven native tail, or None."""
     stage = 'receipt_gate'
@@ -2828,6 +2857,7 @@ def _hot_canonical_source_scope(
             plan,
             resident=resident,
             frozen=frozen,
+            expected_respawn_reason=expected_respawn_reason,
         )
         if identity_decision != 'PASS' or registry is None:
             _hot_scope_diagnostic(
@@ -6058,12 +6088,25 @@ def _attempt_capacity_swap_before_stdin(
         try:
             frozen = _freeze_hot_receipt(plan, resident=resident)
             plan.capacity_source_receipt_frozen = frozen
+            canonical_source_scope = _hot_canonical_source_scope(
+                plan,
+                resident=resident,
+                frozen=frozen,
+                expected_respawn_reason=trigger_reason,
+            )
+            if canonical_source_scope is None:
+                return {
+                    'ok': False,
+                    'error_code': 'context_plan_capacity_source_scope_unproven',
+                    'detail': 'capacity canonical source scope is not proven',
+                }
             context_plan, chunk_bodies = _build_production_context_plan(
                 plan,
                 resident=None,
                 static_system=target_system,
                 mode='capacity',
                 capacity_budget_static_system=static_system,
+                canonical_hot_source_scope=canonical_source_scope,
             )
             plan.capacity_context_plan = context_plan
             plan.capacity_context_chunk_bodies = dict(chunk_bodies)
