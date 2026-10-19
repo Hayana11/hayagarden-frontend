@@ -460,17 +460,23 @@ def _write_legacy(
         memory_tool.DB_PATH = previous
 
 
+_OMBRE_DIAGNOSTIC_STATUSES = frozenset(
+    {"WRITTEN", "TIMEOUT", "EXCEPTION", "RETURNED_NONE", "BACKEND_UNAVAILABLE"}
+)
+
+
 def _write_ombre(
     content: str,
     *,
     tags: str,
     importance: int,
     pinned: bool,
-) -> str:
+    receipt_id: str | None = None,
+) -> tuple[str, dict[str, Any]]:
     try:
         from tools import ombre_adapter
 
-        result = ombre_adapter.hold_memory(
+        diagnostic = ombre_adapter.hold_memory_diagnostic(
             content,
             tags=tags,
             importance=importance,
@@ -478,13 +484,47 @@ def _write_ombre(
             timeout=3.0,
             wall_timeout=4.0,
         )
-        return "WRITTEN" if result is not None else "FAILED"
+        if not isinstance(diagnostic, dict):
+            raise TypeError("invalid_ombre_diagnostic")
+        if diagnostic.get("status") not in _OMBRE_DIAGNOSTIC_STATUSES:
+            raise ValueError("invalid_ombre_diagnostic_status")
+        diagnostic = {
+            "status": str(diagnostic.get("status")),
+            "backend": str(diagnostic.get("backend") or ""),
+            "stage": str(diagnostic.get("stage") or ""),
+            "error_type": str(diagnostic.get("error_type") or ""),
+            "elapsed_ms": diagnostic.get("elapsed_ms"),
+        }
     except Exception as exc:
+        try:
+            backend = str(ombre_adapter._backend())
+        except Exception:
+            backend = ""
+        diagnostic = {
+            "status": "EXCEPTION",
+            "backend": backend,
+            "stage": "adapter",
+            "error_type": type(exc).__name__,
+            "elapsed_ms": 0.0,
+        }
         _LOG.warning(
-            "memory_runtime_ombre_failed error_type=%s",
+            "memory_runtime_ombre_diagnostic_error receipt_id=%s error_type=%s",
+            receipt_id or "",
             type(exc).__name__,
         )
-        return "FAILED"
+
+    _LOG.info(
+        "memory_runtime_ombre_diagnostic receipt_id=%s backend=%s status=%s "
+        "stage=%s error_type=%s elapsed_ms=%s",
+        receipt_id or "",
+        diagnostic["backend"],
+        diagnostic["status"],
+        diagnostic["stage"],
+        diagnostic["error_type"],
+        diagnostic["elapsed_ms"],
+    )
+    legacy_status = "WRITTEN" if diagnostic["status"] == "WRITTEN" else "FAILED"
+    return legacy_status, diagnostic
 
 
 def _result(row: dict[str, Any], *, status: str | None = None) -> dict[str, Any]:
@@ -601,12 +641,14 @@ def persist_memory(
             raise RuntimeError("legacy_write_returned_no_id")
 
         ombre_status = "NOT_REQUESTED"
+        ombre_diagnostic = None
         if write_ombre:
-            ombre_status = _write_ombre(
+            ombre_status, ombre_diagnostic = _write_ombre(
                 text,
                 tags=tags,
                 importance=int(importance),
                 pinned=bool(pinned),
+                receipt_id=row["receipt_id"],
             )
         row = _update_receipt(
             posts_db_path,
@@ -616,13 +658,16 @@ def persist_memory(
             ombre_status=ombre_status,
             error_code="",
         ) or row
+        event_metadata = {"ombre_status": ombre_status}
+        if ombre_diagnostic is not None:
+            event_metadata["ombre_diagnostic"] = ombre_diagnostic
         _event(
             posts_db_path,
             row["receipt_id"],
             "memory_persisted",
             "VERIFIED",
             legacy_memory_id=int(legacy_id),
-            metadata={"ombre_status": ombre_status},
+            metadata=event_metadata,
         )
         return _result(row, status="CREATED")
     except Exception as exc:
@@ -728,12 +773,14 @@ def observe_session_memo(
         return result
 
     ombre_status = "NOT_REQUESTED"
+    ombre_diagnostic = None
     if write_ombre:
-        ombre_status = _write_ombre(
+        ombre_status, ombre_diagnostic = _write_ombre(
             text,
             tags=tags,
             importance=int(importance),
             pinned=False,
+            receipt_id=row["receipt_id"],
         )
     try:
         row = _update_receipt(
@@ -751,6 +798,11 @@ def observe_session_memo(
             metadata={
                 "legacy_write": "DISABLED",
                 "ombre_status": ombre_status,
+                **(
+                    {"ombre_diagnostic": ombre_diagnostic}
+                    if ombre_diagnostic is not None
+                    else {}
+                ),
             },
         )
     except Exception as exc:

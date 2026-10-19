@@ -913,6 +913,146 @@ async def hold_memory_async(
     return await getattr(server, "hold")(**arguments)
 
 
+
+def hold_memory_diagnostic(
+    content: str,
+    *,
+    tags: str = "",
+    importance: int = 5,
+    pinned: bool = False,
+    timeout: float = 3.0,
+    wall_timeout: float = 4.0,
+) -> dict[str, Any]:
+    """Return staged, body-free diagnostics for one Ombre hold attempt.
+
+    This follows the same backend selection and timeout budgets as
+    hold_memory while preserving the failure stage that the compatibility
+    wrapper intentionally collapses.
+    """
+    started = time.monotonic()
+    backend = _backend()
+    text = str(content or "").strip()
+    if not text:
+        return {
+            "status": "RETURNED_NONE",
+            "backend": backend,
+            "stage": "validate",
+            "error_type": "EmptyContent",
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+    if backend not in {"legacy_module", "http"}:
+        return {
+            "status": "BACKEND_UNAVAILABLE",
+            "backend": backend,
+            "stage": "backend_select",
+            "error_type": "UnsupportedBackend",
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+
+    arguments = {
+        "content": text,
+        "tags": str(tags or ""),
+        "importance": max(1, min(10, int(importance))),
+        "pinned": bool(pinned),
+    }
+    is_http = backend == "http"
+    async_timeout = max(float(timeout), 35.0) if is_http else float(timeout)
+    effective_wall = (
+        max(float(wall_timeout), async_timeout + 3.0)
+        if is_http
+        else float(wall_timeout)
+    )
+    state: dict[str, Any] = {"stage": "backend_call"}
+
+    class _BackendUnavailable(Exception):
+        def __init__(self, cause: BaseException):
+            self.cause = cause
+            super().__init__(cause.__class__.__name__)
+
+    async def invoke() -> Any:
+        if is_http:
+            state["stage"] = "backend_call"
+            try:
+                return await _mcp_call("hold", arguments, timeout=30.0)
+            except (ImportError, ModuleNotFoundError) as exc:
+                raise _BackendUnavailable(exc) from exc
+
+        state["stage"] = "backend_load"
+        try:
+            server = _load_server()
+        except BaseException as exc:
+            raise _BackendUnavailable(exc) from exc
+        hold = getattr(server, "hold", None)
+        if not callable(hold):
+            raise _BackendUnavailable(AttributeError("hold"))
+        state["stage"] = "hold"
+        return await hold(**arguments)
+
+    outcome: dict[str, Any] = {}
+    done = threading.Event()
+
+    async def run() -> None:
+        try:
+            value = await asyncio.wait_for(invoke(), timeout=async_timeout)
+        except asyncio.TimeoutError:
+            outcome.update(
+                status="TIMEOUT",
+                error_type="TimeoutError",
+            )
+        except _BackendUnavailable as exc:
+            outcome.update(
+                status="BACKEND_UNAVAILABLE",
+                error_type=exc.cause.__class__.__name__,
+            )
+        except BaseException as exc:
+            outcome.update(
+                status="EXCEPTION",
+                error_type=exc.__class__.__name__,
+            )
+        else:
+            outcome.update(
+                status="RETURNED_NONE" if value is None else "WRITTEN",
+                error_type="",
+            )
+
+    def worker() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(run())
+        except BaseException as exc:
+            outcome.update(
+                status="EXCEPTION",
+                error_type=exc.__class__.__name__,
+            )
+        finally:
+            _close_loop(loop)
+            done.set()
+
+    threading.Thread(
+        target=worker,
+        daemon=True,
+        name="ombre-adapter-diagnostic",
+    ).start()
+    if not done.wait(timeout=max(0.05, effective_wall)):
+        return {
+            "status": "TIMEOUT",
+            "backend": backend,
+            "stage": "wall_timeout",
+            "error_type": "WallTimeout",
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+
+    status = outcome.get("status", "EXCEPTION")
+    error_type = str(outcome.get("error_type") or "")
+    return {
+        "status": status,
+        "backend": backend,
+        "stage": str(state.get("stage") or "unknown"),
+        "error_type": error_type,
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+    }
+
 def hold_memory(
     content: str,
     *,

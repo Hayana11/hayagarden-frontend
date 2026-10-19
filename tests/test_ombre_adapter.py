@@ -192,6 +192,76 @@ class SearchAndWriteTests(unittest.TestCase):
         self.assertFalse(received["pinned"])
 
 
+class HoldDiagnosticTests(unittest.TestCase):
+    def _diagnose(self, hold, **kwargs):
+        server = types.SimpleNamespace(hold=hold)
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(ombre_adapter, "_load_server", return_value=server):
+            return ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=kwargs.pop("timeout", 0.2),
+                wall_timeout=kwargs.pop("wall_timeout", 1.0),
+                **kwargs,
+            )
+
+    def test_hold_returns_written_without_body(self):
+        async def hold(**kwargs):
+            return "legacy-id"
+
+        result = self._diagnose(hold)
+        self.assertEqual(result["status"], "WRITTEN")
+        self.assertEqual(result["backend"], "legacy_module")
+        self.assertEqual(result["stage"], "hold")
+        self.assertGreaterEqual(result["elapsed_ms"], 0)
+        self.assertNotIn("content", result)
+        self.assertNotIn("diagnostic body stays out of result", json.dumps(result))
+
+    def test_hold_returning_none_is_distinguished(self):
+        async def hold(**kwargs):
+            return None
+
+        self.assertEqual(self._diagnose(hold)["status"], "RETURNED_NONE")
+
+    def test_hold_exception_is_distinguished(self):
+        async def hold(**kwargs):
+            raise RuntimeError("sidecar failure")
+
+        result = self._diagnose(hold)
+        self.assertEqual(result["status"], "EXCEPTION")
+        self.assertEqual(result["error_type"], "RuntimeError")
+
+    def test_hold_async_timeout_is_distinguished(self):
+        async def hold(**kwargs):
+            await asyncio.sleep(0.2)
+            return "late"
+
+        result = self._diagnose(hold, timeout=0.03, wall_timeout=0.5)
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(result["error_type"], "TimeoutError")
+
+    def test_backend_load_failure_is_distinguished(self):
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(
+            ombre_adapter,
+            "_load_server",
+            side_effect=ModuleNotFoundError("server module missing"),
+        ):
+            result = ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=0.2,
+                wall_timeout=1.0,
+            )
+        self.assertEqual(result["status"], "BACKEND_UNAVAILABLE")
+        self.assertEqual(result["stage"], "backend_load")
+        self.assertEqual(result["error_type"], "ModuleNotFoundError")
+
+
 class EmotionSnapshotTests(unittest.TestCase):
     def test_safe_snapshot_excludes_permanent_pinned_and_test_data(self):
         dynamic_a = bucket(
