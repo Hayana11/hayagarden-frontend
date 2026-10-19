@@ -84,6 +84,13 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 self.assertEqual(
                     persisted["receipt_id"], repeated["receipt_id"]
                 )
+                conn = sqlite3.connect(db_path)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
+                    1,
+                )
+                conn.close()
+
                 timed_memo_a = bridge.persist_memory(
                     db_path,
                     content="[网页窗口 10-00] memo",
@@ -106,7 +113,7 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 conn = sqlite3.connect(db_path)
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
-                    1,
+                    2,
                 )
                 conn.close()
 
