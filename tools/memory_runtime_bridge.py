@@ -525,7 +525,7 @@ def _write_ombre(
     try:
         from tools import ombre_adapter
 
-        diagnostic = ombre_adapter.hold_memory_diagnostic(
+        raw_diagnostic = ombre_adapter.hold_memory_diagnostic(
             content,
             tags=tags,
             importance=importance,
@@ -535,44 +535,77 @@ def _write_ombre(
             correlation_id=receipt_id,
             late_completion_observer=record_late_completion,
         )
-        if not isinstance(diagnostic, dict):
+        if not isinstance(raw_diagnostic, dict):
             raise TypeError("invalid_ombre_diagnostic")
-        status = diagnostic.get("status")
+        status = raw_diagnostic.get("status")
         if status not in _OMBRE_DIAGNOSTIC_STATUSES:
             raise ValueError("invalid_ombre_diagnostic_status")
         diagnostic = {
             "status": str(status),
-            "backend": str(diagnostic.get("backend") or ""),
-            "stage": str(diagnostic.get("stage") or ""),
+            "backend": str(raw_diagnostic.get("backend") or ""),
+            "stage": str(raw_diagnostic.get("stage") or ""),
             "outer_stage": str(
-                diagnostic.get("outer_stage")
-                or diagnostic.get("stage")
+                raw_diagnostic.get("outer_stage")
+                or raw_diagnostic.get("stage")
                 or ""
             ),
             "inner_stage": str(
-                diagnostic.get("inner_stage")
-                or diagnostic.get("stage")
+                raw_diagnostic.get("inner_stage")
+                or raw_diagnostic.get("stage")
                 or ""
             ),
             "server_cached_before_call": bool(
-                diagnostic.get("server_cached_before_call", False)
+                raw_diagnostic.get("server_cached_before_call", False)
             ),
             "worker_alive_at_return": bool(
-                diagnostic.get("worker_alive_at_return", False)
+                raw_diagnostic.get("worker_alive_at_return", False)
             ),
-            "async_timeout_ms": diagnostic.get("async_timeout_ms"),
-            "wall_timeout_ms": diagnostic.get("wall_timeout_ms"),
+            "async_timeout_ms": raw_diagnostic.get("async_timeout_ms"),
+            "wall_timeout_ms": raw_diagnostic.get("wall_timeout_ms"),
             "failure_class": str(
-                diagnostic.get("failure_class")
+                raw_diagnostic.get("failure_class")
                 or (status if status != "WRITTEN" else "")
             ),
             "root_cause": str(
-                diagnostic.get("root_cause")
+                raw_diagnostic.get("root_cause")
                 or ("unknown" if status != "WRITTEN" else "")
             ),
-            "error_type": str(diagnostic.get("error_type") or ""),
-            "elapsed_ms": diagnostic.get("elapsed_ms"),
+            "error_type": str(raw_diagnostic.get("error_type") or ""),
+            "elapsed_ms": raw_diagnostic.get("elapsed_ms"),
         }
+        attribution_fields = (
+            "missing_module",
+            "pid",
+            "python_executable",
+            "cwd",
+            "ombre_root",
+            "ombre_root_in_sys_path",
+            "server_spec_origin",
+            "server_in_sys_modules",
+            "server_module_file",
+        )
+        for field in attribution_fields:
+            if field not in raw_diagnostic:
+                continue
+            value = raw_diagnostic[field]
+            if field in {
+                "missing_module",
+                "python_executable",
+                "cwd",
+                "ombre_root",
+                "server_spec_origin",
+                "server_module_file",
+            }:
+                diagnostic[field] = str(value or "")[:500]
+            elif field in {
+                "ombre_root_in_sys_path",
+                "server_in_sys_modules",
+            }:
+                diagnostic[field] = bool(value)
+            else:
+                diagnostic[field] = value
+
+
     except Exception as exc:
         try:
             backend = str(ombre_adapter._backend())
