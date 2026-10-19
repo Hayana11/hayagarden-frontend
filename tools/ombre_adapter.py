@@ -1147,7 +1147,9 @@ def hold_memory_diagnostic(
         outer_stage=outer_stage,
         inner_stage=inner_stage,
         error_type=error_type,
-        worker_alive=thread.is_alive(),
+        # The done event marks the worker's diagnostic work complete.  Avoid
+        # exposing the tiny thread teardown race for non-wall outcomes.
+        worker_alive=False,
     )
 
 
