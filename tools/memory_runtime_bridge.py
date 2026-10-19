@@ -533,7 +533,7 @@ def persist_memory(
     except Exception as exc:
         _LOG.warning(
             "memory_runtime_receipt_unavailable error_type=%s",
-            type(exc).__name__,
+            exc.__class__.__name__,
         )
         return {
             "status": "RECEIPT_FAILED",
@@ -624,7 +624,7 @@ def persist_memory(
                 posts_db_path,
                 row["receipt_id"],
                 status="FAILED",
-                error_code=type(exc).__name__,
+                error_code=exc.__class__.__name__,
             ) or row
         except Exception:
             _LOG.warning(
@@ -638,7 +638,7 @@ def persist_memory(
                 row["receipt_id"],
                 "memory_persisted",
                 "FAILED",
-                metadata={"error_type": type(exc).__name__},
+                metadata={"error_type": exc.__class__.__name__},
             )
         except Exception:
             _LOG.warning(
@@ -649,7 +649,7 @@ def persist_memory(
         _LOG.warning(
             "memory_runtime_persist_failed receipt_id=%s error_type=%s",
             row.get("receipt_id"),
-            type(exc).__name__,
+            exc.__class__.__name__,
         )
         return _result(failed_row, status="FAILED")
 
