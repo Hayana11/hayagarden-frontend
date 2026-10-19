@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sqlite3
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -135,7 +138,13 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                     posts_db_path=db_path,
                 )
                 self.assertEqual(unverified["status"], "UNVERIFIED")
-                from chat import system_builder
+                with mock.patch.dict(
+                    sys.modules,
+                    {"config_store": types.ModuleType("config_store")},
+                ):
+                    system_builder = importlib.import_module(
+                        "chat.system_builder"
+                    )
 
                 with mock.patch(
                     "tools.ombre_adapter.get_handoff",
