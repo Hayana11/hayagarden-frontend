@@ -999,6 +999,11 @@ def hold_memory_diagnostic(
                 status="TIMEOUT",
                 error_type="TimeoutError",
             )
+        except asyncio.CancelledError:
+            outcome.update(
+                status="TIMEOUT",
+                error_type="TimeoutError",
+            )
         except _BackendUnavailable as exc:
             outcome.update(
                 status="BACKEND_UNAVAILABLE",
