@@ -6468,7 +6468,24 @@ class ContextPlanConsumerTests(unittest.TestCase):
             bodies,
             {'ab': 'body-ab', 'c': 'body-c', 'd': 'body-d'},
         )
-        self.assertEqual(captured['source_member_scope'], scope)
+        self.assertIsNone(captured['source_member_scope'])
+        self.assertEqual(captured['window_anchor_source_member_scope'], scope)
+
+    def test_hot_scope_stays_on_expected_source_universe(self):
+        plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))
+        captured = {}
+        self._capture_validated_ready_artifacts(
+            plan,
+            (self._ready_chunk('c'),),
+            mode='hot',
+            canonical_hot_source_scope=(('turn:installed',),),
+            captured_kwargs=captured,
+        )
+        self.assertEqual(
+            captured['source_member_scope'],
+            (('turn:installed',),),
+        )
+        self.assertIsNone(captured['window_anchor_source_member_scope'])
 
     def test_cold_and_capacity_see_all_ready_chunks_despite_installed_receipt(self):
         plan = self._hot_receipt_filter_plan(installed_chunk_ids=('c',))

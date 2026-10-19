@@ -277,7 +277,7 @@ class DailyContinuityShadowTests(unittest.TestCase):
             shadow_store_path=self.store_path,
             current_user_message_id=8,
             budget_policy=ContextBudgetPolicy(token_budget=1000, recent_raw_target=1),
-            source_member_scope=proven_scope,
+            window_anchor_source_member_scope=proven_scope,
             window_anchor_enabled=True,
             window_anchor_token_budget=1000,
         )
@@ -289,7 +289,22 @@ class DailyContinuityShadowTests(unittest.TestCase):
         )
         self.assertEqual(anchor.source_ref, 'message:6')
         self.assertNotEqual(anchor.source_ref, 'message:1')
-        self.assertEqual(result.source_member_count, 1)
+        self.assertEqual(result.source_member_count, 2)
+        self.assertEqual(
+            [member.source_ref for member in result.plan.source_members],
+            ['turn:1:2', 'turn:6:7'],
+        )
+
+        full = build_daily_continuity_shadow_plan(
+            source_db_path=self.source_path,
+            shadow_store_path=self.store_path,
+            current_user_message_id=8,
+            budget_policy=ContextBudgetPolicy(token_budget=1000, recent_raw_target=1),
+            window_anchor_enabled=True,
+            window_anchor_token_budget=1000,
+        )
+        self.assertEqual(full.status, 'ready')
+        self.assertEqual(result.plan.source_hash, full.plan.source_hash)
 
     def test_capacity_plan_marks_anchor_too_large_without_truncating(self):
         result = self._run(

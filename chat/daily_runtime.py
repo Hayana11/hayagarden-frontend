@@ -1451,7 +1451,18 @@ def _build_production_context_plan(
         ),
         source_member_scope=(
             tuple(canonical_hot_source_scope or ())
-            if canonical_hot_source_scope is not None
+            if (
+                canonical_hot_source_scope is not None
+                and str(mode or 'hot').strip().lower() == 'hot'
+            )
+            else None
+        ),
+        window_anchor_source_member_scope=(
+            tuple(canonical_hot_source_scope or ())
+            if (
+                canonical_hot_source_scope is not None
+                and str(mode or 'hot').strip().lower() == 'capacity'
+            )
             else None
         ),
     )

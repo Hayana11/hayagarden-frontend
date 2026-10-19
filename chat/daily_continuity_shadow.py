@@ -458,6 +458,7 @@ def build_daily_continuity_shadow_plan(
     continuity_store_path: str | Path | None = None,
     validated_ready_artifacts: Sequence[Mapping[str, str]] | None = None,
     source_member_scope: Sequence[tuple[object, ...]] | None = None,
+    window_anchor_source_member_scope: Sequence[tuple[object, ...]] | None = None,
     window_anchor_enabled: bool = False,
     window_anchor_token_budget: int | None = None,
 ) -> DailyContinuityShadowResult:
@@ -465,10 +466,13 @@ def build_daily_continuity_shadow_plan(
 
     The caller supplies accepted metadata-only fixed sections.  The adapter
     owns the durable current-request section and refuses a caller-supplied
-    duplicate.  A supplied source_member_scope is a proven canonical hot
+    duplicate.  A supplied source_member_scope is a proven canonical Hot
     receipt/native-tail scope; it restricts the expected source universe before
-    the pure R4 planner runs.  The pure R4 planner remains the only selection
-    authority.
+    the pure R4 planner runs.  A supplied
+    window_anchor_source_member_scope is validated against that same canonical
+    member identity, but restricts only the window-anchor candidate.  It never
+    removes members from the expected source universe.  The pure R4 planner
+    remains the only selection authority.
     """
     if budget_policy is None or not isinstance(budget_policy, ContextBudgetPolicy):
         return _blocked('budget_policy_unmapped')
@@ -514,7 +518,6 @@ def build_daily_continuity_shadow_plan(
             expected_members = build_source_members(turns, events)
         except (TypeError, ValueError):
             return _blocked('source_rows_unavailable')
-        allowed_anchor_source_refs: tuple[str, ...] | None = None
         if source_member_scope is not None:
             try:
                 expected_members = _restrict_expected_members(
@@ -523,9 +526,21 @@ def build_daily_continuity_shadow_plan(
                 )
             except _SourceScopeUnavailable:
                 return _blocked('source_scope_unavailable')
+        allowed_anchor_source_refs: tuple[str, ...] | None = None
+        if (
+            window_anchor_enabled
+            and window_anchor_source_member_scope is not None
+        ):
+            try:
+                anchor_scope_members = _restrict_expected_members(
+                    expected_members,
+                    window_anchor_source_member_scope,
+                )
+            except _SourceScopeUnavailable:
+                return _blocked('source_scope_unavailable')
             selected_turn_ids = frozenset(
                 str(getattr(member, 'source_ref', '') or '')
-                for member in tuple(expected_members)
+                for member in tuple(anchor_scope_members)
                 if str(getattr(member, 'source_kind', '') or '')
                 == 'completed_turn'
             )
