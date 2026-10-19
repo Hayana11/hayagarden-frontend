@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from typing import Any, Callable, Optional
 
 _LOG = logging.getLogger("hayagarden.ombre_adapter")
 _DEFAULT_ROOT = "/opt/ombre-brain"
+_OMBRE_SERVER_MODULE_NAME = "hayagarden_ombre_server"
 _DEFAULT_SNAPSHOT_URL = "http://127.0.0.1:8000/emotion_snapshot"
 _SERVER_INSTANCE = None
 _SERVER_ERROR: Optional[BaseException] = None
@@ -159,6 +161,57 @@ async def _mcp_call(tool_name: str, arguments: dict[str, Any], *, timeout: float
     return "\n".join(chunks)
 
 
+
+def _ombre_root() -> str:
+    return os.environ.get("OMBRE_BRAIN_ROOT", _DEFAULT_ROOT).strip() or _DEFAULT_ROOT
+
+
+def _module_load_diagnostics(
+    root: str,
+    exc: ModuleNotFoundError,
+) -> dict[str, Any]:
+    missing_module = getattr(exc, "name", None)
+    if not missing_module:
+        message = str(exc).strip()
+        marker = "No module named "
+        if message.startswith(marker):
+            missing_module = message[len(marker):].strip().strip("'\"")
+        elif message and all(
+            char.isalnum() or char in "._-" for char in message
+        ):
+            missing_module = message
+
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+
+    try:
+        server_spec = importlib.util.find_spec("server")
+    except (ImportError, ValueError, AttributeError):
+        server_spec = None
+
+    server_module = sys.modules.get("server")
+    server_module_file = getattr(server_module, "__file__", None)
+    if not server_module_file:
+        server_module_spec = getattr(server_module, "__spec__", None)
+        server_module_file = getattr(server_module_spec, "origin", None)
+
+    return {
+        "missing_module": str(missing_module or ""),
+        "pid": os.getpid(),
+        "python_executable": str(sys.executable or ""),
+        "cwd": cwd,
+        "ombre_root": str(root),
+        "ombre_root_in_sys_path": root in sys.path,
+        "server_spec_origin": str(
+            getattr(server_spec, "origin", "") or ""
+        ),
+        "server_in_sys_modules": "server" in sys.modules,
+        "server_module_file": str(server_module_file or ""),
+    }
+
+
 def _load_server():
     """Load the configured Ombre server lazily.
 
@@ -172,11 +225,40 @@ def _load_server():
         if _SERVER_INSTANCE is not None:
             return _SERVER_INSTANCE
         try:
-            root = os.environ.get("OMBRE_BRAIN_ROOT", _DEFAULT_ROOT).strip() or _DEFAULT_ROOT
+            root = _ombre_root()
             if root not in sys.path:
                 sys.path.insert(0, root)
-            logging.getLogger("ombre_brain").setLevel(logging.WARNING)
-            _SERVER_INSTANCE = importlib.import_module("server")
+
+            # Resolve only the configured Ombre root's server.py.  A dedicated
+            # module name keeps an unrelated sys.modules["server"] or another
+            # server.py elsewhere on sys.path out of this import path.
+            server_path = os.path.join(root, "server.py")
+            if not os.path.isfile(server_path):
+                raise ModuleNotFoundError(
+                    f"No Ombre server.py at {server_path}",
+                    name="server",
+                )
+            spec = importlib.util.spec_from_file_location(
+                _OMBRE_SERVER_MODULE_NAME,
+                server_path,
+            )
+            if spec is None or spec.loader is None:
+                raise ModuleNotFoundError(
+                    f"Unable to load Ombre server.py at {server_path}",
+                    name="server",
+                )
+
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[_OMBRE_SERVER_MODULE_NAME] = module
+            try:
+                logging.getLogger("ombre_brain").setLevel(logging.WARNING)
+                spec.loader.exec_module(module)
+            except BaseException:
+                if sys.modules.get(_OMBRE_SERVER_MODULE_NAME) is module:
+                    sys.modules.pop(_OMBRE_SERVER_MODULE_NAME, None)
+                raise
+
+            _SERVER_INSTANCE = module
             _SERVER_ERROR = None
             return _SERVER_INSTANCE
         except BaseException as exc:
@@ -955,8 +1037,9 @@ def hold_memory_diagnostic(
         inner_stage: str,
         error_type: str,
         worker_alive: bool = False,
+        load_diagnostics: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        return {
+        result = {
             "status": status,
             "backend": backend,
             # stage is retained for the compatibility receipt contract.
@@ -976,6 +1059,9 @@ def hold_memory_diagnostic(
             "error_type": error_type,
             "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
         }
+        if load_diagnostics:
+            result.update(load_diagnostics)
+        return result
 
     text = str(content or "").strip()
     if not text:
@@ -1002,8 +1088,14 @@ def hold_memory_diagnostic(
     state: dict[str, Any] = {"inner_stage": "backend_call"}
 
     class _BackendUnavailable(Exception):
-        def __init__(self, cause: BaseException):
+        def __init__(
+            self,
+            cause: BaseException,
+            *,
+            load_diagnostics: Optional[dict[str, Any]] = None,
+        ):
             self.cause = cause
+            self.load_diagnostics = load_diagnostics or {}
             super().__init__(cause.__class__.__name__)
 
     async def invoke() -> Any:
@@ -1015,10 +1107,19 @@ def hold_memory_diagnostic(
                 raise _BackendUnavailable(exc) from exc
 
         state["inner_stage"] = "backend_load"
+        root = _ombre_root()
         try:
             server = _load_server()
         except BaseException as exc:
-            raise _BackendUnavailable(exc) from exc
+            load_diagnostics = (
+                _module_load_diagnostics(root, exc)
+                if isinstance(exc, ModuleNotFoundError)
+                else {}
+            )
+            raise _BackendUnavailable(
+                exc,
+                load_diagnostics=load_diagnostics,
+            ) from exc
         hold = getattr(server, "hold", None)
         if not callable(hold):
             raise _BackendUnavailable(AttributeError("hold"))
@@ -1048,6 +1149,7 @@ def hold_memory_diagnostic(
             outcome.update(
                 status="BACKEND_UNAVAILABLE",
                 error_type=exc.cause.__class__.__name__,
+                load_diagnostics=exc.load_diagnostics,
             )
         except BaseException as exc:
             outcome.update(
@@ -1166,6 +1268,7 @@ def hold_memory_diagnostic(
         outer_stage=outer_stage,
         inner_stage=inner_stage,
         error_type=error_type,
+        load_diagnostics=outcome.get("load_diagnostics"),
         # The done event marks the worker's diagnostic work complete.  Avoid
         # exposing the tiny thread teardown race for non-wall outcomes.
         worker_alive=False,

@@ -458,6 +458,61 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 )
                 conn.close()
 
+
+    def test_ombre_load_attribution_is_persisted_in_receipt_event(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            diagnostic = {
+                "status": "BACKEND_UNAVAILABLE",
+                "backend": "legacy_module",
+                "stage": "backend_load",
+                "error_type": "ModuleNotFoundError",
+                "elapsed_ms": 2.0,
+                "missing_module": "foo",
+                "pid": 123,
+                "python_executable": "/usr/bin/python3.11",
+                "cwd": "/opt/frontend",
+                "ombre_root": "/opt/ombre-brain",
+                "ombre_root_in_sys_path": True,
+                "server_spec_origin": "/opt/ombre-brain/server.py",
+                "server_in_sys_modules": False,
+                "server_module_file": "",
+            }
+            with self._env(db_path, receipt_path), mock.patch(
+                "tools.ombre_adapter.hold_memory_diagnostic",
+                return_value=diagnostic,
+            ):
+                result = bridge.persist_memory(
+                    db_path,
+                    content="metadata attribution remains body-free",
+                    source="save_memory",
+                    provenance={"turn_id": "turn-attribution"},
+                    write_ombre=True,
+                )
+
+            self.assertEqual(result["status"], "CREATED")
+            conn = sqlite3.connect(receipt_path)
+            metadata_json = conn.execute(
+                """
+                SELECT metadata_json
+                FROM memory_runtime_receipt_events
+                WHERE receipt_id=? AND stage='memory_persisted'
+                """,
+                (result["receipt_id"],),
+            ).fetchone()[0]
+            conn.close()
+            metadata = json.loads(metadata_json)
+            ombre_metadata = metadata["ombre_diagnostic"]
+            self.assertEqual(ombre_metadata["missing_module"], "foo")
+            self.assertEqual(
+                ombre_metadata["server_spec_origin"],
+                "/opt/ombre-brain/server.py",
+            )
+            self.assertEqual(ombre_metadata["python_executable"], "/usr/bin/python3.11")
+            self.assertNotIn("metadata attribution remains body-free", metadata_json)
+
     def test_runtime_call_sites_are_wired_without_kernel_or_http_cutover(self):
         root = Path(__file__).resolve().parents[1]
         gateway = (root / "gateway.py").read_text(encoding="utf-8")
