@@ -239,7 +239,7 @@ class HoldDiagnosticTests(unittest.TestCase):
             return "late"
 
         result = self._diagnose(hold, timeout=0.03, wall_timeout=0.5)
-        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(result["status"], "TIMEOUT", result)
         self.assertEqual(result["error_type"], "TimeoutError")
 
     def test_backend_load_failure_is_distinguished(self):
