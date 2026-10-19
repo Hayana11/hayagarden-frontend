@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -23,6 +24,7 @@ from tools.capability_manifest import (
 )
 from tools.cc_usage_observability import sha256_canonical_json
 from tools.task_timer_db import resolve_task_timer_commands_db_path
+from tools.ombre_native_surface import OFFICIAL_HOOK_PATH, UPSTREAM_BRAIN_ALLOW_RULE
 from tools.capability_state import (
     CapabilityStateError,
     RUNTIME_STATE_DENY,
@@ -129,13 +131,25 @@ def resolve_uh_a0_turn_lease_path(cwd=None, *, env=None):
 
 
 def build_uh_a0_settings(repo_root=None):
-    """Build hook settings with an explicit, stable Python import root."""
+    """Build the native SessionStart hook plus the existing PreToolUse fence."""
     root = Path(repo_root or Path(__file__).resolve().parent.parent).resolve()
     hook_command = (
         f"PYTHONPATH={shlex.quote(str(root))} "
         "python3 -m tools.execution_fence pretooluse"
     )
-    return {"hooks": {"PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": hook_command}]}]}}
+    session_start_command = f"/usr/bin/python3.11 {shlex.quote(OFFICIAL_HOOK_PATH)}"
+    return {
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "startup|resume",
+                "hooks": [{"type": "command", "command": session_start_command}],
+            }],
+            "PreToolUse": [{
+                "matcher": ".*",
+                "hooks": [{"type": "command", "command": hook_command}],
+            }],
+        }
+    }
 
 
 def write_uh_a0_settings(cwd):
@@ -256,6 +270,35 @@ def _resolve_attachments_root(env: Mapping[str, str] | None = None) -> str:
     return str(environ.get("HAYAGARDEN_ATTACHMENTS_ROOT") or "/opt/frontend").strip() or "/opt/frontend"
 
 
+def _load_native_brain_server(
+    legacy_mcp_config_path: str | os.PathLike[str] | None,
+) -> dict[str, Any]:
+    """Copy the official brain entry without materializing its token."""
+    if not legacy_mcp_config_path:
+        raise ValueError("UH-A0 brain MCP source config is required")
+    path = Path(legacy_mcp_config_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+        raise ValueError("UH-A0 brain MCP source config is unreadable") from exc
+    servers = data.get("mcpServers") if isinstance(data, Mapping) else None
+    source = servers.get("brain") if isinstance(servers, Mapping) else None
+    if not isinstance(source, Mapping):
+        raise ValueError("UH-A0 brain MCP source entry is missing")
+    entry = deepcopy(dict(source))
+    if str(entry.get("type") or "").strip() not in {"http", "streamable-http"}:
+        raise ValueError("UH-A0 brain MCP source transport is invalid")
+    if not str(entry.get("url") or "").strip().startswith(("http://", "https://")):
+        raise ValueError("UH-A0 brain MCP source URL is invalid")
+    headers = entry.get("headers")
+    authorization = headers.get("Authorization") if isinstance(headers, Mapping) else None
+    if not isinstance(authorization, str) or not authorization.strip().lower().startswith("bearer "):
+        raise ValueError("UH-A0 brain MCP Authorization header is invalid")
+    if "${OMBRE_MCP_TOKEN}" not in authorization:
+        raise ValueError("UH-A0 brain MCP Authorization must remain env-backed")
+    return entry
+
+
 def build_uh_a0_mcp_config(
     *,
     legacy_mcp_config_path: str | os.PathLike[str] | None = None,
@@ -263,43 +306,44 @@ def build_uh_a0_mcp_config(
 ) -> dict[str, Any]:
     """Strict UH-A0 config with the existing servers and one local external adapter."""
     root = Path(__file__).resolve().parent.parent
-    return {
-        "mcpServers": {
-            "home": {
-                "type": "http",
-                "url": resolve_home_mcp_url(legacy_mcp_config_path),
-                "headers": {"X-UH-A0-Profile": "uh_a0"},
+    servers = {
+        "home": {
+            "type": "http",
+            "url": resolve_home_mcp_url(legacy_mcp_config_path),
+            "headers": {"X-UH-A0-Profile": "uh_a0"},
+        },
+        "internal": {
+            "type": "http",
+            "url": resolve_internal_mcp_url(legacy_mcp_config_path),
+            "headers": {"X-UH-A0-Profile": "uh_a0"},
+        },
+        "capability": {
+            "type": "stdio",
+            "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
+            "args": [str(root / "capability-proxy-mcp-server.js")],
+            "env": {
+                "UH_A0_REPO_ROOT": str(root),
+                "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
+                "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
+                "HAYA_DB_PATH": _resolve_capability_proxy_db_path(env),
+                "HAYAGARDEN_GALLERY_ROOT": _resolve_gallery_root(env),
+                "HAYAGARDEN_ATTACHMENTS_ROOT": _resolve_attachments_root(env),
+                "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
             },
-            "internal": {
-                "type": "http",
-                "url": resolve_internal_mcp_url(legacy_mcp_config_path),
-                "headers": {"X-UH-A0-Profile": "uh_a0"},
+        },
+        "external": {
+            "type": "stdio",
+            "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
+            "args": [str(root / EXTERNAL_MCP_SERVER_FILENAME)],
+            "env": {
+                "UH_A0_REPO_ROOT": str(root),
+                "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
             },
-            "capability": {
-                "type": "stdio",
-                "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
-                "args": [str(root / "capability-proxy-mcp-server.js")],
-                "env": {
-                    "UH_A0_REPO_ROOT": str(root),
-                    "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
-                    "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
-                    "HAYA_DB_PATH": _resolve_capability_proxy_db_path(env),
-                    "HAYAGARDEN_GALLERY_ROOT": _resolve_gallery_root(env),
-                    "HAYAGARDEN_ATTACHMENTS_ROOT": _resolve_attachments_root(env),
-                    "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
-                },
-            },
-            "external": {
-                "type": "stdio",
-                "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
-                "args": [str(root / EXTERNAL_MCP_SERVER_FILENAME)],
-                "env": {
-                    "UH_A0_REPO_ROOT": str(root),
-                    "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
-                },
-            },
-        }
+        },
     }
+    if legacy_mcp_config_path is not None:
+        servers["brain"] = _load_native_brain_server(legacy_mcp_config_path)
+    return {"mcpServers": servers}
 
 def write_uh_a0_mcp_config(
     cwd: str | os.PathLike[str],
@@ -594,12 +638,18 @@ def build_uh_a0_spawn_plan(
     turn_lease_path = resolve_uh_a0_turn_lease_path(target_cwd, env=env)
 
     built_in_tools = tuple(surface["built_in_tools"])
+    brain_tools = (
+        (UPSTREAM_BRAIN_ALLOW_RULE,)
+        if "brain" in (mcp_config.get("mcpServers") or {})
+        else ()
+    )
     allowlist = (
         list(built_in_tools)
         + list(home_tools)
         + list(internal_tools)
         + list(proxy_tools)
         + list(external_tools)
+        + list(brain_tools)
     )
     disallowed = (
         list(FORBIDDEN_BUILTIN_TOOLS)
@@ -632,6 +682,7 @@ def build_uh_a0_spawn_plan(
         "internal_mcp_tools": internal_tools,
         "capability_proxy_tools": proxy_tools,
         "external_mcp_tools": external_tools,
+        "brain_mcp_tools": brain_tools,
         "native_bindings": native,
         "surface_allowlist": tuple(allowlist),
         "surface_allowlist_csv": allowed_csv,
@@ -652,8 +703,11 @@ def build_uh_a0_spawn_plan(
         "intent_instructions": short_intent_instructions(),
         # Visibility claim for reports: what Claude can see under UH-A0 plan.
         "claude_visible_built_ins": built_in_tools,
-        "claude_visible_mcp_tools": home_tools + internal_tools + proxy_tools + external_tools,
-        "claude_absent_servers": ("brain", "codebase", "workspace"),
+        "claude_visible_mcp_tools": home_tools + internal_tools + proxy_tools + external_tools + brain_tools,
+        "claude_absent_servers": tuple(
+            server for server in ("brain", "codebase", "workspace")
+            if server not in (mcp_config.get("mcpServers") or {})
+        ),
     }
     return plan
 
