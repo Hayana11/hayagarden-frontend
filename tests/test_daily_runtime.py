@@ -9484,6 +9484,178 @@ class HotScopeDiagnosticsTests(unittest.TestCase):
             'native_tail_source_identity_duplicate',
         )
 
+    def test_capacity_turn_limit_uses_real_scope_proof(self):
+        plan = self._plan()
+        plan.worker_id = 'worker'
+        plan.resident_key = 'daily:default:30:65'
+        plan.tool_profile = dr.DAILY_TOOL_PROFILE
+        binding = types.SimpleNamespace(
+            context_id=32,
+            process_generation=65,
+            claude_session_id='session-1',
+            bound_cursor_message_id=11971,
+        )
+        receipt = types.SimpleNamespace(
+            context_id=32,
+            context_epoch=30,
+            resident_generation=65,
+            process_generation=65,
+            installed_source_watermark=11971,
+            resident_key=plan.resident_key,
+            provider='claude_code',
+            model_identity='model-1',
+            session_id='session-1',
+        )
+        installed = self._member('turn:installed')
+        tail = self._member('turn:native-tail')
+        frozen = self._frozen(
+            installed,
+            receipt=receipt,
+            session_id='session-1',
+            process_generation=65,
+            provider='claude_code',
+            model_identity='model-1',
+            installed_source_watermark=11971,
+        )
+        resident = types.SimpleNamespace(
+            generation=65,
+            session_id='session-1',
+            model_identity='model-1',
+            provider='claude_code',
+            system_text='',
+            bound_tool_surface_fingerprint='surface',
+            peek_respawn_reason=lambda _system, *, tool_profile: 'turn_limit',
+        )
+        registry = {
+            'context_id': 32,
+            'context_epoch': 30,
+            'resident_generation': 65,
+            'chat_id': 'default',
+            'claude_session_id': 'session-1',
+            'process_generation': 65,
+        }
+        owner = {
+            'context_id': 32,
+            'resident_generation': 65,
+            'worker_id': 'worker',
+            'resident_key': plan.resident_key,
+            'process_generation': 65,
+            'bound_cursor_message_id': 11971,
+        }
+        context_plan = types.SimpleNamespace(
+            plan_id='plan:' + ('a' * 32),
+            plan_hash='a' * 64,
+            source_hash='b' * 64,
+            valid=True,
+            budget_status='fit',
+            window_anchor_status='ANCHOR_RETAINED',
+            window_anchor=None,
+        )
+        captured = {}
+
+        def build(
+            _plan,
+            *,
+            resident,
+            static_system,
+            mode='hot',
+            capacity_budget_static_system=None,
+            canonical_hot_source_scope=None,
+        ):
+            captured['scope'] = canonical_hot_source_scope
+            captured['mode'] = mode
+            return context_plan, {}
+
+        with mock.patch.object(
+            dr,
+            '_context_plan_consumer_enabled',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value=frozen,
+        ), mock.patch.object(
+            dr,
+            'is_epoch_token_current',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            'get_local_binding',
+            return_value=binding,
+        ), mock.patch.object(
+            dr,
+            '_binding_matches_plan',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            '_resident_is_alive',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            'get_context_claude_session',
+            return_value=registry,
+        ), mock.patch.object(
+            dr.dc,
+            'get_resident_owner',
+            return_value=owner,
+        ), mock.patch.object(
+            dr.dc,
+            'get_resident_history_cursor',
+            return_value=11971,
+        ), mock.patch.object(
+            dr,
+            '_hot_native_tail_proof',
+            return_value={'status': 'pass', 'source_member': tail},
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+            side_effect=build,
+        ), mock.patch.object(
+            dr,
+            '_freeze_capacity_context_bootstrap',
+            return_value={'ok': True},
+        ), mock.patch.object(
+            dr,
+            'prepare_capacity_swap_for_context_plan',
+            side_effect=dr.DailyRuntimeError(
+                'stop after real scope proof',
+                error_code='capacity_test_stop',
+            ),
+        ):
+            result = dr._attempt_capacity_swap_before_stdin(
+                plan,
+                resident=resident,
+                static_system='STATIC',
+                env={},
+                trigger_reason='turn_limit',
+            )
+            mismatch_plan = self._plan()
+            mismatch_plan.worker_id = 'worker'
+            mismatch_plan.resident_key = plan.resident_key
+            mismatch_plan.tool_profile = dr.DAILY_TOOL_PROFILE
+            mismatch_plan.manifest = dict(plan.manifest)
+            mismatch_scope = dr._hot_canonical_source_scope(
+                mismatch_plan,
+                resident=resident,
+                frozen=frozen,
+                expected_respawn_reason='hard_context',
+            )
+
+        self.assertEqual(result.get('error_code'), 'capacity_test_stop')
+        self.assertEqual(captured['mode'], 'capacity')
+        self.assertEqual(
+            captured['scope'],
+            (
+                dr._receipt_member_source_identity(installed),
+                dr._source_member_identity(tail),
+            ),
+        )
+        self.assertIsNone(mismatch_scope)
+        self.assertEqual(
+            mismatch_plan.hot_scope_diagnostic['reason'],
+            'live_respawn_reason_mismatch',
+        )
+
     def test_exception_records_stage_and_not_exception_message(self):
         plan = self._plan()
         secret = 'do-not-log-chat-or-token'
