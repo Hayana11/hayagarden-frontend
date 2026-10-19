@@ -8509,7 +8509,6 @@ def _attach_daily_provider_budget_observation(
             idle_seconds_before_turn=usage.get('_obs_idle_seconds_before_turn'),
             is_cold=bootstrap_kind in {'cold', 'respawn'},
             static_system=provider_system,
-            official_prompt_observation=plan.manifest,
             mcp_config_path=getattr(resident, 'mcp_config_path', None),
             allowed_tools=allowed_tools,
             tool_schema_sha256=(
