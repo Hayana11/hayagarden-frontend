@@ -52,9 +52,16 @@ def build_shared_context(**kwargs):
 
 
 def _ombre_handoff_sync():
-    """Compatibility wrapper around the single Ombre integration boundary."""
+    """Compatibility wrapper with fail-open handoff receipt observation."""
     from tools.ombre_adapter import get_handoff
-    return get_handoff(timeout=3.0, wall_timeout=5.0)
+    handoff = get_handoff(timeout=3.0, wall_timeout=5.0)
+    if handoff and str(handoff).strip():
+        try:
+            from tools.memory_runtime_bridge import record_handoff_observation
+            record_handoff_observation(str(handoff))
+        except Exception:
+            pass
+    return handoff
 
 
 def build_system(
