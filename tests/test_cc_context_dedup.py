@@ -128,7 +128,6 @@ class StableSystemTests(unittest.TestCase):
                     parts['stable_note'],
                     parts['tool_companion_intuition'],
                     parts['save_instr'],
-                    parts.get('official_prompt', ''),
                 )
                 if p and str(p).strip()
             ),

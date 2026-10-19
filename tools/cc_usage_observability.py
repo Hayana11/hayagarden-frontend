@@ -341,7 +341,6 @@ def build_runtime(
     observed_at: Optional[str] = None,
     keepwarm_lease_expires_at: Optional[str] = None,
     provider: str = "claude_code",
-    official_prompt_observation: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     if mcp_config_text is not None:
         mcp_sha = sha256_text(mcp_config_text)
@@ -364,11 +363,6 @@ def build_runtime(
         sha256_canonical_json(dict(thinking_config))
         if thinking_config is not None
         else None
-    )
-    prompt_observation = (
-        dict(official_prompt_observation)
-        if isinstance(official_prompt_observation, Mapping)
-        else {}
     )
     return {
         "gateway_instance_id": instance_id or gateway_instance_id(),
@@ -398,11 +392,6 @@ def build_runtime(
         "claude_code_version": claude_code_version,
         "observed_at": observed_at,
         "keepwarm_lease_expires_at": keepwarm_lease_expires_at,
-        "ombre_prompt_loaded": bool(prompt_observation.get("ombre_prompt_loaded", False)),
-        "ombre_prompt_status": prompt_observation.get("ombre_prompt_status"),
-        "ombre_upstream_sha": prompt_observation.get("ombre_upstream_sha"),
-        "ombre_upstream_version": prompt_observation.get("ombre_upstream_version"),
-        "ombre_prompt_sha256": prompt_observation.get("ombre_prompt_sha256"),
     }
 
 
