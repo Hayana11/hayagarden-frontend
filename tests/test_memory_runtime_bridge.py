@@ -697,15 +697,23 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             diagnostic = {
                 "status": "TIMEOUT",
                 "backend": "legacy_module",
-                "stage": "hold",
-                "error_type": "TimeoutError",
+                "stage": "wall_timeout",
+                "outer_stage": "wall_timeout",
+                "inner_stage": "hold",
+                "server_cached_before_call": True,
+                "worker_alive_at_return": True,
+                "async_timeout_ms": 3000.0,
+                "wall_timeout_ms": 4000.0,
+                "failure_class": "TIMEOUT",
+                "root_cause": "unknown",
+                "error_type": "WallTimeout",
                 "elapsed_ms": 42.0,
             }
             with self._env(db_path, receipt_path):
                 with mock.patch(
                     "tools.ombre_adapter.hold_memory_diagnostic",
                     return_value=diagnostic,
-                ), mock.patch.object(bridge._LOG, "info") as log_info:
+                ), mock.patch.object(bridge._LOG, "warning") as log_warning:
                     result = bridge.persist_memory(
                         db_path,
                         content="legacy commit survives Ombre timeout",
@@ -732,18 +740,90 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             self.assertEqual(metadata["ombre_diagnostic"], diagnostic)
             rendered = " ".join(
                 str(call.args)
-                for call in log_info.call_args_list
+                for call in log_warning.call_args_list
                 if call.args
             )
             for expected in (
                 result["receipt_id"],
                 "legacy_module",
                 "TIMEOUT",
+                "wall_timeout",
                 "hold",
-                "TimeoutError",
+                "TIMEOUT",
+                "unknown",
+                "WallTimeout",
                 "42.0",
             ):
                 self.assertIn(expected, rendered)
+
+
+
+    def test_late_completion_is_recorded_with_receipt_correlation(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            captured = {}
+
+            def fake_diagnostic(*args, **kwargs):
+                captured["correlation_id"] = kwargs["correlation_id"]
+                captured["observer"] = kwargs["late_completion_observer"]
+                return {
+                    "status": "TIMEOUT",
+                    "backend": "legacy_module",
+                    "stage": "wall_timeout",
+                    "outer_stage": "wall_timeout",
+                    "inner_stage": "hold",
+                    "server_cached_before_call": True,
+                    "worker_alive_at_return": True,
+                    "async_timeout_ms": 3000.0,
+                    "wall_timeout_ms": 4000.0,
+                    "failure_class": "TIMEOUT",
+                    "root_cause": "unknown",
+                    "error_type": "WallTimeout",
+                    "elapsed_ms": 42.0,
+                }
+
+            with self._env(db_path, receipt_path):
+                with mock.patch(
+                    "tools.ombre_adapter.hold_memory_diagnostic",
+                    side_effect=fake_diagnostic,
+                ):
+                    result = bridge.persist_memory(
+                        db_path,
+                        content="late completion receipt observation",
+                        source="save_memory",
+                        provenance={"turn_id": "late-observation"},
+                        write_ombre=True,
+                    )
+                captured["observer"](
+                    {
+                        "correlation_id": result["receipt_id"],
+                        "final_status": "WRITTEN",
+                        "final_inner_stage": "hold",
+                        "error_type": "",
+                        "total_elapsed_ms": 125.0,
+                    }
+                )
+
+            self.assertEqual(captured["correlation_id"], result["receipt_id"])
+            conn = sqlite3.connect(receipt_path)
+            row = conn.execute(
+                """
+                SELECT status, metadata_json
+                FROM memory_runtime_receipt_events
+                WHERE receipt_id=? AND stage=?
+                """,
+                (result["receipt_id"], "ombre_late_completion"),
+            ).fetchone()
+            conn.close()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "OBSERVED")
+            metadata = json.loads(row[1])
+            self.assertEqual(metadata["correlation_id"], result["receipt_id"])
+            self.assertEqual(metadata["final_status"], "WRITTEN")
+            self.assertEqual(metadata["final_inner_stage"], "hold")
+            self.assertEqual(metadata["total_elapsed_ms"], 125.0)
 
 
 if __name__ == "__main__":

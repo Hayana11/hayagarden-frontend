@@ -472,7 +472,56 @@ def _write_ombre(
     importance: int,
     pinned: bool,
     receipt_id: str | None = None,
+    posts_db_path: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    def record_late_completion(observation: dict[str, Any]) -> None:
+        final_status = str(
+            observation.get("final_status")
+            or observation.get("status")
+            or "EXCEPTION"
+        )
+        metadata = {
+            "correlation_id": str(
+                observation.get("correlation_id") or receipt_id or ""
+            ),
+            "final_status": final_status,
+            "final_inner_stage": str(
+                observation.get("final_inner_stage")
+                or observation.get("inner_stage")
+                or "unknown"
+            ),
+            "error_type": str(observation.get("error_type") or ""),
+            "total_elapsed_ms": observation.get("total_elapsed_ms"),
+        }
+        log = _LOG.info if final_status == "WRITTEN" else _LOG.warning
+        log(
+            "memory_runtime_ombre_late_completion receipt_id=%s "
+            "final_status=%s final_inner_stage=%s error_type=%s "
+            "total_elapsed_ms=%s",
+            receipt_id or "",
+            metadata["final_status"],
+            metadata["final_inner_stage"],
+            metadata["error_type"],
+            metadata["total_elapsed_ms"],
+        )
+        if posts_db_path and receipt_id:
+            try:
+                _event(
+                    posts_db_path,
+                    receipt_id,
+                    "ombre_late_completion",
+                    "OBSERVED",
+                    metadata=metadata,
+                )
+            except Exception as exc:
+                _LOG.warning(
+                    "memory_runtime_ombre_late_completion_event_failed "
+                    "receipt_id=%s error_type=%s",
+                    receipt_id,
+                    exc.__class__.__name__,
+                    exc_info=True,
+                )
+
     try:
         from tools import ombre_adapter
 
@@ -483,15 +532,44 @@ def _write_ombre(
             pinned=pinned,
             timeout=3.0,
             wall_timeout=4.0,
+            correlation_id=receipt_id,
+            late_completion_observer=record_late_completion,
         )
         if not isinstance(diagnostic, dict):
             raise TypeError("invalid_ombre_diagnostic")
-        if diagnostic.get("status") not in _OMBRE_DIAGNOSTIC_STATUSES:
+        status = diagnostic.get("status")
+        if status not in _OMBRE_DIAGNOSTIC_STATUSES:
             raise ValueError("invalid_ombre_diagnostic_status")
         diagnostic = {
-            "status": str(diagnostic.get("status")),
+            "status": str(status),
             "backend": str(diagnostic.get("backend") or ""),
             "stage": str(diagnostic.get("stage") or ""),
+            "outer_stage": str(
+                diagnostic.get("outer_stage")
+                or diagnostic.get("stage")
+                or ""
+            ),
+            "inner_stage": str(
+                diagnostic.get("inner_stage")
+                or diagnostic.get("stage")
+                or ""
+            ),
+            "server_cached_before_call": bool(
+                diagnostic.get("server_cached_before_call", False)
+            ),
+            "worker_alive_at_return": bool(
+                diagnostic.get("worker_alive_at_return", False)
+            ),
+            "async_timeout_ms": diagnostic.get("async_timeout_ms"),
+            "wall_timeout_ms": diagnostic.get("wall_timeout_ms"),
+            "failure_class": str(
+                diagnostic.get("failure_class")
+                or (status if status != "WRITTEN" else "")
+            ),
+            "root_cause": str(
+                diagnostic.get("root_cause")
+                or ("unknown" if status != "WRITTEN" else "")
+            ),
             "error_type": str(diagnostic.get("error_type") or ""),
             "elapsed_ms": diagnostic.get("elapsed_ms"),
         }
@@ -504,6 +582,14 @@ def _write_ombre(
             "status": "EXCEPTION",
             "backend": backend,
             "stage": "adapter",
+            "outer_stage": "adapter",
+            "inner_stage": "adapter",
+            "server_cached_before_call": False,
+            "worker_alive_at_return": False,
+            "async_timeout_ms": None,
+            "wall_timeout_ms": None,
+            "failure_class": "EXCEPTION",
+            "root_cause": "unknown",
             "error_type": type(exc).__name__,
             "elapsed_ms": 0.0,
         }
@@ -513,13 +599,19 @@ def _write_ombre(
             type(exc).__name__,
         )
 
-    _LOG.info(
-        "memory_runtime_ombre_diagnostic receipt_id=%s backend=%s status=%s "
-        "stage=%s error_type=%s elapsed_ms=%s",
+    log = _LOG.info if diagnostic["status"] == "WRITTEN" else _LOG.warning
+    log(
+        "memory_runtime_ombre_diagnostic receipt_id=%s backend=%s "
+        "status=%s stage=%s outer_stage=%s inner_stage=%s "
+        "failure_class=%s root_cause=%s error_type=%s elapsed_ms=%s",
         receipt_id or "",
         diagnostic["backend"],
         diagnostic["status"],
         diagnostic["stage"],
+        diagnostic["outer_stage"],
+        diagnostic["inner_stage"],
+        diagnostic["failure_class"],
+        diagnostic["root_cause"],
         diagnostic["error_type"],
         diagnostic["elapsed_ms"],
     )
@@ -649,6 +741,7 @@ def persist_memory(
                 importance=int(importance),
                 pinned=bool(pinned),
                 receipt_id=row["receipt_id"],
+                posts_db_path=posts_db_path,
             )
         row = _update_receipt(
             posts_db_path,
@@ -781,6 +874,7 @@ def observe_session_memo(
             importance=int(importance),
             pinned=False,
             receipt_id=row["receipt_id"],
+            posts_db_path=posts_db_path,
         )
     try:
         row = _update_receipt(

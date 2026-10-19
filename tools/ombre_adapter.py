@@ -914,6 +914,10 @@ async def hold_memory_async(
 
 
 
+def _new_diagnostic_event() -> threading.Event:
+    return threading.Event()
+
+
 def hold_memory_diagnostic(
     content: str,
     *,
@@ -922,39 +926,17 @@ def hold_memory_diagnostic(
     pinned: bool = False,
     timeout: float = 3.0,
     wall_timeout: float = 4.0,
+    correlation_id: str | None = None,
+    late_completion_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Return staged, body-free diagnostics for one Ombre hold attempt.
 
-    This follows the same backend selection and timeout budgets as
-    hold_memory while preserving the failure stage that the compatibility
-    wrapper intentionally collapses.
+    failure_class describes the observed boundary failure.  root_cause remains
+    unknown until a separate root-cause investigation establishes more than
+    the caller-visible timeout class.
     """
     started = time.monotonic()
     backend = _backend()
-    text = str(content or "").strip()
-    if not text:
-        return {
-            "status": "RETURNED_NONE",
-            "backend": backend,
-            "stage": "validate",
-            "error_type": "EmptyContent",
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-        }
-    if backend not in {"legacy_module", "http"}:
-        return {
-            "status": "BACKEND_UNAVAILABLE",
-            "backend": backend,
-            "stage": "backend_select",
-            "error_type": "UnsupportedBackend",
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-        }
-
-    arguments = {
-        "content": text,
-        "tags": str(tags or ""),
-        "importance": max(1, min(10, int(importance))),
-        "pinned": bool(pinned),
-    }
     is_http = backend == "http"
     async_timeout = max(float(timeout), 35.0) if is_http else float(timeout)
     effective_wall = (
@@ -962,7 +944,62 @@ def hold_memory_diagnostic(
         if is_http
         else float(wall_timeout)
     )
-    state: dict[str, Any] = {"stage": "backend_call"}
+    server_cached_before_call = (
+        backend == "legacy_module" and _SERVER_INSTANCE is not None
+    )
+
+    def make_result(
+        status: str,
+        *,
+        outer_stage: str,
+        inner_stage: str,
+        error_type: str,
+        worker_alive: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "backend": backend,
+            # stage is retained for the compatibility receipt contract.
+            "stage": (
+                outer_stage
+                if outer_stage == "wall_timeout"
+                else inner_stage
+            ),
+            "outer_stage": outer_stage,
+            "inner_stage": inner_stage,
+            "server_cached_before_call": server_cached_before_call,
+            "worker_alive_at_return": bool(worker_alive),
+            "async_timeout_ms": round(async_timeout * 1000, 3),
+            "wall_timeout_ms": round(effective_wall * 1000, 3),
+            "failure_class": status if status != "WRITTEN" else "",
+            "root_cause": "unknown" if status != "WRITTEN" else "",
+            "error_type": error_type,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+
+    text = str(content or "").strip()
+    if not text:
+        return make_result(
+            "RETURNED_NONE",
+            outer_stage="validate",
+            inner_stage="validate",
+            error_type="EmptyContent",
+        )
+    if backend not in {"legacy_module", "http"}:
+        return make_result(
+            "BACKEND_UNAVAILABLE",
+            outer_stage="backend_select",
+            inner_stage="backend_select",
+            error_type="UnsupportedBackend",
+        )
+
+    arguments = {
+        "content": text,
+        "tags": str(tags or ""),
+        "importance": max(1, min(10, int(importance))),
+        "pinned": bool(pinned),
+    }
+    state: dict[str, Any] = {"inner_stage": "backend_call"}
 
     class _BackendUnavailable(Exception):
         def __init__(self, cause: BaseException):
@@ -971,13 +1008,13 @@ def hold_memory_diagnostic(
 
     async def invoke() -> Any:
         if is_http:
-            state["stage"] = "backend_call"
+            state["inner_stage"] = "backend_call"
             try:
                 return await _mcp_call("hold", arguments, timeout=30.0)
             except (ImportError, ModuleNotFoundError) as exc:
                 raise _BackendUnavailable(exc) from exc
 
-        state["stage"] = "backend_load"
+        state["inner_stage"] = "backend_load"
         try:
             server = _load_server()
         except BaseException as exc:
@@ -985,11 +1022,14 @@ def hold_memory_diagnostic(
         hold = getattr(server, "hold", None)
         if not callable(hold):
             raise _BackendUnavailable(AttributeError("hold"))
-        state["stage"] = "hold"
+        state["inner_stage"] = "hold"
         return await hold(**arguments)
 
     outcome: dict[str, Any] = {}
-    done = threading.Event()
+    done = _new_diagnostic_event()
+    outer_timed_out = _new_diagnostic_event()
+    late_emit_lock = threading.Lock()
+    late_emitted = False
 
     async def run() -> None:
         try:
@@ -1019,6 +1059,59 @@ def hold_memory_diagnostic(
                 status="RETURNED_NONE" if value is None else "WRITTEN",
                 error_type="",
             )
+        outcome["final_inner_stage"] = str(
+            state.get("inner_stage") or "unknown"
+        )
+
+    def late_completion_observation() -> None:
+        status = str(outcome.get("status") or "EXCEPTION")
+        inner_stage = str(
+            outcome.get("final_inner_stage")
+            or state.get("inner_stage")
+            or "unknown"
+        )
+        observation = {
+            "correlation_id": str(correlation_id or ""),
+            "final_status": status,
+            "status": status,
+            "final_inner_stage": inner_stage,
+            "inner_stage": inner_stage,
+            "error_type": str(outcome.get("error_type") or ""),
+            "total_elapsed_ms": round(
+                (time.monotonic() - started) * 1000,
+                3,
+            ),
+        }
+        level = logging.INFO if status == "WRITTEN" else logging.WARNING
+        _LOG.log(
+            level,
+            "ombre_diagnostic_late_completion correlation_id=%s "
+            "final_status=%s final_inner_stage=%s error_type=%s "
+            "total_elapsed_ms=%s",
+            observation["correlation_id"],
+            observation["final_status"],
+            observation["final_inner_stage"],
+            observation["error_type"],
+            observation["total_elapsed_ms"],
+        )
+        if late_completion_observer is not None:
+            try:
+                late_completion_observer(observation)
+            except BaseException as exc:
+                _LOG.warning(
+                    "ombre_diagnostic_late_observer_failed "
+                    "correlation_id=%s error_type=%s",
+                    observation["correlation_id"],
+                    exc.__class__.__name__,
+                )
+
+    def late_completion_once() -> None:
+        nonlocal late_emitted
+        with late_emit_lock:
+            if late_emitted:
+                return
+            late_emitted = True
+        late_completion_observation()
 
     def worker() -> None:
         loop = asyncio.new_event_loop()
@@ -1029,34 +1122,55 @@ def hold_memory_diagnostic(
             outcome.update(
                 status="EXCEPTION",
                 error_type=exc.__class__.__name__,
+                final_inner_stage=str(
+                    state.get("inner_stage") or "unknown"
+                ),
             )
         finally:
             _close_loop(loop)
             done.set()
+            if outer_timed_out.is_set():
+                late_completion_once()
 
-    threading.Thread(
+    thread = threading.Thread(
         target=worker,
         daemon=True,
         name="ombre-adapter-diagnostic",
-    ).start()
+    )
+    thread.start()
     if not done.wait(timeout=max(0.05, effective_wall)):
-        return {
-            "status": "TIMEOUT",
-            "backend": backend,
-            "stage": "wall_timeout",
-            "error_type": "WallTimeout",
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-        }
+        outer_timed_out.set()
+        # The worker may have completed in the narrow interval before the
+        # timeout flag was set.  The worker finally block uses the same
+        # exactly-once emitter.
+        if done.is_set():
+            late_completion_once()
+        return make_result(
+            "TIMEOUT",
+            outer_stage="wall_timeout",
+            inner_stage=str(state.get("inner_stage") or "unknown"),
+            error_type="WallTimeout",
+            worker_alive=thread.is_alive(),
+        )
 
-    status = outcome.get("status", "EXCEPTION")
+    status = str(outcome.get("status") or "EXCEPTION")
     error_type = str(outcome.get("error_type") or "")
-    return {
-        "status": status,
-        "backend": backend,
-        "stage": str(state.get("stage") or "unknown"),
-        "error_type": error_type,
-        "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-    }
+    inner_stage = str(
+        outcome.get("final_inner_stage")
+        or state.get("inner_stage")
+        or "unknown"
+    )
+    outer_stage = "async_timeout" if status == "TIMEOUT" else "completed"
+    return make_result(
+        status,
+        outer_stage=outer_stage,
+        inner_stage=inner_stage,
+        error_type=error_type,
+        # The done event marks the worker's diagnostic work complete.  Avoid
+        # exposing the tiny thread teardown race for non-wall outcomes.
+        worker_alive=False,
+    )
+
 
 def hold_memory(
     content: str,
