@@ -6471,7 +6471,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         captured = {}
 
-        def _build(plan, *, resident, static_system, mode='hot'):
+        def _build(
+            plan, *, resident, static_system, mode='hot',
+            canonical_hot_source_scope=None,
+        ):
             captured.update({
                 'plan': plan,
                 'resident': resident,
@@ -6779,7 +6782,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
         )
         captured = {}
 
-        def _build(plan, *, resident, static_system, mode='hot'):
+        def _build(
+            plan, *, resident, static_system, mode='hot',
+            canonical_hot_source_scope=None,
+        ):
             captured['mode'] = mode
             return chunk_plan, {'chunk:one': 'compressed'}
 
@@ -6899,9 +6905,11 @@ class ContextPlanConsumerTests(unittest.TestCase):
             static_system,
             mode='hot',
             capacity_budget_static_system=None,
+            canonical_hot_source_scope=None,
         ):
             captured['mode'] = mode
             captured['resident'] = resident
+            captured['scope'] = canonical_hot_source_scope
             return chunk_plan, {'chunk:one': 'compressed'}
 
         with mock.patch.object(
@@ -6912,6 +6920,10 @@ class ContextPlanConsumerTests(unittest.TestCase):
             dr,
             '_freeze_hot_receipt',
             return_value={'expected_receipt_revision': 0},
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=(('installed',), ('native-tail',)),
         ), mock.patch.object(
             dr,
             '_build_production_context_plan',
@@ -6937,8 +6949,51 @@ class ContextPlanConsumerTests(unittest.TestCase):
             )
         self.assertEqual(captured['mode'], 'capacity')
         self.assertIsNone(captured['resident'])
+        self.assertEqual(
+            captured['scope'],
+            (('installed',), ('native-tail',)),
+        )
         self.assertIs(plan.capacity_context_plan, chunk_plan)
         self.assertEqual(result.get('error_code'), 'capacity_test_stop')
+
+    def test_capacity_blocks_without_proven_source_scope(self):
+        plan = types.SimpleNamespace(
+            context_id=7,
+            context_epoch=3,
+            resident_generation=1,
+            cursor_before=2,
+            manifest={},
+            db_path='production.db',
+        )
+        with mock.patch.object(
+            dr,
+            '_context_plan_consumer_enabled',
+            return_value=True,
+        ), mock.patch.object(
+            dr,
+            '_freeze_hot_receipt',
+            return_value={'expected_receipt_revision': 0},
+        ), mock.patch.object(
+            dr,
+            '_hot_canonical_source_scope',
+            return_value=None,
+        ), mock.patch.object(
+            dr,
+            '_build_production_context_plan',
+        ) as build_plan:
+            result = dr._attempt_capacity_swap_before_stdin(
+                plan,
+                resident=object(),
+                static_system='STATIC',
+                env={},
+                trigger_reason='hard_context',
+            )
+
+        self.assertEqual(
+            result.get('error_code'),
+            'context_plan_capacity_source_scope_unproven',
+        )
+        build_plan.assert_not_called()
 
     def test_hot_receipt_members_include_fixed_sections_without_body(self):
         from chat.context_receipt import ContextReceiptMember
