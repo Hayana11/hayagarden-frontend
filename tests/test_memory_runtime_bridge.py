@@ -656,6 +656,38 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 self.assertLessEqual(len(fallback.splitlines()), 3)
 
 
+    def test_handoff_fallback_counts_newline_separator_at_budget_boundary(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                for index, content in enumerate(("短记忆一", "短记忆二")):
+                    result = bridge.persist_memory(
+                        db_path,
+                        content=content,
+                        source="save_memory",
+                        provenance={"turn_id": f"separator-{index}"},
+                        write_ombre=False,
+                    )
+                    self.assertEqual(result["status"], "CREATED")
+                wide = bridge.build_handoff_fallback(
+                    db_path,
+                    max_items=2,
+                    max_chars=900,
+                )
+                lines = wide.splitlines()
+                self.assertEqual(len(lines), 2)
+                boundary_budget = len(lines[0]) + len(lines[1])
+                bounded = bridge.build_handoff_fallback(
+                    db_path,
+                    max_items=2,
+                    max_chars=boundary_budget,
+                )
+                self.assertLessEqual(len(bounded), boundary_budget)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

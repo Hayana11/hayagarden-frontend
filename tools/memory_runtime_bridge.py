@@ -947,7 +947,7 @@ def build_handoff_fallback(
                 line = f"{label}: {normalized}"
                 remaining = char_budget - (
                     sum(len(item) for item in fallback_rows)
-                    + max(0, len(fallback_rows) - 1)
+                    + len(fallback_rows)
                 )
                 if remaining <= 0:
                     break
