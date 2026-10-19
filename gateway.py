@@ -4801,7 +4801,6 @@ def _cc_resident_stream_gen(
                     idle_seconds_before_turn=usage.pop('_obs_idle_seconds_before_turn', None),
                     is_cold=is_cold,
                     static_system=full_system,
-                    official_prompt_observation=_static_parts.get('ombre_prompt_observation'),
                     mcp_config_path=_CC_RESIDENT.mcp_config_path,
                     allowed_tools=_CC_RESIDENT.allowed_tools,
                     tool_schema_sha256=usage.pop(
@@ -6989,9 +6988,6 @@ def _stream_cc_daily_soft_window(
             ).hexdigest(),
             provider='claude_code',
             model=_get_model() or '',
-        )
-        _daily_plan.manifest.update(
-            _static_parts.get('ombre_prompt_observation') or {},
         )
         key = _daily_plan.resident_key
         _daily_plan._resident_close_fn = lambda k=key: _daily_rt.close_local_resident_if_bound(

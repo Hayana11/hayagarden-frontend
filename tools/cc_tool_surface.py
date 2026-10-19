@@ -7,15 +7,12 @@ invalidates the fingerprint.
 from __future__ import annotations
 
 import json
-import os
-import re
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from tools.cc_usage_observability import sha256_canonical_json, sha256_text
-from tools.ombre_native_surface import UPSTREAM_BRAIN_TOOL_BINDINGS
 
 _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
 
@@ -26,8 +23,13 @@ LiveToolListsProvider = Callable[
 
 # Brain MCP core tools (parameterless); schema drift still changes fingerprint.
 _BRAIN_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
-    name: _EMPTY_SCHEMA for name in UPSTREAM_BRAIN_TOOL_BINDINGS
+    "mcp__brain__breath": _EMPTY_SCHEMA,
+    "mcp__brain__grow": _EMPTY_SCHEMA,
+    "mcp__brain__hold": _EMPTY_SCHEMA,
+    "mcp__brain__pulse": _EMPTY_SCHEMA,
+    "mcp__brain__trace": _EMPTY_SCHEMA,
 }
+
 # Home MCP allowlisted tools — mirrors mcp-http-server.js registrations.
 _HOME_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "mcp__home__light_on": _EMPTY_SCHEMA,
@@ -273,12 +275,7 @@ def _mcp_cc_name(server: str, tool_name: str) -> str:
     return f"mcp__{server}__{tool_name}"
 
 
-def _fetch_mcp_tools(
-    url: str,
-    *,
-    headers: Optional[Mapping[str, str]] = None,
-    timeout: float = 2.0,
-) -> list[dict[str, Any]]:
+def _fetch_mcp_tools(url: str, *, timeout: float = 2.0) -> list[dict[str, Any]]:
     """Best-effort MCP tools/list over streamable HTTP."""
     payload = {
         "jsonrpc": "2.0",
@@ -292,7 +289,6 @@ def _fetch_mcp_tools(
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
-            **{str(k): str(v) for k, v in (headers or {}).items()},
         },
         method="POST",
     )
@@ -317,14 +313,6 @@ def _fetch_mcp_tools(
     return out
 
 
-def _expand_mcp_env(value: str) -> str:
-    return re.sub(
-        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
-        lambda match: os.environ.get(match.group(1), match.group(0)),
-        str(value),
-    )
-
-
 def _default_live_tool_lists(
     mcp_config_path: Optional[str],
 ) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -347,17 +335,8 @@ def _default_live_tool_lists(
         url = str(meta.get("url") or "").strip()
         if not url:
             continue
-        raw_headers = meta.get("headers") or {}
-        headers = (
-            {
-                str(key): _expand_mcp_env(str(value))
-                for key, value in raw_headers.items()
-            }
-            if isinstance(raw_headers, Mapping)
-            else {}
-        )
         try:
-            tools = _fetch_mcp_tools(url, headers=headers)
+            tools = _fetch_mcp_tools(url)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
             continue
         ordered.append((str(server), tools))
@@ -374,13 +353,6 @@ def _surface_kind(name: str) -> str:
     return "builtin"
 
 
-def _allowlisted_tool_name(name: str, allowlist: list[str]) -> bool:
-    return name in set(allowlist) or any(
-        rule.endswith("__*") and name.startswith(rule[:-1])
-        for rule in allowlist
-    )
-
-
 def _build_ordered_surface(
     allowlist: list[str],
     *,
@@ -388,6 +360,7 @@ def _build_ordered_surface(
     static_registry: Mapping[str, dict[str, Any]],
     used_live: bool,
 ) -> tuple[list[dict[str, Any]], list[str], str]:
+    allowed = set(allowlist)
     surface: list[dict[str, Any]] = []
     seen: set[str] = set()
     missing: list[str] = []
@@ -395,7 +368,7 @@ def _build_ordered_surface(
     for _server, tools in live_tool_lists:
         for tool in tools:
             cc_name = _mcp_cc_name(_server, str(tool.get("name") or ""))
-            if not _allowlisted_tool_name(cc_name, allowlist) or cc_name in seen:
+            if cc_name not in allowed or cc_name in seen:
                 continue
             schema = tool.get("input_schema")
             if not isinstance(schema, dict):
@@ -408,30 +381,18 @@ def _build_ordered_surface(
             seen.add(cc_name)
 
     for name in allowlist:
-        candidates = (
-            [
-                candidate
-                for candidate in static_registry
-                if candidate.startswith(name[:-1])
-            ]
-            if name.endswith("__*")
-            else [name]
-        )
-        if not candidates:
+        if name in seen:
+            continue
+        schema = static_registry.get(name)
+        if schema is None:
             missing.append(name)
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            schema = static_registry.get(candidate)
-            if schema is None:
-                missing.append(candidate)
-                schema = _EMPTY_SCHEMA
-            surface.append({
-                "name": candidate,
-                "input_schema": schema,
-                "surface_kind": _surface_kind(candidate),
-            })
-            seen.add(candidate)
+            schema = _EMPTY_SCHEMA
+        surface.append({
+            "name": name,
+            "input_schema": schema,
+            "surface_kind": _surface_kind(name),
+        })
+        seen.add(name)
 
     if not allowlist:
         source = "unavailable"
@@ -485,8 +446,8 @@ def capture_tool_surface_snapshot(
         "tool_schema_sha256": sha256_text(text),
         "tool_schema_source": source,
         "tool_schema_measurement_status": status,
-        "tool_count": len(surface),
-        "allowed_tool_count": len(surface),
+        "tool_count": len(allowlist),
+        "allowed_tool_count": len(allowlist),
         "missing_tool_schemas": missing,
         "tool_surface_kinds": {
             item["name"]: item["surface_kind"] for item in surface
