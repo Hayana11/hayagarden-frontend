@@ -318,19 +318,19 @@ def build_uh_a0_mcp_config(
             "headers": {"X-UH-A0-Profile": "uh_a0"},
         },
         "capability": {
-                "type": "stdio",
-                "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
-                "args": [str(root / "capability-proxy-mcp-server.js")],
-                "env": {
-                    "UH_A0_REPO_ROOT": str(root),
-                    "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
-                    "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
-                    "HAYA_DB_PATH": _resolve_capability_proxy_db_path(env),
-                    "HAYAGARDEN_GALLERY_ROOT": _resolve_gallery_root(env),
-                    "HAYAGARDEN_ATTACHMENTS_ROOT": _resolve_attachments_root(env),
-                    "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
-                },
+            "type": "stdio",
+            "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
+            "args": [str(root / "capability-proxy-mcp-server.js")],
+            "env": {
+                "UH_A0_REPO_ROOT": str(root),
+                "TODO_INTERNAL_DB_PATH": _resolve_capability_proxy_db_path(env),
+                "TASK_TIMER_COMMANDS_DB_PATH": _resolve_task_timer_commands_db_path(env),
+                "HAYA_DB_PATH": _resolve_capability_proxy_db_path(env),
+                "HAYAGARDEN_GALLERY_ROOT": _resolve_gallery_root(env),
+                "HAYAGARDEN_ATTACHMENTS_ROOT": _resolve_attachments_root(env),
+                "UH_A0_TURN_LEASE_PATH": resolve_uh_a0_turn_lease_path(env=env),
             },
+        },
         "external": {
             "type": "stdio",
             "command": os.environ.get("UH_A0_NODE_COMMAND") or "node",
@@ -705,7 +705,7 @@ def build_uh_a0_spawn_plan(
         "claude_visible_built_ins": built_in_tools,
         "claude_visible_mcp_tools": home_tools + internal_tools + proxy_tools + external_tools + brain_tools,
         "claude_absent_servers": tuple(
-            server for server in ("codebase", "workspace")
+            server for server in ("brain", "codebase", "workspace")
             if server not in (mcp_config.get("mcpServers") or {})
         ),
     }
