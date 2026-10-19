@@ -34,6 +34,14 @@ _SENSITIVE_RE = re.compile(
 )
 _TOKEN_RE = re.compile(r"[0-9A-Za-z一-龥_]{2,}")
 
+_HANDOFF_FALLBACK_SOURCES = ("save_memory", "save_marker")
+_HANDOFF_FALLBACK_MAX_ITEMS = 3
+_HANDOFF_FALLBACK_MAX_CHARS = 900
+_HANDOFF_SOURCE_LABELS = {
+    "save_memory": "【legacy save_memory】",
+    "save_marker": "【legacy SAVE marker】",
+}
+
 
 def _now() -> str:
     return __import__("datetime").datetime.now(
@@ -870,6 +878,95 @@ def _handoff_contains(handoff_text: str, stored_content: str) -> bool:
     return len(prefix) >= 40 and prefix in handoff
 
 
+
+def build_handoff_fallback(
+    posts_db_path: str | None = None,
+    *,
+    existing_handoff: str = "",
+    max_items: int = _HANDOFF_FALLBACK_MAX_ITEMS,
+    max_chars: int = _HANDOFF_FALLBACK_MAX_CHARS,
+) -> str:
+    """Build bounded continuity from explicit committed legacy receipts only."""
+    try:
+        item_limit = min(_HANDOFF_FALLBACK_MAX_ITEMS, max(0, int(max_items)))
+        char_budget = min(_HANDOFF_FALLBACK_MAX_CHARS, max(0, int(max_chars)))
+    except (TypeError, ValueError):
+        return ""
+    if item_limit <= 0 or char_budget <= 0:
+        return ""
+
+    posts_path = os.environ.get(
+        "MEMORY_RUNTIME_POSTS_DB_PATH", posts_db_path or "/opt/frontend/memories.db"
+    )
+    receipt_path = receipt_db_path(posts_path)
+    if not Path(receipt_path).is_file() or not Path(posts_path).is_file():
+        return ""
+
+    try:
+        receipt_conn = sqlite3.connect(receipt_path, timeout=10)
+        receipt_conn.row_factory = sqlite3.Row
+        try:
+            committed = receipt_conn.execute(
+                """
+                SELECT source, legacy_memory_id
+                FROM memory_runtime_receipts
+                WHERE status='COMMITTED'
+                  AND legacy_memory_id IS NOT NULL
+                  AND source IN (?, ?)
+                ORDER BY updated_at DESC, receipt_id DESC
+                LIMIT 50
+                """,
+                _HANDOFF_FALLBACK_SOURCES,
+            ).fetchall()
+        finally:
+            receipt_conn.close()
+
+        legacy_conn = sqlite3.connect(posts_path, timeout=10)
+        try:
+            fallback_rows: list[str] = []
+            seen: set[str] = set()
+            for row in committed:
+                if len(fallback_rows) >= item_limit:
+                    break
+                found = legacy_conn.execute(
+                    "SELECT content, resolved FROM posts WHERE id=?",
+                    (int(row["legacy_memory_id"]),),
+                ).fetchone()
+                if not found or int(found[1] or 0) != 0:
+                    continue
+                normalized = " ".join(str(found[0] or "").split())
+                if not normalized:
+                    continue
+                identity = normalized.casefold()
+                if identity in seen or _handoff_contains(existing_handoff, normalized):
+                    continue
+                seen.add(identity)
+                label = _HANDOFF_SOURCE_LABELS.get(
+                    str(row["source"]), "【legacy receipt】"
+                )
+                line = f"{label}: {normalized}"
+                remaining = char_budget - (
+                    sum(len(item) for item in fallback_rows)
+                    + max(0, len(fallback_rows) - 1)
+                )
+                if remaining <= 0:
+                    break
+                if len(line) > remaining:
+                    if remaining <= 1:
+                        break
+                    line = line[: remaining - 1].rstrip() + "…"
+                fallback_rows.append(line)
+            return "\n".join(fallback_rows)
+        finally:
+            legacy_conn.close()
+    except Exception as exc:
+        _LOG.warning(
+            "memory_runtime_handoff_fallback_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return ""
+
+
 def record_handoff_observation(
     handoff_text: str,
     *,
@@ -910,10 +1007,13 @@ def record_handoff_observation(
             """
             SELECT receipt_id, legacy_memory_id
             FROM memory_runtime_receipts
-            WHERE status='COMMITTED' AND legacy_memory_id IS NOT NULL
-            ORDER BY updated_at DESC
+            WHERE status='COMMITTED'
+              AND legacy_memory_id IS NOT NULL
+              AND source IN (?, ?)
+            ORDER BY updated_at DESC, receipt_id DESC
             LIMIT 50
-            """
+            """,
+            _HANDOFF_FALLBACK_SOURCES,
         ).fetchall()
     finally:
         receipt_conn.close()

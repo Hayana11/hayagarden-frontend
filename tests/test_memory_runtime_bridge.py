@@ -472,5 +472,164 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
         self.assertNotIn("OMBRE_ADAPTER_BACKEND", gateway)
 
 
+    def _handoff_with_ombre(self, text: str):
+        system_builder = importlib.import_module("chat.system_builder")
+        with mock.patch(
+            "tools.ombre_adapter.get_handoff",
+            return_value=text,
+        ):
+            return system_builder._ombre_handoff_sync()
+
+    def test_handoff_fallback_survives_ombre_write_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                with mock.patch(
+                    "tools.ombre_adapter.hold_memory",
+                    side_effect=RuntimeError("legacy hold failed"),
+                ):
+                    result = bridge.persist_memory(
+                        db_path,
+                        content=CONTENT,
+                        source="save_memory",
+                        provenance={"turn_id": "fallback-failure"},
+                        write_ombre=True,
+                    )
+                self.assertEqual(result["status"], "CREATED")
+                self.assertEqual(result["ombre_status"], "FAILED")
+                handoff = self._handoff_with_ombre("")
+                self.assertIn(CONTENT, handoff)
+                self.assertIn("legacy receipt fallback", handoff)
+
+    def test_handoff_fallback_supplements_nonempty_ombre_handoff(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                result = bridge.persist_memory(
+                    db_path,
+                    content=CONTENT,
+                    source="save_memory",
+                    provenance={"turn_id": "fallback-nonempty"},
+                    write_ombre=False,
+                )
+                self.assertEqual(result["status"], "CREATED")
+                handoff = self._handoff_with_ombre("Ombre unrelated continuity")
+                self.assertIn("Ombre unrelated continuity", handoff)
+                self.assertIn(CONTENT, handoff)
+                self.assertIn("legacy receipt fallback", handoff)
+
+    def test_handoff_fallback_excludes_session_memo(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                result = bridge.observe_session_memo(
+                    db_path,
+                    content=CONTENT,
+                    provenance={"turn_id": "session-only"},
+                    write_ombre=False,
+                )
+                self.assertEqual(result["status"], "OBSERVED")
+                self.assertEqual(
+                    bridge.build_handoff_fallback(db_path),
+                    "",
+                )
+
+    def test_handoff_fallback_excludes_shadow_auto_candidate(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(
+                db_path,
+                receipt_path,
+                MEMORY_RUNTIME_AUTO_CANDIDATE_MODE="shadow",
+            ):
+                result = bridge.observe_auto_candidate(
+                    db_path,
+                    user_message="我希望以后保留这个新的偏好",
+                    assistant_message="好的，我会参考它。",
+                    provenance={"turn_id": "shadow-only"},
+                )
+                self.assertEqual(result["status"], "SHADOW")
+                self.assertEqual(
+                    bridge.build_handoff_fallback(db_path),
+                    "",
+                )
+
+    def test_handoff_fallback_excludes_resolved_legacy_memory(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                result = bridge.persist_memory(
+                    db_path,
+                    content=CONTENT,
+                    source="save_memory",
+                    provenance={"turn_id": "resolved-memory"},
+                    write_ombre=False,
+                )
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    "UPDATE posts SET resolved=1 WHERE id=?",
+                    (result["legacy_memory_id"],),
+                )
+                conn.commit()
+                conn.close()
+                self.assertEqual(
+                    bridge.build_handoff_fallback(db_path),
+                    "",
+                )
+
+    def test_handoff_merges_duplicate_ombre_and_legacy_content_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                result = bridge.persist_memory(
+                    db_path,
+                    content=CONTENT,
+                    source="save_memory",
+                    provenance={"turn_id": "dedupe-ombre"},
+                    write_ombre=False,
+                )
+                self.assertEqual(result["status"], "CREATED")
+                handoff = self._handoff_with_ombre(
+                    f"existing Ombre memory: {CONTENT}"
+                )
+                self.assertEqual(handoff.count(CONTENT), 1)
+
+    def test_handoff_fallback_respects_item_and_character_budget(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                for index in range(5):
+                    result = bridge.persist_memory(
+                        db_path,
+                        content=f"长期记忆项目 {index} " + ("x" * 50),
+                        source="save_memory",
+                        provenance={"turn_id": f"budget-{index}"},
+                        write_ombre=False,
+                    )
+                    self.assertEqual(result["status"], "CREATED")
+                fallback = bridge.build_handoff_fallback(
+                    db_path,
+                    max_items=3,
+                    max_chars=80,
+                )
+                self.assertLessEqual(len(fallback), 80)
+                self.assertLessEqual(len(fallback.splitlines()), 3)
+
+
+
 if __name__ == "__main__":
     unittest.main()

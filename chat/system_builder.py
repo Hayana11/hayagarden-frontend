@@ -52,16 +52,31 @@ def build_shared_context(**kwargs):
 
 
 def _ombre_handoff_sync():
-    """Compatibility wrapper with fail-open handoff receipt observation."""
+    """Keep Ombre primary and supplement it with explicit legacy receipts."""
     from tools.ombre_adapter import get_handoff
-    handoff = get_handoff(timeout=3.0, wall_timeout=5.0)
-    if handoff and str(handoff).strip():
+    from tools.memory_runtime_bridge import (
+        build_handoff_fallback,
+        record_handoff_observation,
+    )
+
+    ombre_text = str(
+        get_handoff(timeout=3.0, wall_timeout=5.0) or ""
+    ).strip()
+    if "无交接信息" in ombre_text:
+        ombre_text = ""
+    fallback = build_handoff_fallback(existing_handoff=ombre_text)
+    parts = []
+    if ombre_text:
+        parts.append("【Ombre handoff】\n" + ombre_text)
+    if fallback:
+        parts.append("【legacy receipt fallback】\n" + fallback)
+    merged = "\n\n".join(parts)
+    if merged:
         try:
-            from tools.memory_runtime_bridge import record_handoff_observation
-            record_handoff_observation(str(handoff))
+            record_handoff_observation(merged)
         except Exception:
             pass
-    return handoff
+    return merged
 
 
 def build_system(
