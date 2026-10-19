@@ -150,6 +150,86 @@ def _connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+def verify_receipt_store(path: str | None = None) -> dict[str, Any]:
+    """Verify the receipt DB can enable WAL and commit a real transaction."""
+    target = str(path or receipt_db_path())
+    conn: sqlite3.Connection | None = None
+    probe_id = "preflight-" + uuid.uuid4().hex
+    try:
+        conn = _connect(target)
+        journal_mode = str(
+            conn.execute("PRAGMA journal_mode").fetchone()[0]
+        ).lower()
+        if journal_mode != "wal":
+            raise RuntimeError("wal_not_enabled")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO memory_runtime_receipts (
+                receipt_id, idempotency_key, status, source,
+                request_id, session_id, turn_id, window_id,
+                content_sha256, legacy_memory_id, ombre_status,
+                error_code, created_at, updated_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                probe_id,
+                probe_id,
+                "PREFLIGHT",
+                "receipt_preflight",
+                "",
+                "",
+                "",
+                "",
+                content_sha256(probe_id),
+                None,
+                "NOT_ATTEMPTED",
+                "",
+                _now(),
+                _now(),
+                _RECEIPT_SCHEMA_VERSION,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        conn = _connect(target)
+        committed = conn.execute(
+            "SELECT status FROM memory_runtime_receipts WHERE receipt_id=?",
+            (probe_id,),
+        ).fetchone()
+        if committed is None or committed[0] != "PREFLIGHT":
+            raise RuntimeError("receipt_commit_not_observable")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM memory_runtime_receipts WHERE receipt_id=?",
+            (probe_id,),
+        )
+        conn.commit()
+        return {
+            "status": "VERIFIED",
+            "path": target,
+            "journal_mode": journal_mode,
+        }
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        _LOG.warning(
+            "memory_runtime_receipt_preflight_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return {
+            "status": "FAILED",
+            "path": target,
+            "error_code": type(exc).__name__,
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
@@ -406,6 +486,7 @@ def _result(row: dict[str, Any], *, status: str | None = None) -> dict[str, Any]
         "idempotency_key": row.get("idempotency_key"),
         "legacy_memory_id": row.get("legacy_memory_id"),
         "ombre_status": row.get("ombre_status", "NOT_ATTEMPTED"),
+        "error_code": row.get("error_code", ""),
         "content_sha256": row.get("content_sha256"),
     }
 
@@ -441,13 +522,28 @@ def persist_memory(
     key = deterministic_idempotency_key(
         idempotency_basis, source=source, provenance=prov
     )
-    row, created = _reserve(
-        posts_db_path=posts_db_path,
-        idempotency_key=key,
-        source=prov["source"],
-        provenance=prov,
-        content_hash=content_hash,
-    )
+    try:
+        row, created = _reserve(
+            posts_db_path=posts_db_path,
+            idempotency_key=key,
+            source=prov["source"],
+            provenance=prov,
+            content_hash=content_hash,
+        )
+    except Exception as exc:
+        _LOG.warning(
+            "memory_runtime_receipt_unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        return {
+            "status": "RECEIPT_FAILED",
+            "receipt_id": None,
+            "idempotency_key": key,
+            "legacy_memory_id": None,
+            "ombre_status": "NOT_ATTEMPTED",
+            "error_code": "receipt_db_unavailable",
+            "content_sha256": content_hash,
+        }
     if not created:
         if row.get("status") == "COMMITTED":
             return _result(row, status="DEDUPLICATED")
@@ -522,25 +618,152 @@ def persist_memory(
         )
         return _result(row, status="CREATED")
     except Exception as exc:
-        row = _update_receipt(
-            posts_db_path,
-            row["receipt_id"],
-            status="FAILED",
-            error_code=type(exc).__name__,
-        ) or row
-        _event(
-            posts_db_path,
-            row["receipt_id"],
-            "memory_persisted",
-            "FAILED",
-            metadata={"error_type": type(exc).__name__},
-        )
+        failed_row = row
+        try:
+            failed_row = _update_receipt(
+                posts_db_path,
+                row["receipt_id"],
+                status="FAILED",
+                error_code=type(exc).__name__,
+            ) or row
+        except Exception:
+            _LOG.warning(
+                "memory_runtime_receipt_update_failed receipt_id=%s",
+                row.get("receipt_id"),
+                exc_info=True,
+            )
+        try:
+            _event(
+                posts_db_path,
+                row["receipt_id"],
+                "memory_persisted",
+                "FAILED",
+                metadata={"error_type": type(exc).__name__},
+            )
+        except Exception:
+            _LOG.warning(
+                "memory_runtime_receipt_event_failed receipt_id=%s",
+                row.get("receipt_id"),
+                exc_info=True,
+            )
         _LOG.warning(
             "memory_runtime_persist_failed receipt_id=%s error_type=%s",
             row.get("receipt_id"),
             type(exc).__name__,
         )
-        return _result(row, status="FAILED")
+        return _result(failed_row, status="FAILED")
+
+
+def observe_session_memo(
+    posts_db_path: str,
+    *,
+    content: Any,
+    provenance: dict[str, Any] | None = None,
+    idempotency_content: str | None = None,
+    tags: str = "memo,网页窗口,跨端",
+    importance: int = 4,
+    write_ombre: bool = True,
+) -> dict[str, Any]:
+    """Observe/project a session memo without writing legacy posts."""
+    if not isinstance(content, str):
+        return {"status": "INVALID_CONTENT", "legacy_write": "DISABLED"}
+    text = content.strip()
+    if not text:
+        return {"status": "INVALID_CONTENT", "legacy_write": "DISABLED"}
+
+    prov = normalize_provenance("session_memo", provenance)
+    basis = (
+        idempotency_content.strip()
+        if isinstance(idempotency_content, str) and idempotency_content.strip()
+        else text
+    )
+    key = deterministic_idempotency_key(
+        basis, source=prov["source"], provenance=prov
+    )
+    content_hash = content_sha256(text)
+    try:
+        row, created = _reserve(
+            posts_db_path=posts_db_path,
+            idempotency_key=key,
+            source=prov["source"],
+            provenance=prov,
+            content_hash=content_hash,
+            status="OBSERVED",
+        )
+    except Exception as exc:
+        _LOG.warning(
+            "memory_runtime_session_receipt_unavailable error_type=%s",
+            type(exc).__name__,
+        )
+        return {
+            "status": "RECEIPT_FAILED",
+            "receipt_id": None,
+            "idempotency_key": key,
+            "legacy_memory_id": None,
+            "ombre_status": "NOT_ATTEMPTED",
+            "error_code": "receipt_db_unavailable",
+            "legacy_write": "DISABLED",
+            "content_sha256": content_hash,
+        }
+
+    if not created:
+        if row.get("status") == "OBSERVED":
+            result = _result(row, status="DEDUPLICATED")
+            result["legacy_write"] = "DISABLED"
+            return result
+        if row.get("status") == "PENDING":
+            result = _result(row, status="IN_PROGRESS")
+            result["legacy_write"] = "DISABLED"
+            return result
+        result = _result(row)
+        result["legacy_write"] = "DISABLED"
+        return result
+
+    ombre_status = "NOT_REQUESTED"
+    if write_ombre:
+        ombre_status = _write_ombre(
+            text,
+            tags=tags,
+            importance=int(importance),
+            pinned=False,
+        )
+    try:
+        row = _update_receipt(
+            posts_db_path,
+            row["receipt_id"],
+            status="OBSERVED",
+            ombre_status=ombre_status,
+            error_code="",
+        ) or row
+        _event(
+            posts_db_path,
+            row["receipt_id"],
+            "session_memo_observed",
+            "OBSERVED",
+            metadata={
+                "legacy_write": "DISABLED",
+                "ombre_status": ombre_status,
+            },
+        )
+    except Exception as exc:
+        _LOG.warning(
+            "memory_runtime_session_receipt_commit_failed receipt_id=%s error_type=%s",
+            row.get("receipt_id"),
+            type(exc).__name__,
+        )
+        return {
+            "status": "RECEIPT_FAILED",
+            "receipt_id": row.get("receipt_id"),
+            "idempotency_key": key,
+            "legacy_memory_id": None,
+            "ombre_status": ombre_status,
+            "error_code": "receipt_db_unavailable",
+            "legacy_write": "DISABLED",
+            "content_sha256": content_hash,
+        }
+    result = _result(row, status="OBSERVED")
+    result["legacy_write"] = "DISABLED"
+    return result
 
 
 def _query_hash(query: str) -> str:

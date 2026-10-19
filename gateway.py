@@ -1172,6 +1172,15 @@ def _ombre_breath_sync(timeout=6.0, wall_timeout=7.0):
     return ombre_adapter.surface_memories(timeout=timeout, wall_timeout=wall_timeout)
 
 
+def _memory_save_result_text(result):
+    status = str((result or {}).get('status') or '')
+    if status in ('CREATED', 'DEDUPLICATED', 'IN_PROGRESS'):
+        return '已存入记忆'
+    if status == 'RECEIPT_FAILED':
+        return '记忆保存失败：receipt 数据库不可写，本轮未写入'
+    return '记忆保存失败，本轮未写入'
+
+
 def _write_session_memo(user_msg='', assistant_msg='', provenance=None):
     """
     Persist a bounded session memo through the runtime bridge.
@@ -1191,24 +1200,19 @@ def _write_session_memo(user_msg='', assistant_msg='', provenance=None):
         try:
             from tools.memory_runtime_bridge import (
                 observe_auto_candidate,
-                persist_memory,
+                observe_session_memo,
             )
             now = (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime('%m-%d %H:%M')
             u_clip = user_msg.strip()[:80]
             a_clip = assistant_msg.strip()[:80]
             memo = f'[网页窗口 {now}] 她：{u_clip}… / 我：{a_clip}…'
-            result = persist_memory(
+            result = observe_session_memo(
                 DB_PATH,
                 content=memo,
-                source='session_memo',
                 provenance=session_provenance,
                 idempotency_content=f'{user_msg.strip()}\\n{assistant_msg.strip()}',
-                type='MEMORY',
-                author='fyodor',
-                layer='recent',
                 tags='memo,网页窗口,跨端',
                 importance=4,
-                pinned=0,
                 write_ombre=True,
             )
             candidate = observe_auto_candidate(
@@ -1218,10 +1222,12 @@ def _write_session_memo(user_msg='', assistant_msg='', provenance=None):
                 provenance=session_provenance,
             )
             _mlog.getLogger('gateway').info(
-                '[memo] runtime persisted status=%s receipt_id=%s '
-                'ombre_status=%s candidate_status=%s candidate_receipt_id=%s',
+                '[memo] runtime observed status=%s receipt_id=%s '
+                'legacy_write=%s ombre_status=%s candidate_status=%s '
+                'candidate_receipt_id=%s',
                 result.get('status'),
                 result.get('receipt_id'),
+                result.get('legacy_write'),
                 result.get('ombre_status'),
                 candidate.get('status'),
                 candidate.get('receipt_id'),
@@ -3534,15 +3540,13 @@ def run_tool(name, args, caller='fyodor_cc'):
                     pinned=0,
                     write_ombre=True,
                 )
-                if result.get('status') in ('CREATED', 'DEDUPLICATED', 'IN_PROGRESS'):
-                    return '已存入记忆'
-                return '记忆写入未完成，但不影响本轮对话'
+                return _memory_save_result_text(result)
             except Exception as _e:
                 logging.getLogger('gateway').warning(
                     'memory_runtime_save_failed_open error_type=%s',
                     type(_e).__name__,
                 )
-                return '记忆写入未完成，但不影响本轮对话'
+                return '记忆保存失败：runtime bridge 异常，本轮未写入'
         if name == 'search_memories':
             import memory_tool
             res = memory_tool.search_memories(args.get('keyword', ''))

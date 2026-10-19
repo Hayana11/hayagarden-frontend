@@ -51,3 +51,29 @@ The focused test covers:
 It also verifies duplicate submission, Ombre fail-open behavior, and that
 automatic candidates stay out of legacy `posts` until the explicit write gate
 is enabled.
+
+## Session memo safety boundary
+
+A normal session memo is observer-only in this phase. It records provenance,
+idempotency, receipt, and best-effort Ombre projection, but it does not write
+legacy `posts`. Explicit `save_memory` and `[[SAVE:]]` remain the only
+runtime paths that can create a legacy memory record. There is no session-memo
+legacy-write switch enabled by default.
+
+## Production receipt preflight
+
+Before a production deployment, run the existing deployment procedure's
+preflight gate as the frontend service identity:
+
+```bash
+sudo -n /bin/bash /opt/frontend/scripts/verify-memory-runtime-receipts.sh
+```
+
+The script resolves the `frontend` and `frontend-gw` systemd users and
+invokes the bridge verification under that identity. Verification creates the
+parent/database if needed, enables WAL, writes and commits a probe receipt,
+reopens it to confirm the commit, then removes the probe row. A successful
+result
+must report `status=VERIFIED` and `journal_mode=wal`. This is a deployment
+precondition; it does not change the production authority or enable Kernel
+writes.

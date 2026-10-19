@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import os
@@ -94,29 +95,29 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 )
                 conn.close()
 
-                timed_memo_a = bridge.persist_memory(
+                timed_memo_a = bridge.observe_session_memo(
                     db_path,
                     content="[网页窗口 10-00] memo",
-                    source="session_memo",
                     provenance={"session_id": "window-a", "turn_id": "turn-memo"},
                     idempotency_content="same user turn\\nsame assistant turn",
                     write_ombre=False,
                 )
-                timed_memo_b = bridge.persist_memory(
+                timed_memo_b = bridge.observe_session_memo(
                     db_path,
                     content="[网页窗口 10-01] memo",
-                    source="session_memo",
                     provenance={"session_id": "window-a", "turn_id": "turn-memo"},
                     idempotency_content="same user turn\\nsame assistant turn",
                     write_ombre=False,
                 )
+                self.assertEqual(timed_memo_a["status"], "OBSERVED")
+                self.assertEqual(timed_memo_b["status"], "DEDUPLICATED")
                 self.assertEqual(
                     timed_memo_a["receipt_id"], timed_memo_b["receipt_id"]
                 )
                 conn = sqlite3.connect(db_path)
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
-                    2,
+                    1,
                 )
                 conn.close()
 
@@ -271,6 +272,143 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 )
                 conn.close()
 
+    def test_session_memo_does_not_write_legacy_posts(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                with mock.patch(
+                    "tools.ombre_adapter.hold_memory",
+                    return_value={"id": "ombre-session"},
+                ):
+                    result = bridge.observe_session_memo(
+                        db_path,
+                        content="[网页窗口 10-02] memo",
+                        provenance={"session_id": "window-a", "turn_id": "turn-memo"},
+                        idempotency_content="same user\\nsame assistant",
+                        write_ombre=True,
+                    )
+                self.assertEqual(result["status"], "OBSERVED")
+                self.assertEqual(result["legacy_write"], "DISABLED")
+                self.assertEqual(result["ombre_status"], "WRITTEN")
+                conn = sqlite3.connect(db_path)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
+                    0,
+                )
+                conn.close()
+                receipt = sqlite3.connect(receipt_path)
+                self.assertEqual(
+                    receipt.execute(
+                        "SELECT status FROM memory_runtime_receipts WHERE receipt_id=?",
+                        (result["receipt_id"],),
+                    ).fetchone()[0],
+                    "OBSERVED",
+                )
+                receipt.close()
+
+    def test_session_memo_ombre_failure_is_fail_open_without_legacy_write(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            receipt_path = str(Path(root) / "receipts.db")
+            make_posts_db(db_path)
+            with self._env(db_path, receipt_path):
+                with mock.patch(
+                    "tools.ombre_adapter.hold_memory",
+                    side_effect=RuntimeError("sidecar unavailable"),
+                ):
+                    result = bridge.observe_session_memo(
+                        db_path,
+                        content="[网页窗口 10-03] memo",
+                        provenance={"session_id": "window-a", "turn_id": "turn-ombre-fail"},
+                        write_ombre=True,
+                    )
+                self.assertEqual(result["status"], "OBSERVED")
+                self.assertEqual(result["legacy_write"], "DISABLED")
+                self.assertEqual(result["ombre_status"], "FAILED")
+                conn = sqlite3.connect(db_path)
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
+                    0,
+                )
+                conn.close()
+
+    def test_receipt_db_failure_is_fail_open_and_explicit(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = str(Path(root) / "posts.db")
+            make_posts_db(db_path)
+            with mock.patch.object(
+                bridge,
+                "_connect",
+                side_effect=sqlite3.OperationalError("readonly"),
+            ):
+                result = bridge.persist_memory(
+                    db_path,
+                    content="must not be written without receipt",
+                    source="save_memory",
+                    provenance={"turn_id": "turn-receipt-fail"},
+                    write_ombre=False,
+                )
+            self.assertEqual(result["status"], "RECEIPT_FAILED")
+            self.assertEqual(result["error_code"], "receipt_db_unavailable")
+            conn = sqlite3.connect(db_path)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
+                0,
+            )
+            conn.close()
+
+    def test_receipt_store_preflight_wal_and_commit(self):
+        with tempfile.TemporaryDirectory() as root:
+            receipt_path = str(Path(root) / "receipts.db")
+            result = bridge.verify_receipt_store(receipt_path)
+            self.assertEqual(result["status"], "VERIFIED")
+            self.assertEqual(result["journal_mode"], "wal")
+            conn = sqlite3.connect(receipt_path)
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM memory_runtime_receipts WHERE receipt_id LIKE 'preflight-%'"
+                ).fetchone()
+            )
+            self.assertEqual(
+                conn.execute("PRAGMA journal_mode").fetchone()[0].lower(),
+                "wal",
+            )
+            conn.close()
+
+    def test_gateway_reports_receipt_failure_without_success_text(self):
+        source = Path(__file__).resolve().parents[1] / "gateway.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        node = next(
+            item for item in tree.body
+            if isinstance(item, ast.FunctionDef)
+            and item.name == "_memory_save_result_text"
+        )
+        namespace = {}
+        exec(
+            compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"),
+            namespace,
+        )
+        self.assertIn(
+            "未写入",
+            namespace["_memory_save_result_text"]({"status": "RECEIPT_FAILED"}),
+        )
+        self.assertNotIn(
+            "已存入",
+            namespace["_memory_save_result_text"]({"status": "RECEIPT_FAILED"}),
+        )
+
+    def test_receipt_preflight_script_uses_service_identity(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "verify-memory-runtime-receipts.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("systemctl show", script)
+        self.assertIn("runuser", script)
+        self.assertIn("verify_receipt_store", script)
+
     def test_candidate_rejects_sensitive_or_unbounded_turns(self):
         self.assertEqual(
             bridge.derive_auto_candidate(
@@ -291,7 +429,7 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             "no_safe_intent",
         )
 
-    def test_ombre_failure_is_fail_open_after_legacy_commit(self):
+    def test_explicit_save_memory_ombre_failure_is_fail_open(self):
         with tempfile.TemporaryDirectory() as root:
             db_path = str(Path(root) / "posts.db")
             receipt_path = str(Path(root) / "receipts.db")
@@ -304,7 +442,7 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                     result = bridge.persist_memory(
                         db_path,
                         content="legacy remains authoritative",
-                        source="session_memo",
+                        source="save_memory",
                         provenance={"turn_id": "turn-fail-open"},
                         write_ombre=True,
                     )
@@ -324,6 +462,7 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             root / "chat" / "system_builder.py"
         ).read_text(encoding="utf-8")
         self.assertIn("persist_memory", gateway)
+        self.assertIn("observe_session_memo", gateway)
         self.assertIn("observe_auto_candidate", gateway)
         self.assertIn("record_legacy_recall", gateway)
         self.assertIn("record_handoff_observation", system_builder)
