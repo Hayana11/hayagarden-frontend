@@ -10,6 +10,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 import unittest
 import urllib.error
@@ -216,6 +217,11 @@ class HoldDiagnosticTests(unittest.TestCase):
         self.assertEqual(result["status"], "WRITTEN")
         self.assertEqual(result["backend"], "legacy_module")
         self.assertEqual(result["stage"], "hold")
+        self.assertEqual(result["outer_stage"], "completed")
+        self.assertEqual(result["inner_stage"], "hold")
+        self.assertEqual(result["failure_class"], "")
+        self.assertEqual(result["root_cause"], "")
+        self.assertFalse(result["worker_alive_at_return"])
         self.assertGreaterEqual(result["elapsed_ms"], 0)
         self.assertNotIn("content", result)
         self.assertNotIn("diagnostic body stays out of result", json.dumps(result))
@@ -242,6 +248,122 @@ class HoldDiagnosticTests(unittest.TestCase):
         result = self._diagnose(hold, timeout=0.03, wall_timeout=0.5)
         self.assertEqual(result["status"], "TIMEOUT")
         self.assertEqual(result["error_type"], "TimeoutError")
+
+    def test_wall_timeout_preserves_backend_load_inner_stage(self):
+        async def hold(**kwargs):
+            return "late-load"
+
+        server = SimpleNamespace(hold=hold)
+        observed = []
+        completed = threading.Event()
+
+        def on_late_completion(payload):
+            observed.append(payload)
+            completed.set()
+
+        def slow_load():
+            time.sleep(0.12)
+            return server
+
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(ombre_adapter, "_load_server", side_effect=slow_load):
+            result = ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=0.5,
+                wall_timeout=0.05,
+                correlation_id="receipt-backend-load",
+                late_completion_observer=on_late_completion,
+            )
+
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(result["outer_stage"], "wall_timeout")
+        self.assertEqual(result["inner_stage"], "backend_load")
+        self.assertEqual(result["stage"], "wall_timeout")
+        self.assertFalse(result["server_cached_before_call"])
+        self.assertTrue(result["worker_alive_at_return"])
+        self.assertTrue(completed.wait(1.0))
+        self.assertEqual(observed[0]["final_status"], "WRITTEN")
+        self.assertEqual(observed[0]["final_inner_stage"], "hold")
+
+    def test_cached_server_wall_timeout_preserves_hold_inner_stage(self):
+        async def slow_hold(**kwargs):
+            await asyncio.sleep(0.12)
+            return "late-hold"
+
+        server = SimpleNamespace(hold=slow_hold)
+        observed = []
+        completed = threading.Event()
+
+        def on_late_completion(payload):
+            observed.append(payload)
+            completed.set()
+
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(
+            ombre_adapter, "_SERVER_INSTANCE", server
+        ), mock.patch.object(
+            ombre_adapter, "_load_server", return_value=server
+        ):
+            result = ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=0.5,
+                wall_timeout=0.05,
+                correlation_id="receipt-hold",
+                late_completion_observer=on_late_completion,
+            )
+
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(result["outer_stage"], "wall_timeout")
+        self.assertEqual(result["inner_stage"], "hold")
+        self.assertTrue(result["server_cached_before_call"])
+        self.assertTrue(result["worker_alive_at_return"])
+        self.assertTrue(completed.wait(1.0))
+        self.assertEqual(observed[0]["final_status"], "WRITTEN")
+        self.assertEqual(observed[0]["final_inner_stage"], "hold")
+
+    def test_wall_timeout_eventually_exception_is_observable(self):
+        async def slow_failure(**kwargs):
+            await asyncio.sleep(0.12)
+            raise RuntimeError("late failure")
+
+        server = SimpleNamespace(hold=slow_failure)
+        observed = []
+        completed = threading.Event()
+
+        def on_late_completion(payload):
+            observed.append(payload)
+            completed.set()
+
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(
+            ombre_adapter, "_SERVER_INSTANCE", server
+        ), mock.patch.object(
+            ombre_adapter, "_load_server", return_value=server
+        ):
+            result = ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=0.5,
+                wall_timeout=0.05,
+                correlation_id="receipt-exception",
+                late_completion_observer=on_late_completion,
+            )
+
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(result["failure_class"], "TIMEOUT")
+        self.assertEqual(result["root_cause"], "unknown")
+        self.assertTrue(completed.wait(1.0))
+        self.assertEqual(observed[0]["final_status"], "EXCEPTION")
+        self.assertEqual(observed[0]["final_inner_stage"], "hold")
+        self.assertEqual(observed[0]["error_type"], "RuntimeError")
 
     def test_backend_load_failure_is_distinguished(self):
         with mock.patch.dict(
