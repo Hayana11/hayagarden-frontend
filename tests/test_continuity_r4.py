@@ -1563,6 +1563,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         members = (
             _member(0, logical_size=5_000),
             _member(1, logical_size=36_511),
+            _member(2, logical_size=640),
         )
         recent_ready = _binding(
             members,
@@ -1592,12 +1593,12 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
 
         self.assertTrue(plan.valid)
         self.assertEqual(plan.budget_status, 'fit')
-        self.assertEqual(plan.recent_raw_source_seqs, (1,))
-        self.assertEqual(plan.recent_raw_token_estimate, 36_511)
-        self.assertEqual(plan.selected_token_estimate, 36_511)
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2))
+        self.assertEqual(plan.recent_raw_token_estimate, 37_151)
+        self.assertEqual(plan.selected_token_estimate, 37_151)
         self.assertEqual(
             [item.source_seqs for item in plan.representations],
-            [(1,)],
+            [(1, 2)],
         )
         self.assertEqual(plan.gaps, ())
         self.assertTrue(any(
@@ -1617,6 +1618,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         members = (
             _member(0, logical_size=5_000),
             _member(1, logical_size=36_511),
+            _member(2, logical_size=640),
         )
         fixed = ContextSection(
             kind='invariant_system',
@@ -1639,7 +1641,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
 
         self.assertFalse(plan.valid)
         self.assertEqual(plan.budget_status, 'overflow')
-        self.assertEqual(plan.recent_raw_token_estimate, 36_511)
+        self.assertEqual(plan.recent_raw_token_estimate, 37_151)
         self.assertTrue(any(
             item.code == 'budget_overflow'
             for item in plan.exclusions
