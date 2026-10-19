@@ -1451,7 +1451,7 @@ def _build_production_context_plan(
         ),
         source_member_scope=(
             tuple(canonical_hot_source_scope or ())
-            if str(mode or 'hot').strip().lower() == 'hot'
+            if canonical_hot_source_scope is not None
             else None
         ),
     )
@@ -6058,12 +6058,24 @@ def _attempt_capacity_swap_before_stdin(
         try:
             frozen = _freeze_hot_receipt(plan, resident=resident)
             plan.capacity_source_receipt_frozen = frozen
+            canonical_source_scope = _hot_canonical_source_scope(
+                plan,
+                resident=resident,
+                frozen=frozen,
+            )
+            if canonical_source_scope is None:
+                return {
+                    'ok': False,
+                    'error_code': 'context_plan_capacity_source_scope_unproven',
+                    'detail': 'capacity canonical source scope is not proven',
+                }
             context_plan, chunk_bodies = _build_production_context_plan(
                 plan,
                 resident=None,
                 static_system=target_system,
                 mode='capacity',
                 capacity_budget_static_system=static_system,
+                canonical_hot_source_scope=canonical_source_scope,
             )
             plan.capacity_context_plan = context_plan
             plan.capacity_context_chunk_bodies = dict(chunk_bodies)
