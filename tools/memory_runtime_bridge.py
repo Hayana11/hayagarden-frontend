@@ -285,6 +285,9 @@ def _event(
     event_id = stage_receipt_id(receipt_id, stage)
     conn = _connect(receipt_db_path(posts_db_path))
     try:
+        metadata_json = json.dumps(
+            metadata or {}, ensure_ascii=False, sort_keys=True
+        )
         conn.execute(
             """
             INSERT OR IGNORE INTO memory_runtime_receipt_events (
@@ -298,10 +301,21 @@ def _event(
                 stage,
                 status,
                 legacy_memory_id,
-                json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
+                metadata_json,
                 _now(),
             ),
         )
+        if status == "VERIFIED":
+            conn.execute(
+                """
+                UPDATE memory_runtime_receipt_events
+                SET status='VERIFIED',
+                    legacy_memory_id=COALESCE(?, legacy_memory_id),
+                    metadata_json=?
+                WHERE event_id=? AND status <> 'VERIFIED'
+                """,
+                (legacy_memory_id, metadata_json, event_id),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -622,6 +636,17 @@ def verify_read_after_write(
     }
 
 
+def _handoff_contains(handoff_text: str, stored_content: str) -> bool:
+    handoff = " ".join(str(handoff_text or "").split())
+    stored = " ".join(str(stored_content or "").split())
+    if not stored:
+        return False
+    if stored in handoff:
+        return True
+    prefix = stored[:80].rstrip("…").strip()
+    return len(prefix) >= 40 and prefix in handoff
+
+
 def record_handoff_observation(
     handoff_text: str,
     *,
@@ -645,18 +670,67 @@ def record_handoff_observation(
         content_hash=content_sha256(text),
         status="OBSERVED",
     )
+    handoff_hash = content_sha256(text)
     event_id = _event(
         posts_path,
         row["receipt_id"],
         "new_window_handoff_observed",
         "OBSERVED",
-        metadata={"handoff_sha256": content_sha256(text)},
+        metadata={"handoff_sha256": handoff_hash},
     )
+
+    matched_receipt_ids: list[str] = []
+    recalled_event_ids: list[str] = []
+    receipt_conn = _connect(receipt_db_path(posts_path))
+    try:
+        committed = receipt_conn.execute(
+            """
+            SELECT receipt_id, legacy_memory_id
+            FROM memory_runtime_receipts
+            WHERE status='COMMITTED' AND legacy_memory_id IS NOT NULL
+            ORDER BY updated_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+    finally:
+        receipt_conn.close()
+
+    legacy_conn = sqlite3.connect(posts_path, timeout=10)
+    try:
+        for committed_row in committed:
+            memory_id = int(committed_row["legacy_memory_id"])
+            found = legacy_conn.execute(
+                "SELECT content FROM posts WHERE id=?",
+                (memory_id,),
+            ).fetchone()
+            if not found or not _handoff_contains(text, found[0]):
+                continue
+            recalled_event_ids.append(
+                _event(
+                    posts_path,
+                    str(committed_row["receipt_id"]),
+                    "new_window_handoff_recalled",
+                    "VERIFIED",
+                    legacy_memory_id=memory_id,
+                    metadata={
+                        "handoff_sha256": handoff_hash,
+                        "window_id": prov.get("window_id", ""),
+                    },
+                )
+            )
+            matched_receipt_ids.append(str(committed_row["receipt_id"]))
+    except sqlite3.Error:
+        _LOG.warning("memory_runtime_handoff_match_failed", exc_info=True)
+    finally:
+        legacy_conn.close()
+
     return {
         "status": "OBSERVED",
         "receipt_id": row["receipt_id"],
         "event_id": event_id,
-        "content_sha256": content_sha256(text),
+        "content_sha256": handoff_hash,
+        "matched_receipt_ids": matched_receipt_ids,
+        "recalled_event_ids": recalled_event_ids,
     }
 
 
@@ -734,15 +808,16 @@ def observe_auto_candidate(
     candidate, reason = derive_auto_candidate(user_message, assistant_message)
     if candidate is None:
         return {"status": "REJECTED", "reason": reason}
-    mode = os.environ.get(
+    raw_mode = os.environ.get(
         "MEMORY_RUNTIME_AUTO_CANDIDATE_MODE", "shadow"
     ).strip().lower()
+    mode = raw_mode if raw_mode in {"off", "shadow", "write"} else "shadow"
     enabled = os.environ.get(
         "MEMORY_RUNTIME_AUTO_CANDIDATE_ENABLED", ""
-    ).strip().lower()
-    if enabled in {"0", "false", "no", "off"} or mode in {"", "off"}:
+    ).strip()
+    if mode == "off" or enabled.lower() in {"0", "false", "no", "off"}:
         return {"status": "DISABLED", "reason": reason}
-    if mode == "write" and enabled not in {"1", "true", "yes", "on"}:
+    if mode == "write" and enabled != "1":
         mode = "shadow"
 
     prov = normalize_provenance("chat_auto_candidate", provenance)

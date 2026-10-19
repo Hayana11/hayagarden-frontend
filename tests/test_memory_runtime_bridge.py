@@ -128,21 +128,47 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(recalled["status"], "VERIFIED")
-                handoff = bridge.verify_handoff_recall(
-                    f"new window handoff: {CONTENT}",
+                unverified = bridge.verify_handoff_recall(
+                    "unrelated handoff",
                     memory_receipt_id=persisted["receipt_id"],
                     expected_content=CONTENT,
-                    provenance={"window_id": "window-c"},
                     posts_db_path=db_path,
                 )
-                self.assertEqual(handoff["status"], "VERIFIED")
+                self.assertEqual(unverified["status"], "UNVERIFIED")
+                handoff = bridge.record_handoff_observation(
+                    f"new window handoff: {CONTENT}",
+                    provenance={"window_id": "window-c"},
+                )
+                self.assertEqual(handoff["status"], "OBSERVED")
+                self.assertIn(
+                    persisted["receipt_id"], handoff["matched_receipt_ids"]
+                )
+                self.assertEqual(len(handoff["recalled_event_ids"]), 1)
+                conn = sqlite3.connect(receipt_path)
+                self.assertEqual(
+                    conn.execute(
+                        """
+                        SELECT status
+                        FROM memory_runtime_receipt_events
+                        WHERE receipt_id=? AND stage=?
+                        """,
+                        (
+                            persisted["receipt_id"],
+                            "new_window_handoff_recalled",
+                        ),
+                    ).fetchone()[0],
+                    "VERIFIED",
+                )
+                conn.close()
                 print(
                     "MEMORY_RUNTIME_E2E "
                     + json.dumps(
                         {
                             "turn_a_memory_persisted": persisted["receipt_id"],
                             "turn_b_memory_recalled_injected": recalled["event_id"],
-                            "new_window_handoff_recalled": handoff["event_id"],
+                            "new_window_handoff_recalled": handoff[
+                                "recalled_event_ids"
+                            ][0],
                         },
                         sort_keys=True,
                     )
@@ -193,6 +219,28 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                     provenance={**provenance, "turn_id": "turn-auto-write"},
                 )
                 self.assertEqual(gated["status"], "SHADOW")
+
+                unknown_mode = bridge.observe_auto_candidate(
+                    db_path,
+                    user_message="我希望以后保留这个未知模式偏好",
+                    assistant_message="好的，我会在后续对话中参考它。",
+                    provenance={**provenance, "turn_id": "turn-auto-unknown"},
+                )
+                self.assertEqual(unknown_mode["status"], "SHADOW")
+
+            with self._env(
+                db_path,
+                receipt_path,
+                MEMORY_RUNTIME_AUTO_CANDIDATE_MODE="write",
+                MEMORY_RUNTIME_AUTO_CANDIDATE_ENABLED="yes",
+            ):
+                alias_enabled = bridge.observe_auto_candidate(
+                    db_path,
+                    user_message="我希望以后保留这个别名偏好",
+                    assistant_message="好的，我会在后续对话中参考它。",
+                    provenance={**provenance, "turn_id": "turn-auto-alias"},
+                )
+                self.assertEqual(alias_enabled["status"], "SHADOW")
 
             with self._env(
                 db_path,
