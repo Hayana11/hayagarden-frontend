@@ -225,6 +225,7 @@ class ContextBudgetPolicy:
     reserve_budget: int = 0
     recent_raw_target: int = 0
     history_budget_limit: int | None = None
+    allow_recent_raw_history_limit_overflow: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -252,6 +253,10 @@ class ContextBudgetPolicy:
                 raise ValueError(
                     'invalid_budget_policy:history_budget_limit_must_be_non_negative'
                 )
+        if not isinstance(self.allow_recent_raw_history_limit_overflow, bool):
+            raise ValueError(
+                'invalid_budget_policy:allow_recent_raw_history_limit_overflow_must_be_boolean'
+            )
 
     @property
     def usable_budget(self) -> int:
@@ -599,6 +604,13 @@ def find_cold_bridge(plan: ContextPlan) -> ColdBridgeDetection:
         else int(policy.usable_budget) - fixed_cost
     )
     remaining = effective_history_budget - recent_cost
+    if (
+        bool(getattr(policy, 'allow_recent_raw_history_limit_overflow', False))
+        and recent_cost > effective_history_budget
+    ):
+        # The atomic recent suffix can be admitted by the usable prompt budget,
+        # but it cannot create an older-history bridge obligation.
+        return ColdBridgeDetection('none')
     if bridge_representation.estimated_tokens <= remaining:
         return ColdBridgeDetection('none')
     return ColdBridgeDetection(
@@ -775,6 +787,9 @@ def _identity_payload(
             budget_identity['history_budget_limit'] = (
                 budget_policy.history_budget_limit
             )
+        if budget_policy.allow_recent_raw_history_limit_overflow:
+            # Keep the default/strict identity stable; opt-in is semantic.
+            budget_identity['allow_recent_raw_history_limit_overflow'] = True
     payload = {
         'measurement_semantics': MEASUREMENT_SEMANTICS,
         'budget_policy': budget_identity,
@@ -971,9 +986,32 @@ def _apply_budget(
     older = tuple(item for item in representations if item not in recent)
     recent_cost = sum(int(item.estimated_tokens) for item in recent)
     if recent_cost > history_budget:
+        if (
+            budget_policy.allow_recent_raw_history_limit_overflow
+            and fixed_token_estimate + recent_cost <= usable_budget
+        ):
+            exclusions.extend(
+                _exclusion(
+                    'recent_raw_history_limit_overflow_allowed',
+                    'atomic recent raw suffix exceeds the history sub-budget '
+                    'but fits the usable context budget',
+                    source_ref=','.join(item.source_refs),
+                    representation_id=item.representation_id,
+                )
+                for item in recent
+            )
+            exclusions.extend(
+                _budget_exclusion(
+                    item,
+                    'older representation excluded after recent raw history '
+                    'limit overflow',
+                )
+                for item in older
+            )
+            return tuple(recent), 'fit'
         exclusions.append(_exclusion(
             'budget_overflow',
-            'recent raw suffix alone exceeds usable budget',
+            'recent raw suffix alone exceeds the effective history budget',
         ))
         exclusions.extend(
             _budget_exclusion(item, 'older representation excluded after recent raw overflow')
