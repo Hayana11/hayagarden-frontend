@@ -204,7 +204,7 @@ class DeterministicLoaderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             server_path = Path(root) / "server.py"
-            server_path.write_text("marker = 'ombre-correct'\\n", encoding="utf-8")
+            server_path.write_text("marker = 'ombre-correct'\n", encoding="utf-8")
             wrong_server = SimpleNamespace(marker="wrong")
 
             sys.modules.pop(module_name, None)
