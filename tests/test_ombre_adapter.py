@@ -225,6 +225,8 @@ class DeterministicLoaderTests(unittest.TestCase):
                     None,
                 ):
                     loaded = ombre_adapter._load_server()
+                    self.assertIs(loaded, ombre_adapter._SERVER_INSTANCE)
+                    self.assertIs(sys.modules.get("server"), wrong_server)
             finally:
                 sys.path[:] = original_path
                 sys.modules.pop(module_name, None)
@@ -237,8 +239,6 @@ class DeterministicLoaderTests(unittest.TestCase):
             server_path.resolve(),
         )
         self.assertEqual(loaded.marker, "ombre-correct")
-        self.assertIs(sys.modules.get("server"), wrong_server)
-        self.assertIs(loaded, ombre_adapter._SERVER_INSTANCE)
 
 
 class HoldDiagnosticTests(unittest.TestCase):
