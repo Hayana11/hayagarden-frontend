@@ -1397,12 +1397,28 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
             ContextBudgetPolicy(token_budget=10, history_budget_limit=24).history_budget_limit,
             24,
         )
+        self.assertFalse(
+            ContextBudgetPolicy(token_budget=10).allow_recent_raw_history_limit_overflow
+        )
+        self.assertTrue(
+            ContextBudgetPolicy(
+                token_budget=10,
+                allow_recent_raw_history_limit_overflow=True,
+            ).allow_recent_raw_history_limit_overflow
+        )
         for value in (-1, True, '24'):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     ContextBudgetPolicy(
                         token_budget=10,
                         history_budget_limit=value,
+                    )
+        for value in (None, 1, 'true'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    ContextBudgetPolicy(
+                        token_budget=10,
+                        allow_recent_raw_history_limit_overflow=value,
                     )
 
         members = tuple(_member(index, logical_size=10) for index in range(3))
@@ -1430,6 +1446,16 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
             ),
             budget_policy_version='continuity_context_budget_v2',
         )
+        allowed = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=50,
+                recent_raw_target=10,
+                history_budget_limit=24,
+                allow_recent_raw_history_limit_overflow=True,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
         old_version = build_context_plan(
             members,
             budget_policy=policy,
@@ -1437,6 +1463,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         )
         self.assertEqual(same.plan_hash, repeated.plan_hash)
         self.assertNotEqual(same.plan_hash, changed.plan_hash)
+        self.assertNotEqual(same.plan_hash, allowed.plan_hash)
         self.assertNotEqual(same.plan_hash, old_version.plan_hash)
 
     def test_legacy_identity_shape_omits_optional_history_field_until_v2(self):
@@ -1542,6 +1569,95 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
             [item.source_seqs for item in plan.representations],
             [(0, 1)],
         )
+
+    def test_atomic_recent_raw_overflow_fits_total_budget_and_keeps_ready_overlap_raw(self):
+        members = (
+            _member(0, logical_size=5_000),
+            _member(1, logical_size=36_511),
+            _member(2, logical_size=640),
+        )
+        recent_ready = _binding(
+            members,
+            seqs=(1,),
+            chunk_id='chunk:recent-ready',
+            body='x' * 80_000,
+        )
+        fixed = ContextSection(
+            kind='invariant_system',
+            source_ref='system:fixed',
+            content_hash='f' * 64,
+            estimated_tokens=18_000,
+        )
+        plan = build_context_plan(
+            members,
+            chunks=(recent_ready,),
+            fixed_sections=(fixed,),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=90_000,
+                reserve_budget=8_000,
+                recent_raw_target=12_000,
+                history_budget_limit=24_000,
+                allow_recent_raw_history_limit_overflow=True,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2))
+        self.assertEqual(plan.recent_raw_token_estimate, 37_151)
+        self.assertEqual(plan.selected_token_estimate, 37_151)
+        self.assertEqual(
+            [item.source_seqs for item in plan.representations],
+            [(1, 2)],
+        )
+        self.assertEqual(plan.gaps, ())
+        self.assertTrue(any(
+            item.code == 'recent_raw_priority'
+            and item.representation_id == 'chunk:chunk:recent-ready'
+            for item in plan.exclusions
+        ))
+        self.assertTrue(any(
+            item.code == 'recent_raw_history_limit_overflow_allowed'
+            and item.representation_id.startswith('raw:')
+            for item in plan.exclusions
+        ))
+        self.assertLessEqual(plan.total_token_estimate, plan.token_budget)
+        self.assertEqual(find_cold_bridge(plan).status, 'none')
+
+    def test_atomic_recent_raw_overflow_fails_closed_when_total_budget_is_insufficient(self):
+        members = (
+            _member(0, logical_size=5_000),
+            _member(1, logical_size=36_511),
+            _member(2, logical_size=640),
+        )
+        fixed = ContextSection(
+            kind='invariant_system',
+            source_ref='system:fixed',
+            content_hash='f' * 64,
+            estimated_tokens=10_000,
+        )
+        plan = build_context_plan(
+            members,
+            fixed_sections=(fixed,),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=48_000,
+                reserve_budget=8_000,
+                recent_raw_target=12_000,
+                history_budget_limit=24_000,
+                allow_recent_raw_history_limit_overflow=True,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'overflow')
+        self.assertEqual(plan.recent_raw_token_estimate, 37_151)
+        self.assertTrue(any(
+            item.code == 'budget_overflow'
+            for item in plan.exclusions
+        ))
+        self.assertGreater(plan.total_token_estimate, plan.token_budget)
 
     def test_recent_raw_overflow_keeps_whole_member_and_fails_closed(self):
         members = (_member(0, logical_size=30),)

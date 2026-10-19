@@ -1311,11 +1311,18 @@ def _context_plan_policy(
         ))
     else:
         history_budget_limit = None
+    # Cold/Respawn may admit one atomic recent raw suffix above the history
+    # sub-budget only when the full fixed+history carrier fits. Hot and
+    # Capacity keep the strict history-limit behavior.
+    allow_recent_raw_history_limit_overflow = policy_mode in ('cold', 'respawn')
     policy = ContextBudgetPolicy(
         token_budget=token_budget,
         reserve_budget=reserve,
         recent_raw_target=recent_raw_target,
         history_budget_limit=history_budget_limit,
+        allow_recent_raw_history_limit_overflow=(
+            allow_recent_raw_history_limit_overflow
+        ),
     )
     return policy, CONTINUITY_CONTEXT_BUDGET_POLICY_VERSION
 
@@ -7590,6 +7597,7 @@ def _observe_continuity_shadow(
                         reserve_budget=reserve,
                         recent_raw_target=recent_raw_target,
                         history_budget_limit=recent_raw_target,
+                        allow_recent_raw_history_limit_overflow=True,
                     )
                     fixed_sections = _build_continuity_shadow_fixed_sections(
                         plan=plan,
