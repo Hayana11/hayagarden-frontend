@@ -194,7 +194,7 @@ class SearchAndWriteTests(unittest.TestCase):
 
 class HoldDiagnosticTests(unittest.TestCase):
     def _diagnose(self, hold, **kwargs):
-        server = types.SimpleNamespace(hold=hold)
+        server = SimpleNamespace(hold=hold)
         with mock.patch.dict(
             os.environ,
             {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
