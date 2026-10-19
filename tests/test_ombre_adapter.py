@@ -321,7 +321,7 @@ class HoldDiagnosticTests(unittest.TestCase):
                 return RaceEvent("done")
             if created[0] == 2:
                 return RaceEvent("outer")
-            return RaceEvent("other")
+            return real_event()
 
         async def gated_hold(**kwargs):
             while not finish_gate.is_set():
