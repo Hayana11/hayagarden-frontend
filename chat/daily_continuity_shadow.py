@@ -288,10 +288,23 @@ def _window_anchor_section(
     history_rows: Sequence[dict[str, object]],
     *,
     anchor_token_budget: int,
+    allowed_user_source_refs: Sequence[str] | None = None,
 ) -> tuple[ContextSection | None, str]:
-    """Bind the first formal user to its canonical provider payload identity."""
+    """Bind the first proven-scope formal user to its provider payload identity."""
+    allowed_refs = (
+        None
+        if allowed_user_source_refs is None
+        else frozenset(str(ref) for ref in allowed_user_source_refs)
+    )
     first_user = next(
-        (row for row in history_rows if is_formal_user_source_row(row)),
+        (
+            row for row in history_rows
+            if is_formal_user_source_row(row)
+            and (
+                allowed_refs is None
+                or 'message:' + str(row.get('id') or '') in allowed_refs
+            )
+        ),
         None,
     )
     if first_user is None:
@@ -501,6 +514,7 @@ def build_daily_continuity_shadow_plan(
             expected_members = build_source_members(turns, events)
         except (TypeError, ValueError):
             return _blocked('source_rows_unavailable')
+        allowed_anchor_source_refs: tuple[str, ...] | None = None
         if source_member_scope is not None:
             try:
                 expected_members = _restrict_expected_members(
@@ -509,6 +523,17 @@ def build_daily_continuity_shadow_plan(
                 )
             except _SourceScopeUnavailable:
                 return _blocked('source_scope_unavailable')
+            selected_turn_ids = frozenset(
+                str(getattr(member, 'source_ref', '') or '')
+                for member in tuple(expected_members)
+                if str(getattr(member, 'source_kind', '') or '')
+                == 'completed_turn'
+            )
+            allowed_anchor_source_refs = tuple(
+                str(turn.user_input_ref.source_ref)
+                for turn in tuple(turns)
+                if str(turn.turn_id) in selected_turn_ids
+            )
         if not is_formal_user_source_row(current_row):
             return _blocked('invalid_current_request')
         try:
@@ -523,6 +548,7 @@ def build_daily_continuity_shadow_plan(
                 window_anchor, window_anchor_status = _window_anchor_section(
                     history_rows,
                     anchor_token_budget=int(window_anchor_token_budget),
+                    allowed_user_source_refs=allowed_anchor_source_refs,
                 )
             except (TypeError, ValueError):
                 return _blocked('window_anchor_unavailable')
