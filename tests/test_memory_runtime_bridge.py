@@ -507,6 +507,27 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 handoff = self._handoff_with_ombre("")
                 self.assertIn(CONTENT, handoff)
                 self.assertIn("legacy receipt fallback", handoff)
+                conn = sqlite3.connect(receipt_path)
+                recalled_event = conn.execute(
+                    """
+                    SELECT event_id
+                    FROM memory_runtime_receipt_events
+                    WHERE receipt_id=? AND stage=?
+                    """,
+                    (result["receipt_id"], "new_window_handoff_recalled"),
+                ).fetchone()
+                conn.close()
+                self.assertIsNotNone(recalled_event)
+                print(
+                    "MEMORY_RUNTIME_FALLBACK_E2E "
+                    + json.dumps(
+                        {
+                            "memory_persisted": result["receipt_id"],
+                            "new_window_handoff_recalled": recalled_event[0],
+                        },
+                        sort_keys=True,
+                    )
+                )
 
     def test_handoff_fallback_supplements_nonempty_ombre_handoff(self):
         with tempfile.TemporaryDirectory() as root:
