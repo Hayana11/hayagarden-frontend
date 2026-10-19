@@ -341,7 +341,7 @@ class HoldDiagnosticTests(unittest.TestCase):
         ), mock.patch.object(
             ombre_adapter, "_load_server", return_value=server
         ), mock.patch.object(
-            ombre_adapter.threading, "Event", side_effect=event_factory
+            ombre_adapter, "_new_diagnostic_event", side_effect=event_factory
         ):
             result = ombre_adapter.hold_memory_diagnostic(
                 "diagnostic body stays out of result",
