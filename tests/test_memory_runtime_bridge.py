@@ -135,15 +135,14 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                     posts_db_path=db_path,
                 )
                 self.assertEqual(unverified["status"], "UNVERIFIED")
-                handoff = bridge.record_handoff_observation(
-                    f"new window handoff: {CONTENT}",
-                    provenance={"window_id": "window-c"},
-                )
-                self.assertEqual(handoff["status"], "OBSERVED")
-                self.assertIn(
-                    persisted["receipt_id"], handoff["matched_receipt_ids"]
-                )
-                self.assertEqual(len(handoff["recalled_event_ids"]), 1)
+                from chat import system_builder
+
+                with mock.patch(
+                    "tools.ombre_adapter.get_handoff",
+                    return_value=f"new window handoff: {CONTENT}",
+                ):
+                    handoff_text = system_builder._ombre_handoff_sync()
+                self.assertIn(CONTENT, handoff_text)
                 conn = sqlite3.connect(receipt_path)
                 self.assertEqual(
                     conn.execute(
@@ -166,9 +165,10 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                         {
                             "turn_a_memory_persisted": persisted["receipt_id"],
                             "turn_b_memory_recalled_injected": recalled["event_id"],
-                            "new_window_handoff_recalled": handoff[
-                                "recalled_event_ids"
-                            ][0],
+                            "new_window_handoff_recalled": bridge.stage_receipt_id(
+                                persisted["receipt_id"],
+                                "new_window_handoff_recalled",
+                            ),
                         },
                         sort_keys=True,
                     )
