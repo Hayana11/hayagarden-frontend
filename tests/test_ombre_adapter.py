@@ -10,6 +10,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -192,6 +193,52 @@ class SearchAndWriteTests(unittest.TestCase):
         self.assertEqual(result, "saved")
         self.assertEqual(received["importance"], 10)
         self.assertFalse(received["pinned"])
+
+
+class DeterministicLoaderTests(unittest.TestCase):
+    def test_preexisting_server_module_cannot_redirect_ombre_load(self):
+        module_name = ombre_adapter._OMBRE_SERVER_MODULE_NAME
+        missing = object()
+        previous_module = sys.modules.get(module_name, missing)
+        original_path = list(sys.path)
+
+        with tempfile.TemporaryDirectory() as root:
+            server_path = Path(root) / "server.py"
+            server_path.write_text("marker = 'ombre-correct'\\n", encoding="utf-8")
+            wrong_server = SimpleNamespace(marker="wrong")
+
+            sys.modules.pop(module_name, None)
+            try:
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "OMBRE_ADAPTER_BACKEND": "legacy_module",
+                        "OMBRE_BRAIN_ROOT": root,
+                    },
+                    clear=False,
+                ), mock.patch.dict(
+                    sys.modules,
+                    {"server": wrong_server},
+                ), mock.patch.object(
+                    ombre_adapter,
+                    "_SERVER_INSTANCE",
+                    None,
+                ):
+                    loaded = ombre_adapter._load_server()
+            finally:
+                sys.path[:] = original_path
+                sys.modules.pop(module_name, None)
+                if previous_module is not missing:
+                    sys.modules[module_name] = previous_module
+
+        self.assertEqual(loaded.__name__, module_name)
+        self.assertEqual(
+            Path(loaded.__file__).resolve(),
+            server_path.resolve(),
+        )
+        self.assertEqual(loaded.marker, "ombre-correct")
+        self.assertIs(sys.modules.get("server"), wrong_server)
+        self.assertIs(loaded, ombre_adapter._SERVER_INSTANCE)
 
 
 class HoldDiagnosticTests(unittest.TestCase):
