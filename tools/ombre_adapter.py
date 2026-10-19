@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 
 _LOG = logging.getLogger("hayagarden.ombre_adapter")
 _DEFAULT_ROOT = "/opt/ombre-brain"
+_OMBRE_SERVER_MODULE_NAME = "hayagarden_ombre_server"
 _DEFAULT_SNAPSHOT_URL = "http://127.0.0.1:8000/emotion_snapshot"
 _SERVER_INSTANCE = None
 _SERVER_ERROR: Optional[BaseException] = None
@@ -227,8 +228,37 @@ def _load_server():
             root = _ombre_root()
             if root not in sys.path:
                 sys.path.insert(0, root)
-            logging.getLogger("ombre_brain").setLevel(logging.WARNING)
-            _SERVER_INSTANCE = importlib.import_module("server")
+
+            # Resolve only the configured Ombre root's server.py.  A dedicated
+            # module name keeps an unrelated sys.modules["server"] or another
+            # server.py elsewhere on sys.path out of this import path.
+            server_path = os.path.join(root, "server.py")
+            if not os.path.isfile(server_path):
+                raise ModuleNotFoundError(
+                    f"No Ombre server.py at {server_path}",
+                    name="server",
+                )
+            spec = importlib.util.spec_from_file_location(
+                _OMBRE_SERVER_MODULE_NAME,
+                server_path,
+            )
+            if spec is None or spec.loader is None:
+                raise ModuleNotFoundError(
+                    f"Unable to load Ombre server.py at {server_path}",
+                    name="server",
+                )
+
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[_OMBRE_SERVER_MODULE_NAME] = module
+            try:
+                logging.getLogger("ombre_brain").setLevel(logging.WARNING)
+                spec.loader.exec_module(module)
+            except BaseException:
+                if sys.modules.get(_OMBRE_SERVER_MODULE_NAME) is module:
+                    sys.modules.pop(_OMBRE_SERVER_MODULE_NAME, None)
+                raise
+
+            _SERVER_INSTANCE = module
             _SERVER_ERROR = None
             return _SERVER_INSTANCE
         except BaseException as exc:
