@@ -21,6 +21,7 @@ from tools.capability_state import (
     RUNTIME_STATE_OFF,
     read_capability_state,
 )
+from tools.ombre_native_surface import UPSTREAM_BRAIN_TOOL_BINDINGS
 from tools.lease_signer import ISSUED_FROM_VALUES, TURN_LEASE_FIELDS, TURN_MODES
 
 LEASE_DECISIONS = frozenset(
@@ -179,9 +180,17 @@ def evaluate_tool_call(
             diagnostic=error,
         )
 
-    capability_id = capability_for_tool(tool_name)
+    physical_tool_name = str(tool_name or "").strip()
     turn_mode = str(turn_lease["turn_mode"])
-    if str(tool_name or "").strip().startswith("mcp__external__"):
+    if physical_tool_name in UPSTREAM_BRAIN_TOOL_BINDINGS:
+        return _decision(
+            capability_id="ombre_native:brain",
+            turn_mode=turn_mode,
+            lease_decision="ALLOW",
+            verified_turn_id=str(turn_lease["turn_id"]),
+        )
+    capability_id = capability_for_tool(physical_tool_name)
+    if physical_tool_name.startswith("mcp__external__"):
         surface = external_surface_tool(tool_name)
         if surface is None or surface.get("available") is not True:
             return _decision(
