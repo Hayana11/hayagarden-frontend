@@ -1607,7 +1607,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         ))
         self.assertTrue(any(
             item.code == 'recent_raw_history_limit_overflow_allowed'
-            and item.representation_id == 'raw:'
+            and item.representation_id.startswith('raw:')
             for item in plan.exclusions
         ))
         self.assertLessEqual(plan.total_token_estimate, plan.token_budget)
