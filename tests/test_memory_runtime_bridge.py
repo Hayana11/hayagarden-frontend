@@ -84,6 +84,25 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
                 self.assertEqual(
                     persisted["receipt_id"], repeated["receipt_id"]
                 )
+                timed_memo_a = bridge.persist_memory(
+                    db_path,
+                    content="[网页窗口 10-00] memo",
+                    source="session_memo",
+                    provenance={"session_id": "window-a", "turn_id": "turn-memo"},
+                    idempotency_content="same user turn\\nsame assistant turn",
+                    write_ombre=False,
+                )
+                timed_memo_b = bridge.persist_memory(
+                    db_path,
+                    content="[网页窗口 10-01] memo",
+                    source="session_memo",
+                    provenance={"session_id": "window-a", "turn_id": "turn-memo"},
+                    idempotency_content="same user turn\\nsame assistant turn",
+                    write_ombre=False,
+                )
+                self.assertEqual(
+                    timed_memo_a["receipt_id"], timed_memo_b["receipt_id"]
+                )
                 conn = sqlite3.connect(db_path)
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0],

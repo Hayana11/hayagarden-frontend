@@ -1202,6 +1202,7 @@ def _write_session_memo(user_msg='', assistant_msg='', provenance=None):
                 content=memo,
                 source='session_memo',
                 provenance=session_provenance,
+                idempotency_content=f'{user_msg.strip()}\\n{assistant_msg.strip()}',
                 type='MEMORY',
                 author='fyodor',
                 layer='recent',

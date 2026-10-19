@@ -402,6 +402,7 @@ def persist_memory(
     content: Any,
     source: str,
     provenance: dict[str, Any] | None = None,
+    idempotency_content: str | None = None,
     type: str = "MEMORY",
     author: str = "fyodor",
     layer: str = "recent",
@@ -418,7 +419,14 @@ def persist_memory(
 
     prov = normalize_provenance(source, provenance)
     content_hash = content_sha256(text)
-    key = deterministic_idempotency_key(text, source=source, provenance=prov)
+    idempotency_basis = (
+        idempotency_content.strip()
+        if isinstance(idempotency_content, str) and idempotency_content.strip()
+        else text
+    )
+    key = deterministic_idempotency_key(
+        idempotency_basis, source=source, provenance=prov
+    )
     row, created = _reserve(
         posts_db_path=posts_db_path,
         idempotency_key=key,
