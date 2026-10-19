@@ -456,6 +456,84 @@ class HoldDiagnosticTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "ModuleNotFoundError")
 
 
+    def test_module_not_found_records_missing_module_and_runtime_context(self):
+        spec = SimpleNamespace(origin="/opt/ombre-brain/server.py")
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(
+            ombre_adapter,
+            "_load_server",
+            side_effect=ModuleNotFoundError("foo"),
+        ), mock.patch.object(
+            ombre_adapter.importlib.util,
+            "find_spec",
+            return_value=spec,
+        ):
+            result = ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=0.2,
+                wall_timeout=1.0,
+            )
+
+        self.assertEqual(result["status"], "BACKEND_UNAVAILABLE")
+        self.assertEqual(result["missing_module"], "foo")
+        self.assertEqual(result["server_spec_origin"], "/opt/ombre-brain/server.py")
+        self.assertIn("pid", result)
+        self.assertIn("python_executable", result)
+        self.assertIn("cwd", result)
+        self.assertIn("ombre_root", result)
+        self.assertIn("ombre_root_in_sys_path", result)
+        self.assertIn("server_in_sys_modules", result)
+        self.assertIn("server_module_file", result)
+
+    def test_server_itself_not_found_reports_empty_server_spec(self):
+        missing = ModuleNotFoundError("No module named 'server'", name="server")
+        with mock.patch.dict(
+            os.environ,
+            {"OMBRE_ADAPTER_BACKEND": "legacy_module"},
+            clear=False,
+        ), mock.patch.object(
+            ombre_adapter,
+            "_load_server",
+            side_effect=missing,
+        ), mock.patch.object(
+            ombre_adapter.importlib.util,
+            "find_spec",
+            return_value=None,
+        ):
+            result = ombre_adapter.hold_memory_diagnostic(
+                "diagnostic body stays out of result",
+                timeout=0.2,
+                wall_timeout=1.0,
+            )
+
+        self.assertEqual(result["status"], "BACKEND_UNAVAILABLE")
+        self.assertEqual(result["missing_module"], "server")
+        self.assertEqual(result["server_spec_origin"], "")
+        self.assertFalse(result["server_module_file"])
+
+    def test_existing_server_module_is_reported_without_importing_it(self):
+        cached = SimpleNamespace(__file__="/opt/ombre-brain/server.py")
+        with mock.patch.dict(sys.modules, {"server": cached}), mock.patch.object(
+            ombre_adapter.importlib.util,
+            "find_spec",
+            return_value=SimpleNamespace(origin="/opt/ombre-brain/server.py"),
+        ):
+            result = ombre_adapter._module_load_diagnostics(
+                "/opt/ombre-brain",
+                ModuleNotFoundError("foo", name="foo"),
+            )
+
+        self.assertEqual(result["missing_module"], "foo")
+        self.assertTrue(result["server_in_sys_modules"])
+        self.assertEqual(
+            result["server_module_file"],
+            "/opt/ombre-brain/server.py",
+        )
+
+
 class EmotionSnapshotTests(unittest.TestCase):
     def test_safe_snapshot_excludes_permanent_pinned_and_test_data(self):
         dynamic_a = bucket(
