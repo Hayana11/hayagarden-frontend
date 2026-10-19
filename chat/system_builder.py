@@ -9,87 +9,16 @@ build_wake_system() 仅保留给需要纯字符串的旧调用方与健康检查
 不直接 import gateway（会循环依赖），需要 get_db() 等基础设施时在
 函数体内延迟 import。
 """
-import datetime
-import hashlib
-import json
-import logging
 import os
+import json
+import datetime
 import urllib.request
-from functools import lru_cache
-from pathlib import Path
-
 import config_store
 
 from chat.context_contract import SharedContext
 from chat.relationship_context import build_relationship_context
-from tools.ombre_native_surface import OFFICIAL_PROMPT_PATH, UPSTREAM_SHA, UPSTREAM_VERSION
 
 NL = chr(10)
-
-
-@lru_cache(maxsize=1)
-def load_official_ombre_prompt() -> tuple[str, dict[str, object]]:
-    """Load the pinned upstream prompt without rewriting or embedding it in code."""
-    path = str(OFFICIAL_PROMPT_PATH)
-    base = {
-        "ombre_prompt_loaded": False,
-        "ombre_prompt_status": "not_loaded",
-        "ombre_prompt_error_type": None,
-        "ombre_prompt_path": path,
-        "ombre_upstream_sha": UPSTREAM_SHA,
-        "ombre_upstream_version": UPSTREAM_VERSION,
-        "ombre_prompt_sha256": None,
-    }
-    try:
-        raw = Path(path).read_bytes()
-    except FileNotFoundError:
-        base["ombre_prompt_error_type"] = "missing"
-        logging.getLogger(__name__).error(
-            "ombre_prompt_loaded=false path=%s status=missing error_type=missing",
-            path,
-        )
-        return "", base
-    except OSError as exc:
-        base["ombre_prompt_error_type"] = type(exc).__name__
-        logging.getLogger(__name__).error(
-            "ombre_prompt_loaded=false path=%s status=error error_type=%s",
-            path,
-            type(exc).__name__,
-        )
-        return "", base
-    try:
-        prompt = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        base["ombre_prompt_error_type"] = "invalid_utf8"
-        logging.getLogger(__name__).error(
-            "ombre_prompt_loaded=false path=%s status=error error_type=invalid_utf8",
-            path,
-        )
-        return "", base
-    if not prompt:
-        base["ombre_prompt_error_type"] = "empty"
-        logging.getLogger(__name__).error(
-            "ombre_prompt_loaded=false path=%s status=error error_type=empty",
-            path,
-        )
-        return "", base
-    prompt_sha256 = hashlib.sha256(raw).hexdigest()
-    loaded = dict(base)
-    loaded.update({
-        "ombre_prompt_loaded": True,
-        "ombre_prompt_status": "loaded",
-        "ombre_prompt_sha256": prompt_sha256,
-    })
-    logging.getLogger(__name__).info(
-        "ombre_prompt_loaded=true path=%s status=loaded upstream_sha=%s "
-        "upstream_version=%s prompt_sha256=%s",
-        path,
-        UPSTREAM_SHA,
-        UPSTREAM_VERSION,
-        prompt_sha256,
-    )
-    return prompt, loaded
-
 
 
 def read_persona():
@@ -736,15 +665,8 @@ def build_cc_static_parts():
     tool_companion_intuition = _build_tool_companion_intuition()
     stable_note = build_stable_note()
     save_instr = _CC_SAVE_INSTR
-    official_prompt, official_prompt_observation = load_official_ombre_prompt()
     full_system = '\n\n'.join(
-        p for p in (
-            persona,
-            stable_note,
-            tool_companion_intuition,
-            save_instr,
-            official_prompt,
-        )
+        p for p in (persona, stable_note, tool_companion_intuition, save_instr)
         if p and str(p).strip()
     )
     return {
@@ -752,8 +674,6 @@ def build_cc_static_parts():
         'stable_note': stable_note,
         'tool_companion_intuition': tool_companion_intuition,
         'save_instr': save_instr,
-        'official_prompt': official_prompt,
-        'ombre_prompt_observation': official_prompt_observation,
         'full_system': full_system,
     }
 
@@ -789,9 +709,8 @@ def build_cc_daily_static_parts():
     persona = read_persona()
     tool_companion_intuition = _build_tool_companion_intuition()
     identity = _CC_REPLY_IDENTITY + _CC_DAILY_CHOICES_NOTE
-    official_prompt, official_prompt_observation = load_official_ombre_prompt()
     full_system = '\n\n'.join(
-        p for p in (persona, identity, tool_companion_intuition, official_prompt)
+        p for p in (persona, identity, tool_companion_intuition)
         if p and str(p).strip()
     )
     return {
@@ -799,8 +718,6 @@ def build_cc_daily_static_parts():
         'identity': identity,
         'tool_companion_intuition': tool_companion_intuition,
         'save_instr': '',
-        'official_prompt': official_prompt,
-        'ombre_prompt_observation': official_prompt_observation,
         'full_system': full_system,
     }
 
