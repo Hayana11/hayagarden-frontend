@@ -1446,6 +1446,16 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
             ),
             budget_policy_version='continuity_context_budget_v2',
         )
+        allowed = build_context_plan(
+            members,
+            budget_policy=ContextBudgetPolicy(
+                token_budget=50,
+                recent_raw_target=10,
+                history_budget_limit=24,
+                allow_recent_raw_history_limit_overflow=True,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
         old_version = build_context_plan(
             members,
             budget_policy=policy,
@@ -1453,6 +1463,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
         )
         self.assertEqual(same.plan_hash, repeated.plan_hash)
         self.assertNotEqual(same.plan_hash, changed.plan_hash)
+        self.assertNotEqual(same.plan_hash, allowed.plan_hash)
         self.assertNotEqual(same.plan_hash, old_version.plan_hash)
 
     def test_legacy_identity_shape_omits_optional_history_field_until_v2(self):
