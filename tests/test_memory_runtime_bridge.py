@@ -406,6 +406,9 @@ class MemoryRuntimeBridgeTests(unittest.TestCase):
             / "verify-memory-runtime-receipts.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("systemctl show", script)
+        self.assertIn("ActiveState", script)
+        self.assertIn("MainPID", script)
+        self.assertIn("/proc/$main_pid", script)
         self.assertIn("runuser", script)
         self.assertIn("verify_receipt_store", script)
 

@@ -22,9 +22,17 @@ declare -A checked_users=()
 for service in "${SERVICES[@]}"; do
   load_state="$(systemctl show "$service" -p LoadState --value 2>/dev/null || true)"
   [[ "$load_state" == "loaded" ]] || fail "$service is not loaded"
+  active_state="$(systemctl show "$service" -p ActiveState --value 2>/dev/null || true)"
+  [[ "$active_state" == "active" ]] || fail "$service is not active: $active_state"
 
   runtime_user="$(systemctl show "$service" -p User --value 2>/dev/null || true)"
   runtime_user="${runtime_user:-root}"
+  main_pid="$(systemctl show "$service" -p MainPID --value 2>/dev/null || true)"
+  [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || fail "$service has no live MainPID"
+  expected_uid="$(id -u "$runtime_user" 2>/dev/null || true)"
+  [[ "$expected_uid" =~ ^[0-9]+$ ]] || fail "cannot resolve service user: $runtime_user"
+  actual_uid="$(stat -c '%u' "/proc/$main_pid" 2>/dev/null || true)"
+  [[ "$actual_uid" == "$expected_uid" ]] || fail "$service MainPID $main_pid runs as uid $actual_uid, expected $expected_uid"
   [[ -n "${checked_users[$runtime_user]:-}" ]] && continue
 
   probe='import json

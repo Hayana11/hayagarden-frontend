@@ -62,8 +62,8 @@ legacy-write switch enabled by default.
 
 ## Production receipt preflight
 
-Before a production deployment, run the existing deployment procedure's
-preflight gate as the frontend service identity:
+Before a production deployment, run this receipt preflight as the frontend
+service identity, before invoking the standard deployment script:
 
 ```bash
 sudo -n /bin/bash /opt/frontend/scripts/verify-memory-runtime-receipts.sh
