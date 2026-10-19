@@ -914,6 +914,10 @@ async def hold_memory_async(
 
 
 
+def _new_diagnostic_event() -> threading.Event:
+    return threading.Event()
+
+
 def hold_memory_diagnostic(
     content: str,
     *,
@@ -1022,8 +1026,8 @@ def hold_memory_diagnostic(
         return await hold(**arguments)
 
     outcome: dict[str, Any] = {}
-    done = threading.Event()
-    outer_timed_out = threading.Event()
+    done = _new_diagnostic_event()
+    outer_timed_out = _new_diagnostic_event()
     late_emit_lock = threading.Lock()
     late_emitted = False
 
