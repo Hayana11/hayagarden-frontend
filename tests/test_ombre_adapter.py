@@ -397,6 +397,7 @@ class HoldDiagnosticTests(unittest.TestCase):
                 correlation_id="receipt-race",
                 late_completion_observer=on_late_completion,
             )
+            self.assertTrue(completed.wait(1.0))
 
         self.assertEqual(result["status"], "TIMEOUT")
         self.assertEqual(result["outer_stage"], "wall_timeout")
