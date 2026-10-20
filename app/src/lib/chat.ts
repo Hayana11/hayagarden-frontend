@@ -704,6 +704,19 @@ export async function fetchChatGatewayOnline(): Promise<boolean> {
   }
 }
 
+/** Current gateway generation lock, or null when it cannot be read. */
+export async function fetchChatLockStatus(): Promise<{ busy: boolean; ageSec: number } | null> {
+  try {
+    const resp = await fetch(sseUrl('/api/gw/chat/lock'), { credentials: 'include' });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { busy?: boolean; age_sec?: number };
+    if (typeof data.busy !== 'boolean') return null;
+    return { busy: data.busy, ageSec: Number(data.age_sec) || 0 };
+  } catch {
+    return null;
+  }
+}
+
 /** Force-release stuck generation lock (multi-worker safe via repair API). */
 export async function forceUnlockChatGenLock(): Promise<{ ok: boolean; busy: boolean | null }> {
   try {

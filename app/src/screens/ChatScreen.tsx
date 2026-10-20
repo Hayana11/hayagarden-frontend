@@ -20,6 +20,7 @@ import {
   regenFinalize,
   regenPrepare,
   sendChatMessage,
+  takeLastChatSendError,
   setChatEffort,
   setChatModel,
   setDisplayThinkingAuthoredPrompt,
@@ -44,6 +45,7 @@ import {
   fmtCostUsd,
   fmtTokens,
   fetchChatGatewayOnline,
+  fetchChatLockStatus,
   forceUnlockChatGenLock,
   guessChatErrorHint,
   isChoicesAnswered,
@@ -389,6 +391,7 @@ function CopyIcon({ size = 15 }: { size?: number }) {
 }
 
 const MAX_COMPOSER_ATTACHMENTS = 4;
+const HARD_REFRESH_CONFIRM_MS = 3000;
 
 export const CHAT_PINNED_MODELS = [
   {
@@ -946,6 +949,7 @@ export function ChatScreen() {
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const mountedRef = useRef(true);
   const liveRef = useRef<LiveState | null>(null);
+  const hardRefreshArmedUntilRef = useRef(0);
   const chatHandoffRef = useRef<ChatStreamHandoff | null>(null);
   const presentationByMessageRef = useRef(new Map<number, string>());
   const postingRef = useRef(false);
@@ -1392,6 +1396,32 @@ export function ChatScreen() {
 
   const refreshChat = useCallback(async () => {
     if (refreshing) return;
+    // Hard refresh aborts the live stream (server kills the resident) and
+    // force-releases the gen lock. While a reply is still being produced,
+    // the first tap only refreshes; a second tap inside the window forces.
+    const armed = Date.now() < hardRefreshArmedUntilRef.current;
+    hardRefreshArmedUntilRef.current = 0;
+    if (!armed) {
+      const localStreaming = sending || liveRef.current !== null;
+      const lock = localStreaming ? null : await fetchChatLockStatus();
+      if (localStreaming || lock?.busy) {
+        setNavOpen(null);
+        if (!localStreaming) {
+          setRefreshing(true);
+          try {
+            pinTranscriptToLatest();
+            await refetchLatest();
+          } finally {
+            setRefreshing(false);
+          }
+        }
+        hardRefreshArmedUntilRef.current = Date.now() + HARD_REFRESH_CONFIRM_MS;
+        showToast(localStreaming
+          ? '回复还在生成，再点一次强制中断'
+          : `服务器仍在生成（${Math.round(lock?.ageSec ?? 0)}s），再点一次强制解锁`);
+        return;
+      }
+    }
     setRefreshing(true);
     setNavOpen(null);
     setChatError(null);
@@ -1413,7 +1443,7 @@ export function ChatScreen() {
     } finally {
       setRefreshing(false);
     }
-  }, [refreshing, refetchLatest, showToast, pinTranscriptToLatest]);
+  }, [refreshing, sending, refetchLatest, showToast, pinTranscriptToLatest]);
 
   // Cold start: history first; a valid warm snapshot skips only the visible cold path.
   useEffect(() => {
@@ -1566,10 +1596,14 @@ export function ChatScreen() {
     resizeChatTextarea(textarea, scrollRef.current, followLatestRef.current, reportChatScroll);
   }, [input, reportChatScroll]);
 
+  // Lock state only feeds switchBlocked, which a local stream already blocks.
+  // Keep deps minimal: depending on live re-ran this per streamed token and
+  // fired an immediate fetch each time (5–8 req/s during replies).
   useEffect(() => {
     if (!initialHistoryReady) return;
     let cancelled = false;
     const pollLock = async () => {
+      if (document.hidden || liveRef.current) return;
       try {
         const resp = await fetch('/api/gw/chat/lock', { credentials: 'include' });
         if (!resp.ok) return;
@@ -1585,7 +1619,7 @@ export function ChatScreen() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [initialHistoryReady, sending, live]);
+  }, [initialHistoryReady]);
 
   // gateway reachability — breathing status under the name (first probe after history ready)
   useEffect(() => {
@@ -1838,7 +1872,8 @@ export function ChatScreen() {
       setPosting(false);
     }
     if (messageId === null) {
-      showToast('发送失败');
+      const reason = takeLastChatSendError();
+      showToast(reason ? `发送失败：${reason}` : '发送失败');
       if (composerDraftRevisionRef.current === draftRevisionAtConsume) {
         setInput(rawText);
         writeChatComposerDraft(rawText);
@@ -1884,7 +1919,8 @@ export function ChatScreen() {
       uploadCoordinatorRef.current.endChoicePost();
     }
     if (messageId === null) {
-      showToast('发送失败');
+      const reason = takeLastChatSendError();
+      showToast(reason ? `发送失败：${reason}` : '发送失败');
       setSending(false);
       return false;
     }
