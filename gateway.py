@@ -6818,6 +6818,46 @@ def _daily_heartbeat_sse(evt):
     return None
 
 
+# Pre-send keepalive cadence. Must stay well under proxy idle cuts (~40s seen
+# on the phone path) and the SPA transport timeout (150s).
+DAILY_PRESEND_KEEPALIVE_SEC = 5.0
+
+
+def _call_with_sse_keepalive(fn, *, interval=None):
+    """Run blocking ``fn`` off-thread, yielding transport pings until it settles.
+
+    Use as ``result = yield from _call_with_sse_keepalive(fn)``. Cold prepare
+    on a loaded host can take minutes with zero bytes on the wire, which lets
+    proxies/the SPA drop the stream (499) and turns every retry cold again.
+    If the client leaves mid-call, the worker still runs to completion before
+    GeneratorExit propagates, so caller cleanup observes the real outcome.
+    """
+    if interval is None:
+        interval = DAILY_PRESEND_KEEPALIVE_SEC
+    box = {}
+    done = threading.Event()
+
+    def _run():
+        try:
+            box['value'] = fn()
+        except BaseException as exc:  # re-raised on the generator thread
+            box['error'] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name='daily-presend-keepalive', daemon=True).start()
+    try:
+        # Fast prepares stay byte-identical to the unwrapped stream.
+        while not done.wait(interval):
+            yield _sse_json({'t': 'ping'})
+    except GeneratorExit:
+        done.wait()
+        raise
+    if 'error' in box:
+        raise box['error']
+    return box.get('value')
+
+
 def _stream_cc_daily_soft_window(
     _turn_data, _uc, *, request_reality_context='',
 ):
@@ -6970,26 +7010,39 @@ def _stream_cc_daily_soft_window(
             prepare_daily_display_thinking_plan,
         )
         _display_thinking_mode, _display_thinking_prompt = get_display_thinking_snapshot()
-        _static_parts = build_cc_daily_static_parts()
-        _full_system = _static_parts['full_system']
         _cc_env = dict(os.environ)
         _cc_env['CLAUDE_CODE_OAUTH_TOKEN'] = CC_TOKEN
         _cc_env.pop('ANTHROPIC_API_KEY', None)
 
-        _daily_plan = _daily_rt.prepare_daily_turn(
-            user_message_id=int(_turn_data['user_message_id']),
-            db_path=DB_PATH,
-            resident=_CC_RESIDENT,
-            static_system=_full_system,
-            static_system_sha256=hashlib.sha256(
-                (_full_system or '').encode('utf-8'),
-            ).hexdigest(),
-            persona_sha256=hashlib.sha256(
-                (_static_parts.get('persona') or '').encode('utf-8'),
-            ).hexdigest(),
-            provider='claude_code',
-            model=_get_model() or '',
-        )
+        _prepared = {}
+
+        def _prepare_static_and_plan():
+            static_parts = build_cc_daily_static_parts()
+            _prepared['static_parts'] = static_parts
+            full_system = static_parts['full_system']
+            _prepared['plan'] = _daily_rt.prepare_daily_turn(
+                user_message_id=int(_turn_data['user_message_id']),
+                db_path=DB_PATH,
+                resident=_CC_RESIDENT,
+                static_system=full_system,
+                static_system_sha256=hashlib.sha256(
+                    (full_system or '').encode('utf-8'),
+                ).hexdigest(),
+                persona_sha256=hashlib.sha256(
+                    (static_parts.get('persona') or '').encode('utf-8'),
+                ).hexdigest(),
+                provider='claude_code',
+                model=_get_model() or '',
+            )
+
+        try:
+            yield from _call_with_sse_keepalive(_prepare_static_and_plan)
+        finally:
+            # Expose a lease-holding plan to the outer finally even when the
+            # client disconnected while prepare was still running.
+            _daily_plan = _prepared.get('plan')
+        _static_parts = _prepared['static_parts']
+        _full_system = _static_parts['full_system']
         _daily_plan.manifest.update(
             _static_parts.get('ombre_prompt_observation') or {},
         )
