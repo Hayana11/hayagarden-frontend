@@ -2017,6 +2017,8 @@ class ResidentSession:
             self, '_cold_start_pending_kill_reason', None,
         ) or 'external_kill'
         if not proc:
+            self._cold_start_active_record = None
+            self._cold_start_pending_kill_reason = None
             return
         try:
             if proc.stdin:
