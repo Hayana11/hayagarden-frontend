@@ -433,7 +433,14 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
                 json.dumps({
                     "mcpServers": {
                         "home": {"type": "http", "url": "http://127.0.0.1:3100/mcp"},
-                        "brain": {"type": "http", "url": "http://127.0.0.1:8000/mcp"},
+                        "brain": {
+                            "type": "http",
+                            "url": "http://127.0.0.1:18002/mcp",
+                            "headers": {
+                                "Authorization": "Bearer ${OMBRE_MCP_TOKEN}",
+                            },
+                            "timeout": 12,
+                        },
                         "codebase": {"type": "http", "url": "http://127.0.0.1:5056/mcp"},
                     }
                 }),
@@ -460,14 +467,17 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             self.assertIn("mcp__internal__get_todos", disallowed)
             self.assertIn("mcp__capability__todo_read", allowed)
             self.assertIn("mcp__capability__todo_write", allowed)
-            self.assertNotIn("mcp__brain__", allowed)
+            self.assertIn("mcp__brain__*", allowed)
             self.assertNotIn("mcp__home__get_todos", allowed)
             self.assertNotIn("mcp__home__add_todo", allowed)
             self.assertNotIn("mcp__home__light_on", allowed)
             mcp_path = Path(flags["mcp_path"])
             self.assertTrue(mcp_path.is_file())
             cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
-            self.assertEqual(set(cfg["mcpServers"]), {"home", "internal", "capability", "external"})
+            self.assertEqual(
+                set(cfg["mcpServers"]),
+                {"home", "internal", "capability", "external", "brain"},
+            )
 
             # tool_profile mismatch is detected by the existing decision helper
             # once a live generation exists (process_dead otherwise wins).
