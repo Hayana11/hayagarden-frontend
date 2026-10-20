@@ -191,6 +191,7 @@ class DailyTurnPlan:
     user_created_at: Optional[datetime.datetime] = None
     origin_local_day: str = ''
     turn_started_at: Optional[datetime.datetime] = None
+    cold_start_diagnostic: Optional[dict[str, Any]] = field(default=None, repr=False)
     transcript_cwd: str = ''
     transcript_path: Optional[str] = None
     transcript_start_offset: Optional[int] = None
@@ -4754,6 +4755,11 @@ def prepare_daily_turn(
         else _peek_feedback_snapshot()
     )
     req_id = str(request_id or uuid.uuid4())
+    cold_start_diagnostic = {
+        'correlation_id': req_id,
+        'request_received_at': round(time.time(), 6),
+        'generation_records': [],
+    }
     owner = str(lease_owner or req_id)
     turn_lease = (
         copy.deepcopy(_turn_lease)
@@ -4968,6 +4974,8 @@ def prepare_daily_turn(
             turn_started_at=turn_started_at,
             feedback_snapshot=feedback_snapshot,
         )
+        plan.cold_start_diagnostic = cold_start_diagnostic
+        cold_start_diagnostic['plan_ready_at'] = round(time.time(), 6)
         verify_epoch_token(plan)
         return plan
     except Exception:
@@ -5461,6 +5469,7 @@ def _adopt_reprepared_plan_in_place(
     )
     provider_suffix = getattr(current, 'provider_display_thinking_suffix', '')
     provider_prompt = getattr(current, 'provider_display_thinking_prompt', '')
+    cold_start_diagnostic = getattr(current, 'cold_start_diagnostic', None)
     hot_decision = getattr(current, 'hot_decision', None)
     hot_decision_reason = getattr(current, 'hot_decision_reason', None)
     for f in fields(DailyTurnPlan):
@@ -5469,6 +5478,11 @@ def _adopt_reprepared_plan_in_place(
     current.provider_display_thinking_effective_mode = effective_provider_mode
     current.provider_display_thinking_suffix = provider_suffix
     current.provider_display_thinking_prompt = provider_prompt
+    current.cold_start_diagnostic = (
+        cold_start_diagnostic
+        if isinstance(cold_start_diagnostic, dict)
+        else getattr(replacement, 'cold_start_diagnostic', None)
+    )
     if hot_decision is not None:
         current.hot_decision = hot_decision
         current.hot_decision_reason = str(hot_decision_reason or '')
@@ -7728,6 +7742,9 @@ def ensure_resident_and_stream(
 ) -> Iterator[tuple[str, Any]]:
     """Prepare resident process, handle hot→cold mismatch, stream one turn."""
     static_system = _effective_hidden_flow_static_system(plan, static_system)
+    diagnostic = getattr(plan, 'cold_start_diagnostic', None)
+    if resident is not None and isinstance(diagnostic, dict):
+        setattr(resident, '_cold_start_diagnostic', diagnostic)
     verify_epoch_token(plan)
     if (plan.is_cold or plan.is_respawn) and resident is not None:
         binding = get_local_binding()
@@ -7918,6 +7935,18 @@ def ensure_resident_and_stream(
         actual_cold = bool(
             resident.ensure_alive(effective_system, env, tool_profile=plan.tool_profile)
         )
+        if isinstance(diagnostic, dict):
+            diagnostic['generation_claimed_at'] = round(time.time(), 6)
+            try:
+                diagnostic['resident_generation'] = int(
+                    getattr(resident, 'generation', 0) or 0
+                )
+            except (TypeError, ValueError):
+                diagnostic['resident_generation'] = None
+            diagnostic['respawn_reason'] = (
+                str(getattr(resident, 'pending_respawn_reason', None) or '').strip()
+                or diagnostic.get('respawn_reason')
+            )
         # Hash-only snapshot from the already successful process spawn.  This
         # is evidence for the optional observer, never a lifecycle authority.
         snapshot = getattr(resident, 'tool_surface_snapshot', None)

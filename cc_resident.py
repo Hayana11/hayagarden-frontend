@@ -198,6 +198,256 @@ def _bounded_diagnostic_text(value, limit=_TIMEOUT_DIAGNOSTIC_MAX_CHARS):
     return str(value)[:int(limit)]
 
 
+
+_COLD_START_DIAGNOSTIC_EVENT = 'UH_A0_COLD_START_TIMING'
+_COLD_START_DIAGNOSTIC_MAX_GENERATIONS = 32
+
+
+def _cold_start_now():
+    return round(time.time(), 6)
+
+
+def _cold_start_record(diagnostic, generation, reason):
+    if not isinstance(diagnostic, dict):
+        return None
+    records = diagnostic.setdefault('generation_records', [])
+    if len(records) >= _COLD_START_DIAGNOSTIC_MAX_GENERATIONS:
+        return None
+    record = {
+        'gen': _diagnostic_int(generation),
+        'spawn_reason': str(reason or 'unknown')[:120],
+        'process_spawn_at': None,
+        'process_exit_at': None,
+        'stdin_flush_at': None,
+        'claude_init_event_at': None,
+        'first_stream_event_at': None,
+        'first_provider_message_start_at': None,
+        'first_thinking_or_text_at': None,
+        'reached_stdin': False,
+        'reached_provider': False,
+        'exit_reason': None,
+        'bounded_stderr_category': None,
+        'lifetime_ms': None,
+        'first_failed_stage': None,
+    }
+    records.append(record)
+    diagnostic.setdefault('respawn_reason', record['spawn_reason'])
+    return record
+
+
+def _cold_start_active_record(diagnostic, *, generation=None):
+    if not isinstance(diagnostic, dict):
+        return None
+    records = diagnostic.get('generation_records') or []
+    if generation is not None:
+        for record in reversed(records):
+            if _diagnostic_int(record.get('gen')) == _diagnostic_int(generation):
+                return record
+    return records[-1] if records else None
+
+
+def _cold_start_mark(diagnostic, field, *, record=None):
+    if not isinstance(diagnostic, dict):
+        return None
+    when = _cold_start_now()
+    if record is None:
+        record = _cold_start_active_record(diagnostic)
+    if record is not None and not record.get(field):
+        record[field] = when
+    if not diagnostic.get(field):
+        diagnostic[field] = when
+    return when
+
+
+def _cold_start_stderr_category(proc):
+    try:
+        stream = getattr(proc, 'stderr', None)
+        if stream is None:
+            return 'unavailable'
+        try:
+            if proc.poll() is None:
+                return 'not_exited'
+        except Exception:
+            pass
+        raw = stream.read(4_001)
+        text = str(raw or '').lower()
+    except Exception:
+        return 'unavailable'
+    if not text.strip():
+        return 'empty'
+    markers = (
+        ('auth', 'auth_error'),
+        ('mcp', 'mcp_error'),
+        ('session', 'session_error'),
+        ('enoent', 'startup_error'),
+        ('not found', 'startup_error'),
+        ('error', 'runtime_error'),
+        ('fatal', 'runtime_error'),
+    )
+    for marker, category in markers:
+        if marker in text:
+            return category
+    return 'stderr_other'
+
+
+def _cold_start_failure_stage(record):
+    if not isinstance(record, dict):
+        return 'unknown'
+    if not record.get('process_spawn_at'):
+        return 'process_spawn'
+    if not record.get('reached_stdin'):
+        return 'stdin_write'
+    if not record.get('stdin_flush_at'):
+        return 'stdin_flush'
+    if not record.get('claude_init_event_at'):
+        return 'claude_init'
+    if not record.get('first_provider_message_start_at'):
+        return 'brain_mcp_init_or_provider_startup'
+    if not record.get('first_thinking_or_text_at'):
+        return 'provider_first_content'
+    return None
+
+
+def _cold_start_mark_process_exit(
+    diagnostic,
+    proc,
+    reason,
+    *,
+    record=None,
+):
+    if not isinstance(diagnostic, dict):
+        return
+    if record is None:
+        record = _cold_start_active_record(diagnostic)
+    if record is None:
+        return
+    if not record.get('process_exit_at'):
+        record['process_exit_at'] = _cold_start_now()
+    if not record.get('bounded_stderr_category'):
+        record['bounded_stderr_category'] = _cold_start_stderr_category(proc)
+    if not record.get('exit_reason'):
+        record['exit_reason'] = str(reason or 'process_exit')[:160]
+    spawn_at = record.get('process_spawn_at')
+    if spawn_at:
+        record['lifetime_ms'] = max(
+            0, int(round((record['process_exit_at'] - spawn_at) * 1000)),
+        )
+    record['first_failed_stage'] = _cold_start_failure_stage(record)
+    if not diagnostic.get('process_exit_at'):
+        diagnostic['process_exit_at'] = record.get('process_exit_at')
+    if not diagnostic.get('bounded_stderr_category'):
+        diagnostic['bounded_stderr_category'] = record.get(
+            'bounded_stderr_category',
+        )
+
+
+def _cold_start_sync_summary(diagnostic):
+    if not isinstance(diagnostic, dict):
+        return {}
+    records = diagnostic.get('generation_records') or []
+    for field in (
+        'process_spawn_at',
+        'stdin_flush_at',
+        'claude_init_event_at',
+        'first_stream_event_at',
+        'first_provider_message_start_at',
+        'first_thinking_or_text_at',
+    ):
+        if not diagnostic.get(field):
+            for record in records:
+                if record.get(field):
+                    diagnostic[field] = record[field]
+                    break
+    if records:
+        exited = [r for r in records if r.get('process_exit_at')]
+        if exited:
+            latest = exited[-1]
+            diagnostic['process_exit_at'] = latest.get('process_exit_at')
+            diagnostic['bounded_stderr_category'] = latest.get(
+                'bounded_stderr_category',
+            )
+    for record in records:
+        record['first_failed_stage'] = _cold_start_failure_stage(record)
+        if (
+            record.get('lifetime_ms') is None
+            and record.get('process_spawn_at')
+            and diagnostic.get('terminal_at')
+        ):
+            record['lifetime_ms'] = max(
+                0,
+                int(round(
+                    (diagnostic['terminal_at'] - record['process_spawn_at']) * 1000
+                )),
+            )
+            if not record.get('exit_reason'):
+                record['exit_reason'] = 'active_after_turn'
+    return diagnostic
+
+
+def _log_cold_start_timing(diagnostic):
+    if not isinstance(diagnostic, dict) or not diagnostic.get('generation_records'):
+        return
+    try:
+        _cold_start_sync_summary(diagnostic)
+        payload = {
+            'stage': _COLD_START_DIAGNOSTIC_EVENT,
+            'correlation_id': str(diagnostic.get('correlation_id') or '')[:200],
+            'request_received_at': diagnostic.get('request_received_at'),
+            'plan_ready_at': diagnostic.get('plan_ready_at'),
+            'generation_claimed_at': diagnostic.get('generation_claimed_at'),
+            'resident_generation': _diagnostic_int(
+                diagnostic.get('resident_generation'),
+            ),
+            'respawn_reason': str(diagnostic.get('respawn_reason') or '')[:120] or None,
+            'ensure_alive_start_at': diagnostic.get('ensure_alive_start_at'),
+            'ensure_alive_end_at': diagnostic.get('ensure_alive_end_at'),
+            'process_spawn_at': diagnostic.get('process_spawn_at'),
+            'process_exit_at': diagnostic.get('process_exit_at'),
+            'bounded_stderr_category': diagnostic.get('bounded_stderr_category'),
+            'stdin_flush_at': diagnostic.get('stdin_flush_at'),
+            'claude_init_event_at': diagnostic.get('claude_init_event_at'),
+            'first_stream_event_at': diagnostic.get('first_stream_event_at'),
+            'first_provider_message_start_at': diagnostic.get(
+                'first_provider_message_start_at',
+            ),
+            'first_thinking_or_text_at': diagnostic.get(
+                'first_thinking_or_text_at',
+            ),
+            'terminal_at': diagnostic.get('terminal_at'),
+            'generations': [
+                {
+                    'gen': _diagnostic_int(record.get('gen')),
+                    'spawn_reason': str(record.get('spawn_reason') or '')[:120],
+                    'lifetime_ms': record.get('lifetime_ms'),
+                    'reached_stdin': bool(record.get('reached_stdin')),
+                    'reached_provider': bool(record.get('reached_provider')),
+                    'exit_reason': str(record.get('exit_reason') or '')[:160] or None,
+                    'first_failed_stage': record.get('first_failed_stage'),
+                    'process_spawn_at': record.get('process_spawn_at'),
+                    'process_exit_at': record.get('process_exit_at'),
+                    'bounded_stderr_category': record.get(
+                        'bounded_stderr_category',
+                    ),
+                    'stdin_flush_at': record.get('stdin_flush_at'),
+                    'claude_init_event_at': record.get('claude_init_event_at'),
+                    'first_stream_event_at': record.get('first_stream_event_at'),
+                    'first_provider_message_start_at': record.get(
+                        'first_provider_message_start_at',
+                    ),
+                    'first_thinking_or_text_at': record.get(
+                        'first_thinking_or_text_at',
+                    ),
+                }
+                for record in diagnostic.get('generation_records') or []
+            ],
+        }
+        logging.getLogger(__name__).info(
+            '[UH-A0-COLD-START] %s',
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        )
+    except Exception:
+        # Timing diagnostics are strictly observational and never alter lifecycle.
+        return
 def _diagnostic_path_hash(path):
     if not path:
         return None
@@ -1682,7 +1932,15 @@ class ResidentSession:
                 )
         tool_flags = self._build_spawn_tool_flags(env=env)
         surface_fingerprint = self._require_spawn_surface_fingerprint(tool_flags)
+        self._cold_start_pending_kill_reason = 'replaced_for_%s' % str(reason or 'unknown')
         self._kill(quiet=True)
+        diagnostic = getattr(self, '_cold_start_diagnostic', None)
+        cold_record = _cold_start_record(
+            diagnostic,
+            None,
+            reason,
+        )
+        self._cold_start_active_record = cold_record
         args = compose_spawn_argv(
             runtime_version,
             system_text=system_text,
@@ -1696,6 +1954,9 @@ class ResidentSession:
                 text=True, bufsize=1, cwd=self._cwd, env=env,
             )
         except (OSError, subprocess.SubprocessError) as exc:
+            if cold_record is not None:
+                cold_record['exit_reason'] = 'spawn_exception'
+                cold_record['first_failed_stage'] = 'process_spawn'
             self._proc = None
             raise ResidentError(
                 'Claude Code 启动失败',
@@ -1703,6 +1964,14 @@ class ResidentSession:
             ) from exc
         time.sleep(0.1)
         if self._proc.poll() is not None:
+            _cold_start_mark_process_exit(
+                diagnostic,
+                self._proc,
+                'startup_process_exit',
+                record=cold_record,
+            )
+            self._cold_start_pending_kill_reason = 'startup_process_exit'
+            self._cold_start_pending_kill_reason = 'deferred_resume_exception'
             self._kill(quiet=True)
             raise ResidentError(
                 'Claude Code 启动失败',
@@ -1729,6 +1998,10 @@ class ResidentSession:
         self._session_id = None
         self._cold = True
         self._generation += 1
+        if cold_record is not None:
+            cold_record['gen'] = int(self._generation)
+            cold_record['process_spawn_at'] = _cold_start_now()
+            diagnostic['process_spawn_at'] = cold_record['process_spawn_at']
         self._next_spawn_reason = None
         self._reset_session_meta(respawn_reason=reason)
         self._capture_tool_surface(
@@ -1738,7 +2011,14 @@ class ResidentSession:
 
     def _kill(self, quiet=False):
         proc, self._proc = self._proc, None
+        diagnostic = getattr(self, '_cold_start_diagnostic', None)
+        cold_record = getattr(self, '_cold_start_active_record', None)
+        diagnostic_reason = getattr(
+            self, '_cold_start_pending_kill_reason', None,
+        ) or 'external_kill'
         if not proc:
+            self._cold_start_active_record = None
+            self._cold_start_pending_kill_reason = None
             return
         try:
             if proc.stdin:
@@ -1759,6 +2039,14 @@ class ResidentSession:
                 proc.stdout.close()
             except Exception:
                 pass
+        _cold_start_mark_process_exit(
+            diagnostic,
+            proc,
+            diagnostic_reason,
+            record=cold_record,
+        )
+        self._cold_start_active_record = None
+        self._cold_start_pending_kill_reason = None
         try:
             proc.stderr.close()
         except Exception:
@@ -1868,6 +2156,20 @@ class ResidentSession:
         return None
 
     def ensure_alive(self, system_text, env, *, tool_profile=TOOL_PROFILE_LEGACY):
+        diagnostic = getattr(self, '_cold_start_diagnostic', None)
+        if isinstance(diagnostic, dict):
+            diagnostic.setdefault('ensure_alive_start_at', _cold_start_now())
+        try:
+            return self._ensure_alive_impl(
+                system_text,
+                env,
+                tool_profile=tool_profile,
+            )
+        finally:
+            if isinstance(diagnostic, dict):
+                diagnostic['ensure_alive_end_at'] = _cold_start_now()
+
+    def _ensure_alive_impl(self, system_text, env, *, tool_profile=TOOL_PROFILE_LEGACY):
         with self._lock:
             with self._turn_state_lock:
                 if self._turn_active:
@@ -2617,6 +2919,7 @@ class ResidentSession:
                         self, '_active_terminal_authority', None,
                     )
                     if authority is None:
+                        self._cold_start_pending_kill_reason = 'send_turn_exception'
                         self._kill(quiet=True)
                     else:
                         if not authority.is_terminal():
@@ -2624,6 +2927,7 @@ class ResidentSession:
                         if authority.begin_cleanup('send_turn_exception'):
                             process_present = self._proc is not None
                             try:
+                                self._cold_start_pending_kill_reason = 'send_turn_exception'
                                 self._kill(quiet=True)
                             finally:
                                 authority.record_resident_kill(
@@ -2632,6 +2936,11 @@ class ResidentSession:
                                 )
                 raise
             finally:
+                diagnostic = getattr(self, '_cold_start_diagnostic', None)
+                if isinstance(diagnostic, dict):
+                    diagnostic['terminal_at'] = _cold_start_now()
+                    _log_cold_start_timing(diagnostic)
+                    self._cold_start_diagnostic = None
                 with self._turn_state_lock:
                     self._last_turn_stdin_write_started = bool(self._turn_write_started)
                     self._last_turn_stdin_flushed = bool(self._turn_stdin_flushed)
@@ -2686,6 +2995,8 @@ class ResidentSession:
         self._active_terminal_authority = authority
         turn_process_generation = int(self._generation)
         turn_session_id = self._session_id
+        diagnostic = getattr(self, '_cold_start_diagnostic', None)
+        record = getattr(self, '_cold_start_active_record', None)
 
         uh_a0_runtime = None
         uh_a0_turn_id = None
@@ -3105,6 +3416,7 @@ class ResidentSession:
                 return False
             process_present = self._proc is not None
             try:
+                self._cold_start_pending_kill_reason = 'terminal:%s' % str(reason or 'unknown')
                 self._kill(quiet=True)
             finally:
                 authority.record_resident_kill(
@@ -3270,6 +3582,12 @@ class ResidentSession:
                         ready = True
                     if not ready:
                         if proc.poll() is not None:
+                            _cold_start_mark_process_exit(
+                                diagnostic,
+                                proc,
+                                'process_exit_before_terminal',
+                                record=record,
+                            )
                             authority.accept_disconnected('process_exit')
                             break
                         if authority.is_terminal():
@@ -3290,6 +3608,12 @@ class ResidentSession:
                             recovery.wait_for_final()
                             if authority.is_terminal():
                                 break
+                        _cold_start_mark_process_exit(
+                            diagnostic,
+                            proc,
+                            'stdout_eof_before_terminal',
+                            record=record,
+                        )
                         authority.accept_disconnected('stdout_eof')
                         break
                     line = raw_line.strip()
@@ -3300,6 +3624,11 @@ class ResidentSession:
                     except Exception:
                         continue
                     _set_reader_state('PROCESS_EVENT')
+                    diagnostic = getattr(self, '_cold_start_diagnostic', None)
+                    record = getattr(self, '_cold_start_active_record', None)
+                    if record is not None:
+                        record['reached_provider'] = True
+                    _cold_start_mark(diagnostic, 'first_stream_event_at', record=record)
                     # A terminal provider event must claim the sole authority
                     # before observation bookkeeping or watchdog refresh. This
                     # closes the deterministic result-vs-stall window without
@@ -3329,6 +3658,11 @@ class ResidentSession:
                     t = d.get('type')
                     _record_live_request_id(_diagnostic_request_id(d))
                     if t == 'system' and d.get('subtype') == 'init':
+                        _cold_start_mark(
+                            diagnostic,
+                            'claude_init_event_at',
+                            record=record,
+                        )
                         self._session_id = d.get('session_id') or self._session_id
                     elif t == 'system' and d.get('subtype') == 'model_refusal_no_fallback':
                         provider_refusal_seen = True
@@ -3339,6 +3673,11 @@ class ResidentSession:
                         _record_live_request_id(_diagnostic_request_id(ev))
                         ev_type = ev.get('type')
                         if ev_type == 'message_start':
+                            _cold_start_mark(
+                                diagnostic,
+                                'first_provider_message_start_at',
+                                record=record,
+                            )
                             before_round = _diagnostic_round_snapshot(current_round)
                             if current_round is not None:
                                 _close_round(
@@ -3408,11 +3747,23 @@ class ResidentSession:
                         elif ev_type == 'content_block_delta':
                             delta = ev.get('delta') or {}
                             if delta.get('type') == 'text_delta':
+                                if delta.get('text', ''):
+                                    _cold_start_mark(
+                                        diagnostic,
+                                        'first_thinking_or_text_at',
+                                        record=record,
+                                    )
                                 chunk = delta.get('text', '')
                                 if chunk:
                                     text_acc.append(chunk)
                                     yield from _downstream_yield(('text', chunk))
                             elif delta.get('type') == 'thinking_delta':
+                                if delta.get('thinking', ''):
+                                    _cold_start_mark(
+                                        diagnostic,
+                                        'first_thinking_or_text_at',
+                                        record=record,
+                                    )
                                 chunk = delta.get('thinking', '')
                                 if chunk:
                                     think_acc.append(chunk)
