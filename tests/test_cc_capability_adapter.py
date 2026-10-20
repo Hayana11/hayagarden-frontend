@@ -176,14 +176,37 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
     def test_b_exact_builtin_surface(self):
         self.assertEqual(
             UH_A0_BUILTIN_TOOLS,
-            ("Read", "Glob", "Grep", "WebSearch", "WebFetch"),
+            ("Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch"),
         )
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
         self.assertEqual(plan["built_in_tools"], UH_A0_BUILTIN_TOOLS)
-        self.assertEqual(plan["built_in_tools_csv"], "Read,Glob,Grep,WebSearch,WebFetch")
+        self.assertEqual(plan["built_in_tools_csv"], "Read,Glob,Grep,WebSearch,WebFetch,ToolSearch")
         for bad in FORBIDDEN_BUILTIN_TOOLS:
             self.assertNotIn(bad, plan["built_in_tools"])
             self.assertIn(bad, plan["disallowed_tools"])
+
+    def test_native_discovery_does_not_add_business_permissions(self):
+        plan = self._plan()
+        self.assertIn("ToolSearch", plan["built_in_tools"])
+        self.assertNotIn("ToolSearch", plan["surface_allowlist"])
+        self.assertEqual(plan["surface_allowlist"], tuple(
+            tool for tool in plan["built_in_tools"] if tool != "ToolSearch"
+        ) + plan["home_mcp_tools"] + plan["internal_mcp_tools"]
+          + plan["capability_proxy_tools"] + plan["external_mcp_tools"])
+        allowed = plan["spawn_extra_args"][plan["spawn_extra_args"].index("--allowedTools") + 1]
+        self.assertEqual(allowed, ",".join(plan["surface_allowlist"]))
+        self.assertNotIn("ToolSearch", allowed)
+        # Diagnosis never changes the executable surface or permission rules.
+        for env, status in (
+            ({"ENABLE_TOOL_SEARCH": "false"}, "PRELOAD_FALLBACK"),
+            ({"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"}, "PRELOAD_FALLBACK"),
+            ({"ANTHROPIC_BASE_URL": "https://proxy.example/v1"}, "ENVIRONMENT_BLOCKED"),
+        ):
+            other = build_uh_a0_spawn_plan(cwd=self._tmp.name, write_mcp_config=False, env=env)
+            self.assertEqual(other["tool_search"]["tool_search_status"], status)
+            self.assertEqual(other["built_in_tools"], plan["built_in_tools"])
+            self.assertEqual(other["surface_allowlist"], plan["surface_allowlist"])
+            self.assertEqual(other["disallowed_tools"], plan["disallowed_tools"])
 
     def test_c_home_surface_is_p1_enabled_only(self):
         home = uh_a0_home_mcp_tools()
@@ -406,25 +429,26 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
 
     def test_k_tool_search_status_recorded(self):
-        diag = diagnose_tool_search(env={}, actual_version="2.1.220")
+        diag = diagnose_tool_search(env={}, actual_version="2.1.280")
         self.assertIn(
             diag["tool_search_status"],
-            {"AVAILABLE", "PRELOAD_FALLBACK", "ENVIRONMENT_BLOCKED"},
+            {"NATIVE_MANAGED", "PRELOAD_FALLBACK", "ENVIRONMENT_BLOCKED"},
         )
         self.assertEqual(diag["minimum_claude_code_version"], "2.1.280")
         self.assertEqual(diag["anthropic_base_url_class"], "absent")
         self.assertFalse(diag["enable_tool_search_set"])
-        # Current production-shaped env (no ENABLE_TOOL_SEARCH) => preload fallback.
-        self.assertEqual(diag["tool_search_status"], "PRELOAD_FALLBACK")
+        # No flag is needed on the default host; placement/proof remains native-owned.
+        self.assertEqual(diag["tool_search_status"], "NATIVE_MANAGED")
+        self.assertEqual(diag["proxy_tool_reference_evidence"], "UNKNOWN")
 
         blocked = diagnose_tool_search(
             env={"ANTHROPIC_BASE_URL": "https://proxy.example/v1", "ENABLE_TOOL_SEARCH": "true"},
         )
-        self.assertEqual(blocked["tool_search_status"], "ENVIRONMENT_BLOCKED")
+        self.assertEqual(blocked["tool_search_status"], "NATIVE_MANAGED")
 
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
-        self.assertEqual(plan["tool_search"]["tool_search_status"], "PRELOAD_FALLBACK")
-        self.assertEqual(plan["home_loading_mode"], "preload_fallback")
+        self.assertEqual(plan["tool_search"]["tool_search_status"], "NATIVE_MANAGED")
+        self.assertEqual(plan["home_loading_mode"], "native_managed")
 
     def test_uh_a0_resident_argv_uses_builtin_availability(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -453,7 +477,7 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
             )
             session._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
             flags = session._build_spawn_tool_flags(env={})
-            self.assertEqual(flags["tools"], "Read,Glob,Grep,WebSearch,WebFetch")
+            self.assertEqual(flags["tools"], "Read,Glob,Grep,WebSearch,WebFetch,ToolSearch")
             self.assertIn("--strict-mcp-config", flags["extra"])
             self.assertIn("--disallowedTools", flags["extra"])
             allowed_idx = flags["extra"].index("--allowedTools") + 1
