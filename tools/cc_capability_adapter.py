@@ -37,7 +37,7 @@ from tools.capability_state import (
 TOOL_PROFILE_UH_A0 = "uh_a0"
 
 UH_A0_BUILTIN_TOOLS: tuple[str, ...] = (
-    "Read", "Glob", "Grep", "WebSearch", "WebFetch",
+    "Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch",
 )
 
 FORBIDDEN_BUILTIN_TOOLS: tuple[str, ...] = (
@@ -367,7 +367,7 @@ def diagnose_tool_search(
     actual_version: str | None = None,
 ) -> dict[str, Any]:
     """Read-only ToolSearch environment diagnosis for P3 loading choice."""
-    environ = env or os.environ
+    environ = os.environ if env is None else env
     base_url = str(environ.get("ANTHROPIC_BASE_URL") or "").strip()
     enable_raw = environ.get("ENABLE_TOOL_SEARCH")
     enable_set = enable_raw is not None and str(enable_raw).strip() != ""
@@ -385,34 +385,23 @@ def diagnose_tool_search(
         else:
             host_class = "custom"
 
-    # Without ENABLE_TOOL_SEARCH and without a live deferred-load / tool_reference
-    # proof, do not claim ToolSearch AVAILABLE — even on first-party hosts.
-    if host_class == "custom":
-        proxy_evidence = "UNKNOWN"
-        status = "ENVIRONMENT_BLOCKED"
-        detail = (
-            "custom ANTHROPIC_BASE_URL present without tool_reference proof; "
-            "ENABLE_TOOL_SEARCH alone is insufficient"
-        )
-    elif not enable_set:
-        proxy_evidence = "UNKNOWN"
+    # Claude Code owns placement. This is configuration telemetry, never proof
+    # that the current provider accepted tool_reference or executed a tool.
+    proxy_evidence = "UNKNOWN"
+    if str(environ.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") or "").lower() in {"1", "true", "yes", "on"}:
         status = "PRELOAD_FALLBACK"
-        detail = (
-            "ENABLE_TOOL_SEARCH unset; no live tool_reference deferred-load proof; "
-            "preload only the fixed P3 Home surface"
-        )
-    elif enable_value.lower() in {"0", "false", "off", "no"}:
-        proxy_evidence = "UNKNOWN"
+        detail = "experimental betas suppressed; native managed policy may override"
+    elif enable_set and enable_value.lower() in {"0", "false", "off", "no"}:
         status = "PRELOAD_FALLBACK"
         detail = "ENABLE_TOOL_SEARCH explicitly disabled"
+    elif host_class == "custom" and not enable_set:
+        status = "ENVIRONMENT_BLOCKED"
+        detail = "custom host without explicit override; native proxy fallback expected"
     else:
-        # Flag enabled on first-party, but P3 still lacks a captured live
-        # deferred-load demonstration in this construction slice.
-        proxy_evidence = "UNKNOWN"
-        status = "PRELOAD_FALLBACK"
+        status = "NATIVE_MANAGED"
         detail = (
-            "ENABLE_TOOL_SEARCH set but no captured live tool_reference proof; "
-            "keep preload fallback for the fixed P3 surface"
+            "native ToolSearch entry wired; Claude Code decides loading; "
+            "provider tool_reference and downstream call proof remain UNKNOWN"
         )
 
     return {
@@ -542,6 +531,8 @@ def _surface_snapshot() -> dict[str, Any]:
         hidden_proxy = tuple(proxy_bindings[cid] for cid in CAPABILITY_PROXY_CAPABILITY_IDS if states[cid] not in visible_states)
 
     built_in_tools = tuple(native_file_bindings[cid] for cid in visible_native_file_ids) + tuple(external_bindings[cid] for cid in visible_external_ids)
+    if status == "OK":
+        built_in_tools += ("ToolSearch",)
     home_tools = tuple(home_bindings[cid] for cid in visible_home_ids)
     internal_tools = tuple(internal_bindings[cid] for cid in visible_internal_ids)
     proxy_tools = tuple(proxy_bindings[cid] for cid in visible_proxy_ids)
@@ -611,8 +602,8 @@ def build_uh_a0_spawn_plan(
 
     if diagnosis["tool_search_status"] == "ENVIRONMENT_BLOCKED":
         home_loading_mode = "blocked"
-    elif diagnosis["tool_search_status"] == "AVAILABLE":
-        home_loading_mode = "toolsearch_deferred"
+    elif diagnosis["tool_search_status"] == "NATIVE_MANAGED":
+        home_loading_mode = "native_managed"
     else:
         home_loading_mode = "preload_fallback"
 
@@ -644,7 +635,7 @@ def build_uh_a0_spawn_plan(
         else ()
     )
     allowlist = (
-        list(built_in_tools)
+        [tool for tool in built_in_tools if tool != "ToolSearch"]
         + list(home_tools)
         + list(internal_tools)
         + list(proxy_tools)

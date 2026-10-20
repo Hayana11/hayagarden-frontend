@@ -52,6 +52,38 @@ class ExecutionFenceTests(unittest.TestCase):
             args["task_contract_id"] = "task-1"
         return issue_turn_lease(**args)
 
+    def test_native_discovery_still_requires_a_valid_current_lease(self):
+        lease = self.lease()
+        result = evaluate_tool_call("ToolSearch", {"query": "select:Read"}, lease)
+        self.assertEqual(result["lease_decision"], "ALLOW")
+        self.assertIsNone(result["capability_id"])
+        self.assertEqual(result["diagnostic"], "native tool discovery only")
+        self.assertEqual(pretooluse_payload(result)["hookSpecificOutput"]["permissionDecision"], "allow")
+        for invalid in (None, {}, {**lease, "lease_version": 0}):
+            self.assertEqual(evaluate_tool_call("ToolSearch", {}, invalid)["lease_decision"], "LEASE_MISMATCH")
+        self.assertEqual(evaluate_tool_call("ToolSearch", {}, lease, expected_turn_id="other")["lease_decision"], "LEASE_MISMATCH")
+
+    def test_discovery_does_not_authorize_referenced_tools(self):
+        lease = self.lease(mode="task")
+        before = dict(lease)
+        for name in ("Read", "mcp__capability__memory_search", "Bash", "mcp__unknown__read"):
+            with self.subTest(tool=name):
+                self.assertEqual(evaluate_tool_call("ToolSearch", {"query": "select:" + name}, lease)["lease_decision"], "ALLOW")
+                result = evaluate_tool_call(name, {"tool_reference": {"tool_name": name}}, lease)
+                self.assertEqual(result["lease_decision"], "ALLOW" if name == "Read" else "DENIED_CAPABILITY")
+        self.assertEqual(lease, before)
+        # A reference object is never an executable tool name or an authority token.
+        self.assertEqual(evaluate_tool_call("tool_reference", {"tool_name": "Read"}, lease)["lease_decision"], "DENIED_CAPABILITY")
+
+    def test_discovery_cannot_restore_runtime_off_or_static_deny(self):
+        lease = self.lease()
+        capability_state.set_capability_state("memory.search", enabled=False)
+        for name in ("mcp__capability__memory_search", "mcp__github__search_code"):
+            self.assertEqual(evaluate_tool_call("ToolSearch", {"query": "select:" + name}, lease)["lease_decision"], "ALLOW")
+            result = evaluate_tool_call(name, {"tool_reference": name}, lease)
+            self.assertEqual(result["lease_decision"], "DENIED_CAPABILITY")
+        self.assertEqual(capability_state.read_capability_state("github.read"), "DENY")
+
     def test_a_chat_read_allowed(self):
         result = evaluate_tool_call(
             "mcp__home__search_memories", {"keyword": "昨天"}, self.lease()
@@ -468,7 +500,7 @@ class ExecutionFenceTests(unittest.TestCase):
         self.assertEqual(
             set(physical_surface_names()),
             {
-                "Read", "Glob", "Grep", "WebSearch", "WebFetch",
+                "Read", "Glob", "Grep", "WebSearch", "WebFetch", "ToolSearch",
                 "mcp__capability__memory_search", "mcp__capability__memory_write",
                 "mcp__capability__home_light_status",
                 "mcp__capability__diary_write",

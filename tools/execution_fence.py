@@ -182,6 +182,17 @@ def evaluate_tool_call(
 
     physical_tool_name = str(tool_name or "").strip()
     turn_mode = str(turn_lease["turn_mode"])
+    if physical_tool_name == "ToolSearch":
+        # Native metadata discovery only. It cannot execute the tools it finds:
+        # every subsequent tool_use re-enters this fence with its own name/input.
+        # Keep this after lease validation; never trust tool_reference as authority.
+        return _decision(
+            capability_id=None,
+            turn_mode=turn_mode,
+            lease_decision="ALLOW",
+            diagnostic="native tool discovery only",
+            verified_turn_id=str(turn_lease["turn_id"]),
+        )
     if physical_tool_name in UPSTREAM_BRAIN_TOOL_BINDINGS:
         return _decision(
             capability_id="ombre_native:brain",
