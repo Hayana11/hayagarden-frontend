@@ -879,10 +879,11 @@ def _align_recent_raw_boundary(
     conflicting: set[int],
     *,
     oversize_turn_target: int = 0,
-) -> set[tuple[Any, ...]]:
-    """Align the raw suffix with ready chunks, including cold oversize turns."""
+) -> tuple[set[tuple[Any, ...]], set[tuple[Any, ...]]]:
+    """Align raw, retaining the required sources of cold oversize replacements."""
+    required_recent_keys: set[tuple[Any, ...]] = set()
     if not recent_raw_keys:
-        return set()
+        return set(), required_recent_keys
     ordered = tuple(expected)
     positions = {
         _member_key(member): index
@@ -894,7 +895,7 @@ def _align_recent_raw_boundary(
         if key in positions
     ]
     if not boundary_positions:
-        return set(recent_raw_keys)
+        return set(recent_raw_keys), required_recent_keys
     boundary = min(boundary_positions)
     while boundary < len(ordered):
         boundary_key = _member_key(ordered[boundary])
@@ -921,6 +922,8 @@ def _align_recent_raw_boundary(
             )
             if min(chunk_positions) >= boundary and not oversize_turn:
                 continue
+            if oversize_turn:
+                required_recent_keys.add(boundary_key)
             candidate_boundary = max(chunk_positions) + 1
             next_boundary = (
                 candidate_boundary
@@ -933,7 +936,7 @@ def _align_recent_raw_boundary(
     return {
         _member_key(member)
         for member in ordered[boundary:]
-    }
+    }, required_recent_keys
 
 
 def _budget_exclusion(representation: ContextRepresentation, detail: str) -> ContextPlanExclusion:
@@ -1193,7 +1196,7 @@ def build_context_plan(
                     ),
                 ))
 
-    recent_raw_keys = _align_recent_raw_boundary(
+    recent_raw_keys, required_recent_keys = _align_recent_raw_boundary(
         expected,
         recent_raw_keys,
         valid_chunks,
@@ -1329,6 +1332,25 @@ def build_context_plan(
     else:
         exclusions.extend(probe_exclusions)
         selected, budget_status = probe_selected, probe_status
+    # An oversize READY replaced required recent raw, not optional older
+    # history. Check the final pass (including any anchor cost) so trimming
+    # cannot discard both representations and still report continuity fit.
+    missing_recent = required_recent_keys - {
+        _member_key(member)
+        for representation in selected
+        for member in representation.source_members
+    }
+    if missing_recent and budget_status == 'fit':
+        budget_status = 'overflow'
+        exclusions.extend(
+            _exclusion(
+                'budget_overflow',
+                'oversize recent turn has no representation after budget trimming',
+                source_ref=member.source_ref,
+            )
+            for member in expected
+            if _member_key(member) in missing_recent
+        )
     selected = tuple(sorted(
         selected,
         key=lambda representation: (

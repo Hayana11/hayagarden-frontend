@@ -1404,7 +1404,8 @@ class ColdOversizeReadyTests(unittest.TestCase):
             self.members, seqs=(1,), chunk_id='oversize', body='x' * 2_560,
         )
 
-    def _plan(self, *, members=None, chunks=None, cold=True, token_budget=90_000):
+    def _plan(self, *, members=None, chunks=None, cold=True, token_budget=90_000,
+              **kwargs):
         return build_context_plan(
             self.members if members is None else members,
             chunks=(self.older, self.ready) if chunks is None else chunks,
@@ -1418,6 +1419,7 @@ class ColdOversizeReadyTests(unittest.TestCase):
                 allow_recent_raw_history_limit_overflow=cold,
             ),
             budget_policy_version='continuity_context_budget_v2',
+            **kwargs,
         )
 
     def test_production_turn_uses_640_ready_keeps_newer_raw_and_older_ready(self):
@@ -1561,19 +1563,88 @@ class ColdOversizeReadyTests(unittest.TestCase):
             for e in plan.exclusions
         ))
 
-    def test_large_ready_is_explicitly_excluded_when_it_cannot_fit(self):
+    def test_large_recent_ready_cannot_be_dropped_as_valid_continuity(self):
         ready = _binding(
             self.members, seqs=(1,), chunk_id='large-ready', body='x' * 80_000,
         )
         plan = self._plan(chunks=(self.older, ready))
-        self.assertTrue(plan.valid)
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'overflow')
         self.assertEqual(plan.selected_token_estimate, 9_000)
         self.assertEqual(plan.recent_raw_source_seqs, (2, 3))
         self.assertTrue(any(
             e.code == 'budget_excluded' and e.representation_id == 'chunk:large-ready'
             for e in plan.exclusions
         ))
+        self.assertTrue(any(
+            e.code == 'budget_overflow' and e.source_ref == 'turn:12596:12597'
+            for e in plan.exclusions
+        ))
         self.assertEqual(plan.gaps, ())
+
+    def test_missing_raw_does_not_allow_recent_ready_to_disappear(self):
+        ready = _binding(self.members, seqs=(1,), body='x' * 80_000)
+        plan = self._plan(chunks=(self.older, ready), raw_members=self.members[2:])
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'overflow')
+
+    def test_total_budget_pressure_cannot_drop_recent_640_ready(self):
+        plan = self._plan(token_budget=35_000)
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'overflow')
+        self.assertEqual(plan.selected_token_estimate, 9_000)
+
+    def test_anchor_final_budget_cannot_drop_recent_640_ready(self):
+        plan = self._plan(
+            token_budget=38_000,
+            window_anchor=ContextSection(
+                kind='window_anchor', source_ref='anchor:oversize',
+                content_hash='a' * 64, estimated_tokens=3_000,
+                source_revision='anchor-revision', status='ANCHOR_RETAINED',
+            ),
+            window_anchor_member_source_refs=('turn:12596:12597',),
+        )
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'overflow')
+        self.assertFalse(plan.window_anchor_raw_satisfied)
+        self.assertEqual(plan.selected_token_estimate, 9_000)
+
+    def test_fixed_sections_block_stays_blocked(self):
+        plan = self._plan(token_budget=20_000)
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'blocked')
+
+    def test_old_ready_rebinding_preserves_recent_replacement_requirement(self):
+        rebound = tuple(SourceMember(**{**m.__dict__, 'seq': m.seq + 10})
+                        for m in self.members)
+        normal = self._plan(members=rebound)
+        self.assertTrue(normal.valid)
+        self.assertEqual(normal.selected_token_estimate, 11_640)
+        self.assertEqual(normal.recent_raw_source_seqs, (12, 13))
+        large = _binding(self.members, seqs=(1,), body='x' * 80_000)
+        rejected = self._plan(members=rebound, chunks=(self.older, large))
+        self.assertFalse(rejected.valid)
+        self.assertEqual(rejected.budget_status, 'overflow')
+
+    def test_recent_replacement_exactly_fits_history_budget(self):
+        ready = _binding(self.members, seqs=(1,), body='x' * 60_000)
+        plan = self._plan(chunks=(self.older, ready))
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.selected_token_estimate, 24_000)
+        self.assertEqual(
+            [(r.kind, r.source_seqs) for r in plan.representations],
+            [('chunk', (1,)), ('raw', (2, 3))],
+        )
+
+    def test_ordinary_crossing_chunk_keeps_existing_budget_exclusion(self):
+        members = list(self.members)
+        members[1] = SourceMember(**{**members[1].__dict__, 'logical_size': 6_000})
+        members = tuple(members)
+        crossing = _binding(members, seqs=(0, 1), body='x' * 80_000)
+        plan = self._plan(members=members, chunks=(crossing,))
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(plan.selected_token_estimate, 9_000)
 
 
 class ContextPlanHistoryBudgetTests(unittest.TestCase):
