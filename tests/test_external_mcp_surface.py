@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,6 +105,31 @@ class ExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(tool["source_registry_revision"], catalog[0]["revision"])
         self.assertNotIn("endpoint", tool)
         self.assertNotIn("secret_ref", tool)
+
+    def test_native_discovery_does_not_copy_or_rewrite_canonical_schema(self):
+        self._ingest()
+        catalog = list_external_surface(self._graph())
+        before = json.dumps(catalog, sort_keys=True)
+        raw = json.loads(self.connection.execute(
+            "SELECT raw_snapshot_json FROM external_tool_raw_snapshots"
+        ).fetchone()[0])
+        definition = model_tool_definitions(catalog)[0]
+        lease = issue_turn_lease(
+            turn_id="native-discovery", turn_mode="chat", issued_from="default_policy",
+            issued_at="2026-10-20T00:00:00Z",
+        )
+        result = evaluate_tool_call("ToolSearch", {"query": "select:mcp__external__" + definition["name"]}, lease)
+        self.assertEqual(result["lease_decision"], "ALLOW")
+        self.assertEqual(definition["inputSchema"], raw["inputSchema"])
+        self.assertIs(definition["inputSchema"], catalog[0]["tools"][0]["input_schema"])
+        self.assertEqual(json.dumps(catalog, sort_keys=True), before)
+        # The selected real call still uses the existing external fence, including availability.
+        surface = catalog[0]["tools"][0]
+        name = "mcp__external__" + definition["name"]
+        with patch("tools.execution_fence.external_surface_tool", return_value=surface):
+            self.assertEqual(evaluate_tool_call(name, {}, lease)["lease_decision"], "ALLOW")
+        with patch("tools.execution_fence.external_surface_tool", return_value={**surface, "available": False}):
+            self.assertEqual(evaluate_tool_call(name, {}, lease)["lease_decision"], "DENIED_CAPABILITY")
 
     def test_disconnected_candidate_stays_toolroom_gray_and_leaves_model(self):
         self._ingest()
