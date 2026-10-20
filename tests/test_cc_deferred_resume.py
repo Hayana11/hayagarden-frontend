@@ -108,11 +108,27 @@ class DeferredResumeContractTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
+            legacy_mcp_config = Path(tmp) / "cc-tools.json"
+            legacy_mcp_config.write_text(
+                json.dumps({
+                    "mcpServers": {
+                        "brain": {
+                            "type": "http",
+                            "url": "http://127.0.0.1:18002/mcp",
+                            "headers": {
+                                "Authorization": "Bearer ${OMBRE_MCP_TOKEN}",
+                            },
+                            "timeout": 12,
+                        },
+                    }
+                }),
+                encoding="utf-8",
+            )
             lease_path = Path(tmp) / "lease.json"
             session = cc_resident.ResidentSession(
                 cwd=tmp,
                 allowed_tools="",
-                mcp_config_path=str(Path(tmp) / "cc-tools.json"),
+                mcp_config_path=str(legacy_mcp_config),
             )
             session._tool_profile = cc_resident.TOOL_PROFILE_UH_A0
             session._system_text = "UH-A0 test system"
