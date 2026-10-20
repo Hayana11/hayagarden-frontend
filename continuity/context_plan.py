@@ -877,8 +877,10 @@ def _align_recent_raw_boundary(
     recent_raw_keys: set[tuple[Any, ...]],
     valid_chunks: Sequence[tuple[ContextRepresentation, set[tuple[Any, ...]]]],
     conflicting: set[int],
+    *,
+    oversize_turn_target: int = 0,
 ) -> set[tuple[Any, ...]]:
-    """Move the raw suffix past ready chunks that strictly cross its boundary."""
+    """Align the raw suffix with ready chunks, including cold oversize turns."""
     if not recent_raw_keys:
         return set()
     ordered = tuple(expected)
@@ -897,7 +899,7 @@ def _align_recent_raw_boundary(
     while boundary < len(ordered):
         boundary_key = _member_key(ordered[boundary])
         next_boundary: int | None = None
-        for index, (_representation, member_keys) in enumerate(valid_chunks):
+        for index, (representation, member_keys) in enumerate(valid_chunks):
             if index in conflicting or boundary_key not in member_keys:
                 continue
             chunk_positions = [
@@ -905,7 +907,19 @@ def _align_recent_raw_boundary(
                 for key in member_keys
                 if key in positions
             ]
-            if not chunk_positions or min(chunk_positions) >= boundary:
+            if not chunk_positions:
+                continue
+            # Cold/Respawn may use a smaller READY for one oversized boundary
+            # turn. Keep a contiguous raw suffix and leave all budget trimming
+            # to _apply_budget; rejected/overlapping chunks never reach here.
+            oversize_turn = (
+                oversize_turn_target > 0
+                and len(member_keys) == 1
+                and ordered[boundary].source_kind == 'completed_turn'
+                and int(ordered[boundary].logical_size) > oversize_turn_target
+                and representation.estimated_tokens < int(ordered[boundary].logical_size)
+            )
+            if min(chunk_positions) >= boundary and not oversize_turn:
                 continue
             candidate_boundary = max(chunk_positions) + 1
             next_boundary = (
@@ -1184,6 +1198,11 @@ def build_context_plan(
         recent_raw_keys,
         valid_chunks,
         conflicting,
+        oversize_turn_target=(
+            budget_policy.recent_raw_target
+            if budget_policy and budget_policy.allow_recent_raw_history_limit_overflow
+            else 0
+        ),
     )
 
     covered_by_chunk: set[tuple[Any, ...]] = set()

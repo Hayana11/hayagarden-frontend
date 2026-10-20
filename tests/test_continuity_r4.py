@@ -1386,6 +1386,196 @@ class ContextPlanTests(unittest.TestCase):
 
 
 
+
+class ColdOversizeReadyTests(unittest.TestCase):
+    """Production-size replay using isolated source and immutable READY proofs."""
+
+    def setUp(self):
+        self.members = (
+            _member(0, logical_size=6_000),
+            _member(1, ref='turn:12596:12597', logical_size=36_511),
+            _member(2, logical_size=4_000),
+            _member(3, logical_size=5_000),
+        )
+        self.older = _binding(
+            self.members, seqs=(0,), chunk_id='older', body='x' * 8_000,
+        )
+        self.ready = _binding(
+            self.members, seqs=(1,), chunk_id='oversize', body='x' * 2_560,
+        )
+
+    def _plan(self, *, members=None, chunks=None, cold=True, token_budget=90_000):
+        return build_context_plan(
+            self.members if members is None else members,
+            chunks=(self.older, self.ready) if chunks is None else chunks,
+            fixed_sections=(ContextSection(
+                kind='invariant_system', source_ref='system:fixed',
+                content_hash='f' * 64, estimated_tokens=18_000,
+            ),),
+            budget_policy=ContextBudgetPolicy(
+                token_budget=token_budget, reserve_budget=8_000,
+                recent_raw_target=12_000, history_budget_limit=24_000,
+                allow_recent_raw_history_limit_overflow=cold,
+            ),
+            budget_policy_version='continuity_context_budget_v2',
+        )
+
+    def test_production_turn_uses_640_ready_keeps_newer_raw_and_older_ready(self):
+        before = repr((self.members, self.older, self.ready))
+        plan = self._plan()
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.budget_status, 'fit')
+        self.assertEqual(
+            [(r.kind, r.source_seqs, r.estimated_tokens) for r in plan.representations],
+            [('chunk', (0,), 2_000), ('chunk', (1,), 640), ('raw', (2, 3), 9_000)],
+        )
+        self.assertEqual(plan.recent_raw_source_seqs, (2, 3))
+        self.assertEqual(plan.selected_token_estimate, 11_640)
+        self.assertLessEqual(plan.selected_token_estimate, 24_000)
+        seqs = [seq for r in plan.representations for seq in r.source_seqs]
+        self.assertEqual(seqs, [0, 1, 2, 3])
+        self.assertEqual(plan.gaps, ())
+        self.assertFalse(any(e.code == 'recent_raw_history_limit_overflow_allowed'
+                             for e in plan.exclusions))
+        self.assertEqual(find_cold_bridge(plan).status, 'none')
+        self.assertEqual(repr((self.members, self.older, self.ready)), before)
+
+    def test_latest_oversize_turn_can_leave_empty_raw_suffix(self):
+        members = self.members[:2]
+        plan = self._plan(members=members)
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.recent_raw_source_seqs, ())
+        self.assertEqual(
+            [(r.kind, r.source_seqs) for r in plan.representations],
+            [('chunk', (0,)), ('chunk', (1,))],
+        )
+        self.assertEqual(plan.selected_token_estimate, 2_640)
+        self.assertEqual(plan.gaps, ())
+
+    def test_missing_or_invalid_ready_preserves_atomic_raw(self):
+        invalid = (
+            None,
+            _binding(self.members, seqs=(1,), status='stale'),
+            _binding(self.members, seqs=(1,), body_hash='wrong'),
+            _binding(self.members, seqs=(1,), source_revision='wrong'),
+            _binding(self.members, seqs=(1,), body=''),
+        )
+        for ready in invalid:
+            with self.subTest(ready=ready):
+                chunks = (self.older,) if ready is None else (self.older, ready)
+                plan = self._plan(chunks=chunks)
+                self.assertTrue(plan.valid)
+                self.assertEqual(plan.recent_raw_source_seqs, (1, 2, 3))
+                self.assertEqual(plan.recent_raw_token_estimate, 45_511)
+                self.assertEqual(
+                    [(r.kind, r.source_seqs) for r in plan.representations],
+                    [('raw', (1, 2, 3))],
+                )
+                self.assertEqual(plan.gaps, ())
+                self.assertTrue(any(
+                    e.code == 'recent_raw_history_limit_overflow_allowed'
+                    for e in plan.exclusions
+                ))
+                if ready is not None:
+                    self.assertTrue(any(e.code == 'chunk_rejected'
+                                        for e in plan.exclusions))
+
+    def test_changed_source_cannot_use_old_ready(self):
+        changed = list(self.members)
+        changed[1] = SourceMember(
+            **{**changed[1].__dict__, 'source_revision': 'edited',
+               'content_hash': 'edited'},
+        )
+        plan = self._plan(members=tuple(changed))
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2, 3))
+        self.assertEqual(plan.recent_raw_token_estimate, 45_511)
+        self.assertTrue(any(e.code == 'chunk_rejected' for e in plan.exclusions))
+        self.assertFalse(any(r.kind == 'chunk' for r in plan.representations))
+
+    def test_conflicting_ready_chunks_do_not_replace_raw(self):
+        overlap = _binding(self.members, seqs=(1,), chunk_id='conflict')
+        plan = self._plan(chunks=(self.older, self.ready, overlap))
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2, 3))
+        self.assertEqual(plan.recent_raw_token_estimate, 45_511)
+        self.assertTrue(any(e.code == 'chunk_overlap' for e in plan.exclusions))
+
+    def test_no_ready_and_insufficient_total_budget_still_fails_closed(self):
+        plan = self._plan(chunks=(self.older,), token_budget=48_000)
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'overflow')
+        self.assertEqual(plan.recent_raw_token_estimate, 45_511)
+        self.assertTrue(any(e.code == 'budget_overflow' for e in plan.exclusions))
+
+    def test_strict_hot_and_capacity_policy_does_not_replace_raw(self):
+        plan = self._plan(cold=False)
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.budget_status, 'overflow')
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2, 3))
+        self.assertTrue(any(e.code == 'recent_raw_priority' for e in plan.exclusions))
+
+    def test_normal_and_target_sized_turns_stay_raw(self):
+        for size in (5_000, 12_000):
+            with self.subTest(size=size):
+                members = list(self.members)
+                members[1] = SourceMember(
+                    **{**members[1].__dict__, 'logical_size': size},
+                )
+                members = tuple(members)
+                ready = _binding(members, seqs=(1,), body='x' * 2_560)
+                plan = self._plan(members=members, chunks=(self.older, ready))
+                self.assertTrue(plan.valid)
+                self.assertEqual(plan.recent_raw_source_seqs, (1, 2, 3))
+                self.assertTrue(any(e.code == 'recent_raw_priority'
+                                    for e in plan.exclusions))
+
+    def test_non_saving_ready_does_not_replace_oversize_raw(self):
+        ready = _binding(self.members, seqs=(1,), body='x' * (36_511 * 4))
+        plan = self._plan(chunks=(self.older, ready))
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2, 3))
+        self.assertEqual(plan.recent_raw_token_estimate, 45_511)
+
+    def test_autonomous_event_does_not_use_completed_turn_exception(self):
+        members = list(self.members)
+        members[1] = SourceMember(
+            **{**members[1].__dict__, 'source_kind': 'autonomous_event'},
+        )
+        members = tuple(members)
+        ready = _binding(members, seqs=(1,), body='x' * 2_560)
+        plan = self._plan(members=members, chunks=(self.older, ready))
+        self.assertEqual(plan.recent_raw_source_seqs, (1, 2, 3))
+        self.assertEqual(plan.recent_raw_token_estimate, 45_511)
+
+    def test_remaining_history_budget_still_trims_oldest_ready(self):
+        older = _binding(
+            self.members, seqs=(0,), chunk_id='large-older', body='x' * 80_000,
+        )
+        plan = self._plan(chunks=(older, self.ready))
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.selected_token_estimate, 9_640)
+        self.assertEqual(
+            [(r.kind, r.source_seqs) for r in plan.representations],
+            [('chunk', (1,)), ('raw', (2, 3))],
+        )
+        self.assertTrue(any(
+            e.code == 'budget_excluded' and e.representation_id == 'chunk:large-older'
+            for e in plan.exclusions
+        ))
+
+    def test_large_ready_is_explicitly_excluded_when_it_cannot_fit(self):
+        ready = _binding(
+            self.members, seqs=(1,), chunk_id='large-ready', body='x' * 80_000,
+        )
+        plan = self._plan(chunks=(self.older, ready))
+        self.assertTrue(plan.valid)
+        self.assertEqual(plan.selected_token_estimate, 9_000)
+        self.assertEqual(plan.recent_raw_source_seqs, (2, 3))
+        self.assertTrue(any(
+            e.code == 'budget_excluded' and e.representation_id == 'chunk:large-ready'
+            for e in plan.exclusions
+        ))
+        self.assertEqual(plan.gaps, ())
+
+
 class ContextPlanHistoryBudgetTests(unittest.TestCase):
     def test_history_budget_limit_validation_and_identity(self):
         self.assertIsNone(ContextBudgetPolicy(token_budget=10).history_budget_limit)
@@ -1570,7 +1760,7 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
             [(0, 1)],
         )
 
-    def test_atomic_recent_raw_overflow_fits_total_budget_and_keeps_ready_overlap_raw(self):
+    def test_oversize_turn_uses_smaller_ready_within_history_budget(self):
         members = (
             _member(0, logical_size=5_000),
             _member(1, logical_size=36_511),
@@ -1604,24 +1794,25 @@ class ContextPlanHistoryBudgetTests(unittest.TestCase):
 
         self.assertTrue(plan.valid)
         self.assertEqual(plan.budget_status, 'fit')
-        self.assertEqual(plan.recent_raw_source_seqs, (1, 2))
-        self.assertEqual(plan.recent_raw_token_estimate, 37_151)
-        self.assertEqual(plan.selected_token_estimate, 37_151)
+        self.assertEqual(plan.recent_raw_source_seqs, (2,))
+        self.assertEqual(plan.recent_raw_token_estimate, 640)
+        self.assertEqual(plan.selected_token_estimate, 20_640)
         self.assertEqual(
             [item.source_seqs for item in plan.representations],
-            [(1, 2)],
+            [(1,), (2,)],
         )
         self.assertEqual(plan.gaps, ())
-        self.assertTrue(any(
+        self.assertFalse(any(
             item.code == 'recent_raw_priority'
             and item.representation_id == 'chunk:chunk:recent-ready'
             for item in plan.exclusions
         ))
-        self.assertTrue(any(
+        self.assertFalse(any(
             item.code == 'recent_raw_history_limit_overflow_allowed'
             and item.representation_id.startswith('raw:')
             for item in plan.exclusions
         ))
+        self.assertLessEqual(plan.selected_token_estimate, 24_000)
         self.assertLessEqual(plan.total_token_estimate, plan.token_budget)
         self.assertEqual(find_cold_bridge(plan).status, 'none')
 
