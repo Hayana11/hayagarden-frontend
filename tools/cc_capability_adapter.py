@@ -361,6 +361,22 @@ def write_uh_a0_mcp_config(
     return str(out)
 
 
+_TOOL_SEARCH_ON_VALUES = frozenset({"1", "true", "yes", "on", "auto"})
+_TOOL_SEARCH_OFF_VALUES = frozenset({"0", "false", "off", "no"})
+
+
+def _tool_search_flag_mode(value: str) -> str:
+    """Classify ENABLE_TOOL_SEARCH as on/off/invalid; typos never count as on."""
+    lowered = value.lower()
+    if lowered in _TOOL_SEARCH_OFF_VALUES:
+        return "off"
+    if lowered in _TOOL_SEARCH_ON_VALUES:
+        return "on"
+    if lowered.startswith("auto:") and lowered[len("auto:"):].isdigit():
+        return "on"
+    return "invalid"
+
+
 def diagnose_tool_search(
     *,
     env: Mapping[str, str] | None = None,
@@ -372,6 +388,7 @@ def diagnose_tool_search(
     enable_raw = environ.get("ENABLE_TOOL_SEARCH")
     enable_set = enable_raw is not None and str(enable_raw).strip() != ""
     enable_value = str(enable_raw).strip() if enable_set else None
+    enable_mode = _tool_search_flag_mode(enable_value) if enable_set else None
 
     if not base_url:
         base_url_class = "absent"
@@ -391,12 +408,16 @@ def diagnose_tool_search(
     if str(environ.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") or "").lower() in {"1", "true", "yes", "on"}:
         status = "PRELOAD_FALLBACK"
         detail = "experimental betas suppressed; native managed policy may override"
-    elif enable_set and enable_value.lower() in {"0", "false", "off", "no"}:
+    elif enable_mode == "off":
         status = "PRELOAD_FALLBACK"
         detail = "ENABLE_TOOL_SEARCH explicitly disabled"
-    elif host_class == "custom" and not enable_set:
+    elif host_class == "custom" and enable_mode != "on":
         status = "ENVIRONMENT_BLOCKED"
-        detail = "custom host without explicit override; native proxy fallback expected"
+        detail = (
+            "custom host with unrecognized ENABLE_TOOL_SEARCH; native proxy fallback expected"
+            if enable_mode == "invalid"
+            else "custom host without explicit override; native proxy fallback expected"
+        )
     else:
         status = "NATIVE_MANAGED"
         detail = (
@@ -411,6 +432,7 @@ def diagnose_tool_search(
         "host_class": host_class,
         "enable_tool_search": enable_value,
         "enable_tool_search_set": enable_set,
+        "enable_tool_search_mode": enable_mode,
         "proxy_tool_reference_evidence": proxy_evidence,
         "tool_search_status": status,
         "detail": detail,

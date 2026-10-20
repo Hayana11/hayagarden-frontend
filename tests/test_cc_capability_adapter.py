@@ -446,6 +446,25 @@ class CcCapabilityAdapterContractTests(unittest.TestCase):
         )
         self.assertEqual(blocked["tool_search_status"], "NATIVE_MANAGED")
 
+    def test_tool_search_flag_values_are_whitelisted(self):
+        proxy = "https://proxy.example/v1"
+        for value in ("true", "TRUE", "1", "yes", "on", "auto", "auto:5"):
+            diag = diagnose_tool_search(env={"ANTHROPIC_BASE_URL": proxy, "ENABLE_TOOL_SEARCH": value})
+            self.assertEqual(diag["enable_tool_search_mode"], "on", value)
+            self.assertEqual(diag["tool_search_status"], "NATIVE_MANAGED", value)
+        for value in ("false", "0", "Off", "no"):
+            diag = diagnose_tool_search(env={"ANTHROPIC_BASE_URL": proxy, "ENABLE_TOOL_SEARCH": value})
+            self.assertEqual(diag["enable_tool_search_mode"], "off", value)
+            self.assertEqual(diag["tool_search_status"], "PRELOAD_FALLBACK", value)
+        for value in ("ture", "enabled", "auto:", "auto:x"):
+            diag = diagnose_tool_search(env={"ANTHROPIC_BASE_URL": proxy, "ENABLE_TOOL_SEARCH": value})
+            self.assertEqual(diag["enable_tool_search_mode"], "invalid", value)
+            self.assertEqual(diag["tool_search_status"], "ENVIRONMENT_BLOCKED", value)
+            self.assertIn("unrecognized", diag["detail"])
+        unset = diagnose_tool_search(env={"ANTHROPIC_BASE_URL": proxy})
+        self.assertIsNone(unset["enable_tool_search_mode"])
+        self.assertEqual(unset["tool_search_status"], "ENVIRONMENT_BLOCKED")
+
         plan = build_uh_a0_spawn_plan(write_mcp_config=False, env={})
         self.assertEqual(plan["tool_search"]["tool_search_status"], "NATIVE_MANAGED")
         self.assertEqual(plan["home_loading_mode"], "native_managed")
