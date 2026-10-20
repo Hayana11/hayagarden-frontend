@@ -7741,6 +7741,8 @@ def ensure_resident_and_stream(
     _registry_reprep_depth: int = 0,
 ) -> Iterator[tuple[str, Any]]:
     """Prepare resident process, handle hot→cold mismatch, stream one turn."""
+    # From here on the resident may be touched; see is_unsent_daily_turn().
+    plan._resident_stream_entered = True  # type: ignore[attr-defined]
     static_system = _effective_hidden_flow_static_system(plan, static_system)
     diagnostic = getattr(plan, 'cold_start_diagnostic', None)
     if resident is not None and isinstance(diagnostic, dict):
@@ -8977,6 +8979,46 @@ def abort_daily_turn(
             delattr(plan, attr)
     plan.manifest['error_code'] = error_code
     plan.manifest['abort_epoch_current'] = current
+    return dict(plan.manifest)
+
+
+def is_unsent_daily_turn(plan: DailyTurnPlan) -> bool:
+    """True only while the resident provably has not been touched for this turn.
+
+    Anything past the start of ``ensure_resident_and_stream`` (door-lock,
+    Capacity Swap staging, hot reconcile, spawn, stdin) is not provable here
+    and stays on the fail-closed abort path.
+    """
+    return not (
+        getattr(plan, '_resident_stream_entered', False)
+        or getattr(plan, '_current_user_stdin_flushed', False)
+        or getattr(plan, '_capacity_swap_install_state', None)
+        or getattr(plan, '_capacity_swap_deferred_old_proc', None)
+    )
+
+
+def release_unsent_daily_turn(
+    plan: DailyTurnPlan,
+    *,
+    error_code: str,
+) -> Optional[dict[str, Any]]:
+    """Release a turn the provider never saw, keeping resident and generation.
+
+    A client that drops while prepare is still running must not cost the next
+    retry a cold respawn. Returns None when the turn is not provably unsent;
+    the caller then falls back to ``abort_daily_turn``.
+    """
+    if not is_unsent_daily_turn(plan):
+        return None
+    _release_lease(plan)
+    for attr in (
+        '_continuity_shadow_capacity_pending',
+        '_continuity_shadow_capacity_pending_error',
+    ):
+        if hasattr(plan, attr):
+            delattr(plan, attr)
+    plan.manifest['error_code'] = error_code
+    plan.manifest['unsent_release'] = True
     return dict(plan.manifest)
 
 

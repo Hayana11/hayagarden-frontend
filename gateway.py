@@ -7490,7 +7490,21 @@ def _stream_cc_daily_soft_window(
         return None
     finally:
         if _daily_plan is not None and not turn_terminal:
-            _rescue_and_abort('client_stream_cancelled', respawn=True)
+            released = None
+            try:
+                # Provider never saw this turn: free the lease only, so the
+                # retry stays hot instead of paying a cold respawn.
+                released = _daily_rt.release_unsent_daily_turn(
+                    _daily_plan, error_code='client_stream_cancelled_unsent',
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    'daily_window unsent release failed; falling back to abort',
+                )
+            if released is not None:
+                turn_terminal = True
+            else:
+                _rescue_and_abort('client_stream_cancelled', respawn=True)
 
 
 @app.route('/chat/stream', methods=['POST'])
