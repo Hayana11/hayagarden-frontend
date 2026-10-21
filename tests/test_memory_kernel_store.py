@@ -62,6 +62,7 @@ class RememberTests(StoreFixture):
         self.assertEqual(bucket["metadata"]["source_tool"], "kernel_projection")
         self.assertEqual(self.ombre.calls, [("create_if_absent", result["bucket_id"])])  # one worker run
         self.assertEqual(self.state.get(result["lineage_id"])["projected_state_id"], result["state_id"])
+        self.assertNotIn("name", bucket["metadata"])  # untitled: Ombre picks the name
 
     def test_duplicate_is_not_written_twice(self):
         result = self.remember("[[哈娅]]养了两只猫：多乐和岁岁")

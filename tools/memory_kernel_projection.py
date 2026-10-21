@@ -177,9 +177,8 @@ def target_fields(head: Head) -> dict[str, Any]:
     value = state.structured_value if isinstance(state.structured_value, dict) else {}
     memory = value.get("memory") or {}
     legacy = value.get("legacy") or {}
-    return {
+    fields = {
         "content": state.content,
-        "name": str(value.get("title") or "").strip() or _clean(state.content)[:20],
         "domain": _as_list(value.get("domain")) or ["未分类"],
         "tags": _as_list(value.get("tags")),
         "importance": _importance(value.get("importance")),
@@ -187,6 +186,11 @@ def target_fields(head: Head) -> dict[str, Any]:
         "arousal": value.get("arousal") if value.get("arousal") is not None else 0.3,
         "pinned": bool(memory.get("pinned", legacy.get("pinned", False))),
     }
+    # Without an explicit title Ombre names the bucket itself; never fight it over that.
+    title = str(value.get("title") or "").strip()
+    if title:
+        fields["name"] = title
+    return fields
 
 
 # ----------------------------------------------------------- Ombre semantics
