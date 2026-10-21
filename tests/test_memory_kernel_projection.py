@@ -460,6 +460,18 @@ class SeamTests(ProjectionFixture):
         self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
         self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], head.state.content)
 
+    def test_old_projector_stamp_with_later_edit_is_diverged_not_overwritten(self):
+        self.ombre.buckets.clear()
+        head = self.head("lin:posts:2")
+        self.ombre.buckets[head.bucket_id] = {"id": head.bucket_id, "content": "主人在面板里改过的版本。",
+                                              "metadata": {"id": head.bucket_id, "source_tool": "memory_kernel_projection",
+                                                           "kernel_lineage_id": "lin:posts:2"}}
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "diverged")
+        self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], "主人在面板里改过的版本。")
+        self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
+        [(found, _)] = projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"]
+        self.assertEqual(found.lineage_id, "lin:posts:2")
+
     def test_imported_bucket_edited_before_any_baseline_is_diverged_not_overwritten(self):
         self.ombre.edit("aaa111", content="[[哈娅]]养了两只猫，后来又收养了一只。")
         self.assertEqual(projection.project_lineage(self.head("lin:ombre:aaa111"), self.ombre, self.state),
@@ -467,6 +479,26 @@ class SeamTests(ProjectionFixture):
         self.assertIn("又收养", self.ombre.buckets["aaa111"]["content"])
         [(head, _)] = projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"]
         self.assertEqual(head.lineage_id, "lin:ombre:aaa111")  # the next sync ingests it
+
+    def test_batch_bookkeeping_is_all_or_nothing_and_retry_never_duplicates(self):
+        self.ombre.buckets.clear()
+        real = projection.ProjectionState.projected
+        calls = []
+
+        def crash_on_second(state, *args, **kwargs):
+            calls.append(args[0])
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("disk I/O error")
+            return real(state, *args, **kwargs)
+
+        with mock.patch.object(projection.ProjectionState, "projected", crash_on_second):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.project_all()
+        # The first lineage's record went down with the batch's single commit.
+        self.assertFalse(any(r["status"] == "projected" for r in self.state.rows()))
+        created = list(self.ombre.creates())
+        self.assertEqual(self.project_all()["projected"], len(self.heads()))
+        self.assertEqual(sorted(self.ombre.creates()), sorted(created))  # no second create
 
     def test_lineage_lock_serialises_processes(self):
         head = self.head("lin:posts:2")
