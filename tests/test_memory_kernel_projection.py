@@ -26,6 +26,7 @@ class FakeOmbreRuntime:
         self.buckets: dict[str, dict] = {}
         self.calls: list[tuple[str, str]] = []
         self.created: list[str] = []
+        self.runs = 0
         self.down = False
 
     def seed_from_vault(self, vault: Path) -> "FakeOmbreRuntime":
@@ -35,6 +36,19 @@ class FakeOmbreRuntime:
             meta, body = importer._split_frontmatter(path.read_text(encoding="utf-8"))
             self.buckets[str(meta["id"])] = {"id": str(meta["id"]), "content": body.strip(), "metadata": meta}
         return self
+
+    def batch(self, requests):
+        if self.down:
+            raise projection.RuntimeUnavailable("worker_unreachable:ConnectionRefusedError")
+        self.runs += 1
+        results = []
+        for request in requests:
+            op, args = request["op"], [request[k] for k in ("bucket_id", "fields") if k in request]
+            try:
+                results.append(getattr(self, op)(*args))
+            except Exception as exc:  # the real worker reports per-request failures the same way
+                results.append(projection.RequestFailed(f"{type(exc).__name__}:{exc}"))
+        return results
 
     def _check(self, op, bucket_id=""):
         if self.down:
@@ -168,6 +182,42 @@ class ProjectTests(ProjectionFixture):
         self.assertEqual(tofu["type"], "permanent")
         self.assertIsInstance(tofu["tags"], list)
         self.assertEqual(self.project_all()["unchanged"], len(heads))
+
+    def test_lineages_are_batched_into_few_worker_runs(self):
+        self.ombre.buckets.clear()
+        heads = self.heads()
+        counts = projection.project_heads(heads, self.ombre, self.state, batch_size=2)
+        self.assertEqual(counts["projected"], len(heads))
+        self.assertEqual(self.ombre.runs, -(-len(heads) // 2))  # one run per batch for fresh creates
+        self.ombre.runs = 0
+        for head in heads:
+            self.revise(head.state.state_id, head.state.content + "（补记）", head.state.state_id + "-r")
+        self.assertEqual(self.project_all()["projected"], len(heads))
+        self.assertEqual(self.ombre.runs, 2)  # gets, then update+get pairs
+
+    def test_one_failing_request_does_not_sink_the_batch(self):
+        self.ombre.buckets.clear()
+        bad = self.head("lin:posts:2").bucket_id
+        real = self.ombre.create_if_absent
+
+        def reject(bucket_id, fields):
+            if bucket_id == bad:
+                raise ValueError("ombre validation")
+            return real(bucket_id, fields)
+
+        with mock.patch.object(self.ombre, "create_if_absent", side_effect=reject):
+            counts = self.project_all()
+        self.assertEqual((counts["pending"], counts["projected"]), (1, len(self.heads()) - 1))
+        self.assertIn("ValueError:ombre validation", self.state.get("lin:posts:2")["error"])
+        self.assertEqual(self.project_all()["projected"], 1)
+
+    def test_bucket_lost_entirely_is_recreated_on_the_next_run(self):
+        self.project_all()
+        del self.ombre.buckets["aaa111"]  # e.g. a vault rebuilt from scratch
+        self.revise("st:ombre:aaa111:v1", "哈娅养了两只猫。", "st:ombre:aaa111:v2")
+        self.assertEqual(self.project_all()["pending"], 1)
+        self.assertEqual(self.project_all()["projected"], 1)
+        self.assertEqual(self.ombre.buckets["aaa111"]["content"], "哈娅养了两只猫。")
 
     def test_create_is_read_back_and_ombre_normalisation_is_the_baseline(self):
         self.ombre.buckets.clear()

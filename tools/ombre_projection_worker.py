@@ -14,7 +14,8 @@ Importing Ombre costs over a second, so one process serves a batch of
 requests: ``create_if_absent`` is get -> create -> get in a single call.
 
 Protocol: argv = [worker, ombre_src_dir, ombre_env_file]; stdin = a JSON list
-of requests; stdout = one JSON object {"ok": bool, "results"|"error": ...}.
+of requests; stdout = one JSON object {"ok": bool, "results"|"error": ...}, one
+{"ok", "value"|"error"} result per request.
 Before any request the worker checks the Ombre version and the BucketManager
 signatures it depends on and refuses to run if they don't match.
 
@@ -131,10 +132,15 @@ async def run(src_dir: str, requests: list[dict]) -> dict:
     version, manager = load_runtime(src_dir)
     results = []
     for request in requests:
-        if request.get("op") == "capabilities":
-            results.append({"version": version, "update_fields": list(UPDATE_FIELDS)})
-        else:
-            results.append(await handle(manager, request))
+        # One failing request (e.g. Ombre's validation) must not hide the others' outcomes.
+        try:
+            if request.get("op") == "capabilities":
+                value = {"version": version, "update_fields": list(UPDATE_FIELDS)}
+            else:
+                value = await handle(manager, request)
+            results.append({"ok": True, "value": value})
+        except Exception as exc:
+            results.append({"ok": False, "error": f"{type(exc).__name__}:{str(exc)[:200]}"})
     return {"ok": True, "results": results}
 
 

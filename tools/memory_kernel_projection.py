@@ -51,10 +51,16 @@ SEMANTIC_FIELDS = ("content", "name", "domain", "tags", "importance", "valence",
 # Ombre's handover bucket is its own runtime state, never Kernel-managed.
 SYSTEM_DOMAINS = {"呼吸间"}
 DEFAULT_TIMEOUT_SECONDS = 60.0
+# Lineages per worker run: importing Ombre costs ~1.4s, a request a few ms.
+BATCH_SIZE = 50
 
 
 class RuntimeUnavailable(RuntimeError):
     """Ombre's runtime could not be reached, or is not the one we were built for."""
+
+
+class RequestFailed(str):
+    """One request inside a worker run failed; the others still have results."""
 
 
 @dataclass(frozen=True)
@@ -240,7 +246,8 @@ class OmbreRuntime:
             timeout = DEFAULT_TIMEOUT_SECONDS
         return cls(*values, timeout=timeout)
 
-    def call(self, requests: list[dict[str, Any]]) -> list[Any]:
+    def batch(self, requests: list[dict[str, Any]]) -> list[Any]:
+        """One worker run. Each result is the op's value, or a RequestFailed for that request."""
         try:
             done = subprocess.run(
                 [self.python, str(WORKER), self.src_dir, self.env_file],
@@ -257,25 +264,36 @@ class OmbreRuntime:
         if not answer.get("ok"):
             detail = answer.get("detail") or done.stderr[-300:]
             raise RuntimeUnavailable(f"{answer.get('error') or 'worker_failed'}:{detail}")
-        return answer["results"]
+        return [item["value"] if item.get("ok") else RequestFailed(item.get("error") or "failed")
+                for item in answer["results"]]
+
+    def _one(self, request: dict[str, Any]) -> Any:
+        result = self.batch([request])[0]
+        if isinstance(result, RequestFailed):
+            raise RuntimeUnavailable(str(result))
+        return result
 
     def capabilities(self) -> dict[str, Any]:
-        return self.call([{"op": "capabilities"}])[0]
+        return self._one({"op": "capabilities"})
 
     def get(self, bucket_id: str) -> dict[str, Any] | None:
-        return self.call([{"op": "get", "bucket_id": bucket_id}])[0]
+        return self._one({"op": "get", "bucket_id": bucket_id})
 
     def create_if_absent(self, bucket_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         """get, create only if absent, get again: {"created": bool, "bucket": view}."""
-        return self.call([{"op": "create_if_absent", "bucket_id": bucket_id, "fields": fields}])[0]
+        return self._one({"op": "create_if_absent", "bucket_id": bucket_id, "fields": fields})
 
     def update(self, bucket_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
         """update then get in one worker run; returns what Ombre holds afterwards."""
-        return self.call([{"op": "update", "bucket_id": bucket_id, "fields": fields},
-                          {"op": "get", "bucket_id": bucket_id}])[1]
+        results = self.batch([{"op": "update", "bucket_id": bucket_id, "fields": fields},
+                              {"op": "get", "bucket_id": bucket_id}])
+        for result in results:
+            if isinstance(result, RequestFailed):
+                raise RuntimeUnavailable(str(result))
+        return results[1]
 
     def list(self, *, include_archive: bool = True) -> list[dict[str, Any]]:
-        return self.call([{"op": "list", "include_archive": include_archive}])[0]
+        return self._one({"op": "list", "include_archive": include_archive})
 
 
 # --------------------------------------------------------- projection state
@@ -346,6 +364,12 @@ class ProjectionState:
                  observed_sha(bucket), _now(), lineage_id),
             )
 
+    def forget(self, lineage_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE projection_lineage SET projected_state_id=NULL, observed_json=NULL, observed_sha=NULL, "
+                "updated_at=? WHERE lineage_id=?", (_now(), lineage_id))
+
     def failed(self, lineage_id: str, status: str, error: str) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -363,50 +387,98 @@ def state_path_for(kernel_db: str | os.PathLike[str]) -> Path:
 def project_lineage(head: Head, runtime: OmbreRuntime, state: ProjectionState) -> str:
     """Make Ombre hold ``head``; returns projected / pending / diverged / conflict."""
     row = state.target(head.lineage_id, head.bucket_id, head.state.state_id)
-    fields = target_fields(head)
-    try:
-        if not row.get("observed_sha"):
-            # Never observed: create unless Ombre already has it (imported bucket, or a
-            # run that crashed after Ombre wrote) -- the worker gets before it creates.
-            answer = runtime.create_if_absent(head.bucket_id, {**fields, "bucket_type": bucket_type_for(head)})
-            bucket = answer["bucket"]
-            if answer["created"]:
-                return _record(head, state, bucket)
-        else:
-            bucket = runtime.get(head.bucket_id)
-        if bucket is None:
-            raise RuntimeUnavailable("bucket_missing_after_write")
-        if bucket.get("deleted"):
-            state.failed(head.lineage_id, "conflict", "bucket_deleted_in_ombre")
-            return "conflict"
-        if row.get("observed_sha") and observed_sha(bucket) != row["observed_sha"]:
-            state.failed(head.lineage_id, "diverged", "edited_in_ombre")
-            return "diverged"
-        delta = changed_fields(fields, bucket)
-        if delta:
-            bucket = runtime.update(head.bucket_id, delta)
-        return _record(head, state, bucket)
-    except RuntimeUnavailable as exc:
-        state.failed(head.lineage_id, "pending", str(exc))
-        return "pending"
+    return _project_batch([(head, row)], runtime, state)[0]
 
 
-def _record(head: Head, state: ProjectionState, bucket: dict[str, Any] | None) -> str:
-    if bucket is None:
-        raise RuntimeUnavailable("bucket_missing_after_write")
-    state.projected(head.lineage_id, head.state.state_id, bucket)
-    return "projected"
-
-
-def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> dict[str, int]:
+def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState,
+                  *, batch_size: int = BATCH_SIZE) -> dict[str, int]:
     counts = {"projected": 0, "unchanged": 0, "pending": 0, "diverged": 0, "conflict": 0}
+    todo = []
     for head in heads:
         row = state.get(head.lineage_id)
         if row and row["status"] == "projected" and row["projected_state_id"] == head.state.state_id:
             counts["unchanged"] += 1
             continue
-        counts[project_lineage(head, runtime, state)] += 1
+        todo.append((head, state.target(head.lineage_id, head.bucket_id, head.state.state_id)))
+    for start in range(0, len(todo), batch_size):
+        for outcome in _project_batch(todo[start:start + batch_size], runtime, state):
+            counts[outcome] += 1
     return counts
+
+
+def _project_batch(items: list[tuple[Head, dict[str, Any]]], runtime: OmbreRuntime,
+                   state: ProjectionState) -> list[str]:
+    """At most two worker runs for the whole batch: (create_if_absent | get), then update+get."""
+    outcomes: dict[str, str] = {}
+    try:
+        first = runtime.batch([
+            # Never observed: create unless Ombre already has it (imported bucket, or a
+            # run that crashed after Ombre wrote) -- the worker gets before it creates.
+            {"op": "create_if_absent", "bucket_id": head.bucket_id,
+             "fields": {**target_fields(head), "bucket_type": bucket_type_for(head)}}
+            if not row.get("observed_sha") else {"op": "get", "bucket_id": head.bucket_id}
+            for head, row in items
+        ])
+        updates: list[tuple[Head, dict[str, Any]]] = []
+        for (head, row), result in zip(items, first):
+            if isinstance(result, RequestFailed):
+                outcomes[head.lineage_id] = _pending(head, state, result)
+                continue
+            if not row.get("observed_sha"):
+                if result["created"]:
+                    outcomes[head.lineage_id] = _record(head, state, result["bucket"])
+                    continue
+                result = result["bucket"]
+            outcome, delta = _decide(head, row, result, state)
+            if delta:
+                updates.append((head, delta))
+            elif outcome:
+                outcomes[head.lineage_id] = outcome
+        if updates:
+            requests = []
+            for head, delta in updates:
+                requests += [{"op": "update", "bucket_id": head.bucket_id, "fields": delta},
+                             {"op": "get", "bucket_id": head.bucket_id}]
+            results = runtime.batch(requests)
+            for index, (head, _) in enumerate(updates):
+                updated, after = results[2 * index], results[2 * index + 1]
+                failure = next((r for r in (updated, after) if isinstance(r, RequestFailed)), None)
+                outcomes[head.lineage_id] = (_pending(head, state, failure) if failure is not None
+                                             else _record(head, state, after))
+    except RuntimeUnavailable as exc:
+        for head, _ in items:
+            if head.lineage_id not in outcomes:
+                outcomes[head.lineage_id] = _pending(head, state, str(exc))
+    return [outcomes[head.lineage_id] for head, _ in items]
+
+
+def _decide(head: Head, row: dict[str, Any], bucket: dict[str, Any] | None,
+            state: ProjectionState) -> tuple[str | None, dict[str, Any]]:
+    if bucket is None:
+        # Gone without a trace (a rebuilt vault): forget the baseline so the next
+        # run recreates it. A soft-deleted bucket is a conflict instead.
+        state.forget(head.lineage_id)
+        return _pending(head, state, "bucket_missing_in_ombre"), {}
+    if bucket.get("deleted"):
+        state.failed(head.lineage_id, "conflict", "bucket_deleted_in_ombre")
+        return "conflict", {}
+    if row.get("observed_sha") and observed_sha(bucket) != row["observed_sha"]:
+        state.failed(head.lineage_id, "diverged", "edited_in_ombre")
+        return "diverged", {}
+    delta = changed_fields(target_fields(head), bucket)
+    return (None, delta) if delta else (_record(head, state, bucket), {})
+
+
+def _record(head: Head, state: ProjectionState, bucket: dict[str, Any] | None) -> str:
+    if bucket is None:
+        return _pending(head, state, "bucket_missing_after_write")
+    state.projected(head.lineage_id, head.state.state_id, bucket)
+    return "projected"
+
+
+def _pending(head: Head, state: ProjectionState, error: str) -> str:
+    state.failed(head.lineage_id, "pending", str(error))
+    return "pending"
 
 
 def scan_ombre(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> dict[str, Any]:

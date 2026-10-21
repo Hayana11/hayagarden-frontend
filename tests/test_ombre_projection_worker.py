@@ -112,6 +112,14 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(again["created"])
         self.assertEqual(again["bucket"]["content"], "她今天买了一只鹦鹉。")
 
+    def test_a_failing_request_is_reported_alone(self):
+        results = self.runtime.batch([
+            {"op": "update", "bucket_id": "missing", "fields": {"content": "x"}},
+            {"op": "create_if_absent", "bucket_id": "ok1", "fields": {"content": "她在。"}},
+        ])
+        self.assertIsInstance(results[0], projection.RequestFailed)
+        self.assertTrue(results[1]["created"])
+
     def test_soft_deleted_bucket_is_seen_as_deleted(self):
         (self.store / "gone.json").write_text(json.dumps(
             {"id": "gone", "content": "x", "metadata": {"deleted_at": "2026-10-21T00:00:00"}}))
