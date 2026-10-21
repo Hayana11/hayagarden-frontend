@@ -1,0 +1,153 @@
+"""Ombre projection worker: runs inside Ombre's own interpreter and runtime.
+
+The Memory Kernel projection never touches Ombre's files. It starts this
+worker with Ombre's Python, pointing at Ombre's source tree and env file, and
+the worker drives Ombre exclusively through ``BucketManager.create / update /
+get`` (plus ``get_including_archive`` / ``list_all`` to read deletions and
+buckets Ombre created on its own). Vault location, validation, normalisation,
+locking, the ledger and derived indexes are all Ombre's.
+
+``hold`` is never called: its similarity merge is the right behaviour for
+Ombre's own writes, but an exact projection needs one bucket per lineage.
+
+Protocol: argv = [worker, ombre_src_dir, ombre_env_file]; stdin = a JSON list
+of requests; stdout = one JSON object {"ok": bool, "results"|"error": ...}.
+Before any request the worker checks the Ombre version and the BucketManager
+signatures it depends on and refuses to run if they don't match.
+
+This file must stay importable without anything from this repository.
+"""
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import os
+import sys
+
+SUPPORTED_VERSIONS = ("3.6.",)
+REQUIRED_CREATE_PARAMS = (
+    "content", "tags", "importance", "domain", "valence", "arousal", "bucket_type",
+    "name", "pinned", "source_tool", "bucket_id_override", "imported", "defer_derived_index",
+)
+# Lifecycle and bookkeeping are Ombre's; only these semantics are projected.
+UPDATE_FIELDS = ("content", "name", "domain", "tags", "importance", "valence", "arousal", "pinned")
+
+
+class Incompatible(RuntimeError):
+    pass
+
+
+def _load_env_file(path: str) -> None:
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ[key.strip()] = value.strip().strip('"').strip("'")
+
+
+def _bucket_view(bucket: dict | None, *, deleted: bool = False) -> dict | None:
+    if bucket is None:
+        return None
+    metadata = dict(bucket.get("metadata") or {})
+    return {
+        "id": str(bucket.get("id") or metadata.get("id") or ""),
+        "content": bucket.get("content") or "",
+        "metadata": json.loads(json.dumps(metadata, ensure_ascii=False, default=str)),
+        "deleted": deleted or bool(metadata.get("deleted_at") or metadata.get("tombstone")),
+    }
+
+
+def load_runtime(src_dir: str):
+    version_path = os.path.join(src_dir, "VERSION")
+    with open(version_path, encoding="utf-8") as handle:
+        version = handle.read().strip()
+    if not version.startswith(SUPPORTED_VERSIONS):
+        raise Incompatible(f"unsupported Ombre version {version!r}")
+    sys.path.insert(0, src_dir)
+    from bucket_manager import BucketManager  # noqa: E402 (Ombre's own module)
+    from utils import load_config  # noqa: E402
+
+    params = inspect.signature(BucketManager.create).parameters
+    missing = [name for name in REQUIRED_CREATE_PARAMS if name not in params]
+    for name in ("update", "get", "get_including_archive", "list_all"):
+        if not callable(getattr(BucketManager, name, None)):
+            missing.append(name)
+    if missing:
+        raise Incompatible("BucketManager lacks: " + ", ".join(missing))
+    return version, BucketManager(load_config())
+
+
+async def handle(manager, request: dict) -> object:
+    op = request.get("op")
+    if op == "get":
+        bucket = await manager.get(request["bucket_id"])
+        if bucket is not None:
+            return _bucket_view(bucket)
+        archived = await manager.get_including_archive(request["bucket_id"])
+        return _bucket_view(archived, deleted=True) if archived else None
+    if op == "create":
+        fields = request["fields"]
+        created = await manager.create(
+            fields["content"],
+            tags=list(fields.get("tags") or []),
+            importance=int(fields.get("importance") or 5),
+            domain=list(fields.get("domain") or []),
+            valence=float(fields.get("valence", 0.5)),
+            arousal=float(fields.get("arousal", 0.3)),
+            bucket_type=fields.get("bucket_type") or "dynamic",
+            name=fields.get("name") or None,
+            pinned=bool(fields.get("pinned")),
+            source_tool="kernel_projection",
+            bucket_id_override=request["bucket_id"],
+            imported=True,
+            defer_derived_index=True,
+        )
+        return {"bucket_id": created}
+    if op == "update":
+        fields = {k: v for k, v in request["fields"].items() if k in UPDATE_FIELDS}
+        return {"updated": bool(await manager.update(request["bucket_id"], **fields))}
+    if op == "list":
+        buckets = await manager.list_all(include_archive=bool(request.get("include_archive")))
+        return [_bucket_view(bucket) for bucket in buckets]
+    raise ValueError(f"unknown op {op!r}")
+
+
+async def run(src_dir: str, requests: list[dict]) -> dict:
+    version, manager = load_runtime(src_dir)
+    results = []
+    for request in requests:
+        if request.get("op") == "capabilities":
+            results.append({"version": version, "update_fields": list(UPDATE_FIELDS)})
+        else:
+            results.append(await handle(manager, request))
+    return {"ok": True, "results": results}
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print(json.dumps({"ok": False, "error": "usage: worker <ombre_src_dir> <ombre_env_file>"}))
+        return 2
+    _, src_dir, env_file = argv
+    try:
+        _load_env_file(env_file)
+        requests = json.loads(sys.stdin.read() or "[]")
+        # Ombre logs to stdout/stderr; keep stdout for the protocol answer only.
+        real_stdout = sys.stdout
+        sys.stdout = sys.stderr
+        try:
+            answer = asyncio.run(run(src_dir, requests))
+        finally:
+            sys.stdout = real_stdout
+    except Incompatible as exc:
+        answer = {"ok": False, "error": "incompatible", "detail": str(exc)}
+    except Exception as exc:
+        answer = {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:500]}
+    print(json.dumps(answer, ensure_ascii=False))
+    return 0 if answer.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

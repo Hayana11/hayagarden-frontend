@@ -1,63 +1,60 @@
-"""B-2: one-way projection from the Memory Kernel into an Ombre vault.
+"""B-2: Kernel -> Ombre projection through Ombre's official runtime.
 
-The Kernel is the authority; the vault is a rebuildable projection that Ombre
-indexes, decays and surfaces. Each lineage maps to exactly one bucket. The
-projection writes semantic fields (body, title, domain, tags, importance,
-valence/arousal) and never touches lifecycle fields that Ombre owns
-(resolved — the decay engine auto-resolves —, activation_count, last_active,
-weight, change_log, dont_surface, deleted_at, folder of an existing bucket).
+The Kernel is the authority; Ombre's vault is a projection it can rebuild.
+This module never reads or writes Ombre files: every Ombre access goes through
+tools/ombre_projection_worker.py, which runs in Ombre's own interpreter and
+uses only BucketManager.create / update / get (plus list_all to see buckets
+Ombre created itself). ``hold`` is never used, so its similarity merge stays
+Ombre's own behaviour.
+
+Bookkeeping lives in a separate projection-state database next to the Kernel
+(never inside Ombre's buckets): lineage -> bucket, the target State, the State
+last projected, what Ombre actually stored after the write (the observed
+baseline and its hash), status, error and attempts.
+
+- After every create/update the bucket is read back with get(); Ombre's own
+  normalisation (e.g. a pinned bucket's importance becomes 10) is part of that
+  baseline, so it is a success, never drift.
+- Retries are idempotent: get() comes first, so a bucket Ombre already wrote
+  before the bookkeeping committed is updated, not created twice.
+- If Ombre is unavailable or incompatible the lineage is left ``pending``;
+  the Kernel write already succeeded and nothing falls back to files or posts.
+- A bucket whose semantics differ from the observed baseline was edited
+  inside Ombre: it is reported ``diverged`` (ingested as a Kernel revision by
+  memory_kernel_store), never overwritten.
 
 Head selection is a policy outside the Kernel: a lineage's head is the State
 with no outgoing Delta. A lineage with several heads is reported, not guessed.
-
-Every projected bucket carries kernel_semantics_sha256. When a bucket's
-semantics no longer match that stamp it was edited inside Ombre (trace, the
-dashboard): the projection reports it as ``diverged`` and leaves it for
-memory_kernel_store to ingest as a Kernel revision, never overwriting it.
-
-Writes are safe against a live Ombre: each bucket is rewritten under Ombre's
-own per-bucket file lease and replaced atomically; Ombre's external-change
-poller then refreshes its indexes.
-
-Usage:
-    python -m tools.memory_kernel_projection --kernel-db FILE --vault DIR plan|apply|verify
 """
 from __future__ import annotations
 
 import argparse
-import contextlib
-import fcntl
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
-import tempfile
-import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-import yaml
+from typing import Any, Iterator
 
 from tools.memory_kernel import MemoryKernel, State
 
-PROJECTOR = "memory_kernel_projection"
-PROJECTOR_VERSION = 1
-# Fields this projection owns; everything else in a bucket belongs to Ombre.
-SEMANTIC_FIELDS = ("name", "domain", "tags", "importance", "valence", "arousal", "pinned")
-KERNEL_FIELDS = ("kernel_lineage_id", "kernel_state_id", "kernel_content_sha256",
-                 "kernel_semantics_sha256", "kernel_projection_version")
-# Bumped whenever SEMANTIC_FIELDS change: older stamps are re-baselined, not read as edits.
-PROJECTION_STAMP_VERSION = 2
-LEASE_TIMEOUT_SECONDS = 10.0
-_FOLDERS = {"dynamic": "dynamic", "permanent": "permanent", "archived": "archive", "plan": "plans/active"}
+WORKER = Path(__file__).with_name("ombre_projection_worker.py")
+# What the projection owns in a bucket; lifecycle (resolved, activation, decay,
+# archive placement, dont_surface) stays Ombre's.
+SEMANTIC_FIELDS = ("content", "name", "domain", "tags", "importance", "valence", "arousal", "pinned")
 # Ombre's handover bucket is its own runtime state, never Kernel-managed.
 SYSTEM_DOMAINS = {"呼吸间"}
-_UNSAFE = re.compile(r'[\\/:*?"<>|\n\r\t]')
-# The pure-Python parser costs ~25 ms per bucket; libyaml makes a full scan cheap.
-_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+DEFAULT_TIMEOUT_SECONDS = 60.0
+
+
+class RuntimeUnavailable(RuntimeError):
+    """Ombre's runtime could not be reached, or is not the one we were built for."""
 
 
 @dataclass(frozen=True)
@@ -67,10 +64,18 @@ class Head:
 
     @property
     def bucket_id(self) -> str:
-        # Imported Ombre lineages keep their bucket; everything else gets a stable id.
-        if self.lineage_id.startswith("lin:ombre:"):
-            return self.lineage_id[len("lin:ombre:"):]
-        return hashlib.sha256(self.lineage_id.encode("utf-8")).hexdigest()[:12]
+        return bucket_id_for(self.lineage_id)
+
+
+def bucket_id_for(lineage_id: str) -> str:
+    # Imported Ombre lineages keep their bucket; everything else gets a stable id.
+    if lineage_id.startswith("lin:ombre:"):
+        return lineage_id[len("lin:ombre:"):]
+    return hashlib.sha256(lineage_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _sha(text: str) -> str:
@@ -80,6 +85,24 @@ def _sha(text: str) -> str:
 def _clean(text: str) -> str:
     return re.sub(r"\[\[|\]\]", "", text or "").strip()
 
+
+def _as_list(value: Any) -> list[str]:
+    # Legacy posts keep tags as one comma-separated string.
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return [str(v) for v in (value or [])]
+
+
+def _importance(value: Any) -> int:
+    # Legacy posts default to 0 meaning "unset"; Ombre would clamp it to 1 and decay it first.
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 5
+    return 5 if number <= 0 else min(number, 10)
+
+
+# ---------------------------------------------------------------- Kernel side
 
 def select_heads(kernel_db: Path) -> tuple[list[Head], list[dict[str, Any]]]:
     """Read-only: one head per lineage, plus lineages that cannot be projected."""
@@ -126,55 +149,7 @@ def head_contents(kernel_db: Path) -> list[tuple[str, str, str]]:
         conn.close()
 
 
-def bucket_id_for(lineage_id: str) -> str:
-    return Head(lineage_id, None).bucket_id  # type: ignore[arg-type]
-
-
-def _as_list(value: Any) -> list[str]:
-    # Legacy posts keep tags as one comma-separated string.
-    if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
-    return [str(v) for v in (value or [])]
-
-
-def _importance(value: Any) -> int:
-    # Legacy posts default to 0 meaning "unset"; Ombre would clamp it to 1 and decay it first.
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return 5
-    return 5 if number <= 0 else min(number, 10)
-
-
-def bucket_semantics(head: Head) -> dict[str, Any]:
-    state = head.state
-    value = state.structured_value if isinstance(state.structured_value, dict) else {}
-    title = str(value.get("title") or "").strip() or _clean(state.content)[:20]
-    memory = value.get("memory") or {}
-    legacy = value.get("legacy") or {}
-    return {
-        "name": title,
-        "domain": _as_list(value.get("domain")) or ["未分类"],
-        "tags": _as_list(value.get("tags")),
-        "importance": _importance(value.get("importance")),
-        "valence": value.get("valence") if value.get("valence") is not None else 0.5,
-        "arousal": value.get("arousal") if value.get("arousal") is not None else 0.3,
-        "pinned": bool(memory.get("pinned", legacy.get("pinned", False))),
-    }
-
-
-def semantics_sha(body: str, semantics: dict[str, Any]) -> str:
-    """Fingerprint of everything the projection owns in one bucket."""
-    normalized = {k: _norm_field(k, semantics.get(k)) for k in SEMANTIC_FIELDS}
-    payload = json.dumps([_clean(body), normalized], ensure_ascii=False, sort_keys=True)
-    return _sha(payload)
-
-
-def bucket_current_semantics(meta: dict[str, Any]) -> dict[str, Any]:
-    return {k: meta.get(k) for k in SEMANTIC_FIELDS}
-
-
-def _new_bucket_type(head: Head) -> str:
+def bucket_type_for(head: Head) -> str:
     """FACT, core and pinned memories never become decaying dynamic buckets."""
     value = head.state.structured_value if isinstance(head.state.structured_value, dict) else {}
     legacy = value.get("legacy") or {}
@@ -185,263 +160,286 @@ def _new_bucket_type(head: Head) -> str:
         or memory.get("layer") == "core"
         or memory.get("pinned")
         or legacy.get("pinned")
+        or legacy.get("ombre_type") == "permanent"
     ):
         return "permanent"
-    if legacy.get("ombre_type") in _FOLDERS:
-        return legacy["ombre_type"]
     return "dynamic"
 
 
-def _split(text: str) -> tuple[dict[str, Any], str]:
-    if not text.startswith("---"):
-        return {}, text
-    end = text.find("\n---", 3)
-    if end < 0:
-        return {}, text
-    meta = yaml.load(text[3:end], Loader=_YAML_LOADER) or {}
-    return (meta if isinstance(meta, dict) else {}), text[end + 4:].lstrip("\n")
+def target_fields(head: Head) -> dict[str, Any]:
+    state = head.state
+    value = state.structured_value if isinstance(state.structured_value, dict) else {}
+    memory = value.get("memory") or {}
+    legacy = value.get("legacy") or {}
+    return {
+        "content": state.content,
+        "name": str(value.get("title") or "").strip() or _clean(state.content)[:20],
+        "domain": _as_list(value.get("domain")) or ["未分类"],
+        "tags": _as_list(value.get("tags")),
+        "importance": _importance(value.get("importance")),
+        "valence": value.get("valence") if value.get("valence") is not None else 0.5,
+        "arousal": value.get("arousal") if value.get("arousal") is not None else 0.3,
+        "pinned": bool(memory.get("pinned", legacy.get("pinned", False))),
+    }
 
 
-def _render(meta: dict[str, Any], body: str) -> str:
-    front = yaml.safe_dump(meta, allow_unicode=True, sort_keys=True)
-    return f"---\n{front}---\n\n{body}"
-
-
-def index_vault(vault: Path) -> dict[str, tuple[Path, dict[str, Any], str]]:
-    found = {}
-    if not vault.exists():
-        return found
-    for path in sorted(vault.rglob("*.md")):
-        if any(part.startswith(("_", ".")) for part in path.relative_to(vault).parts):
-            continue
-        meta, body = _split(path.read_text(encoding="utf-8"))
-        bucket_id = str(meta.get("id") or "").strip()
-        if bucket_id:
-            found[bucket_id] = (path, meta, body)
-    return found
-
-
-def is_system_bucket(meta: dict[str, Any]) -> bool:
-    return bool(SYSTEM_DOMAINS & set(_as_list(meta.get("domain"))))
-
-
-def _live_unmanaged(existing, managed: set[str]) -> list[str]:
-    return sorted(
-        b for b, (_, meta, _) in existing.items()
-        if b not in managed and not meta.get("deleted_at") and not meta.get("tombstone")
-        and not is_system_bucket(meta)
-    )
-
-
-def find_buckets(vault: Path, bucket_ids: list[str]) -> dict[str, tuple[Path, dict[str, Any], str]]:
-    """Locate a few buckets by Ombre's ``<name>_<id>.md`` naming without parsing the vault."""
-    found = {}
-    for bucket_id in bucket_ids:
-        for path in vault.rglob(f"*_{bucket_id}.md") if vault.exists() else ():
-            if any(part.startswith(("_", ".")) for part in path.relative_to(vault).parts):
-                continue
-            meta, body = _split(path.read_text(encoding="utf-8"))
-            if str(meta.get("id") or "").strip() == bucket_id:
-                found[bucket_id] = (path, meta, body)
-                break
-    return found
-
-
-def plan(heads: list[Head], vault: Path, existing=None) -> dict[str, Any]:
-    """Plan against the whole vault, or against a pre-supplied partial index."""
-    partial = existing is not None
-    existing = existing if partial else index_vault(vault)
-    actions = []
-    for head in heads:
-        semantics = bucket_semantics(head)
-        body = head.state.content
-        head_sha = semantics_sha(body, semantics)
-        kernel_meta = {
-            "kernel_lineage_id": head.lineage_id,
-            "kernel_state_id": head.state.state_id,
-            "kernel_content_sha256": _sha(body),
-            "kernel_semantics_sha256": head_sha,
-            "kernel_projection_version": PROJECTION_STAMP_VERSION,
-        }
-        current = existing.get(head.bucket_id)
-        if current is None:
-            kind = _new_bucket_type(head)
-            actions.append({"op": "create", "bucket_id": head.bucket_id, "type": kind,
-                            "semantics": semantics, "kernel": kernel_meta, "body": body,
-                            "created": head.state.created_at})
-            continue
-        path, meta, old_body = current
-        if meta.get("deleted_at") or meta.get("tombstone"):
-            actions.append({"op": "conflict", "bucket_id": head.bucket_id, "reason": "bucket_deleted_in_ombre"})
-            continue
-        current_sha = semantics_sha(old_body, bucket_current_semantics(meta))
-        # Only a stamp made under the current rules can prove an Ombre-side edit.
-        stamped = (
-            meta.get("kernel_semantics_sha256")
-            if meta.get("kernel_projection_version") == PROJECTION_STAMP_VERSION
-            else None
-        )
-        if current_sha != head_sha and stamped and current_sha != stamped:
-            # Edited inside Ombre after the last projection: ingest, don't overwrite.
-            actions.append({"op": "diverged", "bucket_id": head.bucket_id, "path": str(path),
-                            "lineage_id": head.lineage_id, "state_id": head.state.state_id})
-            continue
-        changed = [k for k in SEMANTIC_FIELDS if _norm_field(k, meta.get(k)) != _norm_field(k, semantics[k])]
-        if _clean(old_body) != _clean(body):
-            changed.append("body")
-        stale_kernel = any(meta.get(k) != v for k, v in kernel_meta.items())
-        if changed or stale_kernel:
-            actions.append({"op": "update", "bucket_id": head.bucket_id, "path": str(path),
-                            "changed": changed, "semantics": semantics, "kernel": kernel_meta, "body": body,
-                            "expected_sha": current_sha})
-        else:
-            actions.append({"op": "unchanged", "bucket_id": head.bucket_id})
-    unmanaged = [] if partial else _live_unmanaged(existing, {h.bucket_id for h in heads})
-    return {"actions": actions, "unmanaged": unmanaged}
-
+# ----------------------------------------------------------- Ombre semantics
 
 def _norm_field(name: str, value: Any) -> Any:
+    if name == "content":
+        return _clean(str(value or ""))
     if name in ("domain", "tags"):
-        return sorted(str(v) for v in (value or []))
+        return sorted(str(v) for v in _as_list(value))
     if name == "pinned":
         return bool(value)
-    if name in ("importance",):
+    if name == "importance":
         return int(value) if value is not None else None
     if name in ("valence", "arousal"):
         return round(float(value), 6) if value is not None else None
     return value
 
 
-def _new_path(vault: Path, action: dict[str, Any]) -> Path:
-    folder = _FOLDERS[action["type"]]
-    domain = _UNSAFE.sub("_", str(action["semantics"]["domain"][0]))[:40] or "未分类"
-    name = _UNSAFE.sub("_", str(action["semantics"]["name"]))[:40].strip() or action["bucket_id"]
-    return vault / folder / domain / f"{name}_{action['bucket_id']}.md"
+def observed_semantics(bucket: dict[str, Any]) -> dict[str, Any]:
+    """What Ombre actually holds for the projected fields, normalised for comparison."""
+    meta = bucket.get("metadata") or {}
+    raw = {"content": bucket.get("content"), **{k: meta.get(k) for k in SEMANTIC_FIELDS if k != "content"}}
+    return {k: _norm_field(k, raw.get(k)) for k in SEMANTIC_FIELDS}
 
 
-@contextlib.contextmanager
-def bucket_lease(vault: Path, bucket_id: str, timeout: float = LEASE_TIMEOUT_SECONDS):
-    """Take Ombre's own per-bucket OS lease (see bucket_manager._filesystem_turn)."""
-    lock_dir = vault / ".locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    name = hashlib.sha256(f"bucket-{bucket_id}".encode("utf-8")).hexdigest()
-    fd = os.open(lock_dir / f"{name}.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    deadline = time.monotonic() + timeout
-    try:
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"bucket lease busy: {bucket_id}")
-                time.sleep(0.05)
-        yield
-    finally:
+def observed_sha(bucket: dict[str, Any]) -> str:
+    return _sha(json.dumps(observed_semantics(bucket), ensure_ascii=False, sort_keys=True))
+
+
+def changed_fields(target: dict[str, Any], bucket: dict[str, Any]) -> dict[str, Any]:
+    current = observed_semantics(bucket)
+    return {k: v for k, v in target.items() if _norm_field(k, v) != current.get(k)}
+
+
+def is_system_bucket(bucket: dict[str, Any]) -> bool:
+    return bool(SYSTEM_DOMAINS & set(_as_list((bucket.get("metadata") or {}).get("domain"))))
+
+
+# ------------------------------------------------------------ Ombre runtime
+
+class OmbreRuntime:
+    """Ombre's official runtime, reached through the worker in Ombre's interpreter."""
+
+    def __init__(self, python: str, src_dir: str, env_file: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS):
+        self.python, self.src_dir, self.env_file, self.timeout = python, src_dir, env_file, timeout
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> "OmbreRuntime | None":
+        """Configured explicitly (OMBRE_RUNTIME_PYTHON / _SRC / _ENV_FILE); no guessed paths."""
+        source = env if env is not None else os.environ
+        values = [source.get(k, "").strip() for k in ("OMBRE_RUNTIME_PYTHON", "OMBRE_RUNTIME_SRC", "OMBRE_RUNTIME_ENV_FILE")]
+        if not all(values):
+            return None
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            timeout = float(source.get("OMBRE_RUNTIME_TIMEOUT") or DEFAULT_TIMEOUT_SECONDS)
+        except ValueError:
+            timeout = DEFAULT_TIMEOUT_SECONDS
+        return cls(*values, timeout=timeout)
+
+    def call(self, requests: list[dict[str, Any]]) -> list[Any]:
+        try:
+            done = subprocess.run(
+                [self.python, str(WORKER), self.src_dir, self.env_file],
+                input=json.dumps(requests, ensure_ascii=False), capture_output=True,
+                text=True, timeout=self.timeout, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeUnavailable(f"worker_unreachable:{type(exc).__name__}") from exc
+        lines = [line for line in done.stdout.splitlines() if line.strip()]
+        try:
+            answer = json.loads(lines[-1]) if lines else {}
+        except ValueError:
+            answer = {}
+        if not answer.get("ok"):
+            detail = answer.get("detail") or done.stderr[-300:]
+            raise RuntimeUnavailable(f"{answer.get('error') or 'worker_failed'}:{detail}")
+        return answer["results"]
+
+    def capabilities(self) -> dict[str, Any]:
+        return self.call([{"op": "capabilities"}])[0]
+
+    def get(self, bucket_id: str) -> dict[str, Any] | None:
+        return self.call([{"op": "get", "bucket_id": bucket_id}])[0]
+
+    def create(self, bucket_id: str, fields: dict[str, Any]) -> None:
+        self.call([{"op": "create", "bucket_id": bucket_id, "fields": fields}])
+
+    def update(self, bucket_id: str, fields: dict[str, Any]) -> None:
+        self.call([{"op": "update", "bucket_id": bucket_id, "fields": fields}])
+
+    def list(self, *, include_archive: bool = True) -> list[dict[str, Any]]:
+        return self.call([{"op": "list", "include_archive": include_archive}])[0]
+
+
+# --------------------------------------------------------- projection state
+
+_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS projection_lineage (
+    lineage_id TEXT PRIMARY KEY,
+    bucket_id TEXT NOT NULL UNIQUE,
+    target_state_id TEXT NOT NULL,
+    projected_state_id TEXT,
+    observed_json TEXT,
+    observed_sha TEXT,
+    status TEXT NOT NULL,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+)
+"""
+
+
+class ProjectionState:
+    """Projection bookkeeping, kept outside both the Kernel and Ombre."""
+
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = Path(path)
+        if not self.path.exists():
+            os.close(os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+        os.chmod(self.path, 0o600)
+        with self._conn() as conn:
+            conn.execute(_STATE_SCHEMA)
+
+    @contextmanager
+    def _conn(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(str(self.path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                yield conn
         finally:
-            os.close(fd)
+            conn.close()
+
+    def get(self, lineage_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM projection_lineage WHERE lineage_id=?", (lineage_id,)).fetchone()
+        return dict(row) if row else None
+
+    def rows(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM projection_lineage ORDER BY lineage_id")]
+
+    def target(self, lineage_id: str, bucket_id: str, state_id: str) -> dict[str, Any]:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO projection_lineage (lineage_id, bucket_id, target_state_id, status, updated_at) "
+                "VALUES (?, ?, ?, 'pending', ?) ON CONFLICT(lineage_id) DO UPDATE SET "
+                "target_state_id=excluded.target_state_id, updated_at=excluded.updated_at, "
+                "status=CASE WHEN projected_state_id=excluded.target_state_id THEN status ELSE 'pending' END",
+                (lineage_id, bucket_id, state_id, _now()),
+            )
+        return self.get(lineage_id) or {}
+
+    def projected(self, lineage_id: str, state_id: str, bucket: dict[str, Any]) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE projection_lineage SET projected_state_id=?, target_state_id=?, observed_json=?, "
+                "observed_sha=?, status='projected', error=NULL, attempts=0, updated_at=? WHERE lineage_id=?",
+                (state_id, state_id, json.dumps(observed_semantics(bucket), ensure_ascii=False, sort_keys=True),
+                 observed_sha(bucket), _now(), lineage_id),
+            )
+
+    def failed(self, lineage_id: str, status: str, error: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE projection_lineage SET status=?, error=?, attempts=attempts+1, updated_at=? WHERE lineage_id=?",
+                (status, error[:300], _now(), lineage_id),
+            )
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".kernel-", suffix=".tmp", dir=path.parent)
+def state_path_for(kernel_db: str | os.PathLike[str]) -> Path:
+    return Path(os.environ.get("MEMORY_KERNEL_PROJECTION_DB") or f"{kernel_db}.projection.db")
+
+
+# ----------------------------------------------------------------- projection
+
+def project_lineage(head: Head, runtime: OmbreRuntime, state: ProjectionState) -> str:
+    """Make Ombre hold ``head``; returns projected / pending / diverged / conflict."""
+    row = state.target(head.lineage_id, head.bucket_id, head.state.state_id)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
-        raise
+        bucket = runtime.get(head.bucket_id)
+        if bucket is not None and bucket.get("deleted"):
+            state.failed(head.lineage_id, "conflict", "bucket_deleted_in_ombre")
+            return "conflict"
+        fields = target_fields(head)
+        if bucket is None:
+            runtime.create(head.bucket_id, {**fields, "bucket_type": bucket_type_for(head)})
+        elif row.get("projected_state_id") != head.state.state_id:
+            if row.get("observed_sha") and observed_sha(bucket) != row["observed_sha"]:
+                state.failed(head.lineage_id, "diverged", "edited_in_ombre")
+                return "diverged"
+            delta = changed_fields(fields, bucket)
+            if delta:
+                runtime.update(head.bucket_id, delta)
+        after = runtime.get(head.bucket_id)
+        if after is None:
+            raise RuntimeUnavailable("bucket_missing_after_write")
+        state.projected(head.lineage_id, head.state.state_id, after)
+        return "projected"
+    except RuntimeUnavailable as exc:
+        state.failed(head.lineage_id, "pending", str(exc))
+        return "pending"
 
 
-def apply(actions: dict[str, Any], vault: Path) -> dict[str, int]:
-    counts = {"create": 0, "update": 0, "unchanged": 0, "conflict": 0, "diverged": 0, "raced": 0}
-    for action in actions["actions"]:
-        if action["op"] == "create":
-            with bucket_lease(vault, action["bucket_id"]):
-                if find_buckets(vault, [action["bucket_id"]]):
-                    counts["raced"] += 1
-                    continue
-                meta = {
-                    "id": action["bucket_id"],
-                    "type": action["type"],
-                    "created": action["created"],
-                    "last_active": action["created"],
-                    "activation_count": 0,
-                    "source_tool": PROJECTOR,
-                    **action["semantics"],
-                    **action["kernel"],
-                }
-                _atomic_write(_new_path(vault, action), _render(meta, action["body"]))
-        elif action["op"] == "update":
-            path = Path(action["path"])
-            with bucket_lease(vault, action["bucket_id"]):
-                meta, old_body = _split(path.read_text(encoding="utf-8"))
-                if semantics_sha(old_body, bucket_current_semantics(meta)) != action["expected_sha"]:
-                    # Ombre (or a person) changed it after planning; next sync re-plans.
-                    counts["raced"] += 1
-                    continue
-                # Keep Ombre's own rendering (e.g. [[links]]) unless the text really changed.
-                body = action["body"] if "body" in action["changed"] else old_body
-                meta.update(action["semantics"])
-                meta.update(action["kernel"])
-                _atomic_write(path, _render(meta, body))
-        counts[action["op"]] += 1
+def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> dict[str, int]:
+    counts = {"projected": 0, "unchanged": 0, "pending": 0, "diverged": 0, "conflict": 0}
+    for head in heads:
+        row = state.get(head.lineage_id)
+        if row and row["status"] == "projected" and row["projected_state_id"] == head.state.state_id:
+            counts["unchanged"] += 1
+            continue
+        counts[project_lineage(head, runtime, state)] += 1
     return counts
 
 
-def verify(heads: list[Head], reference: Path) -> dict[str, Any]:
-    """Would a vault rebuilt from the Kernel carry the same memories as reference?"""
-    existing = index_vault(reference)
-    mismatches, missing = [], []
+def scan_ombre(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> dict[str, Any]:
+    """Compare Ombre with the observed baselines: edits, deletions, and buckets we don't manage."""
+    buckets = {b["id"]: b for b in runtime.list(include_archive=True)}
+    rows = {row["lineage_id"]: row for row in state.rows()}
+    managed = {row["bucket_id"] for row in rows.values()} | {h.bucket_id for h in heads}
+    diverged, deleted = [], []
     for head in heads:
-        current = existing.get(head.bucket_id)
-        if current is None:
-            missing.append(head.bucket_id)
+        row = rows.get(head.lineage_id)
+        if not row or row["status"] not in ("projected", "diverged") or not row.get("observed_sha"):
             continue
-        _, meta, body = current
-        semantics = bucket_semantics(head)
-        diff = [k for k in SEMANTIC_FIELDS if _norm_field(k, meta.get(k)) != _norm_field(k, semantics[k])]
-        if _clean(body) != _clean(head.state.content):
-            diff.append("body")
-        if diff:
-            mismatches.append({"bucket_id": head.bucket_id, "fields": diff})
-    return {
-        "heads": len(heads),
-        "matched": len(heads) - len(missing) - len(mismatches),
-        "missing_in_reference": missing,
-        "mismatches": mismatches,
-        "reference_unmanaged": _live_unmanaged(existing, {h.bucket_id for h in heads}),
-    }
+        bucket = buckets.get(row["bucket_id"])
+        if bucket is None or bucket.get("deleted"):
+            deleted.append(head.lineage_id)
+        elif observed_sha(bucket) != row["observed_sha"]:
+            diverged.append((head, bucket))
+    unmanaged = [
+        b for bucket_id, b in sorted(buckets.items())
+        if bucket_id not in managed and not b.get("deleted") and not is_system_bucket(b)
+    ]
+    return {"diverged": diverged, "deleted": deleted, "unmanaged": unmanaged}
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description="Kernel -> Ombre projection status")
     parser.add_argument("--kernel-db", required=True, type=Path)
-    parser.add_argument("--vault", required=True, type=Path)
-    parser.add_argument("--report", type=Path)
-    parser.add_argument("mode", choices=("plan", "apply", "verify"))
+    parser.add_argument("command", choices=("capabilities", "status", "project"))
     args = parser.parse_args(argv)
+    runtime = OmbreRuntime.from_env()
+    if runtime is None:
+        print(json.dumps({"ok": False, "error": "ombre_runtime_unconfigured"}))
+        return 2
+    if args.command == "capabilities":
+        print(json.dumps(runtime.capabilities(), ensure_ascii=False))
+        return 0
+    state = ProjectionState(state_path_for(args.kernel_db))
     heads, problems = select_heads(args.kernel_db)
-    if args.mode == "verify":
-        report: dict[str, Any] = verify(heads, args.vault)
+    if args.command == "project":
+        result: dict[str, Any] = project_heads(heads, runtime, state)
     else:
-        planned = plan(heads, args.vault)
-        report = {"counts": {op: sum(1 for a in planned["actions"] if a["op"] == op)
-                             for op in ("create", "update", "unchanged", "conflict", "diverged")},
-                  "unmanaged": planned["unmanaged"],
-                  "conflicts": [a for a in planned["actions"] if a["op"] == "conflict"]}
-        if args.mode == "apply":
-            report["applied"] = apply(planned, args.vault)
-    report["problems"] = problems
-    text = json.dumps(report, ensure_ascii=False, indent=2)
-    if args.report:
-        args.report.write_text(text, encoding="utf-8")
-    summary = {k: (len(v) if isinstance(v, list) else v) for k, v in report.items()}
-    print(json.dumps(summary, ensure_ascii=False))
+        scan = scan_ombre(heads, runtime, state)
+        result = {"heads": len(heads), "diverged": len(scan["diverged"]), "deleted": len(scan["deleted"]),
+                  "unmanaged": len(scan["unmanaged"])}
+    result["problems"] = problems
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 

@@ -1,15 +1,19 @@
 """B-3: Kernel-first memory writes for the live runtime, and Ombre catch-up.
 
 remember() commits Evidence + State + formation Delta to the Kernel first and
-then projects that lineage into the Ombre vault. A failed projection never
-loses the memory: the Kernel row is already committed and the next sync()
-retries it.
+then projects that lineage into Ombre through Ombre's own runtime (see
+memory_kernel_projection). If Ombre is unconfigured or unavailable the lineage
+stays ``pending`` in the projection state and the next sync() retries it; the
+Kernel write already succeeded, so nothing ever falls back to posts.
 
 sync() keeps the two sides converged without ever letting Ombre be the
 authority: buckets Ombre created on its own (letters, plans, anything a tool
 wrote directly) become new lineages, and buckets edited inside Ombre (trace,
 the dashboard) become Kernel revisions with a Delta, before the projection
 runs. Lifecycle fields stay Ombre's.
+
+Ombre is reached only when OMBRE_RUNTIME_PYTHON / OMBRE_RUNTIME_SRC /
+OMBRE_RUNTIME_ENV_FILE are set; there is no default vault path.
 
 The switch is runtime_config key ``memory.kernel_write`` in memories.db, so
 gateway, internal-mcp and the capability proxy all read the same flag.
@@ -37,16 +41,11 @@ from tools.memory_kernel import Delta, Evidence, MemoryKernel, State
 from tools.memory_kernel_switch import FLAG_KEY, write_enabled  # noqa: F401 (re-exported)
 
 DEFAULT_KERNEL_DB = "/var/lib/hayagarden/memory-kernel.db"
-DEFAULT_OMBRE_VAULT = "/var/lib/hayagarden/ombre-shadow-3.6.14-r1/vault"
 DEFAULT_POSTS_DB = "/opt/frontend/memories.db"
 
 
 def kernel_db_path() -> Path:
     return Path(os.environ.get("MEMORY_KERNEL_DB") or DEFAULT_KERNEL_DB)
-
-
-def vault_path() -> Path:
-    return Path(os.environ.get("MEMORY_KERNEL_OMBRE_VAULT") or DEFAULT_OMBRE_VAULT)
 
 
 def posts_db_path() -> Path:
@@ -89,9 +88,29 @@ def _tags(value: Any) -> list[str]:
     return [str(v) for v in (value or [])]
 
 
-def _project(heads: list[projection.Head], vault: Path) -> dict[str, int]:
-    planned = projection.plan(heads, vault, existing=projection.find_buckets(vault, [h.bucket_id for h in heads]))
-    return projection.apply(planned, vault)
+def default_runtime() -> projection.OmbreRuntime | None:
+    return projection.OmbreRuntime.from_env()
+
+
+_DEFAULT = object()
+
+
+def _runtime(value: Any) -> projection.OmbreRuntime | None:
+    return default_runtime() if value is _DEFAULT else value
+
+
+def _project_one(head: projection.Head, db: Path, runtime: projection.OmbreRuntime | None) -> str:
+    """Never raises: the Kernel row is committed, a failure only leaves it pending."""
+    try:
+        state = projection.ProjectionState(projection.state_path_for(db))
+        state.target(head.lineage_id, head.bucket_id, head.state.state_id)
+        if runtime is None:
+            state.failed(head.lineage_id, "pending", "ombre_runtime_unconfigured")
+            return "PENDING:unconfigured"
+        outcome = projection.project_lineage(head, runtime, state)
+    except Exception as exc:  # e.g. bookkeeping failed after Ombre wrote: retry gets first
+        return f"PENDING:{type(exc).__name__}"
+    return "PROJECTED" if outcome == "projected" else outcome.upper()
 
 
 MEMORY_TYPES = ("MEMORY", "FACT", "MISS")
@@ -118,7 +137,7 @@ def remember(
     arousal: float | None = None,
     occurred_at: str | None = None,
     kernel_db: str | os.PathLike[str] | None = None,
-    vault: str | os.PathLike[str] | None = None,
+    runtime: Any = _DEFAULT,
     now: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(content, str) or not content.strip():
@@ -127,7 +146,6 @@ def remember(
         raise ValueError(f"not a memory type: {memory_type}")
     text = content.strip()
     db = Path(kernel_db or kernel_db_path())
-    target = Path(vault or vault_path())
     now = now or _now()
 
     wanted = _norm(text)
@@ -181,11 +199,7 @@ def remember(
     kernel = MemoryKernel(db)
     kernel.create_state(state, formation, evidence=(evidence,))
     head = projection.Head(lineage, state)
-    try:
-        _project([head], target)
-        ombre_status = "PROJECTED"
-    except Exception as exc:  # the Kernel row is committed; sync() retries
-        ombre_status = f"PROJECTION_FAILED:{type(exc).__name__}"
+    ombre_status = _project_one(head, db, _runtime(runtime))
     return {"status": "CREATED", "state_id": state.state_id, "lineage_id": lineage,
             "bucket_id": head.bucket_id, "ombre_status": ombre_status,
             "content_sha256": _sha(text)}
@@ -214,37 +228,38 @@ def _bucket_value(meta: dict[str, Any], *, ingested: str, base: dict[str, Any] |
     return _jsonable(value)
 
 
-def ingest_from_ombre(kernel_db: Path, vault: Path, *, now: str | None = None) -> dict[str, Any]:
+def ingest_from_ombre(
+    kernel_db: Path, runtime: projection.OmbreRuntime, state: projection.ProjectionState,
+    *, now: str | None = None,
+) -> dict[str, Any]:
     """Pull Ombre-side creations and edits into the Kernel; never the reverse."""
     now = now or _now()
     kernel = MemoryKernel(kernel_db)
     heads, _ = projection.select_heads(kernel_db)
-    existing = projection.index_vault(vault)
-    planned = projection.plan(heads, vault)
-    by_bucket = {h.bucket_id: h for h in heads}
+    scan = projection.scan_ombre(heads, runtime, state)
     created, revised, errors = [], [], []
 
-    for bucket_id in planned["unmanaged"]:
-        _, meta, body = existing[bucket_id]
+    for bucket in scan["unmanaged"]:
+        body = bucket.get("content") or ""
         text = projection._clean(body)
         if not text:
             continue
         try:
-            _ingest_created(kernel, bucket_id, meta, body, text, now)
-            created.append(bucket_id)
+            _ingest_created(kernel, bucket["id"], bucket.get("metadata") or {}, body, text, now)
+            created.append(bucket["id"])
         except Exception as exc:
-            errors.append({"bucket_id": bucket_id, "stage": "created", "error": type(exc).__name__})
+            errors.append({"bucket_id": bucket["id"], "stage": "created", "error": type(exc).__name__})
 
-    for action in planned["actions"]:
-        if action["op"] != "diverged":
-            continue
-        _, meta, body = existing[action["bucket_id"]]
+    for head, bucket in scan["diverged"]:
         try:
-            _ingest_edit(kernel, by_bucket[action["bucket_id"]], meta, body, now)
-            revised.append(action["bucket_id"])
+            new_state_id = _ingest_edit(kernel, head, bucket.get("metadata") or {}, bucket.get("content") or "", now)
+            # What Ombre holds now *is* the new head: it becomes the observed baseline.
+            state.target(head.lineage_id, head.bucket_id, new_state_id)
+            state.projected(head.lineage_id, new_state_id, bucket)
+            revised.append(bucket["id"])
         except Exception as exc:
-            errors.append({"bucket_id": action["bucket_id"], "stage": "edited", "error": type(exc).__name__})
-    return {"created": created, "revised": revised, "errors": errors}
+            errors.append({"bucket_id": bucket["id"], "stage": "edited", "error": type(exc).__name__})
+    return {"created": created, "revised": revised, "deleted": scan["deleted"], "errors": errors}
 
 
 def _ingest_created(kernel: MemoryKernel, bucket_id: str, meta: dict[str, Any], body: str, text: str, now: str) -> None:
@@ -253,7 +268,7 @@ def _ingest_created(kernel: MemoryKernel, bucket_id: str, meta: dict[str, Any], 
         evidence_id=f"ev:ombre:{bucket_id}:{uid}", source_type="ombre_bucket",
         source_ref=f"ombre:{bucket_id}", observed_at=now, occurred_at=_iso(meta.get("created"), now),
         content=body, integrity=_sha(body), origin_kind="derived",
-        provenance={"system": "ombre vault", "ingested_by": "memory_kernel_store.ingest",
+        provenance={"system": "ombre", "ingested_by": "memory_kernel_store.ingest",
                     "source_tool": str(meta.get("source_tool") or "")},
     )
     state = State(
@@ -271,7 +286,7 @@ def _ingest_created(kernel: MemoryKernel, bucket_id: str, meta: dict[str, Any], 
     ), evidence=(evidence,))
 
 
-def _ingest_edit(kernel: MemoryKernel, head: projection.Head, meta: dict[str, Any], body: str, now: str) -> None:
+def _ingest_edit(kernel: MemoryKernel, head: projection.Head, meta: dict[str, Any], body: str, now: str) -> str:
     bucket_id = head.bucket_id
     version = len(kernel.lineage_history(head.lineage_id)) + 1
     suffix = head.lineage_id[len("lin:"):]
@@ -280,7 +295,7 @@ def _ingest_edit(kernel: MemoryKernel, head: projection.Head, meta: dict[str, An
         evidence_id=f"ev:{suffix}:v{version}:{uid}", source_type="ombre_bucket_edit",
         source_ref=f"ombre:{bucket_id}", observed_at=now, occurred_at=now,
         content=body, integrity=_sha(body), origin_kind="derived",
-        provenance={"system": "ombre vault", "ingested_by": "memory_kernel_store.ingest",
+        provenance={"system": "ombre", "ingested_by": "memory_kernel_store.ingest",
                     "previous_state": head.state.state_id},
     )
     previous = head.state
@@ -298,9 +313,10 @@ def _ingest_edit(kernel: MemoryKernel, head: projection.Head, meta: dict[str, An
         derived_by={"processor": "memory_kernel_store.ingest", "reason": "edited_in_ombre"},
         confidence=previous.confidence, occurred_at=now, review_status="accepted_from_ombre",
     ), evidence=(evidence,))
+    return state.state_id
 
 
-def backfill_from_posts(posts_db: Path, kernel_db: Path, vault: Path) -> dict[str, Any]:
+def backfill_from_posts(posts_db: Path, kernel_db: Path, runtime: Any = _DEFAULT) -> dict[str, Any]:
     """Bring memories that fell back to posts (Kernel write failed) into the Kernel."""
     if not posts_db.is_file():
         return {"done": [], "errors": []}
@@ -328,7 +344,7 @@ def backfill_from_posts(posts_db: Path, kernel_db: Path, vault: Path) -> dict[st
                         tags=row["tags"], importance=row["importance"] or None,
                         memory_type=row["type"], layer=row["layer"], pinned=row["pinned"],
                         author=row["author"], occurred_at=_iso_beijing(row["created_at"]),
-                        kernel_db=kernel_db, vault=vault,
+                        kernel_db=kernel_db, runtime=runtime,
                     )
                     state_id = result["state_id"]
                 conn.execute(
@@ -356,26 +372,42 @@ def _iso_beijing(value: Any) -> str | None:
     return parsed.isoformat()
 
 
-def sync(kernel_db: Path | None = None, vault: Path | None = None, posts_db: Path | None = None) -> dict[str, Any]:
+def sync(kernel_db: Path | None = None, posts_db: Path | None = None, *, runtime: Any = _DEFAULT) -> dict[str, Any]:
     db = Path(kernel_db or kernel_db_path())
-    target = Path(vault or vault_path())
-    backfilled = backfill_from_posts(Path(posts_db or posts_db_path()), db, target)
-    ingested = ingest_from_ombre(db, target)
+    ombre = _runtime(runtime)
+    backfilled = backfill_from_posts(Path(posts_db or posts_db_path()), db, ombre)
+    report: dict[str, Any] = {"backfilled": backfilled}
+    if ombre is None:
+        heads, problems = projection.select_heads(db)
+        return {**report, "ombre": "unconfigured", "problems": problems}
+    state = projection.ProjectionState(projection.state_path_for(db))
+    try:
+        report["ingested"] = ingest_from_ombre(db, ombre, state)
+    except projection.RuntimeUnavailable as exc:
+        heads, problems = projection.select_heads(db)
+        return {**report, "ombre": f"unavailable:{exc}"[:300], "problems": problems}
     heads, problems = projection.select_heads(db)
-    applied = projection.apply(projection.plan(heads, target), target)
-    return {"backfilled": backfilled, "ingested": ingested, "applied": applied, "problems": problems}
+    report["projected"] = projection.project_heads(heads, ombre, state)
+    report["problems"] = problems
+    return report
 
 
-def status(kernel_db: Path | None = None, vault: Path | None = None) -> dict[str, Any]:
+def status(kernel_db: Path | None = None) -> dict[str, Any]:
+    """Projection bookkeeping only; never calls Ombre."""
     db = Path(kernel_db or kernel_db_path())
-    target = Path(vault or vault_path())
     heads, problems = projection.select_heads(db)
-    planned = projection.plan(heads, target)
+    rows = {r["lineage_id"]: r for r in projection.ProjectionState(projection.state_path_for(db)).rows()}
     counts: dict[str, int] = {}
-    for action in planned["actions"]:
-        counts[action["op"]] = counts.get(action["op"], 0) + 1
-    return {"heads": len(heads), "plan": counts, "unmanaged": len(planned["unmanaged"]),
-            "problems": problems}
+    for head in heads:
+        row = rows.get(head.lineage_id)
+        if row is None:
+            key = "untracked"
+        elif row["status"] == "projected" and row["projected_state_id"] != head.state.state_id:
+            key = "pending"
+        else:
+            key = row["status"]
+        counts[key] = counts.get(key, 0) + 1
+    return {"heads": len(heads), "projection": counts, "problems": problems}
 
 
 def main(argv: list[str] | None = None) -> int:
