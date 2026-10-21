@@ -45,6 +45,7 @@ import {
   fmtCostUsd,
   fmtTokens,
   fetchChatGatewayOnline,
+  decideChatRefresh,
   fetchChatLockStatus,
   forceUnlockChatGenLock,
   guessChatErrorHint,
@@ -1397,30 +1398,28 @@ export function ChatScreen() {
   const refreshChat = useCallback(async () => {
     if (refreshing) return;
     // Hard refresh aborts the live stream (server kills the resident) and
-    // force-releases the gen lock. While a reply is still being produced,
-    // the first tap only refreshes; a second tap inside the window forces.
+    // force-releases the gen lock. While a reply is still being produced (or
+    // the lock cannot be read), the first tap only refreshes; a second tap
+    // inside the window forces.
     const armed = Date.now() < hardRefreshArmedUntilRef.current;
     hardRefreshArmedUntilRef.current = 0;
-    if (!armed) {
-      const localStreaming = sending || liveRef.current !== null;
-      const lock = localStreaming ? null : await fetchChatLockStatus();
-      if (localStreaming || lock?.busy) {
-        setNavOpen(null);
-        if (!localStreaming) {
-          setRefreshing(true);
-          try {
-            pinTranscriptToLatest();
-            await refetchLatest();
-          } finally {
-            setRefreshing(false);
-          }
+    const localStreaming = sending || liveRef.current !== null;
+    const lock = armed || localStreaming ? null : await fetchChatLockStatus();
+    const decision = decideChatRefresh({ armed, localStreaming, lock });
+    if (decision.kind === 'soft') {
+      setNavOpen(null);
+      if (!localStreaming) {
+        setRefreshing(true);
+        try {
+          pinTranscriptToLatest();
+          await refetchLatest();
+        } finally {
+          setRefreshing(false);
         }
-        hardRefreshArmedUntilRef.current = Date.now() + HARD_REFRESH_CONFIRM_MS;
-        showToast(localStreaming
-          ? '回复还在生成，再点一次强制中断'
-          : `服务器仍在生成（${Math.round(lock?.ageSec ?? 0)}s），再点一次强制解锁`);
-        return;
       }
+      hardRefreshArmedUntilRef.current = Date.now() + HARD_REFRESH_CONFIRM_MS;
+      showToast(decision.toast);
+      return;
     }
     setRefreshing(true);
     setNavOpen(null);

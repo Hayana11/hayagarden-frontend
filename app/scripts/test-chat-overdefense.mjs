@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { sendChatMessage, takeLastChatSendError } from '../src/lib/api.ts';
-import { fetchChatLockStatus } from '../src/lib/chat.ts';
+import { decideChatRefresh, fetchChatLockStatus } from '../src/lib/chat.ts';
 
 const originalFetch = globalThis.fetch;
 const json = (status, body) => new Response(JSON.stringify(body), {
@@ -62,11 +62,35 @@ assert.doesNotMatch(pollEffect, /\}, \[initialHistoryReady, sending, live\]\);/)
 // T7 refresh: the confirm gate precedes every destructive step.
 const refreshStart = screen.indexOf('const refreshChat = useCallback(async () => {');
 const refresh = screen.slice(refreshStart, screen.indexOf('}, [refreshing', refreshStart));
-const gate = refresh.indexOf('if (!armed) {');
+const decide = refresh.indexOf('decideChatRefresh({ armed, localStreaming, lock })');
+const gate = refresh.indexOf("if (decision.kind === 'soft') {");
 const earlyReturn = refresh.indexOf('return;', gate);
-assert.ok(gate > 0 && earlyReturn > gate, 'unarmed live/busy tap returns early');
+assert.ok(decide > 0 && gate > decide && earlyReturn > gate, 'soft decision returns early');
 assert.ok(refresh.indexOf('abortRef.current?.abort()') > earlyReturn, 'abort only after the gate');
 assert.ok(refresh.indexOf('forceUnlockChatGenLock()') > earlyReturn, 'force unlock only after the gate');
 assert.match(refresh, /hardRefreshArmedUntilRef\.current = Date\.now\(\) \+ HARD_REFRESH_CONFIRM_MS;/);
 
-console.log('chat over-defense focused tests passed: T1-T7');
+// T8 unreadable lock (null) is never idle: first tap is soft; only the armed second tap is hard.
+const unknown = decideChatRefresh({ armed: false, localStreaming: false, lock: null });
+assert.deepEqual(unknown, {
+  kind: 'soft',
+  reason: 'unknown',
+  toast: '无法确认服务器生成状态，再点一次强制刷新',
+});
+assert.deepEqual(decideChatRefresh({ armed: true, localStreaming: false, lock: null }), { kind: 'hard' });
+// Existing behaviour unchanged.
+assert.equal(decideChatRefresh({ armed: false, localStreaming: true, lock: null }).reason, 'streaming');
+assert.equal(
+  decideChatRefresh({ armed: false, localStreaming: false, lock: { busy: true, ageSec: 41.6 } }).toast,
+  '服务器仍在生成（42s），再点一次强制解锁',
+);
+assert.deepEqual(
+  decideChatRefresh({ armed: false, localStreaming: false, lock: { busy: false, ageSec: 0 } }),
+  { kind: 'hard' },
+);
+// The screen feeds the fetched (possibly null) lock straight into the decision,
+// so a null first tap can only reach the soft branch, never abort/forceUnlock.
+assert.match(refresh, /const lock = armed \|\| localStreaming \? null : await fetchChatLockStatus\(\);/);
+assert.doesNotMatch(refresh, /lock\?\.busy/);
+
+console.log('chat over-defense focused tests passed: T1-T8');
