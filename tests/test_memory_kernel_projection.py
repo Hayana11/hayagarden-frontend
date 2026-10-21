@@ -25,6 +25,7 @@ class FakeOmbreRuntime:
     def __init__(self):
         self.buckets: dict[str, dict] = {}
         self.calls: list[tuple[str, str]] = []
+        self.created: list[str] = []
         self.down = False
 
     def seed_from_vault(self, vault: Path) -> "FakeOmbreRuntime":
@@ -57,14 +58,17 @@ class FakeOmbreRuntime:
         self._check("get", bucket_id)
         return self._view(self.buckets.get(bucket_id))
 
-    def create(self, bucket_id, fields):
-        self._check("create", bucket_id)
-        if bucket_id in self.buckets:
-            raise AssertionError(f"duplicate create of {bucket_id}")
+    def create_if_absent(self, bucket_id, fields):
+        self._check("create_if_absent", bucket_id)
+        existing = self._view(self.buckets.get(bucket_id))
+        if existing is not None:
+            return {"created": False, "bucket": existing}
         meta = {k: v for k, v in fields.items() if k not in ("content", "bucket_type")}
         meta.update(id=bucket_id, type=fields["bucket_type"], activation_count=0, source_tool="kernel_projection")
         self._normalise(meta)
         self.buckets[bucket_id] = {"id": bucket_id, "content": fields["content"], "metadata": meta}
+        self.created.append(bucket_id)
+        return {"created": True, "bucket": self._view(self.buckets[bucket_id])}
 
     def update(self, bucket_id, fields):
         self._check("update", bucket_id)
@@ -75,6 +79,7 @@ class FakeOmbreRuntime:
             else:
                 bucket["metadata"][key] = value
         self._normalise(bucket["metadata"])
+        return self._view(bucket)
 
     def list(self, *, include_archive=True):
         self._check("list")
@@ -89,7 +94,7 @@ class FakeOmbreRuntime:
         bucket["metadata"].update(meta)
 
     def creates(self):
-        return [b for op, b in self.calls if op == "create"]
+        return list(self.created)
 
 
 class ProjectionFixture(ImportFixture):
@@ -169,7 +174,8 @@ class ProjectTests(ProjectionFixture):
         bbb = self.head("lin:ombre:bbb222")
         self.assertEqual(projection.target_fields(bbb)["importance"], 5)
         self.assertEqual(projection.project_lineage(bbb, self.ombre, self.state), "projected")
-        self.assertEqual(self.ombre.calls[-1], ("get", "bbb222"))  # create is followed by get
+        # One worker run: get, create, get back.
+        self.assertEqual(self.ombre.calls, [("create_if_absent", "bbb222")])
         row = self.state.get("lin:ombre:bbb222")
         # pinned -> importance 10 is Ombre's rule: recorded as success, never drift.
         self.assertEqual((row["status"], row["projected_state_id"]), ("projected", "st:ombre:bbb222:v1"))

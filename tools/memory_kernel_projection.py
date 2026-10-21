@@ -265,11 +265,14 @@ class OmbreRuntime:
     def get(self, bucket_id: str) -> dict[str, Any] | None:
         return self.call([{"op": "get", "bucket_id": bucket_id}])[0]
 
-    def create(self, bucket_id: str, fields: dict[str, Any]) -> None:
-        self.call([{"op": "create", "bucket_id": bucket_id, "fields": fields}])
+    def create_if_absent(self, bucket_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """get, create only if absent, get again: {"created": bool, "bucket": view}."""
+        return self.call([{"op": "create_if_absent", "bucket_id": bucket_id, "fields": fields}])[0]
 
-    def update(self, bucket_id: str, fields: dict[str, Any]) -> None:
-        self.call([{"op": "update", "bucket_id": bucket_id, "fields": fields}])
+    def update(self, bucket_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+        """update then get in one worker run; returns what Ombre holds afterwards."""
+        return self.call([{"op": "update", "bucket_id": bucket_id, "fields": fields},
+                          {"op": "get", "bucket_id": bucket_id}])[1]
 
     def list(self, *, include_archive: bool = True) -> list[dict[str, Any]]:
         return self.call([{"op": "list", "include_archive": include_archive}])[0]
@@ -360,29 +363,39 @@ def state_path_for(kernel_db: str | os.PathLike[str]) -> Path:
 def project_lineage(head: Head, runtime: OmbreRuntime, state: ProjectionState) -> str:
     """Make Ombre hold ``head``; returns projected / pending / diverged / conflict."""
     row = state.target(head.lineage_id, head.bucket_id, head.state.state_id)
+    fields = target_fields(head)
     try:
-        bucket = runtime.get(head.bucket_id)
-        if bucket is not None and bucket.get("deleted"):
+        if not row.get("observed_sha"):
+            # Never observed: create unless Ombre already has it (imported bucket, or a
+            # run that crashed after Ombre wrote) -- the worker gets before it creates.
+            answer = runtime.create_if_absent(head.bucket_id, {**fields, "bucket_type": bucket_type_for(head)})
+            bucket = answer["bucket"]
+            if answer["created"]:
+                return _record(head, state, bucket)
+        else:
+            bucket = runtime.get(head.bucket_id)
+        if bucket is None:
+            raise RuntimeUnavailable("bucket_missing_after_write")
+        if bucket.get("deleted"):
             state.failed(head.lineage_id, "conflict", "bucket_deleted_in_ombre")
             return "conflict"
-        fields = target_fields(head)
-        if bucket is None:
-            runtime.create(head.bucket_id, {**fields, "bucket_type": bucket_type_for(head)})
-        elif row.get("projected_state_id") != head.state.state_id:
-            if row.get("observed_sha") and observed_sha(bucket) != row["observed_sha"]:
-                state.failed(head.lineage_id, "diverged", "edited_in_ombre")
-                return "diverged"
-            delta = changed_fields(fields, bucket)
-            if delta:
-                runtime.update(head.bucket_id, delta)
-        after = runtime.get(head.bucket_id)
-        if after is None:
-            raise RuntimeUnavailable("bucket_missing_after_write")
-        state.projected(head.lineage_id, head.state.state_id, after)
-        return "projected"
+        if row.get("observed_sha") and observed_sha(bucket) != row["observed_sha"]:
+            state.failed(head.lineage_id, "diverged", "edited_in_ombre")
+            return "diverged"
+        delta = changed_fields(fields, bucket)
+        if delta:
+            bucket = runtime.update(head.bucket_id, delta)
+        return _record(head, state, bucket)
     except RuntimeUnavailable as exc:
         state.failed(head.lineage_id, "pending", str(exc))
         return "pending"
+
+
+def _record(head: Head, state: ProjectionState, bucket: dict[str, Any] | None) -> str:
+    if bucket is None:
+        raise RuntimeUnavailable("bucket_missing_after_write")
+    state.projected(head.lineage_id, head.state.state_id, bucket)
+    return "projected"
 
 
 def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> dict[str, int]:

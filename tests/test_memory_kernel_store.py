@@ -38,6 +38,7 @@ class StoreFixture(ProjectionFixture):
         super().setUp()
         store.sync(self.kernel, self.posts, runtime=self.ombre)
         self.ombre.calls.clear()
+        self.ombre.created.clear()
 
     def remember(self, content, **kwargs):
         kwargs.setdefault("source", "save_marker")
@@ -59,7 +60,7 @@ class RememberTests(StoreFixture):
         bucket = self.ombre.buckets[result["bucket_id"]]
         self.assertEqual(bucket["content"], "她今天买了一只叫福禄的鹦鹉。")
         self.assertEqual(bucket["metadata"]["source_tool"], "kernel_projection")
-        self.assertEqual([op for op, _ in self.ombre.calls], ["get", "create", "get"])
+        self.assertEqual(self.ombre.calls, [("create_if_absent", result["bucket_id"])])  # one worker run
         self.assertEqual(self.state.get(result["lineage_id"])["projected_state_id"], result["state_id"])
 
     def test_duplicate_is_not_written_twice(self):

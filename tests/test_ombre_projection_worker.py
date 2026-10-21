@@ -89,23 +89,28 @@ class WorkerTests(unittest.TestCase):
     def test_create_get_update_round_trip_through_bucket_manager(self):
         self.assertEqual(self.runtime.capabilities()["version"], "3.6.14")
         self.assertIsNone(self.runtime.get("abc123def456"))
-        self.runtime.create("abc123def456", {"content": "她今天买了鹦鹉。", "name": "鹦鹉", "domain": [],
+        answer = self.runtime.create_if_absent("abc123def456", {"content": "她今天买了鹦鹉。", "name": "鹦鹉", "domain": [],
                                              "tags": ["pet"], "importance": 6, "valence": 0.7, "arousal": 0.4,
                                              "pinned": True, "bucket_type": "permanent"})
-        bucket = self.runtime.get("abc123def456")
+        self.assertTrue(answer["created"])
+        bucket = answer["bucket"]
+        self.assertEqual(bucket, self.runtime.get("abc123def456"))
         meta = bucket["metadata"]
         self.assertEqual(bucket["content"], "她今天买了鹦鹉。")
         self.assertEqual((meta["importance"], meta["domain"], meta["type"]), (10, ["未分类"], "permanent"))
         self.assertEqual((meta["source_tool"], meta["imported"], meta["defer_derived_index"]),
                          ("kernel_projection", True, True))
         # Lifecycle fields never pass through the projection's update.
-        self.runtime.update("abc123def456", {"content": "她今天买了一只鹦鹉。", "resolved": True,
-                                             "activation_count": 99})
-        bucket = self.runtime.get("abc123def456")
+        bucket = self.runtime.update("abc123def456", {"content": "她今天买了一只鹦鹉。", "resolved": True,
+                                                      "activation_count": 99})
         self.assertEqual(bucket["content"], "她今天买了一只鹦鹉。")
         self.assertNotIn("resolved", bucket["metadata"])
         self.assertEqual(bucket["metadata"]["activation_count"], 0)
         self.assertEqual([b["id"] for b in self.runtime.list()], ["abc123def456"])
+        # A retry never creates twice: the existing bucket comes back untouched.
+        again = self.runtime.create_if_absent("abc123def456", {"content": "别的内容"})
+        self.assertFalse(again["created"])
+        self.assertEqual(again["bucket"]["content"], "她今天买了一只鹦鹉。")
 
     def test_soft_deleted_bucket_is_seen_as_deleted(self):
         (self.store / "gone.json").write_text(json.dumps(
@@ -121,7 +126,7 @@ class WorkerTests(unittest.TestCase):
     def test_missing_bucket_manager_capability_fails_explicitly(self):
         self.write_src("3.6.14", drop_param="bucket_id_override")
         with self.assertRaisesRegex(projection.RuntimeUnavailable, "lacks: bucket_id_override"):
-            self.runtime.create("abc", {"content": "x"})
+            self.runtime.create_if_absent("abc", {"content": "x"})
         self.assertEqual(list(self.store.iterdir()), [])
 
     def test_unreachable_interpreter_is_runtime_unavailable(self):

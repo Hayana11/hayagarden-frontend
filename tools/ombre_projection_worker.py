@@ -10,6 +10,9 @@ locking, the ledger and derived indexes are all Ombre's.
 ``hold`` is never called: its similarity merge is the right behaviour for
 Ombre's own writes, but an exact projection needs one bucket per lineage.
 
+Importing Ombre costs over a second, so one process serves a batch of
+requests: ``create_if_absent`` is get -> create -> get in a single call.
+
 Protocol: argv = [worker, ombre_src_dir, ombre_env_file]; stdin = a JSON list
 of requests; stdout = one JSON object {"ok": bool, "results"|"error": ...}.
 Before any request the worker checks the Ombre version and the BucketManager
@@ -80,17 +83,26 @@ def load_runtime(src_dir: str):
     return version, BucketManager(load_config())
 
 
+async def _get(manager, bucket_id: str) -> dict | None:
+    bucket = await manager.get(bucket_id)
+    if bucket is not None:
+        return _bucket_view(bucket)
+    archived = await manager.get_including_archive(bucket_id)
+    return _bucket_view(archived, deleted=True) if archived else None
+
+
 async def handle(manager, request: dict) -> object:
     op = request.get("op")
     if op == "get":
-        bucket = await manager.get(request["bucket_id"])
-        if bucket is not None:
-            return _bucket_view(bucket)
-        archived = await manager.get_including_archive(request["bucket_id"])
-        return _bucket_view(archived, deleted=True) if archived else None
-    if op == "create":
+        return await _get(manager, request["bucket_id"])
+    if op == "create_if_absent":
+        # Idempotent create: a bucket that already exists (e.g. written by a run
+        # that crashed before its bookkeeping committed) is returned, not duplicated.
+        existing = await _get(manager, request["bucket_id"])
+        if existing is not None:
+            return {"created": False, "bucket": existing}
         fields = request["fields"]
-        created = await manager.create(
+        await manager.create(
             fields["content"],
             tags=list(fields.get("tags") or []),
             importance=int(fields.get("importance") or 5),
@@ -105,7 +117,7 @@ async def handle(manager, request: dict) -> object:
             imported=True,
             defer_derived_index=True,
         )
-        return {"bucket_id": created}
+        return {"created": True, "bucket": await _get(manager, request["bucket_id"])}
     if op == "update":
         fields = {k: v for k, v in request["fields"].items() if k in UPDATE_FIELDS}
         return {"updated": bool(await manager.update(request["bucket_id"], **fields))}
