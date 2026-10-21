@@ -53,6 +53,8 @@ _FOLDERS = {"dynamic": "dynamic", "permanent": "permanent", "archived": "archive
 # Ombre's handover bucket is its own runtime state, never Kernel-managed.
 SYSTEM_DOMAINS = {"呼吸间"}
 _UNSAFE = re.compile(r'[\\/:*?"<>|\n\r\t]')
+# The pure-Python parser costs ~25 ms per bucket; libyaml makes a full scan cheap.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 @dataclass(frozen=True)
@@ -180,7 +182,7 @@ def _split(text: str) -> tuple[dict[str, Any], str]:
     end = text.find("\n---", 3)
     if end < 0:
         return {}, text
-    meta = yaml.safe_load(text[3:end]) or {}
+    meta = yaml.load(text[3:end], Loader=_YAML_LOADER) or {}
     return (meta if isinstance(meta, dict) else {}), text[end + 4:].lstrip("\n")
 
 
