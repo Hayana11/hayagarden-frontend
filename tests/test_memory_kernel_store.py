@@ -31,7 +31,7 @@ class StoreFixture(ProjectionFixture):
     def setUp(self):
         super().setUp()
         shutil.copytree(self.vault, self.out)
-        store.sync(self.kernel, self.out)
+        store.sync(self.kernel, self.out, self.posts)
 
 
 class RememberTests(StoreFixture):
@@ -60,7 +60,7 @@ class RememberTests(StoreFixture):
                                     kernel_db=self.kernel, vault=self.out)
         self.assertEqual(result["ombre_status"], "PROJECTION_FAILED:TimeoutError")
         self.assertNotIn(result["bucket_id"], projection.index_vault(self.out))
-        store.sync(self.kernel, self.out)
+        store.sync(self.kernel, self.out, self.posts)
         self.assertIn(result["bucket_id"], projection.index_vault(self.out))
 
     def test_fact_core_and_pinned_never_become_dynamic(self):
@@ -113,19 +113,19 @@ class IngestTests(StoreFixture):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("---\nid: fff666\ntype: dynamic\ncreated: '2026-10-21T09:00:00'\nname: 信\n"
                           "domain:\n- 日常\n---\n\n给未来的她写了一封信。\n", encoding="utf-8")
-        report = store.sync(self.kernel, self.out)
+        report = store.sync(self.kernel, self.out, self.posts)
         self.assertEqual(report["ingested"]["created"], ["fff666"])
         state = MemoryKernel(self.kernel).get_state("st:ombre:fff666:v1")
         self.assertEqual(state.content, "给未来的她写了一封信。")
         [evidence] = MemoryKernel(self.kernel).evidence_for_state(state.state_id)
         self.assertEqual(evidence.occurred_at, "2026-10-21T09:00:00+00:00")
         self.assertIn("kernel_state_id", read_bucket(self.out, "fff666")[1])
-        self.assertEqual(store.sync(self.kernel, self.out)["ingested"]["created"], [])
+        self.assertEqual(store.sync(self.kernel, self.out, self.posts)["ingested"]["created"], [])
 
     def test_edit_inside_ombre_becomes_a_revision_with_delta(self):
         path, meta, body = read_bucket(self.out, "aaa111")
         path.write_text(projection._render(dict(meta, importance=9), body + "还有一只鹦鹉福禄。"), encoding="utf-8")
-        report = store.sync(self.kernel, self.out)
+        report = store.sync(self.kernel, self.out, self.posts)
         self.assertEqual(report["ingested"]["revised"], ["aaa111"])
         kernel = MemoryKernel(self.kernel)
         history = kernel.lineage_history("lin:ombre:aaa111")
@@ -153,31 +153,47 @@ class IngestTests(StoreFixture):
                 raise sqlite3.OperationalError("disk I/O error")
 
         with mock.patch.object(store.MemoryKernel, "_transition", crash_after_evidence):
-            first = store.sync(self.kernel, self.out)
+            first = store.sync(self.kernel, self.out, self.posts)
         self.assertEqual(first["ingested"]["errors"][0]["stage"], "edited")
         conn = sqlite3.connect(self.kernel)
         orphans = conn.execute("SELECT count(*) FROM memory_kernel_evidence WHERE source_type='ombre_bucket_edit'").fetchone()[0]
         conn.close()
         self.assertEqual(orphans, 0)
         self.assertIs(store.MemoryKernel._transition, original)
-        second = store.sync(self.kernel, self.out)
+        second = store.sync(self.kernel, self.out, self.posts)
         self.assertEqual(second["ingested"]["revised"], ["aaa111"])
 
     def test_lifecycle_only_changes_never_reach_the_kernel(self):
         path, meta, body = read_bucket(self.out, "aaa111")
         path.write_text(projection._render(dict(meta, resolved=True, activation_count=1), body), encoding="utf-8")
-        report = store.sync(self.kernel, self.out)
+        report = store.sync(self.kernel, self.out, self.posts)
         self.assertEqual(report["ingested"], {"created": [], "revised": [], "errors": []})
         self.assertEqual(len(MemoryKernel(self.kernel).lineage_history("lin:ombre:aaa111")), 1)
 
 
-class SwitchTests(StoreFixture):
+class RouterTests(StoreFixture):
+    """memory_tool.save_memory is the single write router for memory types."""
+
     def setUp(self):
         super().setUp()
-        self.env = mock.patch.dict(os.environ, {"MEMORY_KERNEL_DB": str(self.kernel),
-                                                "MEMORY_KERNEL_OMBRE_VAULT": str(self.out)})
-        self.env.start()
-        self.addCleanup(self.env.stop)
+        from tools import memory_tool, summary_title
+
+        self.memory_tool = memory_tool
+        for patcher in (
+            mock.patch.dict(os.environ, {"MEMORY_KERNEL_DB": str(self.kernel),
+                                         "MEMORY_KERNEL_OMBRE_VAULT": str(self.out)}),
+            mock.patch.object(memory_tool, "DB_PATH", str(self.posts)),
+            mock.patch.object(summary_title, "generate_summary_title", return_value=""),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def posts_rows(self, where="1=1"):
+        conn = sqlite3.connect(self.posts)
+        try:
+            return conn.execute(f"SELECT id, type, content FROM posts WHERE {where}").fetchall()
+        finally:
+            conn.close()
 
     def test_flag_values(self):
         self.assertFalse(store.write_enabled(self.posts))
@@ -187,36 +203,81 @@ class SwitchTests(StoreFixture):
         self.assertFalse(store.write_enabled(self.posts))
         self.assertFalse(store.write_enabled(Path(self.tmp.name) / "missing.db"))
 
-    def test_persist_memory_routes_to_kernel_only_when_on(self):
+    def test_switch_off_keeps_posts_and_returns_post_id(self):
+        post_id = self.memory_tool.save_memory("她说下次要去看海。", type="MEMORY")
+        self.assertIsInstance(post_id, int)
+        self.assertEqual(self.posts_rows(f"id={post_id}")[0][2], "她说下次要去看海。")
+
+    def test_memory_types_go_to_the_kernel_with_their_semantics(self):
+        set_flag(self.posts, "1")
+        before = len(self.posts_rows())
+        written = self.memory_tool.save_memory(
+            "她不吃青椒，嫌味道怪。", type="FACT", layer="core", tags="food", importance=8,
+            pinned=1, author="fyodor", created_at="2026-10-15 23:10:00", source="fact_extractor")
+        self.assertIsInstance(written, self.memory_tool.KernelWrite)
+        self.assertEqual(len(self.posts_rows()), before)
+        state = MemoryKernel(self.kernel).get_state(written.state_id)
+        self.assertEqual(state.representation, "fact")
+        self.assertEqual(state.structured_value["memory"],
+                         {"type": "FACT", "layer": "core", "pinned": True, "author": "fyodor"})
+        self.assertEqual(state.created_at, "2026-10-15T23:10:00+08:00")
+        _, meta, _ = read_bucket(self.out, written.bucket_id)
+        self.assertEqual((meta["type"], meta["pinned"], meta["importance"]), ("permanent", True, 8))
+
+    def test_non_memory_types_stay_in_posts_even_when_on(self):
+        set_flag(self.posts, "1")
+        for kind in ("DIARY", "DREAM", "THOUGHT", "DAILY_SUMMARY", "WEEKLY_SUMMARY", "PHOTO"):
+            post_id = self.memory_tool.save_memory(f"{kind} 的内容", type=kind)
+            self.assertIsInstance(post_id, int, kind)
+
+    def test_kernel_failure_falls_back_once_and_is_backfilled_by_sync(self):
+        set_flag(self.posts, "1")
+        with mock.patch.object(store, "remember", side_effect=RuntimeError("kernel down")) as kernel, \
+                mock.patch.object(self.memory_tool, "save_memory", wraps=self.memory_tool.save_memory) as router:
+            post_id = self.memory_tool.save_memory("她把围巾落在了公交车上。", type="MEMORY", layer="long-term")
+        self.assertIsInstance(post_id, int)
+        self.assertEqual(kernel.call_count, 1)
+        self.assertEqual(router.call_count, 1)  # the fallback never re-enters the router
+        self.assertEqual(len(self.posts_rows("content='她把围巾落在了公交车上。'")), 1)
+        conn = sqlite3.connect(self.posts)
+        queued = conn.execute("SELECT post_id, done_at FROM memory_kernel_backfill").fetchall()
+        conn.close()
+        self.assertEqual(queued, [(post_id, None)])
+
+        report = store.sync(self.kernel, self.out, self.posts)
+        self.assertEqual(report["backfilled"]["done"], [post_id])
+        conn = sqlite3.connect(self.posts)
+        state_id = conn.execute("SELECT state_id FROM memory_kernel_backfill").fetchone()[0]
+        conn.close()
+        [evidence] = MemoryKernel(self.kernel).evidence_for_state(state_id)
+        self.assertEqual(evidence.source_ref, f"posts:{post_id}")
+        self.assertEqual(MemoryKernel(self.kernel).get_state(state_id).structured_value["memory"]["layer"],
+                         "long-term")
+        self.assertEqual(store.sync(self.kernel, self.out, self.posts)["backfilled"]["done"], [])
+
+    def test_persist_memory_goes_through_the_router(self):
         from tools import memory_runtime_bridge as bridge
 
         set_flag(self.posts, "1")
-        with mock.patch.object(bridge, "_write_legacy") as legacy, mock.patch.object(bridge, "_write_ombre") as ombre:
-            result = bridge.persist_memory(str(self.posts), content="她说下次要去看海。", source="save_marker")
-        legacy.assert_not_called()
-        ombre.assert_not_called()
+        with mock.patch.object(bridge, "_write_ombre") as ombre:
+            result = bridge.persist_memory(str(self.posts), content="她说下次要去看海。", source="save_marker",
+                                           tags="save-marker", importance=4)
+        ombre.assert_not_called()  # the Kernel projects; no second Ombre write
         self.assertEqual(result["status"], "CREATED")
-        self.assertTrue(result["kernel_state_id"].startswith("st:k:"))
+        self.assertIsNone(result["legacy_memory_id"])
         self.assertIn(result["ombre_bucket_id"], projection.index_vault(self.out))
+        self.assertEqual(self.posts_rows("content='她说下次要去看海。'"), [])
+        [evidence] = MemoryKernel(self.kernel).evidence_for_state(result["kernel_state_id"])
+        self.assertEqual(evidence.source_type, "memory_write:save_marker")
 
-    def test_persist_memory_falls_back_to_legacy_when_kernel_breaks(self):
-        from tools import memory_runtime_bridge as bridge
-
-        set_flag(self.posts, "1")
-        with mock.patch.object(store, "remember", side_effect=RuntimeError), \
-                mock.patch.object(bridge, "_reserve", side_effect=RuntimeError("legacy path reached")):
-            result = bridge.persist_memory(str(self.posts), content="她说下次要去看海。", source="save_marker")
-        self.assertEqual(result["status"], "RECEIPT_FAILED")
-
-    def test_write_memory_adapter_routes_to_kernel(self):
+    def test_write_memory_adapter_goes_through_the_router(self):
         from tools import memory_write_adapter
 
         set_flag(self.posts, "1")
-        with mock.patch.object(memory_write_adapter.memory_tool, "save_memory") as legacy:
-            result = memory_write_adapter.write_memory(str(self.posts), content="她最喜欢番茄味鱼粉。")
-        legacy.assert_not_called()
-        self.assertEqual(result["status"], "CREATED")
-        self.assertFalse(result["deduplicated"])
+        result = memory_write_adapter.write_memory(str(self.posts), content="她最喜欢番茄味鱼粉。")
+        self.assertEqual((result["status"], result["store"]), ("CREATED", "kernel"))
+        self.assertNotIn("id", result)
+        self.assertEqual(self.posts_rows("content='她最喜欢番茄味鱼粉。'"), [])
 
     def test_cc_hides_ombre_creation_tools_only_when_on(self):
         from tools.memory_kernel_switch import kernel_owned_brain_writes
@@ -225,7 +286,6 @@ class SwitchTests(StoreFixture):
         self.assertEqual(kernel_owned_brain_writes(env), ())
         set_flag(self.posts, "1")
         self.assertEqual(kernel_owned_brain_writes(env), ("mcp__brain__hold", "mcp__brain__grow"))
-
 
 if __name__ == "__main__":
     unittest.main()

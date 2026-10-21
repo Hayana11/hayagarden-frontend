@@ -24,10 +24,11 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ from tools.memory_kernel_switch import FLAG_KEY, write_enabled  # noqa: F401 (re
 
 DEFAULT_KERNEL_DB = "/var/lib/hayagarden/memory-kernel.db"
 DEFAULT_OMBRE_VAULT = "/var/lib/hayagarden/ombre-shadow-3.6.14-r1/vault"
+DEFAULT_POSTS_DB = "/opt/frontend/memories.db"
 
 
 def kernel_db_path() -> Path:
@@ -45,6 +47,10 @@ def kernel_db_path() -> Path:
 
 def vault_path() -> Path:
     return Path(os.environ.get("MEMORY_KERNEL_OMBRE_VAULT") or DEFAULT_OMBRE_VAULT)
+
+
+def posts_db_path() -> Path:
+    return Path(os.environ.get("MEMORY_KERNEL_POSTS_DB") or DEFAULT_POSTS_DB)
 
 
 def _now() -> str:
@@ -110,6 +116,7 @@ def remember(
     author: str | None = None,
     valence: float | None = None,
     arousal: float | None = None,
+    occurred_at: str | None = None,
     kernel_db: str | os.PathLike[str] | None = None,
     vault: str | os.PathLike[str] | None = None,
     now: str | None = None,
@@ -136,7 +143,7 @@ def remember(
         source_type=f"memory_write:{source}",
         source_ref=str((provenance or {}).get("turn_id") or (provenance or {}).get("source_ref") or f"{source}:{uid}"),
         observed_at=now,
-        occurred_at=now,
+        occurred_at=occurred_at or now,
         content=text,
         integrity=_sha(text),
         provenance=_jsonable({"source": source, **(provenance or {})}),
@@ -158,7 +165,7 @@ def remember(
         confidence=0.6,
         epistemic_status="asserted_by_companion",
         status="active",
-        created_at=now,
+        created_at=occurred_at or now,
     )
     formation = Delta(
         delta_id=f"dl:k:{uid}:formation",
@@ -293,13 +300,70 @@ def _ingest_edit(kernel: MemoryKernel, head: projection.Head, meta: dict[str, An
     ), evidence=(evidence,))
 
 
-def sync(kernel_db: Path | None = None, vault: Path | None = None) -> dict[str, Any]:
+def backfill_from_posts(posts_db: Path, kernel_db: Path, vault: Path) -> dict[str, Any]:
+    """Bring memories that fell back to posts (Kernel write failed) into the Kernel."""
+    if not posts_db.is_file():
+        return {"done": [], "errors": []}
+    conn = sqlite3.connect(str(posts_db), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_kernel_backfill'"
+        ).fetchone():
+            return {"done": [], "errors": []}
+        pending = conn.execute(
+            "SELECT b.post_id, p.* FROM memory_kernel_backfill b LEFT JOIN posts p ON p.id = b.post_id "
+            "WHERE b.done_at IS NULL ORDER BY b.post_id"
+        ).fetchall()
+        done, errors = [], []
+        for row in pending:
+            post_id = row["post_id"]
+            try:
+                if row["id"] is None:
+                    state_id = None  # the post was deleted before backfill: nothing to keep
+                else:
+                    result = remember(
+                        row["content"], source="legacy_fallback",
+                        provenance={"source_ref": f"posts:{post_id}", "post_id": post_id},
+                        tags=row["tags"], importance=row["importance"] or None,
+                        memory_type=row["type"], layer=row["layer"], pinned=row["pinned"],
+                        author=row["author"], occurred_at=_iso_beijing(row["created_at"]),
+                        kernel_db=kernel_db, vault=vault,
+                    )
+                    state_id = result["state_id"]
+                conn.execute(
+                    "UPDATE memory_kernel_backfill SET done_at=?, state_id=? WHERE post_id=?",
+                    (_now(), state_id, post_id),
+                )
+                conn.commit()
+                done.append(post_id)
+            except Exception as exc:
+                errors.append({"post_id": post_id, "error": type(exc).__name__})
+        return {"done": done, "errors": errors}
+    finally:
+        conn.close()
+
+
+def _iso_beijing(value: Any) -> str | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace(" ", "T", 1))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+    return parsed.isoformat()
+
+
+def sync(kernel_db: Path | None = None, vault: Path | None = None, posts_db: Path | None = None) -> dict[str, Any]:
     db = Path(kernel_db or kernel_db_path())
     target = Path(vault or vault_path())
+    backfilled = backfill_from_posts(Path(posts_db or posts_db_path()), db, target)
     ingested = ingest_from_ombre(db, target)
     heads, problems = projection.select_heads(db)
     applied = projection.apply(projection.plan(heads, target), target)
-    return {"ingested": ingested, "applied": applied, "problems": problems}
+    return {"backfilled": backfilled, "ingested": ingested, "applied": applied, "problems": problems}
 
 
 def status(kernel_db: Path | None = None, vault: Path | None = None) -> dict[str, Any]:

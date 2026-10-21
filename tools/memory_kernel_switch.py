@@ -32,7 +32,7 @@ def write_enabled(config_db: str | os.PathLike[str] | None) -> bool:
             row = conn.execute("SELECT value FROM runtime_config WHERE key=?", (FLAG_KEY,)).fetchone()
         finally:
             conn.close()
-    except sqlite3.Error:
+    except Exception:  # unreadable switch (locked, missing table, sandboxed caller) = legacy
         return False
     return bool(row) and str(row[0]).strip().lower() in _TRUE
 

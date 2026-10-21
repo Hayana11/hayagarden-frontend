@@ -390,10 +390,14 @@ def create_post():
             return jsonify({"error":"content looks like an unterminated <thinking> block, nothing to save"}), 400
     tags = data.get('tags','')
     from tools import memory_tool
-    new_id = memory_tool.save_memory(
+    written = memory_tool.save_memory(
         content, type=data.get('type','MEMORY'), author=data.get('author','user'),
-        layer=data.get('layer','recent'), tags=tags)
-    return jsonify({"ok":True,"id":new_id})
+        layer=data.get('layer','recent'), tags=tags, source='api_posts')
+    if isinstance(written, memory_tool.KernelWrite):
+        # 记忆类型在 memory.kernel_write 打开时进 Kernel，没有 posts.id
+        return jsonify({"ok": True, "store": "kernel", "kernel_state_id": written.state_id,
+                        "ombre_bucket_id": written.bucket_id})
+    return jsonify({"ok":True,"id":written})
 
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 def delete_post(pid):
