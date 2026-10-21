@@ -221,3 +221,120 @@ class GatewayRecallTests(PathsFixture):
         [bucket_ids] = touch.call_args.args
         self.assertEqual(sorted(bucket_ids), ["aaa111", "bbb222"])
         self.assertNotIn(pending["bucket_id"], bucket_ids)
+
+
+_APP = None
+
+
+def load_app():
+    """Import app.py once with /opt/frontend isolated (see tests/test_cc_effort.py)."""
+    global _APP
+    if _APP is None:
+        tmp = tempfile.mkdtemp(prefix="kernel-read-app-")
+        real_connect, real_open = sqlite3.connect, builtins.open
+        conn = real_connect(str(Path(tmp) / "memories.db"))
+        conn.execute(  # app.py migrates chat_messages at import time
+            "CREATE TABLE chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL DEFAULT 'user',"
+            " content TEXT NOT NULL DEFAULT '', thinking TEXT DEFAULT '', tool_calls TEXT DEFAULT '',"
+            " branches TEXT DEFAULT '', branch_idx INTEGER DEFAULT 0, cache_info TEXT DEFAULT '',"
+            " choices TEXT DEFAULT '', image_url TEXT DEFAULT '', file_url TEXT DEFAULT '',"
+            " file_name TEXT DEFAULT '', attachments TEXT DEFAULT '[]', display_segments TEXT DEFAULT '',"
+            " source_kind TEXT NOT NULL DEFAULT 'chat', created_at TEXT DEFAULT (datetime('now')))")
+        conn.commit()
+        conn.close()
+
+        def isolated_connect(database, *args, **kwargs):
+            raw = os.fspath(database)
+            if raw.startswith("/opt/frontend/"):
+                database = str(Path(tmp) / Path(raw).name)
+            return real_connect(database, *args, **kwargs)
+
+        def isolated_open(file, *args, **kwargs):
+            try:
+                raw = os.fspath(file)
+            except TypeError:
+                raw = ""
+            if raw == "/opt/frontend/.env":
+                return io.StringIO("")
+            return real_open(file, *args, **kwargs)
+
+        with mock.patch.object(sqlite3, "connect", side_effect=isolated_connect), \
+                mock.patch.object(builtins, "open", side_effect=isolated_open):
+            sys.modules.setdefault("moments_cover", types.ModuleType("moments_cover"))
+            if "account_balance_routes" not in sys.modules:
+                from flask import Blueprint
+                routes = types.ModuleType("account_balance_routes")
+                routes.create_relay_account_blueprint = lambda **_kw: Blueprint("kernel_read_stub", __name__)
+                sys.modules["account_balance_routes"] = routes
+            import app
+        _APP = app
+    return _APP
+
+
+class DashboardTests(PathsFixture):
+    def setUp(self):
+        super().setUp()
+        self.app = load_app()
+        patcher = mock.patch.object(self.app, "get_db", side_effect=self.conn)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = self.app.app.test_client()
+        self.written = self.kernel_memory("她在阳台种了一盆藏红花。", layer="long-term")
+        self.ref = f"kernel:{self.written['lineage_id']}"
+        self.today = reader.list_current(self.kernel)[0]["created_at"][:10]
+
+    def library(self, path="/api/memories/library/index"):
+        return self.client.get(path).get_json()
+
+    def test_switch_off_library_uses_post_refs_and_no_kernel(self):
+        ids = [e["id"] for e in self.library()["entries"]]
+        self.assertIn("post:40", ids)
+        self.assertNotIn(self.ref, ids)
+        self.assertEqual(self.client.get("/api/memories/library/entry/post:40").get_json()["id"], "post:40")
+        self.assertEqual(self.client.get("/api/memories/library/entry/40").get_json()["id"], "post:40")
+        self.assertEqual(self.client.get(f"/api/memories/library/entry/{self.ref}").status_code, 404)
+
+    def test_switch_on_library_index_full_detail_and_search(self):
+        set_flag(self.posts, "1")
+        for path in ("/api/memories/library/index", "/api/memories/library"):
+            ids = [e["id"] for e in self.library(path)["entries"]]
+            self.assertIn(self.ref, ids, path)
+            self.assertNotIn("post:40", ids, path)  # legacy memory post: Kernel owns memories now
+            self.assertIn("post:41", ids, path)  # DIARY stays in posts
+        detail = self.client.get(f"/api/memories/library/entry/{self.ref}").get_json()
+        self.assertEqual(detail, {"id": self.ref, "content": "她在阳台种了一盆藏红花。"})
+        self.assertEqual(self.client.get("/api/memories/library/entry/post:40").status_code, 404)
+        found = self.client.get("/api/memories/library/search?q=藏红花").get_json()["results"]
+        self.assertEqual([r["id"] for r in found], [self.ref])
+
+    def test_switch_on_pending_fallback_is_listed_and_openable(self):
+        set_flag(self.posts, "1")
+        post_id = self.fallback("她把围巾落在了电影院。")
+        ids = [e["id"] for e in self.library()["entries"]]
+        self.assertIn(f"post:{post_id}", ids)
+        self.assertEqual(self.client.get(f"/api/memories/library/entry/post:{post_id}").status_code, 200)
+
+    def test_switch_on_summary_calendar_and_posts_list(self):
+        set_flag(self.posts, "1")
+        summary = self.client.get("/api/posts/summary").get_json()
+        texts = [i["text"] for s in summary["sections"] for i in s["items"]]
+        self.assertIn("她在阳台种了一盆藏红花。", texts)
+        self.assertNotIn(LEGACY, texts)
+        month = self.client.get(f"/api/posts/calendar?month={self.today[:7]}").get_json()
+        self.assertTrue(month["days"][int(self.today[8:]) - 1]["hasMemory"])
+        day = self.client.get(f"/api/posts/calendar/day?date={self.today}").get_json()["entries"]
+        self.assertIn("她在阳台种了一盆藏红花。", [e["title"] for e in day])
+        self.assertNotIn(LEGACY, [e["title"] for e in day])
+        listed = self.client.get("/api/posts?type=MEMORY&layer=long-term&limit=500").get_json()["posts"]
+        self.assertEqual([p["id"] for p in listed], [self.ref])
+        everything = [p["id"] for p in self.client.get("/api/posts?limit=500").get_json()["posts"]]
+        self.assertIn(41, everything)
+        self.assertNotIn(40, everything)
+        self.assertIn(self.ref, everything)
+
+    def test_switch_off_dashboards_are_unchanged(self):
+        summary = self.client.get("/api/posts/summary").get_json()
+        self.assertIn(LEGACY[:120], [i["text"] for s in summary["sections"] for i in s["items"]])
+        listed = [p["id"] for p in self.client.get("/api/posts?type=MEMORY&limit=500").get_json()["posts"]]
+        self.assertIn(40, listed)
+        self.assertNotIn(self.ref, listed)

@@ -27,12 +27,12 @@ import {
   type MemoryState,
   type MoonInfo,
 } from '../lib/memoryLib';
-import type { MemoryIndexEntry, MemorySearchResult, MemoryTopic, MemoryWeight } from '../types';
+import type { MemoryEntryId, MemoryIndexEntry, MemorySearchResult, MemoryTopic, MemoryWeight } from '../types';
 
 type ViewMode = 'time' | 'topic' | 'star';
 type StateFilter = MemoryState | 'all';
 type Chip = { type: 'tag' | 'who'; value: string };
-type DrawerFrame = { type: 'day'; date: string } | { type: 'topic'; key: string } | { type: 'mem'; id: number };
+type DrawerFrame = { type: 'day'; date: string } | { type: 'topic'; key: string } | { type: 'mem'; id: MemoryEntryId };
 
 const VIEW_TABS: { key: ViewMode; icon: string; label: string }[] = [
   { key: 'time', icon: '🌓', label: '月相' },
@@ -60,7 +60,7 @@ function pointerDist(a: { x: number; y: number }, b: { x: number; y: number }) {
 
 type StarPointer = { x: number; y: number };
 type StarGesture =
-  | { kind: 'pending'; x: number; y: number; ox: number; oy: number; starId?: number }
+  | { kind: 'pending'; x: number; y: number; ox: number; oy: number; starId?: MemoryEntryId }
   | { kind: 'pan'; x: number; y: number; ox: number; oy: number }
   | { kind: 'pinch'; startDist: number; startZoom: number; startPan: { x: number; y: number }; startMid: StarPointer; moved: boolean };
 
@@ -98,7 +98,7 @@ export function MemoryScreen() {
   const [observeMode, setObserveMode] = useState<ObserveMode>('none');
   const [observeValue, setObserveValue] = useState<string | null>(null);
   const [replayPct, setReplayPct] = useState(100);
-  const [rippleId, setRippleId] = useState<number | null>(null);
+  const [rippleId, setRippleId] = useState<MemoryEntryId | null>(null);
   const [starPan, setStarPan] = useState({ x: 0, y: 0 });
   const starGestureRef = useRef<StarGesture | null>(null);
   const starPointersRef = useRef(new Map<number, StarPointer>());
@@ -467,7 +467,7 @@ export function MemoryScreen() {
       setTelescopeStep(key);
     }
   }
-  function starClick(id: number) {
+  function starClick(id: MemoryEntryId) {
     setRippleId(id);
     window.setTimeout(() => {
       pushFrame({ type: 'mem', id });
@@ -482,8 +482,8 @@ export function MemoryScreen() {
     const angle = (i / Math.max(1, activeTopics.length)) * Math.PI * 2 - Math.PI / 2;
     topicLayout.set(t.key, { x: 50 + Math.cos(angle) * 28, y: 50 + Math.sin(angle) * 26, color: constellationColor(i) });
   });
-  const starPos = new Map<number, { x: number; y: number }>();
-  type StarPoint = { id: number; x: number; y: number; s: number; c: string; big: boolean; tip: string; topicKey: string; links: number[]; observed: boolean };
+  const starPos = new Map<MemoryEntryId, { x: number; y: number }>();
+  type StarPoint = { id: MemoryEntryId; x: number; y: number; s: number; c: string; big: boolean; tip: string; topicKey: string; links: MemoryEntryId[]; observed: boolean };
   const stars: StarPoint[] = [];
   const constellationPaths: string[] = [];
   const starLabels: { x: number; y: number; name: string }[] = [];
@@ -559,7 +559,7 @@ export function MemoryScreen() {
       return;
     }
     const starNode = (e.target as HTMLElement).closest('[data-star-node]');
-    const starId = starNode ? Number((starNode as HTMLElement).dataset.starId) : undefined;
+    const starId = starNode ? (starNode as HTMLElement).dataset.starId : undefined;
     starGestureRef.current = { kind: 'pending', x: e.clientX, y: e.clientY, ox: starPan.x, oy: starPan.y, starId };
   }
 
@@ -619,7 +619,7 @@ export function MemoryScreen() {
       return;
     }
 
-    if (g?.kind === 'pending' && g.starId !== undefined && !Number.isNaN(g.starId)) {
+    if (g?.kind === 'pending' && g.starId !== undefined && g.starId !== '') {
       starClick(g.starId);
     }
     starGestureRef.current = null;
@@ -1502,7 +1502,7 @@ function MemDetailPanel({
   pushFrame,
   detailCaches,
 }: {
-  id: number;
+  id: MemoryEntryId;
   entries: MemoryIndexEntry[];
   topicByKey: Map<string, MemoryTopic>;
   pushFrame: (frame: DrawerFrame) => void;

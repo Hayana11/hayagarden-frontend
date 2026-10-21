@@ -214,6 +214,8 @@ class LegacyIsolationTests(unittest.TestCase):
                 "tools/dream_generator.py",
                 "chat/system_builder.py",
                 "gateway.py",
+                "app.py",
+                "tools/memory_library.py",
             }:
                 continue
             with self.subTest(path=path.relative_to(ROOT)):

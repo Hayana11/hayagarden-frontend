@@ -6,8 +6,9 @@ import {
   markMemoryPerf,
   type MemoryDetailCaches,
 } from '../lib/memoryColdStart';
+import type { MemoryEntryId } from '../types';
 
-export function useMemoryEntryContent(entryId: number | null, caches: MemoryDetailCaches) {
+export function useMemoryEntryContent(entryId: MemoryEntryId | null, caches: MemoryDetailCaches) {
   const [content, setContent] = useState<string | null>(() =>
     entryId != null ? caches.content.get(entryId) ?? null : null,
   );

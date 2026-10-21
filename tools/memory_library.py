@@ -3,6 +3,7 @@ import re
 from collections import defaultdict
 
 from tools import summary_title
+from tools.memory_kernel_switch import cutover_posts_db
 
 # Thoughts/dreams stay in posts for 朋友圈, but are not part of 记忆库.
 LIBRARY_TYPES = ('MEMORY', 'DIARY', 'FACT', 'DAILY_SUMMARY')
@@ -118,7 +119,7 @@ def _make_excerpt(content_head):
 
 def _index_title_source(row):
     """Bounded title source for index rows — never loads full content into Python."""
-    content_head = (row['content_head'] if 'content_head' in row.keys() else row.get('content') or '').strip()
+    content_head = (row['content_head'] if 'content_head' in row.keys() else row['content'] or '').strip()
     if (row['summary_title'] or '').strip():
         return content_head
     parts = [content_head]
@@ -151,8 +152,46 @@ def _library_select_sql(summary_expr, *, content_mode):
 def _fetch_library_rows(conn, limit=500, *, content_mode='full'):
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     summary_expr = 'summary_title' if 'summary_title' in post_cols else "'' AS summary_title"
-    sql = _library_select_sql(summary_expr, content_mode=content_mode)
-    return conn.execute(sql, (*LIBRARY_TYPES, limit)).fetchall()
+    kernel_posts = cutover_posts_db(conn)
+    if kernel_posts is None:
+        sql = _library_select_sql(summary_expr, content_mode=content_mode)
+        return conn.execute(sql, (*LIBRARY_TYPES, limit)).fetchall()
+    # Memory Kernel cutover: memories come from the Kernel, posts keep the rest.
+    from tools import memory_kernel_read as mkr
+    post_types = tuple(t for t in LIBRARY_TYPES if t not in mkr.MEMORY_TYPES)
+    sql = _library_select_sql(summary_expr, content_mode=content_mode).replace(
+        f"IN ({','.join('?' * len(LIBRARY_TYPES))})", f"IN ({','.join('?' * len(post_types))})")
+    rows = [dict(r) for r in conn.execute(sql, (*post_types, limit)).fetchall()]
+    memory_types = tuple(t for t in LIBRARY_TYPES if t in mkr.MEMORY_TYPES)
+    for item in mkr.memory_items(kernel_posts, memory_type=memory_types):
+        rows.append(_kernel_row(item, content_mode))
+    rows.sort(key=lambda r: (str(r['created_at'] or ''), str(r.get('ref') or r['id'])), reverse=True)
+    return rows[:limit]
+
+
+def _kernel_row(item, content_mode):
+    """A Kernel memory shaped like a library posts row (see _library_select_sql)."""
+    content = item.get('content') or ''
+    row = {k: item.get(k) for k in ('id', 'ref', 'type', 'author', 'created_at', 'pinned', 'tags',
+                                    'layer', 'importance', 'summary_title')}
+    if content_mode != 'head':
+        row['content'] = content
+        return row
+    row['content_head'] = content[:CONTENT_HEAD_LEN]
+    for key, mark, size in (('title_cand_lcorner', '「', TITLE_CAND_CORNER_LEN),
+                            ('title_cand_lcorner2', '『', TITLE_CAND_CORNER_LEN),
+                            ('title_cand_book', '《', TITLE_CAND_BOOK_LEN)):
+        at = content.find(mark)
+        row[key] = content[at:at + size] if at >= 0 else ''
+    return row
+
+
+def entry_ref(row):
+    """Stable, source-qualified id: post:<id> or kernel:<lineage> (never a bare number)."""
+    keys = row.keys()
+    if 'ref' in keys and row['ref']:
+        return str(row['ref'])
+    return f"post:{int(row['id'])}"
 
 
 def _entry_base_from_row(row, *, include_content=False):
@@ -174,7 +213,7 @@ def _entry_base_from_row(row, *, include_content=False):
         titles = dict(titles)
         titles['preview'] = summary_title.truncate_preview(content_source, titles['summaryTitle'])
     entry = {
-        'id': int(row['id']),
+        'id': entry_ref(row),
         'date': date_part or created[:10],
         'time': (time_part or '00:00')[:5],
         'weight': _post_weight(row),
@@ -313,7 +352,21 @@ def build_memory_library(conn, limit=500):
     return _assemble_library(entries, topic_labels, topic_types, assoc_by_id, use_inverted_links=True)
 
 
-def get_memory_library_entry_detail(conn, pid):
+def get_memory_library_entry_detail(conn, ref):
+    """Detail by stable id (post:<id> / kernel:<lineage>); a bare number means post:<id>."""
+    ref = str(ref or '').strip()
+    kernel_posts = cutover_posts_db(conn)
+    if ref.startswith('kernel:'):
+        if kernel_posts is None:
+            return None
+        from tools import memory_kernel_read as mkr
+        item = mkr.get_current([ref[len('kernel:'):]]).get(ref[len('kernel:'):])
+        if not item or item['resolved'] or item['type'] not in LIBRARY_TYPES:
+            return None
+        return {'id': ref, 'content': (item['content'] or '').strip()}
+    pid = ref[len('post:'):] if ref.startswith('post:') else ref
+    if not pid.isdigit():
+        return None
     row = conn.execute(
         """SELECT id, type, content, resolved
            FROM posts WHERE id = ?""",
@@ -324,7 +377,13 @@ def get_memory_library_entry_detail(conn, pid):
     ptype = (row['type'] or '').strip()
     if ptype not in LIBRARY_TYPES or int(row['resolved'] or 0) != 0:
         return None
-    return {'id': int(row['id']), 'content': (row['content'] or '').strip()}
+    if kernel_posts is not None:
+        # A memory post is only part of the library while it waits for backfill.
+        from tools import memory_kernel_read as mkr
+        if ptype in mkr.MEMORY_TYPES and int(row['id']) not in {
+                i['id'] for i in mkr.pending_fallback_posts(kernel_posts, memory_type=ptype)}:
+            return None
+    return {'id': f"post:{int(row['id'])}", 'content': (row['content'] or '').strip()}
 
 
 def search_memory_library(conn, query, limit=4):
@@ -350,7 +409,7 @@ def search_memory_library(conn, query, limit=4):
         created = (row['created_at'] or '').strip()
         date_part, _, _ = created.partition(' ')
         results.append({
-            'id': int(row['id']),
+            'id': entry_ref(row),
             'summaryTitle': titles['summaryTitle'],
             'preview': titles['preview'],
             'date': date_part or created[:10],

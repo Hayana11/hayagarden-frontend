@@ -217,8 +217,14 @@ export interface MemoryTopic {
   related: MemoryTopicRelation[];
 }
 
+/**
+ * Stable, source-qualified memory id: `post:<id>` for posts rows, `kernel:<lineage>`
+ * for Memory Kernel memories. Opaque to the client; never parse it.
+ */
+export type MemoryEntryId = string;
+
 export interface MemoryEntry {
-  id: number;
+  id: MemoryEntryId;
   date: string;
   time: string;
   weight: MemoryWeight;
@@ -233,12 +239,12 @@ export interface MemoryEntry {
   tags: string[];
   content: string;
   /** Ids of other entries this one is semantically linked to. */
-  links: number[];
+  links: MemoryEntryId[];
 }
 
 /** Index row for cold-start — no full `content`. */
 export interface MemoryIndexEntry {
-  id: number;
+  id: MemoryEntryId;
   date: string;
   time: string;
   weight: MemoryWeight;
@@ -249,7 +255,7 @@ export interface MemoryIndexEntry {
   who: string;
   topics: string[];
   tags: string[];
-  links: number[];
+  links: MemoryEntryId[];
 }
 
 export interface MemoryLibraryIndex {
@@ -259,7 +265,7 @@ export interface MemoryLibraryIndex {
 }
 
 export interface MemorySearchResult {
-  id: number;
+  id: MemoryEntryId;
   summaryTitle: string;
   preview: string;
   date: string;
@@ -270,7 +276,7 @@ export interface MemorySearchResult {
 }
 
 export interface MemoryEntryDetail {
-  id: number;
+  id: MemoryEntryId;
   content: string;
 }
 
