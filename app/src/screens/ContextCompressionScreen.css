@@ -153,6 +153,8 @@
 .cc-unavailable-hint, .cc-unavailable-copy { margin-top:7px; color:#9a8787; font-size:11px; line-height:1.7; overflow-wrap:anywhere; }
 .cc-data-state { padding:18px 16px; border:1px solid #ede8e8; border-radius:18px; background:#fff; color:var(--cc-muted); font-size:12px; line-height:1.8; overflow-wrap:anywhere; }
 .cc-data-state--error { border-color:#edd7d4; background:#fcf4f2; color:#a47b77; }
+.cc-load-originals { display:block; margin:0 auto 4px; padding:10px 18px; font-size:13px!important; }
+.cc-data-state .cc-load-originals { margin-top:10px; }
 .cc-current-section { margin-top:24px; }
 .cc-current--unavailable strong { display:block; margin:4px 0 0; font-size:13px; font-weight:500; }
 .cc-current--unavailable p { margin:7px 0 0; color:var(--cc-muted); font-size:11px; line-height:1.7; overflow-wrap:anywhere; }

@@ -97,4 +97,15 @@ const dayblockCss = css.slice(css.indexOf('/* DayBlock:'));
 assert.ok(dayblockCss.length > 20, 'DayBlock CSS block present');
 assert.doesNotMatch(dayblockCss, /\bgap\s*:|\binset\s*:|\bzoom\s*:|transform:\s*scale\(|\b100dvh\b|aspect-ratio/);
 
+// Summary first: opening a chunk must not wait on the original chat.
+assert.match(client, /options\.messages === false \? '\?messages=0' : ''/);
+assert.match(screen, /fetchContinuityBlockDetail\(selected, controller\.signal, \{ messages: false \}\)/,
+  'block detail opens with the summary only');
+assert.match(screen, /查看完整原聊天记录<\/button>/);
+assert.match(screen, /<OriginalChat messages=\{full\.messages\} \/>/,
+  'original chat renders only from the on-demand read');
+assert.doesNotMatch(screen, /<OriginalChat messages=\{value\.messages\}/);
+assert.match(screen, /if \(selectedRef\.current !== id\) return/,
+  'a late original-chat read must not land on another block');
+
 console.log('test-context-compression-page: ok');

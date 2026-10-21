@@ -182,7 +182,11 @@ def create_context_compression_blueprint(
         if request.method not in ('GET', 'HEAD'):
             return _method_not_allowed()
         try:
-            payload = get_block_detail(db_path=db_path, candidate_id=candidate_id)
+            payload = get_block_detail(
+                db_path=db_path,
+                candidate_id=candidate_id,
+                include_messages=request.args.get('messages') != '0',
+            )
         except Exception:
             logger.exception('context-compression/blocks/%s failed', candidate_id)
             return _json_error('continuity_read_failed', 500)

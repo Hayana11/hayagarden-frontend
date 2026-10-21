@@ -303,6 +303,24 @@ class ContextCompressionReadSurfaceTests(unittest.TestCase):
         self.assertTrue(all('thinking' not in item for item in payload['messages']))
         self.assertNotIn('private thinking must never be evidence', json.dumps(payload, ensure_ascii=False))
 
+    def test_detail_summary_only_skips_original_messages(self):
+        rows = _turns(1)
+        conn = self._write(rows)
+        candidate = self._persist_ready_chunk(conn, rows)
+        conn.close()
+
+        fast = self.client.get('/dash/__continuity/blocks/' + candidate.candidate_id + '?messages=0')
+        self.assertEqual(fast.status_code, 200)
+        payload = fast.get_json()
+        self.assertEqual(payload['chunk']['body'], '压缩总结正文')
+        self.assertEqual(payload['messages'], [])
+        self.assertFalse(payload['messages_included'])
+        self.assertFalse(payload['block']['materialization_available'])
+
+        full = self.client.get('/dash/__continuity/blocks/' + candidate.candidate_id).get_json()
+        self.assertTrue(full['messages_included'])
+        self.assertEqual([item['content'] for item in full['messages']], ['用户第0句', '陪伴第0句'])
+
     def test_failed_generation_maps_to_failed_status(self):
         rows = _turns(1)
         conn = self._write(rows)

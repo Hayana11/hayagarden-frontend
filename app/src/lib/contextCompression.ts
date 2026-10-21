@@ -46,6 +46,7 @@ export type ContinuityBlockDetailResponse = {
   source: unknown
   chunk: ContinuityChunk | null
   messages: ContinuityMessage[]
+  messages_included?: boolean
 }
 
 export type ContinuityCurrentResponse = {
@@ -105,8 +106,14 @@ export async function fetchContinuityBlocks(signal?: AbortSignal): Promise<Conti
   return value as ContinuityBlocksResponse
 }
 
-export async function fetchContinuityBlockDetail(candidateId: string, signal?: AbortSignal): Promise<ContinuityBlockDetailResponse> {
-  const value = await fetchJson('/blocks/' + encodeURIComponent(candidateId), signal)
+/** Summary first: pass { messages: false } to skip the slow original-chat read. */
+export async function fetchContinuityBlockDetail(
+  candidateId: string,
+  signal?: AbortSignal,
+  options: { messages?: boolean } = {},
+): Promise<ContinuityBlockDetailResponse> {
+  const query = options.messages === false ? '?messages=0' : ''
+  const value = await fetchJson('/blocks/' + encodeURIComponent(candidateId) + query, signal)
   assertOkRecord(value, '压缩块详情')
   if (!isRecord(value.block) || !Array.isArray(value.messages)) throw new Error('压缩块详情返回格式无效')
   return value as ContinuityBlockDetailResponse

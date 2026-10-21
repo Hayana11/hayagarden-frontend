@@ -275,8 +275,19 @@ function HistoryCard({ block, onOpen }: { block: ContinuityBlock; onOpen: () => 
   </div>
 }
 
-function HistoryDetail({ value }: { value: ContinuityBlockDetailResponse }) {
+type OriginalsState = {
+  state: 'idle' | 'loading' | 'ready' | 'error'
+  value: ContinuityBlockDetailResponse | null
+  error: string
+}
+
+function HistoryDetail({ value, originals, onLoadOriginals }: {
+  value: ContinuityBlockDetailResponse
+  originals: OriginalsState
+  onLoadOriginals: () => void
+}) {
   const block = value.block
+  const full = originals.state === 'ready' ? originals.value : null
   const summary = value.chunk?.body
   return <>
     {block.status === 'complete' && <section className="cc-summary">
@@ -290,9 +301,12 @@ function HistoryDetail({ value }: { value: ContinuityBlockDetailResponse }) {
     {block.status === 'failed' && <div className="cc-retry"><p>这一段暂时没有压缩成功，原聊天仍完整保留。</p><button className="cc-secondary" type="button" disabled>重新压缩</button>{block.materialization_error && <p className="cc-tech-note">{block.materialization_error}</p>}</div>}
     {block.status === 'compressing' && <p className="cc-working">压缩中，正在整理这段对话…</p>}
     <h3 className="cc-original-title">完整原聊天记录</h3>
-    {!block.materialization_available
+    {originals.state === 'idle' && <button className="cc-secondary cc-load-originals" type="button" onClick={onLoadOriginals}>查看完整原聊天记录</button>}
+    {originals.state === 'loading' && <div className="cc-data-state" role="status">正在读取原聊天记录…</div>}
+    {originals.state === 'error' && <div className="cc-data-state cc-data-state--error" role="alert">原聊天记录读取失败：{originals.error}<button className="cc-secondary cc-load-originals" type="button" onClick={onLoadOriginals}>重试</button></div>}
+    {full && (!full.block.materialization_available
       ? <p className="cc-empty-copy">原聊天仍保留，当前无法展示原文。</p>
-      : <OriginalChat messages={value.messages} />}
+      : <OriginalChat messages={full.messages} />)}
   </>
 }
 
@@ -372,6 +386,9 @@ export function ContextCompressionScreen() {
   const [detail, setDetail] = useState<ContinuityBlockDetailResponse | null>(null)
   const [detailState, setDetailState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [detailError, setDetailError] = useState('')
+  const [originals, setOriginals] = useState<OriginalsState>({ state: 'idle', value: null, error: '' })
+  const selectedRef = useRef(selected)
+  const originalsAbortRef = useRef<AbortController | null>(null)
   const [dayblocks, setDayblocks] = useState<Record<string, DayBlockSummary>>({})
   const [dayDetail, setDayDetail] = useState<DayBlockDetail | null>(null)
   const [openDayChunks, setOpenDayChunks] = useState<string[]>([])
@@ -430,6 +447,10 @@ export function ContextCompressionScreen() {
   }, [])
 
   useEffect(() => {
+    selectedRef.current = selected
+    if (originalsAbortRef.current) originalsAbortRef.current.abort()
+    originalsAbortRef.current = null
+    setOriginals({ state: 'idle', value: null, error: '' })
     if (!selected || selected === 'current') {
       setDetail(null)
       setDayDetail(null)
@@ -452,7 +473,7 @@ export function ContextCompressionScreen() {
       })
       return () => controller.abort()
     }
-    fetchContinuityBlockDetail(selected, controller.signal).then(value => {
+    fetchContinuityBlockDetail(selected, controller.signal, { messages: false }).then(value => {
       setDetail(value)
       setDetailState('ready')
     }).catch(error => {
@@ -462,6 +483,28 @@ export function ContextCompressionScreen() {
     })
     return () => controller.abort()
   }, [selected])
+
+  // Original chat is the slow part of a block; read it only when asked.
+  function loadOriginals() {
+    const id = selectedRef.current
+    if (!id || id === 'current' || id.indexOf(DAYBLOCK_SELECTION_PREFIX) === 0) return
+    if (originalsAbortRef.current) originalsAbortRef.current.abort()
+    const controller = new AbortController()
+    originalsAbortRef.current = controller
+    setOriginals({ state: 'loading', value: null, error: '' })
+    fetchContinuityBlockDetail(id, controller.signal).then(value => {
+      if (selectedRef.current !== id) return
+      setOriginals({ state: 'ready', value, error: '' })
+    }).catch(error => {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      if (selectedRef.current !== id) return
+      setOriginals({ state: 'error', value: null, error: error instanceof Error ? error.message : '原聊天记录读取失败' })
+    })
+  }
+
+  useEffect(() => () => {
+    if (originalsAbortRef.current) originalsAbortRef.current.abort()
+  }, [])
 
   const grouped = useMemo(() => {
     const groups = new Map<string, ContinuityBlock[]>()
@@ -594,7 +637,7 @@ export function ContextCompressionScreen() {
         {selected !== 'current' && detailState === 'loading' && <div className="cc-data-state" role="status">{selectedDay ? '正在读取日块…' : '正在读取真实块详情…'}</div>}
         {selected !== 'current' && detailState === 'error' && <div className="cc-data-state cc-data-state--error" role="alert">详情读取失败：{detailError}</div>}
         {selectedDay && detailState === 'ready' && dayDetail && <DayBlockDetailView value={dayDetail} items={groupedByDay.get(selectedDay) || []} onOpenBlock={openHistory} />}
-        {!selectedDay && selected !== 'current' && detailState === 'ready' && detail && <HistoryDetail value={detail} />}
+        {!selectedDay && selected !== 'current' && detailState === 'ready' && detail && <HistoryDetail value={detail} originals={originals} onLoadOriginals={loadOriginals} />}
       </div>
     </Sheet>}
     {panel === 'settings' && <Popover anchor={settingsBtn.current} kind="settings" width={324} label="压缩设置" onClose={() => setPanel(null)}>
