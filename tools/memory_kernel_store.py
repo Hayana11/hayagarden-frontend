@@ -107,13 +107,11 @@ def remember(
     target = Path(vault or vault_path())
     now = now or _now()
 
-    heads, _ = projection.select_heads(db)
     wanted = _norm(text)
-    for head in heads:
-        if _norm(head.state.content or "") == wanted:
-            return {"status": "DEDUPLICATED", "state_id": head.state.state_id,
-                    "lineage_id": head.lineage_id, "bucket_id": head.bucket_id,
-                    "content_sha256": _sha(text)}
+    for lineage_id, state_id, existing in projection.head_contents(db):
+        if _norm(existing) == wanted:
+            return {"status": "DEDUPLICATED", "state_id": state_id, "lineage_id": lineage_id,
+                    "bucket_id": projection.bucket_id_for(lineage_id), "content_sha256": _sha(text)}
 
     uid = uuid.uuid4().hex[:16]
     lineage = f"lin:k:{uid}"

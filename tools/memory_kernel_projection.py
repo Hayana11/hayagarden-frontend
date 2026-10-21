@@ -108,6 +108,23 @@ def select_heads(kernel_db: Path) -> tuple[list[Head], list[dict[str, Any]]]:
     return heads, problems
 
 
+def head_contents(kernel_db: Path) -> list[tuple[str, str, str]]:
+    """Cheap read-only (lineage_id, state_id, content) of every head, for dedupe."""
+    conn = sqlite3.connect(f"file:{kernel_db}?mode=ro", uri=True)
+    try:
+        return [tuple(row) for row in conn.execute(
+            "SELECT s.lineage_id, s.state_id, s.content FROM memory_kernel_state s "
+            "WHERE s.lineage_id IS NOT NULL AND s.content IS NOT NULL AND NOT EXISTS "
+            "(SELECT 1 FROM memory_kernel_delta d WHERE d.before_ref = s.state_id)"
+        )]
+    finally:
+        conn.close()
+
+
+def bucket_id_for(lineage_id: str) -> str:
+    return Head(lineage_id, None).bucket_id  # type: ignore[arg-type]
+
+
 def _as_list(value: Any) -> list[str]:
     # Legacy posts keep tags as one comma-separated string.
     if isinstance(value, str):
@@ -319,7 +336,7 @@ def apply(actions: dict[str, Any], vault: Path) -> dict[str, int]:
     for action in actions["actions"]:
         if action["op"] == "create":
             with bucket_lease(vault, action["bucket_id"]):
-                if action["bucket_id"] in index_vault(vault):
+                if find_buckets(vault, [action["bucket_id"]]):
                     counts["raced"] += 1
                     continue
                 meta = {
