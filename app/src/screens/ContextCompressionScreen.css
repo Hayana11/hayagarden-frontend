@@ -166,3 +166,9 @@
 .cc-current-state > * + * { margin-top:3px; }
 .cc-current-state strong { font-size:11px; font-weight:500; color:var(--color-text-soft); }
 .cc-current-state--threshold { background:#f8f1e7; color:#9a8262; }
+/* DayBlock: one card per day above that day's chunks (Chrome78: no flex gap/inset). */
+.cc-card--dayblock { border-color:#e9cdd6; background:var(--cc-blush); }
+.cc-day-chunks-toggle { display:block; margin:6px 0 0 auto; padding:4px 2px; border:0; background:none; color:var(--cc-muted); font-family:var(--font-mono); font-size:11px!important; letter-spacing:.4px; }
+.cc-day-blocks--under-dayblock { margin-top:9px; padding-left:12px; border-left:2px solid #f0dce3; }
+.cc-dayblock-meta { margin:8px 2px 0; }
+.cc-retry + .cc-summary { margin-top:16px; }

@@ -58,4 +58,43 @@ assert.doesNotMatch(settingsCss, /\b100dvh\b/);
 assert.doesNotMatch(settingsCss, /\bzoom\s*:/);
 assert.doesNotMatch(settingsCss, /transform:\s*scale\(/);
 
+// DayBlock layer: card above the day's chunks, chunks folded under it, full-text sheet.
+const { dayBlockStats, dayBlockStatusLabel, dayBlockStatusTone, dayBlockReasonCopy } = await import(
+  '../src/screens/contextCompression/dayblockView.ts'
+);
+const chunk = (turns) => ({ completed_turn_count: turns });
+const ready = {
+  source_day: '2026-10-18', status: 'ready', reason: null, completed_turn_count: 110,
+  output_token_estimate: 1640, body_char_count: 1700, raw_token_estimate: 33747,
+  created_at: '2026-10-19T03:00:00Z', model_identity: 'explicit:claude-opus-5-5',
+};
+assert.equal(
+  dayBlockStats(ready, [chunk(16), chunk(16), chunk(16), chunk(16), chunk(16), chunk(15), chunk(15)]),
+  '日块 · 7 个压缩块 · 110 轮 · 1.6k',
+);
+assert.equal(dayBlockStats({ ...ready, completed_turn_count: null }, [chunk(3), chunk(4)]), '日块 · 2 个压缩块 · 7 轮 · 1.6k');
+assert.equal(dayBlockStatusLabel(ready), '');
+const refused = { ...ready, status: 'rejected', reason: 'refusal_text' };
+assert.equal(dayBlockStatusLabel(refused), '未采用 · 拒绝稿');
+assert.equal(dayBlockStatusTone(refused), 'failed');
+assert.match(dayBlockReasonCopy(refused), /拒绝/);
+assert.equal(dayBlockStatusLabel({ ...ready, status: 'failed', reason: 'cc_background_spawn_failed' }), '生成失败');
+assert.equal(dayBlockStatusLabel({ ...ready, status: 'blocked' }), '未生成');
+
+assert.match(screen, /parts = \['压缩块', block\.completed_turn_count \+ ' 轮'\]/);
+assert.match(client, /fetchJson\('\/dayblocks'/);
+assert.match(client, /fetchJson\('\/dayblocks\/' \+ encodeURIComponent\(sourceDay\)/);
+assert.match(screen, /fetchDayBlocks\(controller\.signal\)[\s\S]{0,260}\.catch\(\(\) => undefined\)/,
+  'a DayBlock read failure must not break the chunk timeline');
+assert.match(screen, /<DayBlockCard /);
+assert.match(screen, /const chunksOpen = !dayblock \|\| openDayChunks\.includes\(day\)/,
+  "a day's chunks fold under its DayBlock by default and stay open when it has none");
+assert.match(screen, /'展开 ' \+ items\.length \+ ' 个压缩块'/);
+assert.match(screen, /DAYBLOCK_SELECTION_PREFIX = 'dayblock:'/);
+assert.match(screen, /<DayBlockDetailView /);
+assert.match(screen, /日块全文/);
+const dayblockCss = css.slice(css.indexOf('/* DayBlock:'));
+assert.ok(dayblockCss.length > 20, 'DayBlock CSS block present');
+assert.doesNotMatch(dayblockCss, /\bgap\s*:|\binset\s*:|\bzoom\s*:|transform:\s*scale\(|\b100dvh\b|aspect-ratio/);
+
 console.log('test-context-compression-page: ok');

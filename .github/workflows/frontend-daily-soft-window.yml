@@ -44,6 +44,7 @@ jobs:
           npm run test:chat-image-compression
           npm run test:chat-sse-heartbeat
           npm run test:chat-overdefense
+          npm run test:context-compression-page
           npm run test:chat-terminal-contract
           npm run test:file-choices-contract
           npm run test:chat-live-timeline

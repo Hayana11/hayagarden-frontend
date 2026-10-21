@@ -6,10 +6,14 @@ import {
   fetchContinuityBlockDetail,
   fetchContinuityBlocks,
   fetchContinuityCurrent,
+  fetchDayBlockDetail,
+  fetchDayBlocks,
   type ContinuityBlock,
   type ContinuityBlockDetailResponse,
   type ContinuityCurrentResponse,
   type ContinuityMessage,
+  type DayBlockDetail,
+  type DayBlockSummary,
 } from '../lib/contextCompression'
 import {
   fetchContinuitySettings,
@@ -18,20 +22,18 @@ import {
 } from '../lib/contextCompressionSettings'
 import { ROUTES } from '../navigation'
 import { CompressionSettings } from './contextCompression/CompressionSettings'
+import {
+  dayBlockReasonCopy,
+  dayBlockStats,
+  dayBlockStatusLabel,
+  dayBlockStatusTone,
+  formatLogicalSize,
+  formatNumber,
+} from './contextCompression/dayblockView'
 import './ContextCompressionScreen.css'
 
 const SHANGHAI_TIME = 'Asia/Shanghai'
 const weekdays = ['日', '一', '二', '三', '四', '五', '六']
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat('zh-CN').format(value)
-}
-
-function formatLogicalSize(value: number | null) {
-  if (value === null) return '—'
-  if (Math.abs(value) >= 1000) return (value / 1000).toFixed(1) + 'k'
-  return formatNumber(value)
-}
 
 function timeLabel(value: string | null) {
   if (!value) return '—'
@@ -72,7 +74,7 @@ function dayLabel(day: string) {
 
 function formatStats(block: ContinuityBlock) {
   const compressed = block.compressed_size ?? block.compressed_char_count
-  const parts = [block.completed_turn_count + ' 轮']
+  const parts = ['压缩块', block.completed_turn_count + ' 轮']
   if (block.original_char_count !== null) parts.push(block.original_char_count + ' 字')
   parts.push(formatLogicalSize(block.logical_size) + (compressed === null ? '' : ' → ' + formatLogicalSize(compressed)))
   return parts.join(' · ')
@@ -294,6 +296,68 @@ function HistoryDetail({ value }: { value: ContinuityBlockDetailResponse }) {
   </>
 }
 
+const DAYBLOCK_SELECTION_PREFIX = 'dayblock:'
+
+function dayRange(items: ContinuityBlock[]) {
+  const first = items[0]
+  const last = items[items.length - 1]
+  return timeLabel(first ? first.start_at : null) + '–' + timeLabel(last ? last.end_at : null)
+}
+
+function DayBlockCard({ day, dayblock, items, onOpen }: {
+  day: string
+  dayblock: DayBlockSummary
+  items: ContinuityBlock[]
+  onOpen: () => void
+}) {
+  const status = dayBlockStatusLabel(dayblock)
+  return <div className="cc-swipe" data-dayblock-day={day}>
+    <div className="cc-card cc-card--dayblock">
+      <button type="button" className="cc-card-main" aria-label={day + ' 日块 ' + (status || '查看全文')} onClick={onOpen}>
+        <div className="cc-card-copy">
+          <div className="cc-time">{day.slice(5).replace('-', '/')} <span>{dayRange(items)}</span></div>
+          <div className="cc-stats">{dayBlockStats(dayblock, items)}</div>
+        </div>
+        {status && <span className={'cc-status cc-status--' + dayBlockStatusTone(dayblock)}>{status}</span>}
+      </button>
+    </div>
+  </div>
+}
+
+function DayBlockDetailView({ value, items, onOpenBlock }: {
+  value: DayBlockDetail
+  items: ContinuityBlock[]
+  onOpenBlock: (candidateId: string) => void
+}) {
+  const reason = dayBlockReasonCopy(value)
+  const meta = [
+    value.created_at ? '生成于 ' + timeLabel(value.created_at) : '',
+    value.raw_token_estimate !== null ? '原文约 ' + formatLogicalSize(value.raw_token_estimate) + ' token' : '',
+    value.body_char_count !== null ? formatNumber(value.body_char_count) + ' 字' : '',
+  ].filter(Boolean).join(' · ')
+  return <>
+    {value.status !== 'ready' && <div className="cc-retry"><p>
+      {value.status === 'rejected'
+        ? '这篇日块没有被采用' + (reason ? '：' + reason : '') + '。这一天在上下文里仍使用压缩块。'
+        : value.status === 'failed'
+          ? '这一天的日块生成失败，这一天在上下文里仍使用压缩块。'
+          : '这一天还没有可用的日块，上下文里仍使用压缩块。'}
+    </p>{value.status === 'failed' && reason && <p className="cc-tech-note">{reason}</p>}</div>}
+    {value.body && <section className="cc-summary">
+      <div className="cc-summary-heading">
+        <span className="cc-summary-star" aria-hidden="true"><Icon name="star" /></span>
+        <h3>日块全文</h3>
+      </div>
+      <div className="cc-summary-glass"><p className="cc-summary-text">{value.body}</p></div>
+      {meta && <p className="cc-tech-note cc-dayblock-meta">{meta}</p>}
+    </section>}
+    <h3 className="cc-original-title">这一天的压缩块</h3>
+    {items.length
+      ? <div className="cc-day-blocks">{items.map(block => <HistoryCard key={block.candidate_id} block={block} onOpen={() => onOpenBlock(block.candidate_id)} />)}</div>
+      : <p className="cc-empty-copy">这一天没有可显示的压缩块。</p>}
+  </>
+}
+
 export function ContextCompressionScreen() {
   const navigate = useNavigate()
   const [blocks, setBlocks] = useState<ContinuityBlock[]>([])
@@ -308,6 +372,9 @@ export function ContextCompressionScreen() {
   const [detail, setDetail] = useState<ContinuityBlockDetailResponse | null>(null)
   const [detailState, setDetailState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [detailError, setDetailError] = useState('')
+  const [dayblocks, setDayblocks] = useState<Record<string, DayBlockSummary>>({})
+  const [dayDetail, setDayDetail] = useState<DayBlockDetail | null>(null)
+  const [openDayChunks, setOpenDayChunks] = useState<string[]>([])
   const [panel, setPanel] = useState<'calendar' | 'settings' | null>(null)
   const [settings, setSettings] = useState<ContinuitySettingsView | null>(null)
   const [settingsState, setSettingsState] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -330,6 +397,12 @@ export function ContextCompressionScreen() {
       setListError(error instanceof Error ? error.message : '真实压缩数据读取失败')
       setListState('error')
     })
+    // DayBlocks are an additive layer: a failed read only hides them.
+    fetchDayBlocks(controller.signal).then(value => {
+      const byDay: Record<string, DayBlockSummary> = {}
+      value.forEach(item => { byDay[item.source_day] = item })
+      setDayblocks(byDay)
+    }).catch(() => undefined)
     fetchContinuityCurrent(controller.signal).then(value => {
       if (value.available) {
         setCurrent(value)
@@ -359,13 +432,26 @@ export function ContextCompressionScreen() {
   useEffect(() => {
     if (!selected || selected === 'current') {
       setDetail(null)
+      setDayDetail(null)
       setDetailState(selected === 'current' ? 'ready' : 'idle')
       return
     }
     const controller = new AbortController()
     setDetail(null)
+    setDayDetail(null)
     setDetailError('')
     setDetailState('loading')
+    if (selected.indexOf(DAYBLOCK_SELECTION_PREFIX) === 0) {
+      fetchDayBlockDetail(selected.slice(DAYBLOCK_SELECTION_PREFIX.length), controller.signal).then(value => {
+        setDayDetail(value)
+        setDetailState('ready')
+      }).catch(error => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        setDetailError(error instanceof Error ? error.message : '日块读取失败')
+        setDetailState('error')
+      })
+      return () => controller.abort()
+    }
     fetchContinuityBlockDetail(selected, controller.signal).then(value => {
       setDetail(value)
       setDetailState('ready')
@@ -387,6 +473,10 @@ export function ContextCompressionScreen() {
     })
     return Array.from(groups.entries()).sort(([left], [right]) => left.localeCompare(right))
   }, [blocks])
+  const groupedByDay = useMemo(() => new Map(grouped), [grouped])
+  const selectedDay = selected && selected.indexOf(DAYBLOCK_SELECTION_PREFIX) === 0
+    ? selected.slice(DAYBLOCK_SELECTION_PREFIX.length)
+    : null
   const days = grouped.map(([day]) => day)
   const latestDay = days[days.length - 1] || dayFromTimestamp(current?.start_at || null)
   const progress = current ? Math.min(100, Math.max(0, Math.round(Math.max(current.size_progress, current.turn_progress)))) : 0
@@ -454,15 +544,25 @@ export function ContextCompressionScreen() {
         const unavailableCharacterCount = items.filter(block => block.original_char_count === null).length
         const knownCharacterCount = items.reduce((sum, block) => sum + (block.original_char_count ?? 0), 0)
         const characterSummary = unavailableCharacterCount === items.length ? '' : formatNumber(knownCharacterCount) + ' 字'
+        const dayblock = dayblocks[day]
+        const chunksOpen = !dayblock || openDayChunks.includes(day)
         return <section key={day} data-day={day} className="cc-day">
           {old
             ? <button className="cc-day-fold" aria-expanded={expanded} onClick={() => setExpandedDays(value => value.includes(day) ? value.filter(item => item !== day) : value.concat(day))}>
               <div className="cc-day-fold-top"><span>{dayLabel(day)}</span><span aria-hidden="true">{expanded ? '−' : '+'}</span></div>
-              <div className="cc-stats">{items.length} 个压缩块 · {formatNumber(items.reduce((sum, block) => sum + block.completed_turn_count, 0))} 轮{characterSummary ? ' · ' + characterSummary : ''}</div>
+              <div className="cc-stats">{dayblock && dayblock.status === 'ready'
+                ? dayBlockStats(dayblock, items)
+                : <>{items.length} 个压缩块 · {formatNumber(items.reduce((sum, block) => sum + block.completed_turn_count, 0))} 轮{characterSummary ? ' · ' + characterSummary : ''}</>}</div>
               {failed > 0 && <div className="cc-failure-note">有 {failed} 个压缩失败</div>}
             </button>
             : <h2 className="cc-day-label">{day === latestDay ? '最近' : dayLabel(day)}<span>{dayLabel(day)}</span><i /></h2>}
-          {expanded && <div className="cc-day-blocks">{items.map(block => <HistoryCard key={block.candidate_id} block={block} onOpen={() => openHistory(block.candidate_id)} />)}</div>}
+          {expanded && dayblock && <div className="cc-day-blocks">
+            <DayBlockCard day={day} dayblock={dayblock} items={items} onOpen={() => openHistory(DAYBLOCK_SELECTION_PREFIX + day)} />
+            <button type="button" className="cc-day-chunks-toggle" aria-expanded={chunksOpen} onClick={() => setOpenDayChunks(value => value.includes(day) ? value.filter(item => item !== day) : value.concat(day))}>
+              {chunksOpen ? '收起压缩块' : '展开 ' + items.length + ' 个压缩块'}
+            </button>
+          </div>}
+          {expanded && chunksOpen && <div className={'cc-day-blocks' + (dayblock ? ' cc-day-blocks--under-dayblock' : '')}>{items.map(block => <HistoryCard key={block.candidate_id} block={block} onOpen={() => openHistory(block.candidate_id)} />)}</div>}
         </section>
       })}
       <section className="cc-day cc-current-section">
@@ -487,13 +587,14 @@ export function ContextCompressionScreen() {
       {listState === 'ready' && <p className="cc-count-note">真实压缩历史共 {count} 块</p>}
     </div>
     {current && docked && !panel && !selected && <button type="button" className="cc-dock" onClick={() => currentRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' })}>当前块 · {progress}% · {currentNextLabel}</button>}
-    {selected && <Sheet label={selected === 'current' ? '当前聊天记录' : '压缩块详情'} onClose={closeDetail}>
-      <div className="cc-sheet-heading"><div><span className="cc-eyebrow">{selected === 'current' && current ? dayFromTimestamp(current.start_at).replace(/-/g, '/') + ' · ' + timeLabel(current.start_at) + '–现在' : detail ? blockDay(detail.block).replace(/-/g, '/') + ' · ' + timeLabel(detail.block.start_at) + '–' + timeLabel(detail.block.end_at) : '正在读取'}</span><h2>{selected === 'current' ? '当前聊天记录' : '这一段对话'}</h2></div><button className="cc-icon-button" type="button" aria-label="关闭详情" onClick={closeDetail}><Icon name="close" /></button></div>
+    {selected && <Sheet label={selected === 'current' ? '当前聊天记录' : selectedDay ? '日块详情' : '压缩块详情'} onClose={closeDetail}>
+      <div className="cc-sheet-heading"><div><span className="cc-eyebrow">{selected === 'current' && current ? dayFromTimestamp(current.start_at).replace(/-/g, '/') + ' · ' + timeLabel(current.start_at) + '–现在' : selectedDay ? selectedDay.replace(/-/g, '/') + ' · 日块' : detail ? blockDay(detail.block).replace(/-/g, '/') + ' · ' + timeLabel(detail.block.start_at) + '–' + timeLabel(detail.block.end_at) : '正在读取'}</span><h2>{selected === 'current' ? '当前聊天记录' : selectedDay ? '这一天的日块' : '这一段对话'}</h2></div><button className="cc-icon-button" type="button" aria-label="关闭详情" onClick={closeDetail}><Icon name="close" /></button></div>
       <div className="cc-detail-scroll">
         {selected === 'current' && current && <><h3 className="cc-original-title">原聊天记录</h3><OriginalChat messages={current.messages} /></>}
-        {selected !== 'current' && detailState === 'loading' && <div className="cc-data-state" role="status">正在读取真实块详情…</div>}
+        {selected !== 'current' && detailState === 'loading' && <div className="cc-data-state" role="status">{selectedDay ? '正在读取日块…' : '正在读取真实块详情…'}</div>}
         {selected !== 'current' && detailState === 'error' && <div className="cc-data-state cc-data-state--error" role="alert">详情读取失败：{detailError}</div>}
-        {selected !== 'current' && detailState === 'ready' && detail && <HistoryDetail value={detail} />}
+        {selectedDay && detailState === 'ready' && dayDetail && <DayBlockDetailView value={dayDetail} items={groupedByDay.get(selectedDay) || []} onOpenBlock={openHistory} />}
+        {!selectedDay && selected !== 'current' && detailState === 'ready' && detail && <HistoryDetail value={detail} />}
       </div>
     </Sheet>}
     {panel === 'settings' && <Popover anchor={settingsBtn.current} kind="settings" width={324} label="压缩设置" onClose={() => setPanel(null)}>

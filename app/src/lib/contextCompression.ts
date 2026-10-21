@@ -118,3 +118,31 @@ export async function fetchContinuityCurrent(signal?: AbortSignal): Promise<Cont
   if (typeof value.available !== 'boolean' || !Array.isArray(value.messages)) throw new Error('当前块返回格式无效')
   return value as ContinuityCurrentResponse
 }
+
+export type DayBlockStatus = 'ready' | 'rejected' | 'failed' | 'blocked' | 'processing' | 'stale'
+export type DayBlockSummary = {
+  source_day: string
+  status: DayBlockStatus
+  reason: string | null
+  completed_turn_count: number | null
+  output_token_estimate: number | null
+  body_char_count: number | null
+  raw_token_estimate: number | null
+  created_at: string | null
+  model_identity: string | null
+}
+export type DayBlockDetail = DayBlockSummary & { body: string | null }
+
+export async function fetchDayBlocks(signal?: AbortSignal): Promise<DayBlockSummary[]> {
+  const value = await fetchJson('/dayblocks', signal)
+  assertOkRecord(value, '日块列表')
+  if (!Array.isArray(value.dayblocks)) throw new Error('日块列表返回格式无效')
+  return value.dayblocks as DayBlockSummary[]
+}
+
+export async function fetchDayBlockDetail(sourceDay: string, signal?: AbortSignal): Promise<DayBlockDetail> {
+  const value = await fetchJson('/dayblocks/' + encodeURIComponent(sourceDay), signal)
+  assertOkRecord(value, '日块详情')
+  if (!isRecord(value.dayblock)) throw new Error('日块详情返回格式无效')
+  return value.dayblock as DayBlockDetail
+}

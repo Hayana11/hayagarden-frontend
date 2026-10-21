@@ -174,20 +174,27 @@ class StoreLoadTests(unittest.TestCase):
         for day, body, status, body_hash in receipts:
             snap = f'snap-{day}'
             _insert(conn, 'dayblock_source_snapshots', snapshot_id=snap, source_day=day,
-                    source_hash=f'sh-{day}', chat_id='default')
+                    source_hash=f'sh-{day}', chat_id='default', completed_turn_count=4)
             for i, m in enumerate(EXPECTED[:4]):
                 _insert(conn, 'dayblock_source_members', snapshot_id=snap, seq=i,
                         source_kind=m.source_kind, source_ref=m.source_ref,
                         source_revision=m.source_revision, content_hash=m.content_hash,
                         role=m.role, logical_size=20, created_at=m.created_at,
                         branch_id=m.branch_id)
+            job_blocked = status == 'job_blocked'
             _insert(conn, 'dayblock_shadow_jobs', job_id=f'job-{day}', candidate_id=f'cand-{day}',
-                    snapshot_id=snap, source_day=day, provider='claude_code', status='ready',
+                    snapshot_id=snap, source_day=day, provider='claude_code',
+                    status='blocked' if job_blocked else 'ready',
+                    blocking_reasons_json='["uncovered_formal_source_rows"]' if job_blocked else '[]',
                     source_revision=f'sr-{day}', policy_version='p', chat_id='default')
+            if job_blocked:
+                continue
             _insert(conn, 'dayblock_generation_receipts', generation_id=f'gen-{day}-0000000000',
                     generation_job_id=f'job-{day}', source_day=day, provider='claude_code',
                     summary_body=body, body_hash=body_hash or hashlib.sha256(body.encode()).hexdigest(),
-                    status=status, raw_token_estimate=30000)
+                    status=status, raw_token_estimate=30000,
+                    output_token_estimate=1100 if body else 0,
+                    error_code='cc_background_spawn_failed' if status == 'failed' else None)
         conn.commit()
         conn.close()
         return path
@@ -279,6 +286,69 @@ class RuntimeHookTests(unittest.TestCase):
         out = hook(EXPECTED, (bad,))
         self.assertEqual(out, (bad,))
         self.assertEqual(box['error'], 'AttributeError')
+
+
+class PageSurfaceTests(unittest.TestCase):
+    _store = StoreLoadTests._store
+    RECEIPTS = (
+        (OLD, BODY, 'ready', None),
+        ('2026-10-13', '这篇日记我就停在这里，不再继续写。', 'ready', None),
+        ('2026-10-15', '', 'failed', None),
+        ('2026-10-16', '', 'job_blocked', None),
+    )
+
+    def test_list_reports_every_day_state(self):
+        from continuity.dayblock_context import list_dayblock_days
+        with tempfile.TemporaryDirectory() as tmp:
+            days = {d['source_day']: d for d in list_dayblock_days(self._store(tmp, self.RECEIPTS))}
+        self.assertEqual(sorted(days), [OLD, '2026-10-13', '2026-10-15', '2026-10-16'])
+        self.assertEqual(days[OLD]['status'], 'ready')
+        self.assertEqual(days[OLD]['completed_turn_count'], 4)
+        self.assertEqual(days[OLD]['output_token_estimate'], 1100)
+        self.assertEqual(days[OLD]['body_char_count'], len(BODY))
+        self.assertNotIn('body', days[OLD])
+        self.assertEqual((days['2026-10-13']['status'], days['2026-10-13']['reason']), ('rejected', 'refusal_text'))
+        self.assertEqual((days['2026-10-15']['status'], days['2026-10-15']['reason']),
+                         ('failed', 'cc_background_spawn_failed'))
+        self.assertIsNone(days['2026-10-15']['output_token_estimate'])
+        self.assertEqual((days['2026-10-16']['status'], days['2026-10-16']['reason']),
+                         ('blocked', 'uncovered_formal_source_rows'))
+
+    def test_detail_has_body_and_validates_day(self):
+        from continuity.dayblock_context import get_dayblock_day
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._store(tmp, self.RECEIPTS)
+            detail = get_dayblock_day(path, OLD)
+            refused = get_dayblock_day(path, '2026-10-13')
+            self.assertIsNone(get_dayblock_day(path, '2026-10-30'))
+            self.assertIsNone(get_dayblock_day(path, "2026-10-10' OR 1=1"))
+        self.assertEqual(detail['body'], BODY)
+        self.assertEqual(refused['status'], 'rejected')
+        self.assertIn('不再继续写', refused['body'])
+
+    def test_missing_store_lists_nothing(self):
+        from continuity.dayblock_context import get_dayblock_day, list_dayblock_days
+        self.assertEqual(list_dayblock_days('/nonexistent/dayblock.db'), [])
+        self.assertIsNone(get_dayblock_day('/nonexistent/dayblock.db', OLD))
+
+    def test_routes(self):
+        from flask import Flask
+        from context_compression_routes import create_context_compression_blueprint
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Flask(__name__)
+            app.register_blueprint(create_context_compression_blueprint(
+                db_path=str(Path(tmp) / 'memories.db'),
+                dayblock_store_path=str(self._store(tmp, self.RECEIPTS)),
+            ))
+            client = app.test_client()
+            listing = client.get('/dash/__continuity/dayblocks')
+            self.assertEqual(listing.status_code, 200)
+            self.assertEqual(listing.headers['Cache-Control'], 'no-store')
+            self.assertEqual(len(listing.get_json()['dayblocks']), 4)
+            detail = client.get('/dash/__continuity/dayblocks/' + OLD)
+            self.assertEqual(detail.get_json()['dayblock']['body'], BODY)
+            self.assertEqual(client.get('/dash/__continuity/dayblocks/2026-10-30').status_code, 404)
+            self.assertEqual(client.post('/dash/__continuity/dayblocks').status_code, 405)
 
 
 if __name__ == '__main__':
