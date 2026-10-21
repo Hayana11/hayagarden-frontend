@@ -661,6 +661,39 @@ def _write_ombre(
     return legacy_status, diagnostic
 
 
+def _find_kernel_write(posts_db_path: str, content: str):
+    """The router's own lookup: is this memory already in the authoritative store?"""
+    from tools import memory_tool
+
+    previous = memory_tool.DB_PATH
+    memory_tool.DB_PATH = posts_db_path
+    try:
+        return memory_tool.find_kernel_memory(content)
+    except Exception:
+        _LOG.warning("memory_runtime_kernel_lookup_failed", exc_info=True)
+        return None
+    finally:
+        memory_tool.DB_PATH = previous
+
+
+def _commit_kernel_receipt(posts_db_path: str, row: dict[str, Any], written, *, recovered: bool = False):
+    row = _update_receipt(
+        posts_db_path,
+        row["receipt_id"],
+        status="COMMITTED",
+        ombre_status=written.ombre_status,
+        error_code="",
+    ) or row
+    metadata = {"store": "kernel", "kernel_state_id": written.state_id,
+                "ombre_bucket_id": written.bucket_id, "ombre_status": written.ombre_status}
+    if recovered:
+        metadata["recovered"] = True
+    _event(posts_db_path, row["receipt_id"], "memory_persisted", "VERIFIED", metadata=metadata)
+    result = _result(row, status="DEDUPLICATED" if recovered else written.status)
+    result.update(kernel_state_id=written.state_id, ombre_bucket_id=written.bucket_id)
+    return result
+
+
 def _result(row: dict[str, Any], *, status: str | None = None) -> dict[str, Any]:
     return {
         "status": status or row.get("status") or "UNKNOWN",
@@ -747,6 +780,10 @@ def persist_memory(
                     metadata={"recovered": True},
                 )
                 return _result(row, status="DEDUPLICATED")
+            recovered = _find_kernel_write(posts_db_path, text)
+            if recovered is not None:
+                # The router committed it to the Kernel; the crash came before the receipt.
+                return _commit_kernel_receipt(posts_db_path, row, recovered, recovered=True)
             return _result(row, status="IN_PROGRESS")
         if row.get("status") == "FAILED":
             row = _update_receipt(
@@ -779,25 +816,7 @@ def persist_memory(
 
         if isinstance(legacy_id, KernelWrite):
             # The router sent this memory to the Kernel, which projects it into Ombre.
-            row = _update_receipt(
-                posts_db_path,
-                row["receipt_id"],
-                status="COMMITTED",
-                ombre_status=legacy_id.ombre_status,
-                error_code="",
-            ) or row
-            _event(
-                posts_db_path,
-                row["receipt_id"],
-                "memory_persisted",
-                "VERIFIED",
-                metadata={"store": "kernel", "kernel_state_id": legacy_id.state_id,
-                          "ombre_bucket_id": legacy_id.bucket_id,
-                          "ombre_status": legacy_id.ombre_status},
-            )
-            result = _result(row, status=legacy_id.status)
-            result.update(kernel_state_id=legacy_id.state_id, ombre_bucket_id=legacy_id.bucket_id)
-            return result
+            return _commit_kernel_receipt(posts_db_path, row, legacy_id)
 
         ombre_status = "NOT_REQUESTED"
         ombre_diagnostic = None

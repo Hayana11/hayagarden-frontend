@@ -103,7 +103,7 @@ async def handle(manager, request: dict) -> object:
         if existing is not None:
             return {"created": False, "bucket": existing}
         fields = request["fields"]
-        await manager.create(
+        created = await manager.create(
             fields["content"],
             tags=list(fields.get("tags") or []),
             importance=int(fields.get("importance") or 5),
@@ -118,10 +118,16 @@ async def handle(manager, request: dict) -> object:
             imported=True,
             defer_derived_index=True,
         )
-        return {"created": True, "bucket": await _get(manager, request["bucket_id"])}
+        # Ombre 3.6 does not fail on an id collision: it silently picks a suffixed or
+        # random id. Report the id it actually used so the caller can refuse it.
+        created = str(created or "")
+        return {"created": True, "bucket_id": created, "bucket": await _get(manager, created) if created else None}
     if op == "update":
         fields = {k: v for k, v in request["fields"].items() if k in UPDATE_FIELDS}
-        return {"updated": bool(await manager.update(request["bucket_id"], **fields))}
+        # BucketManager.update returns False when it refused or committed nothing.
+        if not await manager.update(request["bucket_id"], **fields):
+            raise RuntimeError("ombre_update_not_committed")
+        return {"updated": True}
     if op == "list":
         buckets = await manager.list_all(include_archive=bool(request.get("include_archive")))
         return [_bucket_view(bucket) for bucket in buckets]

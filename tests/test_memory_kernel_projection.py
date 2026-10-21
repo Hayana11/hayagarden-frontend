@@ -6,6 +6,7 @@ import dataclasses
 import os
 import sqlite3
 import stat
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,7 +21,12 @@ LIFECYCLE = ("activation_count", "last_active", "resolved", "created", "type")
 
 
 class FakeOmbreRuntime:
-    """Stands in for BucketManager: Ombre owns ids, normalisation and lifecycle."""
+    """Stands in for the worker + BucketManager: Ombre owns ids, normalisation and lifecycle.
+
+    Mirrors the official contract: update() returns a bool (False = nothing committed,
+    which the worker turns into a failed request), and create picks another id on a
+    collision instead of failing.
+    """
 
     def __init__(self):
         self.buckets: dict[str, dict] = {}
@@ -28,6 +34,8 @@ class FakeOmbreRuntime:
         self.created: list[str] = []
         self.runs = 0
         self.down = False
+        self.reject_updates = False
+        self.collide_ids: set[str] = set()  # ids another writer takes just before our create
 
     def seed_from_vault(self, vault: Path) -> "FakeOmbreRuntime":
         for path in sorted(vault.rglob("*.md")):
@@ -45,7 +53,12 @@ class FakeOmbreRuntime:
         for request in requests:
             op, args = request["op"], [request[k] for k in ("bucket_id", "fields") if k in request]
             try:
-                results.append(getattr(self, op)(*args))
+                value = getattr(self, op)(*args)
+                if op == "update":
+                    if not value:
+                        raise RuntimeError("ombre_update_not_committed")
+                    value = {"updated": True}
+                results.append(value)
             except Exception as exc:  # the real worker reports per-request failures the same way
                 results.append(projection.RequestFailed(f"{type(exc).__name__}:{exc}"))
         return results
@@ -76,24 +89,27 @@ class FakeOmbreRuntime:
         self._check("create_if_absent", bucket_id)
         existing = self._view(self.buckets.get(bucket_id))
         if existing is not None:
-            return {"created": False, "bucket": existing}
+            return {"created": False, "bucket_id": bucket_id, "bucket": existing}
+        actual = bucket_id + "_07" if bucket_id in self.collide_ids else bucket_id
         meta = {k: v for k, v in fields.items() if k not in ("content", "bucket_type")}
-        meta.update(id=bucket_id, type=fields["bucket_type"], activation_count=0, source_tool="kernel_projection")
+        meta.update(id=actual, type=fields["bucket_type"], activation_count=0, source_tool="kernel_projection")
         self._normalise(meta)
-        self.buckets[bucket_id] = {"id": bucket_id, "content": fields["content"], "metadata": meta}
-        self.created.append(bucket_id)
-        return {"created": True, "bucket": self._view(self.buckets[bucket_id])}
+        self.buckets[actual] = {"id": actual, "content": fields["content"], "metadata": meta}
+        self.created.append(actual)
+        return {"created": True, "bucket_id": actual, "bucket": self._view(self.buckets[actual])}
 
     def update(self, bucket_id, fields):
         self._check("update", bucket_id)
-        bucket = self.buckets[bucket_id]
+        bucket = self.buckets.get(bucket_id)
+        if bucket is None or self.reject_updates:
+            return False
         for key, value in fields.items():
             if key == "content":
                 bucket["content"] = value
             else:
                 bucket["metadata"][key] = value
         self._normalise(bucket["metadata"])
-        return self._view(bucket)
+        return True
 
     def list(self, *, include_archive=True):
         self._check("list")
@@ -299,6 +315,144 @@ class ProjectTests(ProjectionFixture):
         self.assertNotIn("bbb222", self.ombre.creates())
 
 
+class SeamTests(ProjectionFixture):
+    """The gaps between "Ombre wrote" and "we recorded it"."""
+
+    def revise_cats(self, content="哈娅养了两只猫，还有一只鹦鹉福禄。"):
+        self.revise("st:ombre:aaa111:v1", content, "st:ombre:aaa111:v2")
+        return self.head("lin:ombre:aaa111")
+
+    def test_update_refused_by_ombre_is_pending_not_projected(self):
+        self.project_all()
+        self.revise_cats()
+        self.ombre.reject_updates = True
+        self.assertEqual(self.project_all()["pending"], 1)
+        row = self.state.get("lin:ombre:aaa111")
+        self.assertEqual((row["status"], row["projected_state_id"]), ("pending", "st:ombre:aaa111:v1"))
+        self.assertIn("ombre_update_not_committed", row["error"])
+        self.assertNotIn("鹦鹉", self.ombre.buckets["aaa111"]["content"])
+        self.ombre.reject_updates = False
+        self.assertEqual(self.project_all()["projected"], 1)
+        self.assertIn("鹦鹉", self.ombre.buckets["aaa111"]["content"])
+
+    def test_crash_after_update_landed_is_recognised_as_our_own_write(self):
+        self.project_all()
+        head = self.revise_cats()
+        with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError("disk I/O error")):
+            with self.assertRaises(sqlite3.OperationalError):
+                projection.project_lineage(head, self.ombre, self.state)
+        self.assertIn("鹦鹉", self.ombre.buckets["aaa111"]["content"])  # Ombre applied it
+        # Neither the scan nor the retry may read our own write as an edit inside Ombre.
+        self.assertEqual(projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"], [])
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertEqual(self.state.get("lin:ombre:aaa111")["projected_state_id"], "st:ombre:aaa111:v2")
+
+    def test_crash_then_a_newer_head_still_projects_the_newer_head(self):
+        self.project_all()
+        head = self.revise_cats()
+        with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
+            with self.assertRaises(sqlite3.OperationalError):
+                projection.project_lineage(head, self.ombre, self.state)
+        self.revise("st:ombre:aaa111:v2", "哈娅养了两只猫和一只鹦鹉，鹦鹉叫福禄。", "st:ombre:aaa111:v3")
+        newer = self.head("lin:ombre:aaa111")
+        self.assertEqual(projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"], [])
+        self.assertEqual(projection.project_lineage(newer, self.ombre, self.state), "projected")
+        self.assertEqual(self.ombre.buckets["aaa111"]["content"], "哈娅养了两只猫和一只鹦鹉，鹦鹉叫福禄。")
+
+    def test_refused_update_leaves_no_intent_behind(self):
+        self.project_all()
+        self.revise_cats()
+        self.ombre.reject_updates = True
+        self.project_all()
+        self.assertIsNone(self.state.get("lin:ombre:aaa111")["intent_json"])
+
+    def test_crash_after_update_with_ombre_normalisation_is_still_ours(self):
+        self.project_all()
+        kernel = MemoryKernel(self.kernel)
+        before = kernel.get_state("st:ombre:aaa111:v1")
+        pinned = dict(before.structured_value, memory={**before.structured_value.get("memory", {}), "pinned": True})
+        kernel.revise_state(dataclasses.replace(before, state_id="st:ombre:aaa111:v2", structured_value=pinned,
+                                                created_at=NOW), Delta(
+            delta_id="dl:pin", target_scope=before.scope, before_ref=before.state_id, after_ref="st:ombre:aaa111:v2",
+            trigger_evidence_refs=before.evidence_refs, derived_by={"processor": "test"}, confidence=0.5,
+            occurred_at=NOW, review_status="accepted"))
+        head = self.head("lin:ombre:aaa111")
+        with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
+            with self.assertRaises(sqlite3.OperationalError):
+                projection.project_lineage(head, self.ombre, self.state)
+        # Ombre raised importance to 10 on its own when we pinned: still our write.
+        self.assertEqual(self.ombre.buckets["aaa111"]["metadata"]["importance"], 10)
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+
+    def test_outside_content_edit_after_our_crash_is_still_external(self):
+        self.project_all()
+        head = self.revise_cats()
+        with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
+            with self.assertRaises(sqlite3.OperationalError):
+                projection.project_lineage(head, self.ombre, self.state)
+        self.ombre.edit("aaa111", content="她又在面板里改了一遍。")  # before our retry
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "diverged")
+
+    def test_edit_neither_baseline_nor_target_is_external(self):
+        self.project_all()
+        head = self.revise_cats()
+        self.ombre.edit("aaa111", content="她在面板里改成了别的内容。")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "diverged")
+
+    def test_ombre_already_holding_the_target_is_just_recorded(self):
+        self.project_all()
+        head = self.revise_cats()
+        self.ombre.edit("aaa111", content="哈娅养了两只猫，还有一只鹦鹉福禄。")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertNotIn(("update", "aaa111"), self.ombre.calls)
+
+    def test_pinned_importance_normalisation_is_not_resent_every_revision(self):
+        self.project_all()
+        self.revise("st:ombre:bbb222:v1", "我们的小家已经很完美了！", "st:ombre:bbb222:v2")
+        with mock.patch.object(self.ombre, "update", wraps=self.ombre.update) as update:
+            self.project_all()
+        update.assert_called_once_with("bbb222", {"content": "我们的小家已经很完美了！"})
+
+    def test_ombre_minting_another_id_is_a_conflict_not_success(self):
+        self.ombre.buckets.clear()
+        head = self.head("lin:posts:2")
+        self.ombre.collide_ids.add(head.bucket_id)
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "conflict")
+        row = self.state.get("lin:posts:2")
+        self.assertEqual(row["status"], "conflict")
+        self.assertIn(f"ombre_assigned_other_id:{head.bucket_id}_07", row["error"])
+        self.assertIsNone(row["observed_sha"])
+
+    def test_lineage_lock_serialises_processes(self):
+        head = self.head("lin:posts:2")
+        other = projection.ProjectionState(self.state.path)  # e.g. sync in another process
+        entered = threading.Event()
+        release = threading.Event()
+        order = []
+
+        def holder():
+            with self.state.locked([head.lineage_id]):
+                entered.set()
+                order.append("first")
+                release.wait(5)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        entered.wait(5)
+        def waiter_body():
+            with other.locked([head.lineage_id]):
+                order.append("second")
+
+        waiter = threading.Thread(target=waiter_body)
+        waiter.start()
+        waiter.join(0.3)
+        self.assertEqual(order, ["first"])  # blocked while the first holds the lineage
+        release.set()
+        thread.join(5)
+        waiter.join(5)
+        self.assertEqual(order, ["first", "second"])
+
+
 class StateTests(unittest.TestCase):
     def test_projection_state_is_private_and_unique_per_bucket(self):
         import tempfile
@@ -324,7 +478,9 @@ class StateTests(unittest.TestCase):
 
     def test_no_file_level_access_to_ombre(self):
         source = Path(projection.__file__).read_text(encoding="utf-8")
-        for forbidden in ("import yaml", "frontmatter", "flock", "write_text", "/var/lib/hayagarden/ombre",
+        # Its own lineage lock lives beside the projection-state DB; Ombre's per-bucket
+        # lease ("bucket-<id>" under the vault's .locks) is never imitated.
+        for forbidden in ("import yaml", "frontmatter", '"bucket-', "write_text", "/var/lib/hayagarden/ombre",
                           ".hold(", '"hold"'):
             self.assertNotIn(forbidden, source)
 

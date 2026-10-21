@@ -29,6 +29,7 @@ with no outgoing Delta. A lineage with several heads is reported, not guessed.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -36,7 +37,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,9 @@ WORKER = Path(__file__).with_name("ombre_projection_worker.py")
 # What the projection owns in a bucket; lifecycle (resolved, activation, decay,
 # archive placement, dont_surface) stays Ombre's.
 SEMANTIC_FIELDS = ("content", "name", "domain", "tags", "importance", "valence", "arousal", "pinned")
+# Fields Ombre may rewrite on a write (pinned -> importance 10, default domain,
+# generated names). Only used to recognise our own landed write after a crash.
+OMBRE_REWRITTEN = frozenset({"importance", "domain", "name"})
 # Ombre's handover bucket is its own runtime state, never Kernel-managed.
 SYSTEM_DOMAINS = {"呼吸间"}
 DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -220,9 +224,73 @@ def observed_sha(bucket: dict[str, Any]) -> str:
     return _sha(json.dumps(observed_semantics(bucket), ensure_ascii=False, sort_keys=True))
 
 
-def changed_fields(target: dict[str, Any], bucket: dict[str, Any]) -> dict[str, Any]:
+def _norm_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    return {k: _norm_field(k, v) for k, v in fields.items() if k in SEMANTIC_FIELDS}
+
+
+def _dumps_norm(fields: dict[str, Any]) -> str:
+    return json.dumps(_norm_fields(fields), ensure_ascii=False, sort_keys=True)
+
+
+def _loads(text: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(text) if text else {}
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def changed_fields(target: dict[str, Any], bucket: dict[str, Any], row: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Target fields Ombre doesn't hold yet.
+
+    A field whose input is unchanged since the last projection and whose stored value
+    is what Ombre made of it last time (e.g. pinned -> importance 10) is already held.
+    """
     current = observed_semantics(bucket)
-    return {k: v for k, v in target.items() if _norm_field(k, v) != current.get(k)}
+    last_target = _loads((row or {}).get("target_json"))
+    last_observed = _loads((row or {}).get("observed_json"))
+    delta = {}
+    for name, value in target.items():
+        wanted = _norm_field(name, value)
+        if wanted == current.get(name):
+            continue
+        if name in last_target and last_target[name] == wanted and last_observed.get(name) == current.get(name):
+            continue
+        delta[name] = value
+    return delta
+
+
+def classify(head: "Head", row: dict[str, Any] | None, bucket: dict[str, Any]) -> str:
+    """How a bucket relates to the observed baseline.
+
+    baseline  -- unchanged since we last observed it
+    ours      -- our own unconfirmed update (intent) landed: every field we sent
+                 holds what we sent, and anything else that moved is a field Ombre
+                 rewrites itself (OMBRE_REWRITTEN); or it already holds the target
+    external  -- changed by someone else inside Ombre
+    unknown   -- nothing observed yet
+
+    Limitation: an outside edit to one of OMBRE_REWRITTEN, made inside the window
+    between our update landing and its bookkeeping, is taken as ours.
+    """
+    if not row or not row.get("observed_sha"):
+        return "unknown"
+    if observed_sha(bucket) == row["observed_sha"]:
+        return "baseline"
+    intent = _loads(row.get("intent_json"))
+    sent = intent.get("fields") or {}
+    # Any update we sent counts, even one for an older head: the current head's own
+    # delta is still computed and sent afterwards (see _decide).
+    if sent:
+        baseline = _loads(row.get("observed_json"))
+        current = observed_semantics(bucket)
+        moved = {k for k in SEMANTIC_FIELDS if current.get(k) != baseline.get(k)}
+        landed = all(current.get(k) == v or k in OMBRE_REWRITTEN for k, v in sent.items())
+        if landed and (moved - set(sent)) <= OMBRE_REWRITTEN:
+            return "ours"
+    if not changed_fields(target_fields(head), bucket, row):
+        return "ours"
+    return "external"
 
 
 def is_system_bucket(bucket: dict[str, Any]) -> bool:
@@ -284,7 +352,10 @@ class OmbreRuntime:
         return self._one({"op": "get", "bucket_id": bucket_id})
 
     def create_if_absent(self, bucket_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-        """get, create only if absent, get again: {"created": bool, "bucket": view}."""
+        """get, create only if absent, get again: {"created", "bucket_id", "bucket"}.
+
+        bucket_id is the id Ombre actually used: on a collision Ombre 3.6 silently
+        picks a suffixed or random id instead of failing."""
         return self._one({"op": "create_if_absent", "bucket_id": bucket_id, "fields": fields})
 
     def update(self, bucket_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
@@ -313,9 +384,14 @@ CREATE TABLE IF NOT EXISTS projection_lineage (
     status TEXT NOT NULL,
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    target_json TEXT,
+    intent_json TEXT
 )
 """
+# target_json: the (normalised) fields last projected, so Ombre's own normalisation of
+# an unchanged input is not re-sent. intent_json: an update sent but not yet confirmed.
+_STATE_COLUMNS = {"target_json": "TEXT", "intent_json": "TEXT"}
 
 
 class ProjectionState:
@@ -328,6 +404,11 @@ class ProjectionState:
         os.chmod(self.path, 0o600)
         with self._conn() as conn:
             conn.execute(_STATE_SCHEMA)
+            have = {r[1] for r in conn.execute("PRAGMA table_info(projection_lineage)")}
+            for name, kind in _STATE_COLUMNS.items():
+                if name not in have:
+                    conn.execute(f"ALTER TABLE projection_lineage ADD COLUMN {name} {kind}")
+        self.lock_dir = Path(f"{self.path}.locks")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -359,20 +440,47 @@ class ProjectionState:
             )
         return self.get(lineage_id) or {}
 
-    def projected(self, lineage_id: str, state_id: str, bucket: dict[str, Any]) -> None:
+    def projected(self, lineage_id: str, state_id: str, bucket: dict[str, Any], target: dict[str, Any]) -> None:
         with self._conn() as conn:
             conn.execute(
                 "UPDATE projection_lineage SET projected_state_id=?, target_state_id=?, observed_json=?, "
-                "observed_sha=?, status='projected', error=NULL, attempts=0, updated_at=? WHERE lineage_id=?",
+                "observed_sha=?, target_json=?, intent_json=NULL, status='projected', error=NULL, attempts=0, "
+                "updated_at=? WHERE lineage_id=?",
                 (state_id, state_id, json.dumps(observed_semantics(bucket), ensure_ascii=False, sort_keys=True),
-                 observed_sha(bucket), _now(), lineage_id),
+                 observed_sha(bucket), _dumps_norm(target), _now(), lineage_id),
             )
+
+    def intend(self, lineage_id: str, state_id: str, fields: dict[str, Any]) -> None:
+        """Record an update before sending it, so a crash after Ombre applied it is recognised."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE projection_lineage SET intent_json=?, updated_at=? WHERE lineage_id=?",
+                (json.dumps({"state_id": state_id, "fields": _norm_fields(fields)}, ensure_ascii=False,
+                            sort_keys=True), _now(), lineage_id),
+            )
+
+    @contextmanager
+    def locked(self, lineage_ids: list[str]) -> Iterator[None]:
+        """Cross-process exclusive lock per lineage, taken in sorted order (no deadlock)."""
+        self.lock_dir.mkdir(mode=0o700, exist_ok=True)
+        with ExitStack() as stack:
+            for lineage_id in sorted(set(lineage_ids)):
+                path = self.lock_dir / (hashlib.sha256(lineage_id.encode("utf-8")).hexdigest()[:24] + ".lock")
+                fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+                stack.callback(os.close, fd)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                stack.callback(fcntl.flock, fd, fcntl.LOCK_UN)
+            yield
+
+    def clear_intent(self, lineage_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE projection_lineage SET intent_json=NULL WHERE lineage_id=?", (lineage_id,))
 
     def forget(self, lineage_id: str) -> None:
         with self._conn() as conn:
             conn.execute(
                 "UPDATE projection_lineage SET projected_state_id=NULL, observed_json=NULL, observed_sha=NULL, "
-                "updated_at=? WHERE lineage_id=?", (_now(), lineage_id))
+                "target_json=NULL, intent_json=NULL, updated_at=? WHERE lineage_id=?", (_now(), lineage_id))
 
     def failed(self, lineage_id: str, status: str, error: str) -> None:
         with self._conn() as conn:
@@ -389,9 +497,9 @@ def state_path_for(kernel_db: str | os.PathLike[str]) -> Path:
 # ----------------------------------------------------------------- projection
 
 def project_lineage(head: Head, runtime: OmbreRuntime, state: ProjectionState) -> str:
-    """Make Ombre hold ``head``; returns projected / pending / diverged / conflict."""
-    row = state.target(head.lineage_id, head.bucket_id, head.state.state_id)
-    return _project_batch([(head, row)], runtime, state)[0]
+    """Make Ombre hold ``head``: projected / unchanged / pending / diverged / conflict."""
+    state.target(head.lineage_id, head.bucket_id, head.state.state_id)
+    return _project_batch([head], runtime, state)[0]
 
 
 def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState,
@@ -399,65 +507,96 @@ def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionSta
     counts = {"projected": 0, "unchanged": 0, "pending": 0, "diverged": 0, "conflict": 0}
     todo = []
     for head in heads:
-        row = state.get(head.lineage_id)
-        if row and row["status"] == "projected" and row["projected_state_id"] == head.state.state_id:
+        if _is_projected(state.get(head.lineage_id), head):
             counts["unchanged"] += 1
             continue
-        todo.append((head, state.target(head.lineage_id, head.bucket_id, head.state.state_id)))
+        state.target(head.lineage_id, head.bucket_id, head.state.state_id)
+        todo.append(head)
     for start in range(0, len(todo), batch_size):
         for outcome in _project_batch(todo[start:start + batch_size], runtime, state):
             counts[outcome] += 1
     return counts
 
 
-def _project_batch(items: list[tuple[Head, dict[str, Any]]], runtime: OmbreRuntime,
-                   state: ProjectionState) -> list[str]:
-    """At most two worker runs for the whole batch: (create_if_absent | get), then update+get."""
-    outcomes: dict[str, str] = {}
-    try:
-        first = runtime.batch([
-            # Never observed: create unless Ombre already has it (imported bucket, or a
-            # run that crashed after Ombre wrote) -- the worker gets before it creates.
-            {"op": "create_if_absent", "bucket_id": head.bucket_id,
-             "fields": {**target_fields(head), "bucket_type": bucket_type_for(head)}}
-            if not row.get("observed_sha") else {"op": "get", "bucket_id": head.bucket_id}
-            for head, row in items
-        ])
-        updates: list[tuple[Head, dict[str, Any]]] = []
-        for (head, row), result in zip(items, first):
-            if isinstance(result, RequestFailed):
-                outcomes[head.lineage_id] = _pending(head, state, result)
+def _is_projected(row: dict[str, Any] | None, head: Head) -> bool:
+    return bool(row) and row["status"] == "projected" and row["projected_state_id"] == head.state.state_id
+
+
+def _project_batch(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> list[str]:
+    """At most two worker runs for the batch: (create_if_absent | get), then update+get.
+
+    Held under each lineage's cross-process lock, so a request-time write and a
+    sync never project the same lineage at once (Ombre would mint a second id).
+    """
+    with state.locked([h.lineage_id for h in heads]):
+        outcomes: dict[str, str] = {}
+        items = []
+        for head in heads:
+            row = state.get(head.lineage_id) or {}  # re-read under the lock
+            if _is_projected(row, head):
+                outcomes[head.lineage_id] = "unchanged"
+            else:
+                items.append((head, row))
+        try:
+            _run_batch(items, runtime, state, outcomes)
+        except RuntimeUnavailable as exc:
+            for head, _ in items:
+                if head.lineage_id not in outcomes:
+                    outcomes[head.lineage_id] = _pending(head, state, str(exc))
+        return [outcomes[head.lineage_id] for head in heads]
+
+
+def _run_batch(items: list[tuple[Head, dict[str, Any]]], runtime: OmbreRuntime, state: ProjectionState,
+               outcomes: dict[str, str]) -> None:
+    if not items:
+        return
+    first = runtime.batch([
+        # Never observed: create unless Ombre already has it (imported bucket, or a
+        # run that crashed after Ombre wrote) -- the worker gets before it creates.
+        {"op": "create_if_absent", "bucket_id": head.bucket_id,
+         "fields": {**target_fields(head), "bucket_type": bucket_type_for(head)}}
+        if not row.get("observed_sha") else {"op": "get", "bucket_id": head.bucket_id}
+        for head, row in items
+    ])
+    updates: list[tuple[Head, dict[str, Any]]] = []
+    for (head, row), result in zip(items, first):
+        if isinstance(result, RequestFailed):
+            outcomes[head.lineage_id] = _pending(head, state, result)
+            continue
+        if not row.get("observed_sha"):
+            actual = result.get("bucket_id") or head.bucket_id
+            if actual != head.bucket_id:
+                state.failed(head.lineage_id, "conflict", f"ombre_assigned_other_id:{actual}")
+                outcomes[head.lineage_id] = "conflict"
                 continue
-            if not row.get("observed_sha"):
-                if result["created"]:
-                    outcomes[head.lineage_id] = _record(head, state, result["bucket"])
-                    continue
-                result = result["bucket"]
-            outcome, delta = _decide(head, row, result, state)
-            if delta:
-                updates.append((head, delta))
-            elif outcome:
-                outcomes[head.lineage_id] = outcome
-        if updates:
-            requests = []
-            for head, delta in updates:
-                requests += [{"op": "update", "bucket_id": head.bucket_id, "fields": delta},
-                             {"op": "get", "bucket_id": head.bucket_id}]
-            results = runtime.batch(requests)
-            for index, (head, _) in enumerate(updates):
-                updated, after = results[2 * index], results[2 * index + 1]
-                failure = next((r for r in (updated, after) if isinstance(r, RequestFailed)), None)
-                outcomes[head.lineage_id] = (_pending(head, state, failure) if failure is not None
-                                             else _record(head, state, after))
-    except RuntimeUnavailable as exc:
-        for head, _ in items:
-            if head.lineage_id not in outcomes:
-                outcomes[head.lineage_id] = _pending(head, state, str(exc))
-    return [outcomes[head.lineage_id] for head, _ in items]
+            if result["created"]:
+                outcomes[head.lineage_id] = _record(head, state, result["bucket"])
+                continue
+            result = result["bucket"]
+        outcome, delta = _decide(head, row, result, state)
+        if delta:
+            updates.append((head, delta))
+        else:
+            outcomes[head.lineage_id] = outcome
+    if not updates:
+        return
+    requests = []
+    for head, delta in updates:
+        state.intend(head.lineage_id, head.state.state_id, delta)
+        requests += [{"op": "update", "bucket_id": head.bucket_id, "fields": delta},
+                     {"op": "get", "bucket_id": head.bucket_id}]
+    results = runtime.batch(requests)
+    for index, (head, _) in enumerate(updates):
+        updated, after = results[2 * index], results[2 * index + 1]
+        if isinstance(updated, RequestFailed):
+            state.clear_intent(head.lineage_id)  # Ombre answered: nothing was committed
+        failure = next((r for r in (updated, after) if isinstance(r, RequestFailed)), None)
+        outcomes[head.lineage_id] = (_pending(head, state, failure) if failure is not None
+                                     else _record(head, state, after))
 
 
 def _decide(head: Head, row: dict[str, Any], bucket: dict[str, Any] | None,
-            state: ProjectionState) -> tuple[str | None, dict[str, Any]]:
+            state: ProjectionState) -> tuple[str, dict[str, Any]]:
     if bucket is None:
         # Gone without a trace (a rebuilt vault): forget the baseline so the next
         # run recreates it. A soft-deleted bucket is a conflict instead.
@@ -466,17 +605,18 @@ def _decide(head: Head, row: dict[str, Any], bucket: dict[str, Any] | None,
     if bucket.get("deleted"):
         state.failed(head.lineage_id, "conflict", "bucket_deleted_in_ombre")
         return "conflict", {}
-    if row.get("observed_sha") and observed_sha(bucket) != row["observed_sha"]:
+    kind = classify(head, row, bucket)
+    if kind == "external":
         state.failed(head.lineage_id, "diverged", "edited_in_ombre")
         return "diverged", {}
-    delta = changed_fields(target_fields(head), bucket)
-    return (None, delta) if delta else (_record(head, state, bucket), {})
+    delta = changed_fields(target_fields(head), bucket, row)
+    return ("", delta) if delta else (_record(head, state, bucket), {})
 
 
 def _record(head: Head, state: ProjectionState, bucket: dict[str, Any] | None) -> str:
     if bucket is None:
         return _pending(head, state, "bucket_missing_after_write")
-    state.projected(head.lineage_id, head.state.state_id, bucket)
+    state.projected(head.lineage_id, head.state.state_id, bucket, target_fields(head))
     return "projected"
 
 
@@ -498,7 +638,7 @@ def scan_ombre(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState)
         bucket = buckets.get(row["bucket_id"])
         if bucket is None or bucket.get("deleted"):
             deleted.append(head.lineage_id)
-        elif observed_sha(bucket) != row["observed_sha"]:
+        elif classify(head, row, bucket) == "external":
             diverged.append((head, bucket))
     unmanaged = [
         b for bucket_id, b in sorted(buckets.items())

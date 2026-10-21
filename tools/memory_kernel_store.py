@@ -110,7 +110,7 @@ def _project_one(head: projection.Head, db: Path, runtime: projection.OmbreRunti
         outcome = projection.project_lineage(head, runtime, state)
     except Exception as exc:  # e.g. bookkeeping failed after Ombre wrote: retry gets first
         return f"PENDING:{type(exc).__name__}"
-    return "PROJECTED" if outcome == "projected" else outcome.upper()
+    return "PROJECTED" if outcome in ("projected", "unchanged") else outcome.upper()
 
 
 MEMORY_TYPES = ("MEMORY", "FACT", "MISS")
@@ -119,6 +119,24 @@ MEMORY_TYPES = ("MEMORY", "FACT", "MISS")
 def memory_semantics(memory_type: str, layer: str, pinned: Any, author: str | None) -> dict[str, Any]:
     """The legacy write semantics a memory must keep (see projection bucket placement)."""
     return {"type": memory_type, "layer": layer or "recent", "pinned": bool(pinned), "author": author or ""}
+
+
+def find_head(content: str, *, kernel_db: str | os.PathLike[str] | None = None) -> dict[str, Any] | None:
+    """The head already holding this memory (same normalised text), if any."""
+    db = Path(kernel_db or kernel_db_path())
+    if not db.is_file():
+        return None
+    text = content.strip()
+    wanted = _norm(text)
+    for lineage_id, state_id, existing in projection.head_contents(db):
+        if _norm(existing) == wanted:
+            state_db = projection.state_path_for(db)
+            row = projection.ProjectionState(state_db).get(lineage_id) if state_db.is_file() else None
+            ombre = "PROJECTED" if row and row["status"] == "projected" else "PENDING"
+            return {"status": "DEDUPLICATED", "state_id": state_id, "lineage_id": lineage_id,
+                    "bucket_id": projection.bucket_id_for(lineage_id), "ombre_status": ombre,
+                    "content_sha256": _sha(text)}
+    return None
 
 
 def remember(
@@ -148,11 +166,9 @@ def remember(
     db = Path(kernel_db or kernel_db_path())
     now = now or _now()
 
-    wanted = _norm(text)
-    for lineage_id, state_id, existing in projection.head_contents(db):
-        if _norm(existing) == wanted:
-            return {"status": "DEDUPLICATED", "state_id": state_id, "lineage_id": lineage_id,
-                    "bucket_id": projection.bucket_id_for(lineage_id), "content_sha256": _sha(text)}
+    existing = find_head(text, kernel_db=db)
+    if existing is not None:
+        return existing
 
     uid = uuid.uuid4().hex[:16]
     lineage = f"lin:k:{uid}"
@@ -254,8 +270,9 @@ def ingest_from_ombre(
         try:
             new_state_id = _ingest_edit(kernel, head, bucket.get("metadata") or {}, bucket.get("content") or "", now)
             # What Ombre holds now *is* the new head: it becomes the observed baseline.
+            new_head = projection.Head(head.lineage_id, kernel.get_state(new_state_id))
             state.target(head.lineage_id, head.bucket_id, new_state_id)
-            state.projected(head.lineage_id, new_state_id, bucket)
+            state.projected(head.lineage_id, new_state_id, bucket, projection.target_fields(new_head))
             revised.append(bucket["id"])
         except Exception as exc:
             errors.append({"bucket_id": bucket["id"], "stage": "edited", "error": type(exc).__name__})

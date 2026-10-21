@@ -182,6 +182,16 @@ class IngestTests(StoreFixture):
         self.assertEqual(report["ingested"], {"created": [], "revised": [], "deleted": [], "errors": []})
         self.assertEqual(len(MemoryKernel(self.kernel).lineage_history("lin:ombre:aaa111")), 1)
 
+    def test_crash_after_our_update_is_not_ingested_as_an_ombre_edit(self):
+        self.revise("st:ombre:aaa111:v1", "哈娅养了两只猫，还有一只鹦鹉福禄。", "st:ombre:aaa111:v2")
+        with mock.patch.object(store.projection.ProjectionState, "projected", side_effect=sqlite3.OperationalError):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.sync()
+        report = self.sync()
+        self.assertEqual(report["ingested"]["revised"], [])
+        self.assertEqual(len(MemoryKernel(self.kernel).lineage_history("lin:ombre:aaa111")), 2)
+        self.assertEqual(self.state.get("lin:ombre:aaa111")["projected_state_id"], "st:ombre:aaa111:v2")
+
     def test_ombre_unavailable_during_sync_is_reported_not_raised(self):
         self.ombre.down = True
         self.assertTrue(self.sync()["ombre"].startswith("unavailable:"))
@@ -280,6 +290,44 @@ class RouterTests(StoreFixture):
         self.assertEqual(MemoryKernel(self.kernel).get_state(state_id).structured_value["memory"]["layer"],
                          "long-term")
         self.assertEqual(self.sync()["backfilled"]["done"], [])
+
+    def test_fallback_post_and_backfill_entry_commit_together(self):
+        set_flag(self.posts, "1")
+        conn = sqlite3.connect(self.posts)
+        conn.execute("CREATE TABLE memory_kernel_backfill (post_id INTEGER PRIMARY KEY)")  # entry can't be written
+        conn.commit()
+        conn.close()
+        before = len(self.posts_rows())
+        with mock.patch.object(store, "remember", side_effect=RuntimeError("kernel down")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.memory_tool.save_memory("她把钥匙放在了鞋柜上。", type="MEMORY")
+        # The post rolled back with it: no memory stranded in posts without a backfill entry.
+        self.assertEqual(len(self.posts_rows()), before)
+
+    def test_receipt_recovers_after_crash_between_kernel_commit_and_receipt(self):
+        from tools import memory_runtime_bridge as bridge
+
+        set_flag(self.posts, "1")
+        kwargs = dict(content="她说周末想去爬山。", source="save_marker", provenance={"turn_id": "t9"})
+        with mock.patch.object(bridge, "_commit_kernel_receipt", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):  # the process dies here
+                bridge.persist_memory(str(self.posts), **kwargs)
+        retry = bridge.persist_memory(str(self.posts), **kwargs)
+        self.assertEqual(retry["status"], "DEDUPLICATED")
+        heads = [h for h in self.heads() if h.state.content == "她说周末想去爬山。"]
+        self.assertEqual(len(heads), 1)
+        self.assertEqual(retry["kernel_state_id"], heads[0].state.state_id)
+        self.assertEqual(bridge.persist_memory(str(self.posts), **kwargs)["status"], "DEDUPLICATED")
+
+    def test_receipt_does_not_claim_kernel_content_while_the_switch_is_off(self):
+        from tools import memory_runtime_bridge as bridge
+
+        set_flag(self.posts, "1")
+        self.memory_tool.save_memory("她喜欢下雨天听歌。", type="MEMORY")
+        set_flag(self.posts, "0")
+        self.assertIsNone(self.memory_tool.find_kernel_memory("她喜欢下雨天听歌。"))
+        result = bridge.persist_memory(str(self.posts), content="她喜欢下雨天听歌。", source="save_marker")
+        self.assertIsInstance(result["legacy_memory_id"], int)
 
     def test_persist_memory_goes_through_the_router(self):
         from tools import memory_runtime_bridge as bridge

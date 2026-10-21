@@ -69,10 +69,28 @@ def save_memory(content, type='MEMORY', author='fyodor', layer='recent',
                 return _kernel_save(content, source=source, provenance=provenance, **fields)
             except Exception as exc:
                 _LOG.warning('memory_kernel_save_failed_fallback_posts error_type=%s', exc.__class__.__name__)
-                post_id = _legacy_save(content, **fields)
-                _queue_backfill(post_id, exc.__class__.__name__)
-                return post_id
+                # 帖子和待补登记同一事务提交：不会出现写进旧库却没人来补的记忆。
+                return _legacy_save(content, backfill_reason=exc.__class__.__name__, **fields)
     return _legacy_save(content, **fields)
+
+
+def find_kernel_memory(content):
+    """开关打开时，这段记忆是否已经在 Kernel 里（规范化后同文）；返回 KernelWrite 或 None。
+
+    给回执恢复用：Kernel 已写成功、回执还没收尾时进程退出，重试要能认出它。
+    开关关闭时不看 Kernel（B-1 导入的旧内容不能被当成这次写入的结果）。
+    """
+    from tools.memory_kernel_switch import write_enabled
+
+    if not (content or '').strip() or not write_enabled(DB_PATH):
+        return None
+    from tools import memory_kernel_store
+
+    found = memory_kernel_store.find_head(content)
+    if found is None:
+        return None
+    return KernelWrite(status='DEDUPLICATED', state_id=found['state_id'], lineage_id=found['lineage_id'],
+                       bucket_id=found['bucket_id'], ombre_status=found['ombre_status'])
 
 
 def _kernel_save(content, *, source, provenance, type, author, layer, tags, importance,
@@ -97,30 +115,22 @@ def _kernel_save(content, *, source, provenance, type, author, layer, tags, impo
     )
 
 
-def _queue_backfill(post_id, reason):
-    """回退写进 posts 的记忆，持久登记待补；memory_kernel_store.sync() 会补回 Kernel。"""
-    try:
-        conn = _db()
-        try:
-            conn.execute(
-                'CREATE TABLE IF NOT EXISTS memory_kernel_backfill ('
-                ' post_id INTEGER PRIMARY KEY, queued_at TEXT NOT NULL, reason TEXT NOT NULL,'
-                ' done_at TEXT, state_id TEXT)')
-            conn.execute(
-                'INSERT OR IGNORE INTO memory_kernel_backfill (post_id, queued_at, reason) VALUES (?, ?, ?)',
-                (int(post_id), datetime.now(timezone.utc).isoformat(), str(reason)[:80]))
-            conn.commit()
-        finally:
-            conn.close()
-    except Exception as exc:
-        _LOG.error('memory_kernel_backfill_queue_failed post_id=%s error_type=%s',
-                   post_id, exc.__class__.__name__)
+_BACKFILL_SCHEMA = (
+    'CREATE TABLE IF NOT EXISTS memory_kernel_backfill ('
+    ' post_id INTEGER PRIMARY KEY, queued_at TEXT NOT NULL, reason TEXT NOT NULL,'
+    ' done_at TEXT, state_id TEXT)')
 
 
 def _legacy_save(content, *, type, author, layer, tags, importance, pinned, created_at,
-                 valence, arousal):
-    """posts 表的私有写入；只由 save_memory 调用，避免 Kernel 回退时再次路由。"""
+                 valence, arousal, backfill_reason=None):
+    """posts 表的私有写入；只由 save_memory 调用，避免 Kernel 回退时再次路由。
+
+    backfill_reason：Kernel 写失败后的回退。帖子与 memory_kernel_backfill 待补登记
+    在同一个事务里提交，任何一步失败都整体回滚；memory_kernel_store.sync() 会补回 Kernel。
+    """
     conn = _db()
+    if backfill_reason is not None:
+        conn.execute(_BACKFILL_SCHEMA)
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     has_summary_title = 'summary_title' in post_cols
     has_valence = 'valence' in post_cols
@@ -140,13 +150,19 @@ def _legacy_save(content, *, type, author, layer, tags, importance, pinned, crea
         cols.append('arousal')
         vals.append(round(float(arousal), 4))
     placeholders = ','.join('?' for _ in cols)
-    cur = conn.execute(
-        f"INSERT INTO posts ({', '.join(cols)}) VALUES ({placeholders})",
-        vals,
-    )
-    conn.commit()
-    new_id = cur.lastrowid
-    conn.close()
+    try:
+        with conn:
+            cur = conn.execute(
+                f"INSERT INTO posts ({', '.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+            new_id = cur.lastrowid
+            if backfill_reason is not None:
+                conn.execute(
+                    'INSERT INTO memory_kernel_backfill (post_id, queued_at, reason) VALUES (?, ?, ?)',
+                    (int(new_id), datetime.now(timezone.utc).isoformat(), str(backfill_reason)[:80]))
+    finally:
+        conn.close()
     return new_id
 
 
