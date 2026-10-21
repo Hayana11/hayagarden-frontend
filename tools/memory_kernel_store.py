@@ -253,6 +253,7 @@ def ingest_from_ombre(
     kernel = MemoryKernel(kernel_db)
     heads, _ = projection.select_heads(kernel_db)
     scan = projection.scan_ombre(heads, runtime, state)
+    projection.apply_lifecycle(scan, state)
     created, revised, errors = [], [], []
 
     for bucket in scan["unmanaged"]:
@@ -276,7 +277,9 @@ def ingest_from_ombre(
             revised.append(bucket["id"])
         except Exception as exc:
             errors.append({"bucket_id": bucket["id"], "stage": "edited", "error": type(exc).__name__})
-    return {"created": created, "revised": revised, "deleted": scan["deleted"], "errors": errors}
+    return {"created": created, "revised": revised, "missing": scan["missing"],
+            "soft_deleted": scan["soft_deleted"], "orphaned": [b["id"] for b in scan["orphaned"]],
+            "errors": errors}
 
 
 def _ingest_created(kernel: MemoryKernel, bucket_id: str, meta: dict[str, Any], body: str, text: str, now: str) -> None:

@@ -1,6 +1,7 @@
 """B-3: Kernel-first writes, Ombre catch-up, and the runtime switch."""
 from __future__ import annotations
 
+import copy
 import os
 import sqlite3
 import unittest
@@ -179,7 +180,8 @@ class IngestTests(StoreFixture):
     def test_lifecycle_only_changes_never_reach_the_kernel(self):
         self.ombre.edit("aaa111", resolved=True, activation_count=1)
         report = self.sync()
-        self.assertEqual(report["ingested"], {"created": [], "revised": [], "deleted": [], "errors": []})
+        self.assertEqual(report["ingested"], {"created": [], "revised": [], "missing": [], "soft_deleted": [],
+                                              "orphaned": [], "errors": []})
         self.assertEqual(len(MemoryKernel(self.kernel).lineage_history("lin:ombre:aaa111")), 1)
 
     def test_crash_after_our_update_is_not_ingested_as_an_ombre_edit(self):
@@ -191,6 +193,42 @@ class IngestTests(StoreFixture):
         self.assertEqual(report["ingested"]["revised"], [])
         self.assertEqual(len(MemoryKernel(self.kernel).lineage_history("lin:ombre:aaa111")), 2)
         self.assertEqual(self.state.get("lin:ombre:aaa111")["projected_state_id"], "st:ombre:aaa111:v2")
+
+    def test_vanished_bucket_is_recreated_by_one_full_sync(self):
+        before = copy.deepcopy(self.ombre.buckets["aaa111"])
+        del self.ombre.buckets["aaa111"]  # gone without a trace; no new Kernel version
+        report = self.sync()
+        self.assertEqual(report["ingested"]["missing"], ["lin:ombre:aaa111"])
+        self.assertEqual(report["projected"]["projected"], 1)
+        self.assertEqual(self.ombre.buckets["aaa111"]["content"], MemoryKernel(self.kernel).get_state(
+            "st:ombre:aaa111:v1").content)
+        self.assertEqual(self.ombre.buckets["aaa111"]["metadata"]["importance"], before["metadata"]["importance"])
+        self.assertEqual(self.state.get("lin:ombre:aaa111")["status"], "projected")
+        again = self.sync()
+        self.assertEqual((again["ingested"]["missing"], again["projected"]["projected"]), ([], 0))
+
+    def test_soft_deleted_bucket_stays_deleted_and_is_reported(self):
+        self.ombre.edit("bbb222", deleted_at=NOW)
+        for _ in range(2):
+            report = self.sync()
+            self.assertEqual(report["ingested"]["soft_deleted"], ["lin:ombre:bbb222"])
+        self.assertTrue(self.ombre.buckets["bbb222"]["metadata"]["deleted_at"])
+        self.assertNotIn("bbb222", self.ombre.creates())
+        self.assertEqual(self.state.get("lin:ombre:bbb222")["status"], "conflict")
+        self.assertEqual(store.status(self.kernel)["projection"].get("conflict"), 1)
+
+    def test_suffixed_bucket_from_ombre_reid_is_never_ingested_as_a_new_lineage(self):
+        result = self.remember("她说想学钢琴。", runtime=None)
+        self.ombre.collide_ids.add(result["bucket_id"])
+        first = self.sync()
+        self.assertEqual(first["projected"]["conflict"], 1)
+        lineages_before = len(self.heads())
+        for _ in range(2):
+            report = self.sync()
+            self.assertEqual(report["ingested"]["created"], [])
+            self.assertEqual(report["ingested"]["orphaned"], [result["bucket_id"] + "_07"])
+        self.assertEqual(len(self.heads()), lineages_before)
+        self.assertEqual(self.ombre.buckets[result["bucket_id"]]["content"], "别人刚写进来的桶。")
 
     def test_ombre_unavailable_during_sync_is_reported_not_raised(self):
         self.ombre.down = True

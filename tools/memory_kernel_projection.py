@@ -293,6 +293,20 @@ def classify(head: "Head", row: dict[str, Any] | None, bucket: dict[str, Any]) -
     return "external"
 
 
+def projection_marked(bucket: dict[str, Any], lineage_id: str | None = None) -> bool:
+    """Carries the projection's own provenance (for ``lineage_id`` when given)."""
+    meta = bucket.get("metadata") or {}
+    stamped = meta.get("kernel_lineage_id")
+    if lineage_id is not None and stamped:
+        return stamped == lineage_id
+    return str(meta.get("source_tool") or "") in PROJECTION_SOURCE_TOOLS or bool(stamped)
+
+
+def _as_bucket(fields: dict[str, Any]) -> dict[str, Any]:
+    """The bucket view of a target, for a baseline taken from the Kernel itself."""
+    return {"content": fields.get("content"), "metadata": {k: v for k, v in fields.items() if k != "content"}}
+
+
 def is_system_bucket(bucket: dict[str, Any]) -> bool:
     return bool(SYSTEM_DOMAINS & set(_as_list((bucket.get("metadata") or {}).get("domain"))))
 
@@ -392,6 +406,19 @@ CREATE TABLE IF NOT EXISTS projection_lineage (
 # target_json: the (normalised) fields last projected, so Ombre's own normalisation of
 # an unchanged input is not re-sent. intent_json: an update sent but not yet confirmed.
 _STATE_COLUMNS = {"target_json": "TEXT", "intent_json": "TEXT"}
+# Buckets Ombre created for us under an id we did not ask for (its silent re-id on a
+# collision). They are ours, so never ingested back as new lineages, and never adopted.
+_QUARANTINE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS projection_quarantine (
+    bucket_id TEXT PRIMARY KEY,
+    lineage_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+)
+"""
+# The projection's own provenance marks on a bucket: our worker's source_tool, and the
+# lineage stamp the earlier file projector wrote.
+PROJECTION_SOURCE_TOOLS = frozenset({"kernel_projection", "memory_kernel_projection"})
 
 
 class ProjectionState:
@@ -404,6 +431,7 @@ class ProjectionState:
         os.chmod(self.path, 0o600)
         with self._conn() as conn:
             conn.execute(_STATE_SCHEMA)
+            conn.execute(_QUARANTINE_SCHEMA)
             have = {r[1] for r in conn.execute("PRAGMA table_info(projection_lineage)")}
             for name, kind in _STATE_COLUMNS.items():
                 if name not in have:
@@ -440,15 +468,26 @@ class ProjectionState:
             )
         return self.get(lineage_id) or {}
 
-    def projected(self, lineage_id: str, state_id: str, bucket: dict[str, Any], target: dict[str, Any]) -> None:
+    def projected(self, lineage_id: str, state_id: str, bucket: dict[str, Any], target: dict[str, Any],
+                  *, status: str = "projected", error: str | None = None) -> None:
         with self._conn() as conn:
             conn.execute(
                 "UPDATE projection_lineage SET projected_state_id=?, target_state_id=?, observed_json=?, "
-                "observed_sha=?, target_json=?, intent_json=NULL, status='projected', error=NULL, attempts=0, "
+                "observed_sha=?, target_json=?, intent_json=NULL, status=?, error=?, attempts=0, "
                 "updated_at=? WHERE lineage_id=?",
                 (state_id, state_id, json.dumps(observed_semantics(bucket), ensure_ascii=False, sort_keys=True),
-                 observed_sha(bucket), _dumps_norm(target), _now(), lineage_id),
+                 observed_sha(bucket), _dumps_norm(target), status, error, _now(), lineage_id),
             )
+
+    def quarantine(self, bucket_id: str, lineage_id: str, reason: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO projection_quarantine (bucket_id, lineage_id, reason, created_at) "
+                "VALUES (?, ?, ?, ?)", (bucket_id, lineage_id, reason[:120], _now()))
+
+    def quarantined(self) -> dict[str, dict[str, Any]]:
+        with self._conn() as conn:
+            return {r["bucket_id"]: dict(r) for r in conn.execute("SELECT * FROM projection_quarantine")}
 
     def intend(self, lineage_id: str, state_id: str, fields: dict[str, Any]) -> None:
         """Record an update before sending it, so a crash after Ombre applied it is recognised."""
@@ -476,11 +515,13 @@ class ProjectionState:
         with self._conn() as conn:
             conn.execute("UPDATE projection_lineage SET intent_json=NULL WHERE lineage_id=?", (lineage_id,))
 
-    def forget(self, lineage_id: str) -> None:
+    def forget(self, lineage_id: str, reason: str = "bucket_missing_in_ombre") -> None:
+        """Drop the baseline of a bucket that no longer exists, so it is recreated."""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE projection_lineage SET projected_state_id=NULL, observed_json=NULL, observed_sha=NULL, "
-                "target_json=NULL, intent_json=NULL, updated_at=? WHERE lineage_id=?", (_now(), lineage_id))
+                "target_json=NULL, intent_json=NULL, status='pending', error=?, updated_at=? WHERE lineage_id=?",
+                (reason, _now(), lineage_id))
 
     def failed(self, lineage_id: str, status: str, error: str) -> None:
         with self._conn() as conn:
@@ -566,6 +607,9 @@ def _run_batch(items: list[tuple[Head, dict[str, Any]]], runtime: OmbreRuntime, 
         if not row.get("observed_sha"):
             actual = result.get("bucket_id") or head.bucket_id
             if actual != head.bucket_id:
+                # Ombre re-id'd our create: that bucket is ours but under a foreign id.
+                # Quarantine it so it is never ingested back as a new lineage.
+                state.quarantine(actual, head.lineage_id, "ombre_reassigned_id")
                 state.failed(head.lineage_id, "conflict", f"ombre_assigned_other_id:{actual}")
                 outcomes[head.lineage_id] = "conflict"
                 continue
@@ -573,6 +617,10 @@ def _run_batch(items: list[tuple[Head, dict[str, Any]]], runtime: OmbreRuntime, 
                 outcomes[head.lineage_id] = _record(head, state, result["bucket"])
                 continue
             result = result["bucket"]
+            adopted = _adopt(head, result, state)
+            if adopted:
+                outcomes[head.lineage_id] = adopted
+                continue
         outcome, delta = _decide(head, row, result, state)
         if delta:
             updates.append((head, delta))
@@ -593,6 +641,33 @@ def _run_batch(items: list[tuple[Head, dict[str, Any]]], runtime: OmbreRuntime, 
         failure = next((r for r in (updated, after) if isinstance(r, RequestFailed)), None)
         outcomes[head.lineage_id] = (_pending(head, state, failure) if failure is not None
                                      else _record(head, state, after))
+
+
+def _adopt(head: Head, bucket: dict[str, Any] | None, state: ProjectionState) -> str | None:
+    """A bucket already sits at our id and we have no baseline for it: whose is it?
+
+    Returns an outcome, or None when it is ours to update (an earlier create of
+    ours that crashed before its bookkeeping).
+    """
+    if bucket is None:
+        return None
+    if bucket.get("deleted"):
+        state.failed(head.lineage_id, "conflict", "bucket_deleted_in_ombre")
+        return "conflict"
+    target = target_fields(head)
+    if not changed_fields(target, bucket):
+        return _record(head, state, bucket)  # already holds the target: take it as baseline
+    if head.lineage_id == "lin:ombre:" + head.bucket_id:
+        # The lineage was imported from this very bucket, which has been edited inside
+        # Ombre since. Never overwrite: take the Kernel head as the baseline, so the
+        # next scan sees an Ombre-side edit and ingests it as a revision.
+        state.projected(head.lineage_id, head.state.state_id, _as_bucket(target), target,
+                        status="diverged", error="edited_in_ombre_before_baseline")
+        return "diverged"
+    if projection_marked(bucket, head.lineage_id):
+        return None
+    state.failed(head.lineage_id, "conflict", "bucket_id_taken_by_unowned_bucket")
+    return "conflict"
 
 
 def _decide(head: Head, row: dict[str, Any], bucket: dict[str, Any] | None,
@@ -626,25 +701,46 @@ def _pending(head: Head, state: ProjectionState, error: str) -> str:
 
 
 def scan_ombre(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> dict[str, Any]:
-    """Compare Ombre with the observed baselines: edits, deletions, and buckets we don't manage."""
+    """Compare Ombre with the observed baselines.
+
+    diverged      -- edited inside Ombre: (head, bucket), to ingest as a revision
+    missing       -- gone without a trace (rebuilt vault): to recreate
+    soft_deleted  -- deleted inside Ombre: a decision to keep, never revived
+    unmanaged     -- created by Ombre on its own: to ingest as new lineages
+    orphaned      -- projection-made buckets no lineage owns (quarantined re-ids,
+                     or marked by us): never ingested, reported for cleanup
+    """
     buckets = {b["id"]: b for b in runtime.list(include_archive=True)}
     rows = {row["lineage_id"]: row for row in state.rows()}
+    quarantined = state.quarantined()
     managed = {row["bucket_id"] for row in rows.values()} | {h.bucket_id for h in heads}
-    diverged, deleted = [], []
+    diverged, missing, soft_deleted = [], [], []
     for head in heads:
         row = rows.get(head.lineage_id)
-        if not row or row["status"] not in ("projected", "diverged") or not row.get("observed_sha"):
+        if not row or not row.get("observed_sha") or row["status"] not in ("projected", "diverged", "pending", "conflict"):
             continue
         bucket = buckets.get(row["bucket_id"])
-        if bucket is None or bucket.get("deleted"):
-            deleted.append(head.lineage_id)
+        if bucket is None:
+            missing.append(head.lineage_id)
+        elif bucket.get("deleted"):
+            soft_deleted.append(head.lineage_id)
         elif classify(head, row, bucket) == "external":
             diverged.append((head, bucket))
-    unmanaged = [
-        b for bucket_id, b in sorted(buckets.items())
-        if bucket_id not in managed and not b.get("deleted") and not is_system_bucket(b)
-    ]
-    return {"diverged": diverged, "deleted": deleted, "unmanaged": unmanaged}
+    unmanaged, orphaned = [], []
+    for bucket_id, bucket in sorted(buckets.items()):
+        if bucket_id in managed or bucket.get("deleted") or is_system_bucket(bucket):
+            continue
+        (orphaned if bucket_id in quarantined or projection_marked(bucket) else unmanaged).append(bucket)
+    return {"diverged": diverged, "missing": missing, "soft_deleted": soft_deleted,
+            "unmanaged": unmanaged, "orphaned": orphaned}
+
+
+def apply_lifecycle(scan: dict[str, Any], state: ProjectionState) -> None:
+    """Act on what the scan found before projecting: recreate missing, keep deletions."""
+    for lineage_id in scan["missing"]:
+        state.forget(lineage_id)
+    for lineage_id in scan["soft_deleted"]:
+        state.failed(lineage_id, "conflict", "bucket_deleted_in_ombre")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -665,8 +761,8 @@ def main(argv: list[str] | None = None) -> int:
         result: dict[str, Any] = project_heads(heads, runtime, state)
     else:
         scan = scan_ombre(heads, runtime, state)
-        result = {"heads": len(heads), "diverged": len(scan["diverged"]), "deleted": len(scan["deleted"]),
-                  "unmanaged": len(scan["unmanaged"])}
+        result = {key: len(scan[key]) for key in ("diverged", "missing", "soft_deleted", "unmanaged", "orphaned")}
+        result["heads"] = len(heads)
     result["problems"] = problems
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

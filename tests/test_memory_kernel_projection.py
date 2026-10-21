@@ -90,7 +90,13 @@ class FakeOmbreRuntime:
         existing = self._view(self.buckets.get(bucket_id))
         if existing is not None:
             return {"created": False, "bucket_id": bucket_id, "bucket": existing}
-        actual = bucket_id + "_07" if bucket_id in self.collide_ids else bucket_id
+        actual = bucket_id
+        if bucket_id in self.collide_ids:
+            # Another writer takes the id between our get and our create; Ombre then
+            # silently gives our bucket a suffixed id (3.6.14 behaviour).
+            self.buckets[bucket_id] = {"id": bucket_id, "content": "别人刚写进来的桶。",
+                                       "metadata": {"id": bucket_id, "type": "dynamic", "source_tool": "hold"}}
+            actual = bucket_id + "_07"
         meta = {k: v for k, v in fields.items() if k not in ("content", "bucket_type")}
         meta.update(id=actual, type=fields["bucket_type"], activation_count=0, source_tool="kernel_projection")
         self._normalise(meta)
@@ -308,7 +314,8 @@ class ProjectTests(ProjectionFixture):
         scan = projection.scan_ombre(self.heads(), self.ombre, self.state)
         # ddd444 (呼吸间) is Ombre's own; ccc333/eee555 were already deleted before import.
         self.assertEqual([b["id"] for b in scan["unmanaged"]], ["fff666"])
-        self.assertEqual(scan["deleted"], ["lin:ombre:bbb222"])
+        self.assertEqual(scan["soft_deleted"], ["lin:ombre:bbb222"])
+        self.assertEqual(scan["missing"], [])
         self.revise("st:ombre:bbb222:v1", "我们的小家很完美。", "st:ombre:bbb222:v2")
         self.assertEqual(self.project_all()["conflict"], 1)
         self.assertTrue(self.ombre.buckets["bbb222"]["metadata"]["deleted_at"])  # never resurrected
@@ -422,6 +429,44 @@ class SeamTests(ProjectionFixture):
         self.assertEqual(row["status"], "conflict")
         self.assertIn(f"ombre_assigned_other_id:{head.bucket_id}_07", row["error"])
         self.assertIsNone(row["observed_sha"])
+        self.assertIn(f"{head.bucket_id}_07", self.state.quarantined())
+
+    def test_id_taken_by_someone_elses_bucket_is_a_conflict_and_left_untouched(self):
+        head = self.head("lin:posts:2")
+        foreign = {"id": head.bucket_id, "content": "别人的桶，与这条记忆无关。",
+                   "metadata": {"id": head.bucket_id, "type": "dynamic", "source_tool": "hold", "importance": 3}}
+        self.ombre.buckets[head.bucket_id] = copy.deepcopy(foreign)
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "conflict")
+        self.assertEqual(self.ombre.buckets[head.bucket_id], foreign)
+        self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
+        self.assertEqual(self.state.get("lin:posts:2")["error"], "bucket_id_taken_by_unowned_bucket")
+        self.assertEqual(self.project_all()["conflict"], 1)  # stays refused on every run
+        self.assertEqual(self.ombre.buckets[head.bucket_id], foreign)
+
+    def test_existing_bucket_equal_to_the_target_is_adopted(self):
+        self.ombre.buckets.clear()
+        head = self.head("lin:posts:2")
+        fields = projection.target_fields(head)
+        self.ombre.buckets[head.bucket_id] = {"id": head.bucket_id, "content": fields["content"],
+                                              "metadata": {k: v for k, v in fields.items() if k != "content"}}
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
+
+    def test_our_own_marked_bucket_without_bookkeeping_is_crash_recovered(self):
+        self.ombre.buckets.clear()
+        head = self.head("lin:posts:2")
+        self.ombre.buckets[head.bucket_id] = {"id": head.bucket_id, "content": "旧版本的正文",
+                                              "metadata": {"id": head.bucket_id, "source_tool": "kernel_projection"}}
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], head.state.content)
+
+    def test_imported_bucket_edited_before_any_baseline_is_diverged_not_overwritten(self):
+        self.ombre.edit("aaa111", content="[[哈娅]]养了两只猫，后来又收养了一只。")
+        self.assertEqual(projection.project_lineage(self.head("lin:ombre:aaa111"), self.ombre, self.state),
+                         "diverged")
+        self.assertIn("又收养", self.ombre.buckets["aaa111"]["content"])
+        [(head, _)] = projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"]
+        self.assertEqual(head.lineage_id, "lin:ombre:aaa111")  # the next sync ingests it
 
     def test_lineage_lock_serialises_processes(self):
         head = self.head("lin:posts:2")
