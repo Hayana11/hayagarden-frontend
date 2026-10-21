@@ -81,6 +81,17 @@ class BucketManager:
     async def list_all(self, include_archive=False):
         buckets = [json.loads(p.read_text()) for p in sorted(self.root.glob("*.json"))]
         return [b for b in buckets if include_archive or not b["metadata"].get("deleted_at")]
+
+    async def touch_many(self, bucket_ids, ripple=False):
+        # 3.6.14: touch moves last_active / activation_count and nothing else.
+        for bucket_id in bucket_ids:
+            bucket = self._load(bucket_id)
+            if bucket is None:
+                continue
+            bucket["metadata"]["last_active"] = "2026-10-21T15:00:00"
+            bucket["metadata"]["activation_count"] = int(bucket["metadata"].get("activation_count") or 0) + 1
+            bucket["metadata"]["ripple"] = ripple
+            self._path(bucket_id).write_text(json.dumps(bucket))
 '''
 
 
@@ -150,6 +161,25 @@ class WorkerTests(FakeOmbreSource):
         self.assertEqual(results[1]["content"], "原文")
         with self.assertRaises(projection.RuntimeUnavailable):
             self.runtime.update("abc", {"content": "REFUSE"})
+
+    def test_touch_reinforces_without_moving_projected_semantics(self):
+        self.runtime.create_if_absent("abc", {"content": "她今天买了鹦鹉。", "tags": ["pet"], "importance": 6})
+        before = self.runtime.get("abc")
+        [result] = self.runtime.batch([{"op": "touch", "bucket_ids": ["abc", "missing"]}])
+        self.assertEqual(result, {"touched": 2})
+        after = self.runtime.get("abc")
+        self.assertEqual(after["metadata"]["activation_count"], 1)
+        self.assertFalse(after["metadata"]["ripple"])
+        self.assertEqual(projection.observed_sha(after), projection.observed_sha(before))
+
+    def test_touch_without_touch_many_fails_alone(self):
+        source = (self.src / "bucket_manager.py").read_text(encoding="utf-8")
+        (self.src / "bucket_manager.py").write_text(source.replace("async def touch_many", "async def _gone"),
+                                                    encoding="utf-8")
+        results = self.runtime.batch([{"op": "touch", "bucket_ids": ["abc"]}, {"op": "get", "bucket_id": "abc"}])
+        self.assertIsInstance(results[0], projection.RequestFailed)
+        self.assertIn("touch_many", results[0])
+        self.assertIsNone(results[1])
 
     def test_soft_deleted_bucket_is_seen_as_deleted(self):
         (self.store / "gone.json").write_text(json.dumps(

@@ -953,6 +953,38 @@ def search_memories(
     return _observe_read("observe_search", result, query, limit=limit, touch=touch)
 
 
+def search_bucket_ids(
+    query: str,
+    limit: int = 10,
+    *,
+    timeout: float = 4.0,
+    wall_timeout: Optional[float] = None,
+) -> Optional[list[str]]:
+    """Ombre's ranking only: bucket ids, best first. Read-only, never touches.
+
+    Memory readers map these ids to Kernel heads (tools.memory_kernel_read) and
+    show the Kernel's text, not Ombre's. None means Ombre could not be asked,
+    which is different from "nothing matched".
+    """
+    query = str(query or "").strip()
+    if not query:
+        return []
+    if _backend() == "http":
+        def worker() -> Optional[list[str]]:
+            deadline = time.monotonic() + max(0.05, float(wall_timeout or timeout + 1.0))
+            matches = _http_json("/api/search", params={"q": query}, timeout=timeout, deadline=deadline)
+            return [str(item["id"]) for item in (matches or [])[: max(1, int(limit))] if item.get("id")]
+
+        return _run_sync(worker, wall_timeout=wall_timeout or timeout + 1.0, default=None)
+
+    async def call() -> list[str]:
+        manager = getattr(_load_server(), "bucket_mgr")
+        matches = await manager.search(query, limit=max(1, int(limit)))
+        return [str(b.get("id")) for b in matches or [] if b.get("id")]
+
+    return _run_async(call, async_timeout=timeout, wall_timeout=wall_timeout or timeout + 1.0, default=None)
+
+
 def surface_memories(*, timeout: float = 6.0, wall_timeout: float = 7.0) -> Optional[str]:
     is_http = _backend() == "http"
     async_timeout = max(timeout, 30.0) if is_http else timeout

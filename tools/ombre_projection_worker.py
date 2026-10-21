@@ -4,7 +4,8 @@ The Memory Kernel projection never touches Ombre's files. It starts this
 worker with Ombre's Python, pointing at Ombre's source tree and env file, and
 the worker drives Ombre exclusively through ``BucketManager.create / update /
 get`` (plus ``get_including_archive`` / ``list_all`` to read deletions and
-buckets Ombre created on its own). Vault location, validation, normalisation,
+buckets Ombre created on its own, and ``touch_many`` to reinforce memories a
+reader actually used). Vault location, validation, normalisation,
 locking, the ledger and derived indexes are all Ombre's.
 
 ``hold`` is never called: its similarity merge is the right behaviour for
@@ -128,6 +129,14 @@ async def handle(manager, request: dict) -> object:
         if not await manager.update(request["bucket_id"], **fields):
             raise RuntimeError("ombre_update_not_committed")
         return {"updated": True}
+    if op == "touch":
+        # Explicit reinforcement of memories a caller actually used. touch only moves
+        # last_active / activation_count, never a projected semantic field.
+        touch_many = getattr(manager, "touch_many", None)
+        if not callable(touch_many):
+            raise Incompatible("BucketManager lacks: touch_many")
+        await touch_many([str(b) for b in request.get("bucket_ids") or []], ripple=False)
+        return {"touched": len(request.get("bucket_ids") or [])}
     if op == "list":
         buckets = await manager.list_all(include_archive=bool(request.get("include_archive")))
         return [_bucket_view(bucket) for bucket in buckets]
