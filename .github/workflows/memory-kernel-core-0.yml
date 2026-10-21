@@ -6,6 +6,7 @@ on:
       - "tools/memory_kernel.py"
       - "tools/memory_kernel_schema.py"
       - "tools/memory_kernel_import.py"
+      - "tools/memory_kernel_projection.py"
       - "tools/memory_interop.py"
       - "tools/memory_interop_legacy.py"
       - "tools/memory_interop_legacy_shadow.py"
@@ -16,6 +17,7 @@ on:
       - "tools/memory_internal_adapter.py"
       - "tests/test_memory_kernel.py"
       - "tests/test_memory_kernel_import.py"
+      - "tests/test_memory_kernel_projection.py"
       - "tests/test_memory_kernel_legacy_isolation.py"
       - "tests/test_memory_interop.py"
       - "tests/test_memory_interop_legacy.py"
@@ -56,19 +58,20 @@ jobs:
         run: >-
           python -m ruff check
           tools/memory_kernel.py tools/memory_kernel_schema.py tools/memory_kernel_import.py
+          tools/memory_kernel_projection.py
           tools/memory_interop.py
           tools/memory_interop_legacy.py tools/memory_interop_legacy_shadow.py
           tools/memory_interop_shadow.py tools/memory_interop_shadow_worker.py
           tools/memory_runtime_bridge.py
           tests/test_memory_kernel.py tests/test_memory_kernel_legacy_isolation.py
-          tests/test_memory_kernel_import.py
+          tests/test_memory_kernel_import.py tests/test_memory_kernel_projection.py
           tests/test_memory_interop.py tests/test_memory_interop_legacy.py
           tests/test_memory_interop_live_shadow.py tests/test_memory_runtime_bridge.py
       - name: Semantic, migration, and legacy isolation contracts
         run: >-
           python -m unittest
           tests.test_memory_kernel tests.test_memory_kernel_legacy_isolation
-          tests.test_memory_kernel_import
+          tests.test_memory_kernel_import tests.test_memory_kernel_projection
           tests.test_memory_interop tests.test_memory_interop_legacy
           tests.test_memory_interop_live_shadow tests.test_memory_runtime_bridge -v
       - name: Whitespace check
