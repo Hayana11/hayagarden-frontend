@@ -204,11 +204,11 @@ class ConcurrentProjectionTests(FakeOmbreSource):
 
         def request_write():  # remember()'s projection
             outcomes["request"] = projection.project_lineage(
-                self.heads[0], self.runtime, projection.ProjectionState(self.state_path))
+                self.heads[0], self.runtime, projection.ProjectionState(self.state_path), kernel_db=self.kernel)
 
         def sync():  # sync()'s project_heads in another process
             outcomes["sync"] = projection.project_heads(
-                self.heads, self.runtime, projection.ProjectionState(self.state_path))
+                self.heads, self.runtime, projection.ProjectionState(self.state_path), kernel_db=self.kernel)
 
         threads = [threading.Thread(target=request_write), threading.Thread(target=sync)]
         for thread in threads:

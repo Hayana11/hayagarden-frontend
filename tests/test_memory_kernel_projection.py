@@ -160,7 +160,7 @@ class ProjectionFixture(ImportFixture):
         return next(h for h in self.heads() if h.lineage_id == lineage_id)
 
     def project_all(self):
-        return projection.project_heads(self.heads(), self.ombre, self.state)
+        return projection.project_heads(self.heads(), self.ombre, self.state, kernel_db=self.kernel)
 
 
 class HeadTests(ProjectionFixture):
@@ -208,7 +208,7 @@ class ProjectTests(ProjectionFixture):
     def test_lineages_are_batched_into_few_worker_runs(self):
         self.ombre.buckets.clear()
         heads = self.heads()
-        counts = projection.project_heads(heads, self.ombre, self.state, batch_size=2)
+        counts = projection.project_heads(heads, self.ombre, self.state, kernel_db=self.kernel, batch_size=2)
         self.assertEqual(counts["projected"], len(heads))
         self.assertEqual(self.ombre.runs, -(-len(heads) // 2))  # one run per batch for fresh creates
         self.ombre.runs = 0
@@ -245,7 +245,7 @@ class ProjectTests(ProjectionFixture):
         self.ombre.buckets.clear()
         bbb = self.head("lin:ombre:bbb222")
         self.assertEqual(projection.target_fields(bbb)["importance"], 5)
-        self.assertEqual(projection.project_lineage(bbb, self.ombre, self.state), "projected")
+        self.assertEqual(projection.project_lineage(bbb, self.ombre, self.state, kernel_db=self.kernel), "projected")
         # One worker run: get, create, get back.
         self.assertEqual(self.ombre.calls, [("create_if_absent", "bbb222")])
         row = self.state.get("lin:ombre:bbb222")
@@ -288,9 +288,9 @@ class ProjectTests(ProjectionFixture):
         head = self.head("lin:posts:2")
         with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError("disk I/O error")):
             with self.assertRaises(sqlite3.OperationalError):
-                projection.project_lineage(head, self.ombre, self.state)
+                projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel)
         self.assertIn(head.bucket_id, self.ombre.buckets)
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "projected")
         self.assertEqual(self.ombre.creates(), [head.bucket_id])  # retry did get first
 
     def test_edit_inside_ombre_is_diverged_not_overwritten(self):
@@ -347,11 +347,11 @@ class SeamTests(ProjectionFixture):
         head = self.revise_cats()
         with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError("disk I/O error")):
             with self.assertRaises(sqlite3.OperationalError):
-                projection.project_lineage(head, self.ombre, self.state)
+                projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel)
         self.assertIn("鹦鹉", self.ombre.buckets["aaa111"]["content"])  # Ombre applied it
         # Neither the scan nor the retry may read our own write as an edit inside Ombre.
         self.assertEqual(projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"], [])
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "projected")
         self.assertEqual(self.state.get("lin:ombre:aaa111")["projected_state_id"], "st:ombre:aaa111:v2")
 
     def test_crash_then_a_newer_head_still_projects_the_newer_head(self):
@@ -359,11 +359,11 @@ class SeamTests(ProjectionFixture):
         head = self.revise_cats()
         with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
             with self.assertRaises(sqlite3.OperationalError):
-                projection.project_lineage(head, self.ombre, self.state)
+                projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel)
         self.revise("st:ombre:aaa111:v2", "哈娅养了两只猫和一只鹦鹉，鹦鹉叫福禄。", "st:ombre:aaa111:v3")
         newer = self.head("lin:ombre:aaa111")
         self.assertEqual(projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"], [])
-        self.assertEqual(projection.project_lineage(newer, self.ombre, self.state), "projected")
+        self.assertEqual(projection.project_lineage(newer, self.ombre, self.state, kernel_db=self.kernel), "projected")
         self.assertEqual(self.ombre.buckets["aaa111"]["content"], "哈娅养了两只猫和一只鹦鹉，鹦鹉叫福禄。")
 
     def test_refused_update_leaves_no_intent_behind(self):
@@ -386,31 +386,31 @@ class SeamTests(ProjectionFixture):
         head = self.head("lin:ombre:aaa111")
         with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
             with self.assertRaises(sqlite3.OperationalError):
-                projection.project_lineage(head, self.ombre, self.state)
+                projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel)
         # Ombre raised importance to 10 on its own when we pinned: still our write.
         self.assertEqual(self.ombre.buckets["aaa111"]["metadata"]["importance"], 10)
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "projected")
 
     def test_outside_content_edit_after_our_crash_is_still_external(self):
         self.project_all()
         head = self.revise_cats()
         with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
             with self.assertRaises(sqlite3.OperationalError):
-                projection.project_lineage(head, self.ombre, self.state)
+                projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel)
         self.ombre.edit("aaa111", content="她又在面板里改了一遍。")  # before our retry
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "diverged")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "diverged")
 
     def test_edit_neither_baseline_nor_target_is_external(self):
         self.project_all()
         head = self.revise_cats()
         self.ombre.edit("aaa111", content="她在面板里改成了别的内容。")
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "diverged")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "diverged")
 
     def test_ombre_already_holding_the_target_is_just_recorded(self):
         self.project_all()
         head = self.revise_cats()
         self.ombre.edit("aaa111", content="哈娅养了两只猫，还有一只鹦鹉福禄。")
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "projected")
         self.assertNotIn(("update", "aaa111"), self.ombre.calls)
 
     def test_pinned_importance_normalisation_is_not_resent_every_revision(self):
@@ -424,7 +424,7 @@ class SeamTests(ProjectionFixture):
         self.ombre.buckets.clear()
         head = self.head("lin:posts:2")
         self.ombre.collide_ids.add(head.bucket_id)
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "conflict")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "conflict")
         row = self.state.get("lin:posts:2")
         self.assertEqual(row["status"], "conflict")
         self.assertIn(f"ombre_assigned_other_id:{head.bucket_id}_07", row["error"])
@@ -436,7 +436,7 @@ class SeamTests(ProjectionFixture):
         foreign = {"id": head.bucket_id, "content": "别人的桶，与这条记忆无关。",
                    "metadata": {"id": head.bucket_id, "type": "dynamic", "source_tool": "hold", "importance": 3}}
         self.ombre.buckets[head.bucket_id] = copy.deepcopy(foreign)
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "conflict")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "conflict")
         self.assertEqual(self.ombre.buckets[head.bucket_id], foreign)
         self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
         self.assertEqual(self.state.get("lin:posts:2")["error"], "bucket_id_taken_by_unowned_bucket")
@@ -449,16 +449,45 @@ class SeamTests(ProjectionFixture):
         fields = projection.target_fields(head)
         self.ombre.buckets[head.bucket_id] = {"id": head.bucket_id, "content": fields["content"],
                                               "metadata": {k: v for k, v in fields.items() if k != "content"}}
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "projected")
         self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
 
-    def test_our_own_marked_bucket_without_bookkeeping_is_crash_recovered(self):
+    def test_worker_marked_bucket_without_bookkeeping_is_never_overwritten(self):
+        # Bookkeeping lost or rebuilt; the bucket was made by our worker and then edited
+        # in Ombre's dashboard. The marker proves who made it, not that nobody changed it.
         self.ombre.buckets.clear()
         head = self.head("lin:posts:2")
-        self.ombre.buckets[head.bucket_id] = {"id": head.bucket_id, "content": "旧版本的正文",
+        self.ombre.buckets[head.bucket_id] = {"id": head.bucket_id, "content": "在面板里改过的版本。",
                                               "metadata": {"id": head.bucket_id, "source_tool": "kernel_projection"}}
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "projected")
-        self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], head.state.content)
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "diverged")
+        self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], "在面板里改过的版本。")
+        self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
+        [(found, _)] = projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"]
+        self.assertEqual(found.lineage_id, "lin:posts:2")  # the edit is ingested, not lost
+
+    def test_edit_between_our_create_and_its_bookkeeping_is_never_overwritten(self):
+        self.ombre.buckets.clear()
+        head = self.head("lin:posts:2")
+        with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
+            with self.assertRaises(sqlite3.OperationalError):
+                projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel)
+        self.assertEqual(self.ombre.creates(), [head.bucket_id])  # our create landed
+        self.ombre.edit(head.bucket_id, content="她在我们记账之前就改了这条。")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "diverged")
+        self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], "她在我们记账之前就改了这条。")
+        self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
+
+    def test_unedited_create_of_ours_is_recovered_and_a_newer_head_still_projects(self):
+        self.ombre.buckets.clear()
+        head = self.head("lin:posts:2")
+        with mock.patch.object(self.state, "projected", side_effect=sqlite3.OperationalError):
+            with self.assertRaises(sqlite3.OperationalError):
+                projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel)
+        self.revise(head.state.state_id, "哈娅不吃老豆腐，只吃内酯豆腐。", head.state.state_id + "-v2")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel),
+                         "projected")
+        self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], "哈娅不吃老豆腐，只吃内酯豆腐。")
+        self.assertEqual(self.ombre.creates(), [head.bucket_id])
 
     def test_old_projector_stamp_with_later_edit_is_diverged_not_overwritten(self):
         self.ombre.buckets.clear()
@@ -466,7 +495,7 @@ class SeamTests(ProjectionFixture):
         self.ombre.buckets[head.bucket_id] = {"id": head.bucket_id, "content": "主人在面板里改过的版本。",
                                               "metadata": {"id": head.bucket_id, "source_tool": "memory_kernel_projection",
                                                            "kernel_lineage_id": "lin:posts:2"}}
-        self.assertEqual(projection.project_lineage(head, self.ombre, self.state), "diverged")
+        self.assertEqual(projection.project_lineage(head, self.ombre, self.state, kernel_db=self.kernel), "diverged")
         self.assertEqual(self.ombre.buckets[head.bucket_id]["content"], "主人在面板里改过的版本。")
         self.assertNotIn(("update", head.bucket_id), self.ombre.calls)
         [(found, _)] = projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"]
@@ -474,7 +503,7 @@ class SeamTests(ProjectionFixture):
 
     def test_imported_bucket_edited_before_any_baseline_is_diverged_not_overwritten(self):
         self.ombre.edit("aaa111", content="[[哈娅]]养了两只猫，后来又收养了一只。")
-        self.assertEqual(projection.project_lineage(self.head("lin:ombre:aaa111"), self.ombre, self.state),
+        self.assertEqual(projection.project_lineage(self.head("lin:ombre:aaa111"), self.ombre, self.state, kernel_db=self.kernel),
                          "diverged")
         self.assertIn("又收养", self.ombre.buckets["aaa111"]["content"])
         [(head, _)] = projection.scan_ombre(self.heads(), self.ombre, self.state)["diverged"]
@@ -499,6 +528,27 @@ class SeamTests(ProjectionFixture):
         created = list(self.ombre.creates())
         self.assertEqual(self.project_all()["projected"], len(self.heads()))
         self.assertEqual(sorted(self.ombre.creates()), sorted(created))  # no second create
+
+    def test_stale_sync_snapshot_never_downgrades_a_newer_head(self):
+        self.project_all()
+        stale_heads = self.heads()  # sync captures v1
+        self.revise("st:ombre:aaa111:v1", "哈娅养了两只猫，还有一只鹦鹉福禄。", "st:ombre:aaa111:v2")
+        self.assertEqual(projection.project_lineage(self.head("lin:ombre:aaa111"), self.ombre, self.state,
+                                                    kernel_db=self.kernel), "projected")  # request projects v2
+        # sync resumes with its v1 snapshot and gets the lock
+        projection.project_heads(stale_heads, self.ombre, self.state, kernel_db=self.kernel)
+        self.assertIn("鹦鹉", self.ombre.buckets["aaa111"]["content"])
+        row = self.state.get("lin:ombre:aaa111")
+        self.assertEqual((row["status"], row["projected_state_id"]), ("projected", "st:ombre:aaa111:v2"))
+
+    def test_stale_snapshot_projects_the_current_head_when_it_was_not_yet_projected(self):
+        self.project_all()
+        stale = self.head("lin:ombre:aaa111")
+        self.revise("st:ombre:aaa111:v1", "哈娅养了两只猫，还有一只鹦鹉福禄。", "st:ombre:aaa111:v2")
+        self.assertEqual(projection.project_lineage(stale, self.ombre, self.state, kernel_db=self.kernel),
+                         "projected")
+        self.assertIn("鹦鹉", self.ombre.buckets["aaa111"]["content"])
+        self.assertEqual(self.state.get("lin:ombre:aaa111")["projected_state_id"], "st:ombre:aaa111:v2")
 
     def test_lineage_lock_serialises_processes(self):
         head = self.head("lin:posts:2")

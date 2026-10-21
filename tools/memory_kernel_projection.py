@@ -147,6 +147,30 @@ def select_heads(kernel_db: Path) -> tuple[list[Head], list[dict[str, Any]]]:
     return heads, problems
 
 
+def current_heads(kernel_db: Path, lineage_ids: list[str]) -> dict[str, Head | None]:
+    """The Kernel's head of each lineage now; None when it has none or several."""
+    wanted = sorted(set(lineage_ids))
+    found: dict[str, list[str]] = {lineage_id: [] for lineage_id in wanted}
+    conn = sqlite3.connect(f"file:{kernel_db}?mode=ro", uri=True)
+    try:
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            for state_id, lineage_id in conn.execute(
+                f"SELECT s.state_id, s.lineage_id FROM memory_kernel_state s WHERE s.lineage_id IN ({marks}) "
+                "AND NOT EXISTS (SELECT 1 FROM memory_kernel_delta d WHERE d.before_ref = s.state_id)", chunk,
+            ):
+                found[lineage_id].append(state_id)
+    finally:
+        conn.close()
+    kernel = MemoryKernel(kernel_db)
+    heads: dict[str, Head | None] = {}
+    for lineage_id, state_ids in found.items():
+        state = kernel.get_state(state_ids[0]) if len(state_ids) == 1 else None
+        heads[lineage_id] = Head(lineage_id, state) if state is not None and state.content is not None else None
+    return heads
+
+
 def head_contents(kernel_db: Path) -> list[tuple[str, str, str]]:
     """Cheap read-only (lineage_id, state_id, content) of every head, for dedupe."""
     conn = sqlite3.connect(f"file:{kernel_db}?mode=ro", uri=True)
@@ -279,7 +303,7 @@ def classify(head: "Head", row: dict[str, Any] | None, bucket: dict[str, Any]) -
     if observed_sha(bucket) == row["observed_sha"]:
         return "baseline"
     intent = _loads(row.get("intent_json"))
-    sent = intent.get("fields") or {}
+    sent = (intent.get("fields") or {}) if intent.get("op", "update") == "update" else {}
     # Any update we sent counts, even one for an older head: the current head's own
     # delta is still computed and sent afterwards (see _decide).
     if sent:
@@ -529,13 +553,14 @@ class ProjectionState:
         with self._conn() as conn:
             return {r["bucket_id"]: dict(r) for r in conn.execute("SELECT * FROM projection_quarantine")}
 
-    def intend(self, lineage_id: str, state_id: str, fields: dict[str, Any]) -> None:
-        """Record an update before sending it, so a crash after Ombre applied it is recognised."""
+    def intend(self, lineage_id: str, state_id: str, fields: dict[str, Any], *, op: str = "update") -> None:
+        """Record a create or update before sending it, so a crash after Ombre applied
+        it is recognised -- and anything else found later is not mistaken for ours."""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE projection_lineage SET intent_json=?, updated_at=? WHERE lineage_id=?",
-                (json.dumps({"state_id": state_id, "fields": _norm_fields(fields)}, ensure_ascii=False,
-                            sort_keys=True), _now(), lineage_id),
+                (json.dumps({"op": op, "state_id": state_id, "fields": _norm_fields(fields)},
+                            ensure_ascii=False, sort_keys=True), _now(), lineage_id),
             )
 
     @contextmanager
@@ -577,14 +602,15 @@ def state_path_for(kernel_db: str | os.PathLike[str]) -> Path:
 
 # ----------------------------------------------------------------- projection
 
-def project_lineage(head: Head, runtime: OmbreRuntime, state: ProjectionState) -> str:
-    """Make Ombre hold ``head``: projected / unchanged / pending / diverged / conflict."""
+def project_lineage(head: Head, runtime: OmbreRuntime, state: ProjectionState, *, kernel_db: Path) -> str:
+    """Make Ombre hold the lineage's *current* head (``head`` may be stale by the
+    time the lock is held): projected / unchanged / pending / diverged / conflict."""
     state.target(head.lineage_id, head.bucket_id, head.state.state_id)
-    return _project_batch([head], runtime, state)[0]
+    return _project_batch([head], runtime, state, kernel_db)[0]
 
 
 def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState,
-                  *, batch_size: int = BATCH_SIZE) -> dict[str, int]:
+                  *, kernel_db: Path, batch_size: int = BATCH_SIZE) -> dict[str, int]:
     counts = {"projected": 0, "unchanged": 0, "pending": 0, "diverged": 0, "conflict": 0}
     rows = {row["lineage_id"]: row for row in state.rows()}
     todo = []
@@ -596,7 +622,7 @@ def project_heads(heads: list[Head], runtime: OmbreRuntime, state: ProjectionSta
             state.target(head.lineage_id, head.bucket_id, head.state.state_id)
             todo.append(head)
     for start in range(0, len(todo), batch_size):
-        for outcome in _project_batch(todo[start:start + batch_size], runtime, state):
+        for outcome in _project_batch(todo[start:start + batch_size], runtime, state, kernel_db):
             counts[outcome] += 1
     return counts
 
@@ -605,22 +631,35 @@ def _is_projected(row: dict[str, Any] | None, head: Head) -> bool:
     return bool(row) and row["status"] == "projected" and row["projected_state_id"] == head.state.state_id
 
 
-def _project_batch(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState) -> list[str]:
+def _project_batch(heads: list[Head], runtime: OmbreRuntime, state: ProjectionState,
+                   kernel_db: Path) -> list[str]:
     """At most two worker runs for the batch: (create_if_absent | get), then update+get.
 
     Held under each lineage's cross-process lock, so a request-time write and a
     sync never project the same lineage at once (Ombre would mint a second id).
+    Under the lock both the bookkeeping *and the Kernel head* are re-read: a sync
+    holding an older snapshot must never write a stale head over a newer one.
     """
-    with state.locked([h.lineage_id for h in heads]):
+    ids = [h.lineage_id for h in heads]
+    with state.locked(ids):
         outcomes: dict[str, str] = {}
         items = []
-        fresh = state.rows_for([h.lineage_id for h in heads])  # re-read under the lock
-        for head in heads:
-            row = fresh.get(head.lineage_id) or {}
-            if _is_projected(row, head):
-                outcomes[head.lineage_id] = "unchanged"
-            else:
-                items.append((head, row))
+        fresh = state.rows_for(ids)
+        latest = current_heads(kernel_db, ids)
+        with state.transaction():
+            for head in heads:
+                current = latest.get(head.lineage_id)
+                if current is None:
+                    outcomes[head.lineage_id] = _pending(head, state, "kernel_head_unresolved")
+                    continue
+                if current.state.state_id != head.state.state_id:
+                    state.target(current.lineage_id, current.bucket_id, current.state.state_id)
+                    head = current  # the snapshot was stale: project what the Kernel holds now
+                row = fresh.get(head.lineage_id) or {}
+                if _is_projected(row, head):
+                    outcomes[head.lineage_id] = "unchanged"
+                else:
+                    items.append((head, row))
         try:
             _run_batch(items, runtime, state, outcomes)
         except RuntimeUnavailable as exc:
@@ -635,6 +674,10 @@ def _run_batch(items: list[tuple[Head, dict[str, Any]]], runtime: OmbreRuntime, 
                outcomes: dict[str, str]) -> None:
     if not items:
         return
+    with state.transaction():  # durable before the creates go out
+        for head, row in items:
+            if not row.get("observed_sha"):
+                state.intend(head.lineage_id, head.state.state_id, target_fields(head), op="create")
     first = runtime.batch([
         # Never observed: create unless Ombre already has it (imported bucket, or a
         # run that crashed after Ombre wrote) -- the worker gets before it creates.
@@ -687,17 +730,22 @@ def _first_phase(head: Head, row: dict[str, Any], result: Any,
         if result["created"]:
             return _record(head, state, result["bucket"]), {}
         result = result["bucket"]
-        adopted = _adopt(head, result, state)
+        adopted = _adopt(head, row, result, state)
         if adopted:
             return adopted, {}
+        row = state.get(head.lineage_id) or {}  # _adopt recorded our own create as baseline
     return _decide(head, row, result, state)
 
 
-def _adopt(head: Head, bucket: dict[str, Any] | None, state: ProjectionState) -> str | None:
+def _adopt(head: Head, row: dict[str, Any], bucket: dict[str, Any] | None, state: ProjectionState) -> str | None:
     """A bucket already sits at our id and we have no baseline for it: whose is it?
 
-    Returns an outcome, or None when it is ours to update (an earlier create of
-    ours that crashed before its bookkeeping).
+    A bucket without a baseline is never updated from here. A marker on the
+    bucket (our source_tool, the old projector's stamp) proves who made it, not
+    that nobody edited it since. Only our own unconfirmed create, matching what
+    we sent, is taken as baseline -- then None lets the normal path project a
+    newer head. Anything else that belongs to this lineage is diverged, so the
+    edit is ingested; anything else at all is a conflict.
     """
     if bucket is None:
         return None
@@ -707,19 +755,28 @@ def _adopt(head: Head, bucket: dict[str, Any] | None, state: ProjectionState) ->
     target = target_fields(head)
     if not changed_fields(target, bucket):
         return _record(head, state, bucket)  # already holds the target: take it as baseline
-    if created_by_worker(bucket):
-        return None  # our own create that crashed before its bookkeeping (checked before
-        #              the rules below: Ombre's normalisation makes it differ from the target)
+    intent = _loads(row.get("intent_json"))
+    if created_by_worker(bucket) and intent.get("op") == "create" and _holds(bucket, intent.get("fields") or {}):
+        # Our create landed and nothing changed it since; Ombre's own rewrites allowed.
+        state.projected(head.lineage_id, intent["state_id"], bucket, intent["fields"])
+        return None
     stamped = (bucket.get("metadata") or {}).get("kernel_lineage_id")
-    if head.lineage_id == "lin:ombre:" + head.bucket_id or stamped == head.lineage_id:
-        # This lineage's own bucket (imported from it, or written by the earlier file
-        # projector), edited inside Ombre since. Never overwrite: take the Kernel head as
-        # the baseline, so the next scan sees an Ombre-side edit and ingests it.
+    if created_by_worker(bucket) or head.lineage_id == "lin:ombre:" + head.bucket_id or stamped == head.lineage_id:
+        # This lineage's own bucket (our worker's, imported from it, or written by the
+        # earlier file projector), edited inside Ombre -- or we can no longer prove it
+        # wasn't (bookkeeping lost). Never overwrite: take the Kernel head as the
+        # baseline, so the next scan sees the difference and ingests it as a revision.
         state.projected(head.lineage_id, head.state.state_id, _as_bucket(target), target,
                         status="diverged", error="edited_in_ombre_before_baseline")
         return "diverged"
     state.failed(head.lineage_id, "conflict", "bucket_id_taken_by_unowned_bucket")
     return "conflict"
+
+
+def _holds(bucket: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Bucket still holds these (normalised) fields, up to the ones Ombre rewrites itself."""
+    current = observed_semantics(bucket)
+    return bool(fields) and all(current.get(k) == v or k in OMBRE_REWRITTEN for k, v in fields.items())
 
 
 def _decide(head: Head, row: dict[str, Any], bucket: dict[str, Any] | None,
@@ -810,7 +867,7 @@ def main(argv: list[str] | None = None) -> int:
     state = ProjectionState(state_path_for(args.kernel_db))
     heads, problems = select_heads(args.kernel_db)
     if args.command == "project":
-        result: dict[str, Any] = project_heads(heads, runtime, state)
+        result: dict[str, Any] = project_heads(heads, runtime, state, kernel_db=args.kernel_db)
     else:
         scan = scan_ombre(heads, runtime, state)
         result = {key: len(scan[key]) for key in ("diverged", "missing", "soft_deleted", "unmanaged", "orphaned")}

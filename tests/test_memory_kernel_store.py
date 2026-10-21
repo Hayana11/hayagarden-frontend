@@ -156,6 +156,17 @@ class IngestTests(StoreFixture):
         self.assertEqual(store.status(self.kernel)["projection"], {"projected": len(self.heads())})
         self.assertEqual(self.sync()["ingested"]["revised"], [])
 
+    def test_two_syncs_holding_the_same_scan_ingest_an_edit_once(self):
+        self.ombre.edit("aaa111", content="[[哈娅]]养了两只猫：[[多乐]]和岁岁。还有一只鹦鹉福禄。")
+        heads, _ = store.projection.select_heads(self.kernel)
+        scan = store.projection.scan_ombre(heads, self.ombre, self.state)  # both syncs saw this
+        with mock.patch.object(store.projection, "scan_ombre", return_value=scan):
+            first = store.ingest_from_ombre(self.kernel, self.ombre, self.state)
+            second = store.ingest_from_ombre(self.kernel, self.ombre, self.state)
+        self.assertEqual((first["revised"], second["revised"]), (["aaa111"], []))
+        self.assertEqual(len(MemoryKernel(self.kernel).lineage_history("lin:ombre:aaa111")), 2)
+        self.assertEqual(store.projection.select_heads(self.kernel)[1], [])  # no branched heads
+
     def test_failed_edit_ingest_leaves_no_orphan_and_retries_cleanly(self):
         self.ombre.edit("aaa111", content="哈娅养了两只猫：多乐和岁岁。还有一只鹦鹉福禄。")
         original = store.MemoryKernel._transition

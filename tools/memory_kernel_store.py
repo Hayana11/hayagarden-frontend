@@ -107,7 +107,7 @@ def _project_one(head: projection.Head, db: Path, runtime: projection.OmbreRunti
         if runtime is None:
             state.failed(head.lineage_id, "pending", "ombre_runtime_unconfigured")
             return "PENDING:unconfigured"
-        outcome = projection.project_lineage(head, runtime, state)
+        outcome = projection.project_lineage(head, runtime, state, kernel_db=db)
     except Exception as exc:  # e.g. bookkeeping failed after Ombre wrote: retry gets first
         return f"PENDING:{type(exc).__name__}"
     return "PROJECTED" if outcome in ("projected", "unchanged") else outcome.upper()
@@ -269,11 +269,19 @@ def ingest_from_ombre(
 
     for head, bucket in scan["diverged"]:
         try:
-            new_state_id = _ingest_edit(kernel, head, bucket.get("metadata") or {}, bucket.get("content") or "", now)
-            # What Ombre holds now *is* the new head: it becomes the observed baseline.
-            new_head = projection.Head(head.lineage_id, kernel.get_state(new_state_id))
-            state.target(head.lineage_id, head.bucket_id, new_state_id)
-            state.projected(head.lineage_id, new_state_id, bucket, projection.target_fields(new_head))
+            with state.locked([head.lineage_id]):
+                # Re-check under the lock: another process may have revised this lineage
+                # or recorded the bucket since the scan (no double revision, no branch).
+                current = projection.current_heads(kernel_db, [head.lineage_id]).get(head.lineage_id)
+                row = state.get(head.lineage_id)
+                if current is None or current.state.state_id != head.state.state_id or \
+                        projection.classify(head, row, bucket) != "external":
+                    continue
+                new_state_id = _ingest_edit(kernel, head, bucket.get("metadata") or {}, bucket.get("content") or "", now)
+                # What Ombre holds now *is* the new head: it becomes the observed baseline.
+                new_head = projection.Head(head.lineage_id, kernel.get_state(new_state_id))
+                state.target(head.lineage_id, head.bucket_id, new_state_id)
+                state.projected(head.lineage_id, new_state_id, bucket, projection.target_fields(new_head))
             revised.append(bucket["id"])
         except Exception as exc:
             errors.append({"bucket_id": bucket["id"], "stage": "edited", "error": type(exc).__name__})
@@ -407,7 +415,7 @@ def sync(kernel_db: Path | None = None, posts_db: Path | None = None, *, runtime
         heads, problems = projection.select_heads(db)
         return {**report, "ombre": f"unavailable:{exc}"[:300], "problems": problems}
     heads, problems = projection.select_heads(db)
-    report["projected"] = projection.project_heads(heads, ombre, state)
+    report["projected"] = projection.project_heads(heads, ombre, state, kernel_db=db)
     report["problems"] = problems
     return report
 
