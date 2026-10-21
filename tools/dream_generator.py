@@ -191,12 +191,34 @@ def _row_to_frag(row, source='memory'):
     }
 
 
+def _kernel_memories(conn):
+    """Memory Kernel cutover on: (posts file, MEMORY items) — posts then hold only DIARY here."""
+    try:
+        from tools.memory_kernel_switch import cutover_posts_db
+    except ImportError:
+        from memory_kernel_switch import cutover_posts_db
+    posts_db = cutover_posts_db(conn)
+    if posts_db is None:
+        return None, None
+    from tools import memory_kernel_read as mkr
+    items = [i for i in mkr.memory_items(posts_db, memory_type='MEMORY', active_only=False)
+             if (i.get('content') or '').strip()]
+    return posts_db, items
+
+
+def _beijing_days_ago(days):
+    return (datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+            - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+
+
 def _collect_recent_memories(conn, n=2):
+    posts_db, kernel = _kernel_memories(conn)
+    types = "('DIARY')" if posts_db else "('MEMORY', 'DIARY')"
     rows = conn.execute(
-        """
-        SELECT id, content, valence, arousal, importance, recall_count, resolved
+        f"""
+        SELECT id, content, valence, arousal, importance, recall_count, resolved, created_at
         FROM posts
-        WHERE type IN ('MEMORY', 'DIARY')
+        WHERE type IN {types}
           AND created_at > datetime('now', '+8 hours', '-3 days')
           AND TRIM(COALESCE(content, '')) != ''
         ORDER BY id DESC
@@ -204,6 +226,10 @@ def _collect_recent_memories(conn, n=2):
         """,
         (max(n * 8, 16),),
     ).fetchall()
+    if posts_db:
+        since = _beijing_days_ago(3)
+        rows = sorted(list(rows) + [i for i in kernel if i['created_at'] > since],
+                      key=lambda r: str(r['created_at'] or ''), reverse=True)[:max(n * 8, 16)]
     pool = [_row_to_frag(r, 'recent') for r in rows]
     return _weighted_sample(pool, n)
 
@@ -212,11 +238,13 @@ def _collect_remote_memories(conn, n=2):
     """远期记忆：14~365天前，novelty/unresolved 用既有列代理。"""
     if n <= 0:
         return []
+    posts_db, kernel = _kernel_memories(conn)
+    types = "('DIARY')" if posts_db else "('MEMORY', 'DIARY')"
     rows = conn.execute(
-        """
+        f"""
         SELECT id, content, valence, arousal, importance, recall_count, resolved
         FROM posts
-        WHERE type IN ('MEMORY', 'DIARY')
+        WHERE type IN {types}
           AND created_at < datetime('now', '+8 hours', '-14 days')
           AND created_at > datetime('now', '+8 hours', '-365 days')
           AND COALESCE(resolved, 0) = 0
@@ -228,6 +256,11 @@ def _collect_remote_memories(conn, n=2):
         """,
         (n * 4,),
     ).fetchall()
+    if posts_db:
+        # Kernel memories have no posts recall counter (Ombre owns reinforcement): random draw.
+        oldest, newest = _beijing_days_ago(365), _beijing_days_ago(14)
+        window = [i for i in kernel if not i['resolved'] and oldest < i['created_at'] < newest]
+        rows = list(rows) + random.sample(window, min(len(window), n * 4))
     pool = [_row_to_frag(r, 'remote') for r in rows]
     random.shuffle(pool)
     return pool[:n]

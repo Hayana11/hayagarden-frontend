@@ -962,7 +962,7 @@ def search_bucket_ids(
 ) -> Optional[list[str]]:
     """Ombre's ranking only: bucket ids, best first. Read-only, never touches.
 
-    Memory readers map these ids to Kernel heads (tools.memory_kernel_read) and
+    Memory readers map these ids to Kernel heads (the B-4 memory reader) and
     show the Kernel's text, not Ombre's. None means Ombre could not be asked,
     which is different from "nothing matched".
     """

@@ -195,6 +195,13 @@ def search_memories(keyword, active_only=False):
         return []
     resolved_cond = ' AND resolved=0' if active_only else ''
     conn = _db()
+    # 切换后（memory.kernel_write）记忆类型由 memory_kernel_read 给出（Ombre 排序、Kernel 正文，
+    # 显式搜索不 touch）；posts 这里只搜非记忆类型。
+    from tools.memory_kernel_switch import cutover_posts_db
+    kernel_posts = cutover_posts_db(conn)
+    if kernel_posts:
+        from tools import memory_kernel_read as mkr
+        resolved_cond += ' AND ' + mkr.non_memory_clause()
     hay = "(content || ' ' || COALESCE(tags,''))"
     params = tuple('%' + w + '%' for w in words)
     cond_and = ' AND '.join([hay + ' LIKE ?'] * len(words))
@@ -209,4 +216,7 @@ def search_memories(keyword, active_only=False):
             f"ORDER BY _hits DESC, pinned DESC, id DESC LIMIT 20",
             params + params).fetchall()
     conn.close()
+    if kernel_posts:
+        memory = mkr.search(keyword, kernel_posts, active_only=active_only, limit=20)
+        return mkr.merge_search(memory, [dict(r) for r in rows], 20)
     return [dict(r) for r in rows]

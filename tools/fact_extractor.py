@@ -53,6 +53,14 @@ def _day_dialogue(day):
 
 def _existing_facts():
     conn = _db()
+    from tools.memory_kernel_switch import cutover_posts_db
+    posts_db = cutover_posts_db(conn)
+    if posts_db is not None:
+        # FACTs are written to the Memory Kernel after the cutover: dedupe against it,
+        # or every night re-extracts the same facts.
+        conn.close()
+        from tools import memory_kernel_read as mkr
+        return [i['content'] for i in mkr.memory_items(posts_db, memory_type='FACT', active_only=False)[:100]]
     rows = conn.execute(
         "SELECT content FROM posts WHERE type='FACT' ORDER BY id DESC LIMIT 100").fetchall()
     conn.close()

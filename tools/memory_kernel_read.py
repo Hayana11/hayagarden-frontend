@@ -36,7 +36,7 @@ from typing import Any, Iterable
 
 from tools import memory_kernel_projection as projection
 from tools.memory_kernel_store import MEMORY_TYPES, kernel_db_path
-from tools.memory_kernel_switch import cutover_enabled  # noqa: F401 (re-exported)
+from tools.memory_kernel_switch import cutover_enabled, cutover_posts_db  # noqa: F401 (re-exported)
 
 BEIJING = timezone(timedelta(hours=8))
 # Ombre bucket kinds that are memories. Plans, letters (lockable) and anything
@@ -110,6 +110,7 @@ def _item(row: sqlite3.Row, first_created: str, ledger: dict[str, Any] | None) -
         "tag_list": tags,
         "pinned": 1 if (memory.get("pinned") or legacy.get("pinned")) else 0,
         "importance": value.get("importance") or 0,
+        "recall_count": 0,  # reinforcement is Ombre's (touch_buckets), not a posts counter
         "valence": value.get("valence"),
         "arousal": value.get("arousal"),
         "summary_title": value.get("title") or "",
@@ -328,6 +329,77 @@ def search(query: Any, posts_db: Path | None, kernel_db: Path | None = None, *, 
     fallback = lexical(pending_fallback_posts(posts_db, memory_type=memory_type, active_only=active_only), query)
     merged = dedupe(first + _newest_first(gaps) + _newest_first(fallback), drop_norms=non_memory_norms(posts_db))
     return merged[:max(0, int(limit))]
+
+
+# ------------------------------------------------- recipes for the callers
+
+def kernel_posts_db(conn: sqlite3.Connection) -> Path | None:
+    """The posts file when the cutover switch is on for this connection, else None."""
+    return cutover_posts_db(conn)
+
+
+def facts(posts_db: Path, kernel_db: Path | None = None, *, limit: int = 15) -> list[dict[str, Any]]:
+    """Cold-start FACTs: most important first, then newest (posts: importance, id DESC)."""
+    items = memory_items(posts_db, kernel_db, memory_type="FACT")
+    items.sort(key=lambda i: (int(i.get("importance") or 0), i["created_at"]), reverse=True)
+    return items[:limit]
+
+
+def long_term(posts_db: Path, kernel_db: Path | None = None, *, limit: int = 3) -> list[dict[str, Any]]:
+    """layer 'long-term' across every type: non-memory posts plus Kernel memories."""
+    conn = _ro(posts_db)
+    try:
+        rows = [dict(r, ref=f"post:{r['id']}") for r in conn.execute(
+            "SELECT id, type, content, created_at FROM posts WHERE layer='long-term' AND resolved=0 "
+            f"AND {non_memory_clause()} ORDER BY id DESC LIMIT ?", (limit,))]
+    finally:
+        conn.close()
+    merged = dedupe(rows + memory_items(posts_db, kernel_db, layer="long-term"))
+    return _newest_first_any(merged)[:limit]
+
+
+def recent_memos(posts_db: Path, kernel_db: Path | None = None, *, hours: int = 24, limit: int = 4,
+                 now: datetime | None = None) -> list[dict[str, Any]]:
+    """MEMORY tagged memo in the last ``hours`` (posts: created_at >= now+8h-24h), newest first."""
+    since = ((now or datetime.now(timezone.utc)).astimezone(BEIJING).replace(tzinfo=None)
+             - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    items = memory_items(posts_db, kernel_db, memory_type="MEMORY", tag="memo")
+    return [i for i in items if i["created_at"] >= since][:limit]
+
+
+def _newest_first_any(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(items, key=lambda i: (str(i.get("created_at") or ""), str(i.get("id"))), reverse=True)
+
+
+def recall_candidates(posts_db: Path, query: str, kernel_db: Path | None = None, *, use_ombre: bool = True,
+                      ombre_limit: int = 2, ombre: Any = DEFAULT) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Automatic recall: (memories for the caller's own lexical scoring, Ombre-ranked memories).
+
+    The lexical side holds what Ombre cannot find yet (unprojected heads, pending
+    fallback posts), or every memory when Ombre is off or could not be asked.
+    """
+    items = memory_items(posts_db, kernel_db)
+    ranked = None
+    if use_ombre and str(query or "").strip():
+        if ombre is DEFAULT:
+            from tools import ombre_adapter
+            ombre = ombre_adapter.search_bucket_ids
+        try:
+            ranked = ombre(str(query), max(ombre_limit * 3, 6))
+        except Exception:
+            ranked = None
+    if ranked is None:
+        return items, []
+    by_bucket = {i["bucket_id"]: i for i in items if i.get("source") == "kernel"}
+    hits = [by_bucket[b] for b in ranked if b in by_bucket][:ombre_limit]
+    lexical_side = [i for i in items if not i.get("projected")]
+    return lexical_side, hits
+
+
+def merge_search(memory: list[dict[str, Any]], posts_rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Explicit search: memories (already ranked) then the caller's non-memory posts."""
+    kept = {id(i) for i in dedupe(list(posts_rows) + list(memory))}
+    return ([i for i in memory if id(i) in kept] + [p for p in posts_rows if id(p) in kept])[:limit]
 
 
 # ------------------------------------------------------------------ touch

@@ -206,6 +206,14 @@ class LegacyIsolationTests(unittest.TestCase):
                 "tools/memory_interop_legacy.py",
                 # Names memory_kernel_backfill only to skip posts the Kernel owns.
                 "tools/cleaner.py",
+                # B-4 read path: memory_kernel_read is the one reader of memory
+                # types; these callers use it only behind memory.kernel_write.
+                "tools/memory_kernel_read.py",
+                "tools/product_handlers.py",
+                "tools/fact_extractor.py",
+                "tools/dream_generator.py",
+                "chat/system_builder.py",
+                "gateway.py",
             }:
                 continue
             with self.subTest(path=path.relative_to(ROOT)):

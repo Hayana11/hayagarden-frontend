@@ -45,8 +45,33 @@ def write_enabled(config_db: str | os.PathLike[str] | None) -> bool:
 
 
 def cutover_enabled(config_db: str | os.PathLike[str] | None) -> bool:
-    """Do memory reads come from the Kernel? Same flag, same fail-closed rule as writes."""
-    return write_enabled(config_db)
+    """Do memory reads come from the Kernel? Same flag and fail-closed rule as writes.
+
+    Opened read-only: readers (including the read-only legacy Interop bundle) must
+    never get a writable handle on memories.db just to look at the switch.
+    """
+    if not config_db or not Path(config_db).is_file():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{Path(config_db).resolve().as_posix()}?mode=ro", uri=True, timeout=3)
+        try:
+            row = conn.execute("SELECT value FROM runtime_config WHERE key=?", (FLAG_KEY,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    return bool(row) and str(row[0]).strip().lower() in _TRUE
+
+
+def cutover_posts_db(conn: sqlite3.Connection) -> Path | None:
+    """The posts file behind ``conn`` when the switch is on for it, else None (read posts)."""
+    try:
+        for _, name, path in conn.execute("PRAGMA database_list"):
+            if name == "main" and path:
+                return Path(path) if cutover_enabled(path) else None
+    except Exception:
+        return None
+    return None
 
 
 def kernel_owned_brain_writes(env=None) -> tuple[str, ...]:

@@ -874,10 +874,23 @@ def _recall_memories(user_msg, limit=None):
             vec_scores = {}
 
         # ① posts 全扫（正文 + tags 参与词重叠）
+        # Kernel 切换后（memory.kernel_write）：记忆类型不再读 posts，由 memory_kernel_read 给出——
+        # Ombre 能排序的走 ②，Ombre 还没投影到的（或 Ombre 不可用时的全部）并入这里一起打分。
         conn = get_db()
+        from tools.memory_kernel_switch import cutover_posts_db
+        _kernel_posts = cutover_posts_db(conn)
+        if _kernel_posts:
+            from tools import memory_kernel_read as _mkr
+        _post_filter = (' AND ' + _mkr.non_memory_clause()) if _kernel_posts else ''
         rows = conn.execute("SELECT id, type, content, tags, pinned, importance, recall_count, created_at "
-                            "FROM posts WHERE resolved=0").fetchall()
+                            "FROM posts WHERE resolved=0" + _post_filter).fetchall()
         conn.close()
+        kernel_hits = []
+        if _kernel_posts:
+            _kernel_lexical, kernel_hits = _mkr.recall_candidates(
+                _kernel_posts, ' '.join(list(words)[:8]),
+                use_ombre=config_store.get_bool('RECALL_OMBRE', True), ombre_limit=2)
+            rows = list(rows) + _kernel_lexical
         now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         scored = []
         for r in rows:
@@ -897,11 +910,12 @@ def _recall_memories(user_msg, limit=None):
             scored.append((score, r['id'], r['type'], c, str(r['created_at'])[:10]))
         scored.sort(key=lambda x: -x[0])
         top = scored[:limit]
+        post_ids = [s[1] for s in top if isinstance(s[1], int)]
         try:
             from tools.memory_runtime_bridge import record_legacy_recall
             record_legacy_recall(
                 DB_PATH,
-                [s[1] for s in top],
+                post_ids,
                 query=user_msg,
                 provenance=_memory_runtime_provenance('chat_recall'),
             )
@@ -909,19 +923,29 @@ def _recall_memories(user_msg, limit=None):
             pass
 
         # ② 渐变脑分支（可关：RECALL_OMBRE=false）
+        # 切换后：Ombre 只排序，正文取 Kernel 当前头（recall_candidates 已经映射好）。
         ombre_hits = []
-        if config_store.get_bool('RECALL_OMBRE', True):
+        if _kernel_posts:
+            _picked = {s[1] for s in top}
+            kernel_hits = [i for i in kernel_hits if i['id'] not in _picked]
+            top += [(0, i['id'], i['type'], i['content'] or '', str(i['created_at'])[:10]) for i in kernel_hits]
+        elif config_store.get_bool('RECALL_OMBRE', True):
             _q = ' '.join(list(words)[:8])
             ombre_hits = _ombre_recall_search(_q, limit=2)
 
         if not top and not ombre_hits:
             return '', []
-        if top:
+        if post_ids:
             try:
                 import memory_tool as _mt
-                _mt.touch_memories([s[1] for s in top])  # 召回加热：这几条真的进了 prompt
+                _mt.touch_memories(post_ids)  # 召回加热：这几条真的进了 prompt
             except Exception:
                 pass
+        if _kernel_posts:
+            # Kernel 记忆的加热交给 Ombre 自己：只 touch 最终真正注入的、已投影的桶。
+            _injected = {s[1] for s in top}
+            _mkr.touch_buckets([i['bucket_id'] for i in list(kernel_hits) + [r for r in rows if isinstance(r, dict)]
+                                if i.get('source') == 'kernel' and i.get('projected') and i['id'] in _injected])
         parts = ['[%s %s] %s' % (t, d, c[:300]) for _, _, t, c, d in top]
         items = [{'type': t, 'date': d, 'preview': c[:80]} for _, _, t, c, d in top]
         for name, content in ombre_hits:
