@@ -227,7 +227,8 @@ class RuntimeHookTests(unittest.TestCase):
     def _hook(self, plan, *, mode, enabled, dayblocks=None):
         from chat import daily_runtime as dr
         box = {}
-        with mock.patch.object(dr.config_store, 'get_bool', return_value=enabled), \
+        config = SimpleNamespace(get_bool=lambda key, default=False: enabled)
+        with mock.patch.object(dr, 'config_store', config), \
              mock.patch('continuity.dayblock_context.load_ready_dayblocks',
                         return_value=((dayblocks or (_dayblock(),)), ())):
             hook = dr._dayblock_binding_transform(plan, mode=mode, box=box)
