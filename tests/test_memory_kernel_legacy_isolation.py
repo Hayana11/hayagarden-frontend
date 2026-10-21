@@ -188,13 +188,20 @@ class LegacyIsolationTests(unittest.TestCase):
         for path in paths:
             # Isolated semantic/contract layer, including the offline R1
             # legacy Interop translator and the offline B-1 importer / B-2
-            # projector (CLIs that nothing imports). Every actual production
-            # module remains subject to the importer scan.
+            # projector. Since the owner decided the Kernel is the memory
+            # authority (B-3), these named integration points may use it, each
+            # only behind runtime_config memory.kernel_write. Every other
+            # production module remains subject to the importer scan.
             if path.relative_to(ROOT).as_posix() in {
                 "tools/memory_kernel.py",
                 "tools/memory_kernel_schema.py",
                 "tools/memory_kernel_import.py",
                 "tools/memory_kernel_projection.py",
+                "tools/memory_kernel_store.py",
+                "tools/memory_kernel_switch.py",
+                "tools/memory_runtime_bridge.py",
+                "tools/memory_write_adapter.py",
+                "tools/cc_capability_adapter.py",
                 "tools/memory_interop.py",
                 "tools/memory_interop_legacy.py",
             }:

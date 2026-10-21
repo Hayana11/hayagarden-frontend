@@ -597,6 +597,22 @@ def physical_surface_fingerprint() -> str:
     return _surface_fingerprint(_surface_snapshot())
 
 
+# B-3: with runtime_config memory.kernel_write on, new memories must go through
+# memory_write (Kernel first). Ombre's own creation tools would bypass the Kernel;
+# trace edits stay allowed and are ingested back as Kernel revisions.
+KERNEL_OWNED_BRAIN_WRITES = ("mcp__brain__hold", "mcp__brain__grow")
+
+
+def kernel_owned_brain_writes(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    source = env if env is not None else os.environ
+    config_db = source.get("HAYAGARDEN_CONFIG_DB_PATH") or "/opt/frontend/memories.db"
+    try:
+        from tools.memory_kernel_switch import write_enabled
+    except Exception:
+        return ()
+    return KERNEL_OWNED_BRAIN_WRITES if write_enabled(config_db) else ()
+
+
 def build_uh_a0_spawn_plan(
     *,
     cwd: str | os.PathLike[str] | None = None,
@@ -670,6 +686,7 @@ def build_uh_a0_spawn_plan(
         + list(surface["runtime_hidden_home_mcp_tools"])
         + list(surface["runtime_hidden_internal_mcp_tools"])
         + list(surface["runtime_hidden_capability_proxy_tools"])
+        + (list(kernel_owned_brain_writes(env)) if brain_tools else [])
     )
     built_in_csv = ",".join(built_in_tools)
     allowed_csv = ",".join(allowlist)

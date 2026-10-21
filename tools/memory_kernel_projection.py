@@ -3,14 +3,21 @@
 The Kernel is the authority; the vault is a rebuildable projection that Ombre
 indexes, decays and surfaces. Each lineage maps to exactly one bucket. The
 projection writes semantic fields (body, title, domain, tags, importance,
-valence/arousal, resolved) and never touches lifecycle fields that Ombre owns
-(activation_count, last_active, weight, change_log, dont_surface, deleted_at,
-folder placement of an existing bucket).
+valence/arousal) and never touches lifecycle fields that Ombre owns
+(resolved — the decay engine auto-resolves —, activation_count, last_active,
+weight, change_log, dont_surface, deleted_at, folder of an existing bucket).
 
 Head selection is a policy outside the Kernel: a lineage's head is the State
 with no outgoing Delta. A lineage with several heads is reported, not guessed.
 
-Offline only for B-2: run it against a vault no Ombre process is serving.
+Every projected bucket carries kernel_semantics_sha256. When a bucket's
+semantics no longer match that stamp it was edited inside Ombre (trace, the
+dashboard): the projection reports it as ``diverged`` and leaves it for
+memory_kernel_store to ingest as a Kernel revision, never overwriting it.
+
+Writes are safe against a live Ombre: each bucket is rewritten under Ombre's
+own per-bucket file lease and replaced atomically; Ombre's external-change
+poller then refreshes its indexes.
 
 Usage:
     python -m tools.memory_kernel_projection --kernel-db FILE --vault DIR plan|apply|verify
@@ -18,11 +25,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,8 +46,9 @@ from tools.memory_kernel import MemoryKernel, State
 PROJECTOR = "memory_kernel_projection"
 PROJECTOR_VERSION = 1
 # Fields this projection owns; everything else in a bucket belongs to Ombre.
-SEMANTIC_FIELDS = ("name", "domain", "tags", "importance", "valence", "arousal", "resolved")
-KERNEL_FIELDS = ("kernel_lineage_id", "kernel_state_id", "kernel_content_sha256")
+SEMANTIC_FIELDS = ("name", "domain", "tags", "importance", "valence", "arousal")
+KERNEL_FIELDS = ("kernel_lineage_id", "kernel_state_id", "kernel_content_sha256", "kernel_semantics_sha256")
+LEASE_TIMEOUT_SECONDS = 10.0
 _FOLDERS = {"dynamic": "dynamic", "permanent": "permanent", "archived": "archive", "plan": "plans/active"}
 # Ombre's handover bucket is its own runtime state, never Kernel-managed.
 SYSTEM_DOMAINS = {"呼吸间"}
@@ -122,8 +135,18 @@ def bucket_semantics(head: Head) -> dict[str, Any]:
         "importance": _importance(value.get("importance")),
         "valence": value.get("valence") if value.get("valence") is not None else 0.5,
         "arousal": value.get("arousal") if value.get("arousal") is not None else 0.3,
-        "resolved": state.status == "resolved",
     }
+
+
+def semantics_sha(body: str, semantics: dict[str, Any]) -> str:
+    """Fingerprint of everything the projection owns in one bucket."""
+    normalized = {k: _norm_field(k, semantics.get(k)) for k in SEMANTIC_FIELDS}
+    payload = json.dumps([_clean(body), normalized], ensure_ascii=False, sort_keys=True)
+    return _sha(payload)
+
+
+def bucket_current_semantics(meta: dict[str, Any]) -> dict[str, Any]:
+    return {k: meta.get(k) for k in SEMANTIC_FIELDS}
 
 
 def _new_bucket_type(head: Head) -> str:
@@ -163,24 +186,46 @@ def index_vault(vault: Path) -> dict[str, tuple[Path, dict[str, Any], str]]:
     return found
 
 
+def is_system_bucket(meta: dict[str, Any]) -> bool:
+    return bool(SYSTEM_DOMAINS & set(_as_list(meta.get("domain"))))
+
+
 def _live_unmanaged(existing, managed: set[str]) -> list[str]:
     return sorted(
         b for b, (_, meta, _) in existing.items()
         if b not in managed and not meta.get("deleted_at") and not meta.get("tombstone")
-        and not SYSTEM_DOMAINS & set(_as_list(meta.get("domain")))
+        and not is_system_bucket(meta)
     )
 
 
-def plan(heads: list[Head], vault: Path) -> dict[str, Any]:
-    existing = index_vault(vault)
+def find_buckets(vault: Path, bucket_ids: list[str]) -> dict[str, tuple[Path, dict[str, Any], str]]:
+    """Locate a few buckets by Ombre's ``<name>_<id>.md`` naming without parsing the vault."""
+    found = {}
+    for bucket_id in bucket_ids:
+        for path in vault.rglob(f"*_{bucket_id}.md") if vault.exists() else ():
+            if any(part.startswith(("_", ".")) for part in path.relative_to(vault).parts):
+                continue
+            meta, body = _split(path.read_text(encoding="utf-8"))
+            if str(meta.get("id") or "").strip() == bucket_id:
+                found[bucket_id] = (path, meta, body)
+                break
+    return found
+
+
+def plan(heads: list[Head], vault: Path, existing=None) -> dict[str, Any]:
+    """Plan against the whole vault, or against a pre-supplied partial index."""
+    partial = existing is not None
+    existing = existing if partial else index_vault(vault)
     actions = []
     for head in heads:
         semantics = bucket_semantics(head)
         body = head.state.content
+        head_sha = semantics_sha(body, semantics)
         kernel_meta = {
             "kernel_lineage_id": head.lineage_id,
             "kernel_state_id": head.state.state_id,
             "kernel_content_sha256": _sha(body),
+            "kernel_semantics_sha256": head_sha,
         }
         current = existing.get(head.bucket_id)
         if current is None:
@@ -193,23 +238,30 @@ def plan(heads: list[Head], vault: Path) -> dict[str, Any]:
         if meta.get("deleted_at") or meta.get("tombstone"):
             actions.append({"op": "conflict", "bucket_id": head.bucket_id, "reason": "bucket_deleted_in_ombre"})
             continue
+        current_sha = semantics_sha(old_body, bucket_current_semantics(meta))
+        stamped = meta.get("kernel_semantics_sha256")
+        if current_sha != head_sha and stamped and current_sha != stamped:
+            # Edited inside Ombre after the last projection: ingest, don't overwrite.
+            actions.append({"op": "diverged", "bucket_id": head.bucket_id, "path": str(path),
+                            "lineage_id": head.lineage_id, "state_id": head.state.state_id})
+            continue
         changed = [k for k in SEMANTIC_FIELDS if _norm_field(k, meta.get(k)) != _norm_field(k, semantics[k])]
         if _clean(old_body) != _clean(body):
             changed.append("body")
         stale_kernel = any(meta.get(k) != v for k, v in kernel_meta.items())
         if changed or stale_kernel:
             actions.append({"op": "update", "bucket_id": head.bucket_id, "path": str(path),
-                            "changed": changed, "semantics": semantics, "kernel": kernel_meta, "body": body})
+                            "changed": changed, "semantics": semantics, "kernel": kernel_meta, "body": body,
+                            "expected_sha": current_sha})
         else:
             actions.append({"op": "unchanged", "bucket_id": head.bucket_id})
-    return {"actions": actions, "unmanaged": _live_unmanaged(existing, {h.bucket_id for h in heads})}
+    unmanaged = [] if partial else _live_unmanaged(existing, {h.bucket_id for h in heads})
+    return {"actions": actions, "unmanaged": unmanaged}
 
 
 def _norm_field(name: str, value: Any) -> Any:
     if name in ("domain", "tags"):
         return sorted(str(v) for v in (value or []))
-    if name == "resolved":
-        return bool(value)
     if name in ("importance",):
         return int(value) if value is not None else None
     if name in ("valence", "arousal"):
@@ -224,36 +276,77 @@ def _new_path(vault: Path, action: dict[str, Any]) -> Path:
     return vault / folder / domain / f"{name}_{action['bucket_id']}.md"
 
 
+@contextlib.contextmanager
+def bucket_lease(vault: Path, bucket_id: str, timeout: float = LEASE_TIMEOUT_SECONDS):
+    """Take Ombre's own per-bucket OS lease (see bucket_manager._filesystem_turn)."""
+    lock_dir = vault / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(f"bucket-{bucket_id}".encode("utf-8")).hexdigest()
+    fd = os.open(lock_dir / f"{name}.lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"bucket lease busy: {bucket_id}")
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".kernel-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+
+
 def apply(actions: dict[str, Any], vault: Path) -> dict[str, int]:
-    counts = {"create": 0, "update": 0, "unchanged": 0, "conflict": 0}
+    counts = {"create": 0, "update": 0, "unchanged": 0, "conflict": 0, "diverged": 0, "raced": 0}
     for action in actions["actions"]:
-        counts[action["op"]] += 1
         if action["op"] == "create":
-            meta = {
-                "id": action["bucket_id"],
-                "type": action["type"],
-                "created": action["created"],
-                "last_active": action["created"],
-                "activation_count": 0,
-                "source_tool": PROJECTOR,
-                **{k: v for k, v in action["semantics"].items() if k != "resolved" or v},
-                **action["kernel"],
-            }
-            path = _new_path(vault, action)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(_render(meta, action["body"]), encoding="utf-8")
+            with bucket_lease(vault, action["bucket_id"]):
+                if action["bucket_id"] in index_vault(vault):
+                    counts["raced"] += 1
+                    continue
+                meta = {
+                    "id": action["bucket_id"],
+                    "type": action["type"],
+                    "created": action["created"],
+                    "last_active": action["created"],
+                    "activation_count": 0,
+                    "source_tool": PROJECTOR,
+                    **action["semantics"],
+                    **action["kernel"],
+                }
+                _atomic_write(_new_path(vault, action), _render(meta, action["body"]))
         elif action["op"] == "update":
             path = Path(action["path"])
-            meta, old_body = _split(path.read_text(encoding="utf-8"))
-            # Keep Ombre's own rendering (e.g. [[links]]) unless the text really changed.
-            body = action["body"] if "body" in action["changed"] else old_body
-            for key, value in action["semantics"].items():
-                if key == "resolved" and not value:
-                    meta.pop("resolved", None)
-                else:
-                    meta[key] = value
-            meta.update(action["kernel"])
-            path.write_text(_render(meta, body), encoding="utf-8")
+            with bucket_lease(vault, action["bucket_id"]):
+                meta, old_body = _split(path.read_text(encoding="utf-8"))
+                if semantics_sha(old_body, bucket_current_semantics(meta)) != action["expected_sha"]:
+                    # Ombre (or a person) changed it after planning; next sync re-plans.
+                    counts["raced"] += 1
+                    continue
+                # Keep Ombre's own rendering (e.g. [[links]]) unless the text really changed.
+                body = action["body"] if "body" in action["changed"] else old_body
+                meta.update(action["semantics"])
+                meta.update(action["kernel"])
+                _atomic_write(path, _render(meta, body))
+        counts[action["op"]] += 1
     return counts
 
 
@@ -295,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         planned = plan(heads, args.vault)
         report = {"counts": {op: sum(1 for a in planned["actions"] if a["op"] == op)
-                             for op in ("create", "update", "unchanged", "conflict")},
+                             for op in ("create", "update", "unchanged", "conflict", "diverged")},
                   "unmanaged": planned["unmanaged"],
                   "conflicts": [a for a in planned["actions"] if a["op"] == "conflict"]}
         if args.mode == "apply":

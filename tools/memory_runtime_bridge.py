@@ -664,6 +664,57 @@ def _result(row: dict[str, Any], *, status: str | None = None) -> dict[str, Any]
     }
 
 
+def _persist_via_kernel(
+    posts_db_path: str,
+    text: str,
+    *,
+    source: str,
+    provenance: dict[str, Any],
+    tags: str,
+    importance: int,
+) -> dict[str, Any] | None:
+    """B-3: when memory.kernel_write is on, the Kernel is the only write target.
+
+    Returns None to fall back to the legacy posts path: the switch is off, or
+    the Kernel itself failed (logged; the memory must not be lost).
+    """
+    try:
+        from tools.memory_kernel_switch import write_enabled
+
+        if not write_enabled(posts_db_path):
+            return None
+        from tools import memory_kernel_store
+
+        result = memory_kernel_store.remember(
+            text,
+            source=source,
+            provenance=provenance,
+            tags=tags,
+            importance=int(importance) or None,
+        )
+    except Exception as exc:
+        _LOG.warning("memory_kernel_write_failed_fallback_legacy error_type=%s", type(exc).__name__)
+        return None
+    if result.get("status") not in ("CREATED", "DEDUPLICATED"):
+        return None
+    _LOG.info(
+        "memory_kernel_write status=%s state_id=%s bucket_id=%s ombre_status=%s",
+        result.get("status"), result.get("state_id"), result.get("bucket_id"),
+        result.get("ombre_status", "UNCHANGED"),
+    )
+    return {
+        "status": result["status"],
+        "receipt_id": None,
+        "idempotency_key": None,
+        "legacy_memory_id": None,
+        "ombre_status": result.get("ombre_status", "UNCHANGED"),
+        "error_code": "",
+        "content_sha256": content_sha256(text),
+        "kernel_state_id": result.get("state_id"),
+        "ombre_bucket_id": result.get("bucket_id"),
+    }
+
+
 def persist_memory(
     posts_db_path: str,
     *,
@@ -687,6 +738,11 @@ def persist_memory(
 
     prov = normalize_provenance(source, provenance)
     content_hash = content_sha256(text)
+    kernel_result = _persist_via_kernel(
+        posts_db_path, text, source=source, provenance=prov, tags=tags, importance=importance,
+    )
+    if kernel_result is not None:
+        return kernel_result
     idempotency_basis = (
         idempotency_content.strip()
         if isinstance(idempotency_content, str) and idempotency_content.strip()

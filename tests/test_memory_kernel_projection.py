@@ -130,6 +130,37 @@ class IncrementalTests(ProjectionFixture):
         self.assertEqual(meta["activation_count"], 7013)
         self.assertEqual(meta["kernel_state_id"], "st:ombre:aaa111:v2")
 
+    def test_edit_inside_ombre_is_reported_diverged_not_overwritten(self):
+        heads, _ = projection.select_heads(self.kernel)
+        projection.apply(projection.plan(heads, self.out), self.out)
+        path, meta, body = read_bucket(self.out, "aaa111")
+        meta["importance"] = 9  # e.g. trace or the dashboard
+        path.write_text(projection._render(meta, body), encoding="utf-8")
+        planned = projection.plan(heads, self.out)
+        action = next(a for a in planned["actions"] if a["bucket_id"] == "aaa111")
+        self.assertEqual(action["op"], "diverged")
+        projection.apply(planned, self.out)
+        self.assertEqual(read_bucket(self.out, "aaa111")[1]["importance"], 9)
+
+    def test_lifecycle_changes_are_not_divergence(self):
+        heads, _ = projection.select_heads(self.kernel)
+        projection.apply(projection.plan(heads, self.out), self.out)
+        path, meta, body = read_bucket(self.out, "aaa111")
+        meta.update(resolved=True, activation_count=9000, last_active=NOW)
+        path.write_text(projection._render(meta, body), encoding="utf-8")
+        action = next(a for a in projection.plan(heads, self.out)["actions"] if a["bucket_id"] == "aaa111")
+        self.assertEqual(action["op"], "unchanged")
+
+    def test_change_between_plan_and_apply_is_skipped_as_raced(self):
+        self.revise("st:ombre:aaa111:v1", "哈娅养了两只猫，还有一只鹦鹉福禄。", "st:ombre:aaa111:v2")
+        heads, _ = projection.select_heads(self.kernel)
+        planned = projection.plan(heads, self.out)
+        path, meta, body = read_bucket(self.out, "aaa111")
+        path.write_text(projection._render(meta, body + "（她刚刚在面板里补了一句）"), encoding="utf-8")
+        counts = projection.apply(planned, self.out)
+        self.assertEqual(counts["raced"], 1)
+        self.assertIn("面板", read_bucket(self.out, "aaa111")[2])
+
     def test_unmanaged_and_deleted_buckets(self):
         (self.out / "dynamic" / "日常").mkdir(parents=True, exist_ok=True)
         (self.out / "dynamic" / "日常" / "fresh.md").write_text(
