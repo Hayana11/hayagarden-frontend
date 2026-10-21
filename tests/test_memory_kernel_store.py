@@ -157,12 +157,12 @@ class SwitchTests(StoreFixture):
         self.assertFalse(result["deduplicated"])
 
     def test_cc_hides_ombre_creation_tools_only_when_on(self):
-        from tools import cc_capability_adapter as cca
+        from tools.memory_kernel_switch import kernel_owned_brain_writes
 
         env = {"HAYAGARDEN_CONFIG_DB_PATH": str(self.posts)}
-        self.assertEqual(cca.kernel_owned_brain_writes(env), ())
+        self.assertEqual(kernel_owned_brain_writes(env), ())
         set_flag(self.posts, "1")
-        self.assertEqual(cca.kernel_owned_brain_writes(env), ("mcp__brain__hold", "mcp__brain__grow"))
+        self.assertEqual(kernel_owned_brain_writes(env), ("mcp__brain__hold", "mcp__brain__grow"))
 
 
 if __name__ == "__main__":

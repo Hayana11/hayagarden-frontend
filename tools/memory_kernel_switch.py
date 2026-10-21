@@ -13,6 +13,11 @@ from pathlib import Path
 
 FLAG_KEY = "memory.kernel_write"
 _TRUE = {"1", "true", "yes", "on"}
+DEFAULT_CONFIG_DB = "/opt/frontend/memories.db"
+# With the switch on, new memories must go through memory_write (Kernel first).
+# Ombre's own creation tools would bypass the Kernel; trace edits stay allowed
+# and are ingested back as Kernel revisions.
+KERNEL_OWNED_BRAIN_WRITES = ("mcp__brain__hold", "mcp__brain__grow")
 
 
 def write_enabled(config_db: str | os.PathLike[str] | None) -> bool:
@@ -30,3 +35,10 @@ def write_enabled(config_db: str | os.PathLike[str] | None) -> bool:
     except sqlite3.Error:
         return False
     return bool(row) and str(row[0]).strip().lower() in _TRUE
+
+
+def kernel_owned_brain_writes(env=None) -> tuple[str, ...]:
+    """Ombre tools the resident CC must not get while the Kernel owns writes."""
+    source = env if env is not None else os.environ
+    config_db = source.get("HAYAGARDEN_CONFIG_DB_PATH") or DEFAULT_CONFIG_DB
+    return KERNEL_OWNED_BRAIN_WRITES if write_enabled(config_db) else ()
