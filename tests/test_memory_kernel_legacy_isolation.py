@@ -204,6 +204,8 @@ class LegacyIsolationTests(unittest.TestCase):
                 "tools/cc_capability_adapter.py",
                 "tools/memory_interop.py",
                 "tools/memory_interop_legacy.py",
+                # Names memory_kernel_backfill only to skip posts the Kernel owns.
+                "tools/cleaner.py",
             }:
                 continue
             with self.subTest(path=path.relative_to(ROOT)):
