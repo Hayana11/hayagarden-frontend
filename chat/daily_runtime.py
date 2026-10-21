@@ -1385,6 +1385,125 @@ def _visible_ready_artifacts(plan: DailyTurnPlan, artifacts: tuple[Any, ...], *,
     )
 
 
+DAYBLOCK_CONTEXT_FLAG = 'CONTINUITY_DAYBLOCK_CONTEXT_ENABLED'
+# Today and yesterday always stay on chunks; older days may use DayBlocks.
+DAYBLOCK_KEEP_CHUNK_DAYS = 2
+
+
+def _dayblock_keep_chunks_from_day(plan: DailyTurnPlan) -> str:
+    anchor = getattr(plan, 'user_created_at', None)
+    if not isinstance(anchor, datetime.datetime):
+        anchor = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    return (anchor.date() - datetime.timedelta(days=DAYBLOCK_KEEP_CHUNK_DAYS - 1)).isoformat()
+
+
+def _visible_dayblocks(plan: DailyTurnPlan, dayblocks: tuple[Any, ...], *, mode: str) -> tuple[Any, ...]:
+    """Hot turns only see DayBlocks this resident generation already installed."""
+    if str(mode or 'hot').strip().lower() != 'hot':
+        return dayblocks
+    frozen = getattr(plan, 'hot_receipt_frozen', None)
+    if not _hot_receipt_allows_chunk_filter(frozen):
+        return ()
+    allowed = _receipt_chunk_ids((frozen or {}).get('members'))
+    return tuple(
+        item for item in dayblocks
+        if item.chunk_id in allowed or ('chunk:' + item.chunk_id) in allowed
+    )
+
+
+def _dayblock_binding_transform(
+    plan: DailyTurnPlan,
+    *,
+    mode: str,
+    box: dict[str, Any],
+) -> Any:
+    """Return the DayBlock substitution hook for one plan build, or None.
+
+    Flag off: cold/respawn/capacity builds still compute what would change
+    (observation only) and hand back the original bindings.  Any failure
+    keeps the original bindings.
+    """
+    from continuity.dayblock_context import load_ready_dayblocks, substitute_dayblock_bindings
+
+    enabled = bool(config_store.get_bool(DAYBLOCK_CONTEXT_FLAG, False))
+    box.update({'enabled': enabled, 'mode': str(mode or 'hot').strip().lower()})
+    if box['mode'] == 'hot' and not enabled:
+        return None
+    try:
+        dayblocks, rejected = load_ready_dayblocks()
+    except Exception as exc:  # observation must never block a cold start
+        box['error'] = type(exc).__name__
+        return None
+    box['rejected'] = list(rejected)
+    dayblocks = _visible_dayblocks(plan, tuple(dayblocks), mode=box['mode'])
+    if not dayblocks:
+        return None
+    keep_from = _dayblock_keep_chunks_from_day(plan)
+    box['keep_chunks_from_day'] = keep_from
+
+    def _transform(expected_members, bindings):
+        try:
+            substituted, report = substitute_dayblock_bindings(
+                expected_members, bindings, dayblocks, keep_chunks_from_day=keep_from,
+            )
+        except Exception as exc:
+            box['error'] = type(exc).__name__
+            return bindings
+        box['report'] = list(report)
+        if not enabled:
+            return bindings
+        box['chunks'] = {
+            str(binding.chunk.chunk_id): binding.chunk
+            for binding in substituted
+            if str(binding.chunk.chunk_id).startswith('dayblock-')
+        }
+        return substituted
+
+    return _transform
+
+
+def _log_dayblock_observation(plan: DailyTurnPlan, box: dict[str, Any], context_plan: Any) -> None:
+    """Observation only: must never raise into plan building."""
+    try:
+        _log_dayblock_observation_impl(plan, box, context_plan)
+    except Exception:
+        logger.debug('dayblock_context_observation skipped', exc_info=True)
+
+
+def _log_dayblock_observation_impl(plan: Any, box: dict[str, Any], context_plan: Any) -> None:
+    if box.get('mode') == 'hot' or not (box.get('report') or box.get('rejected') or box.get('error')):
+        return
+    selected = [
+        str(rep.representation_id) for rep in tuple(getattr(context_plan, 'representations', ()) or ())
+        if str(getattr(rep, 'chunk_id', '') or '').startswith('dayblock-')
+    ]
+    excluded = [
+        str(item.representation_id) for item in tuple(getattr(context_plan, 'exclusions', ()) or ())
+        if str(getattr(item, 'representation_id', '') or '').startswith('chunk:dayblock-')
+    ]
+    report = list(box.get('report') or ())
+    substituted_days = [entry['source_day'] for entry in report if entry.get('status') == 'substituted']
+    manifest = getattr(plan, 'manifest', None)
+    if isinstance(manifest, dict) and substituted_days:
+        manifest.update({
+            'dayblock_context_enabled': bool(box.get('enabled')),
+            'dayblock_context_substituted_days': substituted_days if box.get('enabled') else [],
+            'dayblock_context_eligible_days': substituted_days,
+        })
+    logger.info('dayblock_context_observation %s', json.dumps({
+        'request_id': str(getattr(plan, 'request_id', '') or ''),
+        'context_id': getattr(plan, 'context_id', None),
+        'mode': box.get('mode'),
+        'enabled': bool(box.get('enabled')),
+        'keep_chunks_from_day': box.get('keep_chunks_from_day'),
+        'report': report,
+        'rejected': box.get('rejected') or [],
+        'selected_dayblocks': selected,
+        'excluded_dayblocks': excluded,
+        'error': box.get('error'),
+    }, ensure_ascii=False, sort_keys=True))
+
+
 def _build_production_context_plan(
     plan: DailyTurnPlan,
     *,
@@ -1440,7 +1559,10 @@ def _build_production_context_plan(
         static_system=static_system,
         require_full_state_snapshot=True,
     )
+    dayblock_box: dict[str, Any] = {}
+    binding_transform = _dayblock_binding_transform(plan, mode=mode, box=dayblock_box)
     result = build_daily_continuity_shadow_plan(
+        binding_transform=binding_transform,
         source_db_path=store_path,
         shadow_store_path=store_path,
         continuity_store_path=store_path,
@@ -1497,6 +1619,9 @@ def _build_production_context_plan(
             error_code='context_plan_invalid',
             retryable=False,
         )
+    _log_dayblock_observation(plan, dayblock_box, result.plan)
+    dayblock_chunks = tuple((dayblock_box.get('chunks') or {}).values())
+    artifacts = tuple(artifacts) + dayblock_chunks
     validated_by_id = {
         str(chunk.chunk_id): (str(chunk.artifact_revision), str(chunk.body_hash))
         for chunk in artifacts

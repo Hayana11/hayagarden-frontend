@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""One-shot scheduled DayBlock generation into the Preview store only."""
+"""One-shot scheduled DayBlock generation into the DayBlock store.
+
+The store defaults to the production path read by the ContextPlan DayBlock
+layer (continuity.dayblock_context); HAYAGARDEN_DAYBLOCK_STORE overrides it.
+Source chat rows are always read from production memories.db read-only.
+"""
 from __future__ import annotations
 
 import contextlib
@@ -15,10 +20,13 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-PREVIEW_ROOT = Path('/opt/frontend-preview')
 PRODUCTION_ROOT = Path('/opt/frontend')
+# Import project modules from the checkout this runner lives in only.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DB = PRODUCTION_ROOT / 'memories.db'
-PREVIEW_DB = PREVIEW_ROOT / 'var' / 'dayblock_shadow.db'
+DAYBLOCK_STORE = Path(
+    os.environ.get('HAYAGARDEN_DAYBLOCK_STORE') or '/var/lib/hayagarden/dayblock.db'
+)
 UTC = dt.timezone.utc
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 
@@ -359,7 +367,7 @@ def _recheck_source(shadow: Any, source_db: str | Path, source_day: str,
 
 
 def run_scheduled_dayblock(
-    *, source_db: str | Path = SOURCE_DB, preview_db: str | Path = PREVIEW_DB,
+    *, source_db: str | Path = SOURCE_DB, preview_db: str | Path = DAYBLOCK_STORE,
     started_at: dt.datetime | None = None,
     authority_capture: Callable[[], Any] | None = None,
     persona_capture: Callable[[], dict[str, Any]] | None = None,
@@ -371,8 +379,8 @@ def run_scheduled_dayblock(
     run_id = str(uuid.uuid4())
     local = start.astimezone(SHANGHAI)
     source_day = (local.date() - dt.timedelta(days=1)).isoformat()
-    sys.path.insert(0, str(PREVIEW_ROOT))
-    sys.path.insert(0, str(PRODUCTION_ROOT))
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     import dayblock_shadow as shadow
 
     try:

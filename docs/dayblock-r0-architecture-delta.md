@@ -57,3 +57,18 @@ The cleaner and planned DayBlock capture still both name 03:00. No cron was chan
 
 
 The Opus 5.5 budget mapping is grounded in Anthropic's [model specifications](https://platform.claude.com/docs/en/models/opus-5-5/overview). No context budget is inferred for other model identities or providers.
+
+
+## R2 owner decisions (2026-10-21) — supersede R0 decisions 3, 8 and 10
+
+The owner revised the DayBlock role. Where this section conflicts with the R0/R1 text above, this section wins.
+
+1. **DayBlock enters chat context and doubles as the diary.** It is no longer a Diary-only artifact. Decision 8 ("ContinuityChunk and DayBlock stay separate; no chat-context consumer") is withdrawn.
+2. **Evidence.** Raw source remains the primary evidence. READY chunks may be supplied as an outline. Decision 3 still forbids a chunk or prior summary from being the *sole* evidence.
+3. **Context role (R2 slice 1, this change).** On cold/respawn/capacity builds, a READY DayBlock replaces every ContinuityChunk of the same natural day in the current window. Today and yesterday always stay on chunks. Budget order is unchanged: recent raw, then newest representations, with oldest-first trimming. Substitution happens only when the DayBlock snapshot covers the day's window members exactly (same `source_ref`, revision and content hash; DayBlock-only auxiliary members may be extra). Otherwise the day keeps its chunks. Refusal or too-short bodies (e.g. the 2026-10-13 receipt) never enter context. Hot turns see only DayBlocks already installed on the resident (receipt visibility), so a new DayBlock waits for the next cold start instead of forcing a respawn. Implementation: `continuity/dayblock_context.py`, hooked through `build_daily_continuity_shadow_plan(binding_transform=...)`.
+4. **Gate.** Runtime flag `CONTINUITY_DAYBLOCK_CONTEXT_ENABLED` defaults to `0`. While off, non-hot builds only log `dayblock_context_observation` and keep their chunks.
+5. **Store.** DayBlock moves out of Preview. The runner writes to `/var/lib/hayagarden/dayblock.db` (override with `HAYAGARDEN_DAYBLOCK_STORE`) and imports only its own checkout. Existing Preview receipts are migrated by an online SQLite backup of `/opt/frontend-preview/var/dayblock_shadow.db`.
+6. **Planned slices.**
+   - Slice 2: one 04:00 day boundary for chunk sealing, DayBlock source day and chat day, with DayBlock generated at 04:30. This replaces decision 10's 03:00.
+   - Slice 3: the DayBlock is projected as the DIARY. An owner-edited DIARY version takes priority in context, so the owner can repair a failed or refused day. Diary injection into the system prompt and Auto Diary are retired.
+   - Cross-window DayBlock carry-over is deferred; forge keeps current-window semantics.

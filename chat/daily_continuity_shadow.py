@@ -11,8 +11,9 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence
 
+from continuity.contracts import SourceMember
 from continuity.context_plan import (
     ContextBudgetPolicy,
     ContextChunkBinding,
@@ -461,6 +462,10 @@ def build_daily_continuity_shadow_plan(
     window_anchor_source_member_scope: Sequence[tuple[object, ...]] | None = None,
     window_anchor_enabled: bool = False,
     window_anchor_token_budget: int | None = None,
+    binding_transform: Callable[
+        [Sequence[SourceMember], tuple[ContextChunkBinding, ...]],
+        tuple[ContextChunkBinding, ...],
+    ] | None = None,
 ) -> DailyContinuityShadowResult:
     """Build one canonical shadow plan from explicit read-only surfaces.
 
@@ -594,6 +599,9 @@ def build_daily_continuity_shadow_plan(
             return _blocked('chunk_surface_unavailable')
         finally:
             store_conn.close()
+        if binding_transform is not None:
+            # Must not raise; callers return the input bindings on failure.
+            bindings = tuple(binding_transform(expected_members, bindings))
 
         try:
             plan = build_context_plan(
