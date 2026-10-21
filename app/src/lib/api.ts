@@ -433,6 +433,15 @@ export interface PendingChatFile {
   fileName: string;
 }
 
+let lastChatSendError = '';
+
+/** Reason for the latest failed sendChatMessage (server message or HTTP status); clears it. */
+export function takeLastChatSendError(): string {
+  const reason = lastChatSendError;
+  lastChatSendError = '';
+  return reason;
+}
+
 export function sendChatMessage(
   content: string,
   extra: { files?: PendingChatFile[]; imageFiles?: File[] } = {},
@@ -442,10 +451,18 @@ export function sendChatMessage(
   fd.append('content', content);
   fd.append('attachments', JSON.stringify(extra.files || []));
   for (const image of extra.imageFiles || []) fd.append('image', image);
+  lastChatSendError = '';
   return fetch('/api/chat/send', { method: 'POST', body: fd })
-    .then((r) => (r.ok ? r.json() : null))
-    .then((r) => (r?.ok ? (r.message_id ?? null) : null))
-    .catch(() => null);
+    .then(async (resp) => {
+      const body = await resp.json().catch(() => null) as { ok?: boolean; message_id?: number; error?: string } | null;
+      if (resp.ok && body?.ok) return body.message_id ?? null;
+      lastChatSendError = (body?.error && String(body.error)) || `HTTP ${resp.status}`;
+      return null;
+    })
+    .catch(() => {
+      lastChatSendError = '网络连接失败';
+      return null;
+    });
 }
 
 // POST /api/chat/upload_file (multipart) -> { file_url, file_name } — each file ≤2MB

@@ -704,6 +704,49 @@ export async function fetchChatGatewayOnline(): Promise<boolean> {
   }
 }
 
+/** Current gateway generation lock, or null when it cannot be read. */
+export async function fetchChatLockStatus(): Promise<{ busy: boolean; ageSec: number } | null> {
+  try {
+    const resp = await fetch(sseUrl('/api/gw/chat/lock'), { credentials: 'include' });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { busy?: boolean; age_sec?: number };
+    if (typeof data.busy !== 'boolean') return null;
+    return { busy: data.busy, ageSec: Number(data.age_sec) || 0 };
+  } catch {
+    return null;
+  }
+}
+
+export type ChatRefreshDecision =
+  | { kind: 'hard' }
+  | { kind: 'soft'; reason: 'streaming' | 'busy' | 'unknown'; toast: string };
+
+/**
+ * Whether a refresh tap may abort the stream / force-unlock ('hard') or must
+ * only refresh and arm a confirm ('soft'). An unreadable lock is never idle.
+ */
+export function decideChatRefresh(input: {
+  armed: boolean;
+  localStreaming: boolean;
+  lock: { busy: boolean; ageSec: number } | null;
+}): ChatRefreshDecision {
+  if (input.armed) return { kind: 'hard' };
+  if (input.localStreaming) {
+    return { kind: 'soft', reason: 'streaming', toast: '回复还在生成，再点一次强制中断' };
+  }
+  if (input.lock === null) {
+    return { kind: 'soft', reason: 'unknown', toast: '无法确认服务器生成状态，再点一次强制刷新' };
+  }
+  if (input.lock.busy) {
+    return {
+      kind: 'soft',
+      reason: 'busy',
+      toast: `服务器仍在生成（${Math.round(input.lock.ageSec)}s），再点一次强制解锁`,
+    };
+  }
+  return { kind: 'hard' };
+}
+
 /** Force-release stuck generation lock (multi-worker safe via repair API). */
 export async function forceUnlockChatGenLock(): Promise<{ ok: boolean; busy: boolean | null }> {
   try {
