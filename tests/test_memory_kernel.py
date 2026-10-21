@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -418,6 +419,56 @@ class MemoryKernelTests(unittest.TestCase):
         MemoryKernel(absent)
         self.assertFalse(absent.exists())
 
+
+
+class AtomicEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "kernel.db"
+        self.kernel = MemoryKernel(self.path)
+        self.kernel.initialize()
+
+    def test_evidence_state_and_formation_commit_together(self):
+        self.kernel.create_state(state(), delta(), evidence=(evidence(),))
+        self.assertEqual(self.kernel.evidence_for_state("s1"), [evidence()])
+
+    def test_failed_formation_leaves_no_orphan_evidence(self):
+        self.kernel.create_state(state(), delta(), evidence=(evidence(),))
+        second = state("s9", content="另一条")
+        with self.assertRaises(ValueError):
+            # Same lineage again: rejected inside the transaction.
+            self.kernel.create_state(second, delta("d9", after_ref="s9"), evidence=(evidence("e9"),))
+        with self.assertRaises(KeyError):
+            self.kernel.get_evidence("e9")
+
+    def test_failed_revision_leaves_no_orphan_evidence(self):
+        self.kernel.create_state(state(), delta(), evidence=(evidence(),))
+        unchanged = state("s2")
+        with self.assertRaises(ValueError):
+            self.kernel.revise_state(
+                unchanged, delta("d2", before_ref="s1", after_ref="s2"), evidence=(evidence("e2"),))
+        with self.assertRaises(KeyError):
+            self.kernel.get_evidence("e2")
+
+    def test_evidence_must_be_a_tuple_of_evidence(self):
+        with self.assertRaises(TypeError):
+            self.kernel.create_state(state(), delta(), evidence=[evidence()])
+
+
+class PrivacyTests(unittest.TestCase):
+    def test_database_is_owner_only_regardless_of_umask(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "kernel.db"
+            previous = os.umask(0o022)
+            try:
+                MemoryKernel(path).initialize()
+            finally:
+                os.umask(previous)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            path.chmod(0o644)
+            MemoryKernel(path).initialize()
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
 if __name__ == "__main__":
     unittest.main()

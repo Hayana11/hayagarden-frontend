@@ -263,6 +263,24 @@ def _canonical(group: list[SourceItem]) -> SourceItem:
     return sorted(group, key=rank)[0]
 
 
+_LAYER_RANK = {"core": 0, "long-term": 1, "recent": 2}
+
+
+def group_memory(group: list[SourceItem], canonical: SourceItem) -> dict[str, Any]:
+    """Legacy write semantics of a merged memory: the strongest member wins."""
+    posts = [m for m in group if m.system == "posts"]
+    types = {m.meta.get("post_type") for m in posts}
+    layers = [m.meta.get("layer") or "recent" for m in posts]
+    if any(m.meta.get("ombre_type") == "permanent" for m in group):
+        layers.append("core")
+    return {
+        "type": "FACT" if "FACT" in types else ("MISS" if types == {"MISS"} else "MEMORY"),
+        "layer": min(layers, key=lambda layer: _LAYER_RANK.get(layer, 3)) if layers else "recent",
+        "pinned": any(m.meta.get("pinned") for m in group),
+        "author": str(canonical.meta.get("author") or (posts[0].meta.get("author") if posts else "") or ""),
+    }
+
+
 def build_records(groups: list[list[SourceItem]], now: str):
     evidences: list[Evidence] = []
     transitions: list[tuple[State, Delta]] = []
@@ -305,6 +323,7 @@ def build_records(groups: list[list[SourceItem]], now: str):
                 "importance": meta.get("importance"),
                 "valence": meta.get("valence"),
                 "arousal": meta.get("arousal"),
+                "memory": group_memory(group, canonical),
                 "legacy": {
                     "canonical": canonical.key,
                     "members": [m.key for m in group],
@@ -376,10 +395,10 @@ def run(vault: Path, posts_db: Path, kernel_db: Path | None, *, now: str | None 
             raise FileExistsError(f"refusing to import into an existing database: {kernel_db}")
         kernel = MemoryKernel(kernel_db)
         kernel.initialize()
-        for evidence in evidences:
-            kernel.create_evidence(evidence)
+        by_id = {evidence.evidence_id: evidence for evidence in evidences}
         for state, delta in transitions:
-            kernel.create_state(state, delta)
+            # One transaction per memory: its Evidence, State and formation Delta.
+            kernel.create_state(state, delta, evidence=tuple(by_id[ref] for ref in state.evidence_refs))
         report["kernel_db"] = str(kernel_db)
     return report
 

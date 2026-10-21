@@ -88,6 +88,14 @@ def _project(heads: list[projection.Head], vault: Path) -> dict[str, int]:
     return projection.apply(planned, vault)
 
 
+MEMORY_TYPES = ("MEMORY", "FACT", "MISS")
+
+
+def memory_semantics(memory_type: str, layer: str, pinned: Any, author: str | None) -> dict[str, Any]:
+    """The legacy write semantics a memory must keep (see projection bucket placement)."""
+    return {"type": memory_type, "layer": layer or "recent", "pinned": bool(pinned), "author": author or ""}
+
+
 def remember(
     content: Any,
     *,
@@ -96,12 +104,20 @@ def remember(
     title: str | None = None,
     tags: Any = None,
     importance: int | None = None,
+    memory_type: str = "MEMORY",
+    layer: str = "recent",
+    pinned: Any = False,
+    author: str | None = None,
+    valence: float | None = None,
+    arousal: float | None = None,
     kernel_db: str | os.PathLike[str] | None = None,
     vault: str | os.PathLike[str] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(content, str) or not content.strip():
         return {"status": "INVALID_CONTENT"}
+    if memory_type not in MEMORY_TYPES:
+        raise ValueError(f"not a memory type: {memory_type}")
     text = content.strip()
     db = Path(kernel_db or kernel_db_path())
     target = Path(vault or vault_path())
@@ -131,10 +147,13 @@ def remember(
         lineage_id=lineage,
         scope="unclassified",
         subject_ref="unresolved",
-        representation="memory",
+        representation="fact" if memory_type == "FACT" else "memory",
         content=text,
-        structured_value={"title": title or "", "domain": [], "tags": _tags(tags),
-                          "importance": importance},
+        structured_value=_jsonable({
+            "title": title or "", "domain": [], "tags": _tags(tags), "importance": importance,
+            "valence": valence, "arousal": arousal,
+            "memory": memory_semantics(memory_type, layer, pinned, author),
+        }),
         evidence_refs=(evidence.evidence_id,),
         confidence=0.6,
         epistemic_status="asserted_by_companion",
@@ -153,8 +172,7 @@ def remember(
         review_status="accepted_by_policy",
     )
     kernel = MemoryKernel(db)
-    kernel.create_evidence(evidence)
-    kernel.create_state(state, formation)
+    kernel.create_state(state, formation, evidence=(evidence,))
     head = projection.Head(lineage, state)
     try:
         _project([head], target)
@@ -180,6 +198,12 @@ def _bucket_value(meta: dict[str, Any], *, ingested: str, base: dict[str, Any] |
     legacy.setdefault("ombre_type", meta.get("type"))
     legacy["last_ingest"] = ingested
     value["legacy"] = legacy
+    memory = dict(value.get("memory") or {})
+    memory.setdefault("type", "MEMORY")
+    memory.setdefault("layer", "core" if meta.get("type") == "permanent" else "recent")
+    # A pin set inside Ombre (anchor / trace) is a semantic decision the Kernel keeps.
+    memory["pinned"] = bool(meta.get("pinned"))
+    value["memory"] = memory
     return _jsonable(value)
 
 
@@ -232,21 +256,21 @@ def _ingest_created(kernel: MemoryKernel, bucket_id: str, meta: dict[str, Any], 
         evidence_refs=(evidence.evidence_id,), confidence=0.5,
         epistemic_status="ingested_from_ombre", status="active", created_at=now,
     )
-    kernel.create_evidence(evidence)
     kernel.create_state(state, Delta(
         delta_id=f"dl:ombre:{bucket_id}:formation", target_scope=state.scope, before_ref=None,
         after_ref=state.state_id, trigger_evidence_refs=(evidence.evidence_id,),
         derived_by={"processor": "memory_kernel_store.ingest", "reason": "created_in_ombre"},
         confidence=0.5, occurred_at=now, review_status="accepted_from_ombre",
-    ))
+    ), evidence=(evidence,))
 
 
 def _ingest_edit(kernel: MemoryKernel, head: projection.Head, meta: dict[str, Any], body: str, now: str) -> None:
     bucket_id = head.bucket_id
     version = len(kernel.lineage_history(head.lineage_id)) + 1
     suffix = head.lineage_id[len("lin:"):]
+    uid = uuid.uuid4().hex[:8]
     evidence = Evidence(
-        evidence_id=f"ev:{suffix}:v{version}", source_type="ombre_bucket_edit",
+        evidence_id=f"ev:{suffix}:v{version}:{uid}", source_type="ombre_bucket_edit",
         source_ref=f"ombre:{bucket_id}", observed_at=now, occurred_at=now,
         content=body, integrity=_sha(body), origin_kind="derived",
         provenance={"system": "ombre vault", "ingested_by": "memory_kernel_store.ingest",
@@ -261,13 +285,12 @@ def _ingest_edit(kernel: MemoryKernel, head: projection.Head, meta: dict[str, An
         evidence_refs=(evidence.evidence_id,), confidence=previous.confidence,
         epistemic_status=previous.epistemic_status, status=previous.status, created_at=now,
     )
-    kernel.create_evidence(evidence)
     kernel.revise_state(state, Delta(
         delta_id=f"dl:{suffix}:v{version}", target_scope=previous.scope, before_ref=previous.state_id,
         after_ref=state.state_id, trigger_evidence_refs=(evidence.evidence_id,),
         derived_by={"processor": "memory_kernel_store.ingest", "reason": "edited_in_ombre"},
         confidence=previous.confidence, occurred_at=now, review_status="accepted_from_ombre",
-    ))
+    ), evidence=(evidence,))
 
 
 def sync(kernel_db: Path | None = None, vault: Path | None = None) -> dict[str, Any]:

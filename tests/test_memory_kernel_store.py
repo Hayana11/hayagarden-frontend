@@ -63,6 +63,45 @@ class RememberTests(StoreFixture):
         store.sync(self.kernel, self.out)
         self.assertIn(result["bucket_id"], projection.index_vault(self.out))
 
+    def test_fact_core_and_pinned_never_become_dynamic(self):
+        cases = {
+            "fact": dict(memory_type="FACT", layer="core"),
+            "core": dict(memory_type="MEMORY", layer="core"),
+            "pinned": dict(memory_type="MEMORY", layer="recent", pinned=1),
+            "plain": dict(memory_type="MEMORY", layer="long-term"),
+        }
+        placed = {}
+        for name, semantics in cases.items():
+            result = store.remember(f"{name}：她冬天手脚冰凉，要提醒她穿袜子。", source="save_memory",
+                                    tags="health,daily", importance=8, kernel_db=self.kernel,
+                                    vault=self.out, **semantics)
+            _, meta, _ = read_bucket(self.out, result["bucket_id"])
+            state = MemoryKernel(self.kernel).get_state(result["state_id"])
+            placed[name] = (meta["type"], bool(meta.get("pinned")), state.structured_value["memory"])
+            self.assertEqual(meta["tags"], ["health", "daily"])
+            self.assertEqual(meta["importance"], 8)
+        self.assertEqual(placed["fact"][0], "permanent")
+        self.assertEqual(placed["core"][0], "permanent")
+        self.assertEqual(placed["pinned"][:2], ("permanent", True))
+        self.assertEqual(placed["plain"][0], "dynamic")
+        self.assertEqual(placed["fact"][2], {"type": "FACT", "layer": "core", "pinned": False, "author": ""})
+        self.assertEqual(MemoryKernel(self.kernel).get_state(
+            store.remember("fact2：她不吃青椒。", source="x", memory_type="FACT", kernel_db=self.kernel,
+                           vault=self.out)["state_id"]).representation, "fact")
+
+    def test_non_memory_types_are_rejected(self):
+        with self.assertRaises(ValueError):
+            store.remember("日记", source="x", memory_type="DIARY", kernel_db=self.kernel, vault=self.out)
+
+    def test_old_projection_stamp_is_rebaselined_not_treated_as_an_edit(self):
+        path, meta, body = read_bucket(self.out, "aaa111")
+        meta.pop("kernel_projection_version")
+        meta["importance"] = 2
+        path.write_text(projection._render(meta, body), encoding="utf-8")
+        heads, _ = projection.select_heads(self.kernel)
+        action = next(a for a in projection.plan(heads, self.out)["actions"] if a["bucket_id"] == "aaa111")
+        self.assertEqual(action["op"], "update")
+
     def test_invalid_content(self):
         self.assertEqual(store.remember("  ", source="x", kernel_db=self.kernel, vault=self.out)["status"],
                          "INVALID_CONTENT")
@@ -100,6 +139,29 @@ class IngestTests(StoreFixture):
         self.assertIn("鹦鹉福禄", body)
         self.assertEqual(meta["kernel_state_id"], "st:ombre:aaa111:v2")
         self.assertEqual(store.status(self.kernel, self.out)["plan"], {"unchanged": 4})
+
+    def test_failed_edit_ingest_leaves_no_orphan_and_retries_cleanly(self):
+        path, meta, body = read_bucket(self.out, "aaa111")
+        path.write_text(projection._render(meta, body + "还有一只鹦鹉福禄。"), encoding="utf-8")
+        original = store.MemoryKernel._transition
+
+        def crash_after_evidence(kernel, state, delta, **kwargs):
+            # Fail inside the transaction, after Evidence would have been inserted.
+            with kernel._write() as conn:
+                for item in kwargs.get("evidence", ()):
+                    kernel._insert(conn, item)
+                raise sqlite3.OperationalError("disk I/O error")
+
+        with mock.patch.object(store.MemoryKernel, "_transition", crash_after_evidence):
+            first = store.sync(self.kernel, self.out)
+        self.assertEqual(first["ingested"]["errors"][0]["stage"], "edited")
+        conn = sqlite3.connect(self.kernel)
+        orphans = conn.execute("SELECT count(*) FROM memory_kernel_evidence WHERE source_type='ombre_bucket_edit'").fetchone()[0]
+        conn.close()
+        self.assertEqual(orphans, 0)
+        self.assertIs(store.MemoryKernel._transition, original)
+        second = store.sync(self.kernel, self.out)
+        self.assertEqual(second["ingested"]["revised"], ["aaa111"])
 
     def test_lifecycle_only_changes_never_reach_the_kernel(self):
         path, meta, body = read_bucket(self.out, "aaa111")

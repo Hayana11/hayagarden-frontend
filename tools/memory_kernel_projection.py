@@ -46,8 +46,11 @@ from tools.memory_kernel import MemoryKernel, State
 PROJECTOR = "memory_kernel_projection"
 PROJECTOR_VERSION = 1
 # Fields this projection owns; everything else in a bucket belongs to Ombre.
-SEMANTIC_FIELDS = ("name", "domain", "tags", "importance", "valence", "arousal")
-KERNEL_FIELDS = ("kernel_lineage_id", "kernel_state_id", "kernel_content_sha256", "kernel_semantics_sha256")
+SEMANTIC_FIELDS = ("name", "domain", "tags", "importance", "valence", "arousal", "pinned")
+KERNEL_FIELDS = ("kernel_lineage_id", "kernel_state_id", "kernel_content_sha256",
+                 "kernel_semantics_sha256", "kernel_projection_version")
+# Bumped whenever SEMANTIC_FIELDS change: older stamps are re-baselined, not read as edits.
+PROJECTION_STAMP_VERSION = 2
 LEASE_TIMEOUT_SECONDS = 10.0
 _FOLDERS = {"dynamic": "dynamic", "permanent": "permanent", "archived": "archive", "plan": "plans/active"}
 # Ombre's handover bucket is its own runtime state, never Kernel-managed.
@@ -147,6 +150,8 @@ def bucket_semantics(head: Head) -> dict[str, Any]:
     state = head.state
     value = state.structured_value if isinstance(state.structured_value, dict) else {}
     title = str(value.get("title") or "").strip() or _clean(state.content)[:20]
+    memory = value.get("memory") or {}
+    legacy = value.get("legacy") or {}
     return {
         "name": title,
         "domain": _as_list(value.get("domain")) or ["未分类"],
@@ -154,6 +159,7 @@ def bucket_semantics(head: Head) -> dict[str, Any]:
         "importance": _importance(value.get("importance")),
         "valence": value.get("valence") if value.get("valence") is not None else 0.5,
         "arousal": value.get("arousal") if value.get("arousal") is not None else 0.3,
+        "pinned": bool(memory.get("pinned", legacy.get("pinned", False))),
     }
 
 
@@ -169,11 +175,21 @@ def bucket_current_semantics(meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def _new_bucket_type(head: Head) -> str:
+    """FACT, core and pinned memories never become decaying dynamic buckets."""
     value = head.state.structured_value if isinstance(head.state.structured_value, dict) else {}
     legacy = value.get("legacy") or {}
+    memory = value.get("memory") or {}
+    if (
+        head.state.representation == "fact"
+        or memory.get("type") == "FACT"
+        or memory.get("layer") == "core"
+        or memory.get("pinned")
+        or legacy.get("pinned")
+    ):
+        return "permanent"
     if legacy.get("ombre_type") in _FOLDERS:
         return legacy["ombre_type"]
-    return "permanent" if head.state.representation == "fact" else "dynamic"
+    return "dynamic"
 
 
 def _split(text: str) -> tuple[dict[str, Any], str]:
@@ -245,6 +261,7 @@ def plan(heads: list[Head], vault: Path, existing=None) -> dict[str, Any]:
             "kernel_state_id": head.state.state_id,
             "kernel_content_sha256": _sha(body),
             "kernel_semantics_sha256": head_sha,
+            "kernel_projection_version": PROJECTION_STAMP_VERSION,
         }
         current = existing.get(head.bucket_id)
         if current is None:
@@ -258,7 +275,12 @@ def plan(heads: list[Head], vault: Path, existing=None) -> dict[str, Any]:
             actions.append({"op": "conflict", "bucket_id": head.bucket_id, "reason": "bucket_deleted_in_ombre"})
             continue
         current_sha = semantics_sha(old_body, bucket_current_semantics(meta))
-        stamped = meta.get("kernel_semantics_sha256")
+        # Only a stamp made under the current rules can prove an Ombre-side edit.
+        stamped = (
+            meta.get("kernel_semantics_sha256")
+            if meta.get("kernel_projection_version") == PROJECTION_STAMP_VERSION
+            else None
+        )
         if current_sha != head_sha and stamped and current_sha != stamped:
             # Edited inside Ombre after the last projection: ingest, don't overwrite.
             actions.append({"op": "diverged", "bucket_id": head.bucket_id, "path": str(path),
@@ -281,6 +303,8 @@ def plan(heads: list[Head], vault: Path, existing=None) -> dict[str, Any]:
 def _norm_field(name: str, value: Any) -> Any:
     if name in ("domain", "tags"):
         return sorted(str(v) for v in (value or []))
+    if name == "pinned":
+        return bool(value)
     if name in ("importance",):
         return int(value) if value is not None else None
     if name in ("valence", "arousal"):

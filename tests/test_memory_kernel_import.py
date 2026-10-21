@@ -166,6 +166,9 @@ class KernelWriteTests(ImportFixture):
         kernel = MemoryKernel(self.kernel)
         tofu = kernel.get_state("st:posts:2:v1")
         self.assertEqual(tofu.representation, "fact")
+        self.assertEqual(tofu.structured_value["memory"]["type"], "FACT")
+        # The permanent Ombre bucket keeps "core" semantics.
+        self.assertEqual(kernel.get_state("st:ombre:bbb222:v1").structured_value["memory"]["layer"], "core")
         # Only one of the two members was resolved, so the State stays active.
         self.assertEqual(tofu.status, "active")
         home = kernel.get_state("st:ombre:bbb222:v1")
