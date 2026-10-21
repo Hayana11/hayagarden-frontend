@@ -187,11 +187,13 @@ class LegacyIsolationTests(unittest.TestCase):
             paths.extend((ROOT / directory).rglob("*.py"))
         for path in paths:
             # Isolated semantic/contract layer, including the offline R1
-            # legacy Interop translator. Every actual production module
+            # legacy Interop translator and the offline B-1 legacy importer
+            # (a CLI that nothing imports). Every actual production module
             # remains subject to the importer scan.
             if path.relative_to(ROOT).as_posix() in {
                 "tools/memory_kernel.py",
                 "tools/memory_kernel_schema.py",
+                "tools/memory_kernel_import.py",
                 "tools/memory_interop.py",
                 "tools/memory_interop_legacy.py",
             }:
