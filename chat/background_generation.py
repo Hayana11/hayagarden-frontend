@@ -127,10 +127,13 @@ def _generate_claude_code(
             cwd=str(root),
             timeout=min(float(request.timeout_sec), 60.0),
         )
+        # The prompt goes through stdin: as one argv element it hits Linux
+        # MAX_ARG_STRLEN (128 KiB) on large inputs (e.g. a full DayBlock day,
+        # ~43k CJK chars) and fails with E2BIG before the process starts.
         proc = subprocess.run(
             claude_cmd_for_version(
                 runtime_version,
-                '-p', request.prompt_text,
+                '-p',
                 '--output-format', 'stream-json',
                 '--verbose',
                 '--max-turns', '1',
@@ -142,6 +145,7 @@ def _generate_claude_code(
             ) + model_args,
             cwd=str(root),
             env=env,
+            input=request.prompt_text,
             text=True,
             capture_output=True,
             timeout=float(request.timeout_sec),

@@ -85,7 +85,9 @@ class BackgroundGenerationTests(unittest.TestCase):
         self.assertIn('--model', argv)
         self.assertEqual(argv[argv.index('--model') + 1], 'claude-opus-5')
         self.assertEqual(argv[argv.index('--system-prompt') + 1], 'SYSTEM-X')
-        self.assertEqual(argv[argv.index('-p') + 1], 'PROMPT-Y')
+        self.assertIn('-p', argv)
+        self.assertNotIn('PROMPT-Y', argv)
+        self.assertEqual(run.call_args.kwargs['input'], 'PROMPT-Y')
         self.assertEqual(argv[argv.index('--tools') + 1], '')
         self.assertEqual(argv[argv.index('--max-turns') + 1], '1')
         self.assertIn('--safe-mode', argv)
@@ -96,6 +98,28 @@ class BackgroundGenerationTests(unittest.TestCase):
         self.assertEqual(result.model_identity, authority.model_identity)
         self.assertEqual(result.actual_executor, 'claude_code_background_oneshot')
         self.assertEqual(result.text, 'cc output')
+
+    def test_cc_large_prompt_goes_through_stdin_not_argv(self):
+        # A busy DayBlock day is ~150-300 KiB of UTF-8; one argv element is
+        # capped at 128 KiB (MAX_ARG_STRLEN) and fails with E2BIG.
+        big_prompt = '今天' * 120_000
+        self.assertGreater(len(big_prompt.encode('utf-8')), 128 * 1024)
+        request = BackgroundGenerationRequest(
+            system_text='SYSTEM-X',
+            prompt_text=big_prompt,
+            max_tokens_hint=321,
+            timeout_sec=12,
+            task_kind='test',
+        )
+        with self._cc_runtime(), self._cc_run() as run:
+            generate_background(
+                request,
+                GenerationAuthoritySnapshot('claude_code', 'explicit:claude-opus-5'),
+                cc_token_getter=lambda: 'fake-token',
+            )
+        argv = run.call_args.args[0]
+        self.assertEqual(run.call_args.kwargs['input'], big_prompt)
+        self.assertTrue(all(len(str(arg).encode('utf-8')) < 128 * 1024 for arg in argv))
 
     def test_cc_default_model_omits_model_argv(self):
         with self._cc_runtime(), self._cc_run(
