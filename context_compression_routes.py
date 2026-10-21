@@ -14,6 +14,7 @@ from typing import Any
 from flask import Blueprint, jsonify, request
 from moments_auth import OwnerAuthError, require_owner
 
+from continuity.dayblock_context import get_dayblock_day, list_dayblock_days
 from continuity.read_surface import get_block_detail, get_current, list_blocks, open_read_only
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,7 @@ def create_context_compression_blueprint(
     *,
     db_path: str,
     window_identity_reader: Callable[[Any, str], Mapping[str, Any]] | None = None,
+    dayblock_store_path: str | None = None,
 ) -> Blueprint:
     blueprint = Blueprint('context_compression', __name__, url_prefix='/dash/__continuity')
 
@@ -180,13 +182,41 @@ def create_context_compression_blueprint(
         if request.method not in ('GET', 'HEAD'):
             return _method_not_allowed()
         try:
-            payload = get_block_detail(db_path=db_path, candidate_id=candidate_id)
+            payload = get_block_detail(
+                db_path=db_path,
+                candidate_id=candidate_id,
+                include_messages=request.args.get('messages') != '0',
+            )
         except Exception:
             logger.exception('context-compression/blocks/%s failed', candidate_id)
             return _json_error('continuity_read_failed', 500)
         if payload is None:
             return _json_error('not_found', 404)
         return _json_ok(payload)
+
+    @blueprint.route('/dayblocks', methods=_ALL_METHODS)
+    def continuity_dayblocks():
+        if request.method not in ('GET', 'HEAD'):
+            return _method_not_allowed()
+        try:
+            days = list_dayblock_days(dayblock_store_path)
+        except Exception:
+            logger.exception('context-compression/dayblocks failed')
+            return _json_error('dayblock_read_failed', 500)
+        return _json_ok({'ok': True, 'dayblocks': days})
+
+    @blueprint.route('/dayblocks/<source_day>', methods=_ALL_METHODS)
+    def continuity_dayblock_detail(source_day: str):
+        if request.method not in ('GET', 'HEAD'):
+            return _method_not_allowed()
+        try:
+            payload = get_dayblock_day(dayblock_store_path, source_day)
+        except Exception:
+            logger.exception('context-compression/dayblocks/%s failed', source_day)
+            return _json_error('dayblock_read_failed', 500)
+        if payload is None:
+            return _json_error('not_found', 404)
+        return _json_ok({'ok': True, 'dayblock': payload})
 
     @blueprint.route('/current', methods=_ALL_METHODS)
     def continuity_current():

@@ -14,6 +14,7 @@ members, so every existing chunk validation still runs on it.  Recent days
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -323,6 +324,110 @@ def substitute_dayblock_bindings(
     return tuple(ordered), tuple(report)
 
 
+_DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _day_entry(conn: sqlite3.Connection, day: str, *, with_body: bool) -> dict[str, Any] | None:
+    """One page-facing DayBlock state for ``day`` (receipt first, else latest job)."""
+    receipt = conn.execute(
+        'SELECT r.*, j.snapshot_id AS job_snapshot_id FROM dayblock_generation_receipts r '
+        'JOIN dayblock_shadow_jobs j ON j.job_id = r.generation_job_id WHERE r.source_day=?',
+        (day,),
+    ).fetchone()
+    job = conn.execute(
+        'SELECT * FROM dayblock_shadow_jobs WHERE source_day=? ORDER BY created_at DESC, job_id DESC LIMIT 1',
+        (day,),
+    ).fetchone()
+    if receipt is None and job is None:
+        return None
+    snapshot_id = str(receipt['job_snapshot_id'] if receipt is not None else job['snapshot_id'])
+    snapshot = conn.execute(
+        'SELECT completed_turn_count FROM dayblock_source_snapshots WHERE snapshot_id=?',
+        (snapshot_id,),
+    ).fetchone()
+    body = ''
+    reason: str | None = None
+    if receipt is not None:
+        status = str(receipt['status'])
+        body = str(receipt['summary_body'] or '')
+        if status == 'ready':
+            if hashlib.sha256(body.encode('utf-8')).hexdigest() != str(receipt['body_hash'] or ''):
+                status, reason = 'rejected', 'body_hash_mismatch'
+            else:
+                reason = dayblock_refusal_reason(body, int(receipt['raw_token_estimate'] or 0))
+                if reason:
+                    status = 'rejected'
+        elif status == 'failed':
+            reason = str(receipt['error_code'] or '') or None
+        created_at = str(receipt['finished_at'] or receipt['created_at'] or '')
+        raw_tokens = int(receipt['raw_token_estimate'] or 0)
+        output_tokens = int(receipt['output_token_estimate'] or 0) if body else 0
+        model_identity = str(receipt['model_identity'] or '')
+    else:
+        status = 'blocked' if str(job['status']) in ('blocked', 'planned') else str(job['status'])
+        try:
+            reasons = json.loads(str(job['blocking_reasons_json'] or '[]'))
+        except ValueError:
+            reasons = []
+        reason = ','.join(str(item) for item in reasons)[:200] or None
+        created_at = str(job['created_at'] or '')
+        raw_tokens = 0
+        output_tokens = 0
+        model_identity = str(job['model_identity'] or '')
+    entry: dict[str, Any] = {
+        'source_day': day,
+        'status': status,
+        'reason': reason,
+        'completed_turn_count': int(snapshot['completed_turn_count']) if snapshot is not None else None,
+        'output_token_estimate': output_tokens if body else None,
+        'body_char_count': len(body) if body else None,
+        'raw_token_estimate': raw_tokens or None,
+        'created_at': created_at or None,
+        'model_identity': model_identity or None,
+    }
+    if with_body:
+        entry['body'] = body or None
+    return entry
+
+
+def _open_dayblock_store(path: str | Path | None) -> sqlite3.Connection | None:
+    target = Path(path) if path is not None else dayblock_store_path()
+    if not target.is_file():
+        return None
+    conn = sqlite3.connect(f'file:{target}?mode=ro', uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def list_dayblock_days(path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Read-only per-day DayBlock states for the context-compression page."""
+    conn = _open_dayblock_store(path)
+    if conn is None:
+        return []
+    try:
+        days = sorted({
+            str(row[0]) for row in conn.execute(
+                'SELECT source_day FROM dayblock_shadow_jobs UNION SELECT source_day FROM dayblock_generation_receipts'
+            )
+        })
+        return [entry for day in days if (entry := _day_entry(conn, day, with_body=False))]
+    finally:
+        conn.close()
+
+
+def get_dayblock_day(path: str | Path | None, day: str) -> dict[str, Any] | None:
+    """Read-only DayBlock detail (with body) for one source day, or None."""
+    if not _DAY_RE.match(str(day or '')):
+        return None
+    conn = _open_dayblock_store(path)
+    if conn is None:
+        return None
+    try:
+        return _day_entry(conn, str(day), with_body=True)
+    finally:
+        conn.close()
+
+
 __all__ = [
     'DAYBLOCK_CHUNK_PREFIX',
     'DAYBLOCK_CONTEXT_POLICY_VERSION',
@@ -330,6 +435,8 @@ __all__ = [
     'DayBlockArtifact',
     'dayblock_refusal_reason',
     'dayblock_store_path',
+    'get_dayblock_day',
+    'list_dayblock_days',
     'load_ready_dayblocks',
     'substitute_dayblock_bindings',
 ]

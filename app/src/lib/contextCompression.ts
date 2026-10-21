@@ -46,6 +46,7 @@ export type ContinuityBlockDetailResponse = {
   source: unknown
   chunk: ContinuityChunk | null
   messages: ContinuityMessage[]
+  messages_included?: boolean
 }
 
 export type ContinuityCurrentResponse = {
@@ -105,8 +106,14 @@ export async function fetchContinuityBlocks(signal?: AbortSignal): Promise<Conti
   return value as ContinuityBlocksResponse
 }
 
-export async function fetchContinuityBlockDetail(candidateId: string, signal?: AbortSignal): Promise<ContinuityBlockDetailResponse> {
-  const value = await fetchJson('/blocks/' + encodeURIComponent(candidateId), signal)
+/** Summary first: pass { messages: false } to skip the slow original-chat read. */
+export async function fetchContinuityBlockDetail(
+  candidateId: string,
+  signal?: AbortSignal,
+  options: { messages?: boolean } = {},
+): Promise<ContinuityBlockDetailResponse> {
+  const query = options.messages === false ? '?messages=0' : ''
+  const value = await fetchJson('/blocks/' + encodeURIComponent(candidateId) + query, signal)
   assertOkRecord(value, '压缩块详情')
   if (!isRecord(value.block) || !Array.isArray(value.messages)) throw new Error('压缩块详情返回格式无效')
   return value as ContinuityBlockDetailResponse
@@ -117,4 +124,32 @@ export async function fetchContinuityCurrent(signal?: AbortSignal): Promise<Cont
   assertOkRecord(value, '当前块')
   if (typeof value.available !== 'boolean' || !Array.isArray(value.messages)) throw new Error('当前块返回格式无效')
   return value as ContinuityCurrentResponse
+}
+
+export type DayBlockStatus = 'ready' | 'rejected' | 'failed' | 'blocked' | 'processing' | 'stale'
+export type DayBlockSummary = {
+  source_day: string
+  status: DayBlockStatus
+  reason: string | null
+  completed_turn_count: number | null
+  output_token_estimate: number | null
+  body_char_count: number | null
+  raw_token_estimate: number | null
+  created_at: string | null
+  model_identity: string | null
+}
+export type DayBlockDetail = DayBlockSummary & { body: string | null }
+
+export async function fetchDayBlocks(signal?: AbortSignal): Promise<DayBlockSummary[]> {
+  const value = await fetchJson('/dayblocks', signal)
+  assertOkRecord(value, '日块列表')
+  if (!Array.isArray(value.dayblocks)) throw new Error('日块列表返回格式无效')
+  return value.dayblocks as DayBlockSummary[]
+}
+
+export async function fetchDayBlockDetail(sourceDay: string, signal?: AbortSignal): Promise<DayBlockDetail> {
+  const value = await fetchJson('/dayblocks/' + encodeURIComponent(sourceDay), signal)
+  assertOkRecord(value, '日块详情')
+  if (!isRecord(value.dayblock)) throw new Error('日块详情返回格式无效')
+  return value.dayblock as DayBlockDetail
 }

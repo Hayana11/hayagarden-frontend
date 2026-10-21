@@ -528,8 +528,18 @@ def list_blocks(*, db_path: str | Path) -> dict[str, Any]:
         conn.close()
 
 
-def get_block_detail(*, db_path: str | Path, candidate_id: str) -> dict[str, Any] | None:
-    """Return one persisted candidate with source, chunk, and original messages."""
+def get_block_detail(
+    *,
+    db_path: str | Path,
+    candidate_id: str,
+    include_messages: bool = True,
+) -> dict[str, Any] | None:
+    """Return one persisted candidate with source, chunk, and original messages.
+
+    ``include_messages=False`` skips the window-wide source read and
+    materialization (the slow part) and returns the summary only, with
+    ``messages=[]`` and ``messages_included=False``.
+    """
     try:
         conn = open_read_only(db_path)
     except (OSError, sqlite3.Error):
@@ -542,14 +552,16 @@ def get_block_detail(*, db_path: str | Path, candidate_id: str) -> dict[str, Any
             return None
         cache: dict[tuple[int, int], tuple[dict[str, object], ...]] = {}
         block, source, chunk, messages = _make_block(
-            conn, candidate, rows_cache=cache, include_messages=True,
+            conn, candidate, rows_cache=cache, include_messages=include_messages,
+            hydrate_source=include_messages,
         )
         return {
             'ok': True,
             'block': block,
             'source': source,
             'chunk': chunk,
-            'messages': messages,
+            'messages': messages if include_messages else [],
+            'messages_included': bool(include_messages),
         }
     finally:
         conn.close()
