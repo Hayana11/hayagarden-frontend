@@ -2,7 +2,9 @@ import datetime
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 import emotion_history
 from valence_scale import normalize_valence
@@ -71,6 +73,59 @@ class EmotionHistoryTests(unittest.TestCase):
         conn.close()
         self.assertEqual(rows, [('旧', None), ('新', 'user_scored:42'),
                                 ('无键', None), ('无键', None)])
+
+    def test_concurrent_upgrade_of_old_table_adds_column_once(self):
+        os.unlink(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE emotion_history (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "recorded_at TEXT NOT NULL, valence REAL NOT NULL, arousal REAL NOT NULL, "
+            "mood_word TEXT, source TEXT DEFAULT 'score')"
+        )
+        conn.commit()
+        conn.close()
+
+        # Both upgraders pause right after reading the schema, so without
+        # serialisation each sees the old table and both run ALTER TABLE.
+        barrier = threading.Barrier(2, timeout=1.0)
+
+        class PausingConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                result = super().execute(sql, *args)
+                if sql.startswith('PRAGMA table_info'):
+                    rows = result.fetchall()
+                    try:
+                        barrier.wait()
+                    except threading.BrokenBarrierError:
+                        pass
+                    return iter(rows)
+                return result
+
+        real_connect = sqlite3.connect
+
+        def pausing_connect(*args, **kwargs):
+            kwargs['factory'] = PausingConnection
+            return real_connect(*args, **kwargs)
+
+        errors = []
+
+        def upgrade():
+            try:
+                emotion_history.ensure_schema(self.db_path)
+            except Exception as exc:  # noqa: BLE001 - surfaced via assertion
+                errors.append(exc)
+
+        with mock.patch.object(emotion_history.sqlite3, 'connect', side_effect=pausing_connect):
+            threads = [threading.Thread(target=upgrade) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+        self.assertEqual(errors, [])
+        conn = sqlite3.connect(self.db_path)
+        cols = [r[1] for r in conn.execute('PRAGMA table_info(emotion_history)')]
+        conn.close()
+        self.assertEqual(cols.count('source_event_key'), 1)
 
     def test_fetch_series_reconciles_from_event_ledger(self):
         import json

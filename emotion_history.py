@@ -27,33 +27,43 @@ def _conn(db_path: str) -> sqlite3.Connection:
 
 
 def ensure_schema(db_path: str) -> None:
-    conn = _conn(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS emotion_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recorded_at TEXT NOT NULL,
-            valence REAL NOT NULL,
-            arousal REAL NOT NULL,
-            mood_word TEXT,
-            source TEXT DEFAULT 'score',
-            source_event_key TEXT
+    # Check-then-ALTER runs under one write lock: two first-use callers after a
+    # deploy must not both see the old table and both ADD COLUMN.
+    conn = sqlite3.connect(db_path, isolation_level=None, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS emotion_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recorded_at TEXT NOT NULL,
+                valence REAL NOT NULL,
+                arousal REAL NOT NULL,
+                mood_word TEXT,
+                source TEXT DEFAULT 'score',
+                source_event_key TEXT
+            )
+            """
         )
-        """
-    )
-    cols = {row['name'] for row in conn.execute('PRAGMA table_info(emotion_history)')}
-    if 'source_event_key' not in cols:
-        conn.execute('ALTER TABLE emotion_history ADD COLUMN source_event_key TEXT')
-    conn.execute(
-        'CREATE INDEX IF NOT EXISTS idx_emotion_history_recorded '
-        'ON emotion_history(recorded_at)'
-    )
-    conn.execute(
-        'CREATE UNIQUE INDEX IF NOT EXISTS idx_emotion_history_event_key '
-        'ON emotion_history(source_event_key) WHERE source_event_key IS NOT NULL'
-    )
-    conn.commit()
-    conn.close()
+        cols = {row['name'] for row in conn.execute('PRAGMA table_info(emotion_history)')}
+        if 'source_event_key' not in cols:
+            conn.execute('ALTER TABLE emotion_history ADD COLUMN source_event_key TEXT')
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_emotion_history_recorded '
+            'ON emotion_history(recorded_at)'
+        )
+        conn.execute(
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_emotion_history_event_key '
+            'ON emotion_history(source_event_key) WHERE source_event_key IS NOT NULL'
+        )
+        conn.execute('COMMIT')
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute('ROLLBACK')
+        raise
+    finally:
+        conn.close()
 
 
 def _now_str() -> str:
