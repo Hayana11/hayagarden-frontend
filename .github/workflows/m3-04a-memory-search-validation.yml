@@ -119,7 +119,7 @@ jobs:
           # tests.test_cc_capability_adapter S4_PHYSICAL_SURFACE_FINGERPRINT.
           fingerprint = physical_surface_fingerprint()
           assert fingerprint == (
-              "9bd1ed4e09a101673da66c5e99bae7732e94457df14c01798f70e0179a0e6815"
+              "b86b79d45ce573ffc65a9cd6595b089f47bfa7d1f142ac3cb97dea3991df02fe"
           ), fingerprint
           print("memory provider/loading/Wake/fingerprint PASS")
           PY
