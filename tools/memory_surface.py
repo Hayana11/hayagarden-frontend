@@ -14,12 +14,21 @@ weighted by how rare they are among the candidates.
 Every decision (including "nothing surfaced" and failures) is written to
 ``memory_surface_log`` with the reason, so a quiet turn is never a silent one.
 Decisions are idempotent per user message: re-preparing the same turn
-(capacity swap, cold rebuild, regeneration) reuses the first decision instead
-of drawing a different memory once the first one is cooling down.
+(capacity swap, cold rebuild, retry) reuses the first decision instead of
+drawing a different memory.
+
+Modes (runtime_config ``MEMORY_SURFACE_MODE``):
+  off     nothing runs, nothing is written;
+  shadow  decide and log only: no prompt block, no UI, no touch, no cooldown;
+  on      the chosen memory goes into the prompt and the UI.
+
+Deciding never consumes anything. Only ``commit`` -- called once the reply that
+carried the memory is persisted -- starts its cooldown and touches it in Ombre,
+so a failed, retried or abandoned turn costs nothing.
 
 Read-only on memories: the Kernel and Ombre are never written. The only side
-effects are the two surface tables in memories.db and an Ombre ``touch`` of the
-surfaced bucket (reinforcement, off the request path).
+effects are the two surface tables in memories.db (the log pruned after
+``MEMORY_SURFACE_LOG_RETENTION_DAYS``) and an Ombre ``touch`` on commit.
 """
 from __future__ import annotations
 
@@ -37,7 +46,10 @@ _LOG = logging.getLogger("hayagarden.memory_surface")
 
 USER_AUTHORS = ("hayana", "haya", "user")
 RRF_K = 60
-POOL_TYPES = frozenset({"MEMORY", "MISS"})  # FACTs belong to the cold-start list
+# FACTs too: Daily carries no FACT list, and one already in this turn's context
+# is skipped by the in-context check like any other memory.
+POOL_TYPES = frozenset({"MEMORY", "MISS", "FACT"})
+MODES = ("off", "shadow", "on")
 OMBRE_LIMIT = 20
 MIN_QUERY_CHARS = 4
 QUERY_CHARS = 200
@@ -70,7 +82,8 @@ _WORD = re.compile(r"[一-鿿A-Za-z]")
 
 @dataclass
 class SurfaceConfig:
-    enabled: bool = True
+    mode: str = "shadow"
+    log_retention_days: int = 30
     cooldown_turns: int = 60
     # At least two clues (words rare in their chat) found in the memory.
     evidence_min: float = 6.0
@@ -87,6 +100,7 @@ class SurfaceConfig:
 class SurfaceResult:
     decision: str  # surfaced | none | skipped | failed
     reason: str
+    mode: str = "on"
     ref: str = ""
     block: str = ""
     items: list[dict[str, str]] = field(default_factory=list)
@@ -95,8 +109,9 @@ class SurfaceResult:
     detail: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def surfaced(self) -> bool:
-        return self.decision == "surfaced" and bool(self.block)
+    def injected(self) -> bool:
+        """Goes into this turn's prompt and UI (mode ``on`` only)."""
+        return self.mode == "on" and self.decision == "surfaced" and bool(self.block)
 
 
 _SCHEMA = (
@@ -110,12 +125,15 @@ _SCHEMA = (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_message_id INTEGER NOT NULL,
         created_at TEXT NOT NULL,
+        mode TEXT NOT NULL,
         decision TEXT NOT NULL,
         reason TEXT NOT NULL,
         ref TEXT,
+        committed INTEGER NOT NULL DEFAULT 0,
         detail_json TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_memory_surface_log_msg ON memory_surface_log(user_message_id)",
+    "CREATE INDEX IF NOT EXISTS idx_memory_surface_log_created ON memory_surface_log(created_at)",
 )
 
 
@@ -129,8 +147,13 @@ def load_config() -> SurfaceConfig:
         import config_store
     except Exception:  # tests / tools without the runtime config
         return SurfaceConfig()
+    mode = str(config_store.get("MEMORY_SURFACE_MODE", "shadow") or "").strip().lower()
+    if mode not in MODES:
+        _LOG.warning("MEMORY_SURFACE_MODE=%r is not off/shadow/on; using shadow", mode)
+        mode = "shadow"
     return SurfaceConfig(
-        enabled=config_store.get_bool("MEMORY_SURFACE_ENABLED", True),
+        mode=mode,
+        log_retention_days=config_store.get_int("MEMORY_SURFACE_LOG_RETENTION_DAYS", 30),
         cooldown_turns=config_store.get_int("MEMORY_SURFACE_COOLDOWN_TURNS", 60),
         evidence_min=config_store.get_float("MEMORY_SURFACE_EVIDENCE_MIN", 6.0),
         chat_df_max=config_store.get_int("MEMORY_SURFACE_CHAT_DF_MAX", 20),
@@ -251,11 +274,11 @@ def _cooling(conn: sqlite3.Connection, turn: int, cooldown_turns: int) -> set[st
         "SELECT ref FROM memory_surface_cooldown WHERE surfaced_turn > ?", (turn - cooldown_turns,))}
 
 
-def _previous(conn: sqlite3.Connection, user_message_id: int) -> Optional[sqlite3.Row]:
+def _previous(conn: sqlite3.Connection, user_message_id: int, mode: str) -> Optional[sqlite3.Row]:
     return conn.execute(
         "SELECT decision, reason, ref, detail_json FROM memory_surface_log WHERE user_message_id=? "
-        "AND decision IN ('surfaced','none','skipped') ORDER BY id ASC LIMIT 1",
-        (int(user_message_id),),
+        "AND mode=? AND decision IN ('surfaced','none','skipped') ORDER BY id ASC LIMIT 1",
+        (int(user_message_id), mode),
     ).fetchone()
 
 
@@ -277,13 +300,17 @@ def render(item: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     return block, items
 
 
-def _log(conn: sqlite3.Connection, user_message_id: int, result: SurfaceResult, now: datetime) -> None:
+def _log(conn: sqlite3.Connection, user_message_id: int, result: SurfaceResult, now: datetime,
+         retention_days: int) -> None:
     conn.execute(
-        "INSERT INTO memory_surface_log (user_message_id, created_at, decision, reason, ref, detail_json) "
-        "VALUES (?,?,?,?,?,?)",
-        (int(user_message_id), now.strftime("%Y-%m-%d %H:%M:%S"), result.decision, result.reason,
+        "INSERT INTO memory_surface_log (user_message_id, created_at, mode, decision, reason, ref, detail_json) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (int(user_message_id), now.strftime("%Y-%m-%d %H:%M:%S"), result.mode, result.decision, result.reason,
          result.ref or None, json.dumps(result.detail, ensure_ascii=False, sort_keys=True)),
     )
+    if retention_days > 0:
+        conn.execute("DELETE FROM memory_surface_log WHERE created_at < ?",
+                     ((now - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S"),))
 
 
 def decide(
@@ -297,8 +324,10 @@ def decide(
     ombre: Optional[Callable[[str, int], Optional[list[str]]]] = None,
     now: Optional[datetime] = None,
 ) -> SurfaceResult:
-    """Pick 0 or 1 memory for this user message and record why. Never raises."""
+    """Pick 0 or 1 memory for this user message and record why. Never raises, never consumes."""
     config = config or load_config()
+    if config.mode == "off":
+        return SurfaceResult("skipped", "off", mode="off")
     now = now or _beijing_now()
     db_path = Path(db_path)
     try:
@@ -306,31 +335,26 @@ def decide(
         conn.row_factory = sqlite3.Row
     except Exception as exc:
         _LOG.warning("memory surface unavailable: %s", type(exc).__name__)
-        return SurfaceResult("failed", "db_unavailable")
+        return SurfaceResult("failed", "db_unavailable", mode=config.mode)
     try:
         with conn:
             ensure_schema(conn)
-            previous = _previous(conn, user_message_id)
+            previous = _previous(conn, user_message_id, config.mode)
         if previous is not None:
             conn.close()
-            return _replay(previous, db_path, pool_loader)
+            return _replay(previous, db_path, pool_loader, config.mode)
         result = _decide(conn, user_message_id=user_message_id, user_text=user_text,
                          context_text=context_text, db_path=db_path, config=config,
                          pool_loader=pool_loader, ombre=ombre, now=now)
     except Exception as exc:
         _LOG.exception("memory surface failed; turn continues without it")
         result = SurfaceResult("failed", "error", detail={"exc": type(exc).__name__})
+    result.mode = config.mode
+    if config.mode != "on":  # shadow: the decision is logged, nothing reaches the turn
+        result.block, result.items = "", []
     try:
         with conn:
-            if result.surfaced:
-                conn.execute(
-                    "INSERT INTO memory_surface_cooldown (ref, surfaced_turn, surfaced_message_id, surfaced_at) "
-                    "VALUES (?,?,?,?) ON CONFLICT(ref) DO UPDATE SET surfaced_turn=excluded.surfaced_turn, "
-                    "surfaced_message_id=excluded.surfaced_message_id, surfaced_at=excluded.surfaced_at",
-                    (result.ref, int(result.detail.get("turn") or 0), int(user_message_id),
-                     now.strftime("%Y-%m-%d %H:%M:%S")),
-                )
-            _log(conn, user_message_id, result, now)
+            _log(conn, user_message_id, result, now, config.log_retention_days)
     except Exception:
         _LOG.exception("memory surface log write failed")
     finally:
@@ -345,23 +369,24 @@ def _pool(db_path: Path, pool_loader) -> list[dict[str, Any]]:
     return mkr.memory_items(db_path, mode=mkr.AUTOMATIC)
 
 
-def _replay(previous: sqlite3.Row, db_path: Path, pool_loader) -> SurfaceResult:
+def _replay(previous: sqlite3.Row, db_path: Path, pool_loader, mode: str) -> SurfaceResult:
     """The same user message gets the same answer, even while that memory is cooling down."""
     detail = json.loads(previous["detail_json"] or "{}")
     if previous["decision"] != "surfaced":
-        return SurfaceResult(previous["decision"], previous["reason"], detail=dict(detail, replayed=True))
+        return SurfaceResult(previous["decision"], previous["reason"], mode=mode, detail=dict(detail, replayed=True))
+    if mode != "on":
+        return SurfaceResult("surfaced", previous["reason"], mode=mode, ref=previous["ref"],
+                             detail=dict(detail, replayed=True))
     item = next((i for i in _pool(db_path, pool_loader) if i.get("ref") == previous["ref"]), None)
     if item is None:  # retired or revised since: do not resurrect it
-        return SurfaceResult("none", "replayed_ref_gone", detail={"replayed": True})
+        return SurfaceResult("none", "replayed_ref_gone", mode=mode, detail={"replayed": True})
     block, items = render(item)
-    return SurfaceResult("surfaced", previous["reason"], ref=previous["ref"], block=block, items=items,
-                         bucket_id=str(item.get("bucket_id") or ""), projected=bool(item.get("projected")),
-                         detail=dict(detail, replayed=True))
+    return SurfaceResult("surfaced", previous["reason"], mode=mode, ref=previous["ref"], block=block,
+                         items=items, bucket_id=str(item.get("bucket_id") or ""),
+                         projected=bool(item.get("projected")), detail=dict(detail, replayed=True))
 
 
 def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, pool_loader, ombre, now):
-    if not config.enabled:
-        return SurfaceResult("skipped", "disabled")
     if pool_loader is None:
         from tools.memory_kernel_switch import cutover_enabled
         if not cutover_enabled(db_path):
@@ -380,7 +405,7 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     turn = _turn_number(conn, user_message_id)
     cutoff = (now - timedelta(days=config.recent_days)).strftime("%Y-%m-%d %H:%M:%S")
     everything = _pool(db_path, pool_loader)
-    # Recent memories are still in the day's context; FACTs go through cold start.
+    # Recent memories are still in the day's context.
     pool = [i for i in everything if str(i.get("type") or "MEMORY") in POOL_TYPES
             and str(i.get("created_at") or "") < cutoff and i.get("ref")]
     detail: dict[str, Any] = {"turn": turn, "words": words[:12], "chat_df": chat_df, "pool": len(pool)}
@@ -388,7 +413,9 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
         return SurfaceResult("none", "empty_pool", detail=detail)
 
     by_ref = {i["ref"]: i for i in pool}
-    kw_ranked, evidence, matched = keyword_list(pool, words, chat_df, chat_n)
+    # Rarity is measured against a full window: a short history (new install) must not
+    # make every word look common and close the gate for good.
+    kw_ranked, evidence, matched = keyword_list(pool, words, chat_df, max(chat_n, CHAT_DF_WINDOW))
     if ombre is None:
         from tools import ombre_adapter
         ombre = ombre_adapter.search_bucket_ids
@@ -433,21 +460,59 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     detail["matched"] = matched.get(chosen, [])
     detail["ombre_rank"] = ombre_ranked.index(chosen) + 1 if chosen in ombre_ranked else None
     item = by_ref[chosen]
+    # commit() needs these after the reply is persisted, without reloading the pool.
+    detail["bucket_id"] = str(item.get("bucket_id") or "")
+    detail["projected"] = bool(item.get("projected"))
     block, items = render(item)
     return SurfaceResult("surfaced", "gate_passed", ref=chosen, block=block, items=items,
                          bucket_id=str(item.get("bucket_id") or ""), projected=bool(item.get("projected")),
                          detail=detail)
 
 
-def touch(result: SurfaceResult) -> None:
-    """Reinforce the surfaced bucket in Ombre (projected Kernel memories only), off the request path."""
-    if not (result.surfaced and result.projected and result.bucket_id):
-        return
+def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime] = None) -> Optional[str]:
+    """The reply that carried this message's surfaced memory is persisted: it has surfaced.
+
+    Starts the memory's cooldown, marks the decision committed and touches the
+    bucket in Ombre. Only an ``on`` decision commits; a second call is a no-op.
+    Returns the committed ref, or None. Never raises.
+    """
+    now = now or _beijing_now()
     try:
-        from tools import memory_kernel_read as mkr
-        mkr.touch_buckets([result.bucket_id])
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                ensure_schema(conn)
+                row = conn.execute(
+                    "SELECT ref, detail_json FROM memory_surface_log WHERE user_message_id=? AND mode='on' "
+                    "AND decision='surfaced' AND committed=0 ORDER BY id ASC LIMIT 1",
+                    (int(user_message_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                detail = json.loads(row["detail_json"] or "{}")
+                conn.execute(
+                    "UPDATE memory_surface_log SET committed=1 WHERE user_message_id=? AND mode='on' "
+                    "AND decision='surfaced'", (int(user_message_id),))
+                conn.execute(
+                    "INSERT INTO memory_surface_cooldown (ref, surfaced_turn, surfaced_message_id, surfaced_at) "
+                    "VALUES (?,?,?,?) ON CONFLICT(ref) DO UPDATE SET surfaced_turn=excluded.surfaced_turn, "
+                    "surfaced_message_id=excluded.surfaced_message_id, surfaced_at=excluded.surfaced_at",
+                    (row["ref"], int(detail.get("turn") or 0), int(user_message_id),
+                     now.strftime("%Y-%m-%d %H:%M:%S")),
+                )
+        finally:
+            conn.close()
     except Exception:
-        _LOG.exception("memory surface touch failed")
+        _LOG.exception("memory surface commit failed")
+        return None
+    if detail.get("projected") and detail.get("bucket_id"):
+        try:
+            from tools import memory_kernel_read as mkr
+            mkr.touch_buckets([str(detail["bucket_id"])])
+        except Exception:
+            _LOG.exception("memory surface touch failed")
+    return row["ref"]
 
 
 def recent_log(db_path: str | Path, limit: int = 20) -> list[dict[str, Any]]:

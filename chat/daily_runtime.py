@@ -437,16 +437,27 @@ def _surface_memory_for_turn(
     user_message_id: int,
     user_content: str,
     assembly: dict[str, Any],
+    static_system: str,
     db_path: Optional[str],
 ) -> dict[str, Any]:
-    """At most one memory for this turn; a failure costs the recall, never the turn."""
+    """The Daily path's only recall entry: at most one memory, decided once per message.
+
+    A failure costs the recall, never the turn. Nothing is consumed here: the
+    gateway commits the memory (cooldown, Ombre touch) after the reply persists.
+    """
     try:
         from tools import memory_surface
-        context_text = NL.join(
-            str(item.get('content') or '')
-            for item in (assembly.get('current_day_history') or [])
-            if isinstance(item, dict)
-        )
+        # Everything this turn already carries, so a memory that is in it is not repeated.
+        context_text = NL.join([
+            str(static_system or ''),
+            str(assembly.get('day_handoff') or ''),
+            _format_carryover_messages(assembly.get('carryover_messages') or []),
+            *(
+                str(item.get('content') or '')
+                for item in (assembly.get('current_day_history') or [])
+                if isinstance(item, dict)
+            ),
+        ])
         result = memory_surface.decide(
             user_message_id=int(user_message_id),
             user_text=str(user_content or ''),
@@ -456,11 +467,9 @@ def _surface_memory_for_turn(
     except Exception:
         logger.exception('memory surface failed; turn continues without recall')
         return {'decision': 'failed', 'reason': 'error'}
-    recall = {'decision': result.decision, 'reason': result.reason}
-    if result.surfaced:
-        if not result.detail.get('replayed'):
-            memory_surface.touch(result)
-        recall.update({'ref': result.ref, 'block': result.block, 'items': list(result.items)})
+    recall = {'decision': result.decision, 'reason': result.reason, 'mode': result.mode, 'ref': result.ref}
+    if result.injected:
+        recall.update({'block': result.block, 'items': list(result.items)})
     return recall
 
 
@@ -4808,10 +4817,12 @@ def _assemble_plan(
         user_message_id=int(user_message_id),
         user_content=user_content,
         assembly=assembly,
+        static_system=static_system,
         db_path=db_path,
     )
     _apply_memory_recall(assembly, memory_recall)
     manifest['auto_recall_injected'] = bool(assembly.get('memory_recall'))
+    manifest['memory_recall_mode'] = memory_recall.get('mode')
     manifest['memory_recall_decision'] = memory_recall.get('decision')
     manifest['memory_recall_reason'] = memory_recall.get('reason')
     manifest['memory_recall_ref'] = memory_recall.get('ref')

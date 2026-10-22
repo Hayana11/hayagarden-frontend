@@ -5,6 +5,18 @@ rather than a weak guess. Implemented in `tools/memory_surface.py`; the Daily
 path (`chat/daily_runtime.py`) puts the chosen memory in front of her words as a
 per-turn prefix, the same way task feedback rides.
 
+## One recall entry per turn
+
+| turn | path | recall |
+|---|---|---|
+| her message | Daily soft window | `memory_surface` only |
+| regenerate / rewrite (`rewrite_id`) | classic resident | legacy `gateway._recall_memories` |
+| heartbeat wake | classic resident | legacy `gateway._recall_memories` |
+
+The Daily stream returns before the classic code, so a Daily turn never runs
+the legacy recall; `tests/test_memory_surface_daily.py` pins this for cold and
+hot turns, with the legacy recall returning content.
+
 ## Route
 
 1. **Entry gate**: skip empty text, `[image]`, `/commands` and messages under 4
@@ -13,10 +25,12 @@ per-turn prefix, the same way task feedback rides.
 2. **Clues**: jieba words minus pet names, fillers and English stopwords. A word
    is a *clue* only if it appears in at most `MEMORY_SURFACE_CHAT_DF_MAX` (20) of
    the latest 4000 chat messages. "地方" or "一次" are everywhere and prove nothing.
-3. **Candidate pool**: Kernel MEMORY / MISS heads the AUTOMATIC lifecycle
-   allows. FACTs belong to the cold start. Memories from the last
-   `MEMORY_SURFACE_RECENT_DAYS` (2) days are excluded: they are still in the
-   day's context.
+3. **Candidate pool**: Kernel MEMORY / MISS / FACT heads the AUTOMATIC
+   lifecycle allows. Daily carries no FACT list, so FACTs compete like any
+   memory. Anything this turn already carries (static system, handoff,
+   carryover, today's history) is skipped by the in-context check. Memories from
+   the last `MEMORY_SURFACE_RECENT_DAYS` (2) days are excluded: they are still
+   in the day's context.
 4. **Two lists, merged with RRF**:
    - Ombre's ranking (`search_bucket_ids`);
    - keyword evidence, which is the summed rarity (IDF over their chat) of the
@@ -35,19 +49,24 @@ per-turn prefix, the same way task feedback rides.
      history is skipped.
 
    The first survivor wins, and nothing is promoted to replace a rejected one.
-6. **Deliver**: `<recalled-memory>` with the date and the original text (600
-   characters at most). It carries the instruction "相关就自然融入，不相关就忽略". The
-   surfaced bucket is touched in Ombre.
+6. **Deliver** (mode `on`): `<recalled-memory>` with the date and the original
+   text (600 characters at most). It carries the instruction
+   "相关就自然融入，不相关就忽略".
+7. **Commit**: deciding consumes nothing. Only after the reply that carried the
+   memory is persisted does the gateway call `memory_surface.commit`, which
+   starts the cooldown, marks the log row `committed=1` and touches the bucket
+   in Ombre. A failed, abandoned or retried turn costs nothing.
 
 The same user message always gets the same decision: cold rebuilds, capacity
-swaps and regenerations replay the logged decision instead of drawing again. A
+swaps and retries replay the logged decision instead of drawing again. A
 replayed memory that has been retired since then is not resurrected.
 
 ## Switches (runtime_config, read every turn)
 
 | key | default | meaning |
 |---|---|---|
-| `MEMORY_SURFACE_ENABLED` | `1` | `0` turns surfacing off; turns run as before |
+| `MEMORY_SURFACE_MODE` | `shadow` | `off`: nothing runs or is written. `shadow`: decide and log only; no prompt block, no UI, no touch, no cooldown. `on`: inject and show. Anything else reads as `shadow` (with a warning) |
+| `MEMORY_SURFACE_LOG_RETENTION_DAYS` | `30` | route-log rows older than this are deleted on each write |
 | `MEMORY_SURFACE_COOLDOWN_TURNS` | `60` | her messages before a memory may surface again |
 | `MEMORY_SURFACE_EVIDENCE_MIN` | `6.0` | summed clue rarity needed |
 | `MEMORY_SURFACE_MIN_WORDS` | `2` | distinct clues needed |
@@ -63,15 +82,25 @@ Every decision is a row in `memories.db`, including skips and failures:
 
 - `memory_surface_log` columns:
   - `user_message_id`;
+  - `mode`: `shadow` / `on`;
   - `decision`: `surfaced` / `none` / `skipped` / `failed`;
-  - `reason`: for example `gate_passed`, `gate_closed`, `no_clues`, `too_short`, `disabled`, `kernel_cutover_off`, `error`;
+  - `committed`: 1 once the reply carrying it was persisted (mode `on` only);
+  - `reason`: for example `gate_passed`, `gate_closed`, `no_clues`, `too_short`, `kernel_cutover_off`, `error`;
   - `ref`: the chosen `kernel:<lineage>`;
   - `detail_json`: words, clue frequencies, pool size, Ombre status, and the first gate steps with each candidate's verdict.
-- `memory_surface_cooldown`: `ref` → the turn number it last surfaced.
+- `memory_surface_cooldown`: `ref` → the turn number it last surfaced (committed only).
 
 `tools.memory_surface.recent_log(db_path)` returns the newest rows. The Daily
-manifest also records `auto_recall_injected`, `memory_recall_decision`,
-`memory_recall_reason` and `memory_recall_ref` for every turn.
+manifest also records `auto_recall_injected`, `memory_recall_mode`,
+`memory_recall_decision`, `memory_recall_reason` and `memory_recall_ref` for
+every turn.
+
+## Rollout
+
+1. Deploy with the default `shadow`; read the route log against real turns.
+2. Owner true-device check on Huawei Chrome78: switch to `on` briefly in their own
+   chat, look at the "◇ N 条记忆浮现 ›" pill live and after a reload.
+3. `on` once both look right; `off` is always one runtime_config write away.
 
 ## Calibration (2026-10-22, last 80 messages, on a copy of memories.db)
 

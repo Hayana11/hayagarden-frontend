@@ -7273,6 +7273,17 @@ def _stream_cc_daily_soft_window(
             }) + SSE_END
             return
 
+        if _recall_shown:
+            # The reply that carried the memory is persisted: only now has it surfaced
+            # (cooldown starts, Ombre is touched). Failed or abandoned turns never get here.
+            try:
+                from tools import memory_surface as _memory_surface
+                _memory_surface.commit(
+                    user_message_id=int(_daily_plan.user_message_id),
+                    db_path=getattr(_daily_plan, 'db_path', None) or DB_PATH,
+                )
+            except Exception:
+                logging.getLogger('gateway').exception('memory surface commit failed')
         try:
             manifest = _daily_rt.handle_provider_success(
                 _daily_plan,
