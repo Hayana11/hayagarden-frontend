@@ -424,8 +424,38 @@ def create_post():
                         "ombre_bucket_id": written.bucket_id})
     return jsonify({"ok":True,"id":written})
 
+def _kernel_read_only():
+    # Kernel 记忆的编辑 / 完成 / 标签 / 删除要走 Kernel 修订（B-5），在那之前明确拒绝，绝不改 posts。
+    return jsonify({'error': 'kernel_memory_read_only', 'message': 'Kernel 记忆暂时只读'}), 409
+
+
+def _kernel_owned_post(pid):
+    """开关打开后，记忆类型的 posts 行已归 Kernel（等待补登的回退帖子除外）。"""
+    conn = get_db()
+    try:
+        kernel_posts = _memory_cutover(conn)
+        if not kernel_posts:
+            return False
+        row = conn.execute("SELECT type FROM posts WHERE id=?", (pid,)).fetchone()
+    finally:
+        conn.close()
+    if not row or row['type'] not in _mkr().MEMORY_TYPES:
+        return False
+    pending = {i['id'] for i in _mkr().pending_fallback_posts(kernel_posts, active_only=False)}
+    return pid not in pending
+
+
+@app.route('/api/posts/<ref>', methods=['PUT', 'PATCH', 'DELETE'])
+def kernel_post_write(ref):
+    if str(ref).startswith('kernel:'):
+        return _kernel_read_only()
+    return jsonify({'error': 'not found'}), 404
+
+
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 def delete_post(pid):
+    if _kernel_owned_post(pid):
+        return _kernel_read_only()
     deleted = moments_store.delete_post(pid, memories_db_path=DB_PATH)
     if not deleted:
         return jsonify({'error': 'not found'}), 404
@@ -1920,6 +1950,8 @@ def put_user_profile():
 
 @app.route('/api/posts/<int:pid>', methods=['PATCH'])
 def patch_post(pid):
+    if _kernel_owned_post(pid):
+        return _kernel_read_only()
     data = request.get_json()
     conn = get_db()
     if 'tags' in data:
@@ -1944,6 +1976,8 @@ def recent_page():
 
 @app.route('/api/posts/<int:pid>', methods=['PUT'])
 def update_post(pid):
+    if _kernel_owned_post(pid):
+        return _kernel_read_only()
     data = request.get_json()
     conn = get_db()
     if 'content' in data:

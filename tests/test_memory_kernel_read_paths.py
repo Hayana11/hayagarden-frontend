@@ -271,7 +271,7 @@ def load_app():
     return _APP
 
 
-class DashboardTests(PathsFixture):
+class DashboardFixture(PathsFixture):
     def setUp(self):
         super().setUp()
         self.app = load_app()
@@ -286,6 +286,8 @@ class DashboardTests(PathsFixture):
     def library(self, path="/api/memories/library/index"):
         return self.client.get(path).get_json()
 
+
+class DashboardTests(DashboardFixture):
     def test_switch_off_library_uses_post_refs_and_no_kernel(self):
         ids = [e["id"] for e in self.library()["entries"]]
         self.assertIn("post:40", ids)
@@ -338,3 +340,54 @@ class DashboardTests(PathsFixture):
         listed = [p["id"] for p in self.client.get("/api/posts?type=MEMORY&limit=500").get_json()["posts"]]
         self.assertIn(40, listed)
         self.assertNotIn(self.ref, listed)
+
+
+class KernelReadOnlyTests(DashboardFixture):
+    """Static pages: Kernel memories are read-only until Kernel revisions (B-5) exist."""
+
+    def snapshot(self):
+        conn = sqlite3.connect(self.posts)
+        try:
+            return conn.execute("SELECT id, type, content, tags, resolved FROM posts ORDER BY id").fetchall()
+        finally:
+            conn.close()
+
+    def test_kernel_entries_refuse_every_change_and_leave_posts_alone(self):
+        for flag in (None, "1"):
+            if flag:
+                set_flag(self.posts, flag)
+            before = self.snapshot()
+            for method, body in (("put", {"content": "改掉"}), ("patch", {"resolved": 1}),
+                                 ("patch", {"tags": "x"}), ("delete", None)):
+                response = getattr(self.client, method)(f"/api/posts/{self.ref}", json=body)
+                self.assertEqual(response.status_code, 409, (flag, method))
+                self.assertEqual(response.get_json()["error"], "kernel_memory_read_only")
+            self.assertEqual(self.snapshot(), before)
+        [head] = reader.get_current([self.written["lineage_id"]], self.kernel).values()
+        self.assertEqual(head["content"], "她在阳台种了一盆藏红花。")
+
+    def test_switch_on_legacy_memory_posts_are_kernel_owned(self):
+        set_flag(self.posts, "1")
+        before = self.snapshot()
+        self.assertEqual(self.client.put("/api/posts/40", json={"content": "改掉"}).status_code, 409)
+        self.assertEqual(self.client.patch("/api/posts/40", json={"resolved": 1}).status_code, 409)
+        self.assertEqual(self.client.delete("/api/posts/40").status_code, 409)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_non_kernel_entries_keep_their_editing(self):
+        set_flag(self.posts, "1")
+        self.assertEqual(self.client.put("/api/posts/41", json={"content": "日记改了一个字。"}).status_code, 200)
+        self.assertEqual(self.client.patch("/api/posts/41", json={"tags": "情绪"}).status_code, 200)
+        post_id = self.fallback("她把围巾落在了电影院。")
+        self.assertEqual(self.client.put(f"/api/posts/{post_id}", json={"content": "她把围巾落在了电影院里。"})
+                         .status_code, 200)
+        rows = {r[0]: r for r in self.snapshot()}
+        self.assertEqual(rows[41][2], "日记改了一个字。")
+        self.assertEqual(rows[post_id][2], "她把围巾落在了电影院里。")
+
+    def test_adding_a_memory_still_works_through_the_router(self):
+        set_flag(self.posts, "1")
+        response = self.client.post("/api/posts", json={"type": "MEMORY", "content": "她说明天想吃馄饨。",
+                                                         "author": "fyodor"})
+        self.assertEqual(response.get_json()["store"], "kernel")
+        self.assertIn("她说明天想吃馄饨。", [h["content"] for h in reader.list_current(self.kernel)])

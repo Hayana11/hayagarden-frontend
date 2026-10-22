@@ -146,7 +146,7 @@ async function load(){
   var ts=function(s){return s?new Date(s.replace(' ','T')).getTime():0;};
   var diary=(d1.posts||[]).filter(function(p){return ts(p.created_at)>=cutoff;});
   var miss=(d2.posts||[]).filter(function(p){return ts(p.created_at)>=cutoff;});
-  posts=diary.concat(miss).sort(function(a,b){return b.id-a.id;});
+  posts=diary.concat(miss).sort(function(a,b){return ts(b.created_at)-ts(a.created_at);});
   drifts=(d3.bottles||[]).filter(function(b){return ts(b.created_at)>=cutoff;});
   render();
 }
@@ -181,12 +181,12 @@ function toggleItem(id,e){
   setTimeout(function(){var el=document.querySelector('[data-id="'+id+'"]');if(el)el.scrollIntoView({behavior:'smooth',block:'nearest'});},50);
 }
 function toggleDrift(uid,e){expandedId=(expandedId===uid?null:uid);render();}
-function startEdit(id,e){
+function startEdit(id,e){if(isKernelId(id))return;
   e.stopPropagation();editingId=id;expandedId=id;render();
   setTimeout(function(){var ta=document.getElementById('eta-'+id);if(ta){ta.focus();ta.setSelectionRange(ta.value.length,ta.value.length);}},30);
 }
 function cancelEdit(e){e.stopPropagation();editingId=null;render();}
-async function saveEdit(id,e){
+async function saveEdit(id,e){if(isKernelId(id))return;
   e.stopPropagation();
   var ta=document.getElementById('eta-'+id);if(!ta)return;
   var c=ta.value.trim();if(!c)return;
@@ -211,20 +211,26 @@ function typeBadge(p){
   if(!m)return'';
   return'<span class="tbadge" style="background:'+m[0]+';color:'+m[1]+'">'+m[2]+'</span>';
 }
+// Kernel 记忆（id 形如 kernel:lin:…）暂时只读：编辑、完成、标签、删除等 Kernel 修订（B-5）。
+function isKernelId(id){return typeof id==='string'&&id.indexOf('kernel:')===0;}
+function jsId(id){return typeof id==='number'?String(id):"'"+String(id).replace(/[^\w:.\-]/g,'')+"'";}
+var KERNEL_RO='<div class="mreadonly" style="margin-top:8px;font-size:11px;color:var(--hint);">Kernel 记忆暂时只读</div>';
 function buildItem(p){
+  var a=jsId(p.id),ro=isKernelId(p.id);
   var isOpen=expandedId===p.id,isEditing=editingId===p.id;
-  var h='<div class="mitem'+(isOpen||isEditing?' open':'')+'" data-id="'+p.id+'" onclick="toggleItem('+p.id+',event)">';
+  var h='<div class="mitem'+(isOpen||isEditing?' open':'')+'" data-id="'+p.id+'" onclick="toggleItem('+a+',event)">';
   h+='<div class="mdot"></div><div class="mright">';
   if(isEditing){
     h+='<textarea class="medit-ta" id="eta-'+p.id+'" onclick="event.stopPropagation()">'+escHtml(p.content)+'</textarea>';
-    h+='<div class="medit-row"><button class="medit-save" onclick="saveEdit('+p.id+',event)">保存</button><button class="medit-cancel" onclick="cancelEdit(event)">取消</button></div>';
+    h+='<div class="medit-row"><button class="medit-save" onclick="saveEdit('+a+',event)">保存</button><button class="medit-cancel" onclick="cancelEdit(event)">取消</button></div>';
   } else {
     var disp=stripThinking(p.content);
     h+='<div class="mpreview">'+dispHtml(disp)+'</div>';
     h+='<div class="mfull">'+dispHtml(disp)+'</div>';
   }
   h+='<div class="mmeta">'+typeBadge(p)+'<span class="mdate">'+fmtDate(p.created_at)+'</span>';
-  if(!isEditing)h+='<button class="mpencil" onclick="startEdit('+p.id+',event)"><i class="ti ti-pencil"></i></button>';
+  if(!isEditing&&!ro)h+='<button class="mpencil" onclick="startEdit('+a+',event)"><i class="ti ti-pencil"></i></button>';
+  if(isOpen&&ro)h+=KERNEL_RO;
   h+='</div></div></div>';
   return h;
 }
