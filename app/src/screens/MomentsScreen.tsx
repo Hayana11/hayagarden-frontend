@@ -1376,11 +1376,12 @@ export function MomentsScreen() {
 
                   <div style={{ background: 'var(--card)', borderRadius: 20, padding: 16, boxShadow: '0 6px 16px var(--shadow)' }}>
                     <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-                      <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>触发过情绪的记忆</span>
+                      <span style={{ fontSize: 14, fontWeight: 600, letterSpacing: 1.5, color: 'var(--ink)' }}>记忆气候</span>
                       <span style={{ fontFamily: FONT_DISPLAY, fontSize: 10, letterSpacing: 1.5, color: 'var(--ghost)' }}>VALENCE × AROUSAL</span>
                     </div>
+                    <span style={{ display: 'block', fontSize: 11, color: 'var(--ghost)', marginTop: 6, lineHeight: 1.7 }}>每段记忆自带的情绪色温，是记忆的元数据，不是此刻的心情。</span>
                     {(data?.emotionMemories || []).length === 0 ? (
-                      <div style={{ padding: '20px 4px', fontSize: 12.5, color: 'var(--faint)', lineHeight: 1.8 }}>还没有关联出情绪读数的记忆。</div>
+                      <div style={{ padding: '20px 4px', fontSize: 12.5, color: 'var(--faint)', lineHeight: 1.8 }}>还没有带情绪色温的记忆。</div>
                     ) : (
                       <div className="moments-va-plot">
                         <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: 1, background: 'var(--line)' }} />
@@ -1397,9 +1398,6 @@ export function MomentsScreen() {
                             </div>
                           );
                         })}
-                        {data?.mood && (
-                          <div style={{ position: 'absolute', left: `${Math.min(96, Math.max(4, ((data.mood.valence + 1) / 2) * 100))}%`, top: `${Math.min(96, Math.max(4, (1 - data.mood.arousal) * 100))}%`, transform: 'translate(-50%,-50%)', width: 14, height: 14, borderRadius: '50%', background: moodColor, outline: '2px solid var(--card)', boxShadow: '0 0 0 2px var(--rose)' }} />
-                        )}
                       </div>
                     )}
 
@@ -1415,7 +1413,7 @@ export function MomentsScreen() {
                         {moodDraft && (
                           <div className="vstack vstack-10" style={{ borderTop: '1px dashed var(--line)', marginTop: 2, paddingTop: 10, display: 'flex', flexDirection: 'column' }}>
                             <span style={{ fontSize: 11.5, color: 'var(--ghost)', letterSpacing: 1 }}>
-                              修正这一刻的情绪{moodSel.bucket_id ? '' : ' · 该点缺少可写回 ID'}
+                              修正这段记忆的情绪色温{moodSel.bucket_id ? '' : ' · 该点缺少可写回 ID'}
                             </span>
                             <div className="hstack hstack-10">
                               <span style={{ fontSize: 11.5, color: 'var(--mut)', width: 50, flexShrink: 0 }}>V 愉悦</span>

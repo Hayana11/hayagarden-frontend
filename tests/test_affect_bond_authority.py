@@ -112,7 +112,9 @@ def _production_bootstrap(db_path: str, *, watermark: int = WATERMARK_MID) -> No
     assert ready.ok, (ready.status, ready.error)
 
 
-class AffectBondAuthorityTests(unittest.TestCase):
+class _AuthorityFixture:
+    """Shared bootstrap + helpers; not a TestCase so its tests aren't inherited."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / 'memories.db')
@@ -155,6 +157,8 @@ class AffectBondAuthorityTests(unittest.TestCase):
         self.assertIn(result.status, ('applied', 'duplicate'))
         return mid
 
+
+class AffectBondAuthorityTests(_AuthorityFixture, unittest.TestCase):
     def test_case1_affect_single_authority(self):
         mid = self._insert_user('你好', created_at='2026-08-04 10:00:00')
         scores = {
@@ -615,6 +619,125 @@ class DesireDelegationTests(unittest.TestCase):
         self.assertEqual(desire['p'], 0.424)
         self.assertEqual(desire['i'], 0.313)
         self.assertEqual(desire['c'], 0.707)
+
+
+class EmotionTimelineTests(_AuthorityFixture, unittest.TestCase):
+    """Moments timeline + current mood read V3 Affect, never the scorer blend."""
+
+    def _score(self, mid, *, valence, arousal, mood, at):
+        with mock.patch.object(ee, '_deepseek_score', return_value={
+            'valence': valence, 'arousal': arousal, 'mood_word': mood,
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }), mock.patch.object(ee, '_get_ombre_va', return_value=(0.9, 0.9)), \
+                mock.patch.object(ee, '_now_str', return_value=at):
+            ee.score_and_update('excerpt', message_id=mid)
+
+    def _history(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='emotion_history'"
+            ).fetchone():
+                return []
+            return conn.execute(
+                'SELECT valence, arousal, mood_word, source FROM emotion_history '
+                'ORDER BY recorded_at, id'
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_applied_score_records_v3_affect(self):
+        mid = self._insert_user('嗯', created_at='2026-08-04 16:00:00')
+        self._score(mid, valence=0.0, arousal=0.2, mood='平静', at='2026-08-04 16:00:05')
+        v3 = aba.read_v3_state(self.db_path)
+        [(v, a, mood, source)] = self._history()
+        # Ombre's 0.9 is not in the V3 Affect, so the point carries V3's value.
+        self.assertEqual((v, a, mood), (v3['valence'], v3['arousal'], v3['mood_word']))
+        self.assertEqual(source, 'v3_affect')
+
+    def test_duplicate_and_stale_scores_record_nothing(self):
+        m1 = self._insert_user('一', created_at='2026-08-04 17:00:00')
+        m2 = self._insert_user('二', created_at='2026-08-04 17:05:00',
+                               prev_at='2026-08-04 17:00:00')
+        self._score(m2, valence=0.8, arousal=0.5, mood='温柔', at='2026-08-04 17:05:05')
+        self._score(m2, valence=0.8, arousal=0.5, mood='温柔', at='2026-08-04 17:05:05')
+        self._score(m1, valence=-0.8, arousal=0.9, mood='烦', at='2026-08-04 17:06:00')
+        self.assertEqual([row[2] for row in self._history()], ['温柔'])
+
+    def test_interleaved_scores_each_record_their_own_settled_affect(self):
+        m1 = self._insert_user('一', created_at='2026-08-04 19:00:00')
+        m2 = self._insert_user('二', created_at='2026-08-04 19:00:02',
+                               prev_at='2026-08-04 19:00:00')
+        real_apply = aba.apply_scored_observation
+        interleaved = []
+
+        def apply_then_let_b_run(**kwargs):
+            result = real_apply(**kwargs)
+            if kwargs['message_id'] == m1 and not interleaved:
+                interleaved.append(True)
+                # B fully settles and records before A gets to record.
+                self._score(m2, valence=-0.6, arousal=0.9, mood='烦躁',
+                            at='2026-08-04 19:00:06')
+            return result
+
+        with mock.patch.object(aba, 'apply_scored_observation',
+                               side_effect=apply_then_let_b_run):
+            self._score(m1, valence=0.6, arousal=0.3, mood='温柔',
+                        at='2026-08-04 19:00:05')
+        self.assertEqual(interleaved, [True])
+        self.assertEqual(aba.read_v3_state(self.db_path)['mood_word'], '烦躁')
+        rows = self._history()
+        self.assertEqual([r[2] for r in rows], ['温柔', '烦躁'])
+        # A's own blend (scorer 70% + Ombre 0.9 30%), not B's later Affect.
+        self.assertAlmostEqual(rows[0][0], 0.7 * 0.8 + 0.3 * 0.9, places=4)
+        self.assertAlmostEqual(rows[0][1], 0.7 * 0.3 + 0.3 * 0.9, places=4)
+
+    def test_projection_lost_after_commit_is_filled_once_by_retry(self):
+        import emotion_history
+        mid = self._insert_user('嗯', created_at='2026-08-04 20:00:00')
+        with mock.patch.object(emotion_history, 'append_snapshot',
+                               side_effect=sqlite3.OperationalError('database is locked')):
+            self._score(mid, valence=0.2, arousal=0.4, mood='安静', at='2026-08-04 20:00:05')
+        self.assertEqual(aba.read_v3_state(self.db_path)['mood_word'], '安静')
+        self.assertEqual(self._history(), [])
+        # Same message scored again → duplicate, which replays the frozen result.
+        self._score(mid, valence=0.2, arousal=0.4, mood='安静', at='2026-08-04 20:00:05')
+        self._score(mid, valence=0.2, arousal=0.4, mood='安静', at='2026-08-04 20:00:05')
+        self.assertEqual([r[2] for r in self._history()], ['安静'])
+
+    def test_reconcile_rebuilds_lost_points_idempotently(self):
+        import emotion_history
+        m1 = self._insert_user('一', created_at='2026-08-04 21:00:00')
+        m2 = self._insert_user('二', created_at='2026-08-04 21:00:02',
+                               prev_at='2026-08-04 21:00:00')
+        self._score(m1, valence=0.6, arousal=0.3, mood='温柔', at='2026-08-04 21:00:05')
+        with mock.patch.object(emotion_history, 'append_snapshot',
+                               side_effect=sqlite3.OperationalError('database is locked')):
+            self._score(m2, valence=-0.6, arousal=0.9, mood='烦躁', at='2026-08-04 21:00:06')
+        self.assertEqual([r[2] for r in self._history()], ['温柔'])
+        self.assertEqual(emotion_history.reconcile_from_events(self.db_path), 1)
+        self.assertEqual(emotion_history.reconcile_from_events(self.db_path), 0)
+        rows = self._history()
+        self.assertEqual([r[2] for r in rows], ['温柔', '烦躁'])
+        self.assertEqual({r[3] for r in rows}, {'v3_affect'})
+
+    def test_failed_apply_records_nothing(self):
+        mid = self._insert_user('嗯', created_at='2026-08-04 18:00:00')
+        with mock.patch.object(aba, 'ensure_authority_ready', return_value=False):
+            self._score(mid, valence=0.5, arousal=0.5, mood='好', at='2026-08-04 18:00:05')
+        self.assertEqual(self._history(), [])
+
+    def test_state_authority_flag(self):
+        state, authoritative = ee.get_state_with_authority()
+        self.assertTrue(authoritative)
+        with mock.patch.object(
+            aba, 'check_cutover_ready',
+            return_value=SimpleNamespace(ok=False, status='proof_gap'),
+        ):
+            state, authoritative = ee.get_state_with_authority()
+            self.assertFalse(authoritative)
+            self.assertEqual(state['mood_word'], '平静')
+            self.assertEqual(ee.get_state(), state)
 
 
 if __name__ == '__main__':

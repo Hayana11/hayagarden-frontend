@@ -5,6 +5,7 @@ Sternberg三角欲望系统 (I/P/C) + 时间衰减 + 关键词规则层
 """
 
 import json
+import logging
 import math
 import datetime
 import threading
@@ -188,6 +189,15 @@ def get_state() -> dict:
     Legacy ``emotion_state`` may supply non-authoritative extras such as
     ``last_interaction`` for display only.
     """
+    return get_state_with_authority()[0]
+
+
+def get_state_with_authority() -> tuple[dict, bool]:
+    """``get_state()`` plus whether the dict is V3 (True) or the fixed fallback.
+
+    Display surfaces use the flag to say "unavailable" instead of showing the
+    fallback 平静 as if it were the current Affect.
+    """
     last_interaction = None
     try:
         conn = _db()
@@ -214,7 +224,7 @@ def get_state() -> dict:
                     v3,
                     last_interaction=last_interaction,
                     longing=get_longing(),
-                )
+                ), True
     except Exception:
         pass
     return {
@@ -223,7 +233,7 @@ def get_state() -> dict:
         'sternberg_i': 0.3, 'sternberg_p': 0.0, 'sternberg_c': 0.7,
         'p_updated_at': None, 'i_updated_at': None,
         'last_interaction': last_interaction,
-    }
+    }, False
 
 
 def get_desire() -> dict:
@@ -607,24 +617,48 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
         return
 
     try:
-        from chat.affect_bond_authority import apply_scored_best_effort
-        apply_scored_best_effort(
+        from chat.affect_bond_authority import apply_scored_observation
+        result = apply_scored_observation(
             message_id=mid_ok,
             scores=scored_payload,
             scored_at=scored_at,
             db_path=DB_PATH,
         )
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning('score_and_update apply failed: %s', exc)
         return
 
+    # Timeline is a projection of the Affect this event settled (frozen in its
+    # result). duplicate replays the original result, so a point lost after V3
+    # committed is filled on retry; stale_skipped / failure carry none.
+    if getattr(result, 'status', None) not in ('applied', 'duplicate'):
+        return
+    record_settled_affect_snapshot(
+        getattr(result, 'result', None), event_key=f'user_scored:{mid_ok}',
+    )
+
+
+def record_settled_affect_snapshot(event_result, *, event_key: str) -> bool:
+    """Project a ``user_scored`` event's frozen ``settled_affect`` into ``emotion_history``.
+
+    Never re-reads current V3, which a later concurrent score may already have
+    moved. Keyed by ``event_key``, so repeats are ignored; a write lost here is
+    also re-projected by ``emotion_history.reconcile_from_events``.
+    """
     try:
         import emotion_history
+        affect = emotion_history.settled_affect_from_result(event_result)
+        if affect is None:
+            return False
         emotion_history.append_snapshot(
-            frozen_v, frozen_a, frozen_mood,
-            db_path=DB_PATH, source='score',
+            affect['valence'], affect['arousal'], affect.get('mood_word') or '',
+            db_path=DB_PATH, source=emotion_history.SOURCE_V3_AFFECT,
+            recorded_at=affect.get('scored_at'), source_event_key=event_key,
         )
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        logging.getLogger(__name__).warning('emotion_history projection failed: %s', exc)
+        return False
 
 
 def score_async(conversation_excerpt: str, *, message_id=None):
