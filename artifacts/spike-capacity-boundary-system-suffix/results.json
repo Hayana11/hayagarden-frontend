@@ -1,0 +1,94 @@
+{
+  "spike": "Step-8-B0-CAPACITY-BOUNDARY-SYSTEM_SUFFIX_V1",
+  "started_at": "2026-08-10T08:03:57Z",
+  "tested_base": "99b60d7325e7bf0c2d62269d97c04d9304995b3d",
+  "representation": "SYSTEM_SUFFIX_V1",
+  "boundary_suffix": "[容量边界]\n当前 Claude session 未包含本窗口更早的部分对话。不要假装精确记得缺失原话；用户引用缺失内容而无法确认时，应自然请求补充。",
+  "verdict": "ENVIRONMENT_BLOCKED",
+  "auth": {
+    "oauth_present": true,
+    "api_key_present": true
+  },
+  "work_root": "/tmp/capacity-boundary-spike-0jnqlxbz",
+  "candidate": {
+    "candidate_session_id": "c1a36b89-bd61-54d5-a365-0942827bb463",
+    "output_sha256": "5506e3d720a5de85f4d1ef781ad0533680ac180ca039f5438de05da21d7de4d7",
+    "event_count": 3,
+    "boundary_required": true,
+    "selected_round_count": 1,
+    "anchor_status": "ANCHOR_RETAINED"
+  },
+  "publish": {
+    "path": "/tmp/capacity-boundary-spike-0jnqlxbz/claude-home/projects/-tmp-capacity-boundary-spike-0jnqlxbz-isolated-project/c1a36b89-bd61-54d5-a365-0942827bb463.jsonl",
+    "file_sha": "5506e3d720a5de85f4d1ef781ad0533680ac180ca039f5438de05da21d7de4d7",
+    "event_count": 3
+  },
+  "A1": {
+    "process_started": true,
+    "stdin_flushed": true,
+    "user_send_count": 1,
+    "first_delta": null,
+    "text": "",
+    "thinking_chars": 0,
+    "result_ok": false,
+    "result_subtype": null,
+    "error": "ResidentError:claude code 返回错误: Failed to authenticate. API Error: 401 Invalid bearer token",
+    "alive_after": false,
+    "jsonl_before": {
+      "exists": true,
+      "bytes": 1042,
+      "lines": 3,
+      "sha256": "5506e3d720a5de85f4d1ef781ad0533680ac180ca039f5438de05da21d7de4d7"
+    },
+    "jsonl_after": {
+      "exists": true,
+      "bytes": 3366,
+      "lines": 9,
+      "sha256": "3fb5521986cc0d106584ace47d7437c8d692a8f4400b41772f293ec3416dc48a"
+    },
+    "jsonl_grew": true
+  },
+  "A2": {
+    "process_started": false,
+    "stdin_flushed": false,
+    "user_send_count": 0,
+    "first_delta": null,
+    "text": "",
+    "thinking_chars": 0,
+    "result_ok": false,
+    "result_subtype": null,
+    "error": "ResidentError:resident 进程不存在，需要先 ensure_alive",
+    "alive_after": false,
+    "same_session": true,
+    "peek_respawn_reason": "process_dead",
+    "system_changed": false,
+    "extra_respawn": false,
+    "generation_before": 1,
+    "generation_after": 1,
+    "jsonl_before": {
+      "exists": true,
+      "bytes": 3366,
+      "lines": 9,
+      "sha256": "3fb5521986cc0d106584ace47d7437c8d692a8f4400b41772f293ec3416dc48a"
+    },
+    "jsonl_after": {
+      "exists": true,
+      "bytes": 3366,
+      "lines": 9,
+      "sha256": "3fb5521986cc0d106584ace47d7437c8d692a8f4400b41772f293ec3416dc48a"
+    },
+    "jsonl_grew": false
+  },
+  "boundary_observation": {
+    "spontaneous_boundary_announce": false,
+    "announce_markers_hit": [],
+    "obvious_persona_drift": false,
+    "drift_markers_hit": [],
+    "a1_text_preview": "",
+    "a2_text_preview": ""
+  },
+  "A1_pass": false,
+  "A2_pass": false,
+  "error": "claude_auth_rejected:ResidentError:claude code 返回错误: Failed to authenticate. API Error: 401 Invalid bearer token",
+  "finished_at": "2026-08-10T08:04:02Z"
+}
