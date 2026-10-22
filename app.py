@@ -634,6 +634,35 @@ def memories_library_search():
     finally:
         conn.close()
 
+@app.route('/api/memory-surface/review', methods=['GET'])
+def memory_surface_review():
+    # Passive-recall decisions for the review console (/dash/memory-review).
+    from tools import memory_surface
+    only = request.args.get('filter') or 'all'
+    if only not in memory_surface.REVIEW_FILTERS:
+        return jsonify({'error': 'unknown filter'}), 400
+    try:
+        limit = int(request.args.get('limit') or 30)
+        before = request.args.get('before')
+        before_id = int(before) if before else None
+    except ValueError:
+        return jsonify({'error': 'bad paging'}), 400
+    return jsonify(memory_surface.review_rows(DB_PATH, limit=limit, before_id=before_id, only=only))
+
+@app.route('/api/memory-surface/review/<int:log_id>/label', methods=['POST'])
+def memory_surface_review_label(log_id):
+    from tools import memory_surface
+    data = request.get_json(silent=True) or {}
+    label = str(data.get('label') or '')
+    if label not in memory_surface.LABELS + ('clear',):
+        return jsonify({'error': 'unknown label'}), 400
+    expected = str(data.get('expected_ref') or '').strip() or None
+    row = memory_surface.set_label(DB_PATH, log_id=log_id, label=label,
+                                   note=str(data.get('note') or ''), expected_ref=expected)
+    if row is None:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(row)
+
 @app.route('/api/posts/calendar/day', methods=['GET'])
 def posts_calendar_day():
     date_str = (request.args.get('date') or '').strip()

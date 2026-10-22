@@ -37,6 +37,7 @@ import logging
 import math
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -134,12 +135,36 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS idx_memory_surface_log_msg ON memory_surface_log(user_message_id)",
     "CREATE INDEX IF NOT EXISTS idx_memory_surface_log_created ON memory_surface_log(created_at)",
+    # The owner's verdict on one decision, with a frozen snapshot of what was decided:
+    # the error set survives log pruning and later memory edits.
+    """CREATE TABLE IF NOT EXISTS memory_surface_labels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_id INTEGER NOT NULL UNIQUE,
+        user_message_id INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        expected_ref TEXT,
+        note TEXT,
+        snapshot_json TEXT NOT NULL,
+        labeled_at TEXT NOT NULL
+    )""",
 )
+# Columns added after the log table first shipped (2026-10-22): the touch outbox.
+_LOG_COLUMNS = (
+    ("touched", "INTEGER NOT NULL DEFAULT 0"),
+    ("touch_attempts", "INTEGER NOT NULL DEFAULT 0"),
+)
+LABELS = ("ok", "missed", "wrong")
+MAX_TOUCH_ATTEMPTS = 3
+_FLUSH_LOCK = threading.Lock()  # one outbox flush at a time, so a pending row is never touched twice
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     for statement in _SCHEMA:
         conn.execute(statement)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(memory_surface_log)")}
+    for name, ddl in _LOG_COLUMNS:
+        if name not in have:
+            conn.execute(f"ALTER TABLE memory_surface_log ADD COLUMN {name} {ddl}")
 
 
 def load_config() -> SurfaceConfig:
@@ -478,12 +503,15 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
                          detail=detail)
 
 
-def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime] = None) -> Optional[str]:
+def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime] = None,
+           wait: bool = False) -> Optional[str]:
     """The reply that carried this message's surfaced memory is persisted: it has surfaced.
 
-    Starts the memory's cooldown, marks the decision committed and touches the
-    bucket in Ombre. Only an ``on`` decision commits; a second call is a no-op.
-    Returns the committed ref, or None. Never raises.
+    Starts the memory's cooldown and marks the decision committed, then hands the
+    Ombre touch to the outbox (``flush_touches``, off the request path), which
+    also retries touches an earlier crash or Ombre outage left pending. Only an
+    ``on`` decision commits; a second call is a no-op. Returns the committed ref,
+    or None. Never raises.
     """
     now = now or _beijing_now()
     try:
@@ -500,9 +528,11 @@ def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime]
                 if row is None:
                     return None
                 detail = json.loads(row["detail_json"] or "{}")
+                # Nothing to reinforce for a memory Ombre does not hold yet: it leaves the outbox now.
+                touchable = bool(detail.get("projected") and detail.get("bucket_id"))
                 conn.execute(
-                    "UPDATE memory_surface_log SET committed=1 WHERE user_message_id=? AND mode='on' "
-                    "AND decision='surfaced'", (int(user_message_id),))
+                    "UPDATE memory_surface_log SET committed=1, touched=? WHERE user_message_id=? AND mode='on' "
+                    "AND decision='surfaced'", (0 if touchable else 1, int(user_message_id)))
                 conn.execute(
                     "INSERT INTO memory_surface_cooldown (ref, surfaced_turn, surfaced_message_id, surfaced_at) "
                     "VALUES (?,?,?,?) ON CONFLICT(ref) DO UPDATE SET surfaced_turn=excluded.surfaced_turn, "
@@ -515,13 +545,234 @@ def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime]
     except Exception:
         _LOG.exception("memory surface commit failed")
         return None
-    if detail.get("projected") and detail.get("bucket_id"):
-        try:
-            from tools import memory_kernel_read as mkr
-            mkr.touch_buckets([str(detail["bucket_id"])])
-        except Exception:
-            _LOG.exception("memory surface touch failed")
+    thread = threading.Thread(target=flush_touches, args=(db_path,), daemon=True, name="memory-surface-touch")
+    thread.start()
+    if wait:
+        thread.join()
     return row["ref"]
+
+
+def flush_touches(db_path: str | Path, *, runtime: Any = None) -> int:
+    """Touch every committed memory whose Ombre touch has not landed yet (the outbox).
+
+    Committing and touching cannot be one transaction (Ombre is another process),
+    so a crash or an Ombre outage between them leaves the row ``touched=0``; the
+    next flush retries it, up to ``MAX_TOUCH_ATTEMPTS``. Returns how many landed.
+    Never raises.
+    """
+    with _FLUSH_LOCK:
+        return _flush_touches(db_path, runtime)
+
+
+def _flush_touches(db_path: str | Path, runtime: Any) -> int:
+    from tools import memory_kernel_projection as projection
+    try:
+        if runtime is None:
+            runtime = projection.OmbreRuntime.from_env()
+        if runtime is None:
+            return 0  # no Ombre runtime configured: rows wait, attempts are not spent
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                ensure_schema(conn)
+                rows = conn.execute(
+                    "SELECT id, detail_json FROM memory_surface_log WHERE mode='on' AND committed=1 "
+                    "AND touched=0 AND touch_attempts < ? ORDER BY id", (MAX_TOUCH_ATTEMPTS,)).fetchall()
+            ids = [r["id"] for r in rows]
+            buckets = sorted({str(json.loads(r["detail_json"] or "{}").get("bucket_id") or "") for r in rows} - {""})
+            if not ids:
+                return 0
+            try:
+                [result] = runtime.batch([{"op": "touch", "bucket_ids": buckets}])
+                landed = not isinstance(result, projection.RequestFailed)
+            except Exception as exc:
+                _LOG.warning("memory surface touch failed: %s", type(exc).__name__)
+                landed = False
+            marks = ",".join("?" for _ in ids)
+            with conn:
+                if landed:
+                    conn.execute(f"UPDATE memory_surface_log SET touched=1 WHERE id IN ({marks})", ids)
+                else:
+                    conn.execute(f"UPDATE memory_surface_log SET touch_attempts=touch_attempts+1 "
+                                 f"WHERE id IN ({marks})", ids)
+            return len(ids) if landed else 0
+        finally:
+            conn.close()
+    except Exception:
+        _LOG.exception("memory surface touch outbox failed")
+        return 0
+
+
+REVIEW_FILTERS = ("all", "unlabeled", "labeled", "surfaced", "blocked")
+REVIEW_TEXT_CHARS = 300
+
+
+def _ro_conn(db_path: str | Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _memory_previews(db_path: Path, refs: set[str], pool_loader=None) -> dict[str, dict[str, str]]:
+    """Current text of the memories a review page names (retired ones included: it is history)."""
+    if not refs:
+        return {}
+    if pool_loader is not None:
+        items = pool_loader(db_path)
+    else:
+        from tools import memory_kernel_read as mkr
+        items = mkr.memory_items(db_path, mode=mkr.EVERY_STORED)
+    return {
+        i["ref"]: {"ref": i["ref"], "date": str(i.get("created_at") or "")[:10],
+                   "type": str(i.get("type") or "MEMORY"),
+                   "text": str(i.get("content") or "")[:REVIEW_TEXT_CHARS]}
+        for i in items if i.get("ref") in refs
+    }
+
+
+def _review_row(row: sqlite3.Row, message: str, label: Optional[sqlite3.Row],
+                previews: dict[str, dict[str, str]]) -> dict[str, Any]:
+    detail = json.loads(row["detail_json"] or "{}")
+    trail = detail.get("trail") or []
+    top = trail[0] if trail else None
+    top_ref = row["ref"] or (top[0] if top else None)
+    runner_up = detail.get("runner_up")
+    return {
+        "id": row["id"],
+        "user_message_id": row["user_message_id"],
+        "created_at": row["created_at"],
+        "mode": row["mode"],
+        "decision": row["decision"],
+        "reason": row["reason"],
+        "verdict": top[1] if top else None,
+        "evidence": top[2] if top else None,
+        "committed": bool(row["committed"]),
+        "message": message[:REVIEW_TEXT_CHARS],
+        "clues": list(detail.get("words") or []),
+        "chat_df": dict(detail.get("chat_df") or {}),
+        "matched": list(detail.get("matched") or []),
+        "top": previews.get(top_ref) if top_ref else None,
+        "runner_up": previews.get(runner_up) if runner_up else None,
+        "label": None if label is None else {
+            "label": label["label"], "note": label["note"] or "", "expected_ref": label["expected_ref"],
+            "labeled_at": label["labeled_at"],
+        },
+    }
+
+
+def review_rows(db_path: str | Path, *, limit: int = 50, before_id: Optional[int] = None,
+                only: str = "all", pool_loader=None) -> dict[str, Any]:
+    """Route-log decisions newest first, each with her words, the memories involved and its label."""
+    if only not in REVIEW_FILTERS:
+        raise ValueError(f"unknown filter {only!r}")
+    limit = max(1, min(int(limit), 200))
+    conn = _ro_conn(db_path)
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_surface_log'").fetchone():
+            return {"rows": [], "counts": {"total": 0, "labeled": 0, **{k: 0 for k in LABELS}}, "next_before": None}
+        has_labels = bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='memory_surface_labels'").fetchone())
+        where, args = ["1=1"], []
+        if before_id is not None:
+            where.append("l.id < ?")
+            args.append(int(before_id))
+        if only == "surfaced":
+            where.append("l.decision='surfaced'")
+        elif only == "blocked":
+            where.append("l.decision='none' AND l.reason='gate_closed'")
+        if has_labels and only in ("labeled", "unlabeled"):
+            where.append(("" if only == "labeled" else "NOT ") +
+                         "EXISTS (SELECT 1 FROM memory_surface_labels b WHERE b.log_id=l.id)")
+        elif only == "labeled":
+            where.append("0")
+        rows = conn.execute(
+            f"SELECT l.* FROM memory_surface_log l WHERE {' AND '.join(where)} ORDER BY l.id DESC LIMIT ?",
+            (*args, limit)).fetchall()
+        ids = [r["id"] for r in rows]
+        marks = ",".join("?" for _ in ids)
+        labels = {}
+        if has_labels and ids:
+            labels = {r["log_id"]: r for r in conn.execute(
+                f"SELECT * FROM memory_surface_labels WHERE log_id IN ({marks})", ids)}
+        messages = {}
+        msg_ids = [r["user_message_id"] for r in rows]
+        if msg_ids:
+            mmarks = ",".join("?" for _ in msg_ids)
+            messages = {r[0]: str(r[1] or "") for r in conn.execute(
+                f"SELECT id, content FROM chat_messages WHERE id IN ({mmarks})", msg_ids)}
+        refs: set[str] = set()
+        for r in rows:
+            detail = json.loads(r["detail_json"] or "{}")
+            trail = detail.get("trail") or []
+            refs.update(x for x in (r["ref"], trail[0][0] if trail else None, detail.get("runner_up")) if x)
+        previews = _memory_previews(Path(db_path), refs, pool_loader)
+        counts = {"total": conn.execute("SELECT COUNT(*) FROM memory_surface_log").fetchone()[0]}
+        counts.update({k: 0 for k in LABELS})
+        if has_labels:
+            for label, n in conn.execute("SELECT label, COUNT(*) FROM memory_surface_labels GROUP BY label"):
+                counts[label] = n
+        counts["labeled"] = sum(counts[k] for k in LABELS)
+        return {
+            "rows": [_review_row(r, messages.get(r["user_message_id"], ""), labels.get(r["id"]), previews)
+                     for r in rows],
+            "counts": counts,
+            "next_before": ids[-1] if len(ids) == limit else None,
+        }
+    finally:
+        conn.close()
+
+
+def set_label(db_path: str | Path, *, log_id: int, label: str, note: str = "",
+              expected_ref: Optional[str] = None, now: Optional[datetime] = None,
+              pool_loader=None) -> Optional[dict[str, Any]]:
+    """Record the owner's verdict on one decision (``clear`` removes it).
+
+    ``ok``: the decision was right. ``missed``: a memory should have surfaced
+    (optionally which, ``expected_ref``). ``wrong``: what surfaced, or was about
+    to, should not have. The decision is snapshotted so the label keeps meaning
+    after the route log is pruned. Returns the labeled review row, or None when
+    the decision does not exist.
+    """
+    if label not in LABELS + ("clear",):
+        raise ValueError(f"unknown label {label!r}")
+    now = now or _beijing_now()
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        with conn:
+            ensure_schema(conn)
+            row = conn.execute("SELECT * FROM memory_surface_log WHERE id=?", (int(log_id),)).fetchone()
+            if row is None:
+                return None
+            if label == "clear":
+                conn.execute("DELETE FROM memory_surface_labels WHERE log_id=?", (int(log_id),))
+            else:
+                message = conn.execute("SELECT content FROM chat_messages WHERE id=?",
+                                       (row["user_message_id"],)).fetchone()
+                detail = json.loads(row["detail_json"] or "{}")
+                trail = detail.get("trail") or []
+                refs = {x for x in (row["ref"], trail[0][0] if trail else None, detail.get("runner_up"),
+                                    expected_ref) if x}
+                snapshot = _review_row(row, str(message[0] if message else ""), None,
+                                       _memory_previews(Path(db_path), refs, pool_loader))
+                snapshot.pop("label", None)
+                if expected_ref:
+                    snapshot["expected"] = _memory_previews(Path(db_path), {expected_ref}, pool_loader).get(
+                        expected_ref)
+                conn.execute(
+                    "INSERT INTO memory_surface_labels (log_id, user_message_id, label, expected_ref, note, "
+                    "snapshot_json, labeled_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(log_id) DO UPDATE SET "
+                    "label=excluded.label, expected_ref=excluded.expected_ref, note=excluded.note, "
+                    "snapshot_json=excluded.snapshot_json, labeled_at=excluded.labeled_at",
+                    (int(log_id), int(row["user_message_id"]), label, expected_ref or None,
+                     str(note or "")[:500], json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                     now.strftime("%Y-%m-%d %H:%M:%S")),
+                )
+    finally:
+        conn.close()
+    page = review_rows(db_path, before_id=int(log_id) + 1, limit=1, pool_loader=pool_loader)
+    return page["rows"][0] if page["rows"] else None
 
 
 def recent_log(db_path: str | Path, limit: int = 20) -> list[dict[str, Any]]:

@@ -58,16 +58,24 @@ hot turns, with the legacy recall returning content.
    "相关就自然融入，不相关就忽略".
 7. **Commit**: deciding consumes nothing. Only after the reply that carried the
    memory is persisted does the gateway call `memory_surface.commit`, which
-   starts the cooldown, marks the log row `committed=1` and touches the bucket
-   in Ombre. A failed, abandoned or retried turn costs nothing.
+   starts the cooldown and marks the log row `committed=1`, then hands the Ombre
+   touch to the outbox. A failed, abandoned or retried turn costs nothing.
 8. **Fail closed**: if the route-log row cannot be written, nothing surfaces
    that turn. Every memory that reaches a prompt is on record, which is what
    `commit` relies on.
 
-**Open before `on`**: `commit` writes the cooldown and `committed=1`, then
-touches Ombre. A crash between the two loses that one touch: the text is safe,
-only one reinforcement is missed. Either add a retryable touch outbox, or accept
-an occasional missed touch.
+**Touch outbox.** Committing and touching cannot share a transaction (Ombre is
+another process). A committed row starts `touched=0`, unless the memory is not
+projected into Ombre yet, in which case there is nothing to touch and it starts at `touched=1`.
+`flush_touches` runs on a background thread after every commit. It sends one
+Ombre `touch` batch for every committed row still at `touched=0`, then:
+
+- on success, sets `touched=1`;
+- on failure, adds one to `touch_attempts`. A row stops being retried after
+  `MAX_TOUCH_ATTEMPTS` (3).
+
+A crash or an Ombre outage between commit and touch is retried on the next
+commit. With no Ombre runtime configured, rows wait and no attempt is spent.
 
 The same user message always gets the same decision: cold rebuilds, capacity
 swaps and retries replay the logged decision instead of drawing again. A
@@ -97,6 +105,7 @@ Every decision is a row in `memories.db`, including skips and failures:
   - `mode`: `shadow` / `on`;
   - `decision`: `surfaced` / `none` / `skipped` / `failed`;
   - `committed`: 1 once the reply carrying it was persisted (mode `on` only);
+  - `touched`, `touch_attempts`: the touch outbox (added to an existing table on first use);
   - `reason`: for example `gate_passed`, `gate_closed`, `no_clues`, `too_short`, `kernel_cutover_off`, `error`;
   - `ref`: the chosen `kernel:<lineage>`;
   - `detail_json`: words, clue frequencies, pool size, Ombre status, and the first gate steps with each candidate's verdict.
@@ -106,6 +115,31 @@ Every decision is a row in `memories.db`, including skips and failures:
 manifest also records `auto_recall_injected`, `memory_recall_mode`,
 `memory_recall_decision`, `memory_recall_reason` and `memory_recall_ref` for
 every turn.
+
+## Review console (`/dash/memory-review`)
+
+The owner labels decisions, so the gate can be tuned against real misses rather than guesses. It is
+reached from the "复盘" chip on the memory library header.
+
+- `GET /api/memory-surface/review?filter=&limit=&before=` returns decisions newest first, each with:
+  - her words;
+  - the clues and their chat frequency;
+  - the first candidate with its verdict and evidence;
+  - the runner-up;
+  - the label, if any.
+
+  The filters are `unlabeled`, `surfaced`, `blocked` (`gate_closed`), `labeled` and `all`.
+- `POST /api/memory-surface/review/<log_id>/label` with `{label, note, expected_ref}` sets one label:
+  - `ok`: the decision was right;
+  - `missed`: a memory should have surfaced;
+  - `wrong`: what surfaced, or would have surfaced in shadow, should not have.
+
+  `clear` removes the label.
+- Labels live in `memory_surface_labels`, one per log row. Each label stores a
+  JSON snapshot of the decision, so it keeps its meaning after the 30-day
+  route-log pruning removes the row it points at.
+
+Both routes sit under `/api/*`, which the upstream proxy already protects.
 
 ## Rollout
 

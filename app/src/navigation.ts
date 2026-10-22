@@ -14,6 +14,7 @@
 export const ROUTES = {
   dash: '/',
   memory: '/memory',
+  memoryReview: '/memory-review',
   usage: '/usage',
   reading: '/reading',
   ledger: '/ledger',
@@ -59,6 +60,7 @@ export type RouteMeta = {
 export const ROUTE_META = {
   dash: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
   memory: { chrome: 'standard', globalNav: false },
+  memoryReview: { chrome: 'standard', globalNav: false },
   usage: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
   reading: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
   ledger: { chrome: 'standard', globalNav: true, globalNavPlacement: 'fixed' },
