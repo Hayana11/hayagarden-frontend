@@ -129,7 +129,8 @@ class ProactiveRoutingTests(unittest.TestCase):
         basic = decide[decide.index('if basic_normal:'):decide.index('    planner_view = None')]
         for arg in (
             'mode=mode,',
-            'guard_clock.last_user_at if guard_clock.reliable else None',
+            "getattr(guard_clock, 'last_user_at', None)",
+            'last_user_at=last_user_at,',
             'activity_desc=activity_desc,',
             "self_trigger_note=str(data.get('self_trigger_note') or ''),",
         ):

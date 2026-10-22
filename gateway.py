@@ -9503,6 +9503,10 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                     'wake_run_id': wake_run_id,
                     'detail': str(observation.get('reason') or ''),
                 })
+            last_user_at = (
+                getattr(guard_clock, 'last_user_at', None)
+                if guard_clock.reliable else None
+            )
             main_turn_entered = True
             main_turn = _run_unified_normal_main_chat_turn(
                 wake_run_id=wake_run_id,
@@ -9512,9 +9516,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 t_hours=t_hours,
                 observation_bundle=observation.get('bundle'),
                 mode=mode,
-                last_user_at=(
-                    guard_clock.last_user_at if guard_clock.reliable else None
-                ),
+                last_user_at=last_user_at,
                 activity_desc=activity_desc,
                 self_trigger_note=str(data.get('self_trigger_note') or ''),
             )
