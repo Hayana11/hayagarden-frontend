@@ -150,12 +150,18 @@ class ShadowTests(_Flow):
         )
 
     def test_shadow_payload_is_byte_identical_to_off(self):
+        # The live reality block (clock minute, weather fetch) is pinned so the two
+        # payloads can differ only by what surfacing put in.
+        reality = {"time_anchor": "【现实时间锚】FIXED", "weather_anchor": "", "time_anchor_reason": "fixed",
+                   "weather_anchor_reason": None, "weather_status": "fixed"}
+        pinned = mock.patch("chat.reality_context.build_reality_context", return_value=reality)
         with mock.patch("tools.memory_kernel_read.touch_buckets"):
-            self.turn(QUERY, extra=self.real_surface("off"))
+            self.turn(QUERY, extra=self.real_surface("off") + [pinned])
         off_payload = self.resident.sent[0]
         self.setUp()  # fresh DB and resident, same message
         with mock.patch("tools.memory_kernel_read.touch_buckets"):
-            self.turn(QUERY, extra=self.real_surface("shadow"))
+            self.turn(QUERY, extra=self.real_surface("shadow") + [pinned])
+        self.assertIn("【现实时间锚】FIXED", off_payload)
         self.assertEqual(self.resident.sent[0], off_payload)
 
 
