@@ -43,6 +43,62 @@ class EmotionHistoryTests(unittest.TestCase):
         self.assertEqual(series[0]['samples'], 2)
         self.assertEqual(series[1]['day'], day2)
 
+    def test_old_table_gains_event_key_and_keyed_points_dedupe(self):
+        os.unlink(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE emotion_history (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "recorded_at TEXT NOT NULL, valence REAL NOT NULL, arousal REAL NOT NULL, "
+            "mood_word TEXT, source TEXT DEFAULT 'score')"
+        )
+        conn.execute(
+            "INSERT INTO emotion_history (recorded_at, valence, arousal, mood_word) "
+            "VALUES ('2026-07-10 09:00:00', 0.2, 0.3, '旧')"
+        )
+        conn.commit()
+        conn.close()
+        for _ in range(2):
+            emotion_history.append_snapshot(
+                0.7, 0.4, '新', db_path=self.db_path, source='v3_affect',
+                source_event_key='user_scored:42',
+            )
+        emotion_history.append_snapshot(0.5, 0.5, '无键', db_path=self.db_path)
+        emotion_history.append_snapshot(0.5, 0.5, '无键', db_path=self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            'SELECT mood_word, source_event_key FROM emotion_history ORDER BY id'
+        ).fetchall()
+        conn.close()
+        self.assertEqual(rows, [('旧', None), ('新', 'user_scored:42'),
+                                ('无键', None), ('无键', None)])
+
+    def test_fetch_series_reconciles_from_event_ledger(self):
+        import json
+        today = (datetime.datetime.utcnow() + emotion_history.SHANGHAI_OFFSET).strftime('%Y-%m-%d')
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "CREATE TABLE internal_state_events (id INTEGER PRIMARY KEY, event_key TEXT UNIQUE, "
+            "event_type TEXT, status TEXT, applied_at TEXT, result_json TEXT)"
+        )
+        rows = [
+            ('user_scored:1', 'user_scored', 'applied', f'{today} 10:00:01',
+             json.dumps({'settled_affect': {'valence': 0.9, 'arousal': 0.2,
+                                            'mood_word': '甜', 'scored_at': f'{today} 10:00:00'}})),
+            ('user_scored:2', 'user_scored', 'stale_skipped', f'{today} 10:05:01', None),
+            ('user_rule:3', 'user_rule', 'applied', f'{today} 10:06:01',
+             json.dumps({'settled_affect': {'valence': 0.1, 'arousal': 0.1}})),
+        ]
+        conn.executemany(
+            'INSERT INTO internal_state_events (event_key, event_type, status, applied_at, result_json) '
+            'VALUES (?, ?, ?, ?, ?)', rows,
+        )
+        conn.commit()
+        conn.close()
+        for _ in range(2):
+            series = emotion_history.fetch_series(7, db_path=self.db_path)
+        self.assertEqual([(p['day'], p['mood_word'], p['samples']) for p in series],
+                         [(today, '甜', 1)])
+
     def test_append_snapshot_writes_row(self):
         emotion_history.append_snapshot(0.72, 0.41, '愉悦', db_path=self.db_path, source='score')
         conn = sqlite3.connect(self.db_path)

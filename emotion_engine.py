@@ -628,31 +628,36 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
         logging.getLogger(__name__).warning('score_and_update apply failed: %s', exc)
         return
 
-    # Timeline records V3 Affect, and only for a score V3 actually applied
-    # (duplicate / stale_skipped / failure leave no point).
-    if getattr(result, 'status', None) != 'applied':
+    # Timeline is a projection of the Affect this event settled (frozen in its
+    # result). duplicate replays the original result, so a point lost after V3
+    # committed is filled on retry; stale_skipped / failure carry none.
+    if getattr(result, 'status', None) not in ('applied', 'duplicate'):
         return
-    record_settled_affect_snapshot(getattr(result, 'result', None))
+    record_settled_affect_snapshot(
+        getattr(result, 'result', None), event_key=f'user_scored:{mid_ok}',
+    )
 
 
-def record_settled_affect_snapshot(event_result) -> bool:
-    """Append the Affect a ``user_scored`` event settled to ``emotion_history``.
+def record_settled_affect_snapshot(event_result, *, event_key: str) -> bool:
+    """Project a ``user_scored`` event's frozen ``settled_affect`` into ``emotion_history``.
 
-    Uses the event's frozen ``settled_affect`` — never re-reads current V3,
-    which a later concurrent score may already have moved.
+    Never re-reads current V3, which a later concurrent score may already have
+    moved. Keyed by ``event_key``, so repeats are ignored; a write lost here is
+    also re-projected by ``emotion_history.reconcile_from_events``.
     """
-    affect = (event_result or {}).get('settled_affect') if isinstance(event_result, dict) else None
-    if not affect or affect.get('valence') is None or affect.get('arousal') is None:
-        return False
     try:
         import emotion_history
+        affect = emotion_history.settled_affect_from_result(event_result)
+        if affect is None:
+            return False
         emotion_history.append_snapshot(
             affect['valence'], affect['arousal'], affect.get('mood_word') or '',
             db_path=DB_PATH, source=emotion_history.SOURCE_V3_AFFECT,
-            recorded_at=affect.get('scored_at'),
+            recorded_at=affect.get('scored_at'), source_event_key=event_key,
         )
         return True
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning('emotion_history projection failed: %s', exc)
         return False
 
 

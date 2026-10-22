@@ -692,6 +692,35 @@ class EmotionTimelineTests(_AuthorityFixture, unittest.TestCase):
         self.assertAlmostEqual(rows[0][0], 0.7 * 0.8 + 0.3 * 0.9, places=4)
         self.assertAlmostEqual(rows[0][1], 0.7 * 0.3 + 0.3 * 0.9, places=4)
 
+    def test_projection_lost_after_commit_is_filled_once_by_retry(self):
+        import emotion_history
+        mid = self._insert_user('嗯', created_at='2026-08-04 20:00:00')
+        with mock.patch.object(emotion_history, 'append_snapshot',
+                               side_effect=sqlite3.OperationalError('database is locked')):
+            self._score(mid, valence=0.2, arousal=0.4, mood='安静', at='2026-08-04 20:00:05')
+        self.assertEqual(aba.read_v3_state(self.db_path)['mood_word'], '安静')
+        self.assertEqual(self._history(), [])
+        # Same message scored again → duplicate, which replays the frozen result.
+        self._score(mid, valence=0.2, arousal=0.4, mood='安静', at='2026-08-04 20:00:05')
+        self._score(mid, valence=0.2, arousal=0.4, mood='安静', at='2026-08-04 20:00:05')
+        self.assertEqual([r[2] for r in self._history()], ['安静'])
+
+    def test_reconcile_rebuilds_lost_points_idempotently(self):
+        import emotion_history
+        m1 = self._insert_user('一', created_at='2026-08-04 21:00:00')
+        m2 = self._insert_user('二', created_at='2026-08-04 21:00:02',
+                               prev_at='2026-08-04 21:00:00')
+        self._score(m1, valence=0.6, arousal=0.3, mood='温柔', at='2026-08-04 21:00:05')
+        with mock.patch.object(emotion_history, 'append_snapshot',
+                               side_effect=sqlite3.OperationalError('database is locked')):
+            self._score(m2, valence=-0.6, arousal=0.9, mood='烦躁', at='2026-08-04 21:00:06')
+        self.assertEqual([r[2] for r in self._history()], ['温柔'])
+        self.assertEqual(emotion_history.reconcile_from_events(self.db_path), 1)
+        self.assertEqual(emotion_history.reconcile_from_events(self.db_path), 0)
+        rows = self._history()
+        self.assertEqual([r[2] for r in rows], ['温柔', '烦躁'])
+        self.assertEqual({r[3] for r in rows}, {'v3_affect'})
+
     def test_failed_apply_records_nothing(self):
         mid = self._insert_user('嗯', created_at='2026-08-04 18:00:00')
         with mock.patch.object(aba, 'ensure_authority_ready', return_value=False):
