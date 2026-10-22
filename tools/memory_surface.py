@@ -40,6 +40,11 @@ RRF_K = 60
 POOL_TYPES = frozenset({"MEMORY", "MISS"})  # FACTs belong to the cold-start list
 OMBRE_LIMIT = 20
 MIN_QUERY_CHARS = 4
+QUERY_CHARS = 200
+# A word counts as a clue only if it is rare in their conversation: "地方" or "一次"
+# shows up in hundreds of messages and proves nothing about which memory is meant.
+CHAT_DF_WINDOW = 4000
+_PASTED = re.compile(r"【.*?】|```.*?```", re.S)
 PREVIEW_CHARS = 80
 INJECT_CHARS = 600
 # A word in more than this share of the pool says nothing about which memory is meant.
@@ -67,9 +72,10 @@ _WORD = re.compile(r"[一-鿿A-Za-z]")
 class SurfaceConfig:
     enabled: bool = True
     cooldown_turns: int = 60
-    # Two rare words' worth: one shared word is coincidence far more often than memory.
-    evidence_min: float = 7.0
+    # At least two clues (words rare in their chat) found in the memory.
+    evidence_min: float = 6.0
     min_words: int = 2
+    chat_df_max: int = 20
     recent_days: int = 2
 
 
@@ -122,7 +128,8 @@ def load_config() -> SurfaceConfig:
     return SurfaceConfig(
         enabled=config_store.get_bool("MEMORY_SURFACE_ENABLED", True),
         cooldown_turns=config_store.get_int("MEMORY_SURFACE_COOLDOWN_TURNS", 60),
-        evidence_min=config_store.get_float("MEMORY_SURFACE_EVIDENCE_MIN", 7.0),
+        evidence_min=config_store.get_float("MEMORY_SURFACE_EVIDENCE_MIN", 6.0),
+        chat_df_max=config_store.get_int("MEMORY_SURFACE_CHAT_DF_MAX", 20),
         min_words=config_store.get_int("MEMORY_SURFACE_MIN_WORDS", 2),
         recent_days=config_store.get_int("MEMORY_SURFACE_RECENT_DAYS", 2),
     )
@@ -153,6 +160,21 @@ def _only_stopwords(word: str) -> bool:
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", "", str(text or ""))
+
+
+def query_text(text: str) -> str:
+    """Her own words: pasted 【…】 / fenced blocks removed, capped."""
+    return _PASTED.sub(" ", str(text or ""))[:QUERY_CHARS]
+
+
+def chat_frequency(conn: sqlite3.Connection, words: list[str], window: int = CHAT_DF_WINDOW) -> dict[str, int]:
+    """In how many of the latest ``window`` chat messages each word appears."""
+    out = {}
+    for word in words:
+        out[word] = int(conn.execute(
+            "SELECT COUNT(*) FROM (SELECT content FROM chat_messages ORDER BY id DESC LIMIT ?) "
+            "WHERE instr(lower(content), ?) > 0", (int(window), word)).fetchone()[0] or 0)
+    return out
 
 
 def entry_gate(text: str) -> Optional[str]:
@@ -330,16 +352,21 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     gate = entry_gate(user_text)
     if gate:
         return SurfaceResult("skipped", gate)
-    words = keywords(user_text)
+    words = keywords(query_text(user_text))
     if not words:
         return SurfaceResult("skipped", "no_keywords")
+    chat_df = chat_frequency(conn, words[:12])
+    clues = [w for w in words[:12] if chat_df.get(w, 0) <= config.chat_df_max]
+    if not clues:
+        return SurfaceResult("none", "no_clues", detail={"words": words[:12], "chat_df": chat_df})
+    words = clues
     turn = _turn_number(conn, user_message_id)
     cutoff = (now - timedelta(days=config.recent_days)).strftime("%Y-%m-%d %H:%M:%S")
     everything = _pool(db_path, pool_loader)
     # Recent memories are still in the day's context; FACTs go through cold start.
     pool = [i for i in everything if str(i.get("type") or "MEMORY") in POOL_TYPES
             and str(i.get("created_at") or "") < cutoff and i.get("ref")]
-    detail: dict[str, Any] = {"turn": turn, "words": words[:12], "pool": len(pool)}
+    detail: dict[str, Any] = {"turn": turn, "words": words[:12], "chat_df": chat_df, "pool": len(pool)}
     if not pool:
         return SurfaceResult("none", "empty_pool", detail=detail)
 
