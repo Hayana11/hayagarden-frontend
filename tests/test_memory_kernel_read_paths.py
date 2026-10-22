@@ -6,6 +6,7 @@ Kernel (legacy posts copies are never read again), other types stay in posts.
 from __future__ import annotations
 
 import builtins
+import importlib
 import io
 import os
 import sqlite3
@@ -190,6 +191,13 @@ class GatewayRecallTests(PathsFixture):
     def setUp(self):
         super().setUp()
         self.gateway = load_gateway()
+        # Importing gateway starts ombre_adapter's jieba warm-up thread. Finish any real
+        # import first (the import lock waits for that thread), so the fake below is
+        # never overwritten mid-test nor left behind for later tests by a racing import.
+        try:
+            importlib.import_module("jieba")
+        except ImportError:
+            pass
         for patcher in (
             mock.patch.dict(sys.modules, {"jieba": _fake_jieba()}),
             mock.patch.object(self.gateway, "get_db", side_effect=self.conn),
