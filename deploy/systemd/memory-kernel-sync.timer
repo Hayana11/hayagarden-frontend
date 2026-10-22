@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Memory Kernel <-> Ombre sync every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=memory-kernel-sync.service
+
+[Install]
+WantedBy=timers.target
