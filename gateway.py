@@ -5034,31 +5034,36 @@ def _run_unified_normal_main_chat_turn(
     user/assistant mapping. No Planner, B2, B3 Renderer, or fallback runner
     is involved.
     """
-    from chat.behavior_authority_b3 import (
-        UnifiedNormalWakeSharedUnavailable,
-        _hot_chat_resident_ready,
-    )
-    from chat.cc_history_rewrite import guard_cc_generation
-    from chat.unified_heartbeat_a1 import (
-        begin_shared_wake_delivery_fence,
-        commit_shared_transcript_watermark,
-        prepare_shared_transcript_watermark,
-    )
-    from chat.display_thinking import (
-        filter_display_thinking_events,
-        get_display_thinking_snapshot,
-    )
-    from tools.lease_signer import issue_turn_lease
+    # Everything from entry to the stdin flush is pre-model: nothing in this
+    # prologue has shown the trigger (or a reminder note) to the model.
+    try:
+        from chat.behavior_authority_b3 import (
+            UnifiedNormalWakeSharedUnavailable,
+            _hot_chat_resident_ready,
+        )
+        from chat.cc_history_rewrite import guard_cc_generation
+        from chat.unified_heartbeat_a1 import (
+            begin_shared_wake_delivery_fence,
+            commit_shared_transcript_watermark,
+            prepare_shared_transcript_watermark,
+        )
+        from chat.display_thinking import (
+            filter_display_thinking_events,
+            get_display_thinking_snapshot,
+        )
+        from tools.lease_signer import issue_turn_lease
 
-    resident = _CC_RESIDENT
-    trace_id = str(wake_run_id or '')
-    _wake_live_trace(
-        trace_id,
-        'START',
-        provider='claude_code',
-        mode=str(mode or 'normal'),
-        **_wake_live_resident_fields(resident),
-    )
+        resident = _CC_RESIDENT
+        trace_id = str(wake_run_id or '')
+        _wake_live_trace(
+            trace_id,
+            'START',
+            provider='claude_code',
+            mode=str(mode or 'normal'),
+            **_wake_live_resident_fields(resident),
+        )
+    except Exception as exc:
+        raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
     acquired = False
     shared_started = False
     watermark = None

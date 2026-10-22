@@ -279,6 +279,15 @@ class MainChatTurnBehaviourTests(unittest.TestCase):
         with self.assertRaises(gateway.UnifiedProactivePreModelFailed):
             self._run(flush=False, raise_after_flush=RuntimeError('write failed'))
 
+    def test_failure_in_the_prologue_is_pre_model(self):
+        import gateway
+        with mock.patch.object(gateway, '_wake_live_trace', side_effect=OSError('trace sink down')), \
+                self.assertRaises(gateway.UnifiedProactivePreModelFailed):
+            gateway._run_unified_normal_main_chat_turn(
+                wake_run_id='prologue', now=NOW, t2_hours=1.0, t_hours=1.0,
+                mode='self_trigger', self_trigger_note='提醒她喝水',
+            )
+
     def test_failure_after_stdin_is_not_pre_model(self):
         import gateway
         with self.assertRaises(RuntimeError) as ctx:
