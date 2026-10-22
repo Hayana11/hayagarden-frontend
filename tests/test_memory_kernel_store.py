@@ -495,3 +495,35 @@ class IncompatibleRuntimeTests(StoreFixture):
     def test_a_dropped_connection_is_a_plain_failure(self):
         self.ombre.down = True
         self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "failed")
+
+
+class SyncOutcomeTests(StoreFixture):
+    """A run that scanned fine but left projections undone is not a success."""
+
+    def test_projection_refused_after_a_good_scan_fails_the_run(self):
+        self.revise("st:ombre:aaa111:v1", "哈娅养了两只猫，还有一只鹦鹉福禄。", "st:ombre:aaa111:v2")
+        self.ombre.reject_updates = True  # Ombre's update() commits nothing
+        result = store.run_sync(self.kernel, self.posts, runtime=self.ombre)
+        self.assertEqual(result["projected"]["pending"], 1)
+        self.assertEqual(result["outcome"], "failed")
+        self.assertIn("pending", result["error"])
+        self.assertEqual(store.sync_health(self.kernel)["consecutive_failures"], 1)
+        with mock.patch("builtins.print"), \
+                mock.patch.object(store, "kernel_db_path", return_value=self.kernel), \
+                mock.patch.object(store, "posts_db_path", return_value=self.posts), \
+                mock.patch.object(store, "default_runtime", return_value=self.ombre):
+            self.assertEqual(store.main(["sync"]), 1)
+        self.ombre.reject_updates = False
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "ok")
+
+    def test_problem_heads_fail_the_run(self):
+        self.revise("st:ombre:aaa111:v1", "版本甲", "st:ombre:aaa111:v2a")
+        self.revise("st:ombre:aaa111:v1", "版本乙", "st:ombre:aaa111:v2b")  # branched lineage
+        result = store.run_sync(self.kernel, self.posts, runtime=self.ombre)
+        self.assertEqual((result["outcome"], result["problems"]), ("failed", 1))
+        self.assertIn("branched_heads", result["error"])
+
+    def test_a_kept_deletion_is_not_a_failure(self):
+        self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "ok")
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "ok")

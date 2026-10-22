@@ -41,7 +41,8 @@ It flips once, so nothing is ever written to the Kernel while readers still only
 - **Health check:** `python -m tools.memory_kernel_store status` prints, under `sync`, the last run, the last success and `consecutive_failures`.
 - **Failures are loud:** a failed run exits 1, so systemd marks the unit failed. Two outcomes are kept apart:
   - `incompatible`: the Ombre runtime is not the expected one, for example `SurfacePolicyVM` is missing. An operator has to act.
-  - `failed`: Ombre was unreachable or not configured, or a backfill / ingest step had errors. The next run may simply succeed.
+  - `failed`: Ombre was unreachable or not configured, a backfill / ingest step had errors, heads were left pending after a good scan (a refused `update()` or a dropped worker), or some heads cannot be projected at all (`problems`, e.g. a branched lineage). The next run may simply succeed.
+  - A deletion kept as `conflict` is the owner's decision, not a failure.
 
 Install (owner approval required; this changes the VPS):
 

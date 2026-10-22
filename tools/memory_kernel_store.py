@@ -439,8 +439,10 @@ def _sync_outcome(report: dict[str, Any]) -> tuple[str, str | None]:
 
     incompatible: the Ombre runtime is not the one the Kernel was built for (e.g. no
     SurfacePolicyVM) -- an operator has to act. failed: Ombre not reachable or not
-    configured, backfill or ingest errors -- the next run may simply succeed. Either way
-    readers keep the last recorded lifecycle verdicts.
+    configured, backfill or ingest errors, heads left pending after a good scan (a
+    refused update(), a dropped worker), or heads that cannot be projected at all
+    (problems) -- the next run may simply succeed. A deletion kept as conflict is a
+    decision, not a failure. Either way readers keep the last recorded verdicts.
     """
     ombre = str(report.get("ombre") or "")
     if "incompatible" in ombre:
@@ -451,6 +453,12 @@ def _sync_outcome(report: dict[str, Any]) -> tuple[str, str | None]:
     errors += list((report.get("ingested") or {}).get("errors") or [])
     if errors:
         return "failed", json.dumps(errors[:5], ensure_ascii=False)[:300]
+    pending = int((report.get("projected") or {}).get("pending") or 0)
+    if pending:
+        return "failed", f"projection pending for {pending} head(s)"
+    problems = list(report.get("problems") or [])
+    if problems:
+        return "failed", "problems: " + json.dumps(problems[:5], ensure_ascii=False)[:280]
     return "ok", None
 
 
