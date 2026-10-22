@@ -57,6 +57,8 @@ interface EmotionHistoryResponse {
 
 interface EmotionStateResponse {
   ok: boolean;
+  /** false: V3 unreadable; `current` is null rather than a fallback mood. */
+  authoritative?: boolean;
   current?: {
     pa: number;
     na: number;
@@ -68,7 +70,7 @@ interface EmotionStateResponse {
     sternberg_p: number;
     sternberg_i: number;
     sternberg_c: number;
-  };
+  } | null;
   error?: string;
 }
 
@@ -432,7 +434,7 @@ export async function fetchMomentsData(): Promise<MomentsData> {
 
   const dreamEntries: DreamEntry[] = dreamsPage?.items || [];
 
-  const mood: MoodState | null = moodRes?.ok && moodRes.current
+  const mood: MoodState | null = moodRes?.ok && moodRes.authoritative !== false && moodRes.current
     ? {
         valence: moodRes.current.valence,
         arousal: moodRes.current.arousal,

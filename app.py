@@ -5809,10 +5809,13 @@ def brain_emotion_state():
         import sys as _sys
         _sys.path.insert(0, '/opt/frontend')
         import emotion_engine as _ee
-        state = _ee.get_state()
+        state, authoritative = _ee.get_state_with_authority()
+        if not authoritative:
+            # V3 unreadable: never present the compatibility fallback as the mood.
+            return jsonify({'ok': True, 'authoritative': False, 'current': None})
         longing = _ee.get_longing()
         desire = _ee.get_desire()
-        return jsonify({'ok': True, 'current': {
+        return jsonify({'ok': True, 'authoritative': True, 'current': {
             'pa': state.get('pa', 0.5),
             'na': state.get('na', 0.2),
             'valence': round(normalize_valence(state.get('valence', 0.6), scale='unipolar'), 3),

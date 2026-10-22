@@ -9,6 +9,10 @@ from valence_scale import normalize_arousal, normalize_valence
 
 SHANGHAI_OFFSET = datetime.timedelta(hours=8)
 
+# Rows written after a V3 user_scored event applied: the post-reducer Affect.
+# Older rows carry source='score' (the scorer blend, written unconditionally).
+SOURCE_V3_AFFECT = 'v3_affect'
+
 
 def _conn(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)

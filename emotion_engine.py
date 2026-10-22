@@ -5,6 +5,7 @@ Sternberg三角欲望系统 (I/P/C) + 时间衰减 + 关键词规则层
 """
 
 import json
+import logging
 import math
 import datetime
 import threading
@@ -188,6 +189,15 @@ def get_state() -> dict:
     Legacy ``emotion_state`` may supply non-authoritative extras such as
     ``last_interaction`` for display only.
     """
+    return get_state_with_authority()[0]
+
+
+def get_state_with_authority() -> tuple[dict, bool]:
+    """``get_state()`` plus whether the dict is V3 (True) or the fixed fallback.
+
+    Display surfaces use the flag to say "unavailable" instead of showing the
+    fallback 平静 as if it were the current Affect.
+    """
     last_interaction = None
     try:
         conn = _db()
@@ -214,7 +224,7 @@ def get_state() -> dict:
                     v3,
                     last_interaction=last_interaction,
                     longing=get_longing(),
-                )
+                ), True
     except Exception:
         pass
     return {
@@ -223,7 +233,7 @@ def get_state() -> dict:
         'sternberg_i': 0.3, 'sternberg_p': 0.0, 'sternberg_c': 0.7,
         'p_updated_at': None, 'i_updated_at': None,
         'last_interaction': last_interaction,
-    }
+    }, False
 
 
 def get_desire() -> dict:
@@ -607,24 +617,39 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
         return
 
     try:
-        from chat.affect_bond_authority import apply_scored_best_effort
-        apply_scored_best_effort(
+        from chat.affect_bond_authority import apply_scored_observation
+        result = apply_scored_observation(
             message_id=mid_ok,
             scores=scored_payload,
             scored_at=scored_at,
             db_path=DB_PATH,
         )
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning('score_and_update apply failed: %s', exc)
         return
 
+    # Timeline records V3 Affect, and only for a score V3 actually applied
+    # (duplicate / stale_skipped / failure leave no point).
+    if getattr(result, 'status', None) != 'applied':
+        return
+    record_v3_affect_snapshot()
+
+
+def record_v3_affect_snapshot() -> bool:
+    """Append the current authoritative V3 Affect to ``emotion_history``."""
     try:
+        from chat.affect_bond_authority import read_v3_state
         import emotion_history
+        v3 = read_v3_state(DB_PATH)
+        if not v3 or v3.get('valence') is None or v3.get('arousal') is None:
+            return False
         emotion_history.append_snapshot(
-            frozen_v, frozen_a, frozen_mood,
-            db_path=DB_PATH, source='score',
+            v3['valence'], v3['arousal'], v3.get('mood_word') or '',
+            db_path=DB_PATH, source=emotion_history.SOURCE_V3_AFFECT,
         )
+        return True
     except Exception:
-        pass
+        return False
 
 
 def score_async(conversation_excerpt: str, *, message_id=None):

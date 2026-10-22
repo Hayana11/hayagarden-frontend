@@ -617,5 +617,66 @@ class DesireDelegationTests(unittest.TestCase):
         self.assertEqual(desire['c'], 0.707)
 
 
+class EmotionTimelineTests(AffectBondAuthorityTests):
+    """Moments timeline + current mood read V3 Affect, never the scorer blend."""
+
+    def _score(self, mid, *, valence, arousal, mood, at):
+        with mock.patch.object(ee, '_deepseek_score', return_value={
+            'valence': valence, 'arousal': arousal, 'mood_word': mood,
+            'passion_delta': 0.0, 'intimacy_delta': 0.0,
+        }), mock.patch.object(ee, '_get_ombre_va', return_value=(0.9, 0.9)), \
+                mock.patch.object(ee, '_now_str', return_value=at):
+            ee.score_and_update('excerpt', message_id=mid)
+
+    def _history(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='emotion_history'"
+            ).fetchone():
+                return []
+            return conn.execute(
+                'SELECT valence, arousal, mood_word, source FROM emotion_history ORDER BY id'
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_applied_score_records_v3_affect(self):
+        mid = self._insert_user('嗯', created_at='2026-08-04 16:00:00')
+        self._score(mid, valence=0.0, arousal=0.2, mood='平静', at='2026-08-04 16:00:05')
+        v3 = aba.read_v3_state(self.db_path)
+        [(v, a, mood, source)] = self._history()
+        # Ombre's 0.9 is not in the V3 Affect, so the point carries V3's value.
+        self.assertEqual((v, a, mood), (v3['valence'], v3['arousal'], v3['mood_word']))
+        self.assertEqual(source, 'v3_affect')
+
+    def test_duplicate_and_stale_scores_record_nothing(self):
+        m1 = self._insert_user('一', created_at='2026-08-04 17:00:00')
+        m2 = self._insert_user('二', created_at='2026-08-04 17:05:00',
+                               prev_at='2026-08-04 17:00:00')
+        self._score(m2, valence=0.8, arousal=0.5, mood='温柔', at='2026-08-04 17:05:05')
+        self._score(m2, valence=0.8, arousal=0.5, mood='温柔', at='2026-08-04 17:05:05')
+        self._score(m1, valence=-0.8, arousal=0.9, mood='烦', at='2026-08-04 17:06:00')
+        self.assertEqual([row[2] for row in self._history()], ['温柔'])
+
+    def test_failed_apply_records_nothing(self):
+        mid = self._insert_user('嗯', created_at='2026-08-04 18:00:00')
+        with mock.patch.object(aba, 'ensure_authority_ready', return_value=False):
+            self._score(mid, valence=0.5, arousal=0.5, mood='好', at='2026-08-04 18:00:05')
+        self.assertEqual(self._history(), [])
+
+    def test_state_authority_flag(self):
+        state, authoritative = ee.get_state_with_authority()
+        self.assertTrue(authoritative)
+        with mock.patch.object(
+            aba, 'check_cutover_ready',
+            return_value=SimpleNamespace(ok=False, status='proof_gap'),
+        ):
+            state, authoritative = ee.get_state_with_authority()
+            self.assertFalse(authoritative)
+            self.assertEqual(state['mood_word'], '平静')
+            self.assertEqual(ee.get_state(), state)
+
+
 if __name__ == '__main__':
     unittest.main()

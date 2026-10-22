@@ -156,6 +156,21 @@ class IngestTests(StoreFixture):
         self.assertEqual(store.status(self.kernel)["projection"], {"projected": len(self.heads())})
         self.assertEqual(self.sync()["ingested"]["revised"], [])
 
+    def test_dashboard_va_edit_survives_projection_and_becomes_a_revision(self):
+        # The Moments "记忆气候" editor writes only valence/arousal into Ombre.
+        self.ombre.edit("aaa111", valence=0.15, arousal=0.85)
+        # A projection pass before the next sync must not write the old V/A back.
+        self.project_all()
+        self.assertNotIn(("update", "aaa111"), self.ombre.calls)
+        self.assertEqual((self.ombre.buckets["aaa111"]["metadata"]["valence"],
+                          self.ombre.buckets["aaa111"]["metadata"]["arousal"]), (0.15, 0.85))
+        report = self.sync()
+        self.assertEqual(report["ingested"]["revised"], ["aaa111"])
+        head = MemoryKernel(self.kernel).lineage_history("lin:ombre:aaa111")[-1]
+        self.assertEqual((head.structured_value["valence"], head.structured_value["arousal"]), (0.15, 0.85))
+        self.assertNotIn(("update", "aaa111"), self.ombre.calls)
+        self.assertEqual(self.sync()["ingested"]["revised"], [])
+
     def test_two_syncs_holding_the_same_scan_ingest_an_edit_once(self):
         self.ombre.edit("aaa111", content="[[哈娅]]养了两只猫：[[多乐]]和岁岁。还有一只鹦鹉福禄。")
         heads, _ = store.projection.select_heads(self.kernel)
