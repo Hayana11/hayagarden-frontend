@@ -187,13 +187,25 @@ class LegacyIsolationTests(unittest.TestCase):
             paths.extend((ROOT / directory).rglob("*.py"))
         for path in paths:
             # Isolated semantic/contract layer, including the offline R1
-            # legacy Interop translator. Every actual production module
-            # remains subject to the importer scan.
+            # legacy Interop translator and the offline B-1 importer / B-2
+            # projector. Since the owner decided the Kernel is the memory
+            # authority (B-3), these named integration points may use it, each
+            # only behind runtime_config memory.kernel_write; memory_tool is
+            # the single memory-type write router. Every other production
+            # module remains subject to the importer scan.
             if path.relative_to(ROOT).as_posix() in {
                 "tools/memory_kernel.py",
                 "tools/memory_kernel_schema.py",
+                "tools/memory_kernel_import.py",
+                "tools/memory_kernel_projection.py",
+                "tools/memory_kernel_store.py",
+                "tools/memory_kernel_switch.py",
+                "tools/memory_tool.py",
+                "tools/cc_capability_adapter.py",
                 "tools/memory_interop.py",
                 "tools/memory_interop_legacy.py",
+                # Names memory_kernel_backfill only to skip posts the Kernel owns.
+                "tools/cleaner.py",
             }:
                 continue
             with self.subTest(path=path.relative_to(ROOT)):

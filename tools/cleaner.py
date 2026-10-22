@@ -262,9 +262,17 @@ def process_and_sync():
     log('=== Task 5: Process new & sync to Ombre Brain ===')
     conn = get_db()
 
+    # Posts that ever entered memory_kernel_backfill are owned by the Memory
+    # Kernel (done or not): holding them here would put a second bucket into
+    # Ombre behind the Kernel's back, which the next scan ingests as a new lineage.
+    has_backfill = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_kernel_backfill'"
+    ).fetchone()
+    kernel_owned = (" AND id NOT IN (SELECT post_id FROM memory_kernel_backfill)"
+                    if has_backfill else "")
     rows = conn.execute(
         "SELECT id, content, type FROM posts "
-        "WHERE processed=0 AND type IN ('MEMORY','DIARY','MISS')"
+        "WHERE processed=0 AND type IN ('MEMORY','DIARY','MISS')" + kernel_owned
     ).fetchall()
     log(f'  {len(rows)} unprocessed records')
 

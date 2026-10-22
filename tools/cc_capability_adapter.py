@@ -24,6 +24,7 @@ from tools.capability_manifest import (
 )
 from tools.cc_usage_observability import sha256_canonical_json
 from tools.task_timer_db import resolve_task_timer_commands_db_path
+from tools.memory_kernel_switch import kernel_owned_brain_writes
 from tools.ombre_native_surface import OFFICIAL_HOOK_PATH, UPSTREAM_BRAIN_ALLOW_RULE
 from tools.capability_state import (
     CapabilityStateError,
@@ -670,6 +671,8 @@ def build_uh_a0_spawn_plan(
         + list(surface["runtime_hidden_home_mcp_tools"])
         + list(surface["runtime_hidden_internal_mcp_tools"])
         + list(surface["runtime_hidden_capability_proxy_tools"])
+        # B-3: memory.kernel_write hides Ombre's creation tools (see memory_kernel_switch).
+        + (list(kernel_owned_brain_writes(env)) if brain_tools else [])
     )
     built_in_csv = ",".join(built_in_tools)
     allowed_csv = ",".join(allowlist)

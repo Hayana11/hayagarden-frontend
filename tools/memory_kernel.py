@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
@@ -220,6 +221,11 @@ class MemoryKernel:
                 raise
 
     def initialize(self) -> None:
+        # Memories are private: owner-only regardless of the process umask.
+        path = Path(self.db_path)
+        if not path.exists():
+            os.close(os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+        os.chmod(path, 0o600)
         with self._connection() as conn:
             ensure_memory_kernel_schema(conn)
 
@@ -250,24 +256,38 @@ class MemoryKernel:
             self._insert(conn, evidence)
             return self._get(conn, Evidence, evidence.evidence_id)
 
-    def create_state(self, state: State, formation: Delta) -> tuple[State, Delta]:
-        """First formation always records a null-before Delta in the same commit."""
-        return self._transition(state, formation, initial=True)
+    def create_state(
+        self, state: State, formation: Delta, *, evidence: tuple[Evidence, ...] = ()
+    ) -> tuple[State, Delta]:
+        """First formation always records a null-before Delta in the same commit.
 
-    def revise_state(self, state: State, transition: Delta) -> tuple[State, Delta]:
+        ``evidence`` (optional) is inserted in that same transaction, so a failed
+        State or Delta never leaves an orphan Evidence behind.
+        """
+        return self._transition(state, formation, initial=True, evidence=evidence)
+
+    def revise_state(
+        self, state: State, transition: Delta, *, evidence: tuple[Evidence, ...] = ()
+    ) -> tuple[State, Delta]:
         """Append a new semantic version and Delta, preserving the predecessor."""
-        return self._transition(state, transition, initial=False)
+        return self._transition(state, transition, initial=False, evidence=evidence)
 
-    def _transition(self, state: State, delta: Delta, *, initial: bool):
+    def _transition(self, state: State, delta: Delta, *, initial: bool, evidence: tuple[Evidence, ...] = ()):
         if type(state) is not State or type(delta) is not Delta:
             raise TypeError("expected State and Delta")
+        if not isinstance(evidence, tuple) or any(type(item) is not Evidence for item in evidence):
+            raise TypeError("evidence must be a tuple of Evidence")
         _validate(state)
         _validate(delta)
+        for item in evidence:
+            _validate(item)
         if (delta.before_ref is None) != initial:
             raise ValueError("formation requires null before_ref; revision requires a predecessor")
         if delta.after_ref != state.state_id or delta.target_scope != state.scope:
             raise ValueError("Delta must target the new State and its scope")
         with self._write() as conn:
+            for item in evidence:
+                self._insert(conn, item)
             if initial:
                 if state.lineage_id is not None and conn.execute(
                     "SELECT 1 FROM memory_kernel_state WHERE lineage_id = ?",

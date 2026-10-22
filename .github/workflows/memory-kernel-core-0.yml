@@ -5,6 +5,13 @@ on:
     paths:
       - "tools/memory_kernel.py"
       - "tools/memory_kernel_schema.py"
+      - "tools/memory_kernel_import.py"
+      - "tools/memory_kernel_projection.py"
+      - "tools/memory_kernel_store.py"
+      - "tools/memory_kernel_switch.py"
+      - "tools/ombre_projection_worker.py"
+      - "tools/memory_tool.py"
+      - "tools/memory_write_adapter.py"
       - "tools/memory_interop.py"
       - "tools/memory_interop_legacy.py"
       - "tools/memory_interop_legacy_shadow.py"
@@ -13,12 +20,19 @@ on:
       - "tools/memory_write_adapter.py"
       - "tools/memory_runtime_bridge.py"
       - "tools/memory_internal_adapter.py"
+      - "tools/cleaner.py"
       - "tests/test_memory_kernel.py"
+      - "tests/test_memory_kernel_import.py"
+      - "tests/test_memory_kernel_projection.py"
+      - "tests/test_memory_kernel_store.py"
+      - "tests/test_ombre_projection_worker.py"
+      - "tests/test_memory_write_routing_guard.py"
       - "tests/test_memory_kernel_legacy_isolation.py"
       - "tests/test_memory_interop.py"
       - "tests/test_memory_interop_legacy.py"
       - "tests/test_memory_interop_live_shadow.py"
       - "tests/test_memory_runtime_bridge.py"
+      - "tests/test_cleaner_kernel_backfill.py"
       - "docs/memory-kernel-core-0.md"
       - "docs/memory-interop-v0.1.md"
       - "docs/memory-interop-legacy-r1.md"
@@ -49,23 +63,32 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install test-only dependencies
-        run: python -m pip install ruff==0.12.12 Flask requests Markdown -r requirements.txt
+        run: python -m pip install ruff==0.12.12 Flask requests Markdown PyYAML -r requirements.txt
       - name: Lint CORE-0
         run: >-
           python -m ruff check
-          tools/memory_kernel.py tools/memory_kernel_schema.py tools/memory_interop.py
+          tools/memory_kernel.py tools/memory_kernel_schema.py tools/memory_kernel_import.py
+          tools/memory_kernel_projection.py tools/memory_kernel_store.py tools/memory_kernel_switch.py
+          tools/ombre_projection_worker.py tools/memory_tool.py
+          tools/memory_interop.py
           tools/memory_interop_legacy.py tools/memory_interop_legacy_shadow.py
           tools/memory_interop_shadow.py tools/memory_interop_shadow_worker.py
           tools/memory_runtime_bridge.py
           tests/test_memory_kernel.py tests/test_memory_kernel_legacy_isolation.py
-          tests/test_memory_interop.py tests/test_memory_interop_legacy.py
+          tests/test_memory_kernel_import.py tests/test_memory_kernel_projection.py
+          tests/test_memory_kernel_store.py tests/test_memory_write_routing_guard.py
+          tests/test_ombre_projection_worker.py tests/test_memory_interop.py tests/test_memory_interop_legacy.py
           tests/test_memory_interop_live_shadow.py tests/test_memory_runtime_bridge.py
+          tests/test_cleaner_kernel_backfill.py
       - name: Semantic, migration, and legacy isolation contracts
         run: >-
           python -m unittest
           tests.test_memory_kernel tests.test_memory_kernel_legacy_isolation
-          tests.test_memory_interop tests.test_memory_interop_legacy
-          tests.test_memory_interop_live_shadow tests.test_memory_runtime_bridge -v
+          tests.test_memory_kernel_import tests.test_memory_kernel_projection
+          tests.test_memory_kernel_store tests.test_memory_write_routing_guard
+          tests.test_ombre_projection_worker tests.test_memory_interop tests.test_memory_interop_legacy
+          tests.test_memory_interop_live_shadow tests.test_memory_runtime_bridge
+          tests.test_cleaner_kernel_backfill -v
       - name: Whitespace check
         run: git diff --check
 

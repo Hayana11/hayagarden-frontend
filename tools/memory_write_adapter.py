@@ -1,7 +1,8 @@
 """Formal memory.write provider adapter.
 
-Validation lives at this provider boundary, while the existing
-tools.memory_tool.save_memory remains the single persistence owner.
+Validation lives at this provider boundary; tools.memory_tool.save_memory is
+the single memory-type write router (posts, or the Memory Kernel when
+runtime_config memory.kernel_write is on).
 """
 from __future__ import annotations
 
@@ -31,10 +32,23 @@ def write_memory(
     resolved_db_path = str(db_path or "").strip() or previous_db_path
     memory_tool.DB_PATH = resolved_db_path
     try:
-        new_id = memory_tool.save_memory(text, type="MEMORY", author="fyodor", layer="long-term")
+        written = memory_tool.save_memory(
+            text, type="MEMORY", author="fyodor", layer="long-term",
+            source="memory_write",
+            provenance={"surface": shadow_surface or "", "turn_id": shadow_turn_id or ""},
+        )
     finally:
         memory_tool.DB_PATH = previous_db_path
-    result = {"status": "CREATED", "id": int(new_id)}
+    if isinstance(written, memory_tool.KernelWrite):
+        # No posts row exists, so the posts-based interop shadow has nothing to observe.
+        return {
+            "status": "CREATED",
+            "store": "kernel",
+            "kernel_state_id": written.state_id,
+            "ombre_bucket_id": written.bucket_id,
+            "deduplicated": written.status == "DEDUPLICATED",
+        }
+    result = {"status": "CREATED", "id": int(written)}
     try:
         from tools.memory_interop_shadow import observe_memory_write
 
