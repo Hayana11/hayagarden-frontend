@@ -47,13 +47,28 @@ def chat_day(ts: datetime.datetime) -> str:
     return day_handoff.chat_day_for_timestamp(ts)
 
 
-def daily_cap(mode: str) -> int:
+def daily_cap(mode: str, db_path: Optional[str] = None) -> int:
+    """Read the optional cap override without importing the write-capable config layer."""
     default = _DEFAULT_DAILY_CAP.get(mode, 0)
+    config_db_path = (
+        os.environ.get('HAYAGARDEN_CONFIG_DB_PATH')
+        or db_path
+        or '/opt/frontend/memories.db'
+    )
     try:
-        import config_store
-        return int(config_store.get_int(_CAP_CONFIG_KEY % mode.upper(), default))
+        conn = sqlite3.connect(f'file:{config_db_path}?mode=ro', uri=True)
+        try:
+            row = conn.execute(
+                'SELECT value FROM runtime_config WHERE key=?',
+                (_CAP_CONFIG_KEY % mode.upper(),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is not None:
+            return int(row[0])
     except Exception:
-        return default
+        pass
+    return default
 
 
 def _counterfactual_state(
@@ -178,7 +193,7 @@ def record_skip(
         except Exception as exc:
             window = {}
             window_error = type(exc).__name__
-        cap = daily_cap(mode)
+        cap = daily_cap(mode, db_path=db_path)
         consumed_ids, cold_start_ids_today = _counterfactual_state(path, mode, day)
         already = len(cold_start_ids_today)
         run_id = str(wake_run_id or '').strip()
