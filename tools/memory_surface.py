@@ -53,6 +53,13 @@ STOPWORDS = frozenset("""
 喜欢 想要 一点 一样 之后 之前 以后 以前 不要 不会 不能 怎么样 为什么 是不是 有没有
 嗯嗯 哈哈 哈哈哈 好耶 呜呜 呜呜呜 嘿嘿 嘿嘿嘿 喵喵 喵喵喵 啊啊 好吧 好的 对吧 是的
 """.split())
+ENGLISH_STOPWORDS = frozenset("""
+the and you are for with this that what have has was were will would can could should not but
+your yours our ours they them their from into about just like then than there here when where
+who why how all any some more most very really also only even still been being its it's i'm
+you're don't can't
+""".split())
+_ASCII = re.compile(r"^[a-z0-9'._-]+$")
 _WORD = re.compile(r"[一-鿿A-Za-z]")
 
 
@@ -60,7 +67,9 @@ _WORD = re.compile(r"[一-鿿A-Za-z]")
 class SurfaceConfig:
     enabled: bool = True
     cooldown_turns: int = 60
-    evidence_min: float = 4.0
+    # Two rare words' worth: one shared word is coincidence far more often than memory.
+    evidence_min: float = 7.0
+    min_words: int = 2
     recent_days: int = 2
 
 
@@ -113,7 +122,8 @@ def load_config() -> SurfaceConfig:
     return SurfaceConfig(
         enabled=config_store.get_bool("MEMORY_SURFACE_ENABLED", True),
         cooldown_turns=config_store.get_int("MEMORY_SURFACE_COOLDOWN_TURNS", 60),
-        evidence_min=config_store.get_float("MEMORY_SURFACE_EVIDENCE_MIN", 4.0),
+        evidence_min=config_store.get_float("MEMORY_SURFACE_EVIDENCE_MIN", 7.0),
+        min_words=config_store.get_int("MEMORY_SURFACE_MIN_WORDS", 2),
         recent_days=config_store.get_int("MEMORY_SURFACE_RECENT_DAYS", 2),
     )
 
@@ -126,8 +136,19 @@ def keywords(text: str) -> list[str]:
         word = word.strip().lower()
         if len(word) < 2 or word in STOPWORDS or not _WORD.search(word):
             continue
+        if _ASCII.match(word) and (len(word) < 3 or word in ENGLISH_STOPWORDS):
+            continue
+        if _only_stopwords(word):  # 爸爸爸爸, 费佳费佳
+            continue
         seen.setdefault(word, None)
     return list(seen)
+
+
+def _only_stopwords(word: str) -> bool:
+    rest = word
+    for stop in sorted(STOPWORDS, key=len, reverse=True):
+        rest = rest.replace(stop, "")
+    return not rest.strip()
 
 
 def _norm(text: str) -> str:
@@ -343,7 +364,7 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     chosen = None
     for ref in order:
         score = round(evidence.get(ref, 0.0), 2)
-        if score < config.evidence_min:
+        if score < config.evidence_min or len(matched.get(ref, ())) < config.min_words:
             trail.append([ref, "below_evidence", score])
             continue
         if ref in cooling:
