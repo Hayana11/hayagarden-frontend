@@ -25,7 +25,7 @@ from continuity.contracts import (
     SourceSnapshot,
 )
 from continuity.coverage import source_hash
-from wake.unified_modes import is_unified_main_chat_wake_mode
+from wake.unified_modes import is_unified_wake_provenance_mode
 
 IDENTITY_ID = 'fyodor'
 CHAT_ID = 'default'
@@ -294,7 +294,7 @@ def _canonical_normal_wake(row: Any) -> bool:
         return False
     cache = _semantic_cache_info(row)
     return bool(
-        is_unified_main_chat_wake_mode(cache.get('wake_mode'))
+        is_unified_wake_provenance_mode(cache.get('wake_mode'))
         and cache.get('canonical_chat_history') is True
         and cache.get('unified_chat_resident') is True
         and cache.get('b3_authority') is True

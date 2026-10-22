@@ -13,4 +13,13 @@ UNIFIED_MAIN_CHAT_WAKE_MODES = frozenset((
 
 
 def is_unified_main_chat_wake_mode(mode) -> bool:
+    """Request routing: an empty request mode means normal."""
     return (str(mode or '').strip() or 'normal') in UNIFIED_MAIN_CHAT_WAKE_MODES
+
+
+def is_unified_wake_provenance_mode(wake_mode) -> bool:
+    """Persisted provenance: wake_mode must be recorded explicitly.
+
+    A row missing wake_mode is never canonical, whatever else it claims.
+    """
+    return isinstance(wake_mode, str) and wake_mode in UNIFIED_MAIN_CHAT_WAKE_MODES

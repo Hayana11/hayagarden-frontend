@@ -33,7 +33,7 @@ def _gateway_source() -> str:
 
 def _trigger_builder():
     src = _gateway_source()
-    start = src.index('def _build_normal_wake_main_chat_trigger(')
+    start = src.index('_WAKE_SILENT_SENTINEL = ')
     end = src.index('def _run_unified_normal_main_chat_turn(', start)
     namespace = {'datetime': datetime}
     exec(src[start:end], namespace)  # noqa: S102 - our own source, no imports
@@ -193,6 +193,157 @@ class ProactiveCanonicalHistoryTests(unittest.TestCase):
         self.assertIs(self._execute('ritual')['canonical_chat_history'], False)
 
 
+class _Resident:
+    _model_identity = 'model:test'
+    session_id = 'sid-1'
+    generation = 1
+
+    def _alive(self):
+        return True
+
+
+class MainChatTurnBehaviourTests(unittest.TestCase):
+    """Drives the real _run_unified_normal_main_chat_turn with a fake stream."""
+
+    def _run(self, *, flush=True, events=(), raise_after_flush=None, mode='normal',
+             lease_error=None, **kwargs):
+        import gateway
+        from chat import behavior_authority_b3 as b3
+        from chat import cc_history_rewrite, display_thinking
+        from chat import unified_heartbeat_a1 as uh
+        from tools import lease_signer
+
+        sent = []
+
+        def stream(messages, **stream_kwargs):
+            sent.append(messages[0]['content'])
+            stream_kwargs['on_stdin_begin']()
+            if flush:
+                stream_kwargs['on_stdin_flushed']()
+            if raise_after_flush is not None:
+                raise raise_after_flush
+            yield from events
+
+        fence = mock.Mock()
+        watermark = uh.SharedTranscriptWatermark(
+            context_id=1, context_epoch=1, resident_generation=1,
+            resident_key='chat:1:1:1', claude_session_id='sid-1',
+            transcript_path='/tmp/sid-1.jsonl', expected_offset=0,
+            process_generation=1,
+        )
+        lease = mock.Mock(side_effect=lease_error, return_value={'turn_id': 'wake'})
+        with mock.patch.object(gateway, '_CC_RESIDENT', _Resident()), \
+                mock.patch.object(gateway, '_gen_acquire_or_wait', return_value=('own', None)), \
+                mock.patch.object(gateway, '_gen_release'), \
+                mock.patch.object(gateway, '_cc_resident_stream_gen', side_effect=stream), \
+                mock.patch.object(gateway, '_wake_live_trace'), \
+                mock.patch.object(b3, '_hot_chat_resident_ready', return_value=(True, 'ok')), \
+                mock.patch.object(uh, 'prepare_shared_transcript_watermark',
+                                  return_value=(watermark, 'ok')), \
+                mock.patch.object(uh, 'begin_shared_wake_delivery_fence', return_value=fence), \
+                mock.patch.object(uh, 'commit_shared_transcript_watermark',
+                                  return_value={'committed': True}), \
+                mock.patch.object(cc_history_rewrite, 'guard_cc_generation',
+                                  side_effect=lambda events: events), \
+                mock.patch.object(display_thinking, 'get_display_thinking_snapshot',
+                                  return_value=(False, '')), \
+                mock.patch.object(lease_signer, 'issue_turn_lease', lease):
+            result = gateway._run_unified_normal_main_chat_turn(
+                wake_run_id='proactive-test', now=NOW, t2_hours=1.0, t_hours=1.0,
+                mode=mode, **kwargs,
+            )
+        return result, sent
+
+    @staticmethod
+    def _done(text):
+        return [('done', (text, '', {'jsonl_usage': {'stream_totals_match': True}}, {}))]
+
+    def test_mode_reaches_the_trigger(self):
+        # The generation-lock result must not overwrite the Wake mode.
+        _, sent = self._run(
+            mode='morning', events=self._done('早'),
+            last_user_at=datetime.datetime(2026, 10, 23, 2, 13),
+        )
+        self.assertIn('现在是每天固定的早安时刻', sent[0])
+        self.assertIn('10-23 02:13', sent[0])
+        _, sent = self._run(
+            mode='self_trigger', events=self._done('喝水'), self_trigger_note='提醒她喝水',
+        )
+        self.assertIn('「提醒她喝水」', sent[0])
+
+    def test_failure_before_stdin_is_pre_model(self):
+        import gateway
+        with self.assertRaises(gateway.UnifiedProactivePreModelFailed):
+            self._run(lease_error=RuntimeError('lease down'))
+        with self.assertRaises(gateway.UnifiedProactivePreModelFailed):
+            self._run(flush=False, raise_after_flush=RuntimeError('write failed'))
+
+    def test_failure_after_stdin_is_not_pre_model(self):
+        import gateway
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run(raise_after_flush=RuntimeError('stream broke'))
+        self.assertNotIsInstance(ctx.exception, gateway.UnifiedProactivePreModelFailed)
+
+    def test_silence_marker_is_a_silent_round(self):
+        result, sent = self._run(events=self._done(' [[SILENT]] '))
+        self.assertTrue(result['silent'])
+        self.assertEqual(result['text'], '')
+        self.assertIn('只回复 [[SILENT]]，它不会发给她', sent[0])
+
+    def test_spoken_text_is_not_silent_and_marker_never_leaks(self):
+        result, _ = self._run(events=self._done('早安 [[SILENT]]'))
+        self.assertFalse(result['silent'])
+        self.assertEqual(result['text'], '早安')
+
+    def test_empty_reply_is_still_an_error_not_silence(self):
+        import gateway
+        with self.assertRaisesRegex(RuntimeError, 'normal_wake_main_chat_empty_response') as ctx:
+            self._run(events=self._done('   '))
+        self.assertNotIsInstance(ctx.exception, gateway.UnifiedProactivePreModelFailed)
+
+
+class ProactiveDispatchTests(unittest.TestCase):
+    def test_silent_round_executes_none_and_pre_model_failure_is_its_own_reason(self):
+        src = _gateway_source()
+        decide = src[src.index('def _wake_decide_locked'):]
+        basic = decide[decide.index('if basic_normal:'):decide.index('    planner_view = None')]
+        self.assertIn("wake_action = 'none' if main_turn.get('silent') else 'message'", basic)
+        self.assertIn('_wake_exec(\n                wake_action,', basic)
+        self.assertIn('except UnifiedProactivePreModelFailed', basic)
+        self.assertIn('if not main_turn_entered:', basic)
+        self.assertEqual(basic.count("'reason': 'NORMAL_WAKE_PRE_MODEL_FAILED'"), 2)
+
+
+class ProvenanceStrictnessTests(unittest.TestCase):
+    def test_missing_wake_mode_is_never_canonical(self):
+        from wake.unified_modes import is_unified_wake_provenance_mode
+        for value in (None, '', '  ', 'ritual', 1):
+            self.assertFalse(is_unified_wake_provenance_mode(value))
+        for value in ('normal', 'morning', 'nightwatch', 'self_trigger'):
+            self.assertTrue(is_unified_wake_provenance_mode(value))
+
+    def test_daily_context_rejects_row_without_wake_mode(self):
+        from chat.daily_context import is_canonical_conversation_message
+        cache = {
+            'canonical_chat_history': True, 'unified_chat_resident': True,
+            'b3_authority': True, 'source': 'wake', 'provider': 'claude_code',
+        }
+        row = {
+            'author': 'assistant', 'content': 'hi', 'source_kind': 'wake',
+            'image_url': '', 'cache_info': json.dumps(cache),
+        }
+
+        class Row(dict):
+            def keys(self):
+                return super().keys()
+
+        check = lambda r: is_canonical_conversation_message(r, include_assistant_wake=True)  # noqa: E731
+        self.assertFalse(check(Row(row)))
+        cache['wake_mode'] = 'morning'
+        row['cache_info'] = json.dumps(cache)
+        self.assertTrue(check(Row(row)))
+
+
 class SelfTriggerReleaseTests(unittest.TestCase):
     def _run(self, wake_result):
         from tools import dream_wake
@@ -214,6 +365,7 @@ class SelfTriggerReleaseTests(unittest.TestCase):
         for reason in (
             'chat_generating', 'wake_in_progress', 'WAKE_MODE_DISABLED',
             'NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP', 'WAKE_READ_OBSERVATION_FAILED',
+            'NORMAL_WAKE_PRE_MODEL_FAILED',
         ):
             release = self._run({'ok': True, 'skipped': True, 'reason': reason})
             release.assert_called_once_with([7])
@@ -226,6 +378,7 @@ class SelfTriggerReleaseTests(unittest.TestCase):
         ):
             self._run({'ok': True, 'skipped': True, 'reason': reason}).assert_not_called()
         self._run({'ok': True, 'action': 'message'}).assert_not_called()
+        self._run({'ok': True, 'action': 'none'}).assert_not_called()
 
 
 if __name__ == '__main__':
