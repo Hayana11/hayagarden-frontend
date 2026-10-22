@@ -4,7 +4,8 @@ The Memory Kernel projection never touches Ombre's files. It starts this
 worker with Ombre's Python, pointing at Ombre's source tree and env file, and
 the worker drives Ombre exclusively through ``BucketManager.create / update /
 get`` (plus ``get_including_archive`` / ``list_all`` to read deletions and
-buckets Ombre created on its own). Vault location, validation, normalisation,
+buckets Ombre created on its own, and ``touch_many`` to reinforce memories a
+reader actually used). Vault location, validation, normalisation,
 locking, the ledger and derived indexes are all Ombre's.
 
 ``hold`` is never called: its similarity merge is the right behaviour for
@@ -52,16 +53,30 @@ def _load_env_file(path: str) -> None:
             os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
+# Ombre's own read-side surfacing policy (SurfacePolicyVM), loaded with the runtime and
+# required: Kernel readers depend on its per-mode verdicts.
+_SURFACE_POLICY = None
+SURFACE_MODES = ("automatic", "search", "dream", "importance", "spontaneous")
+
+
 def _bucket_view(bucket: dict | None, *, deleted: bool = False) -> dict | None:
     if bucket is None:
         return None
     metadata = dict(bucket.get("metadata") or {})
-    return {
+    view = {
         "id": str(bucket.get("id") or metadata.get("id") or ""),
         "content": bucket.get("content") or "",
         "metadata": json.loads(json.dumps(metadata, ensure_ascii=False, default=str)),
         "deleted": deleted or bool(metadata.get("deleted_at") or metadata.get("tombstone")),
     }
+    if _SURFACE_POLICY is not None:
+        # One verdict per kind of read: automatic recall, explicit search, dream, ...
+        modes = {}
+        for mode in SURFACE_MODES:
+            decision = _SURFACE_POLICY.evaluate_bucket(bucket, mode)
+            modes[mode] = {"allowed": bool(decision.allowed), "reasons": list(decision.reasons)}
+        view["lifecycle"] = {"modes": modes}
+    return view
 
 
 def load_runtime(src_dir: str):
@@ -81,6 +96,16 @@ def load_runtime(src_dir: str):
             missing.append(name)
     if missing:
         raise Incompatible("BucketManager lacks: " + ", ".join(missing))
+    global _SURFACE_POLICY
+    try:
+        from ombrebrain.policy.surfacing import SurfacePolicyVM  # noqa: E402 (Ombre's own module)
+        policy = SurfacePolicyVM.default()
+        probe = {"id": "probe", "metadata": {"type": "dynamic"}}
+        for mode in SURFACE_MODES:
+            policy.evaluate_bucket(probe, mode)
+    except Exception as exc:  # a reader would show what Ombre retired: refuse to run
+        raise Incompatible(f"SurfacePolicyVM unavailable: {type(exc).__name__}: {exc}"[:200]) from exc
+    _SURFACE_POLICY = policy
     return version, BucketManager(load_config())
 
 
@@ -128,6 +153,14 @@ async def handle(manager, request: dict) -> object:
         if not await manager.update(request["bucket_id"], **fields):
             raise RuntimeError("ombre_update_not_committed")
         return {"updated": True}
+    if op == "touch":
+        # Explicit reinforcement of memories a caller actually used. touch only moves
+        # last_active / activation_count, never a projected semantic field.
+        touch_many = getattr(manager, "touch_many", None)
+        if not callable(touch_many):
+            raise Incompatible("BucketManager lacks: touch_many")
+        await touch_many([str(b) for b in request.get("bucket_ids") or []], ripple=False)
+        return {"touched": len(request.get("bucket_ids") or [])}
     if op == "list":
         buckets = await manager.list_all(include_archive=bool(request.get("include_archive")))
         return [_bucket_view(bucket) for bucket in buckets]

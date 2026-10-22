@@ -81,7 +81,45 @@ class BucketManager:
     async def list_all(self, include_archive=False):
         buckets = [json.loads(p.read_text()) for p in sorted(self.root.glob("*.json"))]
         return [b for b in buckets if include_archive or not b["metadata"].get("deleted_at")]
+
+    async def touch_many(self, bucket_ids, ripple=False):
+        # 3.6.14: touch moves last_active / activation_count and nothing else.
+        for bucket_id in bucket_ids:
+            bucket = self._load(bucket_id)
+            if bucket is None:
+                continue
+            bucket["metadata"]["last_active"] = "2026-10-21T15:00:00"
+            bucket["metadata"]["activation_count"] = int(bucket["metadata"].get("activation_count") or 0) + 1
+            bucket["metadata"]["ripple"] = ripple
+            self._path(bucket_id).write_text(json.dumps(bucket))
 '''
+
+
+# Mimics Ombre 3.6.14's SurfacePolicyVM for the rules the projection relies on.
+FAKE_SURFACE_POLICY = textwrap.dedent('''
+    class _Decision:
+        def __init__(self, allowed, reasons):
+            self.allowed, self.reasons = allowed, tuple(reasons)
+
+    class SurfacePolicyVM:
+        @classmethod
+        def default(cls):
+            return cls()
+
+        def evaluate_bucket(self, bucket, mode):
+            if mode not in ("automatic", "search", "dream", "importance", "spontaneous"):
+                raise ValueError(mode)
+            meta = bucket.get("metadata") or {}
+            reasons = ["archived"] if meta.get("type") == "archived" else []
+            if meta.get("deleted_at"):
+                reasons.append("deleted")
+            core = meta.get("pinned") or meta.get("type") == "permanent"
+            if mode != "search" and meta.get("dont_surface"):
+                reasons.append("dont_surface")
+            if mode in ("automatic", "dream", "spontaneous") and meta.get("digested") and not core:
+                reasons.append("digested")
+            return _Decision(not reasons, reasons)
+''')
 
 
 class FakeOmbreSource(unittest.TestCase):
@@ -97,13 +135,21 @@ class FakeOmbreSource(unittest.TestCase):
         self.write_src("3.6.14")
         self.runtime = projection.OmbreRuntime(sys.executable, str(self.src), str(self.env), timeout=30)
 
-    def write_src(self, version, *, drop_param=None, extra=""):
+    def write_src(self, version, *, drop_param=None, extra="", policy=True):
         source = FAKE_BUCKET_MANAGER.replace("{extra}", extra).replace("{{", "{").replace("}}", "}")
         if drop_param:
             source = re.sub(rf",\s*{drop_param}=[^,)]+", "", source)
         (self.src / "VERSION").write_text(version + "\n", encoding="utf-8")
         (self.src / "utils.py").write_text("def load_config():\n    return {}\n", encoding="utf-8")
         (self.src / "bucket_manager.py").write_text(textwrap.dedent(source), encoding="utf-8")
+        package = self.src / "ombrebrain" / "policy"
+        if policy:
+            package.mkdir(parents=True, exist_ok=True)
+            (self.src / "ombrebrain" / "__init__.py").write_text("", encoding="utf-8")
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "surfacing.py").write_text(FAKE_SURFACE_POLICY, encoding="utf-8")
+        elif package.exists():
+            (package / "surfacing.py").unlink(missing_ok=True)
 
 
 class WorkerTests(FakeOmbreSource):
@@ -150,6 +196,51 @@ class WorkerTests(FakeOmbreSource):
         self.assertEqual(results[1]["content"], "原文")
         with self.assertRaises(projection.RuntimeUnavailable):
             self.runtime.update("abc", {"content": "REFUSE"})
+
+    def test_touch_reinforces_without_moving_projected_semantics(self):
+        self.runtime.create_if_absent("abc", {"content": "她今天买了鹦鹉。", "tags": ["pet"], "importance": 6})
+        before = self.runtime.get("abc")
+        [result] = self.runtime.batch([{"op": "touch", "bucket_ids": ["abc", "missing"]}])
+        self.assertEqual(result, {"touched": 2})
+        after = self.runtime.get("abc")
+        self.assertEqual(after["metadata"]["activation_count"], 1)
+        self.assertFalse(after["metadata"]["ripple"])
+        self.assertEqual(projection.observed_sha(after), projection.observed_sha(before))
+
+    def test_touch_without_touch_many_fails_alone(self):
+        source = (self.src / "bucket_manager.py").read_text(encoding="utf-8")
+        (self.src / "bucket_manager.py").write_text(source.replace("async def touch_many", "async def _gone"),
+                                                    encoding="utf-8")
+        results = self.runtime.batch([{"op": "touch", "bucket_ids": ["abc"]}, {"op": "get", "bucket_id": "abc"}])
+        self.assertIsInstance(results[0], projection.RequestFailed)
+        self.assertIn("touch_many", results[0])
+        self.assertIsNone(results[1])
+
+    def test_lifecycle_verdicts_come_per_mode_from_ombres_own_surface_policy(self):
+        self.runtime.create_if_absent("abc", {"content": "她今天买了鹦鹉。", "pinned": True})
+        self.runtime.create_if_absent("def", {"content": "旧的账单。"})
+        self.runtime.create_if_absent("ghi", {"content": "安静的一条。"})
+        for bucket_id, flags in (("abc", {"digested": True}), ("def", {"digested": True}),
+                                 ("ghi", {"dont_surface": True})):
+            path = self.store / f"{bucket_id}.json"
+            data = json.loads(path.read_text())
+            data["metadata"].update(flags)
+            path.write_text(json.dumps(data))
+        views = {b["id"]: b["lifecycle"]["modes"] for b in self.runtime.list()}
+        self.assertEqual(set(views["abc"]), {"automatic", "search", "dream", "importance", "spontaneous"})
+        self.assertTrue(views["abc"]["automatic"]["allowed"])  # core rules are never digested
+        self.assertEqual(views["def"]["automatic"], {"allowed": False, "reasons": ["digested"]})
+        self.assertTrue(views["def"]["search"]["allowed"])  # explicit search still finds it
+        self.assertTrue(views["def"]["importance"]["allowed"])
+        self.assertFalse(views["ghi"]["importance"]["allowed"])
+        self.assertTrue(views["ghi"]["search"]["allowed"])
+        self.assertFalse(self.runtime.get("def")["lifecycle"]["modes"]["dream"]["allowed"])
+
+    def test_missing_surface_policy_is_incompatible_not_silent(self):
+        self.write_src("3.6.14", policy=False)
+        with self.assertRaisesRegex(projection.RuntimeUnavailable, "incompatible:SurfacePolicyVM unavailable"):
+            self.runtime.get("abc")
+        self.assertEqual(list(self.store.iterdir()), [])
 
     def test_soft_deleted_bucket_is_seen_as_deleted(self):
         (self.store / "gone.json").write_text(json.dumps(

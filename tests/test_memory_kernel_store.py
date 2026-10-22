@@ -413,3 +413,117 @@ class RouterTests(StoreFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScheduledSyncTests(StoreFixture):
+    """The five-minute sync: recorded, never overlapping, failures visible."""
+
+    def run_sync(self):
+        return store.run_sync(self.kernel, self.posts, runtime=self.ombre)
+
+    def test_ok_run_is_recorded_with_counts(self):
+        self.ombre.buckets["new1"] = {"id": "new1", "content": "她在 Ombre 面板里新建的一条。",
+                                      "metadata": {"id": "new1", "type": "dynamic"}}
+        result = self.run_sync()
+        self.assertEqual((result["outcome"], result["ingested_created"]), ("ok", 1))
+        health = store.sync_health(self.kernel)
+        self.assertEqual((health["runs"], health["consecutive_failures"]), (1, 0))
+        self.assertEqual(health["last_success"]["summary"]["ingested_created"], 1)
+        self.assertGreaterEqual(health["last_run"]["duration_ms"], 0)
+        self.assertEqual(store.status(self.kernel)["sync"]["last_run"]["outcome"], "ok")
+
+    def test_consecutive_failures_are_counted_and_reset(self):
+        self.ombre.down = True
+        self.assertEqual(self.run_sync()["outcome"], "failed")
+        self.assertEqual(self.run_sync()["outcome"], "failed")
+        health = store.sync_health(self.kernel)
+        self.assertEqual(health["consecutive_failures"], 2)
+        self.assertIn("unavailable", health["last_run"]["error"])
+        self.assertIsNone(health["last_success"])
+        self.ombre.down = False
+        self.run_sync()
+        self.assertEqual(store.sync_health(self.kernel)["consecutive_failures"], 0)
+
+    def test_unconfigured_runtime_is_a_failure_not_a_quiet_success(self):
+        result = store.run_sync(self.kernel, self.posts, runtime=None)
+        self.assertEqual((result["outcome"], result["error"]), ("failed", "unconfigured"))
+
+    def test_a_crash_is_recorded_then_raised(self):
+        with mock.patch.object(store, "sync", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.run_sync()
+        self.assertEqual(store.sync_health(self.kernel)["last_run"]["error"], "RuntimeError:boom")
+
+    def test_overlapping_runs_are_skipped(self):
+        import fcntl
+
+        lock = Path(f"{store.projection.state_path_for(self.kernel)}.sync.lock")
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.assertEqual(self.run_sync()["outcome"], "skipped")
+        finally:
+            os.close(fd)
+        self.assertEqual(store.sync_health(self.kernel).get("runs"), 0)
+
+    def test_cli_exit_code_reflects_failure(self):
+        with mock.patch.object(store, "run_sync", return_value={"outcome": "failed"}), \
+                mock.patch("builtins.print"):
+            self.assertEqual(store.main(["sync"]), 1)
+        with mock.patch.object(store, "run_sync", return_value={"outcome": "ok"}), \
+                mock.patch("builtins.print"):
+            self.assertEqual(store.main(["sync"]), 0)
+
+
+class IncompatibleRuntimeTests(StoreFixture):
+    def test_missing_surface_policy_fails_sync_as_incompatible_and_keeps_verdicts(self):
+        self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
+        store.run_sync(self.kernel, self.posts, runtime=self.ombre)
+        class Incompatible:
+            def __getattr__(self, name):
+                def refuse(*args, **kwargs):
+                    raise store.projection.RuntimeUnavailable("incompatible:SurfacePolicyVM unavailable: ImportError")
+                return refuse
+        broken = Incompatible()
+        result = store.run_sync(self.kernel, self.posts, runtime=broken)
+        self.assertEqual(result["outcome"], "incompatible")
+        with mock.patch.object(store, "run_sync", return_value=result), mock.patch("builtins.print"):
+            self.assertEqual(store.main(["sync"]), 1)
+        self.assertEqual(store.projection.ProjectionState(
+            store.projection.state_path_for(self.kernel)).lifecycles()["bbb222"]["allowed"], 0)
+
+    def test_a_dropped_connection_is_a_plain_failure(self):
+        self.ombre.down = True
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "failed")
+
+
+class SyncOutcomeTests(StoreFixture):
+    """A run that scanned fine but left projections undone is not a success."""
+
+    def test_projection_refused_after_a_good_scan_fails_the_run(self):
+        self.revise("st:ombre:aaa111:v1", "哈娅养了两只猫，还有一只鹦鹉福禄。", "st:ombre:aaa111:v2")
+        self.ombre.reject_updates = True  # Ombre's update() commits nothing
+        result = store.run_sync(self.kernel, self.posts, runtime=self.ombre)
+        self.assertEqual(result["projected"]["pending"], 1)
+        self.assertEqual(result["outcome"], "failed")
+        self.assertIn("pending", result["error"])
+        self.assertEqual(store.sync_health(self.kernel)["consecutive_failures"], 1)
+        with mock.patch("builtins.print"), \
+                mock.patch.object(store, "kernel_db_path", return_value=self.kernel), \
+                mock.patch.object(store, "posts_db_path", return_value=self.posts), \
+                mock.patch.object(store, "default_runtime", return_value=self.ombre):
+            self.assertEqual(store.main(["sync"]), 1)
+        self.ombre.reject_updates = False
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "ok")
+
+    def test_problem_heads_fail_the_run(self):
+        self.revise("st:ombre:aaa111:v1", "版本甲", "st:ombre:aaa111:v2a")
+        self.revise("st:ombre:aaa111:v1", "版本乙", "st:ombre:aaa111:v2b")  # branched lineage
+        result = store.run_sync(self.kernel, self.posts, runtime=self.ombre)
+        self.assertEqual((result["outcome"], result["problems"]), ("failed", 1))
+        self.assertIn("branched_heads", result["error"])
+
+    def test_a_kept_deletion_is_not_a_failure(self):
+        self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "ok")
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "ok")

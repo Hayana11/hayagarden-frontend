@@ -9,6 +9,15 @@ on:
       - "tools/memory_kernel_projection.py"
       - "tools/memory_kernel_store.py"
       - "tools/memory_kernel_switch.py"
+      - "tools/memory_kernel_read.py"
+      - "tools/memory_library.py"
+      - "tools/product_handlers.py"
+      - "tools/fact_extractor.py"
+      - "tools/dream_generator.py"
+      - "tools/ombre_adapter.py"
+      - "chat/system_builder.py"
+      - "gateway.py"
+      - "app.py"
       - "tools/ombre_projection_worker.py"
       - "tools/memory_tool.py"
       - "tools/memory_write_adapter.py"
@@ -33,6 +42,9 @@ on:
       - "tests/test_memory_interop_live_shadow.py"
       - "tests/test_memory_runtime_bridge.py"
       - "tests/test_cleaner_kernel_backfill.py"
+      - "tests/test_memory_kernel_read.py"
+      - "tests/test_memory_kernel_read_paths.py"
+      - "tests/test_memory_read_routing_guard.py"
       - "docs/memory-kernel-core-0.md"
       - "docs/memory-interop-v0.1.md"
       - "docs/memory-interop-legacy-r1.md"
@@ -69,6 +81,7 @@ jobs:
           python -m ruff check
           tools/memory_kernel.py tools/memory_kernel_schema.py tools/memory_kernel_import.py
           tools/memory_kernel_projection.py tools/memory_kernel_store.py tools/memory_kernel_switch.py
+          tools/memory_kernel_read.py
           tools/ombre_projection_worker.py tools/memory_tool.py
           tools/memory_interop.py
           tools/memory_interop_legacy.py tools/memory_interop_legacy_shadow.py
@@ -79,7 +92,8 @@ jobs:
           tests/test_memory_kernel_store.py tests/test_memory_write_routing_guard.py
           tests/test_ombre_projection_worker.py tests/test_memory_interop.py tests/test_memory_interop_legacy.py
           tests/test_memory_interop_live_shadow.py tests/test_memory_runtime_bridge.py
-          tests/test_cleaner_kernel_backfill.py
+          tests/test_cleaner_kernel_backfill.py tests/test_memory_kernel_read.py
+          tests/test_memory_kernel_read_paths.py tests/test_memory_read_routing_guard.py
       - name: Semantic, migration, and legacy isolation contracts
         run: >-
           python -m unittest
@@ -88,7 +102,8 @@ jobs:
           tests.test_memory_kernel_store tests.test_memory_write_routing_guard
           tests.test_ombre_projection_worker tests.test_memory_interop tests.test_memory_interop_legacy
           tests.test_memory_interop_live_shadow tests.test_memory_runtime_bridge
-          tests.test_cleaner_kernel_backfill -v
+          tests.test_cleaner_kernel_backfill tests.test_memory_kernel_read
+          tests.test_memory_kernel_read_paths tests.test_memory_read_routing_guard -v
       - name: Whitespace check
         run: git diff --check
 

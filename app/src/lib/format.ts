@@ -22,9 +22,19 @@ export function daysInMonth(base: Date): number {
 }
 
 /** Deterministic pseudo-random in [0,1), used only for offline mock fallbacks. */
-export function seeded(i: number): number {
-  const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+export function seeded(i: number | string): number {
+  const n = typeof i === 'number' ? i : memoryIdSeed(i);
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
   return x - Math.floor(x);
+}
+
+/** Numeric seed for a memory id: `post:<n>` keeps its old numeric seed, others hash. */
+function memoryIdSeed(id: string): number {
+  const post = /^post:(\d+)$/.exec(id);
+  if (post) return Number(post[1]);
+  let h = 0;
+  for (let i = 0; i < id.length; i += 1) h = (h * 31 + id.charCodeAt(i)) % 1000003;
+  return h;
 }
 
 /** Smooth Catmull-Rom spline through normalized [0,1] values, for the emotion sparkline. */

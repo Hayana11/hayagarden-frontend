@@ -1,4 +1,11 @@
-"""B-3 runtime switch: is the Memory Kernel the memory write target?
+"""The Memory Kernel cutover switch: runtime_config ``memory.kernel_write``.
+
+Despite the key's name it is no longer a write-only switch. Since B-4 it moves
+memory types (MEMORY / FACT / MISS) to the Kernel in both directions at once:
+writes go through memory_tool.save_memory into the Kernel, and every read goes
+through memory_kernel_read. One flip, so nothing is ever written to the Kernel
+while readers still look only at posts. It must stay off until B-4 is deployed
+and the owner confirms; ``cutover_enabled`` is the name readers use.
 
 Kept dependency-free (sqlite only) so every caller can check it cheaply and
 only import the Kernel stack when the switch is on. The value lives in the
@@ -35,6 +42,36 @@ def write_enabled(config_db: str | os.PathLike[str] | None) -> bool:
     except Exception:  # unreadable switch (locked, missing table, sandboxed caller) = legacy
         return False
     return bool(row) and str(row[0]).strip().lower() in _TRUE
+
+
+def cutover_enabled(config_db: str | os.PathLike[str] | None) -> bool:
+    """Do memory reads come from the Kernel? Same flag and fail-closed rule as writes.
+
+    Opened read-only: readers (including the read-only legacy Interop bundle) must
+    never get a writable handle on memories.db just to look at the switch.
+    """
+    if not config_db or not Path(config_db).is_file():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{Path(config_db).resolve().as_posix()}?mode=ro", uri=True, timeout=3)
+        try:
+            row = conn.execute("SELECT value FROM runtime_config WHERE key=?", (FLAG_KEY,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    return bool(row) and str(row[0]).strip().lower() in _TRUE
+
+
+def cutover_posts_db(conn: sqlite3.Connection) -> Path | None:
+    """The posts file behind ``conn`` when the switch is on for it, else None (read posts)."""
+    try:
+        for _, name, path in conn.execute("PRAGMA database_list"):
+            if name == "main" and path:
+                return Path(path) if cutover_enabled(path) else None
+    except Exception:
+        return None
+    return None
 
 
 def kernel_owned_brain_writes(env=None) -> tuple[str, ...]:

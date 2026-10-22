@@ -1,0 +1,17 @@
+[Unit]
+Description=Memory Kernel <-> Ombre sync (ingest Ombre-side changes, project Kernel heads)
+After=ombre-next.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/frontend
+# OMBRE_RUNTIME_PYTHON / _SRC / _ENV_FILE (and MEMORY_KERNEL_DB if not the default)
+EnvironmentFile=/opt/frontend/.env
+ExecStart=/usr/bin/python3.11 -m tools.memory_kernel_store sync
+TimeoutStartSec=4min
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true

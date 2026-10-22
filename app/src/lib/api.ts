@@ -20,6 +20,7 @@ import type {
   MemoryCalendar,
   MemoryDayEntry,
   MemoryEntryDetail,
+  MemoryEntryId,
   MemoryLibrary,
   MemoryLibraryIndex,
   MemorySearchResult,
@@ -139,9 +140,9 @@ export function fetchMemoryLibraryIndex(): Promise<MemoryLibraryIndex> {
 }
 
 // GET /api/memories/library/entry/<id>
-export function fetchMemoryEntryContent(id: number): Promise<MemoryEntryDetail | null> {
+export function fetchMemoryEntryContent(id: MemoryEntryId): Promise<MemoryEntryDetail | null> {
   return http
-    .get<MemoryEntryDetail>(`/api/memories/library/entry/${id}`)
+    .get<MemoryEntryDetail>(`/api/memories/library/entry/${encodeURIComponent(id)}`)
     .catch(() => null);
 }
 

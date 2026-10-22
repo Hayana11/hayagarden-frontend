@@ -420,6 +420,138 @@ def sync(kernel_db: Path | None = None, posts_db: Path | None = None, *, runtime
     return report
 
 
+_SYNC_RUNS = """
+CREATE TABLE IF NOT EXISTS projection_sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    summary_json TEXT NOT NULL,
+    error TEXT
+)
+"""
+_SYNC_RUNS_KEPT = 2000  # about a week at one run every five minutes
+
+
+def _sync_outcome(report: dict[str, Any]) -> tuple[str, str | None]:
+    """ok / incompatible / failed.
+
+    incompatible: the Ombre runtime is not the one the Kernel was built for (e.g. no
+    SurfacePolicyVM) -- an operator has to act. failed: Ombre not reachable or not
+    configured, backfill or ingest errors, heads left pending after a good scan (a
+    refused update(), a dropped worker), or heads that cannot be projected at all
+    (problems) -- the next run may simply succeed. A deletion kept as conflict is a
+    decision, not a failure. Either way readers keep the last recorded verdicts.
+    """
+    ombre = str(report.get("ombre") or "")
+    if "incompatible" in ombre:
+        return "incompatible", ombre[:300]
+    if ombre:
+        return "failed", ombre[:300]
+    errors = list((report.get("backfilled") or {}).get("errors") or [])
+    errors += list((report.get("ingested") or {}).get("errors") or [])
+    if errors:
+        return "failed", json.dumps(errors[:5], ensure_ascii=False)[:300]
+    pending = int((report.get("projected") or {}).get("pending") or 0)
+    if pending:
+        return "failed", f"projection pending for {pending} head(s)"
+    problems = list(report.get("problems") or [])
+    if problems:
+        return "failed", "problems: " + json.dumps(problems[:5], ensure_ascii=False)[:280]
+    return "ok", None
+
+
+def _sync_summary(report: dict[str, Any]) -> dict[str, Any]:
+    ingested = report.get("ingested") or {}
+    return {
+        "backfilled": len((report.get("backfilled") or {}).get("done") or []),
+        "ingested_created": len(ingested.get("created") or []),
+        "ingested_revised": len(ingested.get("revised") or []),
+        "scan": {k: len(ingested.get(k) or []) for k in ("missing", "soft_deleted", "orphaned")},
+        "projected": report.get("projected") or {},
+        "problems": len(report.get("problems") or []),
+    }
+
+
+def run_sync(kernel_db: Path | None = None, posts_db: Path | None = None, *, runtime: Any = _DEFAULT,
+             clock=None) -> dict[str, Any]:
+    """The scheduled sync: one at a time, every run recorded in projection_sync_runs.
+
+    Request-time projection and sync already serialise per lineage (ProjectionState.locked);
+    this lock only keeps two scheduled runs from overlapping when one is slow.
+    """
+    import fcntl
+    import time
+
+    clock = clock or time.monotonic
+    db = Path(kernel_db or kernel_db_path())
+    state_db = projection.state_path_for(db)
+    projection.ProjectionState(state_db)  # creates the 0600 file and its tables
+    lock_path = Path(f"{state_db}.sync.lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"outcome": "skipped", "reason": "previous sync still running"}
+        started, began = _now(), clock()
+        try:
+            report = sync(db, posts_db, runtime=runtime)
+            outcome, error = _sync_outcome(report)
+        except Exception as exc:  # recorded, then re-raised for the timer to see
+            report, outcome, error = {}, "failed", f"{type(exc).__name__}:{exc}"[:300]
+            _record_sync(state_db, started, clock() - began, outcome, {}, error)
+            raise
+        summary = _sync_summary(report)
+        _record_sync(state_db, started, clock() - began, outcome, summary, error)
+        return {"outcome": outcome, "error": error, **summary}
+    finally:
+        os.close(fd)
+
+
+def _record_sync(state_db: Path, started: str, seconds: float, outcome: str,
+                 summary: dict[str, Any], error: str | None) -> None:
+    conn = sqlite3.connect(str(state_db), timeout=10)
+    try:
+        with conn:
+            conn.execute(_SYNC_RUNS)
+            conn.execute(
+                "INSERT INTO projection_sync_runs (started_at, finished_at, duration_ms, outcome, summary_json, error) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (started, _now(), int(seconds * 1000), outcome, json.dumps(summary, ensure_ascii=False), error))
+            conn.execute("DELETE FROM projection_sync_runs WHERE id <= (SELECT MAX(id) FROM projection_sync_runs) - ?",
+                         (_SYNC_RUNS_KEPT,))
+    finally:
+        conn.close()
+
+
+def sync_health(kernel_db: Path | None = None) -> dict[str, Any]:
+    """Last run, last success and the current run of consecutive failures."""
+    state_db = projection.state_path_for(Path(kernel_db or kernel_db_path()))
+    if not state_db.is_file():
+        return {"runs": 0}
+    conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='projection_sync_runs'").fetchone():
+            return {"runs": 0}
+        last = conn.execute("SELECT * FROM projection_sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        ok = conn.execute("SELECT * FROM projection_sync_runs WHERE outcome='ok' ORDER BY id DESC LIMIT 1").fetchone()
+        failures = conn.execute(
+            "SELECT COUNT(*) FROM projection_sync_runs WHERE outcome != 'ok' AND id > COALESCE("
+            "(SELECT MAX(id) FROM projection_sync_runs WHERE outcome='ok'), 0)").fetchone()[0]
+        runs = conn.execute("SELECT COUNT(*) FROM projection_sync_runs").fetchone()[0]
+    finally:
+        conn.close()
+
+    def brief(row):
+        return None if row is None else {
+            "started_at": row["started_at"], "finished_at": row["finished_at"], "duration_ms": row["duration_ms"],
+            "outcome": row["outcome"], "summary": json.loads(row["summary_json"]), "error": row["error"]}
+    return {"runs": runs, "last_run": brief(last), "last_success": brief(ok), "consecutive_failures": failures}
+
+
 def status(kernel_db: Path | None = None) -> dict[str, Any]:
     """Projection bookkeeping only; never calls Ombre."""
     db = Path(kernel_db or kernel_db_path())
@@ -435,16 +567,17 @@ def status(kernel_db: Path | None = None) -> dict[str, Any]:
         else:
             key = row["status"]
         counts[key] = counts.get(key, 0) + 1
-    return {"heads": len(heads), "projection": counts, "problems": problems}
+    return {"heads": len(heads), "projection": counts, "problems": problems, "sync": sync_health(db)}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("command", choices=("sync", "status"))
     args = parser.parse_args(argv)
-    result = sync() if args.command == "sync" else status()
+    result = run_sync() if args.command == "sync" else status()
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0
+    # A failed scheduled sync must show as a failed unit, not a quiet success.
+    return 1 if result.get("outcome") in ("failed", "incompatible") else 0
 
 
 if __name__ == "__main__":

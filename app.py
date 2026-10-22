@@ -330,6 +330,21 @@ def sw():
 def icon(size):
     return send_from_directory('/opt/frontend/static', f'icon-{size}.png')
 
+def _memory_cutover(conn):
+    """posts file when memory reads come from the Memory Kernel (memory.kernel_write), else None."""
+    from tools.memory_kernel_switch import cutover_posts_db
+    return cutover_posts_db(conn)
+
+
+def _mkr():
+    from tools import memory_kernel_read
+    return memory_kernel_read
+
+
+def _newest_first(rows):
+    return sorted(rows, key=lambda r: (str(r.get('created_at') or ''), str(r.get('id'))), reverse=True)
+
+
 @app.route('/api/posts', methods=['GET'])
 def get_posts():
     t        = request.args.get('type','')
@@ -369,13 +384,24 @@ def get_posts():
         where.append('content LIKE ?'); params.append('%'+search+'%')
     if resolved != '':
         where.append('resolved=?'); params.append(int(resolved))
+    kernel_posts = _memory_cutover(conn)
+    if kernel_posts:
+        where.append(_mkr().non_memory_clause())
     clause = ('WHERE '+' AND '.join(where)) if where else ''
     rows = conn.execute(
         f'SELECT * FROM posts {clause} ORDER BY id DESC LIMIT ?',
         params+[limit]
     ).fetchall()
     conn.close()
-    return jsonify({"posts":[dict(r) for r in rows]})
+    posts = [dict(r) for r in rows]
+    if kernel_posts and (not t or t in _mkr().MEMORY_TYPES):
+        memory = [i for i in _mkr().memory_items(kernel_posts, memory_type=t or None, layer=layer or None,
+                                                 tag=tags or None, active_only=False,
+                                                 mode=_mkr().SEARCH)
+                  if (not search or search in (i.get('content') or ''))
+                  and (resolved == '' or int(i.get('resolved') or 0) == int(resolved))]
+        posts = _newest_first(posts + memory)[:limit]
+    return jsonify({"posts": posts})
 
 @app.route('/api/posts', methods=['POST'])
 def create_post():
@@ -399,8 +425,38 @@ def create_post():
                         "ombre_bucket_id": written.bucket_id})
     return jsonify({"ok":True,"id":written})
 
+def _kernel_read_only():
+    # Kernel 记忆的编辑 / 完成 / 标签 / 删除要走 Kernel 修订（B-5），在那之前明确拒绝，绝不改 posts。
+    return jsonify({'error': 'kernel_memory_read_only', 'message': 'Kernel 记忆暂时只读'}), 409
+
+
+def _kernel_owned_post(pid):
+    """开关打开后，记忆类型的 posts 行已归 Kernel（等待补登的回退帖子除外）。"""
+    conn = get_db()
+    try:
+        kernel_posts = _memory_cutover(conn)
+        if not kernel_posts:
+            return False
+        row = conn.execute("SELECT type FROM posts WHERE id=?", (pid,)).fetchone()
+    finally:
+        conn.close()
+    if not row or row['type'] not in _mkr().MEMORY_TYPES:
+        return False
+    pending = {i['id'] for i in _mkr().pending_fallback_posts(kernel_posts, active_only=False)}
+    return pid not in pending
+
+
+@app.route('/api/posts/<ref>', methods=['PUT', 'PATCH', 'DELETE'])
+def kernel_post_write(ref):
+    if str(ref).startswith('kernel:'):
+        return _kernel_read_only()
+    return jsonify({'error': 'not found'}), 404
+
+
 @app.route('/api/posts/<int:pid>', methods=['DELETE'])
 def delete_post(pid):
+    if _kernel_owned_post(pid):
+        return _kernel_read_only()
     deleted = moments_store.delete_post(pid, memories_db_path=DB_PATH)
     if not deleted:
         return jsonify({'error': 'not found'}), 404
@@ -469,10 +525,14 @@ def posts_summary():
     post_cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
     layer_expr = "layer" if "layer" in post_cols else "'recent'"
     author_expr = "author" if "author" in post_cols else "''"
+    kernel_posts = _memory_cutover(conn)
+    posts_only = (' WHERE ' + _mkr().non_memory_clause()) if kernel_posts else ''
     rows = conn.execute(
-        f"SELECT id, content, {author_expr} as author, {layer_expr} as layer, created_at FROM posts ORDER BY id DESC LIMIT 600"
+        f"SELECT id, content, {author_expr} as author, {layer_expr} as layer, created_at FROM posts{posts_only} ORDER BY id DESC LIMIT 600"
     ).fetchall()
     conn.close()
+    if kernel_posts:
+        rows = _newest_first([dict(r) for r in rows] + _mkr().memory_items(kernel_posts, active_only=False, mode=_mkr().SEARCH))[:600]
 
     core_items, long_items, recent_items = [], [], []
     for r in rows:
@@ -511,11 +571,17 @@ def posts_calendar():
     if not re.match(r'^\d{4}-\d{2}$', month):
         month = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime('%Y-%m')
     conn = get_db()
+    kernel_posts = _memory_cutover(conn)
+    posts_only = (' AND ' + _mkr().non_memory_clause()) if kernel_posts else ''
     rows = conn.execute(
-        "SELECT substr(created_at,1,10) as day FROM posts WHERE created_at LIKE ?",
+        "SELECT substr(created_at,1,10) as day FROM posts WHERE created_at LIKE ?" + posts_only,
         (month + '%',)
     ).fetchall()
     conn.close()
+    if kernel_posts:
+        rows = [dict(r) for r in rows] + [{'day': i['created_at'][:10]} for i in
+                                          _mkr().memory_items(kernel_posts, active_only=False, mode=_mkr().SEARCH)
+                                          if i['created_at'].startswith(month)]
     by_day = {}
     for r in rows:
         day = (r['day'] or '')[-2:]
@@ -544,12 +610,13 @@ def memories_library_index():
     finally:
         conn.close()
 
-@app.route('/api/memories/library/entry/<int:pid>', methods=['GET'])
-def memories_library_entry(pid):
+@app.route('/api/memories/library/entry/<ref>', methods=['GET'])
+def memories_library_entry(ref):
+    # ref: post:<id> / kernel:<lineage> (a bare number still means post:<id>)
     from tools import memory_library
     conn = get_db()
     try:
-        detail = memory_library.get_memory_library_entry_detail(conn, pid)
+        detail = memory_library.get_memory_library_entry_detail(conn, ref)
         if detail is None:
             return jsonify({'error': 'not found'}), 404
         return jsonify(detail)
@@ -573,11 +640,18 @@ def posts_calendar_day():
     if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         return jsonify({'entries': []})
     conn = get_db()
+    kernel_posts = _memory_cutover(conn)
+    posts_only = (' AND ' + _mkr().non_memory_clause()) if kernel_posts else ''
     rows = conn.execute(
-        "SELECT content, type, created_at FROM posts WHERE substr(created_at,1,10)=? ORDER BY id DESC LIMIT 12",
+        "SELECT id, content, type, created_at FROM posts WHERE substr(created_at,1,10)=?" + posts_only
+        + " ORDER BY id DESC LIMIT 12",
         (date_str,)
     ).fetchall()
     conn.close()
+    if kernel_posts:
+        rows = _newest_first([dict(r) for r in rows] + [
+            i for i in _mkr().memory_items(kernel_posts, active_only=False, mode=_mkr().SEARCH)
+            if i['created_at'].startswith(date_str)])[:12]
     entries = []
     for r in rows:
         entries.append({
@@ -1877,6 +1951,8 @@ def put_user_profile():
 
 @app.route('/api/posts/<int:pid>', methods=['PATCH'])
 def patch_post(pid):
+    if _kernel_owned_post(pid):
+        return _kernel_read_only()
     data = request.get_json()
     conn = get_db()
     if 'tags' in data:
@@ -1901,6 +1977,8 @@ def recent_page():
 
 @app.route('/api/posts/<int:pid>', methods=['PUT'])
 def update_post(pid):
+    if _kernel_owned_post(pid):
+        return _kernel_read_only()
     data = request.get_json()
     conn = get_db()
     if 'content' in data:

@@ -1,10 +1,12 @@
 /** Memory Library cold-start diagnostics (DEV-only performance marks). */
 
+import type { MemoryEntryId } from '../types';
+
 export const MEMORY_SEARCH_DEBOUNCE_MS = 200;
 
 export type MemoryDetailCaches = {
-  content: Map<number, string>;
-  inflight: Map<number, Promise<string>>;
+  content: Map<MemoryEntryId, string>;
+  inflight: Map<MemoryEntryId, Promise<string>>;
 };
 
 /** True only when a search response still matches the active trimmed query and generation. */
@@ -22,8 +24,8 @@ export function canCommitSearchResults(
 export function canCommitDetailContent(
   genAtRequest: number,
   genNow: number,
-  idAtRequest: number,
-  idNow: number,
+  idAtRequest: MemoryEntryId,
+  idNow: MemoryEntryId,
 ): boolean {
   return genAtRequest === genNow && idAtRequest === idNow;
 }
@@ -35,8 +37,8 @@ export function createMemoryDetailCaches(): MemoryDetailCaches {
 /** Load detail body with MemoryScreen-scoped cache + in-flight dedupe. */
 export async function loadMemoryDetailContent(
   caches: MemoryDetailCaches,
-  id: number,
-  fetchContent: (entryId: number) => Promise<string>,
+  id: MemoryEntryId,
+  fetchContent: (entryId: MemoryEntryId) => Promise<string>,
 ): Promise<string> {
   const cached = caches.content.get(id);
   if (cached !== undefined) return cached;

@@ -337,11 +337,28 @@ def search_memory_posts(
     if search:
         where.append("content LIKE ?")
         params.append("%" + search + "%")
+    # With the Memory Kernel cutover on, memory types come from memory_kernel_read
+    # (Ombre-ranked, Kernel text, never touched); posts keep only the other types.
+    from tools.memory_kernel_switch import cutover_posts_db
+    kernel_posts = cutover_posts_db(conn)
+    if kernel_posts:
+        from tools import memory_kernel_read as mkr
+        where.append(mkr.non_memory_clause())
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(
         f"SELECT * FROM posts {clause} ORDER BY id DESC LIMIT ?",
         params + [limit_n],
     ).fetchall()
+    if kernel_posts:
+        if search:
+            memory = mkr.search(search, kernel_posts, active_only=False, limit=limit_n)
+        else:
+            memory = mkr.memory_items(kernel_posts, active_only=False, mode=mkr.SEARCH)[:limit_n]
+        posts = [dict(row) for row in rows]
+        if not search:  # no query: newest first across both, as before
+            return mkr.dedupe(sorted(posts + memory, key=lambda r: str(r.get("created_at") or ""),
+                                     reverse=True))[:limit_n]
+        return mkr.merge_search(memory, posts, limit_n)
     return [dict(row) for row in rows]
 
 # -- Diary --------------------------------------------------------------------

@@ -77,9 +77,13 @@ class FakeOmbreRuntime:
     def _view(self, bucket):
         if bucket is None:
             return None
-        meta = bucket["metadata"]
-        return {"id": bucket["id"], "content": bucket["content"], "metadata": copy.deepcopy(meta),
+        meta = copy.deepcopy(bucket["metadata"])
+        verdict = meta.pop("lifecycle_verdict", None)  # what the real worker's SurfacePolicyVM reports
+        view = {"id": bucket["id"], "content": bucket["content"], "metadata": meta,
                 "deleted": bool(meta.get("deleted_at"))}
+        if verdict is not None:
+            view["lifecycle"] = verdict
+        return view
 
     def get(self, bucket_id):
         self._check("get", bucket_id)

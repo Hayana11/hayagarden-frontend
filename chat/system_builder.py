@@ -24,6 +24,36 @@ from chat.context_contract import SharedContext
 from chat.relationship_context import build_relationship_context
 from tools.ombre_native_surface import OFFICIAL_PROMPT_PATH, UPSTREAM_SHA, UPSTREAM_VERSION
 
+
+# Memory types (FACT / MEMORY memo / long-term) come from the Memory Kernel once the
+# cutover switch memory.kernel_write is on; None means "switch off: read posts".
+# With the switch on a Kernel read error leaves the section empty, never posts.
+def _kernel_facts_and_long_term(conn):
+    from tools.memory_kernel_switch import cutover_posts_db
+    posts_db = cutover_posts_db(conn)
+    if posts_db is None:
+        return None, None
+    try:
+        from tools import memory_kernel_read as mkr
+        return mkr.facts(posts_db), mkr.long_term(posts_db)
+    except Exception:
+        logging.getLogger(__name__).exception('memory kernel read failed')
+        return [], []
+
+
+def _kernel_memos(conn):
+    from tools.memory_kernel_switch import cutover_posts_db
+    posts_db = cutover_posts_db(conn)
+    if posts_db is None:
+        return None
+    try:
+        from tools import memory_kernel_read as mkr
+        return mkr.recent_memos(posts_db)
+    except Exception:
+        logging.getLogger(__name__).exception('memory kernel read failed')
+        return []
+
+
 NL = chr(10)
 
 
@@ -213,13 +243,15 @@ def build_system(
     # ── BP2 · 相对稳定记忆（几小时~一天变一次，缓存断点2）───────
     bp2_parts = []
     conn = get_db()
-    facts = conn.execute(
-        "SELECT content FROM posts WHERE type='FACT' AND resolved=0 "
-        "ORDER BY importance DESC, id DESC LIMIT 15"
-    ).fetchall()
-    lt_mems = conn.execute(
-        "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
-    ).fetchall()
+    facts, lt_mems = _kernel_facts_and_long_term(conn)
+    if facts is None:
+        facts = conn.execute(
+            "SELECT content FROM posts WHERE type='FACT' AND resolved=0 "
+            "ORDER BY importance DESC, id DESC LIMIT 15"
+        ).fetchall()
+        lt_mems = conn.execute(
+            "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
+        ).fetchall()
     diaries = conn.execute(
         "SELECT content, created_at FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
     ).fetchall()
@@ -408,12 +440,14 @@ def build_system(
     # 7. memo层：跨端/跨窗口共同记忆（网页窗口每次对话后写入）
     try:
         _mc2 = get_db()
-        _memos = _mc2.execute(
-            """SELECT content FROM posts WHERE type='MEMORY' AND tags LIKE '%memo%'
-               AND resolved=0
-               AND created_at >= datetime('now','+8 hours','-24 hours')
-               ORDER BY id DESC LIMIT 4"""
-        ).fetchall()
+        _memos = _kernel_memos(_mc2)
+        if _memos is None:
+            _memos = _mc2.execute(
+                """SELECT content FROM posts WHERE type='MEMORY' AND tags LIKE '%memo%'
+                   AND resolved=0
+                   AND created_at >= datetime('now','+8 hours','-24 hours')
+                   ORDER BY id DESC LIMIT 4"""
+            ).fetchall()
         _mc2.close()
         if _memos and not any('网页窗口' in (p or '') for p in parts):
             _memo_lines = [m['content'] for m in reversed(_memos)]
@@ -825,13 +859,15 @@ def _cc_collect_cold_once(get_db_fn):
     }
     try:
         conn = get_db_fn()
-        facts = conn.execute(
-            "SELECT content FROM posts WHERE type='FACT' AND resolved=0 "
-            "ORDER BY importance DESC, id DESC LIMIT 15"
-        ).fetchall()
-        lt_mems = conn.execute(
-            "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
-        ).fetchall()
+        facts, lt_mems = _kernel_facts_and_long_term(conn)
+        if facts is None:
+            facts = conn.execute(
+                "SELECT content FROM posts WHERE type='FACT' AND resolved=0 "
+                "ORDER BY importance DESC, id DESC LIMIT 15"
+            ).fetchall()
+            lt_mems = conn.execute(
+                "SELECT content FROM posts WHERE layer='long-term' AND resolved=0 ORDER BY id DESC LIMIT 3"
+            ).fetchall()
         diaries = conn.execute(
             "SELECT content, created_at FROM posts WHERE type='DIARY' AND resolved=0 ORDER BY id DESC LIMIT 2"
         ).fetchall()
@@ -894,12 +930,14 @@ def _cc_collect_cold_once(get_db_fn):
     try:
         # 网页窗口 memo：冷启动一次注入，不每轮重抄
         mc = get_db_fn()
-        memos = mc.execute(
-            """SELECT content FROM posts WHERE type='MEMORY' AND tags LIKE '%memo%'
-               AND resolved=0
-               AND created_at >= datetime('now','+8 hours','-24 hours')
-               ORDER BY id DESC LIMIT 4"""
-        ).fetchall()
+        memos = _kernel_memos(mc)
+        if memos is None:
+            memos = mc.execute(
+                """SELECT content FROM posts WHERE type='MEMORY' AND tags LIKE '%memo%'
+                   AND resolved=0
+                   AND created_at >= datetime('now','+8 hours','-24 hours')
+                   ORDER BY id DESC LIMIT 4"""
+            ).fetchall()
         mc.close()
         if memos:
             memo_lines = [m['content'] for m in reversed(memos)]
