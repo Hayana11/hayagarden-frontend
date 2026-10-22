@@ -98,13 +98,13 @@ class _Flow(unittest.TestCase):
         rows = self.query("SELECT cache_info FROM chat_messages WHERE author='assistant' ORDER BY id")
         return json.loads(rows[-1][0] or "{}") if rows else {}
 
-    def real_surface(self, mode):
+    def real_surface(self, mode, *, pool=None, ombre=("greek",)):
         """The real decide() over a fake Kernel pool and a fake Ombre ranking."""
         return [
             mock.patch.object(ms, "load_config", return_value=ms.SurfaceConfig(mode=mode)),
             mock.patch("tools.memory_kernel_switch.cutover_enabled", return_value=True),
-            mock.patch.object(ms, "_pool", return_value=list(POOL)),
-            mock.patch("tools.ombre_adapter.search_bucket_ids", return_value=["greek"]),
+            mock.patch.object(ms, "_pool", return_value=list(POOL if pool is None else pool)),
+            mock.patch("tools.ombre_adapter.search_bucket_ids", return_value=list(ombre)),
         ]
 
 
@@ -131,6 +131,32 @@ class SingleEntryTests(_Flow):
         self.assertNotIn("<recalled-memory>", self.resident.sent[0])
         self.legacy.assert_not_called()
         self.assertFalse(any(e.get("t") == "memory_recall" for e in events))
+
+
+class SingleClueFlowTests(_Flow):
+    def test_single_unseen_clue_with_ombre_top3_passes_although_her_message_is_stored(self):
+        # The turn stores "渔粉到了" before deciding; it must not count as the clue's history.
+        fish = dict(GREEK, ref="kernel:fish", id="kernel:fish", bucket_id="fish",
+                    content="她第二回点了番茄玉米渔粉，不辣，加生菜。")
+        with mock.patch("tools.memory_kernel_read.touch_buckets"):
+            uid, events = self.turn("渔粉到了", extra=self.real_surface("on", pool=POOL + [fish], ombre=("fish",)))
+        self.assertEqual(self.query("SELECT content FROM chat_messages WHERE id=?", uid), [("渔粉到了",)])
+        self.assertIn("番茄玉米渔粉", self.resident.sent[0])
+        self.assertEqual(sum(1 for e in events if e.get("t") == "memory_recall"), 1)
+        self.assertEqual(self.query("SELECT ref, committed FROM memory_surface_log"), [("kernel:fish", 1)])
+
+
+class LogFailClosedFlowTests(_Flow):
+    def test_unlogged_decision_reaches_neither_prompt_ui_nor_cooldown(self):
+        broken_log = mock.patch.object(ms, "_log", side_effect=sqlite3.OperationalError("disk I/O error"))
+        with mock.patch("tools.memory_kernel_read.touch_buckets") as touch:
+            _uid, events = self.turn(QUERY, extra=self.real_surface("on") + [broken_log])
+        self.assertNotIn("<recalled-memory>", self.resident.sent[0])
+        self.assertFalse(any(e.get("t") == "memory_recall" for e in events))
+        self.assertTrue(any(e.get("t") == "done" and e.get("ok") for e in events))  # the turn itself is fine
+        self.assertNotIn("memory_recall", self.cache_info())
+        touch.assert_not_called()
+        self.assertEqual(self.query("SELECT ref FROM memory_surface_cooldown"), [])
 
 
 class ShadowTests(_Flow):

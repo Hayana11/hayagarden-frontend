@@ -197,17 +197,22 @@ def query_text(text: str) -> str:
 
 
 def chat_frequency(
-    conn: sqlite3.Connection, words: list[str], window: int = CHAT_DF_WINDOW,
+    conn: sqlite3.Connection, words: list[str], *, exclude_message_id: int,
+    window: int = CHAT_DF_WINDOW,
 ) -> tuple[dict[str, int], int]:
-    """In how many of the latest ``window`` chat messages each word appears, and how many there are."""
-    total = int(conn.execute(
-        "SELECT COUNT(*) FROM (SELECT id FROM chat_messages ORDER BY id DESC LIMIT ?)", (int(window),),
-    ).fetchone()[0] or 0)
+    """In how many of the latest ``window`` earlier chat messages each word appears, and how many there are.
+
+    The message being answered is already stored when Daily decides; counting it
+    would make every word she just said look seen at least once.
+    """
+    recent = "SELECT id, content FROM chat_messages WHERE id != ? ORDER BY id DESC LIMIT ?"
+    args = (int(exclude_message_id), int(window))
+    total = int(conn.execute(f"SELECT COUNT(*) FROM ({recent})", args).fetchone()[0] or 0)
     out = {}
     for word in words:
         out[word] = int(conn.execute(
-            "SELECT COUNT(*) FROM (SELECT content FROM chat_messages ORDER BY id DESC LIMIT ?) "
-            "WHERE instr(lower(content), ?) > 0", (int(window), word)).fetchone()[0] or 0)
+            f"SELECT COUNT(*) FROM ({recent}) WHERE instr(lower(content), ?) > 0", (*args, word),
+        ).fetchone()[0] or 0)
     return out, total
 
 
@@ -356,7 +361,11 @@ def decide(
         with conn:
             _log(conn, user_message_id, result, now, config.log_retention_days)
     except Exception:
-        _LOG.exception("memory surface log write failed")
+        # Every decision that reaches a turn must be on record (commit() finds it
+        # there); an unlogged memory never surfaces.
+        _LOG.exception("memory surface log write failed; nothing surfaces this turn")
+        result = SurfaceResult("failed", "log_write_failed", mode=config.mode,
+                               detail={"unlogged_decision": result.decision, "unlogged_ref": result.ref})
     finally:
         conn.close()
     return result
@@ -397,7 +406,7 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     words = keywords(query_text(user_text))
     if not words:
         return SurfaceResult("skipped", "no_keywords")
-    chat_df, chat_n = chat_frequency(conn, words[:12])
+    chat_df, chat_n = chat_frequency(conn, words[:12], exclude_message_id=user_message_id)
     clues = [w for w in words[:12] if chat_df.get(w, 0) <= config.chat_df_max]
     if not clues:
         return SurfaceResult("none", "no_clues", detail={"words": words[:12], "chat_df": chat_df})
@@ -426,37 +435,37 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     by_bucket = {str(i.get("bucket_id")): i["ref"] for i in pool if i.get("bucket_id")}
     ombre_ranked = [by_bucket[b] for b in (bucket_ids or []) if b in by_bucket]
     detail["ombre"] = "unavailable" if bucket_ids is None else len(ombre_ranked)
-    fused = rrf(ombre_ranked, kw_ranked)
+    # Only memories sharing at least one clue are candidates: Ombre orders them, it
+    # never nominates a memory her words do not touch.
+    fused = rrf([ref for ref in ombre_ranked if ref in evidence], kw_ranked)
     order = sorted(fused, key=lambda ref: (-fused[ref], ref))
-    cooling = _cooling(conn, turn, config.cooldown_turns)
-    context_norm = _norm(context_text)
+    if not order:
+        return SurfaceResult("none", "no_candidates", detail=detail)
 
-    trail = []
-    chosen = None
-    for ref in order:
-        score = round(evidence.get(ref, 0.0), 2)
-        hits = matched.get(ref, ())
-        corroborated = (
-            len(hits) == 1
-            and chat_df.get(hits[0], CHAT_DF_WINDOW) <= config.single_clue_df_max
-            and ref in ombre_ranked[:config.single_clue_ombre_rank]
-        )
-        if not corroborated and (score < config.evidence_min or len(hits) < config.min_words):
-            trail.append([ref, "below_evidence", score])
-            continue
-        if ref in cooling:
-            trail.append([ref, "cooldown", score])
-            continue
-        head = _norm(by_ref[ref].get("content"))[:24]
-        if head and head in context_norm:
-            trail.append([ref, "in_context", score])
-            continue
-        chosen = ref
-        trail.append([ref, "chosen", score])
-        break
-    detail["trail"] = trail[:6]
-    if chosen is None:
-        return SurfaceResult("none", "gate_closed" if order else "no_candidates", detail=detail)
+    # Only the best candidate is judged. If it is blocked, nothing surfaces: a weaker
+    # runner-up is never promoted in its place.
+    top = order[0]
+    score = round(evidence.get(top, 0.0), 2)
+    hits = matched.get(top, ())
+    corroborated = (
+        len(hits) == 1
+        and chat_df.get(hits[0], CHAT_DF_WINDOW) <= config.single_clue_df_max
+        and top in ombre_ranked[:config.single_clue_ombre_rank]
+    )
+    head = _norm(by_ref[top].get("content"))[:24]
+    if not corroborated and (score < config.evidence_min or len(hits) < config.min_words):
+        verdict = "below_evidence"
+    elif top in _cooling(conn, turn, config.cooldown_turns):
+        verdict = "cooldown"
+    elif head and head in _norm(context_text):
+        verdict = "in_context"
+    else:
+        verdict = "chosen"
+    detail["trail"] = [[top, verdict, score]]
+    detail["runner_up"] = order[1] if len(order) > 1 else None
+    if verdict != "chosen":
+        return SurfaceResult("none", "gate_closed", detail=detail)
+    chosen = top
     detail["matched"] = matched.get(chosen, [])
     detail["ombre_rank"] = ombre_ranked.index(chosen) + 1 if chosen in ombre_ranked else None
     item = by_ref[chosen]

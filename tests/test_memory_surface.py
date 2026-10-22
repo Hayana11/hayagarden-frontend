@@ -192,6 +192,75 @@ class DecisionTests(Base):
         self.assertEqual((result.decision, result.reason), ("skipped", "kernel_cutover_off"))
 
 
+class SingleClueTests(Base):
+    def test_her_current_message_does_not_count_against_its_own_clue(self):
+        # Daily stores the message before deciding; it must not make 渔粉 look "seen once".
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO chat_messages (id, author, content) VALUES (100, 'hayana', '渔粉到了')")
+        conn.commit()
+        conn.close()
+        self.ombre_result = ["fish"]
+        result = self.decide("渔粉到了", msg_id=100)
+        self.assertEqual(result.ref, "kernel:fish")
+        self.assertEqual(result.detail["chat_df"], {"渔粉": 0})
+
+    def test_an_earlier_message_still_counts(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO chat_messages (id, author, content) VALUES (99, 'hayana', '渔粉好吃')")
+        conn.execute("INSERT INTO chat_messages (id, author, content) VALUES (100, 'hayana', '渔粉到了')")
+        conn.commit()
+        conn.close()
+        self.ombre_result = ["fish"]
+        self.assertEqual(self.decide("渔粉到了", msg_id=100).decision, "none")
+
+
+class NoSubstituteTests(Base):
+    """Only the best candidate is judged; when it is blocked nothing surfaces."""
+
+    RUNNER_UP = item("kernel:greek2", "她说赫泰拉和阿斯帕西娅的故事还没讲完。")
+
+    def pool(self):
+        fillers = [item(f"kernel:filler{i}", f"第{i}条无关的日常记忆。") for i in range(4)]
+        return POOL + [self.RUNNER_UP] + fillers
+
+    def test_top_cooling_down_is_not_replaced_by_the_runner_up(self):
+        self.ombre_result = ["greek"]
+        self.decide("想起赫泰拉和阿斯帕西娅了", msg_id=100, pool=self.pool())
+        with mock.patch("tools.memory_kernel_read.touch_buckets"):
+            ms.commit(user_message_id=100, db_path=self.db, now=NOW)
+        self.ombre_result = ["greek", "greek2"]
+        result = self.decide("又想起赫泰拉和阿斯帕西娅了", msg_id=101, pool=self.pool())
+        self.assertEqual((result.decision, result.reason), ("none", "gate_closed"))
+        self.assertEqual(result.detail["trail"], [["kernel:greek", "cooldown", result.detail["trail"][0][2]]])
+        self.assertEqual(result.detail["runner_up"], "kernel:greek2")  # would have passed, stays out
+
+    def test_top_already_in_context_is_not_replaced_by_the_runner_up(self):
+        self.ombre_result = ["greek", "greek2"]
+        result = self.decide("想起赫泰拉和阿斯帕西娅了", pool=self.pool(),
+                             context="六月二十七日凌晨我们聊赫泰拉和阿斯帕西娅，她说想吃希腊菜。")
+        self.assertEqual(result.decision, "none")
+        self.assertEqual(result.detail["trail"][0][:2], ["kernel:greek", "in_context"])
+        self.assertEqual(result.detail["runner_up"], "kernel:greek2")
+        self.assertFalse(result.injected)
+
+    def test_a_memory_without_any_clue_is_never_a_candidate(self):
+        self.ombre_result = ["other1", "greek"]  # Ombre's top shares no word with her message
+        self.assertEqual(self.decide("想起赫泰拉和阿斯帕西娅了").ref, "kernel:greek")
+
+
+class LogFailClosedTests(Base):
+    def test_unlogged_decision_never_surfaces(self):
+        with mock.patch.object(ms, "_log", side_effect=sqlite3.OperationalError("disk I/O error")), \
+                self.assertLogs("hayagarden.memory_surface", level="ERROR"):
+            result = self.decide("想起赫泰拉和阿斯帕西娅了")
+        self.assertEqual((result.decision, result.reason), ("failed", "log_write_failed"))
+        self.assertFalse(result.injected)
+        self.assertEqual((result.block, result.items), ("", []))
+        self.assertEqual(result.detail["unlogged_ref"], "kernel:greek")
+        self.assertIsNone(ms.commit(user_message_id=100, db_path=self.db, now=NOW))
+        self.assertEqual(self.cooldown_refs(), [])
+
+
 class ModeTests(Base):
     def test_off_does_nothing_at_all(self):
         result = self.decide("想起赫泰拉和阿斯帕西娅了", config=ms.SurfaceConfig(mode="off"))

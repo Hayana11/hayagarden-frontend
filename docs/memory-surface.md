@@ -24,21 +24,24 @@ hot turns, with the legacy recall returning content.
    her words, and only the first 200 characters are read.
 2. **Clues**: jieba words minus pet names, fillers and English stopwords. A word
    is a *clue* only if it appears in at most `MEMORY_SURFACE_CHAT_DF_MAX` (20) of
-   the latest 4000 chat messages. "地方" or "一次" are everywhere and prove nothing.
+   the latest 4000 earlier chat messages. "地方" or "一次" are everywhere and prove
+   nothing. The message being answered is already stored when Daily decides, so it
+   is left out of the count.
 3. **Candidate pool**: Kernel MEMORY / MISS / FACT heads the AUTOMATIC
    lifecycle allows. Daily carries no FACT list, so FACTs compete like any
    memory. Anything this turn already carries (static system, handoff,
    carryover, today's history) is skipped by the in-context check. Memories from
    the last `MEMORY_SURFACE_RECENT_DAYS` (2) days are excluded: they are still
    in the day's context.
-4. **Two lists, merged with RRF**:
+4. **Two lists, merged with RRF**, over the memories that contain at least one
+   clue:
    - Ombre's ranking (`search_bucket_ids`);
    - keyword evidence, which is the summed rarity (IDF over their chat) of the
      clues found in each memory.
 
    Ombre's own score mixes importance and recency, so it orders candidates but
-   never opens the gate.
-5. **Gate**: a memory passes only with at least `MEMORY_SURFACE_MIN_WORDS` (2)
+   never nominates a memory her words do not touch, and never opens the gate.
+5. **Gate**, applied to the **top candidate only**: it passes only with at least `MEMORY_SURFACE_MIN_WORDS` (2)
    clues and evidence of at least `MEMORY_SURFACE_EVIDENCE_MIN` (6.0). A single
    clue passes only when it never appears in recent chat
    (`MEMORY_SURFACE_SINGLE_CLUE_DF_MAX` = 0) **and** Ombre ranks the same memory
@@ -48,7 +51,8 @@ hot turns, with the legacy recall returning content.
    - **already in context**: a memory whose opening already appears in today's
      history is skipped.
 
-   The first survivor wins, and nothing is promoted to replace a rejected one.
+   If the top candidate fails any of these, nothing surfaces: the runner-up is
+   never promoted in its place (it is recorded as `runner_up` in the log).
 6. **Deliver** (mode `on`): `<recalled-memory>` with the date and the original
    text (600 characters at most). It carries the instruction
    "相关就自然融入，不相关就忽略".
@@ -56,6 +60,14 @@ hot turns, with the legacy recall returning content.
    memory is persisted does the gateway call `memory_surface.commit`, which
    starts the cooldown, marks the log row `committed=1` and touches the bucket
    in Ombre. A failed, abandoned or retried turn costs nothing.
+8. **Fail closed**: if the route-log row cannot be written, nothing surfaces
+   that turn. Every memory that reaches a prompt is on record, which is what
+   `commit` relies on.
+
+**Open before `on`**: `commit` writes the cooldown and `committed=1`, then
+touches Ombre. A crash between the two loses that one touch: the text is safe,
+only one reinforcement is missed. Either add a retryable touch outbox, or accept
+an occasional missed touch.
 
 The same user message always gets the same decision: cold rebuilds, capacity
 swaps and retries replay the logged decision instead of drawing again. A
