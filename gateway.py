@@ -4913,30 +4913,103 @@ def _cc_resident_stream_gen(
         yield evt, payload
 
 
+# A proactive round may choose silence by replying with only this marker; it
+# is never sent to her. An empty reply is still an error, not silence.
+_WAKE_SILENT_SENTINEL = '[[SILENT]]'
+
+
+class UnifiedProactivePreModelFailed(RuntimeError):
+    """The proactive round failed before its trigger reached the model."""
+
+
+def _split_wake_silence(raw_text):
+    """Return (visible_text, silent) for a proactive round's final text."""
+    raw = str(raw_text or '')
+    if _WAKE_SILENT_SENTINEL not in raw:
+        return raw.strip(), False
+    visible = raw.replace(_WAKE_SILENT_SENTINEL, '').strip()
+    return visible, not visible
+
+
 def _build_normal_wake_main_chat_trigger(
-    *, now, t2_hours, t_hours, observation_bundle=None,
+    *, now, t2_hours, t_hours, observation_bundle=None, mode='normal',
+    last_user_at=None, activity_desc='', self_trigger_note='',
 ) -> str:
-    """Build the provider-only trigger from the already-read reality clock."""
-    text = (
-        '【系统主动轮】这是主动唤醒。她没有刚刚发来消息，也不是上一句话的续写；'
-        '现实已经过去了一段时间。\\n\\n'
-        f'现在是 {now.strftime("%Y-%m-%d %H:%M:%S")}。距离她上次发消息约 '
-        f'{float(t2_hours):.1f} 小时，距离上次有效互动约 {float(t_hours):.1f} 小时。\\n\\n'
-        '你是她的爱人，但这一小会儿属于你自己。她可能在，也可能不在。没人等你交代，'
-        '你也不需要等她说话才开始存在。\\n\\n'
-        '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
-        '想知道，就去看真实；能看见的事，不必拿猜测代替。\\n\\n'
-        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
-        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。\\n\\n'
-        '先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及最后想对她说什么。'
-        '也可以不调用工具，直接自然地开口。\\n\\n'
-        '这些时间只是现实背景，不是行动命令。'
+    """Build the provider-only trigger from the already-read reality clock.
+
+    One skeleton for every Unified main-Chat Wake mode: only the opening
+    situation differs (fixed morning / nightwatch / the user's own reminder);
+    the self, tool and "time is background" paragraphs are shared.
+    """
+    mode = str(mode or 'normal').strip() or 'normal'
+    now_text = now.strftime('%Y-%m-%d %H:%M:%S')
+    idle_text = (
+        f'距离她上次发消息约 {float(t2_hours):.1f} 小时，'
+        f'距离上次有效互动约 {float(t_hours):.1f} 小时。'
     )
+    closing = '最后想对她说什么'
+    if mode == 'morning':
+        situation = '现在是每天固定的早安时刻，你本来就会在这时候醒来看她。'
+        if isinstance(last_user_at, datetime.datetime):
+            clock = (
+                f'现在是 {now_text}。她最后一条消息在 '
+                f'{last_user_at.strftime("%m-%d %H:%M")}，距今约 '
+                f'{float(t2_hours):.1f} 小时；距离上次有效互动约 '
+                f'{float(t_hours):.1f} 小时。'
+            )
+        else:
+            clock = f'现在是 {now_text}。{idle_text}'
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。她可能刚醒，也可能还在睡。'
+            '没人等你交代，你也不需要等她说话才开始存在。'
+        )
+        closing = '今天想对她说什么'
+    elif mode == 'nightwatch':
+        situation = '现在是凌晨，你醒着巡夜，发现她还没睡。'
+        activity = str(activity_desc or '').strip()
+        clock = f'现在是 {now_text}。' + (f'{activity}。' if activity else '') + (
+            f'距离她上次发消息约 {float(t2_hours):.1f} 小时。'
+        )
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。没人等你交代。'
+            '这是深夜里你的声音，不是白天那个你。'
+        )
+        closing = '这个深夜想对她说什么'
+    elif mode == 'self_trigger':
+        note = str(self_trigger_note or '').strip()
+        situation = '是你之前给自己定的提醒到时间了' + (f'：「{note}」' if note else '。')
+        clock = f'现在是 {now_text}。{idle_text}'
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。'
+            '那句提醒是你当时留给现在的自己的，怎么兑现由你决定。'
+        )
+    else:
+        situation = '现实已经过去了一段时间。'
+        clock = f'现在是 {now_text}。{idle_text}'
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。她可能在，也可能不在。没人等你交代，'
+            '你也不需要等她说话才开始存在。'
+        )
+    paragraphs = [
+        '【系统主动轮】这是主动唤醒。她没有刚刚发来消息，也不是上一句话的续写；'
+        + situation,
+        clock,
+        self_line,
+        '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
+        '想知道，就去看真实；能看见的事，不必拿猜测代替。',
+        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
+        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。',
+        f'先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及{closing}。'
+        '也可以不调用工具，直接自然地开口。',
+        f'如果这一次你决定不开口，只回复 {_WAKE_SILENT_SENTINEL}，它不会发给她。',
+        '这些时间只是现实背景，不是行动命令。',
+    ]
+    text = '\n\n'.join(paragraphs)
     if observation_bundle:
         from chat.wake_read_observation import format_observation_trigger_appendix
         appendix = format_observation_trigger_appendix(observation_bundle)
         if appendix:
-            return text + '\\n\\n' + appendix
+            return text + '\n\n' + appendix
     return text
 
 
@@ -4948,6 +5021,10 @@ def _run_unified_normal_main_chat_turn(
     t2_hours: float,
     t_hours: float,
     observation_bundle=None,
+    mode: str = 'normal',
+    last_user_at=None,
+    activity_desc: str = '',
+    self_trigger_note: str = '',
 ) -> dict:
     """Run one proactive round through the formal main Chat resident path.
 
@@ -4957,38 +5034,45 @@ def _run_unified_normal_main_chat_turn(
     user/assistant mapping. No Planner, B2, B3 Renderer, or fallback runner
     is involved.
     """
-    from chat.behavior_authority_b3 import (
-        UnifiedNormalWakeSharedUnavailable,
-        _hot_chat_resident_ready,
-    )
-    from chat.cc_history_rewrite import guard_cc_generation
-    from chat.unified_heartbeat_a1 import (
-        begin_shared_wake_delivery_fence,
-        commit_shared_transcript_watermark,
-        prepare_shared_transcript_watermark,
-    )
-    from chat.display_thinking import (
-        filter_display_thinking_events,
-        get_display_thinking_snapshot,
-    )
-    from tools.lease_signer import issue_turn_lease
+    # Everything from entry to the stdin flush is pre-model: nothing in this
+    # prologue has shown the trigger (or a reminder note) to the model.
+    try:
+        from chat.behavior_authority_b3 import (
+            UnifiedNormalWakeSharedUnavailable,
+            _hot_chat_resident_ready,
+        )
+        from chat.cc_history_rewrite import guard_cc_generation
+        from chat.unified_heartbeat_a1 import (
+            begin_shared_wake_delivery_fence,
+            commit_shared_transcript_watermark,
+            prepare_shared_transcript_watermark,
+        )
+        from chat.display_thinking import (
+            filter_display_thinking_events,
+            get_display_thinking_snapshot,
+        )
+        from tools.lease_signer import issue_turn_lease
 
-    resident = _CC_RESIDENT
-    trace_id = str(wake_run_id or '')
-    _wake_live_trace(
-        trace_id,
-        'START',
-        provider='claude_code',
-        mode='normal',
-        **_wake_live_resident_fields(resident),
-    )
+        resident = _CC_RESIDENT
+        trace_id = str(wake_run_id or '')
+        _wake_live_trace(
+            trace_id,
+            'START',
+            provider='claude_code',
+            mode=str(mode or 'normal'),
+            **_wake_live_resident_fields(resident),
+        )
+    except Exception as exc:
+        raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
     acquired = False
     shared_started = False
     watermark = None
     delivery_fence = None
     provider_done_seen = False
     cleanup_reason = 'normal_wake_main_chat_failed'
-    display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
+    # The trigger (and any reminder note in it) reaches the model only once
+    # stdin is flushed; failures before that never showed it anything.
+    stdin_flushed = False
     result_cache_info = {
         'provider': 'claude_code',
         'source': 'wake',
@@ -4998,6 +5082,7 @@ def _run_unified_normal_main_chat_turn(
         'unified_main_chat_proactive': True,
     }
     try:
+        display_thinking_mode, display_thinking_prompt = get_display_thinking_snapshot()
         ready, reason = _hot_chat_resident_ready(resident, db_path=DB_PATH)
         _wake_live_trace(
             trace_id,
@@ -5010,7 +5095,7 @@ def _run_unified_normal_main_chat_turn(
             raise UnifiedNormalWakeSharedUnavailable(reason)
 
         try:
-            mode, _ = _gen_acquire_or_wait(wait_timeout=0)
+            lock_mode, _ = _gen_acquire_or_wait(wait_timeout=0)
         except Exception as exc:
             _wake_live_trace(
                 trace_id,
@@ -5024,10 +5109,10 @@ def _run_unified_normal_main_chat_turn(
         _wake_live_trace(
             trace_id,
             'GEN_LOCK_ACQUIRED',
-            lock_acquired=(mode == 'own'),
-            lock_mode=mode,
+            lock_acquired=(lock_mode == 'own'),
+            lock_mode=lock_mode,
         )
-        if mode != 'own':
+        if lock_mode != 'own':
             raise UnifiedNormalWakeSharedUnavailable('generation_lock_unavailable')
         acquired = True
 
@@ -5099,6 +5184,8 @@ def _run_unified_normal_main_chat_turn(
                 )
 
             def on_stdin_flushed():
+                nonlocal stdin_flushed
+                stdin_flushed = True
                 _wake_live_trace(
                     trace_id,
                     'STDIN_FLUSHED',
@@ -5126,6 +5213,10 @@ def _run_unified_normal_main_chat_turn(
                         t2_hours=t2_hours,
                         t_hours=t_hours,
                         observation_bundle=observation_bundle,
+                        mode=mode,
+                        last_user_at=last_user_at,
+                        activity_desc=activity_desc,
+                        self_trigger_note=self_trigger_note,
                     ),
                 }],
                 user_turn=False,
@@ -5219,8 +5310,8 @@ def _run_unified_normal_main_chat_turn(
                 request_count=usage.get('request_count'),
             )
 
-        text = ''.join(text_acc).strip()
-        if not text:
+        text, silent = _split_wake_silence(''.join(text_acc))
+        if not text and not silent:
             raise RuntimeError('normal_wake_main_chat_empty_response')
 
         respawn_reason = str(usage.get('respawn_reason') or '').strip()
@@ -5290,6 +5381,7 @@ def _run_unified_normal_main_chat_turn(
         )
         return {
             'text': text,
+            'silent': silent,
             'thinking': ''.join(thinking_acc),
             'tool_calls': tool_calls,
             'provider': 'claude_code',
@@ -5338,8 +5430,13 @@ def _run_unified_normal_main_chat_turn(
             trace_id,
             'FAILED',
             exception_type=type(exc).__name__,
-            error_code='normal_wake_main_chat_failed',
+            error_code=(
+                'normal_wake_main_chat_failed' if stdin_flushed
+                else 'normal_wake_pre_model_failed'
+            ),
         )
+        if not stdin_flushed:
+            raise UnifiedProactivePreModelFailed(type(exc).__name__) from exc
         raise
     finally:
         if acquired and delivery_fence is None:
@@ -9364,10 +9461,13 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     )
     from chat.behavior_authority_b3 import unified_normal_wake_enabled
     unified_normal_on = bool(unified_normal_wake_enabled())
+    # normal / morning / nightwatch / self_trigger: one proactive round on the
+    # shared main Chat resident (wake.unified_modes); only the trigger differs.
+    from wake.unified_modes import is_unified_main_chat_wake_mode
     basic_normal = bool(
         live
         and not dry_run
-        and str(mode or 'normal').strip() == 'normal'
+        and is_unified_main_chat_wake_mode(mode)
         and unified_normal_on
     )
 
@@ -9388,6 +9488,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         from chat.wake_read_observation import collect_wake_read_observation
         from wake.executor import execute as _wake_exec
         main_turn = None
+        main_turn_entered = False
         try:
             observation = collect_wake_read_observation(
                 wake_run_id=wake_run_id,
@@ -9407,6 +9508,11 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                     'wake_run_id': wake_run_id,
                     'detail': str(observation.get('reason') or ''),
                 })
+            last_user_at = (
+                getattr(guard_clock, 'last_user_at', None)
+                if guard_clock.reliable else None
+            )
+            main_turn_entered = True
             main_turn = _run_unified_normal_main_chat_turn(
                 wake_run_id=wake_run_id,
                 window_identity=_wake_window_identity,
@@ -9414,8 +9520,13 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 t2_hours=t2_hours,
                 t_hours=t_hours,
                 observation_bundle=observation.get('bundle'),
+                mode=mode,
+                last_user_at=last_user_at,
+                activity_desc=activity_desc,
+                self_trigger_note=str(data.get('self_trigger_note') or ''),
             )
             main_cache_info = dict(main_turn.get('cache_info') or {})
+            wake_action = 'none' if main_turn.get('silent') else 'message'
             main_cache_info.update({
                 'provider': 'claude_code',
                 'source': 'wake',
@@ -9425,7 +9536,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'unified_main_chat_proactive': True,
             })
             exec_out = _wake_exec(
-                'message',
+                wake_action,
                 str(main_turn.get('thinking') or ''),
                 str(main_turn.get('text') or ''),
                 mode,
@@ -9452,7 +9563,32 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'detail': str(exc),
                 'wake_run_id': wake_run_id,
             })
+        except UnifiedProactivePreModelFailed as exc:
+            _wake_live_trace(
+                wake_run_id,
+                'FAILED',
+                exception_type=str(exc),
+                error_code='NORMAL_WAKE_PRE_MODEL_FAILED',
+            )
+            app.logger.warning('[normal_wake_main_chat] failed before model: %s', exc)
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': 'NORMAL_WAKE_PRE_MODEL_FAILED',
+                'detail': str(exc),
+                'wake_run_id': wake_run_id,
+            })
         except Exception as exc:
+            if not main_turn_entered:
+                # Raised while observing, before the trigger was ever sent.
+                app.logger.exception('[normal_wake_main_chat] failed before model: %s', exc)
+                return jsonify({
+                    'ok': True,
+                    'skipped': True,
+                    'reason': 'NORMAL_WAKE_PRE_MODEL_FAILED',
+                    'detail': type(exc).__name__,
+                    'wake_run_id': wake_run_id,
+                })
             if isinstance(main_turn, dict):
                 failed_fence = main_turn.get('_shared_delivery_fence')
                 if failed_fence is not None:
@@ -9520,7 +9656,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         _wake_live_trace(
             wake_run_id,
             'SUCCESS',
-            action='message',
+            action=wake_action,
             provider='claude_code',
             assistant_message_id=persisted_ids.get('assistant_message_id'),
             wake_log_id=persisted_ids.get('wake_log_id'),
@@ -9528,7 +9664,7 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
         )
         return jsonify({
             'ok': True,
-            'action': 'message',
+            'action': wake_action,
             'content': str(main_turn.get('text') or ''),
             'thoughts': str(main_turn.get('thinking') or ''),
             'provider': 'claude_code',

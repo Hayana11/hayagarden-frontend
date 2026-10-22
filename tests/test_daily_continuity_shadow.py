@@ -83,7 +83,9 @@ def _history_rows() -> list[dict[str, object]]:
              source_kind='wake', cache_info=_wake_cache('wake-3')),
         _row(4, 'assistant', 'noncanonical wake', '2026-09-09 04:00:00',
              source_kind='wake', cache_info=json.dumps({
-                 'wake_mode': 'morning',
+                 # ritual stays retired, so it is never canonical history even
+                 # with every shared-resident marker set.
+                 'wake_mode': 'ritual',
                  'canonical_chat_history': True,
                  'unified_chat_resident': True,
                  'b3_authority': True,

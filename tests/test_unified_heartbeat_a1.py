@@ -986,6 +986,9 @@ class UnifiedHeartbeatA1Tests(unittest.TestCase):
         ])
         commit = mock.Mock()
         def main_stream(*args, **kwargs):
+            # Like the real resident: stdin is flushed before any stdout event.
+            kwargs['on_stdin_begin']()
+            kwargs['on_stdin_flushed']()
             yield from resident.events
 
         with (

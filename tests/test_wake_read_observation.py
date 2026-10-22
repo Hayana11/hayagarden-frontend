@@ -707,18 +707,28 @@ class WakeObservationPlannerAndContractTests(unittest.TestCase):
         self.assertIn('if saw_tool:', renderer)
 
     def test_disabled_wake_modes_dream_summarize_and_single_resident(self):
+        from wake import runners as wake_runners
         from wake.runners import (
             DISABLED_CC_WAKE_MODES,
+            UNIFIED_ONLY_WAKE_MODES,
             WAKE_MODE_DISABLED_REASON,
             wake_mode_disabled,
         )
 
+        self.assertEqual(set(DISABLED_CC_WAKE_MODES), {'ritual'})
         self.assertEqual(
-            set(DISABLED_CC_WAKE_MODES),
-            {'morning', 'nightwatch', 'ritual', 'self_trigger'},
+            set(UNIFIED_ONLY_WAKE_MODES),
+            {'morning', 'nightwatch', 'self_trigger'},
         )
-        for mode in DISABLED_CC_WAKE_MODES:
-            self.assertTrue(wake_mode_disabled(mode))
+        for route_on in (True, False):
+            with mock.patch.object(
+                wake_runners, '_unified_main_chat_route_on', return_value=route_on,
+            ):
+                self.assertTrue(wake_mode_disabled('ritual'))
+                self.assertFalse(wake_mode_disabled('normal'))
+                for mode in UNIFIED_ONLY_WAKE_MODES:
+                    # No legacy fallback: off route means fail closed.
+                    self.assertEqual(wake_mode_disabled(mode), not route_on)
         gateway = (ROOT / 'gateway.py').read_text(encoding='utf-8')
         obs_src = (ROOT / 'chat' / 'wake_read_observation.py').read_text(encoding='utf-8')
         self.assertIn("getattr(gateway_module, '_CC_RESIDENT', None)", obs_src)
