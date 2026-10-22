@@ -216,6 +216,9 @@ class LegacyIsolationTests(unittest.TestCase):
                 "gateway.py",
                 "app.py",
                 "tools/memory_library.py",
+                # Passive recall: reads through memory_kernel_read and skips
+                # itself unless memory.kernel_write is on.
+                "tools/memory_surface.py",
             }:
                 continue
             with self.subTest(path=path.relative_to(ROOT)):

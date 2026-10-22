@@ -49,6 +49,34 @@ export interface ChatUsage {
   lastRoundContext?: number;
   residentTurnCount?: number;
   respawnReason?: string;
+  /** Memories injected into this turn's prompt (persisted with the reply). */
+  memoryRecall?: MemoryRecall;
+}
+
+export interface MemoryRecallItem {
+  type: string;
+  date: string;
+  preview: string;
+}
+
+/** What automatic recall actually put into a turn's prompt. */
+export interface MemoryRecall {
+  count: number;
+  items: MemoryRecallItem[];
+}
+
+export function normalizeMemoryRecall(raw: unknown): MemoryRecall | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as { count?: unknown; items?: unknown };
+  const items = (Array.isArray(value.items) ? value.items : [])
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item) => ({
+      type: String(item.type ?? ''),
+      date: String(item.date ?? ''),
+      preview: String(item.preview ?? ''),
+    }));
+  const count = Number(value.count ?? items.length) || items.length;
+  return count > 0 ? { count, items } : null;
 }
 
 export interface ChatAttachment {
@@ -398,6 +426,7 @@ export function normalizeCacheInfo(raw: Record<string, unknown> | null | undefin
     lastRoundContext: Number(raw.last_round_context ?? raw.lastRoundContext ?? 0) || undefined,
     residentTurnCount: Number(raw.resident_turn_count ?? raw.residentTurnCount ?? 0) || undefined,
     respawnReason: String(raw.respawn_reason ?? raw.respawnReason ?? '').trim() || undefined,
+    memoryRecall: normalizeMemoryRecall(raw.memory_recall ?? raw.memoryRecall) ?? undefined,
   };
 }
 
@@ -413,6 +442,7 @@ export interface StreamHandlers {
   onNotice?: (s: string) => void;
   onTurnFinal?: (canonicalSha256: string) => void;
   onTurnReconcile?: (projection: CanonicalLiveProjection) => void;
+  onMemoryRecall?: (recall: MemoryRecall) => void;
 }
 
 export interface StreamResult {
@@ -557,6 +587,11 @@ export async function streamChatReply(
           case 'trace_summary':
             handlers.onTraceSummary?.(String(ev.d ?? ''));
             break;
+          case 'memory_recall': {
+            const recall = normalizeMemoryRecall(ev.d);
+            if (recall) handlers.onMemoryRecall?.(recall);
+            break;
+          }
           case 'usage':
             handlers.onUsage?.({
               inputTokens: ev.input_tokens || 0,

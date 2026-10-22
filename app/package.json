@@ -25,6 +25,7 @@
     "test:chat-terminal-contract": "vite-node scripts/test-chat-terminal-contract.mjs",
     "test:chat-markdown": "vite-node scripts/test-chat-markdown.mjs",
     "test:chat-live-timeline": "vite-node scripts/test-chat-live-timeline.mjs",
+    "test:chat-memory-recall": "vite-node scripts/test-chat-memory-recall.mjs",
     "test:chat-terminal-reconcile": "vite-node scripts/test-chat-terminal-reconcile.mjs",
     "test:chat-durable-order": "vite-node scripts/test-chat-durable-order.mjs",
     "test:legacy-transcript-window": "vite-node scripts/test-legacy-transcript-window.mjs",

@@ -220,6 +220,8 @@ class DailyTurnPlan:
     hidden_flow_plan: Any = field(default=None, repr=False)
     hidden_flow_observation: Any = field(default=None, repr=False)
     hidden_flow_static_system: str = field(default="", repr=False)
+    # 0-or-1 surfaced memory for this turn (tools.memory_surface); None = not decided.
+    memory_recall: Optional[dict[str, Any]] = field(default=None, repr=False)
     _resident_close_fn: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
@@ -430,6 +432,55 @@ def _peek_feedback_snapshot() -> tuple[tuple[str, ...], tuple[int, ...]]:
         return (), ()
 
 
+def _surface_memory_for_turn(
+    *,
+    user_message_id: int,
+    user_content: str,
+    assembly: dict[str, Any],
+    static_system: str,
+    db_path: Optional[str],
+) -> dict[str, Any]:
+    """The Daily path's only recall entry: at most one memory, decided once per message.
+
+    A failure costs the recall, never the turn. Nothing is consumed here: the
+    gateway commits the memory (cooldown, Ombre touch) after the reply persists.
+    """
+    try:
+        from tools import memory_surface
+        # Everything this turn already carries, so a memory that is in it is not repeated.
+        context_text = NL.join([
+            str(static_system or ''),
+            str(assembly.get('day_handoff') or ''),
+            _format_carryover_messages(assembly.get('carryover_messages') or []),
+            *(
+                str(item.get('content') or '')
+                for item in (assembly.get('current_day_history') or [])
+                if isinstance(item, dict)
+            ),
+        ])
+        result = memory_surface.decide(
+            user_message_id=int(user_message_id),
+            user_text=str(user_content or ''),
+            context_text=context_text,
+            db_path=db_path or dc.DEFAULT_DB_PATH,
+        )
+    except Exception:
+        logger.exception('memory surface failed; turn continues without recall')
+        return {'decision': 'failed', 'reason': 'error'}
+    recall = {'decision': result.decision, 'reason': result.reason, 'mode': result.mode, 'ref': result.ref}
+    if result.injected:
+        recall.update({'block': result.block, 'items': list(result.items)})
+    return recall
+
+
+def _apply_memory_recall(assembly: dict[str, Any], recall: Optional[dict[str, Any]]) -> None:
+    block = str((recall or {}).get('block') or '').strip()
+    if block:
+        assembly['memory_recall'] = block
+    else:
+        assembly.pop('memory_recall', None)
+
+
 def _format_task_feedback(lines: tuple[str, ...]) -> str:
     if not lines:
         return ''
@@ -504,6 +555,9 @@ def format_resident_turn_content(
     task_feedback = str(assembly.get('task_feedback') or '').strip()
     if task_feedback:
         prefix_parts.append(task_feedback)
+    memory_recall = str(assembly.get('memory_recall') or '').strip()
+    if memory_recall:
+        prefix_parts.append(memory_recall)
     history = assembly.get('current_day_history') or []
     context_plan_blocks = assembly.get('context_plan_representation_blocks') or []
     canonical_history = _format_context_plan_representation_blocks(
@@ -4759,9 +4813,23 @@ def _assemble_plan(
     task_feedback = _format_task_feedback(feedback_lines)
     if task_feedback:
         assembly['task_feedback'] = task_feedback
+    memory_recall = _surface_memory_for_turn(
+        user_message_id=int(user_message_id),
+        user_content=user_content,
+        assembly=assembly,
+        static_system=static_system,
+        db_path=db_path,
+    )
+    _apply_memory_recall(assembly, memory_recall)
+    manifest['auto_recall_injected'] = bool(assembly.get('memory_recall'))
+    manifest['memory_recall_mode'] = memory_recall.get('mode')
+    manifest['memory_recall_decision'] = memory_recall.get('decision')
+    manifest['memory_recall_reason'] = memory_recall.get('reason')
+    manifest['memory_recall_ref'] = memory_recall.get('ref')
     if context_plan_consumer:
         manifest['context_plan_runtime_overhead'] = (
-            ['task_feedback'] if task_feedback else []
+            (['task_feedback'] if task_feedback else [])
+            + (['memory_recall'] if assembly.get('memory_recall') else [])
         )
     daily_plan = DailyTurnPlan(
         request_id=req_id,
@@ -4781,6 +4849,7 @@ def _assemble_plan(
         manifest=manifest,
         feedback_lines=tuple(feedback_lines),
         feedback_ids=tuple(feedback_ids),
+        memory_recall=memory_recall,
         user_content=user_content,
         user_image_url=str(user_image_url or ''),
         user_attachments=tuple(dict(item) for item in (user_attachments or [])),
@@ -6079,6 +6148,8 @@ def _rebuild_daily_assembly_with_history_budget(
         assembly['task_feedback'] = task_feedback
     else:
         assembly.pop('task_feedback', None)
+    # Same for the surfaced memory: decided once per logical turn.
+    _apply_memory_recall(assembly, plan.memory_recall)
     return assembly
 
 

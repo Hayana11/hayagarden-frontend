@@ -1,4 +1,4 @@
-import { normalizeToolCall, type ChatToolCall } from './chat';
+import { normalizeToolCall, type ChatToolCall, type MemoryRecall } from './chat';
 import { lastItem } from './lastItem';
 
 export type LiveSegment =
@@ -25,10 +25,16 @@ export interface LiveState {
   nextSegmentId: number;
   lastEvent: LiveEvent;
   canonicalSha256?: string;
+  memoryRecall?: MemoryRecall;
 }
 
 export function createLiveState(): LiveState {
   return { segments: [], nextSegmentId: 0, lastEvent: 'connecting' };
+}
+
+/** Recall arrives before the first delta; it never becomes a segment or moves lastEvent. */
+export function setLiveMemoryRecall(state: LiveState, recall: MemoryRecall): LiveState {
+  return { ...state, memoryRecall: recall };
 }
 
 export function isTextCaretActive(state: LiveState): boolean {

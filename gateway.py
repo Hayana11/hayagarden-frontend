@@ -956,6 +956,9 @@ def _recall_memories(user_msg, limit=None):
                  + '\n---\n'.join(parts) + '\n</recalled-memory>\n\n')
         return block, items
     except Exception:
+        # Recall stays best-effort for the turn, but a failure must be visible:
+        # silently returning nothing hid a broken recall for hundreds of turns.
+        logging.getLogger('gateway').exception('memory recall failed; turn continues without recall')
         return '', []
 
 
@@ -4303,7 +4306,7 @@ def _cc_resident_stream_gen(
     turn_lease=None, reality_context='',
     jsonl_finality_profile='default', on_stdin_begin=None,
     on_stdin_flushed=None, on_provider_done=None,
-    diagnostic_wake_run_id=None,
+    diagnostic_wake_run_id=None, on_memory_recall=None,
 ):
     """常驻 CC：静态 system 只在 spawn 时贴墙；热轮只发差量。
 
@@ -4364,7 +4367,7 @@ def _cc_resident_stream_gen(
     last_content = messages[-1].get('content')
     last_text = last_content if isinstance(last_content, str) else ' '.join(
         b.get('text', '') for b in last_content if isinstance(b, dict))
-    recall_blk, _ = _recall_memories(last_text) if last_text else ('', [])
+    recall_blk, recall_items = _recall_memories(last_text) if last_text else ('', [])
 
     def _messages_with_display_instruction(source_messages):
         if not source_messages:
@@ -4679,6 +4682,14 @@ def _cc_resident_stream_gen(
             commit_meta['group_max_id'] = group_max_id
 
     content = _append_reality_context(content, reality_context)
+
+    # The recall block is now part of this turn's prompt (cold or hot); tell the
+    # caller exactly what surfaced so the UI shows what was really injected.
+    if on_memory_recall is not None and recall_text and recall_items:
+        try:
+            on_memory_recall(list(recall_items))
+        except Exception:
+            logging.getLogger('gateway').exception('memory recall notice failed')
 
     # Resident cursors advance only after stdin.flush() succeeds inside
     # ResidentSession.send_turn().  Failed sends therefore cannot suppress a
@@ -7094,6 +7105,10 @@ def _stream_cc_daily_soft_window(
             env=_cc_env,
             static_system=_full_system,
         )
+        # The surfaced memory is shown once provider output starts, i.e. once the
+        # prompt that carries it has really been sent.
+        _recall_pending = dict(getattr(_daily_plan, 'memory_recall', None) or {})
+        _recall_shown = None
         for evt, payload in filter_display_thinking_events(
             _daily_events,
             lambda: _resident_display_thinking_mode(_display_thinking_mode),
@@ -7102,6 +7117,9 @@ def _stream_cc_daily_soft_window(
             if heartbeat_sse is not None:
                 yield heartbeat_sse
                 continue
+            if _recall_pending.get('items') and _recall_shown is None:
+                _recall_shown = {'count': len(_recall_pending['items']), 'items': _recall_pending['items']}
+                yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': _recall_shown}, ensure_ascii=False) + SSE_END
             if evt == 'text':
                 text_acc.append(str(payload or ''))
                 display_segments.append_text(str(payload or ''))
@@ -7185,6 +7203,9 @@ def _stream_cc_daily_soft_window(
         text = canonical.content
         thinking = canonical.thinking
         cc_usage = dict(cc_usage or {})
+        if _recall_shown:
+            # Kept with the reply so history shows what surfaced after a reload.
+            cc_usage['memory_recall'] = _recall_shown
         cc_usage['canonical_sha256'] = canonical.projection_hash
         cc_usage['canonical_content_length'] = len(canonical.content)
         cc_usage['canonical_provider_round_count'] = len(canonical.provider_rounds)
@@ -7252,6 +7273,17 @@ def _stream_cc_daily_soft_window(
             }) + SSE_END
             return
 
+        if _recall_shown:
+            # The reply that carried the memory is persisted: only now has it surfaced
+            # (cooldown starts, Ombre is touched). Failed or abandoned turns never get here.
+            try:
+                from tools import memory_surface as _memory_surface
+                _memory_surface.commit(
+                    user_message_id=int(_daily_plan.user_message_id),
+                    db_path=getattr(_daily_plan, 'db_path', None) or DB_PATH,
+                )
+            except Exception:
+                logging.getLogger('gateway').exception('memory surface commit failed')
         try:
             manifest = _daily_rt.handle_provider_success(
                 _daily_plan,
@@ -7740,6 +7772,10 @@ def chat_stream():
                     cc_tool_calls = []
                     display_segments = DisplaySegmentAccumulator()
                     deferred_payload = None
+                    # Memories the resident actually got this turn; surfaced ahead of
+                    # the first streamed event so the UI shows them above thinking.
+                    _recalled = []
+                    _recall_shown = None
                     # Regression ordering anchor: for evt, payload in _cc_resident_stream_gen
                     # Persistence and one-shot consumption remain below this stream.
                     _resident_events = _cc_resident_stream_gen(
@@ -7752,11 +7788,15 @@ def chat_stream():
                         display_thinking_mode=_display_thinking_mode,
                         display_thinking_prompt=_display_thinking_prompt,
                         reality_context=request_reality_context,
+                        on_memory_recall=_recalled.append,
                     )
                     for evt, payload in filter_display_thinking_events(
                         _resident_events,
                         lambda: _resident_display_thinking_mode(_display_thinking_mode),
                     ):
+                        if _recalled:
+                            _recall_shown = {'count': len(_recalled[-1]), 'items': _recalled.pop()}
+                            yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': _recall_shown}, ensure_ascii=False) + SSE_END
                         if evt == 'text':
                             display_segments.append_text(str(payload or ''))
                             yield 'data: ' + json.dumps({'t': 'text', 'd': payload}) + SSE_END
@@ -7818,6 +7858,9 @@ def chat_stream():
                             text = _cc_save_markers(raw_text)
                     if _rewrite_id:
                         cc_usage = _merge_rewrite_cache_meta(cc_usage, _turn_data)
+                    if text and _recall_shown:
+                        # Kept with the message so history shows what surfaced after a reload.
+                        cc_usage = dict(cc_usage or {}, memory_recall=_recall_shown)
                     if text:
                         _cache_info_json = (
                             json.dumps(cc_usage, ensure_ascii=False)
