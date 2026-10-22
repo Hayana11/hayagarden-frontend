@@ -31,7 +31,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 _LOG = logging.getLogger("hayagarden.memory_surface")
 

@@ -7105,6 +7105,10 @@ def _stream_cc_daily_soft_window(
             env=_cc_env,
             static_system=_full_system,
         )
+        # The surfaced memory is shown once provider output starts, i.e. once the
+        # prompt that carries it has really been sent.
+        _recall_pending = dict(getattr(_daily_plan, 'memory_recall', None) or {})
+        _recall_shown = None
         for evt, payload in filter_display_thinking_events(
             _daily_events,
             lambda: _resident_display_thinking_mode(_display_thinking_mode),
@@ -7113,6 +7117,9 @@ def _stream_cc_daily_soft_window(
             if heartbeat_sse is not None:
                 yield heartbeat_sse
                 continue
+            if _recall_pending.get('items') and _recall_shown is None:
+                _recall_shown = {'count': len(_recall_pending['items']), 'items': _recall_pending['items']}
+                yield 'data: ' + json.dumps({'t': 'memory_recall', 'd': _recall_shown}, ensure_ascii=False) + SSE_END
             if evt == 'text':
                 text_acc.append(str(payload or ''))
                 display_segments.append_text(str(payload or ''))
@@ -7196,6 +7203,9 @@ def _stream_cc_daily_soft_window(
         text = canonical.content
         thinking = canonical.thinking
         cc_usage = dict(cc_usage or {})
+        if _recall_shown:
+            # Kept with the reply so history shows what surfaced after a reload.
+            cc_usage['memory_recall'] = _recall_shown
         cc_usage['canonical_sha256'] = canonical.projection_hash
         cc_usage['canonical_content_length'] = len(canonical.content)
         cc_usage['canonical_provider_round_count'] = len(canonical.provider_rounds)

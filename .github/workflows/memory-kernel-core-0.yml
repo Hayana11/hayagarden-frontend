@@ -10,6 +10,7 @@ on:
       - "tools/memory_kernel_store.py"
       - "tools/memory_kernel_switch.py"
       - "tools/memory_kernel_read.py"
+      - "tools/memory_surface.py"
       - "tools/memory_library.py"
       - "tools/product_handlers.py"
       - "tools/fact_extractor.py"
@@ -45,6 +46,7 @@ on:
       - "tests/test_memory_kernel_read.py"
       - "tests/test_memory_kernel_read_paths.py"
       - "tests/test_memory_read_routing_guard.py"
+      - "tests/test_memory_surface.py"
       - "docs/memory-kernel-core-0.md"
       - "docs/memory-interop-v0.1.md"
       - "docs/memory-interop-legacy-r1.md"
@@ -81,7 +83,7 @@ jobs:
           python -m ruff check
           tools/memory_kernel.py tools/memory_kernel_schema.py tools/memory_kernel_import.py
           tools/memory_kernel_projection.py tools/memory_kernel_store.py tools/memory_kernel_switch.py
-          tools/memory_kernel_read.py
+          tools/memory_kernel_read.py tools/memory_surface.py
           tools/ombre_projection_worker.py tools/memory_tool.py
           tools/memory_interop.py
           tools/memory_interop_legacy.py tools/memory_interop_legacy_shadow.py
@@ -94,6 +96,7 @@ jobs:
           tests/test_memory_interop_live_shadow.py tests/test_memory_runtime_bridge.py
           tests/test_cleaner_kernel_backfill.py tests/test_memory_kernel_read.py
           tests/test_memory_kernel_read_paths.py tests/test_memory_read_routing_guard.py
+          tests/test_memory_surface.py
       - name: Semantic, migration, and legacy isolation contracts
         run: >-
           python -m unittest
@@ -103,7 +106,8 @@ jobs:
           tests.test_ombre_projection_worker tests.test_memory_interop tests.test_memory_interop_legacy
           tests.test_memory_interop_live_shadow tests.test_memory_runtime_bridge
           tests.test_cleaner_kernel_backfill tests.test_memory_kernel_read
-          tests.test_memory_kernel_read_paths tests.test_memory_read_routing_guard -v
+          tests.test_memory_kernel_read_paths tests.test_memory_read_routing_guard
+          tests.test_memory_surface -v
       - name: Whitespace check
         run: git diff --check
 

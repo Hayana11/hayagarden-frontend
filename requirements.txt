@@ -4,6 +4,8 @@ Pillow>=10.4.0,<13
 cryptography>=42.0.0
 python-frontmatter>=1.1.0,<2
 websockets>=14
+# Chinese word segmentation: gateway recall and tools/memory_surface (VPS runs 0.42.1).
+jieba==0.42.1
 
 # HTTP/MCP sidecar client used by the isolated Ombre shadow adapter.
 mcp>=1.27,<2
