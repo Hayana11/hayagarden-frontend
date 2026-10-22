@@ -99,6 +99,24 @@ class ProactiveColdShadowTests(unittest.TestCase):
         self.assertEqual(cap_blocked['blockers'], ['daily_cap_reached'])
         self.assertEqual(cap_blocked['cold_starts_today_before'], 2)
 
+        rows = self._rows()
+        self.assertEqual(
+            sum(
+                1 for row in rows
+                if row.get('would_cold_start') is True
+                and row.get('counterfactual_consumed') is not True
+            ),
+            2,
+        )
+        self.assertEqual(
+            sum(
+                1 for row in rows
+                if row.get('counterfactual_consumed') is not True
+                for _blocker in row.get('blockers', [])
+            ),
+            1,
+        )
+
     def test_chat_day_delegates_to_canonical_helper(self):
         with mock.patch.object(
             __import__('chat.day_handoff', fromlist=['chat_day_for_timestamp']),
