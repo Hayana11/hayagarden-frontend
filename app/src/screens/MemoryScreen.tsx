@@ -1,11 +1,13 @@
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { BackHeader } from '../components/BackHeader';
 import { Card, ScreenLayout } from '../components/Card';
 import { DragScrollRow } from '../components/DragScrollRow';
 import { useMemoryEntryContent } from '../hooks/useMemoryEntryContent';
 import { useMemoryLibrary } from '../hooks/useMemoryLibrary';
 import { searchMemoryEntries } from '../lib/api';
+import { ROUTES } from '../navigation';
 import { dateKey, seeded } from '../lib/format';
 import {
   canCommitSearchResults,
@@ -1262,7 +1264,15 @@ export function MemoryScreen() {
     <ScreenLayout>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         <BackHeader title="记忆库" />
-        <span style={{ marginLeft: 'auto', fontFamily: "'Bodoni Moda',serif", fontSize: 12, letterSpacing: 2, color: 'var(--color-text-faint)' }}>{entries.length} memories</span>
+        <div className="hstack hstack-10" style={{ marginLeft: 'auto', flexShrink: 0 }}>
+        <span style={{ fontFamily: "'Bodoni Moda',serif", fontSize: 12, letterSpacing: 2, color: 'var(--color-text-faint)' }}>{entries.length} memories</span>
+        <Link
+          to={ROUTES.memoryReview}
+          style={{ flexShrink: 0, fontSize: 11, letterSpacing: 1, borderRadius: 999, padding: '4px 10px', color: '#9C3B4A', border: '1px solid rgba(183,110,121,0.35)', textDecoration: 'none' }}
+        >
+          复盘
+        </Link>
+        </div>
       </div>
 
       {/* search + active filters */}

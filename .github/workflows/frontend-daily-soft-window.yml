@@ -53,6 +53,7 @@ jobs:
           npm run test:file-choices-contract
           npm run test:chat-live-timeline
           npm run test:chat-memory-recall
+          npm run test:memory-review
           npm run test:chat-terminal-reconcile
           npm run test:chat-durable-order
           npm run test:chat-effort

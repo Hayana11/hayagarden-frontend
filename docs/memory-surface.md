@@ -58,16 +58,58 @@ hot turns, with the legacy recall returning content.
    "相关就自然融入，不相关就忽略".
 7. **Commit**: deciding consumes nothing. Only after the reply that carried the
    memory is persisted does the gateway call `memory_surface.commit`, which
-   starts the cooldown, marks the log row `committed=1` and touches the bucket
-   in Ombre. A failed, abandoned or retried turn costs nothing.
+   starts the cooldown, marks the log row `committed=1` and queues the Ombre
+   touch in the outbox, all in one transaction. A failed, abandoned or retried
+   turn costs nothing.
 8. **Fail closed**: if the route-log row cannot be written, nothing surfaces
    that turn. Every memory that reaches a prompt is on record, which is what
    `commit` relies on.
 
-**Open before `on`**: `commit` writes the cooldown and `committed=1`, then
-touches Ombre. A crash between the two loses that one touch: the text is safe,
-only one reinforcement is missed. Either add a retryable touch outbox, or accept
-an occasional missed touch.
+**Touch outbox** (`memory_surface_touch_outbox`). Committing and touching
+cannot share a transaction: Ombre is another process. So `commit` queues one
+outbox row per committed decision. A memory not projected into Ombre yet gets
+no row, because there is nothing to touch. The outbox is its own table:
+route-log pruning never removes a pending touch.
+
+`flush_touches` drains it. It runs on a background thread after every commit,
+and every five minutes from `memory-surface-touch.timer`
+(`python -m tools.memory_surface flush`), so a crash is recovered even if
+nothing surfaces for a long time.
+
+- **Claiming**: rows are claimed with a lease (`lease_owner`, `lease_until`)
+  in one SQLite statement. Concurrent flushers, in other threads or processes,
+  never send a row whose lease still holds.
+- **Sending**: every claimed row is its own `touch` request in a single
+  worker run, with its own result. A memory that surfaced twice is reinforced
+  twice, and a bad bucket fails only its own row.
+- **Per-row result**:
+  - success → `done`;
+  - a failed request → back to `pending` with `last_error`, and `failed`
+    (keeping `last_error`) after `MAX_TOUCH_ATTEMPTS` (3). Nothing stops
+    silently: `python -m tools.memory_surface outbox --status failed`
+    lists them.
+- **Ombre unavailable**: when the runtime is missing or unreachable, rows stay
+  `pending` and no attempt is spent. The error is kept in `last_error`.
+- **Pruning**: `done` rows are pruned after 30 days. `pending` and `failed`
+  rows are kept.
+
+**Timer verdict.** `python -m tools.memory_surface flush` prints the run and the
+outbox totals, and its exit code is what `systemctl status` shows.
+
+- It exits 0 only when nothing is owed, or everything sent this run landed.
+- It exits 1 in any of these cases:
+  - Ombre is unreachable (no attempt is spent);
+  - a row was retried or failed this run;
+  - any `failed` row is still waiting for a person, even if this run claimed
+    nothing;
+  - rows are pending with no Ombre runtime configured;
+  - the outbox or its database failed.
+
+Delivery is **at-least-once**. If the process dies after Ombre applied a touch
+but before the outbox recorded it, the lease expires (runtime timeout plus 2
+minutes) and the touch is sent again. At most one extra reinforcement is
+accepted. A lease that expires with no attempts left is marked `failed`
+(`lease_expired`).
 
 The same user message always gets the same decision: cold rebuilds, capacity
 swaps and retries replay the logged decision instead of drawing again. A
@@ -99,13 +141,76 @@ Every decision is a row in `memories.db`, including skips and failures:
   - `committed`: 1 once the reply carrying it was persisted (mode `on` only);
   - `reason`: for example `gate_passed`, `gate_closed`, `no_clues`, `too_short`, `kernel_cutover_off`, `error`;
   - `ref`: the chosen `kernel:<lineage>`;
-  - `detail_json`: words, clue frequencies, pool size, Ombre status, and the first gate steps with each candidate's verdict.
+  - `detail_json`:
+    - words, clue frequencies, pool size and Ombre status;
+    - the first gate step with the candidate's verdict;
+    - `frozen`: her words, the first candidate and the runner-up (date, type
+      and text), as the gate saw them when it decided.
 - `memory_surface_cooldown`: `ref` → the turn number it last surfaced (committed only).
 
 `tools.memory_surface.recent_log(db_path)` returns the newest rows. The Daily
 manifest also records `auto_recall_injected`, `memory_recall_mode`,
 `memory_recall_decision`, `memory_recall_reason` and `memory_recall_ref` for
 every turn.
+
+## Review console (`/dash/memory-review`)
+
+The owner labels decisions, so the gate can be tuned against real misses rather than guesses. It is
+reached from the "复盘" chip on the memory library header.
+
+- `GET /api/memory-surface/review?filter=&limit=&before=` returns decisions newest first, each with:
+  - her words;
+  - the clues and their chat frequency;
+  - the first candidate with its verdict and evidence;
+  - the runner-up;
+  - the label, if any.
+
+  The filters are `unlabeled`, `surfaced`, `blocked` (`gate_closed`), `labeled` and `all`.
+- **Snapshots**: message and memories come from the decision-time snapshot
+  (`frozen`), so a later edit to the chat or the memory does not rewrite what
+  the gate saw. Rows logged before snapshots existed (the first shadow day)
+  show current text and say so (`frozen: false`).
+- `POST /api/memory-surface/review/<log_id>/label` with `{label, note, expected_ref}` sets one label:
+  - `ok`: the decision was right;
+  - `missed`: a memory should have surfaced;
+  - `wrong`: what surfaced, or would have surfaced in shadow, should not have.
+
+  `clear` removes the label.
+- **Labels** live in `memory_surface_labels`, one per decision.
+  - The first label copies the decision-time snapshot, and later edits keep
+    that copy. `expected` is the memory the owner names, with its text at
+    labeling time.
+  - The list is the route log plus labeled decisions whose log row was
+    pruned (`log_pruned`). The error set stays listed, counted, editable and
+    clearable after the 30-day pruning.
+
+Both routes sit under `/api/*`, which the upstream proxy already protects.
+
+## Deploy steps for the outbox and labels
+
+1. Take a consistent SQLite backup and keep it at mode 0600:
+
+   ```
+   sqlite3 /opt/frontend/memories.db ".backup /var/lib/hayagarden/memories.db.bak-<stamp>"
+   chmod 600 /var/lib/hayagarden/memories.db.bak-<stamp>
+   ```
+2. Migrate explicitly. Do not leave it to the first chat turn:
+
+   ```
+   python3.11 -m tools.memory_surface migrate --db /opt/frontend/memories.db
+   ```
+
+   It creates `memory_surface_labels` and `memory_surface_touch_outbox`. The
+   route log's shape is unchanged. The command prints every table's columns
+   for checking.
+3. Install the timer:
+
+   ```
+   cp deploy/systemd/memory-surface-touch.{service,timer} /etc/systemd/system/
+   systemctl daemon-reload && systemctl enable --now memory-surface-touch.timer
+   ```
+
+   Then check one run with `systemctl status memory-surface-touch.service`.
 
 ## Rollout
 

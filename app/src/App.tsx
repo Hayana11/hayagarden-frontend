@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { AppFrame } from './components/AppFrame';
 import { DashScreen } from './screens/DashScreen';
 import { MemoryScreen } from './screens/MemoryScreen';
+import { MemoryReviewScreen } from './screens/MemoryReviewScreen';
 import { UsageScreen } from './screens/UsageScreen';
 import { ReadingScreen } from './screens/ReadingScreen';
 import { LedgerScreen } from './screens/LedgerScreen';
@@ -30,6 +31,7 @@ function AppRoutes() {
     <Routes>
       <Route path={ROUTES.dash} element={<DashScreen />} />
       <Route path={ROUTES.memory} element={<MemoryScreen />} />
+      <Route path={ROUTES.memoryReview} element={<MemoryReviewScreen />} />
       <Route path={ROUTES.usage} element={<UsageScreen />} />
       <Route path={ROUTES.reading} element={<ReadingScreen />} />
       <Route path={ROUTES.ledger} element={<LedgerScreen />} />

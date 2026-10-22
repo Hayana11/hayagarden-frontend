@@ -29,6 +29,7 @@ from tests.test_daily_runtime import (
     _sse_events_from_chunks,
     _tmp_db,
 )
+from tests.test_memory_surface import FakeRuntime, wait_touches
 from tools import memory_surface as ms
 
 BLOCK = "<recalled-memory>\n这是一条自动浮现的旧记忆（2026-06-27）。\n\n凌晨聊赫泰拉。\n</recalled-memory>"
@@ -71,6 +72,16 @@ class _Flow(unittest.TestCase):
         self.addCleanup(os.unlink, self.db)
         _init_chat_messages(self.db)
         self.resident = _ColdThenHotResident()
+        self.runtime = FakeRuntime()
+        patcher = mock.patch("tools.memory_kernel_projection.OmbreRuntime.from_env",
+                             side_effect=lambda *a, **k: self.runtime)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def touched(self):
+        """Touch batches sent to Ombre, once the commit's background touch has finished."""
+        wait_touches()
+        return self.runtime.calls
 
     def turn(self, text, *, extra=(), created_at="2026-07-27 10:00:00"):
         uid = _insert(self.db, "hayana", text, created_at)
@@ -111,10 +122,9 @@ class _Flow(unittest.TestCase):
 class SingleEntryTests(_Flow):
     def test_cold_and_hot_turns_carry_exactly_one_recall_from_one_entry(self):
         decide = mock.Mock(side_effect=lambda **_k: injected())
-        with mock.patch("tools.memory_kernel_read.touch_buckets"):
-            first, events1 = self.turn("想吃希腊菜了", extra=[mock.patch.object(ms, "decide", decide)])
-            second, events2 = self.turn("再说说赫泰拉", extra=[mock.patch.object(ms, "decide", decide)],
-                                        created_at="2026-07-27 10:05:00")
+        first, events1 = self.turn("想吃希腊菜了", extra=[mock.patch.object(ms, "decide", decide)])
+        second, events2 = self.turn("再说说赫泰拉", extra=[mock.patch.object(ms, "decide", decide)],
+                                    created_at="2026-07-27 10:05:00")
         self.assertEqual(self.resident.cold_flags[:2], [True, False])  # one cold turn, one hot turn
         self.assertEqual([c.kwargs["user_message_id"] for c in decide.call_args_list], [first, second])
         for sent in self.resident.sent[:2]:
@@ -138,8 +148,7 @@ class SingleClueFlowTests(_Flow):
         # The turn stores "渔粉到了" before deciding; it must not count as the clue's history.
         fish = dict(GREEK, ref="kernel:fish", id="kernel:fish", bucket_id="fish",
                     content="她第二回点了番茄玉米渔粉，不辣，加生菜。")
-        with mock.patch("tools.memory_kernel_read.touch_buckets"):
-            uid, events = self.turn("渔粉到了", extra=self.real_surface("on", pool=POOL + [fish], ombre=("fish",)))
+        uid, events = self.turn("渔粉到了", extra=self.real_surface("on", pool=POOL + [fish], ombre=("fish",)))
         self.assertEqual(self.query("SELECT content FROM chat_messages WHERE id=?", uid), [("渔粉到了",)])
         self.assertIn("番茄玉米渔粉", self.resident.sent[0])
         self.assertEqual(sum(1 for e in events if e.get("t") == "memory_recall"), 1)
@@ -149,26 +158,24 @@ class SingleClueFlowTests(_Flow):
 class LogFailClosedFlowTests(_Flow):
     def test_unlogged_decision_reaches_neither_prompt_ui_nor_cooldown(self):
         broken_log = mock.patch.object(ms, "_log", side_effect=sqlite3.OperationalError("disk I/O error"))
-        with mock.patch("tools.memory_kernel_read.touch_buckets") as touch:
-            _uid, events = self.turn(QUERY, extra=self.real_surface("on") + [broken_log])
+        _uid, events = self.turn(QUERY, extra=self.real_surface("on") + [broken_log])
         self.assertNotIn("<recalled-memory>", self.resident.sent[0])
         self.assertFalse(any(e.get("t") == "memory_recall" for e in events))
         self.assertTrue(any(e.get("t") == "done" and e.get("ok") for e in events))  # the turn itself is fine
         self.assertNotIn("memory_recall", self.cache_info())
-        touch.assert_not_called()
+        self.assertEqual(self.touched(), [])
         self.assertEqual(self.query("SELECT ref FROM memory_surface_cooldown"), [])
 
 
 class ShadowTests(_Flow):
     def test_shadow_logs_only(self):
-        with mock.patch("tools.memory_kernel_read.touch_buckets") as touch:
-            uid, events = self.turn(QUERY, extra=self.real_surface("shadow"))
+        uid, events = self.turn(QUERY, extra=self.real_surface("shadow"))
         sent = self.resident.sent[0]
         self.assertNotIn("<recalled-memory>", sent)
         self.assertNotIn("赫泰拉和阿斯帕西娅，她说想吃希腊菜", sent)
         self.assertFalse(any(e.get("t") == "memory_recall" for e in events))
         self.assertNotIn("memory_recall", self.cache_info())
-        touch.assert_not_called()
+        self.assertEqual(self.touched(), [])
         self.assertEqual(self.query("SELECT ref FROM memory_surface_cooldown"), [])
         self.assertEqual(
             self.query("SELECT user_message_id, mode, decision, ref, committed FROM memory_surface_log"),
@@ -181,12 +188,10 @@ class ShadowTests(_Flow):
         reality = {"time_anchor": "【现实时间锚】FIXED", "weather_anchor": "", "time_anchor_reason": "fixed",
                    "weather_anchor_reason": None, "weather_status": "fixed"}
         pinned = mock.patch("chat.reality_context.build_reality_context", return_value=reality)
-        with mock.patch("tools.memory_kernel_read.touch_buckets"):
-            self.turn(QUERY, extra=self.real_surface("off") + [pinned])
+        self.turn(QUERY, extra=self.real_surface("off") + [pinned])
         off_payload = self.resident.sent[0]
         self.setUp()  # fresh DB and resident, same message
-        with mock.patch("tools.memory_kernel_read.touch_buckets"):
-            self.turn(QUERY, extra=self.real_surface("shadow") + [pinned])
+        self.turn(QUERY, extra=self.real_surface("shadow") + [pinned])
         self.assertIn("【现实时间锚】FIXED", off_payload)
         self.assertEqual(self.resident.sent[0], off_payload)
 
@@ -194,25 +199,26 @@ class ShadowTests(_Flow):
 class CommitAfterPersistTests(_Flow):
     def test_failed_turn_consumes_nothing_and_its_retry_gets_the_same_memory(self):
         fail = mock.patch.object(dr, "persist_daily_assistant_for_plan", side_effect=RuntimeError("disk full"))
-        with mock.patch("tools.memory_kernel_read.touch_buckets") as touch:
-            uid, events = self.turn(QUERY, extra=self.real_surface("on") + [fail])
+        uid, events = self.turn(QUERY, extra=self.real_surface("on") + [fail])
         self.assertIn(BLOCK.split("\n")[0], self.resident.sent[0])  # it was offered...
         self.assertTrue(any(e.get("t") == "err" for e in events))
-        touch.assert_not_called()  # ...but never committed
+        self.assertEqual(self.touched(), [])  # ...but never committed
         self.assertEqual(self.query("SELECT ref FROM memory_surface_cooldown"), [])
         self.assertEqual(self.query("SELECT committed FROM memory_surface_log WHERE user_message_id=?", uid), [(0,)])
 
         # Retry of the same user message: same decision replayed, then committed once persisted.
         gateway, patches, *_rest = GatewaySuccessHandoffTests._success_stream_patches(None, self.db, uid, self.resident)
         dr.reset_bindings_for_tests()
-        with contextlib.ExitStack() as stack, mock.patch("tools.memory_kernel_read.touch_buckets") as touch:
+        with contextlib.ExitStack() as stack:
             for patch in list(patches) + self.real_surface("on"):
                 stack.enter_context(patch)
             resp = gateway.app.test_client().post("/chat/stream", json={"content": QUERY})
             events = _sse_events_from_chunks(list(resp.response))
         self.assertIn("赫泰拉和阿斯帕西娅，她说想吃希腊菜", self.resident.sent[-1])
         self.assertTrue(any(e.get("t") == "done" and e.get("ok") for e in events))
-        touch.assert_called_once_with(["greek"])
+        self.assertEqual(self.touched(), [[{"op": "touch", "bucket_ids": ["greek"]}]])
+        self.assertEqual(self.query("SELECT status FROM memory_surface_touch_outbox WHERE user_message_id=?", uid),
+                         [("done",)])
         self.assertEqual(self.query("SELECT ref FROM memory_surface_cooldown"), [("kernel:greek",)])
         self.assertEqual(self.query("SELECT committed FROM memory_surface_log WHERE user_message_id=?", uid), [(1,)])
         self.assertEqual(self.cache_info()["memory_recall"], {"count": 1, "items": [
@@ -228,10 +234,12 @@ class DailyRecallPrefixTests(unittest.TestCase):
 
     def prepare(self, text, decide):
         uid = _insert(self.db, "hayana", text, "2026-07-27 10:00:00")
+        runtime = FakeRuntime()
         with mock.patch.object(ms, "decide", side_effect=decide) as decide_mock, \
-             mock.patch("tools.memory_kernel_read.touch_buckets") as touch:
+             mock.patch("tools.memory_kernel_projection.OmbreRuntime.from_env", return_value=runtime):
             plan = _prepare_turn(self.db, uid)
-        touch.assert_not_called()  # deciding never touches
+        wait_touches()
+        self.assertEqual(runtime.calls, [])  # deciding never touches
         return plan, decide_mock
 
     def test_static_system_counts_as_context(self):
@@ -332,6 +340,47 @@ class GatewayRecallEventTests(unittest.TestCase):
         self.assertFalse(any(e.get("t") == "memory_recall" for e in events))
         self.assertNotIn("memory_recall", cache_info)
         commit.assert_not_called()
+
+
+class ReviewApiTests(unittest.TestCase):
+    """app.py routes for the review console, over a temp DB."""
+
+    def setUp(self):
+        import app
+        self.app = app
+        self.client = app.app.test_client()
+        path = _tmp_db()
+        self.addCleanup(os.unlink, path)
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)")
+        conn.execute("INSERT INTO chat_messages VALUES (5, 'hayana', '后来改过的话')")
+        ms.ensure_schema(conn)
+        conn.execute("INSERT INTO memory_surface_log (user_message_id, created_at, mode, decision, reason, "
+                     "detail_json) VALUES (5, '2026-10-22 08:00:00', 'shadow', 'none', 'no_clues', ?)",
+                     (json.dumps({"frozen": {"message": "今天好累"}}),))
+        conn.commit()
+        conn.close()
+        for patcher in (mock.patch.object(app, "DB_PATH", path),
+                        mock.patch.object(ms, "_live_previews", return_value={})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_list_and_label(self):
+        body = self.client.get("/api/memory-surface/review?filter=unlabeled&limit=10").get_json()
+        self.assertEqual([r["message"] for r in body["rows"]], ["今天好累"])
+        log_id = body["rows"][0]["id"]
+        resp = self.client.post(f"/api/memory-surface/review/{log_id}/label", json={"label": "ok", "note": "对"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["label"]["label"], "ok")
+        body = self.client.get("/api/memory-surface/review?filter=labeled").get_json()
+        self.assertEqual(body["counts"]["ok"], 1)
+
+    def test_bad_requests(self):
+        self.assertEqual(self.client.get("/api/memory-surface/review?filter=x").status_code, 400)
+        self.assertEqual(self.client.get("/api/memory-surface/review?before=abc").status_code, 400)
+        self.assertEqual(self.client.post("/api/memory-surface/review/1/label", json={"label": "x"}).status_code, 400)
+        self.assertEqual(self.client.post("/api/memory-surface/review/999/label", json={"label": "ok"}).status_code,
+                         404)
 
 
 if __name__ == "__main__":

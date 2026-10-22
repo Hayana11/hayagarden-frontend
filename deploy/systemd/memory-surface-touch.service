@@ -1,0 +1,17 @@
+[Unit]
+Description=Memory surfacing: send the Ombre touches the outbox still owes
+After=ombre-next.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/frontend
+# OMBRE_RUNTIME_PYTHON / _SRC / _ENV_FILE, the same runtime the gateway uses
+EnvironmentFile=/opt/frontend/.env
+ExecStart=/usr/bin/python3.11 -m tools.memory_surface flush --db /opt/frontend/memories.db
+TimeoutStartSec=4min
+NoNewPrivileges=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true

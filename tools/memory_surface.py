@@ -23,12 +23,13 @@ Modes (runtime_config ``MEMORY_SURFACE_MODE``):
   on      the chosen memory goes into the prompt and the UI.
 
 Deciding never consumes anything. Only ``commit`` -- called once the reply that
-carried the memory is persisted -- starts its cooldown and touches it in Ombre,
-so a failed, retried or abandoned turn costs nothing.
+carried the memory is persisted -- starts its cooldown and queues its Ombre
+touch in an outbox, so a failed, retried or abandoned turn costs nothing.
 
 Read-only on memories: the Kernel and Ombre are never written. The only side
-effects are the two surface tables in memories.db (the log pruned after
-``MEMORY_SURFACE_LOG_RETENTION_DAYS``) and an Ombre ``touch`` on commit.
+effects are the surface tables in memories.db (the log pruned after
+``MEMORY_SURFACE_LOG_RETENTION_DAYS``; cooldown, labels, touch outbox) and
+Ombre ``touch`` requests sent from the outbox.
 """
 from __future__ import annotations
 
@@ -37,6 +38,8 @@ import logging
 import math
 import re
 import sqlite3
+import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -134,7 +137,49 @@ _SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS idx_memory_surface_log_msg ON memory_surface_log(user_message_id)",
     "CREATE INDEX IF NOT EXISTS idx_memory_surface_log_created ON memory_surface_log(created_at)",
+    # The owner's verdict on one decision. It carries its own copy of the decision
+    # (taken from the decision-time snapshot), so the error set outlives route-log
+    # pruning and can still be listed, edited and cleared afterwards.
+    """CREATE TABLE IF NOT EXISTS memory_surface_labels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_id INTEGER NOT NULL UNIQUE,
+        user_message_id INTEGER NOT NULL,
+        decided_at TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        label TEXT NOT NULL,
+        expected_ref TEXT,
+        note TEXT,
+        snapshot_json TEXT NOT NULL,
+        labeled_at TEXT NOT NULL
+    )""",
+    # Touches owed to Ombre for committed memories. Independent of the route log:
+    # log pruning never drops a pending touch. Drained by flush_touches (after a
+    # commit, and by the memory-surface-touch timer).
+    """CREATE TABLE IF NOT EXISTS memory_surface_touch_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_id INTEGER NOT NULL UNIQUE,
+        user_message_id INTEGER NOT NULL,
+        ref TEXT NOT NULL,
+        bucket_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        lease_owner TEXT,
+        lease_until TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_memory_surface_outbox_status ON memory_surface_touch_outbox(status, id)",
 )
+LABELS = ("ok", "missed", "wrong")
+MAX_TOUCH_ATTEMPTS = 3
+TOUCH_BATCH = 50
+# done outbox rows are kept this long for inspection; pending and failed rows are never pruned.
+OUTBOX_DONE_RETENTION_DAYS = 30
+SNAPSHOT_CHARS = 300
+DEFAULT_DB_PATH = "/opt/frontend/memories.db"
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -305,6 +350,12 @@ def render(item: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
     return block, items
 
 
+def _freeze(item: dict[str, Any]) -> dict[str, str]:
+    return {"ref": str(item.get("ref") or ""), "date": str(item.get("created_at") or "")[:10],
+            "type": str(item.get("type") or "MEMORY"),
+            "text": str(item.get("content") or "")[:SNAPSHOT_CHARS]}
+
+
 def _log(conn: sqlite3.Connection, user_message_id: int, result: SurfaceResult, now: datetime,
          retention_days: int) -> None:
     conn.execute(
@@ -355,6 +406,9 @@ def decide(
         _LOG.exception("memory surface failed; turn continues without it")
         result = SurfaceResult("failed", "error", detail={"exc": type(exc).__name__})
     result.mode = config.mode
+    # Her words as decided on, frozen with the decision (a replay keeps the first copy).
+    frozen = result.detail.setdefault("frozen", {})
+    frozen.setdefault("message", str(user_text or "")[:SNAPSHOT_CHARS])
     if config.mode != "on":  # shadow: the decision is logged, nothing reaches the turn
         result.block, result.items = "", []
     try:
@@ -463,6 +517,9 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
         verdict = "chosen"
     detail["trail"] = [[top, verdict, score]]
     detail["runner_up"] = order[1] if len(order) > 1 else None
+    # What the gate saw, frozen now: later edits to the memory must not rewrite the review.
+    detail["frozen"] = {"top": _freeze(by_ref[top]),
+                        "runner_up": _freeze(by_ref[order[1]]) if len(order) > 1 else None}
     if verdict != "chosen":
         return SurfaceResult("none", "gate_closed", detail=detail)
     chosen = top
@@ -478,14 +535,19 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
                          detail=detail)
 
 
-def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime] = None) -> Optional[str]:
+def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime] = None,
+           wait: bool = False) -> Optional[str]:
     """The reply that carried this message's surfaced memory is persisted: it has surfaced.
 
-    Starts the memory's cooldown, marks the decision committed and touches the
-    bucket in Ombre. Only an ``on`` decision commits; a second call is a no-op.
-    Returns the committed ref, or None. Never raises.
+    In one transaction: starts the memory's cooldown, marks the decision
+    committed and queues its Ombre touch in the outbox. The touch itself is sent
+    off the request path (``flush_touches`` on a background thread, and the
+    memory-surface-touch timer for anything left behind). Only an ``on``
+    decision commits; a second call is a no-op. Returns the committed ref, or
+    None. Never raises.
     """
     now = now or _beijing_now()
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
     try:
         conn = sqlite3.connect(str(db_path), timeout=5)
         conn.row_factory = sqlite3.Row
@@ -493,7 +555,7 @@ def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime]
             with conn:
                 ensure_schema(conn)
                 row = conn.execute(
-                    "SELECT ref, detail_json FROM memory_surface_log WHERE user_message_id=? AND mode='on' "
+                    "SELECT id, ref, detail_json FROM memory_surface_log WHERE user_message_id=? AND mode='on' "
                     "AND decision='surfaced' AND committed=0 ORDER BY id ASC LIMIT 1",
                     (int(user_message_id),),
                 ).fetchone()
@@ -507,21 +569,364 @@ def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime]
                     "INSERT INTO memory_surface_cooldown (ref, surfaced_turn, surfaced_message_id, surfaced_at) "
                     "VALUES (?,?,?,?) ON CONFLICT(ref) DO UPDATE SET surfaced_turn=excluded.surfaced_turn, "
                     "surfaced_message_id=excluded.surfaced_message_id, surfaced_at=excluded.surfaced_at",
-                    (row["ref"], int(detail.get("turn") or 0), int(user_message_id),
-                     now.strftime("%Y-%m-%d %H:%M:%S")),
+                    (row["ref"], int(detail.get("turn") or 0), int(user_message_id), stamp),
                 )
+                # Nothing to reinforce for a memory Ombre does not hold yet.
+                if detail.get("projected") and detail.get("bucket_id"):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO memory_surface_touch_outbox (log_id, user_message_id, ref, "
+                        "bucket_id, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                        (row["id"], int(user_message_id), row["ref"], str(detail["bucket_id"]), stamp, stamp))
         finally:
             conn.close()
     except Exception:
         _LOG.exception("memory surface commit failed")
         return None
-    if detail.get("projected") and detail.get("bucket_id"):
-        try:
-            from tools import memory_kernel_read as mkr
-            mkr.touch_buckets([str(detail["bucket_id"])])
-        except Exception:
-            _LOG.exception("memory surface touch failed")
+    thread = threading.Thread(target=flush_touches, args=(db_path,), daemon=True, name="memory-surface-touch")
+    thread.start()
+    if wait:
+        thread.join()
     return row["ref"]
+
+
+def flush_touches(db_path: str | Path, *, runtime: Any = None, now: Optional[datetime] = None,
+                  limit: int = TOUCH_BATCH) -> dict[str, Any]:
+    """Send the touches the outbox owes Ombre. At-least-once; never raises.
+
+    Rows are claimed with a lease in one SQLite statement, so concurrent
+    flushes (gateway threads, other processes, the timer) never send the same
+    row twice while its lease holds. Each row is its own ``touch`` request in a
+    single worker run, with its own result: a memory that surfaced twice is
+    reinforced twice, and one bad bucket fails only its own row.
+
+    Per row: success -> ``done``; a failed request -> back to ``pending`` with
+    ``last_error``, and ``failed`` after ``MAX_TOUCH_ATTEMPTS``. If Ombre's
+    runtime is missing or unreachable, rows wait and no attempt is spent. A
+    crash after Ombre applied a touch but before the ledger recorded it lets
+    the lease expire and the touch is sent again: at most one extra
+    reinforcement, accepted.
+
+    Returns this run's counts plus ``runtime`` (``ok`` / ``missing`` /
+    ``unavailable``) and ``error`` (1 when the outbox itself failed).
+    """
+    from tools import memory_kernel_projection as projection
+    counts: dict[str, Any] = {"claimed": 0, "done": 0, "retry": 0, "failed": 0, "runtime": "ok", "error": 0}
+    now = now or _beijing_now()
+    try:
+        if runtime is None:
+            runtime = projection.OmbreRuntime.from_env()
+        if runtime is None:
+            counts["runtime"] = "missing"
+            return counts  # not configured: rows wait, attempts are not spent
+        lease_seconds = float(getattr(runtime, "timeout", 60.0) or 60.0) + 120.0
+        owner = uuid.uuid4().hex
+        stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                ensure_schema(conn)
+                # A lease that ran out with no attempts left is a final failure, never a silent stop.
+                conn.execute(
+                    "UPDATE memory_surface_touch_outbox SET status='failed', updated_at=?, "
+                    "last_error='lease_expired' "
+                    "WHERE status='sending' AND lease_until < ? AND attempts >= ?",
+                    (stamp, stamp, MAX_TOUCH_ATTEMPTS))
+                conn.execute(
+                    "UPDATE memory_surface_touch_outbox SET status='sending', attempts=attempts+1, "
+                    "lease_owner=?, lease_until=?, updated_at=? WHERE id IN ("
+                    "SELECT id FROM memory_surface_touch_outbox WHERE attempts < ? AND "
+                    "(status='pending' OR (status='sending' AND lease_until < ?)) ORDER BY id LIMIT ?)",
+                    (owner, (now + timedelta(seconds=lease_seconds)).strftime("%Y-%m-%d %H:%M:%S"), stamp,
+                     MAX_TOUCH_ATTEMPTS, stamp, int(limit)))
+                if OUTBOX_DONE_RETENTION_DAYS > 0:
+                    conn.execute(
+                        "DELETE FROM memory_surface_touch_outbox WHERE status='done' AND updated_at < ?",
+                        ((now - timedelta(days=OUTBOX_DONE_RETENTION_DAYS)).strftime("%Y-%m-%d %H:%M:%S"),))
+            rows = conn.execute(
+                "SELECT id, bucket_id, attempts FROM memory_surface_touch_outbox WHERE lease_owner=? "
+                "AND status='sending' ORDER BY id", (owner,)).fetchall()
+            counts["claimed"] = len(rows)
+            if not rows:
+                return counts
+            try:
+                results = runtime.batch([{"op": "touch", "bucket_ids": [r["bucket_id"]]} for r in rows])
+                if len(results) != len(rows):
+                    raise projection.RuntimeUnavailable("result_count_mismatch")
+            except Exception as exc:
+                # The runtime itself is down: not this row's fault, the attempt is given back.
+                error = f"runtime:{type(exc).__name__}:{str(exc)[:200]}"
+                _LOG.warning("memory surface touch: Ombre runtime unavailable (%s)", type(exc).__name__)
+                with conn:
+                    conn.executemany(
+                        "UPDATE memory_surface_touch_outbox SET status='pending', attempts=attempts-1, "
+                        "last_error=?, lease_owner=NULL, lease_until=NULL, updated_at=? "
+                        "WHERE id=? AND lease_owner=?", [(error, stamp, r["id"], owner) for r in rows])
+                counts["retry"], counts["runtime"] = len(rows), "unavailable"
+                return counts
+            with conn:
+                for row, result in zip(rows, results):
+                    if not isinstance(result, projection.RequestFailed):
+                        status, error = "done", None
+                    else:
+                        status = "failed" if row["attempts"] >= MAX_TOUCH_ATTEMPTS else "pending"
+                        error = f"request:{str(result)[:200]}"
+                    conn.execute(
+                        "UPDATE memory_surface_touch_outbox SET status=?, last_error=COALESCE(?, last_error), "
+                        "lease_owner=NULL, lease_until=NULL, updated_at=? WHERE id=? AND lease_owner=?",
+                        (status, error, stamp, row["id"], owner))
+                    counts["done" if status == "done" else "failed" if status == "failed" else "retry"] += 1
+            return counts
+        finally:
+            conn.close()
+    except Exception:
+        _LOG.exception("memory surface touch outbox failed")
+        counts["error"] = 1
+        return counts
+
+
+def outbox_health(db_path: str | Path) -> dict[str, int]:
+    """How many outbox rows sit in each status (all zero before the table exists)."""
+    health = {"pending": 0, "sending": 0, "done": 0, "failed": 0}
+    conn = _ro_conn(db_path)
+    try:
+        if _has_table(conn, "memory_surface_touch_outbox"):
+            for status, n in conn.execute(
+                    "SELECT status, COUNT(*) FROM memory_surface_touch_outbox GROUP BY status"):
+                health[status] = n
+        return health
+    finally:
+        conn.close()
+
+
+def flush_exit_code(counts: dict[str, Any], health: Optional[dict[str, int]]) -> int:
+    """0 only when nothing is owed or everything this run sent landed.
+
+    Non-zero (so the timer shows red, not a false green) when the outbox or its
+    database failed, Ombre could not be reached, a row was retried or failed
+    this run, any ``failed`` row is waiting for a person, or rows are pending
+    with no Ombre runtime configured.
+    """
+    if health is None or counts.get("error"):
+        return 1
+    if counts.get("retry") or counts.get("failed") or health.get("failed"):
+        return 1
+    if counts.get("runtime") != "ok" and (health.get("pending") or health.get("sending")):
+        return 1
+    return 0
+
+
+def outbox_rows(db_path: str | Path, *, status: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
+    """Outbox rows newest first, for inspection (``failed`` rows carry their last error)."""
+    conn = _ro_conn(db_path)
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_surface_touch_outbox'").fetchone():
+            return []
+        where, args = ("WHERE status=?", (status,)) if status else ("", ())
+        return [dict(r) for r in conn.execute(
+            f"SELECT * FROM memory_surface_touch_outbox {where} ORDER BY id DESC LIMIT ?", (*args, int(limit)))]
+    finally:
+        conn.close()
+
+
+REVIEW_FILTERS = ("all", "unlabeled", "labeled", "surfaced", "blocked")
+
+
+def _ro_conn(db_path: str | Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+
+
+def _live_previews(db_path: Path, refs: set[str], pool_loader=None) -> dict[str, dict[str, str]]:
+    """Current text of memories (retired ones included). Only for rows logged before
+    decisions were snapshotted, and for the ``expected`` memory the owner names."""
+    if not refs:
+        return {}
+    if pool_loader is not None:
+        items = pool_loader(db_path)
+    else:
+        from tools import memory_kernel_read as mkr
+        items = mkr.memory_items(db_path, mode=mkr.EVERY_STORED)
+    return {i["ref"]: _freeze(i) for i in items if i.get("ref") in refs}
+
+
+def _decision_record(conn: sqlite3.Connection, row: sqlite3.Row, db_path: Path, pool_loader) -> dict[str, Any]:
+    """One decision as the review console shows it, from the decision-time snapshot.
+
+    Rows logged before snapshots existed fall back to current text and say so
+    (``frozen: False``)."""
+    detail = json.loads(row["detail_json"] or "{}")
+    trail = detail.get("trail") or []
+    top = trail[0] if trail else None
+    frozen = detail.get("frozen")
+    if frozen:
+        message = str(frozen.get("message") or "")
+        top_memory, runner_up = frozen.get("top"), frozen.get("runner_up")
+    else:
+        hit = conn.execute("SELECT content FROM chat_messages WHERE id=?", (row["user_message_id"],)).fetchone() \
+            if _has_table(conn, "chat_messages") else None
+        message = str(hit[0] if hit else "")[:SNAPSHOT_CHARS]
+        top_ref = row["ref"] or (top[0] if top else None)
+        live = _live_previews(db_path, {x for x in (top_ref, detail.get("runner_up")) if x}, pool_loader)
+        top_memory = live.get(top_ref) if top_ref else None
+        runner_up = live.get(detail.get("runner_up")) if detail.get("runner_up") else None
+    return {
+        "id": row["id"],
+        "user_message_id": row["user_message_id"],
+        "created_at": row["created_at"],
+        "mode": row["mode"],
+        "decision": row["decision"],
+        "reason": row["reason"],
+        "verdict": top[1] if top else None,
+        "evidence": top[2] if top else None,
+        "committed": bool(row["committed"]),
+        "message": message,
+        "clues": list(detail.get("words") or []),
+        "chat_df": dict(detail.get("chat_df") or {}),
+        "top": top_memory,
+        "runner_up": runner_up,
+        "frozen": bool(frozen),
+    }
+
+
+def _labeled_record(label: sqlite3.Row, log_present: bool) -> dict[str, Any]:
+    record = json.loads(label["snapshot_json"])
+    record["label"] = {"label": label["label"], "note": label["note"] or "",
+                       "expected_ref": label["expected_ref"], "labeled_at": label["labeled_at"]}
+    record["log_pruned"] = not log_present
+    return record
+
+
+def review_rows(db_path: str | Path, *, limit: int = 50, before_id: Optional[int] = None,
+                only: str = "all", pool_loader=None) -> dict[str, Any]:
+    """Decisions newest first: the route log plus labeled decisions whose log row is gone.
+
+    A labeled decision is shown from its label's own snapshot, so the error set
+    stays complete (listed, counted, editable) after route-log pruning.
+    """
+    if only not in REVIEW_FILTERS:
+        raise ValueError(f"unknown filter {only!r}")
+    limit = max(1, min(int(limit), 200))
+    empty = {"rows": [], "counts": {"total": 0, "labeled": 0, **{k: 0 for k in LABELS}}, "next_before": None}
+    conn = _ro_conn(db_path)
+    try:
+        has_log, has_labels = _has_table(conn, "memory_surface_log"), _has_table(conn, "memory_surface_labels")
+        parts = []
+        if has_log:
+            parts.append("SELECT id, decision, reason, 0 AS labeled FROM memory_surface_log")
+        if has_labels:
+            parts.append("SELECT log_id AS id, decision, reason, 1 AS labeled FROM memory_surface_labels")
+        if not parts:
+            return empty
+        union = " UNION ALL ".join(parts)
+        where, args = [], []
+        if before_id is not None:
+            where.append("id < ?")
+            args.append(int(before_id))
+        if only == "surfaced":
+            where.append("decision='surfaced'")
+        elif only == "blocked":
+            where.append("decision='none' AND reason='gate_closed'")
+        having = {"labeled": "HAVING MAX(labeled)=1", "unlabeled": "HAVING MAX(labeled)=0"}.get(only, "")
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        ids = [r[0] for r in conn.execute(
+            f"SELECT id FROM ({union}) {clause} GROUP BY id {having} ORDER BY id DESC LIMIT ?", (*args, limit))]
+        total = conn.execute(f"SELECT COUNT(DISTINCT id) FROM ({union})").fetchone()[0]
+        counts = {"total": total, **{k: 0 for k in LABELS}}
+        if has_labels:
+            for label, n in conn.execute("SELECT label, COUNT(*) FROM memory_surface_labels GROUP BY label"):
+                if label in counts:
+                    counts[label] = n
+        counts["labeled"] = sum(counts[k] for k in LABELS)
+        marks = ",".join("?" for _ in ids)
+        logs = {r["id"]: r for r in conn.execute(
+            f"SELECT * FROM memory_surface_log WHERE id IN ({marks})", ids)} if has_log and ids else {}
+        labels = {r["log_id"]: r for r in conn.execute(
+            f"SELECT * FROM memory_surface_labels WHERE log_id IN ({marks})", ids)} if has_labels and ids else {}
+        rows = []
+        for i in ids:
+            if i in labels:
+                rows.append(_labeled_record(labels[i], i in logs))
+            else:
+                record = _decision_record(conn, logs[i], Path(db_path), pool_loader)
+                record.update(label=None, log_pruned=False)
+                rows.append(record)
+        return {"rows": rows, "counts": counts, "next_before": ids[-1] if len(ids) == limit else None}
+    finally:
+        conn.close()
+
+
+def set_label(db_path: str | Path, *, log_id: int, label: str, note: str = "",
+              expected_ref: Optional[str] = None, now: Optional[datetime] = None,
+              pool_loader=None) -> Optional[dict[str, Any]]:
+    """Record the owner's verdict on one decision (``clear`` removes it).
+
+    ``ok``: the decision was right. ``missed``: a memory should have surfaced
+    (optionally which, ``expected_ref``). ``wrong``: what surfaced, or would
+    have in shadow, should not have. The first label copies the decision-time
+    snapshot from the route log; later edits keep that copy, so a label also
+    works after the log row is pruned. Returns the labeled review row,
+    ``{"id", "removed": True}`` when clearing removed the decision's last trace,
+    or None when the decision is unknown.
+    """
+    if label not in LABELS + ("clear",):
+        raise ValueError(f"unknown label {label!r}")
+    now = now or _beijing_now()
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        with conn:
+            ensure_schema(conn)
+            existing = conn.execute("SELECT * FROM memory_surface_labels WHERE log_id=?", (int(log_id),)).fetchone()
+            row = conn.execute("SELECT * FROM memory_surface_log WHERE id=?", (int(log_id),)).fetchone()
+            if existing is None and row is None:
+                return None
+            if label == "clear":
+                conn.execute("DELETE FROM memory_surface_labels WHERE log_id=?", (int(log_id),))
+            else:
+                if existing is not None:
+                    snapshot = json.loads(existing["snapshot_json"])
+                else:
+                    snapshot = _decision_record(conn, row, Path(db_path), pool_loader)
+                snapshot.pop("expected", None)
+                if expected_ref:
+                    # The memory she says should have come: her statement now, so its current text.
+                    snapshot["expected"] = _live_previews(Path(db_path), {expected_ref}, pool_loader).get(
+                        expected_ref)
+                conn.execute(
+                    "INSERT INTO memory_surface_labels (log_id, user_message_id, decided_at, mode, decision, "
+                    "reason, label, expected_ref, note, snapshot_json, labeled_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(log_id) DO UPDATE SET label=excluded.label, expected_ref=excluded.expected_ref, "
+                    "note=excluded.note, snapshot_json=excluded.snapshot_json, labeled_at=excluded.labeled_at",
+                    (int(log_id), int(snapshot["user_message_id"]), snapshot["created_at"], snapshot["mode"],
+                     snapshot["decision"], snapshot["reason"], label, expected_ref or None,
+                     str(note or "")[:500], json.dumps(snapshot, ensure_ascii=False, sort_keys=True), stamp),
+                )
+    finally:
+        conn.close()
+    page = review_rows(db_path, before_id=int(log_id) + 1, limit=1, pool_loader=pool_loader)
+    rows = [r for r in page["rows"] if r["id"] == int(log_id)]
+    # A cleared label whose log row is already pruned leaves nothing to show.
+    return rows[0] if rows else {"id": int(log_id), "removed": True}
+
+
+def migrate(db_path: str | Path) -> dict[str, Any]:
+    """Create the surface tables explicitly (deploy step), then report what exists."""
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        with conn:
+            ensure_schema(conn)
+        tables = ("memory_surface_log", "memory_surface_cooldown", "memory_surface_labels",
+                  "memory_surface_touch_outbox")
+        return {t: [r[1] for r in conn.execute(f"PRAGMA table_info({t})")] for t in tables}
+    finally:
+        conn.close()
 
 
 def recent_log(db_path: str | Path, limit: int = 20) -> list[dict[str, Any]]:
@@ -533,3 +938,37 @@ def recent_log(db_path: str | Path, limit: int = 20) -> list[dict[str, Any]]:
             "SELECT * FROM memory_surface_log ORDER BY id DESC LIMIT ?", (int(limit),))]
     finally:
         conn.close()
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """``python -m tools.memory_surface migrate|flush|outbox [--db PATH]``.
+
+    ``flush`` exits non-zero when anything is still owed or broken (see
+    ``flush_exit_code``), so ``systemctl status`` of the touch timer is honest."""
+    import argparse
+    parser = argparse.ArgumentParser(prog="python -m tools.memory_surface")
+    parser.add_argument("command", choices=("migrate", "flush", "outbox"))
+    parser.add_argument("--db", default=DEFAULT_DB_PATH)
+    parser.add_argument("--status", default=None, help="outbox: only rows with this status")
+    args = parser.parse_args(argv)
+    if args.command == "migrate":
+        out: Any = migrate(args.db)
+    elif args.command == "flush":
+        counts = flush_touches(args.db)
+        try:
+            health: Optional[dict[str, int]] = outbox_health(args.db)
+        except Exception:
+            _LOG.exception("memory surface outbox health check failed")
+            health = None
+        code = flush_exit_code(counts, health)
+        print(json.dumps({"run": counts, "outbox": health, "exit": code}, ensure_ascii=False, indent=1))
+        return code
+    else:
+        out = outbox_rows(args.db, status=args.status)
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    raise SystemExit(main())
