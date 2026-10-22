@@ -181,6 +181,43 @@ class WorkerTests(FakeOmbreSource):
         self.assertIn("touch_many", results[0])
         self.assertIsNone(results[1])
 
+    def test_lifecycle_verdict_comes_from_ombres_own_surface_policy(self):
+        policy = self.src / "ombrebrain" / "policy"
+        policy.mkdir(parents=True)
+        (self.src / "ombrebrain" / "__init__.py").write_text("", encoding="utf-8")
+        (policy / "__init__.py").write_text("", encoding="utf-8")
+        (policy / "surfacing.py").write_text(textwrap.dedent('''
+            class _Decision:
+                def __init__(self, allowed, reasons):
+                    self.allowed, self.reasons = allowed, tuple(reasons)
+
+            class SurfacePolicyVM:
+                @classmethod
+                def default(cls):
+                    return cls()
+
+                def evaluate_bucket(self, bucket, mode):
+                    assert mode == "automatic"
+                    meta = bucket.get("metadata") or {}
+                    reasons = [k for k in ("dont_surface", "digested") if meta.get(k) and not meta.get("pinned")]
+                    return _Decision(not reasons, reasons)
+        '''), encoding="utf-8")
+        self.runtime.create_if_absent("abc", {"content": "她今天买了鹦鹉。", "pinned": True})
+        self.runtime.create_if_absent("def", {"content": "旧的账单。"})
+        for bucket_id in ("abc", "def"):
+            path = self.store / f"{bucket_id}.json"
+            data = json.loads(path.read_text())
+            data["metadata"]["digested"] = True
+            path.write_text(json.dumps(data))
+        views = {b["id"]: b for b in self.runtime.list()}
+        self.assertEqual(views["abc"]["lifecycle"], {"allowed": True, "reasons": []})  # core rule exempt
+        self.assertEqual(views["def"]["lifecycle"], {"allowed": False, "reasons": ["digested"]})
+        self.assertEqual(self.runtime.get("def")["lifecycle"]["allowed"], False)
+
+    def test_without_the_policy_module_no_verdict_is_claimed(self):
+        self.runtime.create_if_absent("abc", {"content": "她在。"})
+        self.assertNotIn("lifecycle", self.runtime.get("abc"))
+
     def test_soft_deleted_bucket_is_seen_as_deleted(self):
         (self.store / "gone.json").write_text(json.dumps(
             {"id": "gone", "content": "x", "metadata": {"deleted_at": "2026-10-21T00:00:00"}}))

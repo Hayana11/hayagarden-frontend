@@ -191,3 +191,72 @@ class SwitchTests(ReadFixture):
         set_flag(self.posts, "1")
         self.assertTrue(reader.cutover_enabled(self.posts))
         self.assertEqual(json.dumps(store.FLAG_KEY), '"memory.kernel_write"')
+
+
+class LifecycleTests(ReadFixture):
+    """A memory Ombre retired (archived, deleted, dont_surface, digested) never comes back."""
+
+    def visible(self, lineage_id):
+        everywhere = [
+            {h["lineage_id"] for h in reader.list_current(self.kernel, active_only=False)},
+            {i.get("lineage_id") for i in reader.memory_items(self.posts, self.kernel, active_only=False)},
+            {h["lineage_id"] for h in self.search("小家", ranked=None)},  # Ombre down: every head lexical
+            {h["lineage_id"] for h in self.search("小家", ranked=["bbb222"])},
+            {k for k, v in reader.get_current([lineage_id], self.kernel).items() if v},
+        ]
+        return [lineage_id in seen for seen in everywhere]
+
+    def test_soft_deleted_in_ombre_is_never_read_back(self):
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [True] * 5)
+        self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
+        self.sync()
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
+        self.assertEqual(self.state.get("lin:ombre:bbb222")["status"], "conflict")  # not revived either
+
+    def test_archived_in_ombre_is_never_read_back(self):
+        self.ombre.edit("bbb222", type="archived")
+        self.sync()
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
+
+    def test_dont_surface_and_digested_retire(self):
+        self.ombre.edit("bbb222", dont_surface=True)
+        self.ombre.edit("aaa111", digested=True)
+        self.sync()
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
+        self.assertNotIn("lin:ombre:aaa111", {h["lineage_id"] for h in reader.list_current(self.kernel)})
+
+    def test_ombre_outage_keeps_the_last_verdict(self):
+        self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
+        self.sync()
+        self.ombre.down = True
+        self.sync()  # cannot ask Ombre: nothing is re-decided
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
+
+    def test_official_verdict_wins_over_metadata(self):
+        # Ombre's policy exempts core rules from digested; its verdict is what counts.
+        self.ombre.edit("bbb222", digested=True, lifecycle_verdict={"allowed": True, "reasons": []})
+        self.sync()
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [True] * 5)
+        [row] = [r for b, r in self.state.lifecycles().items() if b == "bbb222"]
+        self.assertEqual(row["source"], "ombre_surface_policy")
+
+    def test_restored_in_ombre_surfaces_again(self):
+        self.ombre.edit("bbb222", type="archived")
+        self.sync()
+        self.ombre.edit("bbb222", type="permanent")
+        self.sync()
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [True] * 5)
+
+    def test_missing_bucket_is_rebuilt_not_retired(self):
+        del self.ombre.buckets["bbb222"]
+        self.sync()
+        self.assertIn("bbb222", self.ombre.buckets)
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [True] * 5)
+
+    def test_archived_at_import_and_never_observed_stays_hidden(self):
+        written = store.remember("很久以前的一次散步。", source="test", kernel_db=self.kernel, runtime=None)
+        state = MemoryKernel(self.kernel).get_state(written["state_id"])
+        self.revise(written["lineage_id"], "很久以前的一次散步。", value=dict(
+            state.structured_value, legacy={"ombre_type": "archived"}))
+        self.assertNotIn(written["lineage_id"],
+                         {h["lineage_id"] for h in reader.list_current(self.kernel, active_only=False)})

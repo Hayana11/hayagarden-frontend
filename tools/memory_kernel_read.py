@@ -84,7 +84,21 @@ def _ro(path: Path) -> sqlite3.Connection:
 
 # ---------------------------------------------------------------- Kernel heads
 
-def _item(row: sqlite3.Row, first_created: str, ledger: dict[str, Any] | None) -> dict[str, Any] | None:
+def _retired(bucket_id: str, legacy: dict[str, Any], lifecycles: dict[str, dict[str, Any]]) -> list[str]:
+    """Why Ombre retired this memory ([] = it may surface).
+
+    Ombre's last observed verdict wins (projection_lifecycle, recorded by every scan and
+    projection through the official runtime); it is kept while Ombre is unreachable.
+    Never observed: a bucket that was already archived when it was imported stays retired.
+    """
+    seen = lifecycles.get(bucket_id)
+    if seen is not None:
+        return [] if seen["allowed"] else (json.loads(seen["reasons_json"] or "[]") or ["retired"])
+    return ["archived_at_import"] if legacy.get("ombre_type") == "archived" else []
+
+
+def _item(row: sqlite3.Row, first_created: str, ledger: dict[str, Any] | None,
+          lifecycles: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     value = json.loads(row["structured_value"]) if row["structured_value"] else {}
     value = value if isinstance(value, dict) else {}
     memory = value.get("memory") or {}
@@ -96,6 +110,8 @@ def _item(row: sqlite3.Row, first_created: str, ledger: dict[str, Any] | None) -
     # Heads imported before memory semantics were recorded carry only representation.
     mtype = memory.get("type") or ("FACT" if row["representation"] == "fact" else "MEMORY")
     bucket_id = (ledger or {}).get("bucket_id") or projection.bucket_id_for(lineage)
+    if _retired(bucket_id, legacy, lifecycles):
+        return None  # archived / deleted / dont_surface / digested in Ombre: never read back
     projected = bool(ledger) and ledger.get("status") == "projected" \
         and ledger.get("projected_state_id") == row["state_id"]
     return {
@@ -144,14 +160,18 @@ def _heads(kernel_db: Path) -> list[dict[str, Any]]:
     finally:
         conn.close()
     ledger: dict[str, dict[str, Any]] = {}
+    lifecycles: dict[str, dict[str, Any]] = {}
     projection_db = projection.state_path_for(kernel_db)
     if projection_db.is_file():
         pconn = _ro(projection_db)
         try:
             ledger = {r["lineage_id"]: dict(r) for r in pconn.execute(
                 "SELECT lineage_id, bucket_id, status, projected_state_id FROM projection_lineage")}
-        except sqlite3.Error:
-            ledger = {}
+            # A ledger from before lifecycle recording has never seen a verdict to keep.
+            if pconn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                             "AND name='projection_lifecycle'").fetchone():
+                lifecycles = {r["bucket_id"]: dict(r) for r in pconn.execute(
+                    "SELECT bucket_id, allowed, reasons_json FROM projection_lifecycle")}
         finally:
             pconn.close()
     counts: dict[str, int] = {}
@@ -161,7 +181,7 @@ def _heads(kernel_db: Path) -> list[dict[str, Any]]:
     for row in rows:
         if counts[row["lineage_id"]] != 1:
             continue  # branched: no single current version to show
-        item = _item(row, first[row["lineage_id"]], ledger.get(row["lineage_id"]))
+        item = _item(row, first[row["lineage_id"]], ledger.get(row["lineage_id"]), lifecycles)
         if item is not None:
             items.append(item)
     return items

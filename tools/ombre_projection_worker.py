@@ -53,16 +53,26 @@ def _load_env_file(path: str) -> None:
             os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
+# Ombre's own read-side surfacing policy (SurfacePolicyVM), loaded with the runtime.
+_SURFACE_POLICY = None
+
+
 def _bucket_view(bucket: dict | None, *, deleted: bool = False) -> dict | None:
     if bucket is None:
         return None
     metadata = dict(bucket.get("metadata") or {})
-    return {
+    view = {
         "id": str(bucket.get("id") or metadata.get("id") or ""),
         "content": bucket.get("content") or "",
         "metadata": json.loads(json.dumps(metadata, ensure_ascii=False, default=str)),
         "deleted": deleted or bool(metadata.get("deleted_at") or metadata.get("tombstone")),
     }
+    if _SURFACE_POLICY is not None:
+        # "automatic": what may enter a context without being asked for -- archived,
+        # deleted / tombstoned, dont_surface and digested (core rules exempt) may not.
+        decision = _SURFACE_POLICY.evaluate_bucket(bucket, "automatic")
+        view["lifecycle"] = {"allowed": bool(decision.allowed), "reasons": list(decision.reasons)}
+    return view
 
 
 def load_runtime(src_dir: str):
@@ -82,6 +92,12 @@ def load_runtime(src_dir: str):
             missing.append(name)
     if missing:
         raise Incompatible("BucketManager lacks: " + ", ".join(missing))
+    global _SURFACE_POLICY
+    try:
+        from ombrebrain.policy.surfacing import SurfacePolicyVM  # noqa: E402 (Ombre's own module)
+        _SURFACE_POLICY = SurfacePolicyVM.default()
+    except ImportError:  # the caller falls back to the bucket's own lifecycle metadata
+        _SURFACE_POLICY = None
     return version, BucketManager(load_config())
 
 
