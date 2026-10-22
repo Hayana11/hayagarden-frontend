@@ -78,7 +78,7 @@ class SurfaceConfig:
     chat_df_max: int = 20
     # One clue is enough only when it is very rare and Ombre independently ranks
     # the same memory near the top: two lanes agreeing.
-    single_clue_df_max: int = 5
+    single_clue_df_max: int = 0  # 0: only words unseen in recent chat; wider proved noisy
     single_clue_ombre_rank: int = 3
     recent_days: int = 2
 
@@ -134,7 +134,7 @@ def load_config() -> SurfaceConfig:
         cooldown_turns=config_store.get_int("MEMORY_SURFACE_COOLDOWN_TURNS", 60),
         evidence_min=config_store.get_float("MEMORY_SURFACE_EVIDENCE_MIN", 6.0),
         chat_df_max=config_store.get_int("MEMORY_SURFACE_CHAT_DF_MAX", 20),
-        single_clue_df_max=config_store.get_int("MEMORY_SURFACE_SINGLE_CLUE_DF_MAX", 5),
+        single_clue_df_max=config_store.get_int("MEMORY_SURFACE_SINGLE_CLUE_DF_MAX", 0),
         single_clue_ombre_rank=config_store.get_int("MEMORY_SURFACE_SINGLE_CLUE_OMBRE_RANK", 3),
         min_words=config_store.get_int("MEMORY_SURFACE_MIN_WORDS", 2),
         recent_days=config_store.get_int("MEMORY_SURFACE_RECENT_DAYS", 2),
@@ -173,14 +173,19 @@ def query_text(text: str) -> str:
     return _PASTED.sub(" ", str(text or ""))[:QUERY_CHARS]
 
 
-def chat_frequency(conn: sqlite3.Connection, words: list[str], window: int = CHAT_DF_WINDOW) -> dict[str, int]:
-    """In how many of the latest ``window`` chat messages each word appears."""
+def chat_frequency(
+    conn: sqlite3.Connection, words: list[str], window: int = CHAT_DF_WINDOW,
+) -> tuple[dict[str, int], int]:
+    """In how many of the latest ``window`` chat messages each word appears, and how many there are."""
+    total = int(conn.execute(
+        "SELECT COUNT(*) FROM (SELECT id FROM chat_messages ORDER BY id DESC LIMIT ?)", (int(window),),
+    ).fetchone()[0] or 0)
     out = {}
     for word in words:
         out[word] = int(conn.execute(
             "SELECT COUNT(*) FROM (SELECT content FROM chat_messages ORDER BY id DESC LIMIT ?) "
             "WHERE instr(lower(content), ?) > 0", (int(window), word)).fetchone()[0] or 0)
-    return out
+    return out, total
 
 
 def entry_gate(text: str) -> Optional[str]:
@@ -195,18 +200,24 @@ def entry_gate(text: str) -> Optional[str]:
     return None
 
 
-def keyword_list(pool: list[dict[str, Any]], words: list[str]) -> tuple[list[str], dict[str, float], dict[str, list[str]]]:
-    """Refs ranked by keyword evidence: summed IDF of her words found in each memory."""
+def keyword_list(
+    pool: list[dict[str, Any]],
+    words: list[str],
+    chat_df: dict[str, int],
+    chat_n: int,
+) -> tuple[list[str], dict[str, float], dict[str, list[str]]]:
+    """Refs ranked by keyword evidence: summed IDF (rarity in their chat) of her words in each memory."""
     n = len(pool)
     if not n or not words:
         return [], {}, {}
     norms = {item["ref"]: _norm(item.get("content")).lower() for item in pool}
-    df = {w: sum(1 for text in norms.values() if w in text) for w in words}
     idf = {}
-    for w, count in df.items():
-        if count == 0 or count / n > COMMON_SHARE:
+    for w in words:
+        pool_df = sum(1 for text in norms.values() if w in text)
+        if pool_df == 0 or pool_df / n > COMMON_SHARE:
             continue
-        idf[w] = math.log((n - count + 0.5) / (count + 0.5) + 1.0)
+        df = chat_df.get(w, 0)
+        idf[w] = math.log((chat_n - df + 0.5) / (df + 0.5) + 1.0)
     evidence: dict[str, float] = {}
     matched: dict[str, list[str]] = {}
     for ref, text in norms.items():
@@ -361,7 +372,7 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     words = keywords(query_text(user_text))
     if not words:
         return SurfaceResult("skipped", "no_keywords")
-    chat_df = chat_frequency(conn, words[:12])
+    chat_df, chat_n = chat_frequency(conn, words[:12])
     clues = [w for w in words[:12] if chat_df.get(w, 0) <= config.chat_df_max]
     if not clues:
         return SurfaceResult("none", "no_clues", detail={"words": words[:12], "chat_df": chat_df})
@@ -377,7 +388,7 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
         return SurfaceResult("none", "empty_pool", detail=detail)
 
     by_ref = {i["ref"]: i for i in pool}
-    kw_ranked, evidence, matched = keyword_list(pool, words)
+    kw_ranked, evidence, matched = keyword_list(pool, words, chat_df, chat_n)
     if ombre is None:
         from tools import ombre_adapter
         ombre = ombre_adapter.search_bucket_ids
