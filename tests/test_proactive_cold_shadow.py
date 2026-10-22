@@ -70,9 +70,43 @@ class ProactiveColdShadowTests(unittest.TestCase):
         self.assertTrue(self._record(
             run='d', now=datetime.datetime(2026, 10, 24, 4, 0))['would_cold_start'])
 
-    def test_self_trigger_cap_is_two(self):
-        results = [self._record(mode='self_trigger', run=str(i))['would_cold_start'] for i in range(3)]
-        self.assertEqual(results, [True, True, False])
+    def test_self_trigger_retries_are_consumed_once_and_cap_counts_unique_tasks(self):
+        repeated = [
+            self._record(mode='self_trigger', run='self-trigger-7')
+            for _ in range(3)
+        ]
+        self.assertEqual(
+            [record['would_cold_start'] for record in repeated],
+            [True, False, False],
+        )
+        self.assertFalse(repeated[0]['counterfactual_consumed'])
+        self.assertTrue(repeated[1]['counterfactual_consumed'])
+        self.assertEqual(repeated[1]['blockers'], ['already_would_cold_started'])
+        self.assertEqual(repeated[2]['blockers'], ['already_would_cold_started'])
+        self.assertEqual(repeated[2]['cold_starts_today_before'], 1)
+
+        second_task = self._record(
+            mode='self_trigger', run='self-trigger-8',
+        )
+        self.assertTrue(second_task['would_cold_start'])
+        self.assertFalse(second_task['counterfactual_consumed'])
+
+        cap_blocked = self._record(
+            mode='self_trigger', run='self-trigger-9',
+        )
+        self.assertFalse(cap_blocked['would_cold_start'])
+        self.assertFalse(cap_blocked['counterfactual_consumed'])
+        self.assertEqual(cap_blocked['blockers'], ['daily_cap_reached'])
+        self.assertEqual(cap_blocked['cold_starts_today_before'], 2)
+
+    def test_chat_day_delegates_to_canonical_helper(self):
+        with mock.patch.object(
+            __import__('chat.day_handoff', fromlist=['chat_day_for_timestamp']),
+            'chat_day_for_timestamp',
+            return_value='canonical-day',
+        ) as helper:
+            self.assertEqual(shadow.chat_day(MORNING), 'canonical-day')
+        helper.assert_called_once_with(MORNING)
 
     def test_structural_reasons_never_cold_start(self):
         record = self._record(reason='context_closed')

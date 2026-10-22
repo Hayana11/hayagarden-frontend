@@ -15,6 +15,8 @@ import os
 import sqlite3
 from typing import Any, Mapping, Optional
 
+from chat import day_handoff
+
 _LOG = logging.getLogger('proactive_cold_shadow')
 
 _DEFAULT_OBSERVE_PATH = '/opt/frontend/proactive_cold_shadow.jsonl'
@@ -30,7 +32,6 @@ COLD_STARTABLE_REASONS = frozenset((
 # Daily cold-start cap per chat day (design Q3), overridable in runtime_config.
 _DEFAULT_DAILY_CAP = {'morning': 1, 'self_trigger': 2}
 _CAP_CONFIG_KEY = 'PROACTIVE_COLD_START_DAILY_CAP_%s'
-_CHAT_DAY_START_HOUR = 4
 
 
 def observation_path() -> str:
@@ -42,9 +43,8 @@ def _beijing_now() -> datetime.datetime:
 
 
 def chat_day(ts: datetime.datetime) -> str:
-    if ts.hour < _CHAT_DAY_START_HOUR:
-        ts = ts - datetime.timedelta(days=1)
-    return ts.strftime('%Y-%m-%d')
+    """Use the canonical chat-day boundary shared with formal runtime."""
+    return day_handoff.chat_day_for_timestamp(ts)
 
 
 def daily_cap(mode: str) -> int:
@@ -56,8 +56,14 @@ def daily_cap(mode: str) -> int:
         return default
 
 
-def _would_cold_start_count(path: str, mode: str, day: str) -> int:
-    count = 0
+def _counterfactual_state(
+    path: str,
+    mode: str,
+    day: str,
+) -> tuple[set[str], set[str]]:
+    """Return consumed IDs globally and unique cold-start IDs for this day."""
+    consumed_ids: set[str] = set()
+    cold_start_ids_today: set[str] = set()
     try:
         with open(path, encoding='utf-8') as fh:
             for line in fh:
@@ -65,12 +71,23 @@ def _would_cold_start_count(path: str, mode: str, day: str) -> int:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if (row.get('mode') == mode and row.get('chat_day') == day
-                        and row.get('would_cold_start') is True):
-                    count += 1
+                if row.get('would_cold_start') is not True:
+                    continue
+                wake_run_id = str(row.get('wake_run_id') or '').strip()
+                if not wake_run_id:
+                    continue
+                consumed_ids.add(wake_run_id)
+                if row.get('mode') == mode and row.get('chat_day') == day:
+                    cold_start_ids_today.add(wake_run_id)
     except FileNotFoundError:
-        return 0
-    return count
+        pass
+    return consumed_ids, cold_start_ids_today
+
+
+def _would_cold_start_count(path: str, mode: str, day: str) -> int:
+    """Count distinct physical tasks, not JSONL retry rows."""
+    _unused_consumed_ids, cold_start_ids_today = _counterfactual_state(path, mode, day)
+    return len(cold_start_ids_today)
 
 
 def _window_facts(db_path: str, chat_id: str) -> dict[str, Any]:
@@ -162,13 +179,19 @@ def record_skip(
             window = {}
             window_error = type(exc).__name__
         cap = daily_cap(mode)
-        already = _would_cold_start_count(path, mode, day)
-        would, blockers = evaluate(
-            mode=mode, hot_reason=str(hot_reason or ''), window=window,
-            already_today=already, cap=cap,
-        )
-        if window_error:
-            would, blockers = False, blockers + ['window_read_failed:' + window_error]
+        consumed_ids, cold_start_ids_today = _counterfactual_state(path, mode, day)
+        already = len(cold_start_ids_today)
+        run_id = str(wake_run_id or '').strip()
+        counterfactual_consumed = bool(run_id and run_id in consumed_ids)
+        if counterfactual_consumed:
+            would, blockers = False, ['already_would_cold_started']
+        else:
+            would, blockers = evaluate(
+                mode=mode, hot_reason=str(hot_reason or ''), window=window,
+                already_today=already, cap=cap,
+            )
+            if window_error:
+                would, blockers = False, blockers + ['window_read_failed:' + window_error]
         record = {
             'observed_at': now.strftime('%Y-%m-%d %H:%M:%S'),
             'chat_day': day,
@@ -176,6 +199,7 @@ def record_skip(
             'mode': mode,
             'hot_reason': str(hot_reason or ''),
             'would_cold_start': would,
+            'counterfactual_consumed': counterfactual_consumed,
             'blockers': blockers,
             'cold_starts_today_before': already,
             'daily_cap': cap,

@@ -110,7 +110,7 @@ reason ∈ COLD_STARTABLE_REASONS 且 mode ∈ PROACTIVE_COLD_START_MODES
 | 阶段 | 内容 | 生产影响 | 验收 |
 |---|---|---|---|
 | **S0** | 本设计稿 | 无 | 哈娅确认 |
-| **S1 shadow** | 资格判定 shadow（`chat/proactive_cold_shadow.py`）：morning / self_trigger 因 resident 凉而跳过时，只读判定 S2/S3 规则下**会不会**冷启动、被什么拦住（原因不在可冷启动集合、窗口关闭、switch_in_progress、finalize pending、当日上限），记录当前窗口，写 `/opt/frontend/proactive_cold_shadow.jsonl`。不调用 `_assemble_plan`（它有副作用），拼装一致性留到 S2 的测试环境验证 | 无（只读 + 一行 JSONL） | 连续 7 个早晨的记录：会冷启动的比例、各 blocker 出现次数 |
+| **S1 shadow** | 资格判定 shadow（`chat/proactive_cold_shadow.py`）：morning / self_trigger 因 resident 凉而跳过时，只读判定 S2/S3 规则下**会不会**冷启动、被什么拦住（原因不在可冷启动集合、窗口关闭、switch_in_progress、finalize pending、当日上限），记录当前窗口；同一 `wake_run_id` 的重试只保留一次 counterfactual cold-start，后续行标记为已消费，不计入 would-start 或 blocker 统计。写 `/opt/frontend/proactive_cold_shadow.jsonl`。不调用 `_assemble_plan`（它有副作用），拼装一致性留到 S2 的测试环境验证 | 无（只读 + 一行 JSONL） | 连续 7 个早晨的记录：会冷启动的比例、各 blocker 出现次数 |
 | **S2 live：morning** | `PROACTIVE_COLD_START_MODES={morning}` | 每天至多一次冷启动 | 早安准时送达；她回复是 hot turn；映射/连续性测试全绿；一周无 `context_*` 异常 |
 | **S3 live：self_trigger** | 加入 `self_trigger` | 提醒准时 | 同上，外加提醒触发与她开口并发的竞争测试 |
 
