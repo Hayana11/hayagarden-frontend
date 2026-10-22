@@ -590,7 +590,7 @@ def commit(*, user_message_id: int, db_path: str | Path, now: Optional[datetime]
 
 
 def flush_touches(db_path: str | Path, *, runtime: Any = None, now: Optional[datetime] = None,
-                  limit: int = TOUCH_BATCH) -> dict[str, int]:
+                  limit: int = TOUCH_BATCH) -> dict[str, Any]:
     """Send the touches the outbox owes Ombre. At-least-once; never raises.
 
     Rows are claimed with a lease in one SQLite statement, so concurrent
@@ -605,14 +605,18 @@ def flush_touches(db_path: str | Path, *, runtime: Any = None, now: Optional[dat
     crash after Ombre applied a touch but before the ledger recorded it lets
     the lease expire and the touch is sent again: at most one extra
     reinforcement, accepted.
+
+    Returns this run's counts plus ``runtime`` (``ok`` / ``missing`` /
+    ``unavailable``) and ``error`` (1 when the outbox itself failed).
     """
     from tools import memory_kernel_projection as projection
-    counts = {"claimed": 0, "done": 0, "retry": 0, "failed": 0}
+    counts: dict[str, Any] = {"claimed": 0, "done": 0, "retry": 0, "failed": 0, "runtime": "ok", "error": 0}
     now = now or _beijing_now()
     try:
         if runtime is None:
             runtime = projection.OmbreRuntime.from_env()
         if runtime is None:
+            counts["runtime"] = "missing"
             return counts  # not configured: rows wait, attempts are not spent
         lease_seconds = float(getattr(runtime, "timeout", 60.0) or 60.0) + 120.0
         owner = uuid.uuid4().hex
@@ -658,7 +662,7 @@ def flush_touches(db_path: str | Path, *, runtime: Any = None, now: Optional[dat
                         "UPDATE memory_surface_touch_outbox SET status='pending', attempts=attempts-1, "
                         "last_error=?, lease_owner=NULL, lease_until=NULL, updated_at=? "
                         "WHERE id=? AND lease_owner=?", [(error, stamp, r["id"], owner) for r in rows])
-                counts["retry"] = len(rows)
+                counts["retry"], counts["runtime"] = len(rows), "unavailable"
                 return counts
             with conn:
                 for row, result in zip(rows, results):
@@ -677,7 +681,39 @@ def flush_touches(db_path: str | Path, *, runtime: Any = None, now: Optional[dat
             conn.close()
     except Exception:
         _LOG.exception("memory surface touch outbox failed")
+        counts["error"] = 1
         return counts
+
+
+def outbox_health(db_path: str | Path) -> dict[str, int]:
+    """How many outbox rows sit in each status (all zero before the table exists)."""
+    health = {"pending": 0, "sending": 0, "done": 0, "failed": 0}
+    conn = _ro_conn(db_path)
+    try:
+        if _has_table(conn, "memory_surface_touch_outbox"):
+            for status, n in conn.execute(
+                    "SELECT status, COUNT(*) FROM memory_surface_touch_outbox GROUP BY status"):
+                health[status] = n
+        return health
+    finally:
+        conn.close()
+
+
+def flush_exit_code(counts: dict[str, Any], health: Optional[dict[str, int]]) -> int:
+    """0 only when nothing is owed or everything this run sent landed.
+
+    Non-zero (so the timer shows red, not a false green) when the outbox or its
+    database failed, Ombre could not be reached, a row was retried or failed
+    this run, any ``failed`` row is waiting for a person, or rows are pending
+    with no Ombre runtime configured.
+    """
+    if health is None or counts.get("error"):
+        return 1
+    if counts.get("retry") or counts.get("failed") or health.get("failed"):
+        return 1
+    if counts.get("runtime") != "ok" and (health.get("pending") or health.get("sending")):
+        return 1
+    return 0
 
 
 def outbox_rows(db_path: str | Path, *, status: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -905,7 +941,10 @@ def recent_log(db_path: str | Path, limit: int = 20) -> list[dict[str, Any]]:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """``python -m tools.memory_surface migrate|flush|outbox [--db PATH]``."""
+    """``python -m tools.memory_surface migrate|flush|outbox [--db PATH]``.
+
+    ``flush`` exits non-zero when anything is still owed or broken (see
+    ``flush_exit_code``), so ``systemctl status`` of the touch timer is honest."""
     import argparse
     parser = argparse.ArgumentParser(prog="python -m tools.memory_surface")
     parser.add_argument("command", choices=("migrate", "flush", "outbox"))
@@ -915,7 +954,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "migrate":
         out: Any = migrate(args.db)
     elif args.command == "flush":
-        out = flush_touches(args.db)
+        counts = flush_touches(args.db)
+        try:
+            health: Optional[dict[str, int]] = outbox_health(args.db)
+        except Exception:
+            _LOG.exception("memory surface outbox health check failed")
+            health = None
+        code = flush_exit_code(counts, health)
+        print(json.dumps({"run": counts, "outbox": health, "exit": code}, ensure_ascii=False, indent=1))
+        return code
     else:
         out = outbox_rows(args.db, status=args.status)
     print(json.dumps(out, ensure_ascii=False, indent=1))

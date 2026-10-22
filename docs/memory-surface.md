@@ -93,6 +93,18 @@ nothing surfaces for a long time.
 - **Pruning**: `done` rows are pruned after 30 days. `pending` and `failed`
   rows are kept.
 
+**Timer verdict.** `python -m tools.memory_surface flush` prints the run and the
+outbox totals, and its exit code is what `systemctl status` shows.
+
+- It exits 0 only when nothing is owed, or everything sent this run landed.
+- It exits 1 in any of these cases:
+  - Ombre is unreachable (no attempt is spent);
+  - a row was retried or failed this run;
+  - any `failed` row is still waiting for a person, even if this run claimed
+    nothing;
+  - rows are pending with no Ombre runtime configured;
+  - the outbox or its database failed.
+
 Delivery is **at-least-once**. If the process dies after Ombre applied a touch
 but before the outbox recorded it, the lease expires (runtime timeout plus 2
 minutes) and the touch is sent again. At most one extra reinforcement is

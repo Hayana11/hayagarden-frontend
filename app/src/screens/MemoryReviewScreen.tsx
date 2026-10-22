@@ -7,6 +7,7 @@ import { ROUTES } from '../navigation';
 import {
   REVIEW_FILTERS,
   REVIEW_LABELS,
+  applyLabelSave,
   decisionText,
   fetchReviewPage,
   reasonText,
@@ -166,21 +167,12 @@ export function MemoryReviewScreen() {
   const onLabel = useCallback(async (row: ReviewRow, label: ReviewLabel | 'clear', note: string) => {
     try {
       const saved = await saveReviewLabel(row.id, label, label === 'clear' ? '' : note);
-      // null: a cleared label whose route-log row is already pruned — the decision is gone.
-      setRows((prev) => (saved ? prev.map((r) => (r.id === saved.id ? saved : r)) : prev.filter((r) => r.id !== row.id)));
-      setCounts((prev) => {
-        if (!prev) return prev;
-        const next = { ...prev };
-        if (row.label) next[row.label.label] -= 1;
-        if (saved?.label) next[saved.label.label] += 1;
-        if (!saved) next.total -= 1;
-        next.labeled = next.ok + next.missed + next.wrong;
-        return next;
-      });
+      setRows((prev) => applyLabelSave(prev, null, row, saved, filter).rows);
+      setCounts((prev) => applyLabelSave([], prev, row, saved, filter).counts);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [filter]);
 
   return (
     <ScreenLayout>

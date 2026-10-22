@@ -375,7 +375,7 @@ class _Crash(BaseException):
     """The process dies mid-send (not an Exception: nothing inside catches it)."""
 
 
-class TouchOutboxTests(Base):
+class _OutboxBase(Base):
     def surface(self, msg_id, text="想起赫泰拉和阿斯帕西娅了", ombre=("greek", "flow", "fish")):
         self.ombre_result = list(ombre)
         result = self.decide(text, msg_id=msg_id)
@@ -386,6 +386,8 @@ class TouchOutboxTests(Base):
         return self.query("SELECT user_message_id, bucket_id, status, attempts, last_error "
                           "FROM memory_surface_touch_outbox ORDER BY id")
 
+
+class TouchOutboxTests(_OutboxBase):
     def test_runtime_outage_spends_no_attempt_and_the_next_flush_delivers(self):
         self.runtime.fail = RuntimeError("worker_unreachable")
         self.surface(100)
@@ -487,6 +489,74 @@ class TouchOutboxTests(Base):
         self.assertIn("lease_until", tables["memory_surface_touch_outbox"])
         self.assertIn("snapshot_json", tables["memory_surface_labels"])
         self.assertNotIn("touched", tables["memory_surface_log"])  # the log table's shape is unchanged
+
+
+class FlushExitCodeTests(_OutboxBase):
+    """`python -m tools.memory_surface flush` is the timer's verdict: no false green."""
+
+    def run_flush(self, db=None):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = ms.main(["flush", "--db", str(db or self.db)])
+        return code, json.loads(out.getvalue())
+
+    def test_nothing_owed_exits_zero(self):
+        ms.migrate(self.db)
+        self.assertEqual(self.run_flush()[0], 0)
+
+    def test_everything_delivered_exits_zero(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
+        self.runtime.fail = None
+        code, report = self.run_flush()
+        self.assertEqual((code, report["run"]["done"]), (0, 1))
+
+    def test_ombre_unavailable_exits_one_without_spending_attempts(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
+        code, report = self.run_flush()
+        self.assertEqual((code, report["run"]["runtime"]), (1, "unavailable"))
+        self.assertEqual([r[2:4] for r in self.outbox()], [("pending", 0)])
+
+    def test_a_retry_this_run_exits_one(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
+        self.runtime.fail, self.runtime.bad = None, {"greek"}
+        code, report = self.run_flush()
+        self.assertEqual((code, report["run"]["retry"]), (1, 1))
+
+    def test_a_failure_this_run_exits_one(self):
+        self.runtime.bad = {"greek"}
+        self.surface(100)
+        for _ in range(ms.MAX_TOUCH_ATTEMPTS - 2):
+            ms.flush_touches(self.db, now=NOW)
+        code, report = self.run_flush()
+        self.assertEqual((code, report["run"]["failed"]), (1, 1))
+
+    def test_an_old_failed_row_keeps_exiting_one_with_nothing_claimed(self):
+        self.runtime.bad = {"greek"}
+        self.surface(100)
+        for _ in range(ms.MAX_TOUCH_ATTEMPTS):
+            ms.flush_touches(self.db, now=NOW)
+        code, report = self.run_flush()
+        self.assertEqual((code, report["run"]["claimed"], report["outbox"]["failed"]), (1, 0, 1))
+
+    def test_pending_rows_with_no_runtime_configured_exit_one(self):
+        with mock.patch("tools.memory_kernel_projection.OmbreRuntime.from_env", return_value=None):
+            self.surface(100)
+            code, report = self.run_flush()
+        self.assertEqual((code, report["run"]["runtime"], report["outbox"]["pending"]), (1, "missing", 1))
+
+    def test_no_runtime_and_nothing_owed_exits_zero(self):
+        ms.migrate(self.db)
+        with mock.patch("tools.memory_kernel_projection.OmbreRuntime.from_env", return_value=None):
+            self.assertEqual(self.run_flush()[0], 0)
+
+    def test_an_unreadable_database_exits_one(self):
+        code, report = self.run_flush(db=Path(tempfile.gettempdir()) / "no-such-dir" / "memories.db")
+        self.assertEqual((code, report["run"]["error"], report["outbox"]), (1, 1, None))
 
 
 class ReviewTests(Base):

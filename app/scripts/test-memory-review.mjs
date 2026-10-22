@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  applyLabelSave,
   decisionText,
+  matchesReviewFilter,
   fetchReviewPage,
   normalizeReviewPage,
   normalizeReviewRow,
@@ -84,6 +86,37 @@ assert.equal(saved.id, 7);
 // Clearing the label of a pruned decision removes it: no row comes back.
 assert.equal(await saveReviewLabel(8, 'clear'), null);
 
+// Saving a label keeps the list true to the current filter (no stale card until reload).
+const pending = normalizeReviewRow({ ...wireRow, id: 1, label: null, log_pruned: false });
+const other = normalizeReviewRow({ ...wireRow, id: 2, label: null, log_pruned: false });
+const labeledOk = normalizeReviewRow({ ...wireRow, id: 1, log_pruned: false, label: { label: 'ok', note: '', labeled_at: 'x' } });
+const counts0 = { total: 5, labeled: 0, ok: 0, missed: 0, wrong: 0 };
+
+// 「待复盘」: labeling a card takes it off the list; counts move.
+let next = applyLabelSave([pending, other], counts0, pending, labeledOk, 'unlabeled');
+assert.deepEqual(next.rows.map((r) => r.id), [2]);
+assert.deepEqual(next.counts, { total: 5, labeled: 1, ok: 1, missed: 0, wrong: 0 });
+
+// 「已标注」: clearing a label whose log row still exists takes it off the list.
+next = applyLabelSave([labeledOk, other], next.counts, labeledOk, pending, 'labeled');
+assert.deepEqual(next.rows.map((r) => r.id), [2]);
+assert.deepEqual(next.counts, { total: 5, labeled: 0, ok: 0, missed: 0, wrong: 0 });
+
+// 「全部」: the card stays, updated in place; changing ok → wrong moves one count.
+const labeledWrong = { ...labeledOk, label: { ...labeledOk.label, label: 'wrong' } };
+next = applyLabelSave([labeledOk, other], { ...counts0, labeled: 1, ok: 1 }, labeledOk, labeledWrong, 'all');
+assert.deepEqual(next.rows.map((r) => r.label?.label ?? null), ['wrong', null]);
+assert.deepEqual(next.counts, { total: 5, labeled: 1, ok: 0, missed: 0, wrong: 1 });
+
+// A pruned decision cleared away disappears everywhere and leaves the total.
+next = applyLabelSave([labeledOk], { ...counts0, labeled: 1, ok: 1 }, labeledOk, null, 'all');
+assert.deepEqual(next.rows, []);
+assert.deepEqual(next.counts, { total: 4, labeled: 0, ok: 0, missed: 0, wrong: 0 });
+
+assert.equal(matchesReviewFilter(pending, 'surfaced'), false);
+assert.equal(matchesReviewFilter(normalizeReviewRow({ ...wireRow, decision: 'surfaced' }), 'surfaced'), true);
+assert.equal(matchesReviewFilter(pending, 'blocked'), true);
+
 // Wiring: one route authority, standard chrome without global nav, entry from the memory library.
 const read = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), 'utf8');
 assert.match(read('navigation.ts'), /memoryReview:\s*'\/memory-review'/);
@@ -91,6 +124,7 @@ assert.match(read('navigation.ts'), /memoryReview:\s*\{\s*chrome:\s*'standard',\
 assert.match(read('App.tsx'), /<Route path=\{ROUTES\.memoryReview\} element=\{<MemoryReviewScreen \/>\} \/>/);
 assert.match(read('screens/MemoryScreen.tsx'), /to=\{ROUTES\.memoryReview\}/);
 const screen = read('screens/MemoryReviewScreen.tsx');
+assert.match(screen, /applyLabelSave\(prev, null, row, saved, filter\)/, 'the page applies saves through the filter-aware helper');
 assert.match(screen, /<PageHeader[\s\S]*onBack=\{\(\) => navigate\(ROUTES\.memory\)\}/);
 assert.doesNotMatch(screen, /\bgap\s*:/, 'Chrome78: no flex gap in the review page');
 assert.doesNotMatch(screen, /mock/i, 'review data is real only');

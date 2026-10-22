@@ -195,3 +195,38 @@ export async function saveReviewLabel(
   if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).removed === true) return null;
   return normalizeReviewRow(raw);
 }
+
+/** Whether a decision belongs in the list for this filter (mirrors the backend's filters). */
+export function matchesReviewFilter(row: ReviewRow, filter: ReviewFilter): boolean {
+  switch (filter) {
+    case 'unlabeled': return row.label === null;
+    case 'labeled': return row.label !== null;
+    case 'surfaced': return row.decision === 'surfaced';
+    case 'blocked': return row.decision === 'none' && row.reason === 'gate_closed';
+    default: return true;
+  }
+}
+
+/**
+ * The list and counts after one label save. `saved` is null when clearing removed
+ * the decision entirely (its route-log row was already pruned). A card that no
+ * longer matches the current filter leaves the list right away.
+ */
+export function applyLabelSave(
+  rows: ReviewRow[],
+  counts: ReviewCounts | null,
+  before: ReviewRow,
+  saved: ReviewRow | null,
+  filter: ReviewFilter,
+): { rows: ReviewRow[]; counts: ReviewCounts | null } {
+  const nextRows = saved && matchesReviewFilter(saved, filter)
+    ? rows.map((r) => (r.id === saved.id ? saved : r))
+    : rows.filter((r) => r.id !== before.id);
+  if (!counts) return { rows: nextRows, counts };
+  const next = { ...counts };
+  if (before.label) next[before.label.label] -= 1;
+  if (saved?.label) next[saved.label.label] += 1;
+  if (!saved) next.total -= 1;
+  next.labeled = next.ok + next.missed + next.wrong;
+  return { rows: nextRows, counts: next };
+}
