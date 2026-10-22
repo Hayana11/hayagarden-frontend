@@ -11,6 +11,7 @@ from tests.test_memory_kernel_store import StoreFixture
 from tools import memory_kernel_read as reader
 from tools import memory_kernel_store as store
 from tools.memory_kernel import Delta, MemoryKernel
+from tools.memory_kernel_projection import state_path_for as projection_db
 
 NOW = "2026-10-21T14:00:00+00:00"
 
@@ -194,7 +195,9 @@ class SwitchTests(ReadFixture):
 
 
 class LifecycleTests(ReadFixture):
-    """A memory Ombre retired (archived, deleted, dont_surface, digested) never comes back."""
+    """What Ombre retired never comes back; what it only quiets follows its per-mode rules."""
+
+    MODES = (reader.AUTOMATIC, reader.SEARCH, reader.DREAM, reader.IMPORTANCE)
 
     def visible(self, lineage_id):
         everywhere = [
@@ -206,24 +209,37 @@ class LifecycleTests(ReadFixture):
         ]
         return [lineage_id in seen for seen in everywhere]
 
+    def by_mode(self, lineage_id):
+        return {mode: lineage_id in {h["lineage_id"] for h in reader.list_current(
+            self.kernel, active_only=False, mode=mode)} for mode in self.MODES}
+
     def test_soft_deleted_in_ombre_is_never_read_back(self):
         self.assertEqual(self.visible("lin:ombre:bbb222"), [True] * 5)
         self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
         self.sync()
         self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
+        self.assertEqual(set(self.by_mode("lin:ombre:bbb222").values()), {False})
         self.assertEqual(self.state.get("lin:ombre:bbb222")["status"], "conflict")  # not revived either
 
     def test_archived_in_ombre_is_never_read_back(self):
         self.ombre.edit("bbb222", type="archived")
         self.sync()
         self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
+        self.assertEqual(set(self.by_mode("lin:ombre:bbb222").values()), {False})
 
-    def test_dont_surface_and_digested_retire(self):
+    def test_dont_surface_is_quiet_everywhere_but_explicit_search(self):
         self.ombre.edit("bbb222", dont_surface=True)
+        self.sync()
+        self.assertEqual(self.by_mode("lin:ombre:bbb222"), {
+            reader.AUTOMATIC: False, reader.SEARCH: True, reader.DREAM: False, reader.IMPORTANCE: False})
+        # automatic recall / long-term / memo do not see it; search and the library do
+        self.assertEqual(self.visible("lin:ombre:bbb222"), [False, False, True, True, True])
+
+    def test_digested_leaves_recall_and_dreams_but_not_search_or_importance(self):
         self.ombre.edit("aaa111", digested=True)
         self.sync()
-        self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
-        self.assertNotIn("lin:ombre:aaa111", {h["lineage_id"] for h in reader.list_current(self.kernel)})
+        self.assertEqual(self.by_mode("lin:ombre:aaa111"), {
+            reader.AUTOMATIC: False, reader.SEARCH: True, reader.DREAM: False, reader.IMPORTANCE: True})
 
     def test_ombre_outage_keeps_the_last_verdict(self):
         self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
@@ -232,13 +248,24 @@ class LifecycleTests(ReadFixture):
         self.sync()  # cannot ask Ombre: nothing is re-decided
         self.assertEqual(self.visible("lin:ombre:bbb222"), [False] * 5)
 
-    def test_official_verdict_wins_over_metadata(self):
-        # Ombre's policy exempts core rules from digested; its verdict is what counts.
-        self.ombre.edit("bbb222", digested=True, lifecycle_verdict={"allowed": True, "reasons": []})
+    def test_official_verdicts_win_over_metadata(self):
+        allow = {"allowed": True, "reasons": []}
+        verdict = {"modes": {m: allow for m in ("automatic", "search", "dream", "importance", "spontaneous")}}
+        verdict["modes"]["dream"] = {"allowed": False, "reasons": ["anchor"]}
+        self.ombre.edit("aaa111", digested=True, lifecycle_verdict=verdict)
         self.sync()
-        self.assertEqual(self.visible("lin:ombre:bbb222"), [True] * 5)
-        [row] = [r for b, r in self.state.lifecycles().items() if b == "bbb222"]
-        self.assertEqual(row["source"], "ombre_surface_policy")
+        self.assertEqual(self.by_mode("lin:ombre:aaa111"), {
+            reader.AUTOMATIC: True, reader.SEARCH: True, reader.DREAM: False, reader.IMPORTANCE: True})
+        self.assertEqual(self.state.lifecycles()["aaa111"]["source"], "ombre_surface_policy")
+
+    def test_a_verdict_recorded_before_modes_is_applied_strictly(self):
+        self.ombre.edit("bbb222", dont_surface=True)
+        self.sync()
+        conn = sqlite3.connect(projection_db(self.kernel))
+        conn.execute("UPDATE projection_lifecycle SET modes_json=NULL WHERE bucket_id='bbb222'")
+        conn.commit()
+        conn.close()
+        self.assertEqual(set(self.by_mode("lin:ombre:bbb222").values()), {False})
 
     def test_restored_in_ombre_surfaces_again(self):
         self.ombre.edit("bbb222", type="archived")

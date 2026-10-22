@@ -13,11 +13,22 @@ It flips once, so nothing is ever written to the Kernel while readers still only
 
 - **Source of truth:** the text is always the Kernel's current head. Ombre only ranks (bucket ids → lineage via the projection ledger).
 - **Memories Ombre has not projected yet:** heads not yet projected, and posts that fell back on a Kernel write failure and are still waiting for backfill, are matched lexically. If Ombre cannot be asked, every head is matched lexically.
-- **Memories Ombre has retired never come back:** archived, deleted / tombstoned, `dont_surface`, `digested`.
-  - The verdict is Ombre's own (`SurfacePolicyVM`, "automatic" mode, observed by the worker).
-  - It is recorded per bucket in `projection_lifecycle`.
-  - It is kept while Ombre is unreachable.
-  - A vanished bucket is "missing" and gets rebuilt; that is never treated as a deletion.
+- **Ombre's lifecycle decides what each kind of read may see.**
+  - The worker asks Ombre's own `SurfacePolicyVM` for a verdict in every mode, and every scan and projection records those verdicts per bucket in `projection_lifecycle`.
+  - Each reader uses its own mode:
+
+    | Read | Mode |
+    |---|---|
+    | gateway automatic recall, long-term and memo injection | AUTOMATIC |
+    | `memory.search`, the memory library (search and browsing), the dashboards | SEARCH |
+    | `dream_generator` | DREAM |
+    | the FACT cold-start list | IMPORTANCE |
+
+  - **Hidden in every mode:** archived, deleted and tombstoned memories.
+  - **Mode-dependent (Ombre's own rules):** `dont_surface` and `digested`. For example, explicit search still finds a digested memory.
+  - **Ombre unreachable:** the last recorded verdicts stay.
+  - **Ombre without `SurfacePolicyVM`:** the worker refuses to run (`incompatible`), the sync fails, and the last verdicts still stay.
+  - **A vanished bucket** is "missing" and gets rebuilt; it is never treated as a deletion.
 - **Buckets created inside Ombre** appear after the next sync (at most about five minutes later). Raw Ombre text is never shown.
 - **Kernel memories are read-only on the static pages (core / long-term / recent)** until Kernel revisions exist (B-5). `PUT` / `PATCH` / `DELETE /api/posts/kernel:…` answer `409 kernel_memory_read_only`.
 
@@ -28,7 +39,9 @@ It flips once, so nothing is ever written to the Kernel while readers still only
 - **No overlap:** a run takes a non-blocking lock (`<projection db>.sync.lock`), so a slow run is never doubled. Request-time projection and sync keep serialising per lineage through the existing locks.
 - **Every run is recorded** in `projection_sync_runs`: start, finish, duration, outcome, summary (backfilled, ingested, projected, scan counts) and error.
 - **Health check:** `python -m tools.memory_kernel_store status` prints, under `sync`, the last run, the last success and `consecutive_failures`.
-- **Failures are loud:** a failed run exits 1, so systemd marks the unit failed. A missing runtime configuration counts as a failure.
+- **Failures are loud:** a failed run exits 1, so systemd marks the unit failed. Two outcomes are kept apart:
+  - `incompatible`: the Ombre runtime is not the expected one, for example `SurfacePolicyVM` is missing. An operator has to act.
+  - `failed`: Ombre was unreachable or not configured, or a backfill / ingest step had errors. The next run may simply succeed.
 
 Install (owner approval required; this changes the VPS):
 

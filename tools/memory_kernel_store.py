@@ -435,8 +435,16 @@ _SYNC_RUNS_KEPT = 2000  # about a week at one run every five minutes
 
 
 def _sync_outcome(report: dict[str, Any]) -> tuple[str, str | None]:
-    """ok / failed (Ombre not reachable or not configured, backfill errors)."""
+    """ok / incompatible / failed.
+
+    incompatible: the Ombre runtime is not the one the Kernel was built for (e.g. no
+    SurfacePolicyVM) -- an operator has to act. failed: Ombre not reachable or not
+    configured, backfill or ingest errors -- the next run may simply succeed. Either way
+    readers keep the last recorded lifecycle verdicts.
+    """
     ombre = str(report.get("ombre") or "")
+    if "incompatible" in ombre:
+        return "incompatible", ombre[:300]
     if ombre:
         return "failed", ombre[:300]
     errors = list((report.get("backfilled") or {}).get("errors") or [])
@@ -561,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
     result = run_sync() if args.command == "sync" else status()
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     # A failed scheduled sync must show as a failed unit, not a quiet success.
-    return 1 if result.get("outcome") == "failed" else 0
+    return 1 if result.get("outcome") in ("failed", "incompatible") else 0
 
 
 if __name__ == "__main__":

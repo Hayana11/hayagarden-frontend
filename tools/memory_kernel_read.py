@@ -84,21 +84,36 @@ def _ro(path: Path) -> sqlite3.Connection:
 
 # ---------------------------------------------------------------- Kernel heads
 
-def _retired(bucket_id: str, legacy: dict[str, Any], lifecycles: dict[str, dict[str, Any]]) -> list[str]:
-    """Why Ombre retired this memory ([] = it may surface).
+# Ombre's SurfacePolicyVM modes, one per kind of read (see projection.SURFACE_MODES):
+AUTOMATIC = "automatic"    # recall, long-term and memo injection
+SEARCH = "search"          # explicit memory.search, the library, human browsing
+DREAM = "dream"            # dream_generator
+IMPORTANCE = "importance"  # the FACT cold-start list
+EVERY_STORED = None        # no surfacing at all (dedupe against everything kept)
 
-    Ombre's last observed verdict wins (projection_lifecycle, recorded by every scan and
-    projection through the official runtime); it is kept while Ombre is unreachable.
-    Never observed: a bucket that was already archived when it was imported stays retired.
+
+def _retired(bucket_id: str, legacy: dict[str, Any], lifecycles: dict[str, dict[str, Any]],
+             mode: str | None) -> list[str]:
+    """Why Ombre keeps this memory out of a ``mode`` read ([] = it may surface).
+
+    Ombre's last observed verdict for that mode wins (projection_lifecycle, recorded by
+    every scan and projection through the official runtime) and is kept while Ombre is
+    unreachable; a verdict recorded before per-mode recording is the strict automatic
+    one. Never observed: a bucket already archived when it was imported stays retired.
     """
+    if mode is EVERY_STORED:
+        return []
     seen = lifecycles.get(bucket_id)
-    if seen is not None:
-        return [] if seen["allowed"] else (json.loads(seen["reasons_json"] or "[]") or ["retired"])
-    return ["archived_at_import"] if legacy.get("ombre_type") == "archived" else []
+    if seen is None:
+        return ["archived_at_import"] if legacy.get("ombre_type") == "archived" else []
+    modes = json.loads(seen.get("modes_json") or "{}")
+    verdict = modes.get(mode) or {"allowed": bool(seen["allowed"]),
+                                  "reasons": json.loads(seen["reasons_json"] or "[]")}
+    return [] if verdict["allowed"] else (list(verdict.get("reasons") or []) or ["retired"])
 
 
 def _item(row: sqlite3.Row, first_created: str, ledger: dict[str, Any] | None,
-          lifecycles: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+          lifecycles: dict[str, dict[str, Any]], mode: str | None) -> dict[str, Any] | None:
     value = json.loads(row["structured_value"]) if row["structured_value"] else {}
     value = value if isinstance(value, dict) else {}
     memory = value.get("memory") or {}
@@ -110,8 +125,8 @@ def _item(row: sqlite3.Row, first_created: str, ledger: dict[str, Any] | None,
     # Heads imported before memory semantics were recorded carry only representation.
     mtype = memory.get("type") or ("FACT" if row["representation"] == "fact" else "MEMORY")
     bucket_id = (ledger or {}).get("bucket_id") or projection.bucket_id_for(lineage)
-    if _retired(bucket_id, legacy, lifecycles):
-        return None  # archived / deleted / dont_surface / digested in Ombre: never read back
+    if _retired(bucket_id, legacy, lifecycles, mode):
+        return None  # Ombre keeps it out of this kind of read (archived, deleted, digested...)
     projected = bool(ledger) and ledger.get("status") == "projected" \
         and ledger.get("projected_state_id") == row["state_id"]
     return {
@@ -140,7 +155,7 @@ def _item(row: sqlite3.Row, first_created: str, ledger: dict[str, Any] | None,
     }
 
 
-def _heads(kernel_db: Path) -> list[dict[str, Any]]:
+def _heads(kernel_db: Path, mode: str | None) -> list[dict[str, Any]]:
     """Every lineage with exactly one content head (as projection.select_heads)."""
     if not kernel_db.is_file():
         return []
@@ -170,8 +185,10 @@ def _heads(kernel_db: Path) -> list[dict[str, Any]]:
             # A ledger from before lifecycle recording has never seen a verdict to keep.
             if pconn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                              "AND name='projection_lifecycle'").fetchone():
+                cols = {r[1] for r in pconn.execute("PRAGMA table_info(projection_lifecycle)")}
+                modes = "modes_json" if "modes_json" in cols else "NULL AS modes_json"
                 lifecycles = {r["bucket_id"]: dict(r) for r in pconn.execute(
-                    "SELECT bucket_id, allowed, reasons_json FROM projection_lifecycle")}
+                    f"SELECT bucket_id, allowed, reasons_json, {modes} FROM projection_lifecycle")}
         finally:
             pconn.close()
     counts: dict[str, int] = {}
@@ -181,7 +198,7 @@ def _heads(kernel_db: Path) -> list[dict[str, Any]]:
     for row in rows:
         if counts[row["lineage_id"]] != 1:
             continue  # branched: no single current version to show
-        item = _item(row, first[row["lineage_id"]], ledger.get(row["lineage_id"]), lifecycles)
+        item = _item(row, first[row["lineage_id"]], ledger.get(row["lineage_id"]), lifecycles, mode)
         if item is not None:
             items.append(item)
     return items
@@ -204,21 +221,24 @@ def _newest_first(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def list_current(kernel_db: Path | None = None, *, memory_type: Any = None, layer: str | None = None,
-                 tag: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
-    """Current heads, newest first; type / layer / tag from structured_value.memory."""
-    heads = _heads(Path(kernel_db or kernel_db_path()))
+                 tag: str | None = None, active_only: bool = True, mode: str | None = AUTOMATIC) -> list[dict[str, Any]]:
+    """Current heads Ombre lets into a ``mode`` read, newest first; type / layer / tag
+    from structured_value.memory."""
+    heads = _heads(Path(kernel_db or kernel_db_path()), mode)
     return _newest_first([h for h in heads if _wanted(
         h, memory_type=memory_type, layer=layer, tag=tag, active_only=active_only)])
 
 
-def get_current(lineage_ids: Iterable[str], kernel_db: Path | None = None) -> dict[str, dict[str, Any] | None]:
-    by_lineage = {h["lineage_id"]: h for h in _heads(Path(kernel_db or kernel_db_path()))}
+def get_current(lineage_ids: Iterable[str], kernel_db: Path | None = None, *,
+                mode: str | None = SEARCH) -> dict[str, dict[str, Any] | None]:
+    by_lineage = {h["lineage_id"]: h for h in _heads(Path(kernel_db or kernel_db_path()), mode)}
     return {lineage: by_lineage.get(lineage) for lineage in lineage_ids}
 
 
-def get_current_by_bucket_ids(bucket_ids: Iterable[str], kernel_db: Path | None = None) -> dict[str, dict[str, Any]]:
+def get_current_by_bucket_ids(bucket_ids: Iterable[str], kernel_db: Path | None = None, *,
+                              mode: str | None = SEARCH) -> dict[str, dict[str, Any]]:
     """Ombre bucket id -> the Kernel head it projects. Unknown buckets are left out."""
-    by_bucket = {h["bucket_id"]: h for h in _heads(Path(kernel_db or kernel_db_path()))}
+    by_bucket = {h["bucket_id"]: h for h in _heads(Path(kernel_db or kernel_db_path()), mode)}
     return {b: by_bucket[b] for b in bucket_ids if b in by_bucket}
 
 
@@ -244,8 +264,9 @@ def lexical(items: list[dict[str, Any]], query: Any) -> list[dict[str, Any]]:
 
 
 def search_current(query: Any, kernel_db: Path | None = None, *, memory_type: Any = None,
-                   active_only: bool = True, unprojected_only: bool = False) -> list[dict[str, Any]]:
-    heads = [h for h in list_current(kernel_db, memory_type=memory_type, active_only=active_only)
+                   active_only: bool = True, unprojected_only: bool = False,
+                   mode: str | None = SEARCH) -> list[dict[str, Any]]:
+    heads = [h for h in list_current(kernel_db, memory_type=memory_type, active_only=active_only, mode=mode)
              if not (unprojected_only and h["projected"])]
     return lexical(heads, query)
 
@@ -317,17 +338,20 @@ def dedupe(items: Iterable[dict[str, Any]], *, drop_norms: set[str] = frozenset(
 
 
 def memory_items(posts_db: Path | None, kernel_db: Path | None = None, *, memory_type: Any = None,
-                 layer: str | None = None, tag: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
-    """Every current memory (Kernel heads + pending fallback posts), newest first."""
-    kernel = list_current(kernel_db, memory_type=memory_type, layer=layer, tag=tag, active_only=active_only)
+                 layer: str | None = None, tag: str | None = None, active_only: bool = True,
+                 mode: str | None = AUTOMATIC) -> list[dict[str, Any]]:
+    """Every memory a ``mode`` read may see (Kernel heads + pending fallback posts), newest first."""
+    kernel = list_current(kernel_db, memory_type=memory_type, layer=layer, tag=tag, active_only=active_only,
+                          mode=mode)
     fallback = [i for i in pending_fallback_posts(posts_db, memory_type=memory_type, active_only=active_only)
                 if _wanted(i, memory_type=None, layer=layer, tag=tag, active_only=False)]
     return _newest_first(dedupe(kernel + fallback, drop_norms=non_memory_norms(posts_db)))
 
 
 def search(query: Any, posts_db: Path | None, kernel_db: Path | None = None, *, memory_type: Any = None,
-           active_only: bool = True, limit: int = 20, ombre: Any = DEFAULT) -> list[dict[str, Any]]:
-    """Memories for a query: Ombre-ranked heads first, then the gaps, newest first.
+           active_only: bool = True, limit: int = 20, ombre: Any = DEFAULT,
+           mode: str | None = SEARCH) -> list[dict[str, Any]]:
+    """Explicit search: Ombre-ranked heads first, then the gaps, newest first.
 
     ``ombre(query, limit)`` returns ranked bucket ids, or None when Ombre could not
     be asked; then every Kernel head is matched lexically so nothing is lost.
@@ -342,7 +366,7 @@ def search(query: Any, posts_db: Path | None, kernel_db: Path | None = None, *, 
         ranked = ombre(str(query), max(limit, 10)) if ombre else None
     except Exception:
         ranked = None
-    heads = list_current(kernel_db, memory_type=memory_type, active_only=active_only)
+    heads = list_current(kernel_db, memory_type=memory_type, active_only=active_only, mode=mode)
     by_bucket = {h["bucket_id"]: h for h in heads}
     first = [by_bucket[b] for b in (ranked or []) if b in by_bucket]
     gaps = lexical([h for h in heads if ranked is None or not h["projected"]], query)
@@ -360,7 +384,7 @@ def kernel_posts_db(conn: sqlite3.Connection) -> Path | None:
 
 def facts(posts_db: Path, kernel_db: Path | None = None, *, limit: int = 15) -> list[dict[str, Any]]:
     """Cold-start FACTs: most important first, then newest (posts: importance, id DESC)."""
-    items = memory_items(posts_db, kernel_db, memory_type="FACT")
+    items = memory_items(posts_db, kernel_db, memory_type="FACT", mode=IMPORTANCE)
     items.sort(key=lambda i: (int(i.get("importance") or 0), i["created_at"]), reverse=True)
     return items[:limit]
 
@@ -374,7 +398,7 @@ def long_term(posts_db: Path, kernel_db: Path | None = None, *, limit: int = 3) 
             f"AND {non_memory_clause()} ORDER BY id DESC LIMIT ?", (limit,))]
     finally:
         conn.close()
-    merged = dedupe(rows + memory_items(posts_db, kernel_db, layer="long-term"))
+    merged = dedupe(rows + memory_items(posts_db, kernel_db, layer="long-term", mode=AUTOMATIC))
     return _newest_first_any(merged)[:limit]
 
 
@@ -383,7 +407,7 @@ def recent_memos(posts_db: Path, kernel_db: Path | None = None, *, hours: int = 
     """MEMORY tagged memo in the last ``hours`` (posts: created_at >= now+8h-24h), newest first."""
     since = ((now or datetime.now(timezone.utc)).astimezone(BEIJING).replace(tzinfo=None)
              - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
-    items = memory_items(posts_db, kernel_db, memory_type="MEMORY", tag="memo")
+    items = memory_items(posts_db, kernel_db, memory_type="MEMORY", tag="memo", mode=AUTOMATIC)
     return [i for i in items if i["created_at"] >= since][:limit]
 
 
@@ -398,7 +422,7 @@ def recall_candidates(posts_db: Path, query: str, kernel_db: Path | None = None,
     The lexical side holds what Ombre cannot find yet (unprojected heads, pending
     fallback posts), or every memory when Ombre is off or could not be asked.
     """
-    items = memory_items(posts_db, kernel_db)
+    items = memory_items(posts_db, kernel_db, mode=AUTOMATIC)
     ranked = None
     if use_ombre and str(query or "").strip():
         if ombre is DEFAULT:

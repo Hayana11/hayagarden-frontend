@@ -163,7 +163,7 @@ def _fetch_library_rows(conn, limit=500, *, content_mode='full'):
         f"IN ({','.join('?' * len(LIBRARY_TYPES))})", f"IN ({','.join('?' * len(post_types))})")
     rows = [dict(r) for r in conn.execute(sql, (*post_types, limit)).fetchall()]
     memory_types = tuple(t for t in LIBRARY_TYPES if t in mkr.MEMORY_TYPES)
-    for item in mkr.memory_items(kernel_posts, memory_type=memory_types):
+    for item in mkr.memory_items(kernel_posts, memory_type=memory_types, mode=mkr.SEARCH):
         rows.append(_kernel_row(item, content_mode))
     rows.sort(key=lambda r: (str(r['created_at'] or ''), str(r.get('ref') or r['id'])), reverse=True)
     return rows[:limit]

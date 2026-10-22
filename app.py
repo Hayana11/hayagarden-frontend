@@ -396,7 +396,8 @@ def get_posts():
     posts = [dict(r) for r in rows]
     if kernel_posts and (not t or t in _mkr().MEMORY_TYPES):
         memory = [i for i in _mkr().memory_items(kernel_posts, memory_type=t or None, layer=layer or None,
-                                                 tag=tags or None, active_only=False)
+                                                 tag=tags or None, active_only=False,
+                                                 mode=_mkr().SEARCH)
                   if (not search or search in (i.get('content') or ''))
                   and (resolved == '' or int(i.get('resolved') or 0) == int(resolved))]
         posts = _newest_first(posts + memory)[:limit]
@@ -531,7 +532,7 @@ def posts_summary():
     ).fetchall()
     conn.close()
     if kernel_posts:
-        rows = _newest_first([dict(r) for r in rows] + _mkr().memory_items(kernel_posts, active_only=False))[:600]
+        rows = _newest_first([dict(r) for r in rows] + _mkr().memory_items(kernel_posts, active_only=False, mode=_mkr().SEARCH))[:600]
 
     core_items, long_items, recent_items = [], [], []
     for r in rows:
@@ -579,7 +580,7 @@ def posts_calendar():
     conn.close()
     if kernel_posts:
         rows = [dict(r) for r in rows] + [{'day': i['created_at'][:10]} for i in
-                                          _mkr().memory_items(kernel_posts, active_only=False)
+                                          _mkr().memory_items(kernel_posts, active_only=False, mode=_mkr().SEARCH)
                                           if i['created_at'].startswith(month)]
     by_day = {}
     for r in rows:
@@ -649,7 +650,7 @@ def posts_calendar_day():
     conn.close()
     if kernel_posts:
         rows = _newest_first([dict(r) for r in rows] + [
-            i for i in _mkr().memory_items(kernel_posts, active_only=False)
+            i for i in _mkr().memory_items(kernel_posts, active_only=False, mode=_mkr().SEARCH)
             if i['created_at'].startswith(date_str)])[:12]
     entries = []
     for r in rows:

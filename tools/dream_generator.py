@@ -201,7 +201,7 @@ def _kernel_memories(conn):
     if posts_db is None:
         return None, None
     from tools import memory_kernel_read as mkr
-    items = [i for i in mkr.memory_items(posts_db, memory_type='MEMORY', active_only=False)
+    items = [i for i in mkr.memory_items(posts_db, memory_type='MEMORY', active_only=False, mode=mkr.DREAM)
              if (i.get('content') or '').strip()]
     return posts_db, items
 

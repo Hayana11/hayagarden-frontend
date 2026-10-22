@@ -53,8 +53,10 @@ def _load_env_file(path: str) -> None:
             os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
-# Ombre's own read-side surfacing policy (SurfacePolicyVM), loaded with the runtime.
+# Ombre's own read-side surfacing policy (SurfacePolicyVM), loaded with the runtime and
+# required: Kernel readers depend on its per-mode verdicts.
 _SURFACE_POLICY = None
+SURFACE_MODES = ("automatic", "search", "dream", "importance", "spontaneous")
 
 
 def _bucket_view(bucket: dict | None, *, deleted: bool = False) -> dict | None:
@@ -68,10 +70,12 @@ def _bucket_view(bucket: dict | None, *, deleted: bool = False) -> dict | None:
         "deleted": deleted or bool(metadata.get("deleted_at") or metadata.get("tombstone")),
     }
     if _SURFACE_POLICY is not None:
-        # "automatic": what may enter a context without being asked for -- archived,
-        # deleted / tombstoned, dont_surface and digested (core rules exempt) may not.
-        decision = _SURFACE_POLICY.evaluate_bucket(bucket, "automatic")
-        view["lifecycle"] = {"allowed": bool(decision.allowed), "reasons": list(decision.reasons)}
+        # One verdict per kind of read: automatic recall, explicit search, dream, ...
+        modes = {}
+        for mode in SURFACE_MODES:
+            decision = _SURFACE_POLICY.evaluate_bucket(bucket, mode)
+            modes[mode] = {"allowed": bool(decision.allowed), "reasons": list(decision.reasons)}
+        view["lifecycle"] = {"modes": modes}
     return view
 
 
@@ -95,9 +99,13 @@ def load_runtime(src_dir: str):
     global _SURFACE_POLICY
     try:
         from ombrebrain.policy.surfacing import SurfacePolicyVM  # noqa: E402 (Ombre's own module)
-        _SURFACE_POLICY = SurfacePolicyVM.default()
-    except ImportError:  # the caller falls back to the bucket's own lifecycle metadata
-        _SURFACE_POLICY = None
+        policy = SurfacePolicyVM.default()
+        probe = {"id": "probe", "metadata": {"type": "dynamic"}}
+        for mode in SURFACE_MODES:
+            policy.evaluate_bucket(probe, mode)
+    except Exception as exc:  # a reader would show what Ombre retired: refuse to run
+        raise Incompatible(f"SurfacePolicyVM unavailable: {type(exc).__name__}: {exc}"[:200]) from exc
+    _SURFACE_POLICY = policy
     return version, BucketManager(load_config())
 
 

@@ -473,3 +473,25 @@ class ScheduledSyncTests(StoreFixture):
         with mock.patch.object(store, "run_sync", return_value={"outcome": "ok"}), \
                 mock.patch("builtins.print"):
             self.assertEqual(store.main(["sync"]), 0)
+
+
+class IncompatibleRuntimeTests(StoreFixture):
+    def test_missing_surface_policy_fails_sync_as_incompatible_and_keeps_verdicts(self):
+        self.ombre.edit("bbb222", deleted_at="2026-10-22T03:00:00")
+        store.run_sync(self.kernel, self.posts, runtime=self.ombre)
+        class Incompatible:
+            def __getattr__(self, name):
+                def refuse(*args, **kwargs):
+                    raise store.projection.RuntimeUnavailable("incompatible:SurfacePolicyVM unavailable: ImportError")
+                return refuse
+        broken = Incompatible()
+        result = store.run_sync(self.kernel, self.posts, runtime=broken)
+        self.assertEqual(result["outcome"], "incompatible")
+        with mock.patch.object(store, "run_sync", return_value=result), mock.patch("builtins.print"):
+            self.assertEqual(store.main(["sync"]), 1)
+        self.assertEqual(store.projection.ProjectionState(
+            store.projection.state_path_for(self.kernel)).lifecycles()["bbb222"]["allowed"], 0)
+
+    def test_a_dropped_connection_is_a_plain_failure(self):
+        self.ombre.down = True
+        self.assertEqual(store.run_sync(self.kernel, self.posts, runtime=self.ombre)["outcome"], "failed")

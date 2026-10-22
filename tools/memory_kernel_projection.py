@@ -318,28 +318,53 @@ def classify(head: "Head", row: dict[str, Any] | None, bucket: dict[str, Any]) -
     return "external"
 
 
-# The automatic-surfacing reasons of SurfacePolicyVM (Ombre 3.6), used only when the
-# runtime did not report its own verdict (an older worker): any of them retires.
-_RETIRING_FLAGS = ("dont_surface", "digested")
+# Ombre 3.6's SurfacePolicyVM modes: one verdict per kind of read.
+SURFACE_MODES = ("automatic", "search", "dream", "importance", "spontaneous")
+_PRIVATE_TYPES = ("feel", "plan", "letter", "self", "i")
+
+
+def _truthy(value: Any) -> bool:
+    return value in (True, 1, "true", "True", "1", "yes")
+
+
+def _metadata_verdicts(bucket: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """SurfacePolicyVM's rules applied to a bucket view, for runtimes that report none
+    (test doubles); the real worker refuses to run without the official policy."""
+    meta = bucket.get("metadata") or {}
+    kind = str(meta.get("type") or "").strip().lower()
+    gone = []
+    if kind == "tombstone" or _truthy(meta.get("tombstone")):
+        gone.append("tombstone")
+    if kind == "archived":
+        gone.append("archived")
+    if bucket.get("deleted") or meta.get("deleted_at"):
+        gone.append("deleted")
+    core = _truthy(meta.get("pinned")) or kind == "permanent" or _truthy(meta.get("anchor"))
+    quiet = ["dont_surface"] if _truthy(meta.get("dont_surface")) else []
+    digested = ["digested"] if _truthy(meta.get("digested")) and not core else []
+    private = ["private_type"] if kind in _PRIVATE_TYPES else []
+    extra = {
+        "search": [],
+        "automatic": quiet + digested,
+        "importance": quiet + private,
+        "dream": quiet + digested + (["anchor"] if _truthy(meta.get("anchor")) else [])
+        + (["protected"] if _truthy(meta.get("protected")) else []) + private,
+    }
+    extra["spontaneous"] = extra["dream"]
+    return {mode: {"allowed": not (gone + extra[mode]), "reasons": gone + extra[mode]} for mode in SURFACE_MODES}
 
 
 def lifecycle_of(bucket: dict[str, Any]) -> dict[str, Any]:
-    """Ombre's verdict for a bucket view: the official one when the worker sent it."""
+    """Ombre's per-mode verdicts for a bucket view: the official ones the worker sent."""
     official = bucket.get("lifecycle")
-    if isinstance(official, dict) and "allowed" in official:
-        return {"allowed": bool(official["allowed"]), "reasons": [str(r) for r in official.get("reasons") or []],
-                "source": "ombre_surface_policy"}
-    meta = bucket.get("metadata") or {}
-    kind = str(meta.get("type") or "").strip().lower()
-    reasons = []
-    if bucket.get("deleted") or meta.get("deleted_at"):
-        reasons.append("deleted")
-    if kind == "tombstone" or meta.get("tombstone"):
-        reasons.append("tombstone")
-    if kind == "archived":
-        reasons.append("archived")
-    reasons += [flag for flag in _RETIRING_FLAGS if meta.get(flag) in (True, 1, "true", "True", "1", "yes")]
-    return {"allowed": not reasons, "reasons": reasons, "source": "metadata"}
+    if isinstance(official, dict) and isinstance(official.get("modes"), dict):
+        modes = {m: {"allowed": bool(v.get("allowed")), "reasons": [str(r) for r in v.get("reasons") or []]}
+                 for m, v in official["modes"].items()}
+        source = "ombre_surface_policy"
+    else:
+        modes, source = _metadata_verdicts(bucket), "metadata"
+    automatic = modes.get("automatic") or {"allowed": False, "reasons": ["no_verdict"]}
+    return {"modes": modes, "allowed": automatic["allowed"], "reasons": automatic["reasons"], "source": source}
 
 
 def projection_marked(bucket: dict[str, Any]) -> bool:
@@ -466,10 +491,10 @@ CREATE TABLE IF NOT EXISTS projection_quarantine (
     created_at TEXT NOT NULL
 )
 """
-# Ombre's own verdict on whether a bucket may still surface, per bucket, as last
-# observed through the official runtime (SurfacePolicyVM, "automatic" mode: archived,
-# soft-deleted / tombstoned, dont_surface and digested buckets are retired). Readers use
-# the last observed verdict, so an Ombre outage never brings a retired memory back.
+# Ombre's own verdicts on whether a bucket may still surface, per bucket and per
+# SurfacePolicyVM mode (modes_json), as last observed through the official runtime;
+# allowed / reasons_json repeat the strict "automatic" verdict. Readers use the last
+# observed verdicts, so an Ombre outage never brings a retired memory back.
 _LIFECYCLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS projection_lifecycle (
     bucket_id TEXT PRIMARY KEY,
@@ -477,7 +502,8 @@ CREATE TABLE IF NOT EXISTS projection_lifecycle (
     allowed INTEGER NOT NULL,
     reasons_json TEXT NOT NULL,
     source TEXT NOT NULL,
-    observed_at TEXT NOT NULL
+    observed_at TEXT NOT NULL,
+    modes_json TEXT
 )
 """
 # The projection's own provenance marks on a bucket. WORKER_SOURCE_TOOL is set only by
@@ -501,6 +527,8 @@ class ProjectionState:
             conn.execute(_STATE_SCHEMA)
             conn.execute(_QUARANTINE_SCHEMA)
             conn.execute(_LIFECYCLE_SCHEMA)
+            if "modes_json" not in {r[1] for r in conn.execute("PRAGMA table_info(projection_lifecycle)")}:
+                conn.execute("ALTER TABLE projection_lifecycle ADD COLUMN modes_json TEXT")
             have = {r[1] for r in conn.execute("PRAGMA table_info(projection_lineage)")}
             for name, kind in _STATE_COLUMNS.items():
                 if name not in have:
@@ -593,15 +621,16 @@ class ProjectionState:
         for bucket_id, (lineage_id, bucket) in observed.items():
             verdict = lifecycle_of(bucket)
             rows.append((bucket_id, lineage_id, 1 if verdict["allowed"] else 0,
-                         json.dumps(verdict["reasons"], ensure_ascii=False), verdict["source"], now))
+                         json.dumps(verdict["reasons"], ensure_ascii=False), verdict["source"], now,
+                         json.dumps(verdict["modes"], ensure_ascii=False, sort_keys=True)))
         if not rows:
             return
         with self._conn() as conn:
             conn.executemany(
-                "INSERT INTO projection_lifecycle (bucket_id, lineage_id, allowed, reasons_json, source, observed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(bucket_id) DO UPDATE SET lineage_id=excluded.lineage_id, "
-                "allowed=excluded.allowed, reasons_json=excluded.reasons_json, source=excluded.source, "
-                "observed_at=excluded.observed_at", rows)
+                "INSERT INTO projection_lifecycle (bucket_id, lineage_id, allowed, reasons_json, source, observed_at, "
+                "modes_json) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(bucket_id) DO UPDATE SET "
+                "lineage_id=excluded.lineage_id, allowed=excluded.allowed, reasons_json=excluded.reasons_json, "
+                "source=excluded.source, observed_at=excluded.observed_at, modes_json=excluded.modes_json", rows)
 
     def lifecycles(self) -> dict[str, dict[str, Any]]:
         with self._conn() as conn:

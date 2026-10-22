@@ -391,3 +391,40 @@ class KernelReadOnlyTests(DashboardFixture):
                                                          "author": "fyodor"})
         self.assertEqual(response.get_json()["store"], "kernel")
         self.assertIn("她说明天想吃馄饨。", [h["content"] for h in reader.list_current(self.kernel)])
+
+
+class SurfaceModeTests(DashboardFixture):
+    """Each reader asks Ombre's policy in its own mode (AUTOMATIC / SEARCH / DREAM / IMPORTANCE)."""
+
+    def test_quiet_memory_is_found_by_search_and_the_library_but_never_injected(self):
+        fact = self.kernel_memory("她对芒果过敏，吃了会起疹子。", memory_type="FACT", importance=9)
+        quiet = self.kernel_memory("她在阳台上悄悄哭过一次。", layer="long-term")
+        self.ombre.edit(fact["bucket_id"], dont_surface=True)
+        self.ombre.edit(quiet["bucket_id"], dont_surface=True)
+        self.sync()
+        set_flag(self.posts, "1")
+        from chat import system_builder
+        facts, long_term = system_builder._kernel_facts_and_long_term(self.conn())
+        self.assertNotIn("她对芒果过敏，吃了会起疹子。", [f["content"] for f in facts])        # IMPORTANCE
+        self.assertNotIn("她在阳台上悄悄哭过一次。", [m["content"] for m in long_term])      # AUTOMATIC
+        with mock.patch("tools.ombre_adapter.search_bucket_ids", return_value=[quiet["bucket_id"]]):
+            found = self.memory_tool.search_memories("悄悄哭过")                             # SEARCH
+            _, recalled = reader.recall_candidates(self.posts, "悄悄哭过", self.kernel)       # AUTOMATIC
+        self.assertEqual([h["lineage_id"] for h in found], [quiet["lineage_id"]])
+        self.assertEqual(recalled, [])
+        ids = [e["id"] for e in self.library()["entries"]]                                   # SEARCH
+        self.assertIn(f"kernel:{quiet['lineage_id']}", ids)
+
+    def test_digested_memory_leaves_dreams_and_recall_but_not_the_fact_list(self):
+        fact = self.kernel_memory("她每天早上要喝一杯温水。", memory_type="FACT", importance=8)
+        memory = self.kernel_memory("她今天在雨里跑回家。")
+        self.ombre.edit(fact["bucket_id"], digested=True, type="dynamic", pinned=False)
+        self.ombre.edit(memory["bucket_id"], digested=True)
+        self.sync()
+        set_flag(self.posts, "1")
+        from tools import dream_generator
+        self.assertNotIn("她今天在雨里跑回家。",
+                         [f["content"] for f in dream_generator._collect_recent_memories(self.conn(), n=8)])
+        self.assertIn("她每天早上要喝一杯温水。", [f["content"] for f in reader.facts(self.posts, self.kernel)])
+        self.assertNotIn("她今天在雨里跑回家。",
+                         [i["content"] for i in reader.memory_items(self.posts, self.kernel)])

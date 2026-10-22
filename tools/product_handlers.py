@@ -353,7 +353,7 @@ def search_memory_posts(
         if search:
             memory = mkr.search(search, kernel_posts, active_only=False, limit=limit_n)
         else:
-            memory = mkr.memory_items(kernel_posts, active_only=False)[:limit_n]
+            memory = mkr.memory_items(kernel_posts, active_only=False, mode=mkr.SEARCH)[:limit_n]
         posts = [dict(row) for row in rows]
         if not search:  # no query: newest first across both, as before
             return mkr.dedupe(sorted(posts + memory, key=lambda r: str(r.get("created_at") or ""),
