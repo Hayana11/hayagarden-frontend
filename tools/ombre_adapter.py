@@ -16,6 +16,7 @@ import importlib.util
 import json
 import logging
 import os
+import socket
 import sys
 import threading
 import http.cookiejar
@@ -281,6 +282,35 @@ def _close_loop(loop: asyncio.AbstractEventLoop) -> None:
         loop.close()
 
 
+def _failure_kind(exc: BaseException) -> str:
+    """Why an Ombre call failed: connection / timeout / auth / http_<code> / error."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return "auth" if exc.code in (401, 403) else f"http_{exc.code}"
+    if isinstance(exc, (TimeoutError, socket.timeout, asyncio.TimeoutError)):
+        return "timeout"
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return "timeout"
+        return "connection"
+    if isinstance(exc, ConnectionError):
+        return "connection"
+    return "error"
+
+
+def _log_failure(call: Callable[..., Any], kind: str, exc: Optional[BaseException] = None) -> None:
+    # Callers turn a failure into their default ([] / None), which reads like
+    # "nothing found"; this line is the only trace that Ombre was not reached.
+    # Never logs the query or URL: queries are the user's own words.
+    _LOG.warning(
+        "ombre call failed: call=%s kind=%s exc=%s backend=%s",
+        getattr(call, "__qualname__", repr(call)),
+        kind,
+        type(exc).__name__ if exc is not None else "-",
+        _backend(),
+    )
+
+
 def _run_async(
     coroutine_factory: Callable[[], Any],
     *,
@@ -299,14 +329,16 @@ def _run_async(
             result[0] = loop.run_until_complete(
                 asyncio.wait_for(coroutine_factory(), timeout=async_timeout)
             )
-        except Exception:
+        except Exception as exc:
+            _log_failure(coroutine_factory, _failure_kind(exc), exc)
             result[0] = default
         finally:
             _close_loop(loop)
             done.set()
 
     threading.Thread(target=worker, daemon=True, name="ombre-adapter").start()
-    done.wait(timeout=max(0.05, wall_timeout))
+    if not done.wait(timeout=max(0.05, wall_timeout)):
+        _log_failure(coroutine_factory, "wall_timeout")
     return result[0]
 
 
@@ -323,13 +355,15 @@ def _run_sync(
     def target() -> None:
         try:
             result[0] = worker()
-        except Exception:
+        except Exception as exc:
+            _log_failure(worker, _failure_kind(exc), exc)
             result[0] = default
         finally:
             done.set()
 
     threading.Thread(target=target, daemon=True, name="ombre-adapter-sync").start()
-    done.wait(timeout=max(0.05, wall_timeout))
+    if not done.wait(timeout=max(0.05, wall_timeout)):
+        _log_failure(worker, "wall_timeout")
     return result[0]
 
 

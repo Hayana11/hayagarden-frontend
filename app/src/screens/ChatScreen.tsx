@@ -55,6 +55,7 @@ import {
   type ChatContextLimits,
   type ChatMsg,
   type ChatToolCall,
+  type MemoryRecall,
 } from '../lib/chat';
 import { imageUrlsFromToolValue, type ChatMediaItem } from '../lib/chatMedia';
 import type { SoftWindowUiState } from '../lib/dailySoftWindow';
@@ -65,6 +66,7 @@ import {
   createLiveState,
   isTextCaretActive,
   replaceWithCanonicalProjection,
+  setLiveMemoryRecall,
   upsertToolUse,
   type LiveSegment,
   type LiveState,
@@ -347,6 +349,8 @@ function collectLayoutDiagnostics(
 interface DrawerState {
   text: string;
   label: string;
+  /** Sheet title; thinking when omitted. */
+  title?: string;
 }
 
 const iconBtn: CSSProperties = {
@@ -1766,6 +1770,9 @@ export function ChatScreen() {
             updateLive((l) => replaceWithCanonicalProjection(l, projection));
             scrollBottom(true);
           },
+          onMemoryRecall: (recall) => {
+            updateLive((l) => setLiveMemoryRecall(l, recall));
+          },
           onNotice: (s) => showToast(s),
         },
         ctrl,
@@ -2295,6 +2302,27 @@ export function ChatScreen() {
     );
   }
 
+  // What automatic recall put into this turn's prompt; sits above thinking.
+  function renderMemoryRecall(recall: MemoryRecall | undefined, key: string) {
+    if (!recall || recall.count <= 0) return null;
+    const label = `${recall.count} 条记忆浮现`;
+    const text = recall.items
+      .map((item) => `[${[item.type, item.date].filter(Boolean).join(' ')}] ${item.preview}…`)
+      .join('\n\n');
+    return (
+      <div
+        key={key}
+        onClick={() => setDrawer({ text, label, title: '浮现的记忆' })}
+        className="chat-memory-recall hstack hstack-6"
+        style={{ cursor: 'pointer', color: 'var(--faint)', fontSize: 12.5, letterSpacing: 1 }}
+      >
+        <span style={{ color: 'var(--rose)' }}>◇</span>
+        <span>{label}</span>
+        <span>›</span>
+      </div>
+    );
+  }
+
   function renderArtifactCard(key: string, tc: ChatToolCall) {
     const art = tc.artifact!;
     const previewable = art.type === 'html' || art.type === 'markdown';
@@ -2578,6 +2606,7 @@ export function ChatScreen() {
     const mediaItems = messageMediaItems(m);
     return (
       <div id={`msg-${m.id}`} className={`chat-msg vstack vstack-12${flashId === m.id ? ' chat-flash' : ''}`} style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+        {renderMemoryRecall(usage?.memoryRecall, presentationKey + '-recall')}
         <div className="chat-message-content chat-message-content-assistant">
           {mediaItems.length > 0 && <ChatMediaGroup items={mediaItems} onOpenGallery={openMediaGallery} />}
           {m.displaySegments?.length
@@ -2669,6 +2698,7 @@ export function ChatScreen() {
     const presentationKey = handoff?.presentationKey || 'chat-live-fallback';
     return (
       <div className="chat-msg vstack vstack-12" style={{ alignItems: 'flex-start', borderRadius: 16 }}>
+          {renderMemoryRecall(l.memoryRecall, presentationKey + '-recall')}
           <div className="chat-message-content chat-message-content-assistant">
             <div key={presentationKey + '-segments'} className="vstack vstack-12">
               {l.segments.map((segment: LiveSegment) => {
@@ -3221,7 +3251,7 @@ export function ChatScreen() {
                 <span style={{ display: 'flex', color: 'var(--rose)' }}>
                   <Svg d={IC.brain} size={17} sw={1.5} />
                 </span>
-                <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>Fyodor 的思考</span>
+                <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: 2, color: 'var(--ink)' }}>{drawer.title || 'Fyodor 的思考'}</span>
                 <span style={{ fontFamily: fontFamilyForText(drawer.label), fontSize: 12, color: 'var(--ghost)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{drawer.label}</span>
                 <span onClick={() => setDrawer(null)} style={{ marginLeft: 'auto', cursor: 'pointer', width: 30, height: 30, borderRadius: '50%', background: 'var(--card2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--mut)', fontSize: 14, flexShrink: 0 }}>×</span>
               </div>
