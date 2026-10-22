@@ -632,20 +632,24 @@ def score_and_update(conversation_excerpt: str, *, message_id=None):
     # (duplicate / stale_skipped / failure leave no point).
     if getattr(result, 'status', None) != 'applied':
         return
-    record_v3_affect_snapshot()
+    record_settled_affect_snapshot(getattr(result, 'result', None))
 
 
-def record_v3_affect_snapshot() -> bool:
-    """Append the current authoritative V3 Affect to ``emotion_history``."""
+def record_settled_affect_snapshot(event_result) -> bool:
+    """Append the Affect a ``user_scored`` event settled to ``emotion_history``.
+
+    Uses the event's frozen ``settled_affect`` — never re-reads current V3,
+    which a later concurrent score may already have moved.
+    """
+    affect = (event_result or {}).get('settled_affect') if isinstance(event_result, dict) else None
+    if not affect or affect.get('valence') is None or affect.get('arousal') is None:
+        return False
     try:
-        from chat.affect_bond_authority import read_v3_state
         import emotion_history
-        v3 = read_v3_state(DB_PATH)
-        if not v3 or v3.get('valence') is None or v3.get('arousal') is None:
-            return False
         emotion_history.append_snapshot(
-            v3['valence'], v3['arousal'], v3.get('mood_word') or '',
+            affect['valence'], affect['arousal'], affect.get('mood_word') or '',
             db_path=DB_PATH, source=emotion_history.SOURCE_V3_AFFECT,
+            recorded_at=affect.get('scored_at'),
         )
         return True
     except Exception:

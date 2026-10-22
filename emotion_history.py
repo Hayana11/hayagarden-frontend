@@ -53,6 +53,7 @@ def append_snapshot(
     *,
     db_path: str,
     source: str = 'score',
+    recorded_at: str | None = None,
 ) -> None:
     ensure_schema(db_path)
     conn = _conn(db_path)
@@ -62,7 +63,7 @@ def append_snapshot(
         VALUES (?, ?, ?, ?, ?)
         """,
         (
-            _now_str(),
+            recorded_at or _now_str(),
             round(float(valence_unipolar), 4),
             round(float(arousal), 4),
             (mood_word or '')[:30],

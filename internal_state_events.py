@@ -1143,9 +1143,18 @@ def observe_scored(
             scores=payload['scores'],
             scored_at=scored_canon,
         )
+        updates = plan['updates']
         return ConditionalDecision(
             status='applied',
-            updates=plan['updates'],
+            updates=updates,
+            # Affect this event settled, frozen in the same transaction so
+            # consumers (Moments timeline) never re-read a later state.
+            result={'settled_affect': {
+                'valence': updates['valence'],
+                'arousal': updates['arousal'],
+                'mood_word': updates['mood_word'],
+                'scored_at': scored_canon,
+            }},
         )
 
     return apply_conditional_state_update(
