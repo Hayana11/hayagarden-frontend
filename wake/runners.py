@@ -2,8 +2,9 @@
 
 ApiRelayWakeRunner wraps the existing relay agent loop (behavior unchanged).
 Legacy Claude Wake structured protocol and the independent CC Wake resident
-are retired: morning/nightwatch/ritual/self_trigger fail closed, and
-canonical normal Wake stays on the Unified/_CC_RESIDENT route.
+are retired. normal / morning / nightwatch / self_trigger run only as one
+proactive round on the Unified/_CC_RESIDENT route (wake.unified_modes); with that
+route off, the non-normal ones fail closed. ritual stays retired.
 """
 from __future__ import annotations
 
@@ -11,15 +12,17 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
 from chat.provider_router import resolve_provider
+from wake.unified_modes import UNIFIED_MAIN_CHAT_WAKE_MODES
 
 NL = chr(10)
 
 # Modes that stay on BACKGROUND_PROVIDER in B1 — api_relay only (scheme A).
 BACKGROUND_WAKE_MODES = frozenset(('summarize',))
 # Retired Claude Wake modes: no provider round, no Action, no runner fallback.
-DISABLED_CC_WAKE_MODES = frozenset((
-    'morning', 'nightwatch', 'ritual', 'self_trigger',
-))
+DISABLED_CC_WAKE_MODES = frozenset(('ritual',))
+# Served only by the Unified main-Chat proactive round; there is no legacy
+# fallback, so they fail closed whenever that route is off.
+UNIFIED_ONLY_WAKE_MODES = frozenset(('morning', 'nightwatch', 'self_trigger'))
 WAKE_MODE_DISABLED_REASON = 'WAKE_MODE_DISABLED'
 
 
@@ -28,8 +31,19 @@ class UnsupportedWakeModeError(ValueError):
     pass
 
 
+def _unified_main_chat_route_on() -> bool:
+    try:
+        from chat.behavior_authority_b3 import unified_normal_wake_enabled
+        return bool(unified_normal_wake_enabled())
+    except Exception:
+        return False
+
+
 def wake_mode_disabled(mode: str) -> bool:
-    return str(mode or '').strip() in DISABLED_CC_WAKE_MODES
+    cleaned = str(mode or '').strip()
+    if cleaned in DISABLED_CC_WAKE_MODES:
+        return True
+    return cleaned in UNIFIED_ONLY_WAKE_MODES and not _unified_main_chat_route_on()
 
 
 def wake_mode_disabled_payload(mode: str) -> dict[str, Any] | None:
@@ -260,9 +274,9 @@ def inspect_wake_plan(
     prepared = prepare_tools_for_provider(provider, tools, cleaned, dry_run=False)
     stable, dynamic = split_wake_system(system)
     flat = (stable + NL + dynamic).lower()
-    if provider == 'claude_code' and cleaned == 'normal':
+    if provider == 'claude_code' and cleaned in UNIFIED_MAIN_CHAT_WAKE_MODES:
         profile = 'unified_hot_resident'
-        route = 'unified_b2_b3'
+        route = 'unified_b2_b3' if cleaned == 'normal' else 'unified_main_chat'
         resident = '_CC_RESIDENT'
         owned = ['none', 'message']
     elif cleaned == 'summarize':

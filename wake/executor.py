@@ -7,6 +7,8 @@ import json
 import logging
 from typing import Optional
 
+from wake.unified_modes import is_unified_main_chat_wake_mode
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +112,8 @@ def execute(action: str, thoughts: str, content: str,
             and wake_cache_info.get('provider') == 'claude_code'
         )
         wake_cache_info['canonical_chat_history'] = (
-            wake_mode == 'normal' and verified_unified_shared_chat
+            is_unified_main_chat_wake_mode(wake_mode)
+            and verified_unified_shared_chat
         )
         cache_info_json = json.dumps(wake_cache_info, ensure_ascii=False)
     elif isinstance(cache_info, str):

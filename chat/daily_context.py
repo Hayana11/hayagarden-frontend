@@ -43,6 +43,7 @@ from chat.daily_schema import (
     get_meta_int,
 )
 from chat.context_receipt import ensure_context_receipt_schema
+from wake.unified_modes import is_unified_main_chat_wake_mode
 
 logger = logging.getLogger(__name__)
 
@@ -1626,7 +1627,7 @@ def is_canonical_conversation_message(
         return False
     if not isinstance(cache_info, dict):
         return False
-    if cache_info.get('wake_mode') != 'normal':
+    if not is_unified_main_chat_wake_mode(cache_info.get('wake_mode')):
         return False
     if cache_info.get('canonical_chat_history') is not True:
         return False

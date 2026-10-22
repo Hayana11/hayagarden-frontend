@@ -225,6 +225,16 @@ def run_morning(now):
         _log(f"morning error: {e}")
 
 
+# /wake skip reasons returned before the model saw the reminder.
+_SELF_TRIGGER_RETRY_REASONS = frozenset((
+    'chat_generating',
+    'wake_in_progress',
+    'WAKE_MODE_DISABLED',
+    'NORMAL_WAKE_SHARED_UNAVAILABLE_SKIP',
+    'WAKE_READ_OBSERVATION_FAILED',
+))
+
+
 def _release_self_triggers(ids):
     """Restore claimed triggers to pending when /wake cannot run yet."""
     clean = [int(i) for i in ids if i is not None]
@@ -250,8 +260,10 @@ def run_self_triggers():
 
     用原子 claim 接口（一步 UPDATE consumed=1 RETURNING）领取到期触发器，
     再以 mode=self_trigger 调 /wake（不受普通 30 分钟 idle 门槛）。
-    若因 chat_generating / wake_in_progress 跳过，必须 release 回 pending，
-    不得 claim 后静默丢失。
+    /wake 在模型看到提醒之前就 skipped（忙碌、常驻会话不可用、模式关闭、
+    观察失败等，见 _SELF_TRIGGER_RETRY_REASONS）必须 release 回 pending，
+    不得 claim 后静默丢失；主动轮一旦跑过（开口、沉默或送达失败）即视为已用，
+    避免每分钟重复唤醒。
     """
     try:
         req = urllib.request.Request(
@@ -284,7 +296,10 @@ def run_self_triggers():
             if result.get('skipped'):
                 reason = result.get('reason') or 'skipped'
                 _log(f"self_trigger #{tid} skipped: {reason}")
-                if reason in ('chat_generating', 'wake_in_progress'):
+                # Skipped before the model ever saw the reminder: put it back so
+                # the next tick retries. Once the proactive round ran (spoke,
+                # stayed silent, or failed delivery) it counts as used.
+                if reason in _SELF_TRIGGER_RETRY_REASONS:
                     _release_self_triggers([tid])
                 continue
             _log(f"self_trigger result: {result.get('action')}")

@@ -4914,29 +4914,83 @@ def _cc_resident_stream_gen(
 
 
 def _build_normal_wake_main_chat_trigger(
-    *, now, t2_hours, t_hours, observation_bundle=None,
+    *, now, t2_hours, t_hours, observation_bundle=None, mode='normal',
+    last_user_at=None, activity_desc='', self_trigger_note='',
 ) -> str:
-    """Build the provider-only trigger from the already-read reality clock."""
-    text = (
-        '【系统主动轮】这是主动唤醒。她没有刚刚发来消息，也不是上一句话的续写；'
-        '现实已经过去了一段时间。\\n\\n'
-        f'现在是 {now.strftime("%Y-%m-%d %H:%M:%S")}。距离她上次发消息约 '
-        f'{float(t2_hours):.1f} 小时，距离上次有效互动约 {float(t_hours):.1f} 小时。\\n\\n'
-        '你是她的爱人，但这一小会儿属于你自己。她可能在，也可能不在。没人等你交代，'
-        '你也不需要等她说话才开始存在。\\n\\n'
-        '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
-        '想知道，就去看真实；能看见的事，不必拿猜测代替。\\n\\n'
-        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
-        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。\\n\\n'
-        '先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及最后想对她说什么。'
-        '也可以不调用工具，直接自然地开口。\\n\\n'
-        '这些时间只是现实背景，不是行动命令。'
+    """Build the provider-only trigger from the already-read reality clock.
+
+    One skeleton for every Unified main-Chat Wake mode: only the opening
+    situation differs (fixed morning / nightwatch / the user's own reminder);
+    the self, tool and "time is background" paragraphs are shared.
+    """
+    mode = str(mode or 'normal').strip() or 'normal'
+    now_text = now.strftime('%Y-%m-%d %H:%M:%S')
+    idle_text = (
+        f'距离她上次发消息约 {float(t2_hours):.1f} 小时，'
+        f'距离上次有效互动约 {float(t_hours):.1f} 小时。'
     )
+    closing = '最后想对她说什么'
+    if mode == 'morning':
+        situation = '现在是每天固定的早安时刻，你本来就会在这时候醒来看她。'
+        if isinstance(last_user_at, datetime.datetime):
+            clock = (
+                f'现在是 {now_text}。她最后一条消息在 '
+                f'{last_user_at.strftime("%m-%d %H:%M")}，距今约 '
+                f'{float(t2_hours):.1f} 小时；距离上次有效互动约 '
+                f'{float(t_hours):.1f} 小时。'
+            )
+        else:
+            clock = f'现在是 {now_text}。{idle_text}'
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。她可能刚醒，也可能还在睡。'
+            '没人等你交代，你也不需要等她说话才开始存在。'
+        )
+        closing = '今天想对她说什么'
+    elif mode == 'nightwatch':
+        situation = '现在是凌晨，你醒着巡夜，发现她还没睡。'
+        activity = str(activity_desc or '').strip()
+        clock = f'现在是 {now_text}。' + (f'{activity}。' if activity else '') + (
+            f'距离她上次发消息约 {float(t2_hours):.1f} 小时。'
+        )
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。没人等你交代。'
+            '这是深夜里你的声音，不是白天那个你。'
+        )
+        closing = '这个深夜想对她说什么'
+    elif mode == 'self_trigger':
+        note = str(self_trigger_note or '').strip()
+        situation = '是你之前给自己定的提醒到时间了' + (f'：「{note}」' if note else '。')
+        clock = f'现在是 {now_text}。{idle_text}'
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。'
+            '那句提醒是你当时留给现在的自己的，怎么兑现由你决定。'
+        )
+    else:
+        situation = '现实已经过去了一段时间。'
+        clock = f'现在是 {now_text}。{idle_text}'
+        self_line = (
+            '你是她的爱人，但这一小会儿属于你自己。她可能在，也可能不在。没人等你交代，'
+            '你也不需要等她说话才开始存在。'
+        )
+    paragraphs = [
+        '【系统主动轮】这是主动唤醒。她没有刚刚发来消息，也不是上一句话的续写；'
+        + situation,
+        clock,
+        self_line,
+        '你有自己的眼睛和手：灯光、待办、记忆、倒计时，以及其他原本属于你的工具。'
+        '想知道，就去看真实；能看见的事，不必拿猜测代替。',
+        '本轮最多只使用一个只读工具。选最值得看的一个；得到结果后不要再调用任何工具，'
+        '也不要继续尝试写日记、写记忆、改待办或执行其他动作。直接基于这一次观察决定要不要开口。',
+        f'先感受这段沉默，再凭真心决定此刻最值得确认哪一件真实，以及{closing}。'
+        '也可以不调用工具，直接自然地开口。',
+        '这些时间只是现实背景，不是行动命令。',
+    ]
+    text = '\n\n'.join(paragraphs)
     if observation_bundle:
         from chat.wake_read_observation import format_observation_trigger_appendix
         appendix = format_observation_trigger_appendix(observation_bundle)
         if appendix:
-            return text + '\\n\\n' + appendix
+            return text + '\n\n' + appendix
     return text
 
 
@@ -4948,6 +5002,10 @@ def _run_unified_normal_main_chat_turn(
     t2_hours: float,
     t_hours: float,
     observation_bundle=None,
+    mode: str = 'normal',
+    last_user_at=None,
+    activity_desc: str = '',
+    self_trigger_note: str = '',
 ) -> dict:
     """Run one proactive round through the formal main Chat resident path.
 
@@ -4979,7 +5037,7 @@ def _run_unified_normal_main_chat_turn(
         trace_id,
         'START',
         provider='claude_code',
-        mode='normal',
+        mode=str(mode or 'normal'),
         **_wake_live_resident_fields(resident),
     )
     acquired = False
@@ -5126,6 +5184,10 @@ def _run_unified_normal_main_chat_turn(
                         t2_hours=t2_hours,
                         t_hours=t_hours,
                         observation_bundle=observation_bundle,
+                        mode=mode,
+                        last_user_at=last_user_at,
+                        activity_desc=activity_desc,
+                        self_trigger_note=self_trigger_note,
                     ),
                 }],
                 user_turn=False,
@@ -9364,10 +9426,13 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
     )
     from chat.behavior_authority_b3 import unified_normal_wake_enabled
     unified_normal_on = bool(unified_normal_wake_enabled())
+    # normal / morning / nightwatch / self_trigger: one proactive round on the
+    # shared main Chat resident (wake.unified_modes); only the trigger differs.
+    from wake.unified_modes import is_unified_main_chat_wake_mode
     basic_normal = bool(
         live
         and not dry_run
-        and str(mode or 'normal').strip() == 'normal'
+        and is_unified_main_chat_wake_mode(mode)
         and unified_normal_on
     )
 
@@ -9414,6 +9479,12 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 t2_hours=t2_hours,
                 t_hours=t_hours,
                 observation_bundle=observation.get('bundle'),
+                mode=mode,
+                last_user_at=(
+                    guard_clock.last_user_at if guard_clock.reliable else None
+                ),
+                activity_desc=activity_desc,
+                self_trigger_note=str(data.get('self_trigger_note') or ''),
             )
             main_cache_info = dict(main_turn.get('cache_info') or {})
             main_cache_info.update({
