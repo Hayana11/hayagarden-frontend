@@ -1,6 +1,6 @@
 # 主动轮冷启动（Proactive Cold Start）设计稿
 
-状态：**设计稿，未施工。** 开工前需哈娅确认本文。
+状态：**已确认（S0），S1 施工中。**
 日期：2026-10-22
 上游：Internal State V3 合同 7.8 / 7.8.1 / 7.8.2；UH-A1（共享 resident）；PR #622。
 
@@ -58,12 +58,13 @@ PR #622 之后，normal / morning / nightwatch / self_trigger 都走同一条 ba
 
 `DailyTurnPlan` 增加 `proactive_mode`（None 表示普通 Chat），下游据此分流，不新增第二种 plan 类型。
 
-### 4.2 日界（开放问题 Q1）
+### 4.2 日界（已核实，2026-10-22）
 
-08:50 往往跨过了 chat day 边界。普通 Chat 冷启动遇到新的一天会走 day handoff
-（`chat/day_handoff.py`，`close_local_resident_for_context_switch`）。主动轮冷启动**必须走同一条**，
-否则会在前一天的 context 上 respawn。施工前需确认 day handoff 是否能由「非用户消息」触发；
-若不能，S1 shadow 先记录这类情况的比例，再决定是扩展 handoff 还是让早安在跨日时退回「她回来时补上」。
+生产开着 `DAILY_SOFT_WINDOW_ENABLED=1`，此时 `cw.enabled()` 为真，`prepare_daily_turn` 走**手动窗口模式**：
+上下文窗口只在她显式切换时更换，不按 04:00 聊天日自动 rollover。因此早安冷启动直接接她当前打开的窗口，
+不存在「在前一天 context 上 respawn」的问题。仍需处理的只有手动模式本身的两道门：
+`switch_in_progress`（她正在切窗口）与 `first-turn finalize pending`——遇到即按 pre-model 跳过，不强行冷启动。
+自动 rollover 分支（manual_mode 为假）不在本设计范围内；若将来关闭手动窗口模式，需要重新评估本节。
 
 ### 4.3 转录映射
 
@@ -109,15 +110,15 @@ reason ∈ COLD_STARTABLE_REASONS 且 mode ∈ PROACTIVE_COLD_START_MODES
 | 阶段 | 内容 | 生产影响 | 验收 |
 |---|---|---|---|
 | **S0** | 本设计稿 | 无 | 哈娅确认 |
-| **S1 shadow** | 实现 `prepare_proactive_cold_turn`，凉 resident 时**只构建 plan 与拼装、不碰 resident**，记录 context/day、拼装大小、是否跨日、是否会触发 handoff | 无（不发送） | 连续 7 个早晨的 shadow 记录；与当天她第一次开口的真实冷启动对比拼装一致性 |
+| **S1 shadow** | 实现 `prepare_proactive_cold_turn`，凉 resident 时**只构建 plan 与拼装、不碰 resident**，记录 context 窗口、拼装大小、是否遇到 switch_in_progress / finalize pending、当日冷启动计数 | 无（不发送） | 连续 7 个早晨的 shadow 记录；与当天她第一次开口的真实冷启动对比拼装一致性 |
 | **S2 live：morning** | `PROACTIVE_COLD_START_MODES={morning}` | 每天至多一次冷启动 | 早安准时送达；她回复是 hot turn；映射/连续性测试全绿；一周无 `context_*` 异常 |
 | **S3 live：self_trigger** | 加入 `self_trigger` | 提醒准时 | 同上，外加提醒触发与她开口并发的竞争测试 |
 
 每一阶段一个 PR；S1 起每个 PR 都要过 `context-continuity`、`soft-window-fe`、`context-window-r0`
 三组 CI，并补「无用户消息的冷启动不产生 chat user 行」「跳过区间覆盖整轮」两类专门测试。
 
-## 6. 需要哈娅决定的问题
+## 6. 已确认的决定（2026-10-22，哈娅）
 
-- **Q1 跨日**：早安撞上日界、而 day handoff 只能由用户消息触发时，是扩展 handoff，还是当天退回「她回来时补上」？（建议先看 S1 数据）
-- **Q2 范围**：结构性异常（`context_closed` 等）保持不冷启动——同意吗？
-- **Q3 成本上限**：是否需要每日冷启动次数上限（例如 morning 1 次 + self_trigger 2 次）？
+- **Q1 跨日**：先观察。核实后生产是手动窗口模式，跨日不触发 rollover（见 4.2）；S1 shadow 记录 `switch_in_progress` / finalize-pending 的出现次数。
+- **Q2 范围**：同意。结构性异常（`context_closed`、`process_generation_mismatch` 等）不冷启动。
+- **Q3 成本上限**：需要。每个聊天日（04:00 起算）最多 morning 1 次 + self_trigger 2 次冷启动，超过即按现有 hot-only 规则跳过；上限放 runtime_config。
