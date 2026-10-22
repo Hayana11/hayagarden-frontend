@@ -7,6 +7,7 @@ wake_health.py — wake 系统每小时健康检测
   3. gateway 服务可达（API_KEY 已设）
   4. build_wake_system() 返回纯字符串（核心类型检测）
   5. 最终 payload 大小在安全范围内
+  6. 情绪评分新鲜度：最近一个完成的 Chat 回合在宽限期后仍未进入 V3
 任一失败 → POST 到留言板发 P0 警报，exit(1)
 """
 import sys, os, json, urllib.request, importlib.util, datetime
@@ -126,6 +127,18 @@ def main():
             print(f'[5] payload 估算 {size:,} bytes — OK')
     except Exception as e:
         errors.append(f'payload 大小估算失败: {e}')
+
+    # ── 6. 情绪评分新鲜度 ─────────────────────────────────────────
+    # V3 Affect 只在 user_scored 落账时变化；评分 provider 断了会静默冻结。
+    try:
+        from tools.affect_scoring_probe import check_affect_scoring_freshness
+        stale = check_affect_scoring_freshness('/opt/frontend/memories.db')
+        if stale:
+            errors.append(stale)
+        else:
+            print('[6] 情绪评分新鲜度 — OK')
+    except Exception as e:
+        errors.append(f'情绪评分新鲜度检测失败: {e}')
 
     # ── 结果 ──────────────────────────────────────────────────────
     if errors:
