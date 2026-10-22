@@ -26,6 +26,9 @@ const wireRow = {
   matched: ['石榴石'],
   top: { ref: 'kernel:ring', date: '2026-08-01', type: 'MEMORY', text: '《寂静》戒指' },
   runner_up: null,
+  frozen: true,
+  log_pruned: true,
+  expected: { ref: 'kernel:ring', date: '2026-08-01', type: 'MEMORY', text: '《寂静》戒指' },
   label: { label: 'missed', note: '该想起戒指', expected_ref: 'kernel:ring', labeled_at: '2026-10-22 17:00:00' },
 };
 
@@ -35,6 +38,10 @@ assert.equal(row.userMessageId, 12697);
 assert.deepEqual(row.chatDf, { 石榴石: 2 });
 assert.equal(row.top.ref, 'kernel:ring');
 assert.equal(row.runnerUp, null);
+assert.equal(row.frozen, true);
+assert.equal(row.logPruned, true);
+assert.equal(row.expected.ref, 'kernel:ring');
+assert.equal(normalizeReviewRow({ id: 1 }).frozen, false);
 assert.deepEqual(row.label, { label: 'missed', note: '该想起戒指', expectedRef: 'kernel:ring', labeledAt: '2026-10-22 17:00:00' });
 assert.equal(normalizeReviewRow({ id: 'x' }), null);
 assert.equal(normalizeReviewRow({ ...wireRow, label: { label: 'maybe' } }).label, null);
@@ -57,7 +64,9 @@ assert.equal(decisionText({ decision: 'surfaced', mode: 'on', committed: false }
 const calls = [];
 globalThis.fetch = async (url, init = {}) => {
   calls.push({ url, method: init.method ?? 'GET', body: init.body ? JSON.parse(init.body) : undefined });
-  const body = String(url).includes('/label') ? wireRow : { rows: [wireRow], counts: {}, next_before: 7 };
+  const body = String(url).includes('/label')
+    ? (String(url).includes('/8/') ? { id: 8, removed: true } : wireRow)
+    : { rows: [wireRow], counts: {}, next_before: 7 };
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 };
 const fetched = await fetchReviewPage('blocked', 40);
@@ -72,6 +81,8 @@ assert.deepEqual(calls[2], {
   body: { label: 'missed', note: '该想起戒指', expected_ref: 'kernel:ring' },
 });
 assert.equal(saved.id, 7);
+// Clearing the label of a pruned decision removes it: no row comes back.
+assert.equal(await saveReviewLabel(8, 'clear'), null);
 
 // Wiring: one route authority, standard chrome without global nav, entry from the memory library.
 const read = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), 'utf8');

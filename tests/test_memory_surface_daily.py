@@ -217,7 +217,8 @@ class CommitAfterPersistTests(_Flow):
         self.assertIn("赫泰拉和阿斯帕西娅，她说想吃希腊菜", self.resident.sent[-1])
         self.assertTrue(any(e.get("t") == "done" and e.get("ok") for e in events))
         self.assertEqual(self.touched(), [[{"op": "touch", "bucket_ids": ["greek"]}]])
-        self.assertEqual(self.query("SELECT touched FROM memory_surface_log WHERE user_message_id=?", uid), [(1,)])
+        self.assertEqual(self.query("SELECT status FROM memory_surface_touch_outbox WHERE user_message_id=?", uid),
+                         [("done",)])
         self.assertEqual(self.query("SELECT ref FROM memory_surface_cooldown"), [("kernel:greek",)])
         self.assertEqual(self.query("SELECT committed FROM memory_surface_log WHERE user_message_id=?", uid), [(1,)])
         self.assertEqual(self.cache_info()["memory_recall"], {"count": 1, "items": [
@@ -352,14 +353,15 @@ class ReviewApiTests(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         conn = sqlite3.connect(path)
         conn.execute("CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT)")
-        conn.execute("INSERT INTO chat_messages VALUES (5, 'hayana', '今天好累')")
+        conn.execute("INSERT INTO chat_messages VALUES (5, 'hayana', '后来改过的话')")
         ms.ensure_schema(conn)
-        conn.execute("INSERT INTO memory_surface_log (user_message_id, created_at, mode, decision, reason) "
-                     "VALUES (5, '2026-10-22 08:00:00', 'shadow', 'none', 'no_clues')")
+        conn.execute("INSERT INTO memory_surface_log (user_message_id, created_at, mode, decision, reason, "
+                     "detail_json) VALUES (5, '2026-10-22 08:00:00', 'shadow', 'none', 'no_clues', ?)",
+                     (json.dumps({"frozen": {"message": "今天好累"}}),))
         conn.commit()
         conn.close()
         for patcher in (mock.patch.object(app, "DB_PATH", path),
-                        mock.patch.object(ms, "_memory_previews", return_value={})):
+                        mock.patch.object(ms, "_live_previews", return_value={})):
             patcher.start()
             self.addCleanup(patcher.stop)
 

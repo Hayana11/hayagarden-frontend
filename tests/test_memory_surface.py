@@ -4,6 +4,7 @@ Fake pool and fake Ombre only: never reads the production Kernel or calls Ombre.
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -36,20 +37,28 @@ FACT = item("kernel:fact", "她过敏的东西：芒果和菠萝蜜，吃了会�
 
 
 class FakeRuntime:
-    """Stands in for the Ombre worker: records touch batches, can fail on demand."""
+    """Stands in for the Ombre worker: one result per request, like OmbreRuntime.batch."""
+
+    timeout = 60.0
 
     def __init__(self):
         self.calls = []
-        self.fail = None  # an exception to raise, or "request" for a per-request failure
+        self.fail = None  # an exception to raise for the whole run (runtime unavailable)
+        self.bad = set()  # buckets whose own request fails
+        self.during = None  # called inside the run, before results come back
 
     def batch(self, requests):
         self.calls.append(requests)
-        if isinstance(self.fail, Exception):
+        if self.during:
+            self.during()
+        if self.fail is not None:
             raise self.fail
-        if self.fail == "request":
-            from tools.memory_kernel_projection import RequestFailed
-            return [RequestFailed("ombre_touch_failed")]
-        return [{"touched": len(requests[0]["bucket_ids"])}]
+        from tools.memory_kernel_projection import RequestFailed
+        return [RequestFailed("bucket_not_found") if r["bucket_ids"][0] in self.bad else {"touched": 1}
+                for r in requests]
+
+    def touched(self):
+        return [r["bucket_ids"][0] for call in self.calls for r in call]
 
 
 def wait_touches():
@@ -339,7 +348,8 @@ class CommitTests(Base):
         self.assertEqual(ms.commit(user_message_id=100, db_path=self.db, now=NOW, wait=True), "kernel:greek")
         self.assertIsNone(ms.commit(user_message_id=100, db_path=self.db, now=NOW, wait=True))  # idempotent
         self.assertEqual(self.runtime.calls, [[{"op": "touch", "bucket_ids": ["greek"]}]])
-        self.assertEqual(self.query("SELECT touched, touch_attempts FROM memory_surface_log"), [(1, 0)])
+        self.assertEqual(self.query("SELECT ref, bucket_id, status, attempts FROM memory_surface_touch_outbox"),
+                         [("kernel:greek", "greek", "done", 1)])
         self.assertEqual(self.cooldown_refs(), ["kernel:greek"])
         self.assertEqual(self.log_rows()[0][-1], 1)
 
@@ -348,7 +358,7 @@ class CommitTests(Base):
         self.decide("想起赫泰拉和阿斯帕西娅了", msg_id=100, pool=pool)
         self.assertEqual(ms.commit(user_message_id=100, db_path=self.db, now=NOW, wait=True), "kernel:greek")
         self.assertEqual(self.runtime.calls, [])
-        self.assertEqual(self.query("SELECT touched FROM memory_surface_log"), [(1,)])  # nothing left to touch
+        self.assertEqual(self.query("SELECT COUNT(*) FROM memory_surface_touch_outbox"), [(0,)])  # nothing to touch
 
     def test_cooldown_counts_her_turns_after_commit(self):
         self.decide("想起赫泰拉和阿斯帕西娅了", msg_id=100)
@@ -361,89 +371,153 @@ class CommitTests(Base):
         self.assertEqual(self.decide("又想起赫泰拉和阿斯帕西娅了", msg_id=600).ref, "kernel:greek")
 
 
+class _Crash(BaseException):
+    """The process dies mid-send (not an Exception: nothing inside catches it)."""
+
+
 class TouchOutboxTests(Base):
-    def surfaced_and_committed(self, msg_id=100, text="想起赫泰拉和阿斯帕西娅了"):
-        self.decide(text, msg_id=msg_id)
+    def surface(self, msg_id, text="想起赫泰拉和阿斯帕西娅了", ombre=("greek", "flow", "fish")):
+        self.ombre_result = list(ombre)
+        result = self.decide(text, msg_id=msg_id)
+        self.assertEqual(result.decision, "surfaced", result.detail)
         return ms.commit(user_message_id=msg_id, db_path=self.db, now=NOW, wait=True)
 
     def outbox(self):
-        return self.query("SELECT user_message_id, touched, touch_attempts FROM memory_surface_log ORDER BY id")
+        return self.query("SELECT user_message_id, bucket_id, status, attempts, last_error "
+                          "FROM memory_surface_touch_outbox ORDER BY id")
 
-    def test_a_failed_touch_stays_pending_and_lands_on_the_next_flush(self):
+    def test_runtime_outage_spends_no_attempt_and_the_next_flush_delivers(self):
         self.runtime.fail = RuntimeError("worker_unreachable")
-        self.surfaced_and_committed()
-        self.assertEqual(self.outbox(), [(100, 0, 1)])
+        self.surface(100)
+        [(_msg, _bucket, status, attempts, error)] = self.outbox()
+        self.assertEqual((status, attempts), ("pending", 0))
+        self.assertIn("worker_unreachable", error)
         self.runtime.fail = None
-        self.assertEqual(ms.flush_touches(self.db), 1)
-        self.assertEqual(self.outbox(), [(100, 1, 1)])
+        self.assertEqual(ms.flush_touches(self.db, now=NOW)["done"], 1)
+        self.assertEqual([r[2:4] for r in self.outbox()], [("done", 1)])
 
-    def test_a_crash_between_commit_and_touch_is_recovered(self):
-        # No runtime at commit time (process died / not configured): the row waits, attempts unspent.
+    def test_no_runtime_configured_leaves_rows_waiting(self):
         with mock.patch("tools.memory_kernel_projection.OmbreRuntime.from_env", return_value=None):
-            self.surfaced_and_committed()
-        self.assertEqual(self.outbox(), [(100, 0, 0)])
+            self.surface(100)
+        self.assertEqual([r[2:4] for r in self.outbox()], [("pending", 0)])
         self.assertEqual(self.runtime.calls, [])
-        # The next commit (another memory) flushes the earlier one too, in one worker run.
-        self.add_user_turns(1, start=150)
-        self.ombre_result = ["flow"]
-        self.decide("flow studio 和 hidden 修好啦", msg_id=200)
-        ms.commit(user_message_id=200, db_path=self.db, now=NOW, wait=True)
-        self.assertEqual(self.runtime.calls, [[{"op": "touch", "bucket_ids": ["flow", "greek"]}]])
-        self.assertEqual([r[1] for r in self.outbox()], [1, 1])
 
-    def test_a_request_level_failure_counts_as_an_attempt(self):
-        self.runtime.fail = "request"
-        self.surfaced_and_committed()
-        self.assertEqual(self.outbox(), [(100, 0, 1)])
-
-    def test_gives_up_after_max_attempts(self):
+    def test_each_row_is_its_own_request_so_two_surfacings_mean_two_touches(self):
         self.runtime.fail = RuntimeError("down")
-        self.surfaced_and_committed()
-        for _ in range(ms.MAX_TOUCH_ATTEMPTS + 2):
-            ms.flush_touches(self.db)
-        self.assertEqual(self.outbox(), [(100, 0, ms.MAX_TOUCH_ATTEMPTS)])
-        self.assertEqual(len(self.runtime.calls), ms.MAX_TOUCH_ATTEMPTS)
+        self.surface(100)
+        self.add_user_turns(61, start=200)  # past the cooldown
+        self.surface(300, text="又想起赫泰拉和阿斯帕西娅了")
+        self.surface(400, text="flow studio 和 hidden 修好啦", ombre=("flow",))
+        self.runtime.fail, self.runtime.calls = None, []
+        self.assertEqual(ms.flush_touches(self.db, now=NOW)["done"], 3)
+        self.assertEqual(self.runtime.calls, [[{"op": "touch", "bucket_ids": ["greek"]},
+                                               {"op": "touch", "bucket_ids": ["greek"]},
+                                               {"op": "touch", "bucket_ids": ["flow"]}]])
 
-    def test_log_table_from_before_the_outbox_gains_its_columns(self):
+    def test_one_bad_bucket_fails_only_its_own_row(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
+        self.surface(400, text="flow studio 和 hidden 修好啦", ombre=("flow",))
+        self.runtime.fail, self.runtime.bad = None, {"greek"}
+        counts = ms.flush_touches(self.db, now=NOW)
+        self.assertEqual((counts["done"], counts["retry"]), (1, 1))
+        self.assertEqual([r[1:4] for r in self.outbox()], [("greek", "pending", 1), ("flow", "done", 1)])
+        self.assertEqual(self.outbox()[0][4], "request:bucket_not_found")
+
+    def test_failed_after_max_attempts_with_its_last_error(self):
+        self.runtime.bad = {"greek"}
+        self.surface(100)
+        for _ in range(ms.MAX_TOUCH_ATTEMPTS + 2):
+            ms.flush_touches(self.db, now=NOW)
+        self.assertEqual(self.outbox(), [(100, "greek", "failed", ms.MAX_TOUCH_ATTEMPTS, "request:bucket_not_found")])
+        self.assertEqual(len(self.runtime.touched()), ms.MAX_TOUCH_ATTEMPTS)
+        self.assertEqual([r["status"] for r in ms.outbox_rows(self.db, status="failed")], ["failed"])
+
+    def test_a_leased_row_is_not_sent_by_a_concurrent_flush(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
+        self.runtime.fail, self.runtime.calls = None, []
+        inner = []
+        # While the first flush is sending, another flusher (own connection, as another process would) runs.
+        self.runtime.during = lambda: inner.append(ms.flush_touches(self.db, runtime=FakeRuntime(), now=NOW))
+        self.assertEqual(ms.flush_touches(self.db, now=NOW)["done"], 1)
+        self.assertEqual(inner[0]["claimed"], 0)
+        self.assertEqual(self.runtime.touched(), ["greek"])
+
+    def test_a_crash_mid_send_is_resent_after_the_lease_expires(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
+        self.runtime.fail, self.runtime.calls = _Crash(), []
+        with self.assertRaises(_Crash):
+            ms.flush_touches(self.db, now=NOW)
+        self.assertEqual([r[2:4] for r in self.outbox()], [("sending", 1)])
+        self.runtime.fail = None
+        self.assertEqual(ms.flush_touches(self.db, now=NOW)["claimed"], 0)  # lease still held
+        later = NOW + timedelta(seconds=FakeRuntime.timeout + 121)
+        self.assertEqual(ms.flush_touches(self.db, now=later)["done"], 1)  # at-least-once: sent again
+        self.assertEqual(self.runtime.touched(), ["greek", "greek"])
+
+    def test_an_expired_lease_with_no_attempts_left_is_marked_failed(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
         conn = sqlite3.connect(self.db)
-        conn.execute("""CREATE TABLE memory_surface_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_message_id INTEGER NOT NULL, created_at TEXT NOT NULL, mode TEXT NOT NULL,
-            decision TEXT NOT NULL, reason TEXT NOT NULL, ref TEXT,
-            committed INTEGER NOT NULL DEFAULT 0, detail_json TEXT)""")
-        conn.execute("INSERT INTO memory_surface_log (user_message_id, created_at, mode, decision, reason) "
-                     "VALUES (1, '2026-10-22 08:00:00', 'shadow', 'none', 'no_clues')")
+        conn.execute("UPDATE memory_surface_touch_outbox SET status='sending', attempts=?, "
+                     "lease_until='2026-10-22 13:00:00'", (ms.MAX_TOUCH_ATTEMPTS,))
         conn.commit()
         conn.close()
-        self.decide("想起赫泰拉和阿斯帕西娅了")
-        self.assertEqual(self.query("SELECT user_message_id, touched, touch_attempts FROM memory_surface_log "
-                                    "ORDER BY id"), [(1, 0, 0), (100, 0, 0)])
+        ms.flush_touches(self.db, now=NOW)
+        self.assertEqual(self.outbox()[0][2:], ("failed", ms.MAX_TOUCH_ATTEMPTS, "lease_expired"))
+
+    def test_route_log_pruning_keeps_pending_touches(self):
+        self.runtime.fail = RuntimeError("down")
+        self.surface(100)
+        later = NOW + timedelta(days=40)
+        self.decide("今天好累啊啊啊", msg_id=500, now=later)  # this write prunes the 40-day-old log row
+        self.assertEqual(self.query("SELECT COUNT(*) FROM memory_surface_log WHERE user_message_id=100"), [(0,)])
+        self.runtime.fail = None
+        self.assertEqual(ms.flush_touches(self.db, now=later)["done"], 1)
+
+    def test_done_rows_are_pruned_after_their_retention(self):
+        self.surface(100)
+        ms.flush_touches(self.db, now=NOW + timedelta(days=ms.OUTBOX_DONE_RETENTION_DAYS + 1))
+        self.assertEqual(self.outbox(), [])
+
+    def test_migrate_creates_every_table(self):
+        tables = ms.migrate(self.db)
+        self.assertIn("lease_until", tables["memory_surface_touch_outbox"])
+        self.assertIn("snapshot_json", tables["memory_surface_labels"])
+        self.assertNotIn("touched", tables["memory_surface_log"])  # the log table's shape is unchanged
 
 
 class ReviewTests(Base):
-    """The review console's data: decisions with her words, the memories involved and labels."""
+    """The review console's data: decisions frozen when made, labels that outlive the log."""
 
     def setUp(self):
         super().setUp()
-        self.loader = lambda _p: list(POOL)
+        self.pool = list(POOL)
+        self.loader = lambda _p: list(self.pool)
         conn = sqlite3.connect(self.db)
         conn.executemany("INSERT INTO chat_messages (id, author, content) VALUES (?,?,?)", [
             (100, "hayana", "想起赫泰拉和阿斯帕西娅了"), (101, "hayana", "今天好累啊啊啊"),
             (102, "hayana", "一个地方变成正常")])
         conn.commit()
         conn.close()
-        self.decide("想起赫泰拉和阿斯帕西娅了", msg_id=100)
-        self.decide("今天好累啊啊啊", msg_id=101)
-        self.decide("一个地方变成正常", msg_id=102)
+        for msg_id, text in ((100, "想起赫泰拉和阿斯帕西娅了"), (101, "今天好累啊啊啊"), (102, "一个地方变成正常")):
+            self.decide(text, msg_id=msg_id, pool=self.pool)
         self.ids = [r[0] for r in self.query("SELECT id FROM memory_surface_log ORDER BY id")]
 
     def page(self, **kwargs):
         return ms.review_rows(self.db, pool_loader=self.loader, **kwargs)
 
+    def label(self, log_id, label, **kwargs):
+        return ms.set_label(self.db, log_id=log_id, label=label, now=NOW, pool_loader=self.loader, **kwargs)
+
     def test_rows_carry_her_words_and_the_memory_newest_first(self):
         page = self.page()
         self.assertEqual([r["user_message_id"] for r in page["rows"]], [102, 101, 100])
         surfaced = page["rows"][-1]
-        self.assertEqual((surfaced["decision"], surfaced["reason"]), ("surfaced", "gate_passed"))
+        self.assertEqual((surfaced["decision"], surfaced["reason"], surfaced["frozen"]),
+                         ("surfaced", "gate_passed", True))
         self.assertEqual(surfaced["message"], "想起赫泰拉和阿斯帕西娅了")
         self.assertEqual(surfaced["top"]["ref"], "kernel:greek")
         self.assertIn("希腊菜", surfaced["top"]["text"])
@@ -458,39 +532,72 @@ class ReviewTests(Base):
         self.assertEqual([r["user_message_id"] for r in rest["rows"]], [100])
         self.assertIsNone(rest["next_before"])
         self.assertEqual([r["user_message_id"] for r in self.page(only="surfaced")["rows"]], [100])
-        ms.set_label(self.db, log_id=self.ids[0], label="ok", now=NOW, pool_loader=self.loader)
+        self.label(self.ids[0], "ok")
         self.assertEqual([r["user_message_id"] for r in self.page(only="labeled")["rows"]], [100])
         self.assertEqual([r["user_message_id"] for r in self.page(only="unlabeled")["rows"]], [102, 101])
         with self.assertRaises(ValueError):
             self.page(only="everything")
 
-    def test_label_upserts_snapshots_and_clears(self):
-        row = ms.set_label(self.db, log_id=self.ids[1], label="missed", note="该想起渔粉",
-                           expected_ref="kernel:fish", now=NOW, pool_loader=self.loader)
-        self.assertEqual(row["label"]["label"], "missed")
-        self.assertEqual(row["label"]["expected_ref"], "kernel:fish")
-        row = ms.set_label(self.db, log_id=self.ids[1], label="wrong", now=NOW, pool_loader=self.loader)
-        self.assertEqual((row["label"]["label"], row["label"]["note"]), ("wrong", ""))
-        self.assertEqual(self.query("SELECT COUNT(*) FROM memory_surface_labels"), [(1,)])
-        self.assertEqual(self.page()["counts"]["wrong"], 1)
-        self.assertIsNone(ms.set_label(self.db, log_id=self.ids[1], label="clear", pool_loader=self.loader)["label"])
-        self.assertEqual(self.query("SELECT COUNT(*) FROM memory_surface_labels"), [(0,)])
-        self.assertIsNone(ms.set_label(self.db, log_id=9999, label="ok", pool_loader=self.loader))
-        with self.assertRaises(ValueError):
-            ms.set_label(self.db, log_id=self.ids[1], label="maybe", pool_loader=self.loader)
-
-    def test_snapshot_outlives_the_pruned_log_row(self):
-        ms.set_label(self.db, log_id=self.ids[1], label="missed", expected_ref="kernel:fish",
-                     now=NOW, pool_loader=self.loader)
+    def test_snapshot_is_what_the_gate_saw_not_later_edits(self):
+        # After the decision: her message and the memory are both revised.
         conn = sqlite3.connect(self.db)
-        conn.execute("DELETE FROM memory_surface_log WHERE id=?", (self.ids[1],))
+        conn.execute("UPDATE chat_messages SET content='改过的话' WHERE id=100")
         conn.commit()
         conn.close()
-        import json
+        self.pool[0] = item("kernel:greek", "改写后的记忆：完全不同的内容。")
+        row = self.label(self.ids[0], "wrong", note="不该想起")
+        self.assertEqual(row["message"], "想起赫泰拉和阿斯帕西娅了")
+        self.assertIn("希腊菜", row["top"]["text"])
         snap = json.loads(self.query("SELECT snapshot_json FROM memory_surface_labels")[0][0])
-        self.assertEqual(snap["message"], "今天好累啊啊啊")
-        self.assertEqual(snap["expected"]["ref"], "kernel:fish")
-        self.assertIn("渔粉", snap["expected"]["text"])
+        self.assertEqual(snap["message"], "想起赫泰拉和阿斯帕西娅了")
+        self.assertIn("希腊菜", snap["top"]["text"])
+        self.assertTrue(snap["frozen"])
+
+    def test_label_upserts_keeps_its_first_snapshot_and_clears(self):
+        row = self.label(self.ids[1], "missed", note="该想起渔粉", expected_ref="kernel:fish")
+        self.assertEqual((row["label"]["label"], row["label"]["expected_ref"]), ("missed", "kernel:fish"))
+        self.assertIn("渔粉", row["expected"]["text"])
+        row = self.label(self.ids[1], "wrong")
+        self.assertEqual((row["label"]["label"], row["label"]["note"]), ("wrong", ""))
+        self.assertNotIn("expected", row)
+        self.assertEqual(self.query("SELECT COUNT(*) FROM memory_surface_labels"), [(1,)])
+        self.assertEqual(self.page()["counts"]["wrong"], 1)
+        self.assertIsNone(self.label(self.ids[1], "clear")["label"])
+        self.assertEqual(self.query("SELECT COUNT(*) FROM memory_surface_labels"), [(0,)])
+        self.assertIsNone(self.label(9999, "ok"))
+        with self.assertRaises(ValueError):
+            self.label(self.ids[1], "maybe")
+
+    def test_a_labeled_decision_outlives_the_pruned_log_row(self):
+        self.label(self.ids[0], "wrong", note="不该想起")
+        self.label(self.ids[1], "missed", expected_ref="kernel:fish")
+        conn = sqlite3.connect(self.db)
+        conn.execute("DELETE FROM memory_surface_log WHERE id IN (?, ?)", (self.ids[0], self.ids[1]))
+        conn.commit()
+        conn.close()
+        labeled = self.page(only="labeled")
+        self.assertEqual([r["user_message_id"] for r in labeled["rows"]], [101, 100])
+        self.assertTrue(all(r["log_pruned"] for r in labeled["rows"]))
+        self.assertEqual(labeled["rows"][1]["message"], "想起赫泰拉和阿斯帕西娅了")
+        self.assertEqual(labeled["counts"], {"total": 3, "labeled": 2, "ok": 0, "missed": 1, "wrong": 1})
+        self.assertEqual([r["user_message_id"] for r in self.page()["rows"]], [102, 101, 100])
+        self.assertEqual([r["user_message_id"] for r in self.page(only="surfaced")["rows"]], [100])
+        # Still editable and clearable without its log row.
+        self.assertEqual(self.label(self.ids[0], "wrong", note="改备注")["label"]["note"], "改备注")
+        self.assertEqual(self.label(self.ids[0], "clear"), {"id": self.ids[0], "removed": True})
+        self.assertEqual(self.page()["counts"]["labeled"], 1)
+
+    def test_rows_logged_before_snapshots_fall_back_to_live_text_and_say_so(self):
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO memory_surface_log (user_message_id, created_at, mode, decision, reason, ref, "
+                     "detail_json) VALUES (101, '2026-10-22 13:00:00', 'shadow', 'surfaced', 'gate_passed', "
+                     "'kernel:fish', '{}')")
+        conn.commit()
+        conn.close()
+        row = self.page(limit=1)["rows"][0]
+        self.assertFalse(row["frozen"])
+        self.assertEqual(row["message"], "今天好累啊啊啊")
+        self.assertIn("渔粉", row["top"]["text"])
 
     def test_empty_database_reads_as_no_rows(self):
         fd, path = tempfile.mkstemp(suffix=".db")

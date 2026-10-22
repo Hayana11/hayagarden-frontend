@@ -25,6 +25,12 @@ export type ReviewRow = {
   chatDf: Record<string, number>;
   top: ReviewMemory | null;
   runnerUp: ReviewMemory | null;
+  /** The memory the owner says should have come (its text when labeled). */
+  expected: ReviewMemory | null;
+  /** Message and memories are the decision-time snapshot (false: logged before snapshots, current text). */
+  frozen: boolean;
+  /** The route-log row was pruned; the decision lives on in its label. */
+  logPruned: boolean;
   label: { label: ReviewLabel; note: string; expectedRef: string | null; labeledAt: string } | null;
 };
 
@@ -134,6 +140,9 @@ export function normalizeReviewRow(v: unknown): ReviewRow | null {
     chatDf,
     top: memory(r.top),
     runnerUp: memory(r.runner_up),
+    expected: memory(r.expected),
+    frozen: r.frozen === true,
+    logPruned: r.log_pruned === true,
     label: rawLabel && isLabel(rawLabel.label)
       ? {
         label: rawLabel.label,
@@ -182,5 +191,7 @@ export async function saveReviewLabel(
     note,
     expected_ref: expectedRef,
   });
+  // Clearing the label of a decision whose route-log row is pruned removes it entirely.
+  if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).removed === true) return null;
   return normalizeReviewRow(raw);
 }

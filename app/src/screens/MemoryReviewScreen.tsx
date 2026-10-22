@@ -70,6 +70,8 @@ function ReviewCard({ row, onLabel }: { row: ReviewRow; onLabel: (row: ReviewRow
           {row.createdAt.slice(5, 16)} · {decisionText(row)} · {reasonText(row.reason)}
           {row.verdict ? ` · ${verdictText(row.verdict)}` : ''}
           {row.evidence !== null ? ` · 证据 ${row.evidence.toFixed(1)}` : ''}
+          {row.frozen ? '' : ' · 当前文本（旧记录无快照）'}
+          {row.logPruned ? ' · 日志已清理' : ''}
         </div>
         <div style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--color-text)', wordBreak: 'break-word' }}>
           「{row.message || '（消息已不在）'}」
@@ -88,6 +90,7 @@ function ReviewCard({ row, onLabel }: { row: ReviewRow; onLabel: (row: ReviewRow
         ) : null}
         {row.top ? <MemoryBox title={row.decision === 'surfaced' ? '浮现的记忆' : '第一候选'} memory={row.top} /> : null}
         {row.runnerUp ? <MemoryBox title="次选（不替补）" memory={row.runnerUp} /> : null}
+        {row.expected ? <MemoryBox title="该想起的" memory={row.expected} /> : null}
         <div className="hstack hstack-6">
           {REVIEW_LABELS.map((item) => {
             const on = current === item.key;
@@ -163,13 +166,14 @@ export function MemoryReviewScreen() {
   const onLabel = useCallback(async (row: ReviewRow, label: ReviewLabel | 'clear', note: string) => {
     try {
       const saved = await saveReviewLabel(row.id, label, label === 'clear' ? '' : note);
-      if (!saved) return;
-      setRows((prev) => prev.map((r) => (r.id === saved.id ? saved : r)));
+      // null: a cleared label whose route-log row is already pruned — the decision is gone.
+      setRows((prev) => (saved ? prev.map((r) => (r.id === saved.id ? saved : r)) : prev.filter((r) => r.id !== row.id)));
       setCounts((prev) => {
         if (!prev) return prev;
         const next = { ...prev };
         if (row.label) next[row.label.label] -= 1;
-        if (saved.label) next[saved.label.label] += 1;
+        if (saved?.label) next[saved.label.label] += 1;
+        if (!saved) next.total -= 1;
         next.labeled = next.ok + next.missed + next.wrong;
         return next;
       });
