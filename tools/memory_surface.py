@@ -76,6 +76,10 @@ class SurfaceConfig:
     evidence_min: float = 6.0
     min_words: int = 2
     chat_df_max: int = 20
+    # One clue is enough only when it is very rare and Ombre independently ranks
+    # the same memory near the top: two lanes agreeing.
+    single_clue_df_max: int = 5
+    single_clue_ombre_rank: int = 3
     recent_days: int = 2
 
 
@@ -130,6 +134,8 @@ def load_config() -> SurfaceConfig:
         cooldown_turns=config_store.get_int("MEMORY_SURFACE_COOLDOWN_TURNS", 60),
         evidence_min=config_store.get_float("MEMORY_SURFACE_EVIDENCE_MIN", 6.0),
         chat_df_max=config_store.get_int("MEMORY_SURFACE_CHAT_DF_MAX", 20),
+        single_clue_df_max=config_store.get_int("MEMORY_SURFACE_SINGLE_CLUE_DF_MAX", 5),
+        single_clue_ombre_rank=config_store.get_int("MEMORY_SURFACE_SINGLE_CLUE_OMBRE_RANK", 3),
         min_words=config_store.get_int("MEMORY_SURFACE_MIN_WORDS", 2),
         recent_days=config_store.get_int("MEMORY_SURFACE_RECENT_DAYS", 2),
     )
@@ -391,7 +397,13 @@ def _decide(conn, *, user_message_id, user_text, context_text, db_path, config, 
     chosen = None
     for ref in order:
         score = round(evidence.get(ref, 0.0), 2)
-        if score < config.evidence_min or len(matched.get(ref, ())) < config.min_words:
+        hits = matched.get(ref, ())
+        corroborated = (
+            len(hits) == 1
+            and chat_df.get(hits[0], CHAT_DF_WINDOW) <= config.single_clue_df_max
+            and ref in ombre_ranked[:config.single_clue_ombre_rank]
+        )
+        if not corroborated and (score < config.evidence_min or len(hits) < config.min_words):
             trail.append([ref, "below_evidence", score])
             continue
         if ref in cooling:
