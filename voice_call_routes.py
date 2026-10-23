@@ -22,11 +22,15 @@ def _sse(event, data, event_id=None):
 
 
 def _utterance_arg():
-    raw = request.args.get('utt')
+    seq = request.args.get('seq')
+    utt = request.args.get('utt')
+    if seq is not None and utt is not None and seq != utt:
+        raise CallStateError('seq and utt disagree', 400)
+    raw = seq if seq is not None else utt
     if raw is None:
         return None
     if not raw.isdigit() or not 0 < int(raw) < 10 ** 9:
-        raise CallStateError('utt must be a positive integer', 400)
+        raise CallStateError('seq must be a positive integer', 400)
     return int(raw)
 
 
@@ -92,20 +96,25 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
     def hear(call_id):
         """Body: one utterance (audio/wav PCM16 from the shell).
 
-        Query: utt=<n> (the shell's per-call utterance number, see CallService.hear),
-        lang=zho|eng, discard=1 (the shell threw this utterance away: no body).
+        Query: seq=<n> (with legacy utt=<n> accepted as an alias), lang=zho|eng,
+        discard=1 (the shell threw this utterance away: no body).
         """
         utterance = _utterance_arg()
+        length = request.content_length
+        if length is not None and length > MAX_CLIP_BYTES:
+            return jsonify({'ok': False, 'error': 'clip too large'}), 413
         if request.args.get('discard') == '1':
+            discarded_body = request.stream.read(MAX_CLIP_BYTES + 1)
+            if len(discarded_body) > MAX_CLIP_BYTES:
+                return jsonify({'ok': False, 'error': 'clip too large'}), 413
             return jsonify({'ok': True, **service.hear(call_id, None, None, utterance=utterance)})
         mime = (request.mimetype or '').lower()
         if mime not in AUDIO_TYPES:
             return jsonify({'ok': False, 'error': 'unsupported audio type'}), 415
-        length = request.content_length
-        if length is not None and length > MAX_CLIP_BYTES:
-            return jsonify({'ok': False, 'error': 'clip too large'}), 413
         # Never buffer more than the cap, even without (or with a lying) Content-Length.
         audio = request.stream.read(MAX_CLIP_BYTES + 1)
+        if len(audio) > MAX_CLIP_BYTES:
+            return jsonify({'ok': False, 'error': 'clip too large'}), 413
         try:
             result = service.hear(call_id, audio, mime, request.args.get('lang'), utterance)
         except STTError as exc:

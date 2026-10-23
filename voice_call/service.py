@@ -12,6 +12,7 @@ import uuid
 from voice_call import store as call_store
 from voice_call.brain import BrainError
 from voice_call.sentences import SentenceSplitter
+from voice_call.stt import STTError
 from voice_call.tts import TTSError
 
 HER = 'her'
@@ -32,9 +33,12 @@ class _Utterances:
         self.committed = 0    # every utterance <= this has been handed on (or dropped)
         self.started_at = {}  # utterance -> clock time it began
         self.results = {}     # utterance -> transcript, waiting for its turn
-        self.submitted = set()  # utterances whose audio is being transcribed right now
         self.carry = []       # committed text held back because she was already talking again
-        self.timer = None     # wakes the queue when a lost utterance goes stale
+        self.in_flight = set() # utterances currently in Scribe; closes duplicate-upload races
+        self.responses = {}    # completed request payloads for idempotent retries
+        self.errors = {}       # completed STT failures; retries do not call Scribe again
+        self.stale = set()       # sequence numbers skipped after a lost/expired upload
+        self.timer = None        # wakes the queue when a lost utterance goes stale
 
     def begin(self, number, now):
         self.started = max(self.started, number)
@@ -74,6 +78,7 @@ class CallService:
         self._replied = set()  # call_ids that already had a first turn
         self._record_lock = threading.Lock()
         self._utter_lock = threading.Lock()
+        self._utter_done = threading.Condition(self._utter_lock)
         self._utterances = {}  # call_id -> _Utterances
         self._schedule = schedule
 
@@ -127,29 +132,18 @@ class CallService:
         return line
 
     def hear(self, call_id, audio, mime, language=None, utterance=None):
-        """One finished utterance as audio (the phone's VAD cut it): transcribe it, then say it.
+        """Transcribe one finished VAD utterance with strict, idempotent ordering.
 
-        Ordering contract. Utterances are numbered per call from 1, in the order she
-        started them (the shell sends ``utterance``; without it the server numbers
-        them by arrival). Transcription runs concurrently, but text is handed on
-        strictly in that order, whatever order Scribe answers in. And when a newer
-        utterance has already begun (``hear`` or ``interrupt`` with a higher
-        number) by the time an older one is handed on, the older text never starts
-        a reply of its own: it is held and said together with the next one. So a
-        sentence finishing transcription after she started talking again cannot
-        revive the answer her new sentence interrupted.
+        The client number is allocated at speech_start. Scribe may finish out
+        of order, but only the next number is handed to say(). A duplicate
+        upload waits for an in-flight request or returns its saved result, so
+        a retry never calls Scribe or creates another her line.
 
-        Each number is heard at most once: a second ``hear`` for a number that is
-        being transcribed, waiting or already handed on is refused (409) without
-        calling Scribe again. Every started utterance should end in a ``hear`` (an
-        empty body with ``discard`` for one the shell threw away); one that begun
-        but was never heard stops holding the queue after STALE_UTTERANCE_S, on a
-        call-scoped timer, so the sentences behind it are handed on even when
-        nothing else arrives. One being transcribed always holds its place (Scribe
-        has its own timeout). The call is checked for being active before
-        transcribing, so a clip for a dead call is never billed.
-        Returns {'utterance', 'text', 'line'}; line is the her-line created by this
-        request, or None when the text was held or handed on by another request.
+        A number that began (speech_start / interrupt) but whose audio never
+        arrives stops holding the queue after STALE_UTTERANCE_S; a call-scoped
+        timer re-drains the queue then, so a last sentence behind it is handed on
+        even if nothing else arrives. A number whose audio is in Scribe never goes
+        stale: it hands itself on when Scribe returns or fails.
         """
         if self._stt is None:
             raise call_store.CallStateError('speech-to-text is not configured', 503)
@@ -157,24 +151,60 @@ class CallService:
             raise call_store.CallStateError('clip must be 1 byte to %d bytes' % MAX_CLIP_BYTES, 413)
         if self.get(call_id)['state'] != call_store.ACTIVE:
             raise call_store.CallStateError('call is not active')
+        try:
+            requested = int(utterance) if utterance is not None else None
+        except (TypeError, ValueError):
+            raise call_store.CallStateError('utterance must be a positive integer', 400)
         with self._utter_lock:
             queue = self._utterances.setdefault(call_id, _Utterances())
-            number = queue.started + 1 if utterance is None else int(utterance)
-            if number <= queue.committed or number in queue.results or number in queue.submitted:
-                raise call_store.CallStateError('utterance %d was already heard' % number)
-            queue.submitted.add(number)
+            number = queue.started + 1 if requested is None else requested
+            if number <= 0:
+                raise call_store.CallStateError('utterance must be a positive integer', 400)
+            while number in queue.in_flight:
+                self._utter_done.wait()
+            if number in queue.errors:
+                raise STTError(queue.errors[number])
+            if number in queue.responses:
+                result = dict(queue.responses[number])
+                result['duplicate'] = True
+                return result
+            if number in queue.stale or number <= queue.committed:
+                return {
+                    'utterance': number,
+                    'text': '',
+                    'line': None,
+                    'stale': True,
+                    'duplicate': True,
+                }
             queue.begin(number, self._clock())
+            queue.in_flight.add(number)
+
         text = ''
+        stt_error = None
         try:
             if audio is not None:
                 text = self._stt.transcribe(audio, mime, language or DEFAULT_STT_LANGUAGE)
+        except STTError as exc:
+            stt_error = exc
         finally:
-            # A failed transcription still takes its place, so it cannot block the queue.
             with self._utter_lock:
-                queue.submitted.discard(number)
+                queue.in_flight.discard(number)
                 queue.results[number] = text
                 line = self._hand_on(call_id, queue)
-        return {'utterance': number, 'text': text, 'line': line}
+                response = {
+                    'utterance': number,
+                    'text': text,
+                    'line': line,
+                    'stale': False,
+                    'discarded': audio is None,
+                }
+                queue.responses[number] = response
+                if stt_error is not None:
+                    queue.errors[number] = str(stt_error)
+                self._utter_done.notify_all()
+        if stt_error is not None:
+            raise stt_error
+        return response
 
     def _hand_on(self, call_id, queue):
         """Hand on every transcript whose turn has come (caller holds _utter_lock)."""
@@ -185,13 +215,16 @@ class CallService:
             if number > queue.started:
                 break
             if number not in queue.results:
-                if number in queue.submitted:
-                    break  # being transcribed: it hands on itself when Scribe returns
+                if number in queue.in_flight:
+                    break  # in Scribe: it hands itself on when Scribe returns or fails
                 began = queue.started_at.get(number)
                 if began is not None and now - began < STALE_UTTERANCE_S:
+                    # Begun, audio not here yet: everything after it waits, and a timer
+                    # makes sure the wait ends even if nothing else ever arrives.
                     self._wake_when_stale(call_id, queue, began + STALE_UTTERANCE_S - now)
-                    break  # begun, audio not here yet: everything after it waits
+                    break
                 queue.results[number] = ''  # never begun here, or lost: skip it
+                queue.stale.add(number)
             text = queue.results.pop(number)
             queue.started_at.pop(number, None)
             queue.committed = number
@@ -205,18 +238,23 @@ class CallService:
         return said
 
     def _wake_when_stale(self, call_id, queue, delay_s):
-        """Re-run _hand_on once the waited-for utterance goes stale (caller holds _utter_lock)."""
+        """Re-run _hand_on once the waited-for utterance goes stale (caller holds _utter_lock).
+
+        Call-scoped: at most one timer per call, only while something is queued
+        behind the gap, cancelled when the call ends.
+        """
         if queue.timer is not None or not (queue.results or queue.carry):
             return
 
         def wake():
             with self._utter_lock:
                 queue.timer = None
-                if self._utterances.get(call_id) is queue:
-                    try:
-                        self._hand_on(call_id, queue)
-                    except call_store.CallStateError:
-                        pass  # the call ended meanwhile; nothing left to say
+                if self._utterances.get(call_id) is not queue:
+                    return
+                try:
+                    self._hand_on(call_id, queue)
+                except call_store.CallStateError:
+                    pass  # the call ended meanwhile; nothing left to say
 
         queue.timer = self._schedule(delay_s, wake)
 

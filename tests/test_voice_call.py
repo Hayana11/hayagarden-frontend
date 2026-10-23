@@ -189,6 +189,8 @@ class GatedSTT:
 
 
 class FakeScheduler:
+    """Stands in for threading.Timer: the test advances the clock and fires due timers."""
+
     def __init__(self):
         self.pending = []
 
@@ -323,21 +325,6 @@ class UtteranceOrderTests(unittest.TestCase):
         self.service.hear(self.call_id, b'C', 'audio/wav', None, 3)
         self.assertEqual(self.her_lines(), ['喂 听得到吗'])
 
-    def test_same_number_while_still_in_scribe_is_refused_and_billed_once(self):
-        self.stt.expect(b'A', '你在吗')
-        first = self.hear_async(b'A', 1)
-        self.wait_started(1)
-        with self.assertRaises(call_store.CallStateError) as refused:
-            self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)  # retried upload
-        self.assertEqual(refused.exception.status, 409)
-        self.stt.release(b'A')
-        first.join(5)
-        self.assertEqual(self.stt.calls, [b'A'], 'Scribe is called once per utterance')
-        self.assertEqual(self.her_lines(), ['你在吗'])
-        self.assertEqual(len(self.brain.calls), 1)
-        queue = self.service._utterances[self.call_id]
-        self.assertEqual((queue.results, queue.submitted, queue.committed), ({}, set(), 1))
-
     def test_last_sentence_behind_a_lost_one_is_handed_on_by_the_stale_timer(self):
         self.service.interrupt(self.call_id, utterance=1)  # A began; its upload is lost
         self.stt.expect(b'B', '晚安')
@@ -361,10 +348,12 @@ class UtteranceOrderTests(unittest.TestCase):
         self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
         self.clock.now += STALE_UTTERANCE_S * 2
         self.scheduler.run_due()
-        self.assertEqual(self.her_lines(), [], 'A is still being transcribed: B keeps waiting for it')
+        self.assertEqual(self.her_lines(), [], 'A is still in Scribe: B keeps waiting for it')
         self.stt.release(b'A')
         first.join(5)
         self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+        queue = self.service._utterances[self.call_id]
+        self.assertEqual(queue.results, {}, 'no late transcript is left behind')
 
     def test_hanging_up_cancels_the_stale_timer(self):
         self.service.interrupt(self.call_id, utterance=1)
@@ -376,12 +365,41 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertTrue(timer.cancelled)
         self.assertNotIn(self.call_id, self.service._utterances)
 
-    def test_repeated_or_old_utterance_numbers_are_refused(self):
+    def test_repeated_utterance_numbers_replay_idempotently(self):
         self.stt.expect(b'A', '嗯')
         self.stt.release(b'A')
         self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
-        with self.assertRaises(call_store.CallStateError):
-            self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
+        duplicate = self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)
+        self.assertTrue(duplicate['duplicate'])
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(self.her_lines(), ['嗯'])
+
+    def test_duplicate_in_flight_waits_and_replays_without_second_stt(self):
+        self.stt.expect(b'A', '只处理一次')
+        returned = []
+        errors = []
+
+        def hear_once():
+            try:
+                returned.append(self.service.hear(self.call_id, b'A', 'audio/wav', None, 1))
+            except Exception as exc:  # noqa: BLE001 - assertion below
+                errors.append(exc)
+
+        first = threading.Thread(target=hear_once)
+        duplicate = threading.Thread(target=hear_once)
+        first.start()
+        self.wait_started(1)
+        duplicate.start()
+        time.sleep(0.05)
+        self.assertTrue(duplicate.is_alive(), 'duplicate must wait for the in-flight Scribe call')
+        self.stt.release(b'A')
+        first.join(5)
+        duplicate.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(len(returned), 2)
+        self.assertEqual(self.her_lines(), ['只处理一次'])
+        self.assertTrue(any(result.get('duplicate') for result in returned))
 
     def test_without_numbers_arrival_order_is_used(self):
         self.stt.expect(b'A', '一')

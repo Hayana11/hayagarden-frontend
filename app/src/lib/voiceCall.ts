@@ -28,6 +28,15 @@ export type CallSummary = {
   duration?: string;
 };
 
+export type VoiceHearResult = {
+  utterance: number;
+  text: string;
+  line: CallLine | null;
+  stale?: boolean;
+  duplicate?: boolean;
+  discarded?: boolean;
+};
+
 export const FINAL_CALL_STATES: readonly CallState[] = ['ended', 'missed', 'declined', 'canceled'];
 
 const base = (callId: string) => `/api/call/${encodeURIComponent(callId)}`;
@@ -39,7 +48,20 @@ export const voiceCall = {
   answer: (callId: string) => http.post<{ call: VoiceCall }>(`${base(callId)}/answer`).then((r) => r.call),
   decline: (callId: string) => http.post<CallSummary>(`${base(callId)}/decline`),
   hangup: (callId: string) => http.post<CallSummary>(`${base(callId)}/hangup`),
-  interrupt: (callId: string) => http.post<{ ok: boolean }>(`${base(callId)}/interrupt`),
+  interrupt: (callId: string, utteranceSeq?: number) =>
+    http.post<{ ok: boolean }>(
+      `${base(callId)}/interrupt${utteranceSeq === undefined ? '' : `?seq=${encodeURIComponent(String(utteranceSeq))}`}`,
+    ),
+  hear: (callId: string, wavBlob: Blob, utteranceSeq: number, language: string) =>
+    http.post<VoiceHearResult>(
+      `${base(callId)}/hear?lang=${encodeURIComponent(language)}&seq=${encodeURIComponent(String(utteranceSeq))}`,
+      wavBlob,
+      { headers: { 'Content-Type': 'audio/wav', Accept: 'application/json' } },
+    ).then((result) => result),
+  discard: (callId: string, utteranceSeq: number) =>
+    http.post<VoiceHearResult>(
+      `${base(callId)}/hear?seq=${encodeURIComponent(String(utteranceSeq))}&discard=1`,
+    ).then((result) => result),
   say: (callId: string, text: string) =>
     http.post<{ line: CallLine }>(`${base(callId)}/say`, { text }).then((r) => r.line),
   streamUrl: (callId: string, after: number) => sseUrl(`${base(callId)}/stream?after=${after}`),
