@@ -148,6 +148,123 @@ class GateTests(unittest.TestCase):
                          ('BLOCK', 'precondition_failed'))
 
 
+class TypingGateTests(GateTests):
+    """She is typing (composer pulse) holds the call Gate shut for a short TTL only."""
+
+    def pulse(self, at=None):
+        return wake_call.record_typing(self.get_db, clock=lambda: self.epoch if at is None else at)
+
+    def test_a_live_pulse_blocks_even_when_everything_else_is_idle(self):
+        # Her last message was 2 hours ago and nothing is generating, but she is typing.
+        self.assertEqual(self.gate(), ('ALLOW', 'ok'))
+        self.pulse()
+        self.assertEqual(self.gate(), ('BLOCK', 'user_active'))
+        self.epoch += wake_call.TYPING_TTL_S - 1
+        self.assertEqual(self.gate(), ('BLOCK', 'user_active'), 'still inside the TTL')
+
+    def test_the_pulse_lapses_on_its_own(self):
+        self.pulse()
+        self.epoch += wake_call.TYPING_TTL_S
+        self.assertEqual(self.gate(), ('ALLOW', 'ok'), 'nothing clears it; it simply expires')
+
+    def test_each_pulse_extends_it(self):
+        self.pulse()
+        self.epoch += wake_call.TYPING_TTL_S - 1
+        self.pulse()
+        self.epoch += wake_call.TYPING_TTL_S - 1
+        self.assertEqual(self.gate(), ('BLOCK', 'user_active'))
+
+    def test_never_pulsed_is_not_typing(self):
+        self.assertFalse(wake_call.typing_now(self.get_db, clock=lambda: self.epoch))
+
+    def test_no_stored_value_can_hold_the_gate_forever(self):
+        # A pulse written under a clock far ahead (or a bad write) is treated as lapsed.
+        self.pulse(at=self.epoch + 10 * 365 * 86400)
+        self.assertEqual(self.gate(), ('ALLOW', 'ok'))
+
+    def test_a_failed_pulse_leaves_nothing_behind(self):
+        def broken_db():
+            raise sqlite3.OperationalError('database is locked')
+        with self.assertRaises(sqlite3.OperationalError):
+            wake_call.record_typing(broken_db, clock=lambda: self.epoch)
+        self.assertEqual(self.gate(), ('ALLOW', 'ok'))
+
+    def test_a_typing_read_failure_blocks(self):
+        real = self.get_db
+        calls = {'n': 0}
+
+        def flaky():
+            conn = real()
+            calls['n'] += 1
+            if calls['n'] == 1:  # the typing read is the gate's first DB access
+                conn.close()
+                raise sqlite3.OperationalError('disk I/O error')
+            return conn
+        self.assertEqual(self.gate(get_db_fn=flaky), ('BLOCK', 'precondition_failed'))
+
+    def test_typing_after_the_planner_stops_the_ring(self):
+        # First Gate (on the Planner decision): she is not typing yet.
+        self.assertEqual(self.gate(), ('ALLOW', 'ok'))
+        # While the Renderer writes the opening, she starts typing.
+        self.epoch += 5
+        self.pulse()
+        rang = []
+        gate_kwargs = dict(planner_decision=self.decision, skill_view=self.skill, wake_run_id='r1',
+                           get_db_fn=self.get_db, now=NOW, clock=lambda: self.epoch)
+        with enabled(True):
+            result = wake_call.recheck_and_ring(
+                '在吗', gate_kwargs=gate_kwargs, ring=lambda opening: rang.append(opening) or (True, 'c1'))
+        self.assertEqual(result, ('blocked', 'user_active'))
+        self.assertEqual(rang, [], 'the internal ring is never called')
+        # Once the pulse lapses the same recheck rings.
+        self.epoch += wake_call.TYPING_TTL_S
+        with enabled(True):
+            result = wake_call.recheck_and_ring(
+                '在吗', gate_kwargs=gate_kwargs, ring=lambda opening: rang.append(opening) or (True, 'c1'))
+        self.assertEqual((result, rang), (('rang', 'c1'), ['在吗']))
+
+    def test_recheck_reports_a_failed_ring(self):
+        gate_kwargs = dict(planner_decision=self.decision, skill_view=self.skill, wake_run_id='r1',
+                           get_db_fn=self.get_db, now=NOW, clock=lambda: self.epoch)
+        with enabled(True):
+            self.assertEqual(
+                wake_call.recheck_and_ring('在吗', gate_kwargs=gate_kwargs,
+                                           ring=lambda o: (False, 'ring_invalid_response')),
+                ('ring_failed', 'ring_invalid_response'))
+
+    def test_typing_does_not_touch_the_message_gate(self):
+        src = Path(ROOT, 'chat', 'behavior_authority_b3.py').read_text(encoding='utf-8')
+        src += Path(ROOT, 'chat', 'interaction_state.py').read_text(encoding='utf-8')
+        self.assertNotIn('typing_now', src)
+        self.assertNotIn(wake_call.TYPING_TABLE, src)
+
+
+class TypingPulseRouteTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.db = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+
+    def tearDown(self):
+        os.unlink(self.db)
+
+    def test_route_records_a_pulse_and_a_failure_is_a_503(self):
+        src = Path(ROOT, 'app.py').read_text(encoding='utf-8')
+        start = src.index("@app.route('/api/chat/typing', methods=['POST'])")
+        body = src[start:src.index('@app.route', start + 10)]
+        self.assertIn('record_typing(get_db)', body)
+        self.assertIn("return ('', 204)", body)
+        self.assertIn('503', body)
+        # record_typing against a real file: one row, overwritten, ending one TTL out.
+        def get_db():
+            return sqlite3.connect(self.db)
+        until = wake_call.record_typing(get_db, clock=lambda: 100.0)
+        wake_call.record_typing(get_db, clock=lambda: 104.0)
+        rows = sqlite3.connect(self.db).execute(
+            'SELECT id, busy_until FROM %s' % wake_call.TYPING_TABLE).fetchall()
+        self.assertEqual(until, 100.0 + wake_call.TYPING_TTL_S)
+        self.assertEqual(rows, [(1, 104.0 + wake_call.TYPING_TTL_S)])
+
+
 class B2RouteTests(GateTests):
     def plan(self, decision, b3=True, busy=False):
         with mock.patch('chat.behavior_authority_b2.consumer_enabled', return_value=True), \
@@ -166,6 +283,9 @@ class B2RouteTests(GateTests):
 
     def test_a_blocked_call_stops_instead_of_falling_back(self):
         self.assertEqual(self.plan(dict(self.decision), busy=True).route, 'blocked')
+        wake_call.record_typing(self.get_db, clock=lambda: self.epoch)
+        plan = self.plan(dict(self.decision))
+        self.assertEqual((plan.route, plan.gate_reason), ('blocked', 'user_active'), 'she is typing')
         plan = self.plan(dict(self.decision), b3=False)
         self.assertEqual((plan.route, plan.gate_reason), ('blocked', 'b3_unavailable'))
 
@@ -186,6 +306,11 @@ class RingAndAuditTests(unittest.TestCase):
         for status, reason in ((409, 'call_open'), (429, 'cooldown'), (500, 'ring_http_500')):
             self.assertEqual(wake_call.ring_her('在吗', post=lambda *a, s=status: (s, b''), token_fn=lambda: 't'),
                              (False, reason))
+
+        for body in (b'', b'not json', b'{"ok": true}', b'{"call": {}}', b'{"call": {"id": ""}}',
+                     b'{"call": {"id": "  "}}', b'{"call": {"id": 7}}', b'{"call": null}'):
+            self.assertEqual(wake_call.ring_her('在吗', post=lambda *a, b=body: (201, b), token_fn=lambda: 't'),
+                             (False, 'ring_invalid_response'), body)
 
         def boom(*a):
             raise OSError('refused')
@@ -259,12 +384,18 @@ class GatewayCallTakeoverContractTests(unittest.TestCase):
         order = [s.index(marker) for marker in (
             'invoke_fn=invoke_renderer_relay',
             '_wake_call.validate_opening(',
-            '_wake_call.evaluate_call_gate(',
+            '_wake_call.recheck_and_ring(',
             'chat_busy=_chat_is_generating()',
-            '_wake_call.ring_her(opening)',
+            "if _stage == 'blocked':",
+            "if _stage != 'rang':",
             "_wake_exec(\n                'call',",
         )]
         self.assertEqual(order, sorted(order))
+
+    def test_rings_only_through_the_recheck(self):
+        s = self.section()
+        self.assertNotIn('ring_her(', s, 'ringing must go through recheck_and_ring')
+        self.assertNotIn('evaluate_call_gate(', s)
 
     def test_never_uses_the_shared_resident_or_settles(self):
         s = self.section()

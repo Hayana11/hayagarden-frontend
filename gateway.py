@@ -9931,28 +9931,30 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
                 'reason': f'call_renderer_failed:{_call_render_exc}',
                 'wake_run_id': wake_run_id,
             })
-        _recheck, _recheck_reason = _wake_call.evaluate_call_gate(
-            planner_decision=planner_decision,
-            skill_view=_skill_view,
-            wake_run_id=wake_run_id,
-            get_db_fn=get_db,
-            now=now,
-            chat_busy=_chat_is_generating(),
-            wake_run_id_seen=_wake_run_id_seen,
-            min_idle_minutes=min_idle,
+        _stage, _ring_detail = _wake_call.recheck_and_ring(
+            opening,
+            gate_kwargs=dict(
+                planner_decision=planner_decision,
+                skill_view=_skill_view,
+                wake_run_id=wake_run_id,
+                get_db_fn=get_db,
+                now=now,
+                chat_busy=_chat_is_generating(),
+                wake_run_id_seen=_wake_run_id_seen,
+                min_idle_minutes=min_idle,
+            ),
         )
-        if _recheck != 'ALLOW':
+        if _stage == 'blocked':
             _mark_production_attempt(
-                'failed', action='call', reason=f'call_gate_recheck:{_recheck_reason}',
+                'failed', action='call', reason=f'call_gate_recheck:{_ring_detail}',
             )
             return jsonify({
                 'ok': True,
                 'skipped': True,
-                'reason': f'call_gate_recheck:{_recheck_reason}',
+                'reason': f'call_gate_recheck:{_ring_detail}',
                 'wake_run_id': wake_run_id,
             })
-        _rang, _ring_detail = _wake_call.ring_her(opening)
-        if not _rang:
+        if _stage != 'rang':
             _mark_production_attempt(
                 'failed', action='call', reason=f'call_ring:{_ring_detail}',
             )

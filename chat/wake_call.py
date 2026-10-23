@@ -35,6 +35,10 @@ APP_BASE = 'http://127.0.0.1:5050'
 RING_PATH = '/internal/voice_call/ring'
 TOKEN_KEY = 'VOICE_CALL_INTERNAL_TOKEN'
 TOKEN_HEADER = 'X-Voice-Call-Internal-Token'
+# "She is typing": the Chat composer pulses (throttled) while she edits; each
+# pulse holds the call Gate shut for TYPING_TTL_S. Only the call Gate reads it.
+TYPING_TABLE = 'chat_typing_pulse'
+TYPING_TTL_S = 12.0
 
 _GATE_ALLOW = 'ALLOW'
 _GATE_BLOCK = 'BLOCK'
@@ -79,6 +83,57 @@ def _call_state(get_db_fn: Callable, clock: Callable[[], float]) -> tuple[bool, 
         conn.close()
 
 
+def record_typing(
+    get_db_fn: Callable,
+    clock: Callable[[], float] = time.time,
+    ttl_s: float = TYPING_TTL_S,
+) -> float:
+    """One composer pulse: she is typing until now + ttl_s. Returns that time.
+
+    A single row, overwritten each pulse; nothing ever clears it, it just lapses,
+    so a closed page or a lost network can never leave her "typing".
+    """
+    until = clock() + float(ttl_s)
+    conn = get_db_fn()
+    try:
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS %s '
+            '(id INTEGER PRIMARY KEY CHECK (id = 1), busy_until REAL NOT NULL)' % TYPING_TABLE
+        )
+        conn.execute(
+            'INSERT INTO %s (id, busy_until) VALUES (1, ?) '
+            'ON CONFLICT(id) DO UPDATE SET busy_until = excluded.busy_until' % TYPING_TABLE,
+            (until,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return until
+
+
+def typing_now(get_db_fn: Callable, clock: Callable[[], float] = time.time) -> bool:
+    """Is a composer pulse still live? Never pulsed: no. Read errors propagate.
+
+    A busy_until further ahead than one TTL (clock stepped back, bad write) is
+    treated as lapsed, so no stored value can hold the Gate shut indefinitely.
+    """
+    conn = get_db_fn()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TYPING_TABLE,)
+        ).fetchone()
+        if not exists:
+            return False
+        row = conn.execute('SELECT busy_until FROM %s WHERE id = 1' % TYPING_TABLE).fetchone()
+    finally:
+        conn.close()
+    if row is None or row[0] is None:
+        return False
+    now = clock()
+    until = float(row[0])
+    return now < until <= now + TYPING_TTL_S
+
+
 def evaluate_call_gate(
     *,
     planner_decision: Mapping[str, Any],
@@ -89,13 +144,15 @@ def evaluate_call_gate(
     chat_busy: bool = False,
     wake_run_id_seen: Callable[[str], bool] = lambda _rid: False,
     min_idle_minutes: float = 30.0,
-    clock: Callable[[], float] = time.time,
+    clock: Optional[Callable[[], float]] = None,
 ) -> tuple[str, str]:
     """Deterministic call Gate. Returns (ALLOW|BLOCK, reason_code).
 
-    "She is active" is never a stored flag: it is the live generating state plus
-    the time since her last real message (interaction clock), so it cannot stick.
+    "She is active" is never a sticky flag: it is the live generating state, a
+    composer typing pulse that lapses after TYPING_TTL_S, and the time since her
+    last real message (interaction clock). A typing read that fails blocks.
     """
+    clock = clock or (lambda: time.time())  # late-bound, so a patched time.time applies
     if str(planner_decision.get('action_candidate') or '').strip() != 'call':
         return _GATE_BLOCK, 'precondition_failed'
     blocks: list[str] = []
@@ -104,6 +161,12 @@ def evaluate_call_gate(
         blocks.append('duplicate')
     if chat_busy:
         blocks.append('user_active')
+    try:
+        if typing_now(get_db_fn, clock):
+            blocks.append('user_active')
+    except Exception as exc:
+        _LOG.warning('call gate typing read failed: %s', exc)
+        blocks.append('precondition_failed')
     try:
         from chat.interaction_state import read_interaction_clock
         interaction = read_interaction_clock(get_db_fn, now=now)
@@ -129,6 +192,27 @@ def evaluate_call_gate(
         if reason in blocks:
             return _GATE_BLOCK, reason
     return _GATE_ALLOW, 'ok'
+
+
+def recheck_and_ring(
+    opening: str,
+    *,
+    gate_kwargs: Mapping[str, Any],
+    ring: Optional[Callable[[str], tuple[bool, str]]] = None,
+) -> tuple[str, str]:
+    """The last step of call_takeover: Gate again, then ring only if it still allows.
+
+    Returns ('blocked', gate reason), ('ring_failed', why) or ('rang', call id).
+    Anything that changed since the Planner (she started typing, a call opened)
+    stops it here, before the internal ring is ever called.
+    """
+    verdict, reason = evaluate_call_gate(**gate_kwargs)
+    if verdict != _GATE_ALLOW:
+        return 'blocked', reason
+    rang, detail = (ring or ring_her)(opening)
+    if not rang:
+        return 'ring_failed', detail
+    return 'rang', detail
 
 
 def validate_opening(text: str) -> str:
@@ -177,7 +261,10 @@ def ring_her(
         return False, 'ring_request_failed:%s' % type(exc).__name__
     if status == 201:
         try:
-            return True, str(json.loads(data.decode('utf-8'))['call']['id'])
+            call_id = json.loads(data.decode('utf-8'))['call']['id']
         except Exception:
-            return True, ''
+            call_id = None
+        if not isinstance(call_id, str) or not call_id.strip():
+            return False, 'ring_invalid_response'
+        return True, call_id
     return False, {409: 'call_open', 429: 'cooldown'}.get(status, 'ring_http_%s' % status)

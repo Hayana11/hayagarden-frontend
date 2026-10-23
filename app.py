@@ -1410,6 +1410,18 @@ def group_chat_clear():
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
+@app.route('/api/chat/typing', methods=['POST'])
+def chat_typing_pulse():
+    """Composer pulse (throttled client-side): she is typing for the next few
+    seconds. Read only by the Wake call Gate; lapses on its own (chat.wake_call)."""
+    from chat.wake_call import record_typing
+    try:
+        record_typing(get_db)
+    except Exception as exc:
+        app.logger.warning('chat typing pulse failed: %s', exc)
+        return jsonify({'ok': False}), 503
+    return ('', 204)
+
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
     ct = request.content_type or ''
