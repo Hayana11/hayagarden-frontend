@@ -1,36 +1,33 @@
 package com.bettermifitness.sync
 
+enum class BatteryOptimizationStatus {
+    EXEMPT,
+    NOT_EXEMPT,
+    UNAVAILABLE,
+}
+
 /**
- * iOS bridges for system background refresh and status. No-ops on Android.
+ * iOS bridges for system background refresh and status. Android also exposes
+ * the WorkManager and battery diagnostics used by Settings.
  */
 expect object AutoSyncPlatform {
-    /** Ask the OS to schedule the next opportunistic background refresh. */
     fun scheduleBackgroundRefresh()
-
-    /** Cancel any pending opportunistic background refresh. */
     fun cancelBackgroundRefresh()
-
-    /**
-     * Human-readable Background App Refresh status for Settings.
-     * Empty string when the platform has no equivalent (Android).
-     */
     fun backgroundRefreshStatusLabel(): String
-
-    /**
-     * Whether Settings can show a “test 1-day refresh” control (iOS).
-     * Simulator never auto-fires BGAppRefresh; this runs the same code path.
-     */
+    fun supportsBatteryOptimization(): Boolean
+    fun batteryOptimizationStatus(): BatteryOptimizationStatus
+    fun requestBatteryOptimizationExemption(): Boolean
+    suspend fun currentBackgroundWorkState(): String
     fun supportsOpportunisticRefreshTest(): Boolean
-
-    /**
-     * Runs the opportunistic (last 1 day) sync immediately for debugging.
-     * Invokes [onDone] with a status code string (success / skipped / failed / …).
-     */
     fun runOpportunisticRefreshTest(onDone: (String) -> Unit)
-
-    /**
-     * Whether Settings should show Apple Shortcuts / Siri setup help.
-     * iOS only — Android has no Shortcuts App Intent.
-     */
     fun supportsShortcutsHelp(): Boolean
+}
+
+/** A platform read must never make the settings screen crash. */
+fun safeBatteryOptimizationStatus(
+    read: () -> BatteryOptimizationStatus,
+): BatteryOptimizationStatus = try {
+    read()
+} catch (_: Exception) {
+    BatteryOptimizationStatus.UNAVAILABLE
 }
