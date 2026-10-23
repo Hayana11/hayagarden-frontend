@@ -4632,21 +4632,51 @@ _init_wake_tables()
 
 @app.route('/api/wake_log/pending_notification', methods=['GET'])
 def pending_notification():
-    """供VII app轮询：是否有费奥多尔自主发出的、还没推送过的消息。
-    取最新一条未推送的 action='message'，并把所有未推送的一并标记，
-    避免她隔几小时打开时被一堆补发的旧通知刷屏。
-    另外复用这个通道下发 command='screenshot' 让手机立刻截一张屏。
-    带 ?wait=N（最多 25 秒）时挂住请求直到有消息或超时，供前台服务长轮询。"""
+    """供 app 拉取费奥多尔自主发出、还没送达的消息（以及截屏指令）。
+    协议说明见 wake_push.py：不带 protocol 是旧协议（领取即消费，仅为旧客户端保留）；
+    protocol=ack 只发租约，客户端展示后 POST /api/wake_log/ack 才算送达。
+    带 ?wait=N（最多 25 秒）时挂住请求直到有可投递内容或超时。"""
+    import time as _time
     from chat.window_identity import fetch_pending_wake_notification_row, soft_window_enabled
     import wake_push
 
-    payload = wake_push.poll(
-        get_db,
-        fetch_pending_wake_notification_row,
-        soft_window_enabled,
-        wake_push.parse_wait(request.args.get('wait')),
-    )
-    return jsonify(payload)
+    wait_s = wake_push.parse_wait(request.args.get('wait'))
+    if request.args.get('protocol') == wake_push.ACK_PROTOCOL:
+        since = wake_push.parse_since(request.args.get('since'))
+        want_screenshot = 'screenshot' in (request.args.get('commands') or '').split(',')
+
+        def take(conn):
+            return wake_push.lease_pending_payload(
+                conn, fetch_pending_wake_notification_row, soft_window_enabled(),
+                _time.time(), since=since, want_screenshot=want_screenshot,
+            )
+    else:
+        def take(conn):
+            return wake_push.take_pending_payload(
+                conn, fetch_pending_wake_notification_row, soft_window_enabled(),
+            )
+
+    return jsonify(wake_push.poll(get_db, take, wait_s))
+
+
+@app.route('/api/wake_log/ack', methods=['POST'])
+def ack_notification():
+    """客户端确认已展示/已接收；幂等。body: {"ids": ["wake-12", "cap-3"]}"""
+    from chat.window_identity import soft_window_enabled
+    import wake_push
+
+    data = request.get_json(silent=True) or {}
+    ids = data.get('ids')
+    if ids is None and data.get('id'):
+        ids = [data.get('id')]
+    if not isinstance(ids, list) or not ids or len(ids) > 50:
+        return jsonify({'ok': False, 'error': 'ids must be a non-empty list'}), 400
+    conn = get_db()
+    try:
+        results = wake_push.ack(conn, ids, soft_window_enabled())
+    finally:
+        conn.close()
+    return jsonify({'ok': True, 'results': results})
 
 # ── Board 留言板 ───────────────────────────────────────────
 @app.route('/board')
