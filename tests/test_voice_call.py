@@ -383,6 +383,21 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 404)
         self.assertNotIn('missing-call', self.service._utterances)
 
+    def test_call_opening_at_a_large_process_wide_seq_skips_the_gap_in_one_step(self):
+        self.stt.expect(b'A', '我回来了')
+        self.stt.release(b'A')
+        result = self.service.hear(self.call_id, b'A', 'audio/wav', None, 50001)
+        self.assertEqual(result['line']['text'], '我回来了')
+        queue = self.service._utterances[self.call_id]
+        self.assertEqual(queue.committed, 50001)
+        self.assertEqual(queue.stale, set(), 'no O(N) stale slots for numbers this call never saw')
+        self.assertTrue(self.service.hear(self.call_id, b'old', 'audio/wav', None, 3)['stale'])
+        self.stt.expect(b'B', '接着说')
+        self.stt.release(b'B')
+        self.service.hear(self.call_id, b'B', 'audio/wav', None, 50002)
+        self.assertEqual(self.her_lines(), ['我回来了', '接着说'])
+        self.assertEqual(self.stt.calls, [b'A', b'B'])
+
     def test_repeated_utterance_numbers_replay_idempotently(self):
         self.stt.expect(b'A', '嗯')
         self.stt.release(b'A')

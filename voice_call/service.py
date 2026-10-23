@@ -5,6 +5,7 @@ after the last seq it has, so a reconnect replays only what it missed. When she
 starts a new utterance while he is still answering, the rest of his answer is
 dropped from the call (it stays in chat history, it is just not spoken).
 """
+import itertools
 import threading
 import time
 import uuid
@@ -223,6 +224,15 @@ class CallService:
                     # makes sure the wait ends even if nothing else ever arrives.
                     self._wake_when_stale(call_id, queue, began + STALE_UTTERANCE_S - now)
                     break
+                if began is None:
+                    # Never begun on this call (the shell's seq is process-wide, so a
+                    # call may open at N): jump to the next number that did begin
+                    # instead of stepping through N stale slots.
+                    ahead = [n for n in itertools.chain(queue.started_at, queue.results, queue.in_flight)
+                             if n > number]
+                    if ahead:
+                        queue.committed = min(ahead) - 1
+                        continue
                 queue.results[number] = ''  # never begun here, or lost: skip it
                 queue.stale.add(number)
             text = queue.results.pop(number)
