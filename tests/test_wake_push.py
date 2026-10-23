@@ -296,6 +296,50 @@ class AckProtocolTests(Base):
         self.assertEqual(self.ack('wake-%d' % w10, now=self.now + 4), {'wake-%d' % w10: 'acked'})
         self.assertEqual(self.state(w10), (1, 'acked'))
 
+    def lease_row(self, wake_id):
+        conn = self.open_conn()
+        try:
+            return tuple(conn.execute("SELECT push_lease_until, push_lease_device FROM wake_log WHERE id=?",
+                                      (wake_id,)).fetchone())
+        finally:
+            conn.close()
+
+    def overtaken_in_flight(self):
+        """device A leases old, then leases and acks newer, all within old's lease."""
+        old = self.add_message('old')
+        self.assertEqual(self.lease()['id'], 'wake-%d' % old)               # 1
+        newer = self.add_message('newer')
+        self.assertEqual(self.lease(now=self.now + 1)['id'], 'wake-%d' % newer)  # 2
+        self.assertEqual(self.ack('wake-%d' % newer, now=self.now + 2),
+                         {'wake-%d' % newer: 'acked'})                       # 3
+        return old, newer
+
+    def test_overtaken_in_flight_row_is_not_retaken_by_the_same_device(self):
+        old, _newer = self.overtaken_in_flight()
+        lease_before = self.lease_row(old)
+        self.assertIsNone(self.lease(now=self.now + 10))                     # 4, 5: not returned
+        self.assertEqual(self.lease_row(old), lease_before)                  # 5: lease not renewed
+        self.assertEqual(self.state(old), (0, None))                         # 5: still pending
+        self.assertEqual(self.ack('wake-%d' % old, now=self.now + 20),      # 6: late ack in lease
+                         {'wake-%d' % old: 'acked'})
+        self.assertEqual(self.state(old), (1, 'acked'))
+
+    def test_overtaken_in_flight_row_without_ack_is_superseded_when_its_lease_ends(self):
+        old, _newer = self.overtaken_in_flight()                             # 7
+        self.assertIsNone(self.lease(now=self.now + 10))
+        self.assertIsNone(self.lease(now=self.now + wake_push.LEASE_S + 1))
+        self.assertEqual(self.state(old), (2, 'superseded'))
+
+    def test_overtaken_in_flight_row_is_not_handed_to_another_device_either(self):
+        old, _newer = self.overtaken_in_flight()
+        self.assertIsNone(self.lease(now=self.now + 10, device=DEVICE_B))
+        self.assertEqual(self.state(old), (0, None))
+
+    def test_plain_lost_response_retake_still_works_without_a_newer_ack(self):
+        only = self.add_message('only')
+        self.lease()
+        self.assertEqual(self.lease(now=self.now + 5)['id'], 'wake-%d' % only)
+
     def test_late_ack_of_a_message_superseded_meanwhile_keeps_it_superseded(self):
         w10 = self.add_message('ten')
         self.lease()                                   # handed to this device...

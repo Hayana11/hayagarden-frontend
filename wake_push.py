@@ -16,7 +16,9 @@ else with 401 before touching wake or screenshot state. Then:
     ``wake-<row id>``; handing it out never consumes it;
   * the lease is taken with a conditional UPDATE checked by rowcount, so two
     devices never both hold it; the same device may re-take its own lease (a
-    restarted process need not wait), and its on-device ledger shows it once;
+    restarted process need not wait), and its on-device ledger shows it once —
+    except for a row already overtaken by an acked newer message, which is
+    never handed out again (see below);
   * ``POST /api/wake_log/ack {"ids": [...]}`` is the only thing that marks a
     message delivered. Every id must have been handed to the acking device,
     otherwise the whole request is refused (403) and nothing changes. Acks are
@@ -35,9 +37,10 @@ else with 401 before touching wake or screenshot state. Then:
     no-flood rule). An ack of wake-<n> therefore closes older pending rows as
     *superseded* (``notified=2``, ``push_disposition='superseded'``) — but not
     rows whose lease is still live, which are in flight and wait for their own
-    ack. If such a lease then runs out unacknowledged, the next poll finds the
-    row older than an acked message and supersedes it instead of handing it
-    out late. Superseded rows were never counted as delivered and are no
+    ack. While overtaken and in flight, such a row is not handed out again, not
+    even to the device holding the lease, and its lease is not renewed. If the
+    lease then runs out unacknowledged, the next poll supersedes it instead of
+    handing it out late. Superseded rows were never counted as delivered and are no
     longer pending;
   * screenshot commands go only to a device that passes ``commands=screenshot``
     and are bound to it; ``cap-<id>`` acks from that device move them to
@@ -137,6 +140,11 @@ def lease_pending_payload(conn, fetch_row, soft_window, now, device_id, want_scr
             (int(row['id']), now),
         )
         if cur.rowcount != 1:
+            # In flight and already overtaken: never hand it out again, not even to
+            # the device holding the lease (same-device re-take is only for a plain
+            # lost response). It stays pending for its own ack or for the lease to
+            # run out, after which it is superseded.
+            row = None
             break
         row = fetch_row(conn)
     leased = None
