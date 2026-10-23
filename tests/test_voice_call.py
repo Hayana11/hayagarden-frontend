@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from moments_auth import OwnerAuthError
 from voice_call import store as call_store
+from voice_call.chat_record import record_call_in_chat
 from voice_call.brain import BrainError, ChatPipelineBrain, format_utterance, parse_sse_text, PHONE_STYLE
 from voice_call.sentences import SentenceSplitter
 from voice_call.service import CallService, format_duration
@@ -309,6 +310,85 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(format_duration(0), '00:00')
         self.assertEqual(format_duration(201.4), '03:21')
         self.assertEqual(format_duration(-3), '00:00')
+
+
+class ChatRecordTests(unittest.TestCase):
+    def make_db(self, with_source_kind):
+        fd, path = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.addCleanup(os.unlink, path)
+        conn = __import__('sqlite3').connect(path)
+        extra = ", source_kind TEXT DEFAULT 'chat'" if with_source_kind else ''
+        conn.execute('CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, author TEXT, content TEXT%s)' % extra)
+        conn.commit()
+        conn.close()
+        return path
+
+    def rows(self, path):
+        conn = __import__('sqlite3').connect(path)
+        try:
+            return conn.execute('SELECT * FROM chat_messages').fetchall()
+        finally:
+            conn.close()
+
+    def test_record_is_fyodors_call_line(self):
+        path = self.make_db(True)
+        self.assertEqual(record_call_in_chat(path, {'record': 'ᯅ 通话时长 03:21'}), 1)
+        self.assertEqual(self.rows(path), [(1, 'fyodor', 'ᯅ 通话时长 03:21', 'call')])
+
+    def test_old_schema_without_source_kind(self):
+        path = self.make_db(False)
+        record_call_in_chat(path, {'record': 'ᯅ 未接听'})
+        self.assertEqual(self.rows(path), [(1, 'fyodor', 'ᯅ 未接听')])
+
+    def test_empty_record_writes_nothing(self):
+        path = self.make_db(True)
+        self.assertIsNone(record_call_in_chat(path, {'record': ''}))
+        self.assertEqual(self.rows(path), [])
+
+    def test_every_outcome_reaches_on_end_once(self):
+        fd, db = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.addCleanup(os.unlink, db)
+        chat_db = self.make_db(True)
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as tmp:
+            service = CallService(call_store.CallStore(db, clock), CachedTTS(FakeEngine(), tmp), FakeBrain(),
+                                  clock=clock, spawn=run_now,
+                                  on_end=lambda summary: record_call_in_chat(chat_db, summary))
+            first = service.ring()
+            service.answer(first['id'])
+            clock.now += 65
+            service.hangup(first['id'])
+            service.hangup(first['id'])
+            second = service.ring()
+            service.decline(second['id'])
+        self.assertEqual([row[2] for row in self.rows(chat_db)], ['ᯅ 通话时长 01:05', 'ᯅ 已拒绝'])
+
+
+class MissedCallRecordTests(unittest.TestCase):
+    def test_missed_call_is_recorded_once_by_the_sweep(self):
+        fd, db = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.addCleanup(os.unlink, db)
+        clock = Clock()
+        ended = []
+        with tempfile.TemporaryDirectory() as tmp:
+            store = call_store.CallStore(db, clock)
+            service = CallService(store, CachedTTS(FakeEngine(), tmp), FakeBrain(),
+                                  clock=clock, spawn=run_now, on_end=ended.append)
+            service.ring()
+            service.flush_records()
+            self.assertEqual(ended, [])
+            clock.now += 61
+            service.flush_records()
+            service.flush_records()
+            self.assertEqual([s['record'] for s in ended], ['ᯅ 未接听'])
+            # A restarted service over the same DB does not record it again.
+            again = []
+            CallService(call_store.CallStore(db, clock), CachedTTS(FakeEngine(), tmp), FakeBrain(),
+                        clock=clock, spawn=run_now, on_end=again.append).flush_records()
+            self.assertEqual(again, [])
 
 
 class ThreadedServiceTests(unittest.TestCase):

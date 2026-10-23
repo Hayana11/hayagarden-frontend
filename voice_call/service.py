@@ -153,13 +153,34 @@ class CallService:
 
     def _finish(self, call_id, state):
         call = self._change(call_id, state)
-        summary = self._summary(call)
-        if self._on_end:
+        self.flush_records()
+        return self._summary(call)
+
+    def flush_records(self):
+        """Hand every finished, not-yet-recorded call to on_end exactly once.
+
+        Calls that end by ring timeout have no request to hook, so this also
+        runs from a background sweep.
+        """
+        if not self._on_end:
+            return
+        for call in self._store.claim_unrecorded_final():
             try:
-                self._on_end(summary)
+                self._on_end(self._summary(call))
             except Exception:
                 pass
-        return summary
+
+    def start_record_sweeper(self, interval_s=15):
+        def sweep():
+            while True:
+                time.sleep(interval_s)
+                try:
+                    self.flush_records()
+                except Exception:
+                    pass
+        thread = threading.Thread(target=sweep, daemon=True, name='voice-call-records')
+        thread.start()
+        return thread
 
     def _summary(self, call):
         summary = {'call': call}

@@ -167,6 +167,7 @@ app.register_blueprint(create_weread_blueprint())
 def _create_voice_call_service():
     import time as _time
     from voice_call.brain import ChatPipelineBrain
+    from voice_call.chat_record import record_call_in_chat
     from voice_call.service import CallService
     from voice_call.store import CallStore
     from voice_call.tts import CachedTTS, ElevenLabsTTS, read_env_value
@@ -177,10 +178,13 @@ def _create_voice_call_service():
         CallStore(DB_PATH, _time.time),
         CachedTTS(engine, '/opt/frontend/voice_call_cache'),
         ChatPipelineBrain(),
+        on_end=lambda summary: record_call_in_chat(DB_PATH, summary),
     )
 
 
-app.register_blueprint(create_voice_call_blueprint(_create_voice_call_service()))
+_voice_call_service = _create_voice_call_service()
+_voice_call_service.start_record_sweeper()
+app.register_blueprint(create_voice_call_blueprint(_voice_call_service))
 from context_compression_routes import create_context_compression_blueprint
 app.register_blueprint(create_context_compression_blueprint(db_path=DB_PATH))
 

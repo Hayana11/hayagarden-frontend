@@ -30,6 +30,9 @@ class CallStateError(Exception):
         self.status = status
 
 
+_CALL_COLUMNS = 'id, state, created_at, answered_at, ended_at'
+
+
 class CallStore:
     def __init__(self, db_path, clock, ring_timeout_s=RING_TIMEOUT_S):
         self._db_path = db_path
@@ -55,6 +58,10 @@ class CallStore:
                     PRIMARY KEY (call_id, seq)
                 );
             """)
+            cols = {row[1] for row in conn.execute('PRAGMA table_info(voice_calls)')}
+            if 'recorded' not in cols:
+                # 1 once the call's record line has been written to chat (exactly once).
+                conn.execute("ALTER TABLE voice_calls ADD COLUMN recorded INTEGER NOT NULL DEFAULT 0")
 
     @contextlib.contextmanager
     def _connect(self):
@@ -77,14 +84,14 @@ class CallStore:
     def get(self, call_id):
         with self._lock, self._connect() as conn:
             self._expire(conn)
-            row = conn.execute("SELECT * FROM voice_calls WHERE id=?", (call_id,)).fetchone()
+            row = conn.execute("SELECT %s FROM voice_calls WHERE id=?" % _CALL_COLUMNS, (call_id,)).fetchone()
         return dict(row) if row else None
 
     def latest_open(self):
         with self._lock, self._connect() as conn:
             self._expire(conn)
             row = conn.execute(
-                "SELECT * FROM voice_calls WHERE state IN (?, ?) ORDER BY created_at DESC LIMIT 1",
+                "SELECT %s FROM voice_calls WHERE state IN (?, ?) ORDER BY created_at DESC LIMIT 1" % _CALL_COLUMNS,
                 (RINGING, ACTIVE),
             ).fetchone()
         return dict(row) if row else None
@@ -105,6 +112,20 @@ class CallStore:
                 conn.execute("UPDATE voice_calls SET state=?, ended_at=? WHERE id=?",
                              (new_state, now, call_id))
         return self.get(call_id)
+
+    def claim_unrecorded_final(self):
+        """Return finished calls whose record has not been written yet, marking them claimed."""
+        marks = ','.join('?' for _ in FINAL_STATES)
+        with self._lock, self._connect() as conn:
+            self._expire(conn)
+            rows = conn.execute(
+                "SELECT %s FROM voice_calls WHERE recorded=0 AND state IN (%s) ORDER BY created_at"
+                % (_CALL_COLUMNS, marks),
+                FINAL_STATES,
+            ).fetchall()
+            for row in rows:
+                conn.execute("UPDATE voice_calls SET recorded=1 WHERE id=?", (row['id'],))
+        return [dict(row) for row in rows]
 
     def add_line(self, call_id, speaker, text):
         with self._lock, self._connect() as conn:
