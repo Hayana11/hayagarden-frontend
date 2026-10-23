@@ -96,12 +96,11 @@ class Base(unittest.TestCase):
             conn.close()
 
     # ack-protocol helpers, all on fresh connections like separate HTTP requests
-    def lease(self, screenshot=False, now=None, device=DEVICE_A):
+    def lease(self, now=None, device=DEVICE_A):
         conn = self.open_conn()
         try:
             return wake_push.lease_pending_payload(
-                conn, fetch_row, False, self.now if now is None else now, device,
-                want_screenshot=screenshot)
+                conn, fetch_row, False, self.now if now is None else now, device)
         finally:
             conn.close()
 
@@ -396,29 +395,18 @@ class AckProtocolTests(Base):
         self.assertEqual({wake for _, wake in handed}, {'wake-%d' % ids[-1]})
         self.assertEqual(len({device for device, _ in handed}), 1)
 
-    def test_screenshot_only_for_clients_that_support_it(self):
+    def test_screenshots_are_retired(self):
         cap = self.add_screenshot()
         self.assertIsNone(self.lease())
-        self.assertEqual(self.screenshot_status(cap), 'pending')
-        payload = self.lease(screenshot=True)
-        self.assertEqual(payload['command_id'], 'cap-%d' % cap)
+        wake = self.add_message('晚安')
+        payload = self.lease()
+        self.assertEqual(payload['id'], 'wake-%d' % wake)
+        self.assertNotIn('command', payload)
+        self.assertNotIn('command_id', payload)
         with self.assertRaises(wake_push.AckRefused):
-            self.ack('cap-%d' % cap, device=DEVICE_B)
-        self.assertEqual(self.screenshot_status(cap), 'dispatched')
-        self.assertEqual(self.ack('cap-%d' % cap), {'cap-%d' % cap: 'acked'})
-        self.assertEqual(self.screenshot_status(cap), 'received')
-        self.assertEqual(self.ack('cap-%d' % cap), {'cap-%d' % cap: 'acked'})
-        self.assertEqual(self.screenshot_status(cap), 'received')
-
-    def test_unacked_screenshot_is_redispatched_after_two_minutes(self):
-        cap = self.add_screenshot()
-        self.lease(screenshot=True)
-        conn = self.open_conn()
-        conn.execute("UPDATE screenshot_requests SET dispatched_at=datetime('now','+8 hours','-3 minutes') WHERE id=?",
-                     (cap,))
-        conn.commit()
-        conn.close()
-        self.assertEqual(self.lease(screenshot=True)['command_id'], 'cap-%d' % cap)
+            self.ack('wake-%d' % wake, 'cap-%d' % cap)
+        self.assertEqual(self.notified(wake), 0)
+        self.assertEqual(self.screenshot_status(cap), 'pending')
 
 
 class WaitTests(Base):

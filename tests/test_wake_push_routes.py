@@ -196,18 +196,18 @@ class WakePushRouteTests(unittest.TestCase):
         self.assertEqual(self.wake_state(w11)[0], 0)
 
     # ── commands, rotation, compatibility ─────────────────────
-    def test_screenshot_only_for_authenticated_declaring_device(self):
+    def test_screenshot_commands_are_retired(self):
         cap = self.add_screenshot()
         self.assertEqual(self.get(query='protocol=ack&commands=screenshot').status_code, 401)
-        self.assertEqual(self.get(self.headers(self.a)).get_json(), {'has_message': False})
+        self.assertEqual(self.get(self.headers(self.a), 'protocol=ack&commands=screenshot').get_json(),
+                         {'has_message': False})
         self.assertEqual(self.cap_state(cap), ('pending', None))
+        self.assertEqual(self.post_ack(['cap-%d' % cap], self.headers(self.a)).status_code, 403)
+        self.assertEqual(self.cap_state(cap), ('pending', None))
+        wake = self.add_message()
         body = self.get(self.headers(self.a), 'protocol=ack&commands=screenshot').get_json()
-        self.assertEqual(body['command_id'], 'cap-%d' % cap)
-        self.assertEqual(self.cap_state(cap), ('dispatched', self.a['deviceId']))
-        self.assertEqual(self.post_ack(['cap-%d' % cap], self.headers(self.b)).status_code, 403)
-        self.assertEqual(self.cap_state(cap), ('dispatched', self.a['deviceId']))
-        self.assertEqual(self.post_ack(['cap-%d' % cap], self.headers(self.a)).status_code, 200)
-        self.assertEqual(self.cap_state(cap)[0], 'received')
+        self.assertEqual(body['id'], 'wake-%d' % wake)
+        self.assertNotIn('command_id', body)
 
     def test_reenrolled_device_old_credential_stops_working(self):
         old = dict(self.a)

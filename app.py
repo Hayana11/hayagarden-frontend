@@ -4150,7 +4150,7 @@ def _init_phone_monitor_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         source TEXT DEFAULT 'tool',
         note TEXT DEFAULT '',
-        status TEXT DEFAULT 'pending',  -- pending / dispatched / done
+        status TEXT DEFAULT 'pending',  -- pending / dispatched / done / retired
         requested_at DATETIME DEFAULT (datetime('now','+8 hours')),
         dispatched_at DATETIME,
         completed_at DATETIME
@@ -4162,6 +4162,8 @@ def _init_phone_monitor_tables():
         capture_ts_ms INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT (datetime('now','+8 hours'))
     )""")
+    # Screenshots are retired (see screenshot_retired): close requests left open.
+    conn.execute("UPDATE screenshot_requests SET status='retired' WHERE status IN ('pending','dispatched')")
     conn.commit()
     conn.close()
 
@@ -4204,89 +4206,17 @@ def device_latest():
     return jsonify({'ok': True, **d})
 
 
+# Phone screenshots are retired: only the old shell (xyz.lovestyle.home) could take
+# them and the Canary never could, so a request would just wait for a device that
+# never comes. The tables and past captures are kept; nothing writes to them now.
+_SCREENSHOT_RETIRED = {'ok': False, 'error': 'phone screenshots are retired'}
+
+
 @app.route('/api/screenshot/request', methods=['POST'])
-def screenshot_request():
-    d = request.get_json() or {}
-    source = (d.get('source') or 'tool').strip()[:32]
-    note = (d.get('note') or '').strip()[:200]
-    conn = get_db()
-    cur = conn.execute(
-        "INSERT INTO screenshot_requests (source,note,status,requested_at) "
-        "VALUES (?,?, 'pending', datetime('now','+8 hours'))",
-        (source, note)
-    )
-    conn.commit()
-    rid = cur.lastrowid
-    conn.close()
-    return jsonify({'ok': True, 'request_id': rid})
-
-
 @app.route('/api/screenshot/upload', methods=['POST'])
-def screenshot_upload():
-    raw = request.get_data() or b''
-    if not raw:
-        return jsonify({'ok': False, 'error': 'empty body'}), 400
-    tmp = '/tmp/screen_' + uuid.uuid4().hex + '.jpg'
-    with open(tmp, 'wb') as f:
-        f.write(raw)
-    try:
-        aid = attachment_store.save(tmp, kind='image', mime='image/jpeg')
-    except Exception as e:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-        return jsonify({'ok': False, 'error': str(e)}), 500
-
-    ts = request.headers.get('X-Capture-Ts', '').strip()
-    try:
-        capture_ts_ms = int(ts) if ts else 0
-    except Exception:
-        capture_ts_ms = 0
-
-    conn = get_db()
-    req = conn.execute(
-        "SELECT id FROM screenshot_requests "
-        "WHERE status IN ('pending','dispatched') "
-        "ORDER BY CASE status WHEN 'dispatched' THEN 0 ELSE 1 END, id DESC LIMIT 1"
-    ).fetchone()
-    req_id = int(req['id']) if req else None
-    if req_id:
-        conn.execute(
-            "UPDATE screenshot_requests SET status='done', completed_at=datetime('now','+8 hours') WHERE id=?",
-            (req_id,)
-        )
-    conn.execute(
-        "INSERT INTO screenshot_captures (request_id, attachment_id, capture_ts_ms) VALUES (?,?,?)",
-        (req_id, aid, capture_ts_ms)
-    )
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True, 'attachment': 'attachment://' + aid, 'request_id': req_id})
-
-
 @app.route('/api/screenshot/latest', methods=['GET'])
-def screenshot_latest():
-    after_req = request.args.get('after_request_id', type=int)
-    conn = get_db()
-    if after_req:
-        row = conn.execute(
-            "SELECT c.*, CAST((julianday('now','+8 hours')-julianday(c.created_at))*86400 AS INT) AS age_sec "
-            "FROM screenshot_captures c WHERE c.request_id >= ? ORDER BY c.id DESC LIMIT 1",
-            (after_req,)
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT c.*, CAST((julianday('now','+8 hours')-julianday(c.created_at))*86400 AS INT) AS age_sec "
-            "FROM screenshot_captures c ORDER BY c.id DESC LIMIT 1"
-        ).fetchone()
-    conn.close()
-    if not row:
-        return jsonify({'ok': False, 'error': 'no data'})
-    d = dict(row)
-    d['age_sec'] = max(0, int(d.get('age_sec') or 0))
-    d['attachment'] = 'attachment://' + d['attachment_id']
-    return jsonify({'ok': True, **d})
+def screenshot_retired():
+    return jsonify(_SCREENSHOT_RETIRED), 410
 
 
 # ── 附件间接层：attachment://<id> 的唯一取图入口 ──────────────

@@ -73,7 +73,7 @@ DRAWERS = {
     'life': {
         'label': '生活状态',
         'tools': ['get_activity_summary', 'log_period_event', 'get_location',
-                  'get_device_status', 'request_phone_screenshot'],
+                  'get_device_status'],
     },
     'calendar': {
         'label': '日历记账',

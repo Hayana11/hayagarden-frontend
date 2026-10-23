@@ -8,7 +8,7 @@ requests get 410 and change nothing.
 
 ack (``protocol=ack``) — requires the Health Bridge device credential
 (``X-Health-Device-ID`` + ``Authorization: Bearer``); the route rejects anything
-else with 401 before touching wake or screenshot state. Then:
+else with 401 before touching wake state. Then:
   * the latest pending message for the current window is leased to that device
     (``push_lease_until`` / ``push_lease_device``) and returned with a stable id
     ``wake-<row id>``; handing it out never consumes it;
@@ -40,9 +40,9 @@ else with 401 before touching wake or screenshot state. Then:
     lease then runs out unacknowledged, the next poll supersedes it instead of
     handing it out late. Superseded rows were never counted as delivered and are no
     longer pending;
-  * screenshot commands go only to a device that passes ``commands=screenshot``
-    and are bound to it; ``cap-<id>`` acks from that device move them to
-    ``received``.
+  * phone screenshots are retired (only the old shell could take them; the
+    Canary never could): ``commands=screenshot`` is ignored, no command is ever
+    handed out, and a ``cap-<id>`` ack is refused like any unknown id.
 
 ``wait=N`` (max 25s) holds either kind of request open, re-checking once a
 second with the DB connection closed in between, until something is
@@ -61,7 +61,6 @@ ACK_PROTOCOL = 'ack'
 # executor audit rows carry notified=1 without having been delivered.
 NOTIFIED_DELIVERED = 1
 NOTIFIED_SUPERSEDED = 2
-SCREENSHOT_LEASE_SQL = "datetime('now','+8 hours','-2 minutes')"
 
 
 class AckRefused(Exception):
@@ -93,12 +92,11 @@ def ensure_columns(conn):
     _add_column(conn, 'wake_log', 'push_lease_until', 'REAL')
     _add_column(conn, 'wake_log', 'push_lease_device', 'TEXT')
     _add_column(conn, 'wake_log', 'push_disposition', 'TEXT')
-    _add_column(conn, 'screenshot_requests', 'dispatched_device', 'TEXT')
 
 
 # ── ack protocol (caller has authenticated device_id) ────────
-def lease_pending_payload(conn, fetch_row, soft_window, now, device_id, want_screenshot=False):
-    """Lease (not consume) the latest message to device_id; optionally a screenshot command."""
+def lease_pending_payload(conn, fetch_row, soft_window, now, device_id):
+    """Lease (not consume) the latest message to device_id."""
     ensure_columns(conn)
     row = fetch_row(conn)
     for _ in range(100):
@@ -130,11 +128,10 @@ def lease_pending_payload(conn, fetch_row, soft_window, now, device_id, want_scr
         )
         if cur.rowcount == 1:
             leased = row
-    sreq = _claim_screenshot(conn, device_id) if want_screenshot else None
     conn.commit()
-    if not leased and not sreq:
+    if not leased:
         return None
-    payload = _payload(leased, sreq)
+    payload = _payload(leased)
     payload['protocol'] = ACK_PROTOCOL
     payload['lease_s'] = LEASE_S
     return payload
@@ -144,10 +141,10 @@ def ack(conn, ids, soft_window, device_id, now):
     """Acknowledge ids handed to device_id.
 
     All-or-nothing validation: raises AckRefused, changing nothing, if any id was
-    not handed to this device. Returns {id: 'acked' | 'superseded' | 'received'}.
+    not handed to this device. Returns {id: 'acked' | 'superseded'}.
     """
     ensure_columns(conn)
-    wake_ids, cap_ids = [], []
+    wake_ids = []
     for raw in ids or []:
         key = str(raw or '').strip()
         if key.startswith('wake-') and key[5:].isdigit():
@@ -158,14 +155,6 @@ def ack(conn, ids, soft_window, device_id, now):
             if not row or row[0] != device_id:
                 raise AckRefused(key)
             wake_ids.append(int(key[5:]))
-        elif key.startswith('cap-') and key[4:].isdigit():
-            row = conn.execute(
-                "SELECT dispatched_device FROM screenshot_requests WHERE id=?",
-                (int(key[4:]),),
-            ).fetchone()
-            if not row or row[0] != device_id:
-                raise AckRefused(key)
-            cap_ids.append(int(key[4:]))
         else:
             raise AckRefused(key)
 
@@ -189,13 +178,6 @@ def ack(conn, ids, soft_window, device_id, now):
                 "AND (push_lease_until IS NULL OR push_lease_until<=?)",
                 (wake_id, now),
             )
-    for cap_id in cap_ids:
-        conn.execute(
-            "UPDATE screenshot_requests SET status='received' "
-            "WHERE id=? AND status IN ('pending','dispatched')",
-            (cap_id,),
-        )
-        results['cap-%d' % cap_id] = 'acked'
     conn.commit()
     return results
 
@@ -208,38 +190,14 @@ def _newer_acked_exists(conn, wake_id):
 
 
 # ── shared ───────────────────────────────────────────────────
-def _claim_screenshot(conn, device_id):
-    # 手机截屏指令：优先取 pending；若 dispatched 超过 2 分钟还没回传，重试下发一次
-    sreq = conn.execute(
-        "SELECT id FROM screenshot_requests "
-        "WHERE status='pending' "
-        "   OR (status='dispatched' AND dispatched_at < " + SCREENSHOT_LEASE_SQL + ") "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if sreq:
-        conn.execute(
-            "UPDATE screenshot_requests SET status='dispatched', dispatched_at=datetime('now','+8 hours'), "
-            "dispatched_device=? WHERE id=?",
-            (device_id, int(sreq['id']))
-        )
-    return sreq
-
-
-def _payload(row, sreq):
-    payload = {'has_message': bool(row)}
-    if row:
-        payload.update({
-            'id': 'wake-' + str(row['id']),
-            'title': '费奥多尔',
-            'content': row['content'],
-            'woke_at': row['woke_at'],
-        })
-    if sreq:
-        payload.update({
-            'command': 'screenshot',
-            'command_id': 'cap-' + str(int(sreq['id'])),
-        })
-    return payload
+def _payload(row):
+    return {
+        'has_message': True,
+        'id': 'wake-' + str(row['id']),
+        'title': '费奥多尔',
+        'content': row['content'],
+        'woke_at': row['woke_at'],
+    }
 
 
 def poll(open_conn, take, wait_s, sleep=time.sleep, monotonic=time.monotonic):

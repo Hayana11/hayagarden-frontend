@@ -1804,13 +1804,6 @@ _BASE_TOOLS = [
         'input_schema': {'type': 'object', 'properties': {}},
     },
     {
-        'name': 'request_phone_screenshot',
-        'description': '让哈娅手机立刻截一张当前屏幕（由 app 端执行，截完会在手机上弹提醒）。工具会等待回传并返回 attachment://id；如果超时就先告诉你已下发。适合在她说"我在看这个"、你想确认她当前页面，或夜里醒来想轻轻看一眼她在做什么时使用。',
-        'input_schema': {'type': 'object', 'properties': {
-            'timeout_sec': {'type': 'integer', 'description': '等待回传秒数，默认 18，范围 5-40'},
-        }},
-    },
-    {
         'name': 'read_webpage',
         'description': '用真实浏览器打开一个网页，读取完整正文并截图。web_search 只给摘要——想读某个链接的全文、看 JS 渲染后的内容、或亲眼看看页面长什么样时用这个。传 url（可从 web_search/browse_github 的结果里拿）。返回标题、正文和一张网页截图。较慢（几秒到十几秒），一次只开一个页面。',
         'input_schema': {'type': 'object', 'properties': {
@@ -2459,42 +2452,6 @@ def _get_device_status():
     if age >= 3600:
         lines.append('（这是 %s 的设备状态，可能不是她此刻的实时状态）' % ago)
     return '\n'.join(lines)
-
-
-def _request_phone_screenshot(timeout_sec=18):
-    """请求手机截屏，并短轮询等待回传 attachment://id。"""
-    try:
-        timeout_sec = int(timeout_sec or 18)
-    except Exception:
-        timeout_sec = 18
-    timeout_sec = max(5, min(40, timeout_sec))
-    try:
-        body = json.dumps({'source': 'gateway_tool'}).encode('utf-8')
-        req = urllib.request.Request(
-            'http://127.0.0.1:5050/api/screenshot/request',
-            data=body,
-            headers={'Content-Type': 'application/json'},
-            method='POST')
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
-        req_id = int(data.get('request_id') or 0)
-    except Exception as e:
-        return f'下发手机截屏请求失败：{e}'
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        try:
-            q = urllib.parse.urlencode({'after_request_id': req_id})
-            with urllib.request.urlopen('http://127.0.0.1:5050/api/screenshot/latest?' + q, timeout=5) as r:
-                d = json.loads(r.read().decode('utf-8', 'ignore') or '{}')
-            if d.get('ok') and int(d.get('request_id') or 0) >= req_id and d.get('attachment'):
-                age = max(0, int(d.get('age_sec') or 0))
-                ago = '刚刚' if age < 3 else ('%d 秒前' % age)
-                return '📱 已拿到手机截屏（%s）\n🖼 %s' % (ago, d.get('attachment'))
-        except Exception:
-            pass
-        time.sleep(2)
-    return ('已下发手机截屏请求（request_id=%d），但在 %d 秒内还没回传。\n'
-            '可能是她手机暂时离线、后台被系统省电限制，或尚未授予投屏权限。') % (req_id, timeout_sec)
 
 
 # 无头浏览器同时只允许开一个（这台机器内存紧，两个 chromium 会撑爆）
@@ -3353,8 +3310,6 @@ def run_tool(name, args, caller='fyodor_cc'):
             return _get_location()
         if name == 'get_device_status':
             return _get_device_status()
-        if name == 'request_phone_screenshot':
-            return _request_phone_screenshot(args.get('timeout_sec', 18))
         if name == 'read_webpage':
             return _read_webpage(args.get('url', ''))
         if name == 'pocket_status':
@@ -8774,13 +8729,6 @@ WAKE_TOOLS = [
             'Wake 只能查看，不能修改灯。'
         ),
         'input_schema': {'type': 'object', 'properties': {}},
-    },
-    {
-        'name': 'request_phone_screenshot',
-        'description': '请求她手机立刻截一张当前屏幕（app 端会有提醒），并等待回传 attachment://id。醒来时若想确认她当下在看什么、要不要打扰她时用。',
-        'input_schema': {'type': 'object', 'properties': {
-            'timeout_sec': {'type': 'integer', 'description': '等待回传秒数，默认18，范围5-40'},
-        }},
     },
     {
         'name': 'web_search',
