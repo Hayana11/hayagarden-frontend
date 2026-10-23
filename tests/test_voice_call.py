@@ -327,7 +327,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(self.stt.calls, [b'A'])
         self.assertEqual(len(returned), 2)
-        self.assertEqual([line['text'] for line in self.her_lines()], [])
+        self.assertEqual(self.her_lines(), ['只处理一次'])
         self.assertTrue(any(result.get('duplicate') for result in returned))
 
     def test_without_numbers_arrival_order_is_used(self):
