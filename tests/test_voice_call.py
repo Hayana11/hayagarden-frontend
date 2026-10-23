@@ -343,6 +343,23 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.her_lines(), ['先说这一句', '再补一句'])
         self.assertEqual([text for text, _ in self.brain.calls], ['先说这一句 再补一句'])
 
+    def test_visible_transcript_does_not_wait_for_a_lost_successor_timeout(self):
+        self.stt.expect(b'A', '我先说完了')
+        thread_a = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        self.service.interrupt(self.call_id, utterance=2)  # B starts, but its upload is lost.
+        self.stt.release(b'A')
+        thread_a.join(5)
+
+        self.assertEqual(self.her_lines(), ['我先说完了'])
+        self.assertEqual(self.brain.calls, [], 'B still holds only the brain flush, not transcript visibility')
+        self.assertEqual([t.delay_s for t in self.scheduler.pending], [STALE_UTTERANCE_S])
+
+        self.clock.now += STALE_UTTERANCE_S
+        self.assertEqual(self.scheduler.run_due(), 1)
+        self.assertEqual(self.her_lines(), ['我先说完了'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['我先说完了'])
+
     def test_concurrent_sentences_keep_spoken_order_when_the_later_one_transcribes_first(self):
         self.stt.expect(b'A', '第一句')
         self.stt.expect(b'B', '第二句')
@@ -848,6 +865,7 @@ class BargeInCancellationTests(unittest.TestCase):
         self.assertIn('新回复。', texts)
         self.assertNotIn('旧回复。', texts)
         self.assertNotIn('（信号不太好，刚才那句我没接住。）', texts)
+        self.wait_until(lambda: self.call_id not in self.service._brain_turns)
         self.assertNotIn(self.call_id, self.service._brain_turns)
 
     def test_hangup_closes_the_active_call_reply(self):
