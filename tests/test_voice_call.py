@@ -170,6 +170,7 @@ class GatedSTT:
         self.gates = {}
         self.texts = {}
         self.errors = {}
+        self.calls = []
 
     def expect(self, clip, text, error=None):
         self.gates[clip] = threading.Event()
@@ -180,10 +181,37 @@ class GatedSTT:
         self.gates[clip].set()
 
     def transcribe(self, audio, mime, language):
+        self.calls.append(audio)
         self.gates[audio].wait(5)
         if self.errors[audio]:
             raise self.errors[audio]
         return self.texts[audio]
+
+
+class FakeScheduler:
+    def __init__(self):
+        self.pending = []
+
+    def __call__(self, delay_s, callback):
+        timer = FakeTimer(delay_s, callback)
+        self.pending.append(timer)
+        return timer
+
+    def run_due(self):
+        due, self.pending = [t for t in self.pending if not t.cancelled], []
+        for timer in due:
+            timer.callback()
+        return len(due)
+
+
+class FakeTimer:
+    def __init__(self, delay_s, callback):
+        self.delay_s = delay_s
+        self.callback = callback
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
 
 
 class UtteranceOrderTests(unittest.TestCase):
@@ -194,10 +222,11 @@ class UtteranceOrderTests(unittest.TestCase):
         self.clock = Clock()
         self.brain = FakeBrain()
         self.stt = GatedSTT()
+        self.scheduler = FakeScheduler()
         self.service = CallService(
             call_store.CallStore(self.path, self.clock),
             CachedTTS(FakeEngine(), self.tmp.name),
-            self.brain, clock=self.clock, spawn=run_now, stt=self.stt,
+            self.brain, clock=self.clock, spawn=run_now, stt=self.stt, schedule=self.scheduler,
         )
         call = self.service.ring()
         self.service.answer(call['id'])
@@ -293,6 +322,59 @@ class UtteranceOrderTests(unittest.TestCase):
         self.stt.release(b'C')
         self.service.hear(self.call_id, b'C', 'audio/wav', None, 3)
         self.assertEqual(self.her_lines(), ['喂 听得到吗'])
+
+    def test_same_number_while_still_in_scribe_is_refused_and_billed_once(self):
+        self.stt.expect(b'A', '你在吗')
+        first = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        with self.assertRaises(call_store.CallStateError) as refused:
+            self.service.hear(self.call_id, b'A', 'audio/wav', None, 1)  # retried upload
+        self.assertEqual(refused.exception.status, 409)
+        self.stt.release(b'A')
+        first.join(5)
+        self.assertEqual(self.stt.calls, [b'A'], 'Scribe is called once per utterance')
+        self.assertEqual(self.her_lines(), ['你在吗'])
+        self.assertEqual(len(self.brain.calls), 1)
+        queue = self.service._utterances[self.call_id]
+        self.assertEqual((queue.results, queue.submitted, queue.committed), ({}, set(), 1))
+
+    def test_last_sentence_behind_a_lost_one_is_handed_on_by_the_stale_timer(self):
+        self.service.interrupt(self.call_id, utterance=1)  # A began; its upload is lost
+        self.stt.expect(b'B', '晚安')
+        self.stt.release(b'B')
+        self.assertIsNone(self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)['line'])
+        self.assertEqual(self.her_lines(), [])
+        self.assertEqual([t.delay_s for t in self.scheduler.pending], [STALE_UTTERANCE_S])
+        # B is her last sentence: nothing else arrives, only time passes.
+        self.clock.now += STALE_UTTERANCE_S
+        self.assertEqual(self.scheduler.run_due(), 1)
+        self.assertEqual(self.her_lines(), ['晚安'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['晚安'])
+        self.assertEqual(self.scheduler.pending, [])
+
+    def test_utterance_in_scribe_never_goes_stale(self):
+        self.stt.expect(b'A', '慢慢说')
+        first = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        self.stt.expect(b'B', '我在')
+        self.stt.release(b'B')
+        self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
+        self.clock.now += STALE_UTTERANCE_S * 2
+        self.scheduler.run_due()
+        self.assertEqual(self.her_lines(), [], 'A is still being transcribed: B keeps waiting for it')
+        self.stt.release(b'A')
+        first.join(5)
+        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+
+    def test_hanging_up_cancels_the_stale_timer(self):
+        self.service.interrupt(self.call_id, utterance=1)
+        self.stt.expect(b'B', '喂')
+        self.stt.release(b'B')
+        self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
+        timer = self.scheduler.pending[0]
+        self.service.hangup(self.call_id)
+        self.assertTrue(timer.cancelled)
+        self.assertNotIn(self.call_id, self.service._utterances)
 
     def test_repeated_or_old_utterance_numbers_are_refused(self):
         self.stt.expect(b'A', '嗯')

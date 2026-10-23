@@ -32,7 +32,9 @@ class _Utterances:
         self.committed = 0    # every utterance <= this has been handed on (or dropped)
         self.started_at = {}  # utterance -> clock time it began
         self.results = {}     # utterance -> transcript, waiting for its turn
+        self.submitted = set()  # utterances whose audio is being transcribed right now
         self.carry = []       # committed text held back because she was already talking again
+        self.timer = None     # wakes the queue when a lost utterance goes stale
 
     def begin(self, number, now):
         self.started = max(self.started, number)
@@ -44,6 +46,13 @@ def format_duration(seconds):
     return '%02d:%02d' % (seconds // 60, seconds % 60)
 
 
+def _schedule(delay_s, callback):
+    timer = threading.Timer(max(0.0, delay_s), callback)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def _spawn(target):
     thread = threading.Thread(target=target, daemon=True, name='voice-call-reply')
     thread.start()
@@ -51,7 +60,8 @@ def _spawn(target):
 
 
 class CallService:
-    def __init__(self, store, tts, brain, clock=time.time, spawn=_spawn, on_end=None, stt=None):
+    def __init__(self, store, tts, brain, clock=time.time, spawn=_spawn, on_end=None, stt=None,
+                 schedule=_schedule):
         self._store = store
         self._tts = tts
         self._stt = stt
@@ -65,6 +75,7 @@ class CallService:
         self._record_lock = threading.Lock()
         self._utter_lock = threading.Lock()
         self._utterances = {}  # call_id -> _Utterances
+        self._schedule = schedule
 
     # ── lifecycle ────────────────────────────────────────────
     def ring(self):
@@ -128,10 +139,15 @@ class CallService:
         sentence finishing transcription after she started talking again cannot
         revive the answer her new sentence interrupted.
 
-        Every started utterance should end in a ``hear`` (an empty body with
-        ``discard`` for one the shell threw away); one that never does stops
-        holding the queue after STALE_UTTERANCE_S. The call is checked for being
-        active before transcribing, so a clip for a dead call is never billed.
+        Each number is heard at most once: a second ``hear`` for a number that is
+        being transcribed, waiting or already handed on is refused (409) without
+        calling Scribe again. Every started utterance should end in a ``hear`` (an
+        empty body with ``discard`` for one the shell threw away); one that begun
+        but was never heard stops holding the queue after STALE_UTTERANCE_S, on a
+        call-scoped timer, so the sentences behind it are handed on even when
+        nothing else arrives. One being transcribed always holds its place (Scribe
+        has its own timeout). The call is checked for being active before
+        transcribing, so a clip for a dead call is never billed.
         Returns {'utterance', 'text', 'line'}; line is the her-line created by this
         request, or None when the text was held or handed on by another request.
         """
@@ -144,8 +160,9 @@ class CallService:
         with self._utter_lock:
             queue = self._utterances.setdefault(call_id, _Utterances())
             number = queue.started + 1 if utterance is None else int(utterance)
-            if number <= queue.committed or number in queue.results:
+            if number <= queue.committed or number in queue.results or number in queue.submitted:
                 raise call_store.CallStateError('utterance %d was already heard' % number)
+            queue.submitted.add(number)
             queue.begin(number, self._clock())
         text = ''
         try:
@@ -154,6 +171,7 @@ class CallService:
         finally:
             # A failed transcription still takes its place, so it cannot block the queue.
             with self._utter_lock:
+                queue.submitted.discard(number)
                 queue.results[number] = text
                 line = self._hand_on(call_id, queue)
         return {'utterance': number, 'text': text, 'line': line}
@@ -167,9 +185,12 @@ class CallService:
             if number > queue.started:
                 break
             if number not in queue.results:
+                if number in queue.submitted:
+                    break  # being transcribed: it hands on itself when Scribe returns
                 began = queue.started_at.get(number)
                 if began is not None and now - began < STALE_UTTERANCE_S:
-                    break  # still being heard: everything after it waits
+                    self._wake_when_stale(call_id, queue, began + STALE_UTTERANCE_S - now)
+                    break  # begun, audio not here yet: everything after it waits
                 queue.results[number] = ''  # never begun here, or lost: skip it
             text = queue.results.pop(number)
             queue.started_at.pop(number, None)
@@ -182,6 +203,22 @@ class CallService:
                 if self.get(call_id)['state'] == call_store.ACTIVE:
                     said = self.say(call_id, joined)
         return said
+
+    def _wake_when_stale(self, call_id, queue, delay_s):
+        """Re-run _hand_on once the waited-for utterance goes stale (caller holds _utter_lock)."""
+        if queue.timer is not None or not (queue.results or queue.carry):
+            return
+
+        def wake():
+            with self._utter_lock:
+                queue.timer = None
+                if self._utterances.get(call_id) is queue:
+                    try:
+                        self._hand_on(call_id, queue)
+                    except call_store.CallStateError:
+                        pass  # the call ended meanwhile; nothing left to say
+
+        queue.timer = self._schedule(delay_s, wake)
 
     def interrupt(self, call_id, utterance=None):
         """She started talking: stop adding the rest of his current answer.
@@ -252,7 +289,9 @@ class CallService:
     def _finish(self, call_id, state):
         call = self._change(call_id, state)
         with self._utter_lock:
-            self._utterances.pop(call_id, None)
+            queue = self._utterances.pop(call_id, None)
+            if queue is not None and queue.timer is not None:
+                queue.timer.cancel()
         self.flush_records()
         return self._summary(call)
 
