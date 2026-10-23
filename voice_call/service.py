@@ -161,7 +161,18 @@ class CallService:
             raise call_store.CallStateError('empty utterance', 400)
         if self.get(call_id)['state'] != call_store.ACTIVE:
             raise call_store.CallStateError('call is not active')
+        line = self._commit_her_line(call_id, text)
+        self._start_reply(call_id, text)
+        return line
+
+    def _commit_her_line(self, call_id, text):
+        """Persist one ordered transcript immediately, independently of brain batching."""
         line = self._store.add_line(call_id, HER, text)
+        self._notify()
+        return line
+
+    def _start_reply(self, call_id, text):
+        """Start one brain turn for an already-visible HER utterance or speech burst."""
         with self._changed:
             previous = self._brain_turns.pop(call_id, None)
             generation = self._turns.get(call_id, 0) + 1
@@ -171,15 +182,16 @@ class CallService:
             self._changed.notify_all()
         self._cancel_brain_handle(previous)
         self._spawn(lambda: self._run_reply(call_id, text, first_turn, generation))
-        return line
 
     def hear(self, call_id, audio, mime, language=None, utterance=None, prev=None):
         """Transcribe one finished VAD utterance with strict, idempotent ordering.
 
         The client number is allocated at speech_start. Scribe may finish out
-        of order, but only the next number is handed to say(). A duplicate
-        upload waits for an in-flight request or returns its saved result, so
-        a retry never calls Scribe or creates another her line.
+        of order, but only ordered transcripts are committed. Each committed
+        transcript becomes a visible HER line immediately; consecutive speech
+        is still batched into one later brain turn. A duplicate upload waits
+        for an in-flight request or returns its saved result, so a retry never
+        calls Scribe or creates another her line.
 
         A number that began (speech_start / interrupt) but whose audio never
         arrives stops holding the queue after STALE_UTTERANCE_S; a call-scoped
@@ -240,7 +252,8 @@ class CallService:
             with self._utter_lock:
                 queue.in_flight.discard(number)
                 queue.results[number] = text
-                line = self._hand_on(call_id, queue)
+                committed_lines = self._hand_on(call_id, queue)
+                line = committed_lines.get(number)
                 response = {
                     'utterance': number,
                     'text': text,
@@ -257,8 +270,8 @@ class CallService:
         return response
 
     def _hand_on(self, call_id, queue):
-        """Hand on every transcript whose turn has come (caller holds _utter_lock)."""
-        said = None
+        """Commit ordered transcripts now; batch only the later brain turn (caller holds _utter_lock)."""
+        committed_lines = {}
         now = self._clock()
         while True:
             number = queue.committed + 1
@@ -288,14 +301,24 @@ class CallService:
             text = queue.results.pop(number)
             queue.started_at.pop(number, None)
             queue.committed = number
-            if text:
+            active = self.get(call_id)['state'] == call_store.ACTIVE
+            if text and active:
+                # Visibility follows spoken-order commit, not brain flush.  A user
+                # should see what Scribe heard even while a later utterance is open.
+                line = self._commit_her_line(call_id, text)
+                committed_lines[number] = line
+                previous_response = queue.responses.get(number)
+                if previous_response is not None:
+                    previous_response['line'] = line
                 queue.carry.append(text)
             if queue.carry and queue.started <= number:
                 joined = ' '.join(queue.carry)
                 queue.carry = []
-                if self.get(call_id)['state'] == call_store.ACTIVE:
-                    said = self.say(call_id, joined)
-        return said
+                if active:
+                    # One brain turn for the complete speech burst; HER lines above
+                    # are already durable, so do not add a second joined HER line.
+                    self._start_reply(call_id, joined)
+        return committed_lines
 
     def _wake_when_stale(self, call_id, queue, delay_s):
         """Re-run _hand_on once the waited-for utterance goes stale (caller holds _utter_lock).
