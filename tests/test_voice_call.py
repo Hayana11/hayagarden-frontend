@@ -258,6 +258,56 @@ class TTSTests(unittest.TestCase):
             with open(cache.path(key), 'rb') as cached:
                 self.assertEqual(cached.read(), b'abcd')
 
+    def test_two_workers_share_one_synthesis_and_both_stream(self):
+        """Two CachedTTS sharing cache_dir stand in for two Gunicorn workers."""
+        gate = threading.Event()
+        started = []
+
+        class SlowEngine(FakeEngine):
+            def stream(self, text, voice_id=None, model_id=None):
+                started.append(text)
+                yield b'ab'
+                gate.wait(5)
+                yield b'cd'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_a = CachedTTS(SlowEngine(), tmp, poll_s=0.005)
+            worker_b = CachedTTS(SlowEngine(), tmp, poll_s=0.005)
+            key_a, from_a = worker_a.stream('晚安')  # _emit's warm, on worker A
+            self.assertEqual(next(from_a), b'ab')
+            key_b, from_b = worker_b.stream('晚安')  # the page's request lands on worker B
+            self.assertEqual(key_a, key_b)
+            self.assertEqual(next(from_b), b'ab', 'B plays the bytes A has so far, before the line is done')
+            gate.set()
+            self.assertEqual(b'ab' + b''.join(from_b), b'abcd')
+            self.assertEqual(b'ab' + b''.join(from_a), b'abcd')
+            self.assertEqual(started, ['晚安'], 'ElevenLabs is asked once across both workers')
+            self.assertEqual(worker_b.get('晚安')[1], b'abcd')
+            self.assertEqual(sorted(os.listdir(tmp)), [key_a + '.mp3'], 'no part or lock left behind')
+
+    def test_a_worker_following_a_failed_owner_stops_with_an_error(self):
+        gate = threading.Event()
+
+        class FailingEngine(FakeEngine):
+            def stream(self, text, voice_id=None, model_id=None):
+                yield b'ab'
+                gate.wait(5)
+                raise TTSError('tts stream broke: ConnectionResetError')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_a = CachedTTS(FailingEngine(), tmp, poll_s=0.005)
+            worker_b = CachedTTS(FailingEngine(), tmp, poll_s=0.005)
+            _, from_a = worker_a.stream('晚安')
+            self.assertEqual(next(from_a), b'ab')
+            _, from_b = worker_b.stream('晚安')
+            self.assertEqual(next(from_b), b'ab')
+            gate.set()
+            with self.assertRaises(TTSError):
+                b''.join(from_b)
+            with self.assertRaises(TTSError):
+                b''.join(from_a)
+            self.assertEqual(os.listdir(tmp), [], 'nothing cached, nothing left to block a retry')
+
     def test_a_stream_that_breaks_is_not_cached(self):
         class BrokenEngine(FakeEngine):
             def stream(self, text, voice_id=None, model_id=None):

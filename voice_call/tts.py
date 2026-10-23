@@ -7,15 +7,18 @@ page usually joins a synthesis already under way. The cache key covers voice,
 model and text: a phone that reconnects and asks for the same line again is
 served from disk instead of being billed twice.
 """
+import fcntl
 import hashlib
 import json
 import os
-import tempfile
 import threading
+import time
+import uuid
 import urllib.error
 import urllib.request
 
 STREAM_CHUNK = 4096
+FOLLOW_POLL_S = 0.02  # how often another worker's reader checks for new bytes
 
 DEFAULT_VOICE_ID = 'TpHHy93T39MKuyQgrXh8'
 DEFAULT_MODEL_ID = 'eleven_v4_turbo'
@@ -180,12 +183,24 @@ def _spawn_thread(target):
 
 
 class CachedTTS:
-    def __init__(self, engine, cache_dir, spawn=_spawn_thread):
+    """Per-line mp3 cache whose lines are synthesized at most once at a time,
+    across every Gunicorn worker sharing ``cache_dir``.
+
+    The owner of a line holds ``<key>.lock`` (flock) while it streams the line
+    into its own ``<key>.<attempt>.part`` (named inside the lock file) and,
+    once complete, renames it to ``<key>.mp3``. A reader in the same process
+    follows the owner's chunks in memory; one in another worker tails the
+    part file, so it too plays from the first bytes. An owner that dies drops
+    its flock, and its readers stop with a TTSError instead of waiting forever.
+    """
+
+    def __init__(self, engine, cache_dir, spawn=_spawn_thread, poll_s=FOLLOW_POLL_S):
         self._engine = engine
         self._cache_dir = cache_dir
         self._spawn = spawn
+        self._poll_s = poll_s
         self._lock = threading.Lock()
-        self._running = {}  # key -> _Synthesis, while it is being synthesized
+        self._running = {}  # key -> _Synthesis this process owns
 
     def key(self, text, voice_id=None, model_id=None):
         raw = '\0'.join((voice_id or self._engine.voice_id, model_id or self._engine.model_id, text))
@@ -194,28 +209,40 @@ class CachedTTS:
     def path(self, key):
         return os.path.join(self._cache_dir, key + '.mp3')
 
-    def stream(self, text, voice_id=None):
-        """Return (key, mp3 chunks): from disk, from the synthesis already under way, or a new one.
+    def _lock_path(self, key):
+        return os.path.join(self._cache_dir, key + '.lock')
 
-        A line is synthesized at most once at a time however many ask for it.
-        """
+    @staticmethod
+    def _read(path):
+        try:
+            with open(path, 'rb') as cached:
+                return cached.read()
+        except OSError:
+            return None
+
+    def stream(self, text, voice_id=None):
+        """Return (key, mp3 chunks): from disk, from the synthesis already under way
+        (in this worker or another), or a new one this worker owns."""
         model_id = self._engine.model_id  # read once: the model can change live between key and request
         key = self.key(text, voice_id, model_id)
         path = self.path(key)
-        started = False
         with self._lock:
             job = self._running.get(key)
-            if job is None:
-                try:
-                    with open(path, 'rb') as cached:
-                        return key, iter([cached.read()])
-                except OSError:
-                    pass
-                job = _Synthesis()
-                self._running[key] = job
-                started = True
-        if started:  # outside the lock: _synthesize takes it again when it ends
-            self._spawn(lambda: self._synthesize(key, path, job, text, voice_id, model_id))
+            if job is not None:
+                return key, job.read()
+            cached = self._read(path)
+            if cached is not None:
+                return key, iter([cached])
+            owner = self._try_own(key)
+            if owner is None:
+                return key, self._follow(key, path)
+            cached = self._read(path)  # finished between our check and taking the lock
+            if cached is not None:
+                self._release(key, owner)
+                return key, iter([cached])
+            job = _Synthesis()
+            self._running[key] = job
+        self._spawn(lambda: self._synthesize(key, path, job, owner, text, voice_id, model_id))
         return key, job.read()
 
     def warm(self, text, voice_id=None):
@@ -230,35 +257,120 @@ class CachedTTS:
         key, chunks = self.stream(text, voice_id)
         return key, b''.join(chunks)
 
-    def _synthesize(self, key, path, job, text, voice_id, model_id):
-        tmp = None
+    def _try_own(self, key):
+        """The line's lock fd if this worker now owns it, else None (someone else does)."""
+        os.makedirs(self._cache_dir, exist_ok=True)
+        lock_path = self._lock_path(key)
+        while True:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                return None
+            try:
+                same = os.fstat(fd).st_ino == os.stat(lock_path).st_ino
+            except FileNotFoundError:
+                same = False
+            if same:
+                return fd
+            os.close(fd)  # locked a file its owner already unlinked: take the current one
+
+    def _release(self, key, fd):
         try:
-            stream = getattr(self._engine, 'stream', None)
-            if callable(stream):
-                chunks = stream(text, voice_id, model_id)
-            else:
-                chunks = [self._engine.synthesize(text, voice_id, model_id)]
-            os.makedirs(self._cache_dir, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self._cache_dir, suffix='.part')
-            got = False
-            with os.fdopen(fd, 'wb') as out:
+            os.unlink(self._lock_path(key))  # unlinked while still held, so no one locks a stale file
+        except OSError:
+            pass
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    def _owner_alive(self, key):
+        try:
+            fd = os.open(self._lock_path(key), os.O_RDWR)
+        except FileNotFoundError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)  # closing drops a lock we may have just taken
+        return False
+
+    def _part_name(self, key):
+        try:
+            with open(self._lock_path(key), 'rb') as lock_file:
+                name = lock_file.read().decode('ascii', 'ignore').strip()
+        except OSError:
+            return None
+        if name.startswith(key + '.') and name.endswith('.part') and '/' not in name:
+            return name
+        return None
+
+    def _follow(self, key, path):
+        """Tail another worker's synthesis of this line from its part file."""
+        part = None
+        offset = 0
+        while True:
+            if part is None:
+                name = self._part_name(key)
+                part = os.path.join(self._cache_dir, name) if name else None
+            data = b''
+            if part is not None:
+                try:
+                    with open(part, 'rb') as growing:
+                        growing.seek(offset)
+                        data = growing.read()
+                except FileNotFoundError:
+                    pass
+            if data:
+                offset += len(data)
+                yield data
+                continue
+            done = self._read(path)
+            if done is not None:  # the part became the cache: same bytes, read the rest
+                if len(done) > offset:
+                    yield done[offset:]
+                return
+            if not self._owner_alive(key):
+                done = self._read(path)
+                if done is not None:
+                    if len(done) > offset:
+                        yield done[offset:]
+                    return
+                raise TTSError('tts synthesis ended without audio')
+            time.sleep(self._poll_s)
+
+    def _synthesize(self, key, path, job, owner, text, voice_id, model_id):
+        part = '%s.%d-%s.part' % (path[:-len('.mp3')], os.getpid(), uuid.uuid4().hex[:8])
+        error = None
+        try:
+            with open(part, 'wb') as out:
+                os.ftruncate(owner, 0)
+                os.pwrite(owner, os.path.basename(part).encode('ascii'), 0)
+                stream = getattr(self._engine, 'stream', None)
+                if callable(stream):
+                    chunks = stream(text, voice_id, model_id)
+                else:
+                    chunks = [self._engine.synthesize(text, voice_id, model_id)]
+                got = False
                 for chunk in chunks:
                     if chunk:
                         out.write(chunk)
+                        out.flush()  # other workers tail this file
                         job.push(chunk)
                         got = True
             if not got:
                 raise TTSError('tts returned no audio')
-            os.replace(tmp, path)  # only a complete line is ever cached
-            tmp = None
-            job.finish()
+            os.replace(part, path)  # only a complete line is ever cached
         except Exception as exc:
-            job.finish(exc if isinstance(exc, TTSError) else TTSError('tts failed: %s' % type(exc).__name__))
-        finally:
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-            with self._lock:
-                self._running.pop(key, None)
+            error = exc if isinstance(exc, TTSError) else TTSError('tts failed: %s' % type(exc).__name__)
+            try:
+                os.unlink(part)
+            except OSError:
+                pass
+        # Tidy up before anyone hears the outcome, so a retry finds a clean slate.
+        with self._lock:
+            self._running.pop(key, None)
+            self._release(key, owner)
+        job.finish(error)
