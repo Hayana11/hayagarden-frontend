@@ -158,12 +158,12 @@ class StoreTests(unittest.TestCase):
         os.unlink(self.path)
 
     def test_ring_answer_end(self):
-        self.store.create('c1')
+        self.store.create_if_none_open('c1')
         self.assertEqual(self.store.transition('c1', call_store.ACTIVE)['state'], 'active')
         self.assertEqual(self.store.transition('c1', call_store.ENDED)['state'], 'ended')
 
     def test_illegal_transitions_are_refused(self):
-        self.store.create('c1')
+        self.store.create_if_none_open('c1')
         with self.assertRaises(call_store.CallStateError):
             self.store.transition('c1', call_store.ENDED)
         with self.assertRaises(call_store.CallStateError) as ctx:
@@ -171,7 +171,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 404)
 
     def test_unanswered_call_becomes_missed_after_timeout(self):
-        self.store.create('c1')
+        self.store.create_if_none_open('c1')
         self.clock.now += 59
         self.assertEqual(self.store.get('c1')['state'], 'ringing')
         self.clock.now += 2
@@ -182,8 +182,62 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(call_store.CallStateError):
             self.store.transition('c1', call_store.ACTIVE)
 
+    def test_concurrent_rings_create_at_most_one_call(self):
+        import sqlite3
+        import threading
+        for round_no in range(20):
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                # Separate store objects = separate in-process locks, like separate workers.
+                stores = [call_store.CallStore(path, self.clock) for _ in range(8)]
+                barrier = threading.Barrier(len(stores))
+                created, refused, errors = [], [], []
+
+                def ring(store, n):
+                    try:
+                        barrier.wait()
+                        created.append(store.create_if_none_open('c%d' % n))
+                    except call_store.CallStateError:
+                        refused.append(n)
+                    except Exception as exc:  # pragma: no cover - reported below
+                        errors.append(repr(exc))
+
+                threads = [threading.Thread(target=ring, args=(st, i)) for i, st in enumerate(stores)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(30)
+                self.assertEqual(errors, [])
+                self.assertEqual(len(created), 1, 'round %d created %d calls' % (round_no, len(created)))
+                self.assertEqual(len(refused), len(stores) - 1)
+                conn = sqlite3.connect(path)
+                open_rows = conn.execute(
+                    "SELECT COUNT(*) FROM voice_calls WHERE state IN ('ringing','active')").fetchone()[0]
+                conn.close()
+                self.assertEqual(open_rows, 1)
+            finally:
+                os.unlink(path)
+
+    def test_database_refuses_a_second_open_call_even_bypassing_the_store(self):
+        import sqlite3
+        self.store.create_if_none_open('c1')
+        conn = sqlite3.connect(self.path)
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO voice_calls (id, state, created_at) VALUES ('c2', 'ringing', 0)")
+        finally:
+            conn.close()
+
+    def test_new_call_allowed_once_the_open_one_expired(self):
+        self.store.create_if_none_open('c1')
+        with self.assertRaises(call_store.CallStateError):
+            self.store.create_if_none_open('c2')
+        self.clock.now += call_store.RING_TIMEOUT_S + 1
+        self.assertEqual(self.store.create_if_none_open('c2')['state'], 'ringing')
+
     def test_lines_are_sequenced_per_call(self):
-        self.store.create('c1')
+        self.store.create_if_none_open('c1')
         self.store.add_line('c1', 'her', 'a')
         self.store.add_line('c1', 'him', 'b')
         self.assertEqual([l['seq'] for l in self.store.lines_after('c1', 0)], [1, 2])
@@ -312,6 +366,10 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(format_duration(-3), '00:00')
 
 
+def sqlite3_error(message):
+    return __import__('sqlite3').OperationalError(message)
+
+
 class ChatRecordTests(unittest.TestCase):
     def make_db(self, with_source_kind):
         fd, path = tempfile.mkstemp(suffix='.db')
@@ -333,18 +391,100 @@ class ChatRecordTests(unittest.TestCase):
 
     def test_record_is_fyodors_call_line(self):
         path = self.make_db(True)
-        self.assertEqual(record_call_in_chat(path, {'record': 'ᯅ 通话时长 03:21'}), 1)
+        self.assertEqual(record_call_in_chat(path, {'record': 'ᯅ 通话时长 03:21', 'call': {'id': 'c1'}}), 1)
         self.assertEqual(self.rows(path), [(1, 'fyodor', 'ᯅ 通话时长 03:21', 'call')])
 
     def test_old_schema_without_source_kind(self):
         path = self.make_db(False)
-        record_call_in_chat(path, {'record': 'ᯅ 未接听'})
+        record_call_in_chat(path, {'record': 'ᯅ 未接听', 'call': {'id': 'c1'}})
         self.assertEqual(self.rows(path), [(1, 'fyodor', 'ᯅ 未接听')])
 
     def test_empty_record_writes_nothing(self):
         path = self.make_db(True)
         self.assertIsNone(record_call_in_chat(path, {'record': ''}))
         self.assertEqual(self.rows(path), [])
+
+    def test_same_call_id_is_written_once(self):
+        path = self.make_db(True)
+        summary = {'record': 'ᯅ 通话时长 00:05', 'call': {'id': 'c1'}}
+        first = record_call_in_chat(path, summary)
+        second = record_call_in_chat(path, summary)
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.rows(path)), 1)
+        with self.assertRaises(ValueError):
+            record_call_in_chat(path, {'record': 'ᯅ 未接听', 'call': {}})
+
+    def service_with(self, db, chat_db, clock, on_end):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__('shutil').rmtree, tmp)
+        return CallService(call_store.CallStore(db, clock), CachedTTS(FakeEngine(), tmp), FakeBrain(),
+                           clock=clock, spawn=run_now, on_end=on_end)
+
+    def new_db(self):
+        fd, db = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        self.addCleanup(os.unlink, db)
+        return db
+
+    def test_failed_record_is_retried_until_it_succeeds(self):
+        db, chat_db, clock = self.new_db(), self.make_db(True), Clock()
+        attempts = []
+
+        def flaky(summary):
+            attempts.append(summary['call']['id'])
+            if len(attempts) == 1:
+                raise sqlite3_error('database is locked')
+            return record_call_in_chat(chat_db, summary)
+
+        service = self.service_with(db, chat_db, clock, flaky)
+        call = service.ring()
+        service.answer(call['id'])
+        clock.now += 30
+        service.hangup(call['id'])          # first attempt fails inside hangup
+        self.assertEqual(self.rows(chat_db), [])
+        self.assertEqual(service._store.unrecorded_final()[0]['id'], call['id'])
+        service.flush_records()             # the sweep retries and succeeds
+        self.assertEqual([r[2] for r in self.rows(chat_db)], ['ᯅ 通话时长 00:30'])
+        self.assertEqual(service._store.unrecorded_final(), [])
+        service.flush_records()
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(self.rows(chat_db)), 1)
+
+    def test_written_record_is_not_repeated_after_a_crash_before_marking(self):
+        db, chat_db, clock = self.new_db(), self.make_db(True), Clock()
+        first = self.service_with(db, chat_db, clock, None)  # no on_end: nothing gets marked
+        call = first.ring()
+        first.answer(call['id'])
+        clock.now += 12
+        first.hangup(call['id'])
+        # The chat line was written, then the process died before mark_recorded.
+        record_call_in_chat(chat_db, first._summary(first.get(call['id'])))
+        restarted = self.service_with(db, chat_db, clock, lambda s: record_call_in_chat(chat_db, s))
+        restarted.flush_records()
+        self.assertEqual([r[2] for r in self.rows(chat_db)], ['ᯅ 通话时长 00:12'])
+        self.assertEqual(restarted._store.unrecorded_final(), [])
+
+    def test_two_sweepers_on_one_call_write_one_line(self):
+        import threading
+        db, chat_db, clock = self.new_db(), self.make_db(True), Clock()
+        a = self.service_with(db, chat_db, clock, lambda s: record_call_in_chat(chat_db, s))
+        b = self.service_with(db, chat_db, clock, lambda s: record_call_in_chat(chat_db, s))
+        a._on_end, saved = None, a._on_end
+        call = a.ring()
+        a.decline(call['id'])
+        a._on_end = saved
+        barrier = threading.Barrier(2)
+
+        def sweep(service):
+            barrier.wait()
+            service.flush_records()
+
+        threads = [threading.Thread(target=sweep, args=(svc,)) for svc in (a, b)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual([r[2] for r in self.rows(chat_db)], ['ᯅ 已拒绝'])
 
     def test_every_outcome_reaches_on_end_once(self):
         fd, db = tempfile.mkstemp(suffix='.db')

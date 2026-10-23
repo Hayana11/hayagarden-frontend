@@ -58,9 +58,19 @@ class CallStore:
                     PRIMARY KEY (call_id, seq)
                 );
             """)
+            # At most one ringing/active call, enforced by the database itself
+            # (every open row indexes the same value, so a second one violates it).
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS voice_calls_one_open "
+                    "ON voice_calls((state IN ('ringing','active'))) "
+                    "WHERE state IN ('ringing','active')"
+                )
+            except sqlite3.IntegrityError:
+                pass  # pre-existing duplicate open calls; create_if_none_open still serializes
             cols = {row[1] for row in conn.execute('PRAGMA table_info(voice_calls)')}
             if 'recorded' not in cols:
-                # 1 once the call's record line has been written to chat (exactly once).
+                # 1 once the call's chat record is confirmed written (set after, never before).
                 conn.execute("ALTER TABLE voice_calls ADD COLUMN recorded INTEGER NOT NULL DEFAULT 0")
 
     @contextlib.contextmanager
@@ -73,12 +83,32 @@ class CallStore:
         finally:
             conn.close()
 
-    def create(self, call_id):
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                "INSERT INTO voice_calls (id, state, created_at) VALUES (?, ?, ?)",
-                (call_id, RINGING, self._clock()),
-            )
+    def create_if_none_open(self, call_id):
+        """Atomically: expire stale rings, refuse if a call is open, else create one ringing."""
+        with self._lock:
+            conn = sqlite3.connect(self._db_path, timeout=10, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                try:
+                    self._expire(conn)
+                    if conn.execute(
+                        "SELECT 1 FROM voice_calls WHERE state IN (?, ?) LIMIT 1", (RINGING, ACTIVE)
+                    ).fetchone():
+                        raise CallStateError('a call is already ringing or active')
+                    conn.execute(
+                        "INSERT INTO voice_calls (id, state, created_at) VALUES (?, ?, ?)",
+                        (call_id, RINGING, self._clock()),
+                    )
+                    conn.execute('COMMIT')
+                except sqlite3.IntegrityError:
+                    conn.execute('ROLLBACK')
+                    raise CallStateError('a call is already ringing or active')
+                except BaseException:
+                    conn.execute('ROLLBACK')
+                    raise
+            finally:
+                conn.close()
         return self.get(call_id)
 
     def get(self, call_id):
@@ -113,8 +143,8 @@ class CallStore:
                              (new_state, now, call_id))
         return self.get(call_id)
 
-    def claim_unrecorded_final(self):
-        """Return finished calls whose record has not been written yet, marking them claimed."""
+    def unrecorded_final(self):
+        """Finished calls whose chat record has not been confirmed written yet (no claim)."""
         marks = ','.join('?' for _ in FINAL_STATES)
         with self._lock, self._connect() as conn:
             self._expire(conn)
@@ -123,9 +153,12 @@ class CallStore:
                 % (_CALL_COLUMNS, marks),
                 FINAL_STATES,
             ).fetchall()
-            for row in rows:
-                conn.execute("UPDATE voice_calls SET recorded=1 WHERE id=?", (row['id'],))
         return [dict(row) for row in rows]
+
+    def mark_recorded(self, call_id):
+        """Only after the chat record for call_id is durably written."""
+        with self._lock, self._connect() as conn:
+            conn.execute("UPDATE voice_calls SET recorded=1 WHERE id=?", (call_id,))
 
     def add_line(self, call_id, speaker, text):
         with self._lock, self._connect() as conn:

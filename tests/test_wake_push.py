@@ -201,12 +201,41 @@ class AckProtocolTests(Base):
         self.assertEqual(self.notified(wake), 1)
         self.assertIsNone(self.lease(now=self.now + 10 * wake_push.LEASE_S))
 
-    def test_ack_of_latest_retires_older_pending_like_legacy(self):
+    def disposition(self, wake_id):
+        conn = self.open_conn()
+        try:
+            return conn.execute("SELECT notified, push_disposition FROM wake_log WHERE id=?",
+                                (wake_id,)).fetchone()[:]
+        finally:
+            conn.close()
+
+    def test_ack_marks_only_the_acked_row_delivered(self):
+        older = self.add_message('older, never leased or shown')
+        latest = self.add_message('latest')
+        self.lease()
+        self.ack('wake-%d' % latest)
+        self.assertEqual(tuple(self.disposition(latest)), (1, 'acked'))
+        # Older pending rows are closed as superseded, never as delivered...
+        self.assertEqual(tuple(self.disposition(older)), (2, 'superseded'))
+        # ...and are no longer pending, so they do not surface afterwards.
+        self.assertIsNone(self.lease(now=self.now + 10 * wake_push.LEASE_S))
+
+    def test_superseded_rows_are_not_resurrected_or_acked_later(self):
         older = self.add_message('older')
         latest = self.add_message('latest')
         self.lease()
         self.ack('wake-%d' % latest)
-        self.assertEqual(self.notified(older), 1)
+        with self.assertRaises(wake_push.AckRefused):
+            self.ack('wake-%d' % older)  # never handed to this device
+        self.assertEqual(tuple(self.disposition(older)), (2, 'superseded'))
+
+    def test_newer_message_after_ack_is_still_delivered(self):
+        first = self.add_message('first')
+        self.lease()
+        self.ack('wake-%d' % first)
+        second = self.add_message('second')
+        self.assertEqual(self.lease(now=self.now + 1)['id'], 'wake-%d' % second)
+        self.assertEqual(tuple(self.disposition(second)), (0, None))
 
     def test_soft_window_ack_only_touches_that_row(self):
         older = self.add_message('other window')
@@ -248,6 +277,10 @@ class AckProtocolTests(Base):
         # shown, ack lost, phone reboots; first poll after boot carries since=<shown id>
         self.assertIsNone(self.lease(since=wake, now=self.now + wake_push.LEASE_S + 1))
         self.assertEqual(self.notified(wake), 1)
+        conn = self.open_conn()
+        self.assertEqual(conn.execute("SELECT push_disposition FROM wake_log WHERE id=?", (wake,)).fetchone()[0],
+                         'acked')
+        conn.close()
 
     def test_cursor_never_acks_messages_that_were_never_handed_out(self):
         first = self.add_message('one')

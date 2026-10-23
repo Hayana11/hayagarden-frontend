@@ -40,12 +40,11 @@ class CallService:
         self._changed = threading.Condition()
         self._turns = {}  # call_id -> generation counter of the current reply
         self._replied = set()  # call_ids that already had a first turn
+        self._record_lock = threading.Lock()
 
     # ── lifecycle ────────────────────────────────────────────
     def ring(self):
-        if self._store.latest_open():
-            raise call_store.CallStateError('a call is already ringing or active')
-        call = self._store.create(uuid.uuid4().hex)
+        call = self._store.create_if_none_open(uuid.uuid4().hex)
         self._notify()
         return call
 
@@ -157,18 +156,23 @@ class CallService:
         return self._summary(call)
 
     def flush_records(self):
-        """Hand every finished, not-yet-recorded call to on_end exactly once.
+        """Write each finished call's chat record; retry failures on the next run.
 
+        on_end must be idempotent per call id (record_call_in_chat is). A call is
+        marked recorded only after on_end returns, so a failure is retried and a
+        crash between the chat write and the mark cannot duplicate the line.
         Calls that end by ring timeout have no request to hook, so this also
         runs from a background sweep.
         """
         if not self._on_end:
             return
-        for call in self._store.claim_unrecorded_final():
-            try:
-                self._on_end(self._summary(call))
-            except Exception:
-                pass
+        with self._record_lock:
+            for call in self._store.unrecorded_final():
+                try:
+                    self._on_end(self._summary(call))
+                except Exception:
+                    continue  # stays unrecorded; the next sweep retries
+                self._store.mark_recorded(call['id'])
 
     def start_record_sweeper(self, interval_s=15):
         def sweep():

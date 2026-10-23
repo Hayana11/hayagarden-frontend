@@ -26,9 +26,12 @@ else with 401 before touching wake or screenshot state. Then:
   * ``since=<n>``: "this device has shown everything up to wake-<n>". It acks
     rows at or below n that were handed to this device, recovering an ack lost
     before a reboot; never rows handed elsewhere or never handed out;
-  * in non-soft-window mode an ack of the latest message also retires older
-    still-pending messages: only the latest is ever delivered (the legacy
-    no-flood rule), so they would otherwise surface one by one afterwards;
+  * acks mark only the acked rows delivered (``notified=1``,
+    ``push_disposition='acked'``). In non-soft-window mode only the latest
+    message is ever pushed (the legacy no-flood rule), so an ack of wake-<n>
+    also closes older still-pending rows as *superseded* (``notified=2``,
+    ``push_disposition='superseded'``): never shown, never counted as
+    delivered, and no longer pending, so they do not surface one by one;
   * screenshot commands go only to a device that passes ``commands=screenshot``
     and are bound to it; ``cap-<id>`` acks from that device move them to
     ``received``.
@@ -44,6 +47,10 @@ MAX_WAIT_S = 25
 POLL_INTERVAL_S = 1.0
 LEASE_S = 60
 ACK_PROTOCOL = 'ack'
+# wake_log.notified: 0/NULL pending, 1 delivered (ack, legacy read, or executor
+# audit row), 2 superseded by a newer delivered message (never delivered).
+NOTIFIED_DELIVERED = 1
+NOTIFIED_SUPERSEDED = 2
 SCREENSHOT_LEASE_SQL = "datetime('now','+8 hours','-2 minutes')"
 
 
@@ -83,6 +90,7 @@ def _add_column(conn, table, column, decl):
 def ensure_columns(conn):
     _add_column(conn, 'wake_log', 'push_lease_until', 'REAL')
     _add_column(conn, 'wake_log', 'push_lease_device', 'TEXT')
+    _add_column(conn, 'wake_log', 'push_disposition', 'TEXT')
     _add_column(conn, 'screenshot_requests', 'dispatched_device', 'TEXT')
 
 
@@ -118,7 +126,7 @@ def lease_pending_payload(conn, fetch_row, soft_window, now, device_id,
     ensure_columns(conn)
     if since:
         conn.execute(
-            "UPDATE wake_log SET notified=1 WHERE action='message' "
+            "UPDATE wake_log SET notified=1, push_disposition='acked' WHERE action='message' "
             "AND (notified IS NULL OR notified=0) AND push_lease_device=? AND id<=?",
             (device_id, since),
         )
@@ -169,11 +177,14 @@ def ack(conn, ids, soft_window, device_id):
             raise AckRefused(key)
 
     for wake_id in wake_ids:
-        conn.execute("UPDATE wake_log SET notified=1 WHERE id=?", (wake_id,))
+        conn.execute(
+            "UPDATE wake_log SET notified=1, push_disposition='acked' WHERE id=?",
+            (wake_id,),
+        )
         if not soft_window:
             conn.execute(
-                "UPDATE wake_log SET notified=1 WHERE action='message' "
-                "AND (notified IS NULL OR notified=0) AND id<?",
+                "UPDATE wake_log SET notified=2, push_disposition='superseded' "
+                "WHERE action='message' AND (notified IS NULL OR notified=0) AND id<?",
                 (wake_id,),
             )
     for cap_id in cap_ids:
