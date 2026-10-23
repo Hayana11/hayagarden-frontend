@@ -161,3 +161,31 @@
 
 .call-send:disabled,
 .call-test:disabled { opacity: 0.5; cursor: default; }
+
+.call-line--pending .call-bubble {
+  opacity: 0.55;
+}
+
+.call-mic {
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 20px;
+  border: 1px solid var(--color-border);
+  background: var(--color-card);
+  color: var(--color-text-mute);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.call-mic.is-on {
+  border-color: var(--color-green);
+  color: var(--color-green-deep);
+}
+
+.call-mic.is-hearing {
+  background: var(--color-green);
+  color: #FFFFFF;
+}
+
+.call-btn--interrupt { background: var(--color-primary); }
