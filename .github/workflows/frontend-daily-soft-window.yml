@@ -11,6 +11,9 @@ on:
       - 'tests/test_chat_durable_order.py'
       - 'tools/memory_surface.py'
       - 'tests/test_memory_surface_daily.py'
+      - 'voice_call/**'
+      - 'voice_call_routes.py'
+      - 'tests/test_voice_call.py'
       - '.github/workflows/frontend-daily-soft-window.yml'
   push:
     branches: [main]
@@ -23,6 +26,9 @@ on:
       - 'tests/test_chat_durable_order.py'
       - 'tools/memory_surface.py'
       - 'tests/test_memory_surface_daily.py'
+      - 'voice_call/**'
+      - 'voice_call_routes.py'
+      - 'tests/test_voice_call.py'
       - '.github/workflows/frontend-daily-soft-window.yml'
 
 concurrency:
@@ -75,6 +81,12 @@ jobs:
           npm run test:memory-cold-start
           npm run test:flow-studio-persistence
           npm run test:flow-studio-runtime-status
+      - name: P2F native voice + P2E fallback call e2e
+        working-directory: app
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:call-native-voice:e2e
+          npm run test:call-speech:e2e
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -137,6 +149,9 @@ jobs:
           python -m unittest tests.test_hidden_flow_engine -v
           python -m unittest tests.test_hidden_flow_activation_contract -v
           python -m unittest tests.test_hidden_flow_observability -v
+      - name: Voice call server ordering and request-limit regressions
+        run: python -m unittest tests.test_voice_call -v
+
       - name: Claude chat effort backend regressions
         env:
           HAYAGARDEN_CONFIG_DB_PATH: ${{ runner.temp }}/chat-effort-config.db
