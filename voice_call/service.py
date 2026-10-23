@@ -37,6 +37,7 @@ class _Utterances:
         self.in_flight = set() # utterances currently in Scribe; closes duplicate-upload races
         self.responses = {}    # completed request payloads for idempotent retries
         self.errors = {}       # completed STT failures; retries do not call Scribe again
+        self.stale = set()       # sequence numbers skipped after a lost/expired upload
 
     def begin(self, number, now):
         self.started = max(self.started, number)
