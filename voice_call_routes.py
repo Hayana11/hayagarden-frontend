@@ -5,7 +5,8 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from moments_auth import OwnerAuthError, require_owner
 from voice_call.store import CallStateError
-from voice_call.stt import STTError
+from voice_call.service import MAX_CLIP_BYTES
+from voice_call.stt import AUDIO_TYPES, STTError
 from voice_call.tts import TTSError
 
 STREAM_WINDOW_S = 25
@@ -18,6 +19,15 @@ def _sse(event, data, event_id=None):
     lines.append('event: %s' % event)
     lines.append('data: ' + json.dumps(data, ensure_ascii=False, separators=(',', ':')))
     return '\n'.join(lines) + '\n\n'
+
+
+def _utterance_arg():
+    raw = request.args.get('utt')
+    if raw is None:
+        return None
+    if not raw.isdigit() or not 0 < int(raw) < 10 ** 9:
+        raise CallStateError('utt must be a positive integer', 400)
+    return int(raw)
 
 
 def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREAM_WINDOW_S):
@@ -70,7 +80,7 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
 
     @bp.post('/<call_id>/interrupt')
     def interrupt(call_id):
-        service.interrupt(call_id)
+        service.interrupt(call_id, _utterance_arg())
         return jsonify({'ok': True})
 
     @bp.post('/<call_id>/say')
@@ -80,10 +90,24 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
 
     @bp.post('/<call_id>/hear')
     def hear(call_id):
-        """Body: one utterance (audio/wav PCM16 from the shell). ?lang=zho|eng."""
+        """Body: one utterance (audio/wav PCM16 from the shell).
+
+        Query: utt=<n> (the shell's per-call utterance number, see CallService.hear),
+        lang=zho|eng, discard=1 (the shell threw this utterance away: no body).
+        """
+        utterance = _utterance_arg()
+        if request.args.get('discard') == '1':
+            return jsonify({'ok': True, **service.hear(call_id, None, None, utterance=utterance)})
         mime = (request.mimetype or '').lower()
+        if mime not in AUDIO_TYPES:
+            return jsonify({'ok': False, 'error': 'unsupported audio type'}), 415
+        length = request.content_length
+        if length is not None and length > MAX_CLIP_BYTES:
+            return jsonify({'ok': False, 'error': 'clip too large'}), 413
+        # Never buffer more than the cap, even without (or with a lying) Content-Length.
+        audio = request.stream.read(MAX_CLIP_BYTES + 1)
         try:
-            result = service.hear(call_id, request.get_data(cache=False), mime, request.args.get('lang'))
+            result = service.hear(call_id, audio, mime, request.args.get('lang'), utterance)
         except STTError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 502
         return jsonify({'ok': True, **result})

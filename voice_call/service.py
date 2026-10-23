@@ -19,6 +19,24 @@ HIM = 'him'
 # 16 kHz mono PCM16 is 32 KB/s: 4 MB holds a ~2 minute clip, far above a VAD-cut sentence.
 MAX_CLIP_BYTES = 4 * 1024 * 1024
 DEFAULT_STT_LANGUAGE = 'zho'
+# An utterance that was started but never heard (lost upload) stops holding the
+# queue after this long, so the sentences behind it are not stuck forever.
+STALE_UTTERANCE_S = 45
+
+
+class _Utterances:
+    """Per-call order of her spoken utterances (see CallService.hear)."""
+
+    def __init__(self):
+        self.started = 0      # highest utterance number known to have begun
+        self.committed = 0    # every utterance <= this has been handed on (or dropped)
+        self.started_at = {}  # utterance -> clock time it began
+        self.results = {}     # utterance -> transcript, waiting for its turn
+        self.carry = []       # committed text held back because she was already talking again
+
+    def begin(self, number, now):
+        self.started = max(self.started, number)
+        self.started_at.setdefault(number, now)
 
 
 def format_duration(seconds):
@@ -45,6 +63,8 @@ class CallService:
         self._turns = {}  # call_id -> generation counter of the current reply
         self._replied = set()  # call_ids that already had a first turn
         self._record_lock = threading.Lock()
+        self._utter_lock = threading.Lock()
+        self._utterances = {}  # call_id -> _Utterances
 
     # ── lifecycle ────────────────────────────────────────────
     def ring(self):
@@ -95,25 +115,83 @@ class CallService:
         self._spawn(lambda: self._run_reply(call_id, text, first_turn, generation))
         return line
 
-    def hear(self, call_id, audio, mime, language=None):
-        """One finished utterance as audio (the phone's VAD cut it): transcribe, then say.
+    def hear(self, call_id, audio, mime, language=None, utterance=None):
+        """One finished utterance as audio (the phone's VAD cut it): transcribe it, then say it.
 
-        Checked for an active call before transcribing, so a clip for a dead call
-        is never billed. Silence or noise transcribes to '' and says nothing.
+        Ordering contract. Utterances are numbered per call from 1, in the order she
+        started them (the shell sends ``utterance``; without it the server numbers
+        them by arrival). Transcription runs concurrently, but text is handed on
+        strictly in that order, whatever order Scribe answers in. And when a newer
+        utterance has already begun (``hear`` or ``interrupt`` with a higher
+        number) by the time an older one is handed on, the older text never starts
+        a reply of its own: it is held and said together with the next one. So a
+        sentence finishing transcription after she started talking again cannot
+        revive the answer her new sentence interrupted.
+
+        Every started utterance should end in a ``hear`` (an empty body with
+        ``discard`` for one the shell threw away); one that never does stops
+        holding the queue after STALE_UTTERANCE_S. The call is checked for being
+        active before transcribing, so a clip for a dead call is never billed.
+        Returns {'utterance', 'text', 'line'}; line is the her-line created by this
+        request, or None when the text was held or handed on by another request.
         """
         if self._stt is None:
             raise call_store.CallStateError('speech-to-text is not configured', 503)
-        if not audio or len(audio) > MAX_CLIP_BYTES:
+        if audio is not None and (not audio or len(audio) > MAX_CLIP_BYTES):
             raise call_store.CallStateError('clip must be 1 byte to %d bytes' % MAX_CLIP_BYTES, 413)
         if self.get(call_id)['state'] != call_store.ACTIVE:
             raise call_store.CallStateError('call is not active')
-        text = self._stt.transcribe(audio, mime, language or DEFAULT_STT_LANGUAGE)
-        if not text:
-            return {'text': '', 'line': None}
-        return {'text': text, 'line': self.say(call_id, text)}
+        with self._utter_lock:
+            queue = self._utterances.setdefault(call_id, _Utterances())
+            number = queue.started + 1 if utterance is None else int(utterance)
+            if number <= queue.committed or number in queue.results:
+                raise call_store.CallStateError('utterance %d was already heard' % number)
+            queue.begin(number, self._clock())
+        text = ''
+        try:
+            if audio is not None:
+                text = self._stt.transcribe(audio, mime, language or DEFAULT_STT_LANGUAGE)
+        finally:
+            # A failed transcription still takes its place, so it cannot block the queue.
+            with self._utter_lock:
+                queue.results[number] = text
+                line = self._hand_on(call_id, queue)
+        return {'utterance': number, 'text': text, 'line': line}
 
-    def interrupt(self, call_id):
-        """She started talking: stop adding the rest of his current answer."""
+    def _hand_on(self, call_id, queue):
+        """Hand on every transcript whose turn has come (caller holds _utter_lock)."""
+        said = None
+        now = self._clock()
+        while True:
+            number = queue.committed + 1
+            if number > queue.started:
+                break
+            if number not in queue.results:
+                began = queue.started_at.get(number)
+                if began is not None and now - began < STALE_UTTERANCE_S:
+                    break  # still being heard: everything after it waits
+                queue.results[number] = ''  # never begun here, or lost: skip it
+            text = queue.results.pop(number)
+            queue.started_at.pop(number, None)
+            queue.committed = number
+            if text:
+                queue.carry.append(text)
+            if queue.carry and queue.started <= number:
+                joined = ' '.join(queue.carry)
+                queue.carry = []
+                if self.get(call_id)['state'] == call_store.ACTIVE:
+                    said = self.say(call_id, joined)
+        return said
+
+    def interrupt(self, call_id, utterance=None):
+        """She started talking: stop adding the rest of his current answer.
+
+        With ``utterance`` (the number of the utterance she just began), any older
+        utterance still being transcribed is held instead of starting a reply.
+        """
+        if utterance is not None:
+            with self._utter_lock:
+                self._utterances.setdefault(call_id, _Utterances()).begin(int(utterance), self._clock())
         with self._changed:
             self._turns[call_id] = self._turns.get(call_id, 0) + 1
             self._changed.notify_all()
@@ -173,6 +251,8 @@ class CallService:
 
     def _finish(self, call_id, state):
         call = self._change(call_id, state)
+        with self._utter_lock:
+            self._utterances.pop(call_id, None)
         self.flush_records()
         return self._summary(call)
 
