@@ -58,6 +58,10 @@ export const voiceCall = {
       wavBlob,
       { headers: { 'Content-Type': 'audio/wav', Accept: 'application/json' } },
     ).then((result) => result),
+  discard: (callId: string, utteranceSeq: number) =>
+    http.post<VoiceHearResult>(
+      `${base(callId)}/hear?seq=${encodeURIComponent(String(utteranceSeq))}&discard=1`,
+    ).then((result) => result),
   say: (callId: string, text: string) =>
     http.post<{ line: CallLine }>(`${base(callId)}/say`, { text }).then((r) => r.line),
   streamUrl: (callId: string, after: number) => sseUrl(`${base(callId)}/stream?after=${after}`),
