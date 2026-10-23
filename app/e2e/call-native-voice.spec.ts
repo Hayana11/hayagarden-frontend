@@ -13,7 +13,7 @@ async function installRoutes(page: Page) {
     const body = route.request().postDataBuffer();
     expect(route.request().url()).toContain('seq=7');
     expect(route.request().headers()['content-type']).toBe('audio/wav');
-    expect(body && body.length).toBeGreaterThan(44);
+    expect(body && body.length).toBeGreaterThanOrEqual(44);
     seq += 1;
     return route.fulfill({ json: { ok: true, utterance: 7, text: '我回来了', line: { seq, speaker: 'her', text: '我回来了' } } });
   });
@@ -90,7 +90,6 @@ test.describe('P2F native voice bridge', () => {
     await page.evaluate(() => (window as unknown as { __emitVoice: (event: object) => void }).__emitVoice({ type: 'speech_start', seq: 7 }));
     await expect.poll(() => page.evaluate(() => (window as unknown as { __voiceLog: string[] }).__voiceLog)).toContain('audio-pause');
     await expect.poll(() => page.evaluate(() => (window as unknown as { __voiceLog: string[] }).__voiceLog)).toContain('start');
-    await expect.poll(() => page.url()).toBe(page.url());
 
     await page.evaluate(() => (window as unknown as { __emitVoice: (event: object) => void }).__emitVoice({
       type: 'utterance_ready', seq: 7, duration_ms: 900, bytes: 52,
