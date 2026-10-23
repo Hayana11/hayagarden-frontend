@@ -1,11 +1,12 @@
 // P2F native voice adapter for the Elpis Canary shell.
 export type VoiceEvent = {
-  type: 'permission' | 'ready' | 'speech_start' | 'utterance_ready' | 'error' | 'paused' | 'resumed';
+  type: 'permission' | 'ready' | 'speech_start' | 'utterance_ready' | 'utterance_discarded' | 'error' | 'paused' | 'resumed';
   seq?: number;
   duration_ms?: number;
   bytes?: number;
   granted?: boolean;
   code?: string;
+  reason?: string;
 };
 
 type ElpisVoiceBridge = {
