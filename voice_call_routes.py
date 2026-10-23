@@ -106,6 +106,8 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
             return jsonify({'ok': False, 'error': 'clip too large'}), 413
         # Never buffer more than the cap, even without (or with a lying) Content-Length.
         audio = request.stream.read(MAX_CLIP_BYTES + 1)
+        if len(audio) > MAX_CLIP_BYTES:
+            return jsonify({'ok': False, 'error': 'clip too large'}), 413
         try:
             result = service.hear(call_id, audio, mime, request.args.get('lang'), utterance)
         except STTError as exc:
