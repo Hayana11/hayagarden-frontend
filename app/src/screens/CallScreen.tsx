@@ -237,17 +237,23 @@ export function CallScreen() {
       } else if (event.type === 'utterance_ready' && event.seq !== undefined) {
         setHearing(false);
         const wav = nativeVoice.takeUtterance(event.seq);
+        if (!current || current.state !== 'active') return;
         if (!wav) {
           setError('utterance_unavailable');
+          void voiceCall.discard(current.id, event.seq).catch(() => undefined);
           return;
         }
-        if (!current || current.state !== 'active') return;
         void voiceCall.hear(current.id, wav, event.seq, P2F_LANGUAGE).then((result) => {
           if (result.line && !result.stale) addLines([result.line], false);
         }).catch((err) => {
           // Scribe failure is recoverable; the native capture remains on for the next sentence.
           setError(describeError(err));
         });
+      } else if (event.type === 'utterance_discarded' && event.seq !== undefined) {
+        setHearing(false);
+        if (current && current.state === 'active') {
+          void voiceCall.discard(current.id, event.seq).catch(() => undefined);
+        }
       } else if (event.type === 'error') {
         setHearing(false);
         setPartial('');
