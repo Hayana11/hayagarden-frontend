@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../components/PageHeader';
 import { HttpError } from '../lib/http';
-import { nativeSpeech, type SpeechEvent } from '../lib/nativeSpeech';
+import { nativeSpeech, type SpeechEvent, type SpeechStatus } from '../lib/nativeSpeech';
 import { ROUTES } from '../navigation';
 import {
   FINAL_CALL_STATES,
@@ -31,6 +31,12 @@ function isFinal(call: VoiceCall | null): boolean {
   return !!call && FINAL_CALL_STATES.indexOf(call.state) !== -1;
 }
 
+// Why the mic is missing, inside the Elpis shell only (a desktop browser just types).
+const SPEECH_HINT: Partial<Record<SpeechStatus, string>> = {
+  no_bridge: '这个 Elpis 版本还不能直接说话，装新版 Canary（#143 或更新）就有开麦按钮',
+  unavailable: '手机没有可用的语音识别服务，先打字吧（系统设置里搜“语音输入”，装或启用一个）',
+};
+
 function describeError(err: unknown): string {
   if (err instanceof HttpError && err.status === 401) return '需要主人授权后才能通话';
   if (err instanceof HttpError && err.detail) return err.detail;
@@ -47,7 +53,8 @@ export function CallScreen() {
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [voiceless, setVoiceless] = useState<Record<number, true>>({});
-  const [speechSupported] = useState(() => nativeSpeech.supported());
+  const [speechStatus] = useState(() => nativeSpeech.status());
+  const speechSupported = speechStatus === 'ready';
   const [micOn, setMicOn] = useState(false);
   const [hearing, setHearing] = useState(false);
   const [partial, setPartial] = useState('');
@@ -536,6 +543,9 @@ export function CallScreen() {
       </div>
 
       {error ? <div className="call-error">{error}</div> : null}
+      {state === 'active' && SPEECH_HINT[speechStatus] ? (
+        <div className="call-hint" data-testid="call-speech-hint">{SPEECH_HINT[speechStatus]}</div>
+      ) : null}
 
       <footer className="call-controls">
         {state === 'ringing' ? (
