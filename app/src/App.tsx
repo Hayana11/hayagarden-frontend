@@ -20,6 +20,7 @@ import { DailySoftWindowPreviewScreen } from './screens/DailySoftWindowPreviewSc
 import { ManualContextWindowPreviewScreen } from './screens/ManualContextWindowPreviewScreen';
 import { ContextCompressionScreen } from './screens/ContextCompressionScreen';
 import { ToolroomScreen } from './screens/ToolroomScreen';
+import { CallScreen } from './screens/CallScreen';
 import { FlowStudioScreen } from './screens/FlowStudioScreen';
 import { FlowStudioSoftGlowScreen } from './screens/FlowStudioSoftGlowScreen';
 import { useLegacyNativeCompat } from './hooks/useLegacyNativeCompat';
@@ -58,6 +59,7 @@ function AppRoutes() {
         <Route path={CONTEXT_COMPRESSION_PREVIEW_PATH} element={<ContextCompressionScreen />} />
       ) : null}
       <Route path={ROUTES.toolroom} element={<ToolroomScreen />} />
+      <Route path={ROUTES.call} element={<CallScreen />} />
     </Routes>
   );
 }

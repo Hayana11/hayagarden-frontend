@@ -21,6 +21,7 @@ from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 from monopoly_rooms import MonopolyService
 from monopoly_routes import create_monopoly_blueprint
 from weread_routes import create_weread_blueprint
+from voice_call_routes import create_voice_call_blueprint
 from valence_scale import normalize_arousal, normalize_valence
 from tools.product_handlers import (
     ProductHandlerError,
@@ -161,6 +162,29 @@ app.register_blueprint(create_moments_blueprint(
 app.register_blueprint(create_external_mcp_admin_blueprint())
 app.register_blueprint(create_monopoly_blueprint(MonopolyService(db_path=DB_PATH)))
 app.register_blueprint(create_weread_blueprint())
+
+
+def _create_voice_call_service():
+    import time as _time
+    from voice_call.brain import ChatPipelineBrain
+    from voice_call.chat_record import record_call_in_chat
+    from voice_call.service import CallService
+    from voice_call.store import CallStore
+    from voice_call.tts import CachedTTS, ElevenLabsTTS, read_env_value
+
+    voice_id = read_env_value('ELEVENLABS_VOICE_ID') or None
+    engine = ElevenLabsTTS(voice_id=voice_id) if voice_id else ElevenLabsTTS()
+    return CallService(
+        CallStore(DB_PATH, _time.time),
+        CachedTTS(engine, '/opt/frontend/voice_call_cache'),
+        ChatPipelineBrain(),
+        on_end=lambda summary: record_call_in_chat(DB_PATH, summary),
+    )
+
+
+_voice_call_service = _create_voice_call_service()
+_voice_call_service.start_record_sweeper()
+app.register_blueprint(create_voice_call_blueprint(_voice_call_service))
 from context_compression_routes import create_context_compression_blueprint
 app.register_blueprint(create_context_compression_blueprint(db_path=DB_PATH))
 
@@ -4606,62 +4630,13 @@ def _init_wake_tables():
 
 _init_wake_tables()
 
-@app.route('/api/wake_log/pending_notification', methods=['GET'])
-def pending_notification():
-    """供VII app轮询：是否有费奥多尔自主发出的、还没推送过的消息。
-    取最新一条未推送的 action='message'，并把所有未推送的一并标记，
-    避免她隔几小时打开时被一堆补发的旧通知刷屏。
-    另外复用这个通道下发 command='screenshot' 让手机立刻截一张屏。"""
-    from chat.window_identity import fetch_pending_wake_notification_row, soft_window_enabled
+from chat.window_identity import fetch_pending_wake_notification_row as _fetch_pending_wake_row
+from chat.window_identity import soft_window_enabled as _soft_window_enabled
+from wake_push_routes import create_wake_push_blueprint
 
-    conn = get_db()
-    row = fetch_pending_wake_notification_row(conn)
-    if row:
-        if soft_window_enabled():
-            # Only mark the matched current-window row; never wipe foreign wakes.
-            conn.execute(
-                "UPDATE wake_log SET notified=1 WHERE id=?",
-                (int(row['id']),),
-            )
-        else:
-            conn.execute(
-                "UPDATE wake_log SET notified=1 WHERE action='message' AND (notified IS NULL OR notified=0)"
-            )
-
-    # 手机截屏指令：优先取 pending；若 dispatched 超过 2 分钟还没回传，重试下发一次
-    sreq = conn.execute(
-        "SELECT id FROM screenshot_requests "
-        "WHERE status='pending' "
-        "   OR (status='dispatched' AND dispatched_at < datetime('now','+8 hours','-2 minutes')) "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    if sreq:
-        conn.execute(
-            "UPDATE screenshot_requests SET status='dispatched', dispatched_at=datetime('now','+8 hours') "
-            "WHERE id=?",
-            (int(sreq['id']),)
-        )
-
-    conn.commit()
-    conn.close()
-
-    if not row and not sreq:
-        return jsonify({'has_message': False})
-
-    payload = {'has_message': bool(row)}
-    if row:
-        payload.update({
-            'id': 'wake-' + str(row['id']),
-            'title': '费奥多尔',
-            'content': row['content'],
-            'woke_at': row['woke_at'],
-        })
-    if sreq:
-        payload.update({
-            'command': 'screenshot',
-            'command_id': 'cap-' + str(int(sreq['id'])),
-        })
-    return jsonify(payload)
+app.register_blueprint(create_wake_push_blueprint(
+    get_db, _fetch_pending_wake_row, _soft_window_enabled, HEALTH_DB_PATH,
+))
 
 # ── Board 留言板 ───────────────────────────────────────────
 @app.route('/board')

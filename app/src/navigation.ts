@@ -31,6 +31,7 @@ export const ROUTES = {
   toolroom: '/toolroom',
   contextCompression: '/context-compression',
   flowStudio: '/flow-studio',
+  call: '/call',
 } as const;
 
 // Preview deep-link alias when BrowserRouter basename is `/preview`.
@@ -77,6 +78,7 @@ export const ROUTE_META = {
   toolroom: { chrome: 'fullscreen', globalNav: false },
   contextCompression: { chrome: 'fullscreen', globalNav: false },
   flowStudio: { chrome: 'fullscreen', globalNav: false },
+  call: { chrome: 'fullscreen', globalNav: false },
 } as const satisfies Record<keyof typeof ROUTES, RouteMeta>;
 
 /** Chrome for dynamic monopoly room routes (`/monopoly/:roomId`). */
