@@ -47,6 +47,12 @@ function codeFromPayload(payload: unknown): string | undefined {
   return typeof code === 'string' && code.trim() ? code.trim() : undefined;
 }
 
+function requestBody(body: unknown): BodyInit | undefined {
+  if (body === undefined) return undefined;
+  if (typeof Blob !== 'undefined' && body instanceof Blob) return body;
+  return JSON.stringify(body);
+}
+
 function buildUrl(path: string, params?: Params): string {
   if (!params) return `${BASE_URL}${path}`;
   const qs = Object.entries(params)
@@ -106,7 +112,7 @@ export const http = {
     request<T>(path, {
       ...init,
       method: 'POST',
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: requestBody(body),
     }),
   put: <T>(path: string, body: unknown, init?: RequestInit) =>
     request<T>(path, { ...init, method: 'PUT', body: JSON.stringify(body) }),
