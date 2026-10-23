@@ -163,6 +163,7 @@ import { FONT_CN, FONT_DISPLAY, FONT_MONO, fontFamilyForText } from '../lib/typo
 import { TaskTimerCard } from '../components/TaskTimerCard';
 import { isTaskTimerFixtureEnabled, useTaskTimerController } from '../lib/taskTimer';
 import { ChatMediaGallery, ChatMediaGroup } from '../components/ChatMediaGroup';
+import { createTypingPulse } from '../lib/typingPulse';
 import {
   resizeChatTextarea,
   type ChatScrollProbeRecord,
@@ -887,6 +888,8 @@ export function ChatScreen() {
   const [loadingMore, setLoadingMore] = useState(false);
 
   const [input, setInput] = useState(readChatComposerDraft);
+  // Holds a Wake call off while she types (chat.wake_call Gate); lapses server-side.
+  const typingPulseRef = useRef(createTypingPulse());
   const [sending, setSending] = useState(false);
   const [posting, setPosting] = useState(false);
   const [live, setLive] = useState<LiveState | null>(null);
@@ -3199,6 +3202,7 @@ export function ChatScreen() {
                 const ta = e.target;
                 composerDraftRevisionRef.current += 1;
                 writeChatComposerDraft(value);
+                if (value.trim()) typingPulseRef.current();
                 setInput(value);
                 resizeChatTextarea(ta, scrollRef.current, followLatestRef.current, reportChatScroll);
               }}

@@ -20,6 +20,8 @@ from voice_call.tts import TTSError
 
 HER = 'her'
 HIM = 'him'
+PROACTIVE_COOLDOWN_S = 3 * 3600  # between calls he places, answered or not
+MAX_OPENING_CHARS = 200
 # 16 kHz mono PCM16 is 32 KB/s: 4 MB holds a ~2 minute clip, far above a VAD-cut sentence.
 MAX_CLIP_BYTES = 4 * 1024 * 1024
 DEFAULT_STT_LANGUAGE = 'zho'
@@ -156,8 +158,38 @@ class CallService:
         """The call's language as frozen at ring, or None for the default call."""
         return self._store.language_spec(call_id)
 
+    def ring_from_him(self, opening, language=None, cooldown_s=PROACTIVE_COOLDOWN_S):
+        """He calls her (a Wake's call action). ``opening`` is what he says once she answers.
+
+        The store re-checks, in the transaction that creates the call, that no call is
+        open (409) and that his last call was placed at least ``cooldown_s`` ago (429).
+        """
+        opening = (opening or '').strip()
+        if not opening or len(opening) > MAX_OPENING_CHARS:
+            raise call_store.CallStateError('opening must be 1 to %d characters' % MAX_OPENING_CHARS, 400)
+        spec = None
+        if language is not None:
+            entry = self._languages().get(language)
+            if not entry:
+                raise call_store.CallStateError('unknown call language', 400)
+            spec = {key: entry[key] for key in ('label', 'voice_id', 'stt', 'speech', 'fallback')}
+        call = self._store.create_if_none_open(
+            uuid.uuid4().hex, language, spec, caller=call_store.FYODOR, opening=opening,
+            caller_cooldown_s=cooldown_s,
+        )
+        self._notify()
+        return call
+
+    def incoming_ringing_id(self):
+        return self._store.incoming_ringing_id()
+
     def answer(self, call_id):
-        return self._change(call_id, call_store.ACTIVE)
+        call = self._change(call_id, call_store.ACTIVE)
+        if call.get('caller') == call_store.FYODOR:
+            opening = self._store.opening(call_id)
+            if opening:
+                self._warm(call_id, opening)
+        return call
 
     def decline(self, call_id):
         return self._finish(call_id, call_store.DECLINED)
@@ -460,6 +492,12 @@ class CallService:
         handle = None
         entry = self._language(call_id)
         extra = {'language': entry['label']} if entry else {}
+        if first_turn:
+            call = self._store.get(call_id)
+            if call and call.get('caller') == call_store.FYODOR:
+                opening = self._store.opening(call_id)
+                if opening:
+                    extra['opening'] = opening  # the brain must know he placed this call and what he said
         fallback = (entry and entry.get('fallback')) or '（信号不太好，刚才那句我没接住。）'
         try:
             start_reply = getattr(self._brain, 'start_reply', None)

@@ -21,7 +21,7 @@ from external_mcp_admin_routes import create_external_mcp_admin_blueprint
 from monopoly_rooms import MonopolyService
 from monopoly_routes import create_monopoly_blueprint
 from weread_routes import create_weread_blueprint
-from voice_call_routes import create_voice_call_blueprint
+from voice_call_routes import create_voice_call_blueprint, create_voice_call_internal_blueprint
 from valence_scale import normalize_arousal, normalize_valence
 from tools.product_handlers import (
     ProductHandlerError,
@@ -190,6 +190,7 @@ def _create_voice_call_service():
 _voice_call_service = _create_voice_call_service()
 _voice_call_service.start_record_sweeper()
 app.register_blueprint(create_voice_call_blueprint(_voice_call_service))
+app.register_blueprint(create_voice_call_internal_blueprint(_voice_call_service))
 from context_compression_routes import create_context_compression_blueprint
 app.register_blueprint(create_context_compression_blueprint(db_path=DB_PATH))
 
@@ -1408,6 +1409,18 @@ def group_chat_clear():
         return jsonify({'ok': True, 'deleted': deleted})
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
+
+@app.route('/api/chat/typing', methods=['POST'])
+def chat_typing_pulse():
+    """Composer pulse (throttled client-side): she is typing for the next few
+    seconds. Read only by the Wake call Gate; lapses on its own (chat.wake_call)."""
+    from chat.wake_call import record_typing
+    try:
+        record_typing(get_db)
+    except Exception as exc:
+        app.logger.warning('chat typing pulse failed: %s', exc)
+        return jsonify({'ok': False}), 503
+    return ('', 204)
 
 @app.route('/api/chat/send', methods=['POST'])
 def send_chat():
@@ -4571,6 +4584,7 @@ from wake_push_routes import create_wake_push_blueprint
 
 app.register_blueprint(create_wake_push_blueprint(
     get_db, _fetch_pending_wake_row, _soft_window_enabled, HEALTH_DB_PATH,
+    incoming_call=_voice_call_service.incoming_ringing_id,
 ))
 
 # ── Board 留言板 ───────────────────────────────────────────

@@ -668,7 +668,8 @@ class WakeObservationPlannerAndContractTests(unittest.TestCase):
         self.assertIn("'ObservationBundle': bundle", shadow_src)
         planner_src = (ROOT / 'chat' / 'authoritative_planner.py').read_text(encoding='utf-8')
         self.assertIn("'ObservationBundle'", planner_src)
-        self.assertIn("action not in ('none', 'message')", planner_src)
+        self.assertIn("if action not in allowed_actions:", planner_src)
+        self.assertIn("return ('none', 'message', 'call') if call_enabled() else ('none', 'message')", planner_src)
 
     def test_b3_renderer_tool_use_rejection_unchanged(self):
         from chat import behavior_authority_b3 as b3

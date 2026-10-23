@@ -9896,6 +9896,115 @@ def _wake_decide_locked(data, mode, activity_desc, ritual_type):
             'b2_gate': _b2_plan.gate_reason,
         })
 
+    if _b2_plan is not None and _b2_plan.route == 'call_takeover':
+        # He phones her (chat.wake_call). The opening comes from the relay Renderer,
+        # never the shared resident; the Gate runs again right before ringing; the
+        # ring re-checks open call + cooldown in its own transaction; the wake_log
+        # row is an audit record only.
+        from chat import wake_call as _wake_call
+        from chat.behavior_authority_b3 import (
+            build_renderer_input,
+            invoke_renderer,
+            invoke_renderer_relay,
+        )
+        planner_decision = _b2_plan.planner_decision or {}
+        thoughts = str(planner_decision.get('intent') or '').strip()
+        try:
+            renderer_input = build_renderer_input(
+                planner_decision=planner_decision,
+                get_db_fn=get_db,
+                wake_run_id=wake_run_id,
+                decision_attempt_id=decision_attempt_id or '',
+                content_target=_wake_call.CONTENT_TARGET,
+            )
+            render_out = invoke_renderer(
+                renderer_input=renderer_input, invoke_fn=invoke_renderer_relay,
+            )
+            opening = _wake_call.validate_opening(str(render_out.get('text') or ''))
+        except Exception as _call_render_exc:
+            _mark_production_attempt(
+                'failed', action='call', reason=f'call_renderer:{_call_render_exc}',
+            )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': f'call_renderer_failed:{_call_render_exc}',
+                'wake_run_id': wake_run_id,
+            })
+        _stage, _ring_detail = _wake_call.recheck_and_ring(
+            opening,
+            gate_kwargs=dict(
+                planner_decision=planner_decision,
+                skill_view=_skill_view,
+                wake_run_id=wake_run_id,
+                get_db_fn=get_db,
+                now=now,
+                chat_busy=_chat_is_generating(),
+                wake_run_id_seen=_wake_run_id_seen,
+                min_idle_minutes=min_idle,
+            ),
+        )
+        if _stage == 'blocked':
+            _mark_production_attempt(
+                'failed', action='call', reason=f'call_gate_recheck:{_ring_detail}',
+            )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': f'call_gate_recheck:{_ring_detail}',
+                'wake_run_id': wake_run_id,
+            })
+        if _stage != 'rang':
+            _mark_production_attempt(
+                'failed', action='call', reason=f'call_ring:{_ring_detail}',
+            )
+            return jsonify({
+                'ok': True,
+                'skipped': True,
+                'reason': f'call_ring_failed:{_ring_detail}',
+                'wake_run_id': wake_run_id,
+            })
+        _wake_run_id_mark(wake_run_id)
+        from wake.executor import execute as _wake_exec
+        try:
+            _wake_exec(
+                'call',
+                thoughts,
+                opening,
+                mode,
+                get_db_fn=get_db,
+                cache_info={
+                    'provider': str(render_out.get('provider') or '') or wake_provider,
+                    'model': str(render_out.get('model_identity') or '') or None,
+                    'source': 'wake',
+                    'wake_run_id': wake_run_id,
+                    'b3_authority': True,
+                    'call_id': _ring_detail,
+                },
+                wake_run_id=wake_run_id,
+                window_identity=_wake_window_identity,
+                settle_fired_drive=None,
+                settle_provenance_present=False,
+                settle_user_idle_hours=t2_hours,
+                settlement_required=False,
+            )
+        except Exception as _call_audit_exc:
+            # The call already rang; only its audit row is missing.
+            _mark_production_attempt(
+                'success', action='call', reason=f'call_audit_failed:{_call_audit_exc}',
+            )
+        else:
+            _mark_production_attempt('success', action='call')
+        return jsonify({
+            'ok': True,
+            'action': 'call',
+            'call_id': _ring_detail,
+            'thoughts': thoughts,
+            'wake_run_id': wake_run_id,
+            'b3_authority': True,
+            'b3_gate': _b2_plan.gate_reason,
+        })
+
     if _b2_plan is not None and _b2_plan.route == 'message_takeover':
         from chat.behavior_authority_b3 import (
             build_renderer_input,

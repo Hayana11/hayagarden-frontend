@@ -18,7 +18,7 @@ _PARSER_ACTIONS = ('none', 'message', 'diary', 'explore')
 _BEHAVIOR_MODES = frozenset({
     'normal', 'morning', 'nightwatch', 'ritual', 'self_trigger',
 })
-_UNIFIED_ACTION_ORDER = ('none', 'message')
+_UNIFIED_ACTION_ORDER = ('none', 'message', 'call')
 
 
 def _now_beijing() -> datetime.datetime:
@@ -76,10 +76,14 @@ def _disabled_wake_mode(mode: str) -> bool:
 
 
 def _unified_claude_normal_actions() -> tuple[str, ...]:
-    """Canonical Claude normal Wake: B2 owns none, B3 owns message."""
+    """Canonical Claude normal Wake: B2 owns none, B3 owns message, and call when
+    WAKE_CALL_ENABLED is on (chat.wake_call)."""
     from chat.behavior_authority_b2 import owned_actions as b2_owned
     from chat.behavior_authority_b3 import owned_actions as b3_owned
+    from chat.wake_call import call_enabled
     owned = set(b2_owned()) | set(b3_owned())
+    if call_enabled():
+        owned.add('call')
     return tuple(action for action in _UNIFIED_ACTION_ORDER if action in owned)
 
 

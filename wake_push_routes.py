@@ -16,7 +16,8 @@ def _unauthorized():
 
 
 def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db_path,
-                               clock=time.time):
+                               clock=time.time, incoming_call=None):
+    """``incoming_call()`` returns the id of a call he placed that is ringing now, or None."""
     bp = Blueprint('wake_push', __name__)
 
     def device_id_from_request():
@@ -47,11 +48,20 @@ def create_wake_push_blueprint(get_db, fetch_row, soft_window_enabled, health_db
             return _unauthorized()
         # ?since= from older Canary builds and ?commands= (phone screenshots, retired)
         # are accepted and ignored (see wake_push).
+        # ?known_call= is the call the phone shows as ringing. The response carries a
+        # call delta beside (never instead of) the message: the message lease/ack is
+        # unchanged and the call is neither leased nor acked. The poll returns when a
+        # message can be leased or the ringing call differs from known_call.
+        known_call = wake_push.parse_known_call(request.args.get('known_call'))
 
         def take(conn):
-            return wake_push.lease_pending_payload(
+            payload = wake_push.lease_pending_payload(
                 conn, fetch_row, soft_window_enabled(), clock(), device_id,
             )
+            if incoming_call is None:
+                return payload
+            delta = wake_push.call_delta(incoming_call(), known_call)
+            return wake_push.with_call_delta(payload, delta)
 
         return jsonify(wake_push.poll(get_db, take, wake_push.parse_wait(request.args.get('wait'))))
 

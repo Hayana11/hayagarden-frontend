@@ -54,7 +54,9 @@ def execute(action: str, thoughts: str, content: str,
             settlement_required: bool = True,
             tool_calls_json: str = ''):
     """
-    action: 'none' | 'message' | 'diary' | 'explore'
+    action: 'none' | 'message' | 'diary' | 'explore' | 'call'
+      ('call' only records the call he placed: an audit row, never pushed or
+      read back into chat; the call itself was rung before this runs)
     get_db_fn: callable，返回 sqlite3 connection（来自 gateway.get_db）
 
     When soft window is on, ``window_identity`` must be the identity frozen at
@@ -219,10 +221,12 @@ def execute(action: str, thoughts: str, content: str,
             columns.append('wake_run_id')
             values.append(rid)
             placeholders.append('?')
-        if 'notified' in wake_columns and flag_on and gate_reason != REASON_OK:
+        if 'notified' in wake_columns and (action == 'call' or (flag_on and gate_reason != REASON_OK)):
             columns.append('notified')
             values.append(1)
             placeholders.append('?')
+        if action == 'call':
+            values[3] = 1  # consumed: never surfaced back into chat as a message
 
         # Persist original four-tuple even on stale audit rows.
         identity_for_row = captured_norm if captured_norm is not None else normalize_window_identity(window_identity)

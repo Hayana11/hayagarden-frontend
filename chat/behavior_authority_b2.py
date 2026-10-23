@@ -170,6 +170,35 @@ def plan_b2_wake_action(
 
     action = str(decision.get('action_candidate') or '').strip()
 
+    if action == 'call':
+        from chat.behavior_authority_b3 import effective_b3_enabled
+        from chat.wake_call import evaluate_call_gate
+        if not effective_b3_enabled():  # the opening needs the B3 Renderer
+            return B2WakePlan(route='blocked', gate_reason='b3_unavailable', planner_decision=decision)
+        try:
+            chat_busy = bool(chat_busy_fn()) if chat_busy_fn is not None else False
+            verdict, gate_reason = evaluate_call_gate(
+                planner_decision=decision,
+                skill_view=skill_view,
+                wake_run_id=wake_run_id,
+                get_db_fn=get_db_fn,
+                now=now,
+                chat_busy=chat_busy,
+                wake_run_id_seen=wake_run_id_seen,
+                min_idle_minutes=min_idle_minutes,
+            )
+        except Exception as exc:
+            _LOG.warning('call gate evaluation failed: %s', exc)
+            return B2WakePlan(route='blocked', gate_reason='precondition_failed', planner_decision=decision)
+        if verdict == _GATE_BLOCK:
+            return B2WakePlan(route='blocked', gate_reason=gate_reason, planner_decision=decision)
+        return B2WakePlan(
+            route='call_takeover',
+            gate_reason=gate_reason,
+            planner_decision=decision,
+            planner_provenance=freeze_provenance_from_planner_decision(decision),
+        )
+
     if action == 'message':
         from chat.behavior_authority_b3 import (
             effective_b3_enabled,

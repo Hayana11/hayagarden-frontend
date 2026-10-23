@@ -14,6 +14,7 @@
     "test:manual-context-window": "vite-node scripts/test-manual-context-window.mjs",
     "test:profile-display-thinking": "vite-node scripts/test-profile-display-thinking.mjs",
     "test:period-cycle": "vite-node scripts/test-period-cycle.mjs",
+    "test:chat-typing-pulse": "vite-node scripts/test-chat-typing-pulse.mjs",
     "test:model-1a-provider-switch": "vite-node scripts/test-model-1a-provider-switch.mjs",
     "test:chat-effort": "node scripts/test-chat-effort.mjs",
     "test:settings-effort": "node scripts/test-settings-effort.mjs",
