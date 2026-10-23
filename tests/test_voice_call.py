@@ -313,16 +313,35 @@ class UtteranceOrderTests(unittest.TestCase):
         self.service.interrupt(self.call_id, utterance=2)  # B begins while A is in Scribe
         self.stt.release(b'A')
         thread_a.join(5)
-        self.assertIsNone(self.results[b'A']['line'])
-        self.assertEqual(self.her_lines(), [])
-        self.assertEqual(self.brain.calls, [], 'A must not start a reply of its own')
+        self.assertEqual(self.results[b'A']['line']['text'], '你在吗')
+        self.assertEqual(self.her_lines(), ['你在吗'])
+        self.assertEqual(self.brain.calls, [], 'A is visible immediately but must not start a reply of its own')
 
         self.stt.expect(b'B', '我刚才在想你')
         self.stt.release(b'B')
         result = self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
-        self.assertEqual(self.her_lines(), ['你在吗 我刚才在想你'])
-        self.assertEqual(result['line']['text'], '你在吗 我刚才在想你')
+        self.assertEqual(self.her_lines(), ['你在吗', '我刚才在想你'])
+        self.assertEqual(result['line']['text'], '我刚才在想你')
         self.assertEqual([text for text, _ in self.brain.calls], ['你在吗 我刚才在想你'])
+
+    def test_committed_transcript_is_visible_before_the_speech_burst_flushes(self):
+        self.stt.expect(b'A', '先说这一句')
+        thread_a = self.hear_async(b'A', 1)
+        self.wait_started(1)
+        self.service.interrupt(self.call_id, utterance=2)  # B began; its audio is still pending.
+        self.stt.release(b'A')
+        thread_a.join(5)
+
+        self.assertEqual(self.results[b'A']['line']['text'], '先说这一句')
+        self.assertEqual(self.her_lines(), ['先说这一句'])
+        self.assertEqual(self.brain.calls, [], 'visibility must not force an early brain reply')
+
+        self.stt.expect(b'B', '再补一句')
+        self.stt.release(b'B')
+        result_b = self.service.hear(self.call_id, b'B', 'audio/wav', None, 2)
+        self.assertEqual(result_b['line']['text'], '再补一句')
+        self.assertEqual(self.her_lines(), ['先说这一句', '再补一句'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['先说这一句 再补一句'])
 
     def test_concurrent_sentences_keep_spoken_order_when_the_later_one_transcribes_first(self):
         self.stt.expect(b'A', '第一句')
@@ -336,7 +355,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.her_lines(), [])
         self.stt.release(b'A')
         thread_a.join(5)
-        self.assertEqual(self.her_lines(), ['第一句 第二句'])
+        self.assertEqual(self.her_lines(), ['第一句', '第二句'])
         self.assertEqual([text for text, _ in self.brain.calls], ['第一句 第二句'])
 
     def test_failed_or_discarded_utterance_does_not_block_the_queue(self):
@@ -368,7 +387,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.stt.expect(b'C', '听得到吗')
         self.stt.release(b'C')
         self.service.hear(self.call_id, b'C', 'audio/wav', None, 3)
-        self.assertEqual(self.her_lines(), ['喂 听得到吗'])
+        self.assertEqual(self.her_lines(), ['喂', '听得到吗'])
 
     def test_last_sentence_behind_a_lost_one_is_handed_on_by_the_stale_timer(self):
         self.service.interrupt(self.call_id, utterance=1)  # A began; its upload is lost
@@ -396,7 +415,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.her_lines(), [], 'A is still in Scribe: B keeps waiting for it')
         self.stt.release(b'A')
         first.join(5)
-        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+        self.assertEqual(self.her_lines(), ['慢慢说', '我在'])
         queue = self.service._utterances[self.call_id]
         self.assertEqual(queue.results, {}, 'no late transcript is left behind')
 
@@ -460,7 +479,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertIsNone(self.say_clip(b'B', '第二句', n + 1, n)['line'])
         self.service.interrupt(self.call_id, utterance=n, prev=0)  # late speech_start(N)
         self.say_clip(b'A', '第一句', n, 0)
-        self.assertEqual(self.her_lines(), ['第一句 第二句'])
+        self.assertEqual(self.her_lines(), ['第一句', '第二句'])
         self.assertEqual([text for text, _ in self.brain.calls], ['第一句 第二句'])
         self.assertEqual(self.service._utterances[self.call_id].stale, set())
 
@@ -469,7 +488,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertIsNone(self.say_clip(b'C', '三', n + 2, n + 1)['line'])
         self.assertIsNone(self.say_clip(b'B', '二', n + 1, n)['line'])
         self.say_clip(b'A', '一', n, 0)
-        self.assertEqual(self.her_lines(), ['一 二 三'])
+        self.assertEqual(self.her_lines(), ['一', '二', '三'])
         self.assertEqual(self.service._utterances[self.call_id].stale, set())
 
     def test_lost_predecessor_is_released_by_the_stale_timer(self):
@@ -492,7 +511,7 @@ class UtteranceOrderTests(unittest.TestCase):
         self.assertEqual(self.her_lines(), [], 'N is in Scribe: N+1 keeps waiting for it')
         self.stt.release(b'A')
         first.join(5)
-        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+        self.assertEqual(self.her_lines(), ['慢慢说', '我在'])
 
     def test_same_prev_replays_and_a_conflicting_prev_is_refused(self):
         n = 50000
