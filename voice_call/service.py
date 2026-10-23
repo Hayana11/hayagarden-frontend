@@ -40,10 +40,47 @@ class _Utterances:
         self.errors = {}       # completed STT failures; retries do not call Scribe again
         self.stale = set()       # sequence numbers skipped after a lost/expired upload
         self.timer = None        # wakes the queue when a lost utterance goes stale
+        self.prev = {}           # utterance -> its predecessor in this call (0: the call's first)
 
     def begin(self, number, now):
         self.started = max(self.started, number)
         self.started_at.setdefault(number, now)
+
+    def link(self, number, prev, now):
+        """Record ``prev`` as the utterance she started just before ``number`` (caller holds the lock).
+
+        The edge is fixed once known: a retry naming another predecessor is refused.
+        A predecessor not yet here is held as begun from now, so it is waited for
+        (and goes stale like any begun utterance) instead of being skipped as a gap.
+        """
+        if prev is None:
+            return
+        if prev < 0 or (prev != 0 and prev >= number):
+            raise call_store.CallStateError('prev must be 0 or an earlier seq', 400)
+        known = self.prev.setdefault(number, prev)
+        if known != prev:
+            raise call_store.CallStateError('seq %d already follows %d' % (number, known), 409)
+        if prev > self.committed:
+            self.begin(prev, now)
+
+    def gap_end(self, number, now):
+        """``(end, wait_s)`` for the run of never-begun numbers starting at ``number``.
+
+        ``end`` is the next number that did begin, minus one: skip to it now.
+        Without predecessors (old shells) any such run is skipped. Once she
+        sends them, a run is skipped only when an edge proves it holds none of
+        her utterances; a run below an utterance whose predecessor is not known
+        yet may hide that predecessor, so it waits (``wait_s``) until that
+        utterance goes stale. ``(None, None)`` when nothing lies ahead.
+        """
+        ahead = [n for n in itertools.chain(self.started_at, self.results, self.in_flight) if n > number]
+        if not ahead:
+            return None, None
+        nearest = min(ahead)
+        if not self.prev or self.prev.get(nearest, nearest) < number:
+            return nearest - 1, None
+        wait_s = self.started_at.get(nearest, now) + STALE_UTTERANCE_S - now
+        return (nearest - 1, None) if wait_s <= 0 else (None, wait_s)
 
 
 def format_duration(seconds):
@@ -132,7 +169,7 @@ class CallService:
         self._spawn(lambda: self._run_reply(call_id, text, first_turn, generation))
         return line
 
-    def hear(self, call_id, audio, mime, language=None, utterance=None):
+    def hear(self, call_id, audio, mime, language=None, utterance=None, prev=None):
         """Transcribe one finished VAD utterance with strict, idempotent ordering.
 
         The client number is allocated at speech_start. Scribe may finish out
@@ -145,6 +182,11 @@ class CallService:
         timer re-drains the queue then, so a last sentence behind it is handed on
         even if nothing else arrives. A number whose audio is in Scribe never goes
         stale: it hands itself on when Scribe returns or fails.
+
+        ``prev`` is the number she started just before this one in this call (0
+        for the first). Numbers are process-wide on the shell, so only these
+        edges tell a gap that holds no utterance of hers (skipped at once) from
+        one still on its way (waited for); see _Utterances.link.
         """
         if self._stt is None:
             raise call_store.CallStateError('speech-to-text is not configured', 503)
@@ -156,11 +198,14 @@ class CallService:
             requested = int(utterance) if utterance is not None else None
         except (TypeError, ValueError):
             raise call_store.CallStateError('utterance must be a positive integer', 400)
+        if prev is not None and requested is None:
+            raise call_store.CallStateError('prev needs a seq', 400)
         with self._utter_lock:
             queue = self._utterances.setdefault(call_id, _Utterances())
             number = queue.started + 1 if requested is None else requested
             if number <= 0:
                 raise call_store.CallStateError('utterance must be a positive integer', 400)
+            queue.link(number, prev, self._clock())
             while number in queue.in_flight:
                 self._utter_done.wait()
             if number in queue.errors:
@@ -226,12 +271,13 @@ class CallService:
                     break
                 if began is None:
                     # Never begun on this call (the shell's seq is process-wide, so a
-                    # call may open at N): jump to the next number that did begin
-                    # instead of stepping through N stale slots.
-                    ahead = [n for n in itertools.chain(queue.started_at, queue.results, queue.in_flight)
-                             if n > number]
-                    if ahead:
-                        queue.committed = min(ahead) - 1
+                    # call may open at N): jump the whole run in one step.
+                    end, wait_s = queue.gap_end(number, now)
+                    if wait_s is not None:
+                        self._wake_when_stale(call_id, queue, wait_s)
+                        break
+                    if end is not None:
+                        queue.committed = end
                         continue
                 queue.results[number] = ''  # never begun here, or lost: skip it
                 queue.stale.add(number)
@@ -268,7 +314,7 @@ class CallService:
 
         queue.timer = self._schedule(delay_s, wake)
 
-    def interrupt(self, call_id, utterance=None):
+    def interrupt(self, call_id, utterance=None, prev=None):
         """She started talking: stop adding the rest of his current answer.
 
         With ``utterance`` (the number of the utterance she just began), any older
@@ -281,8 +327,12 @@ class CallService:
         with self._utter_lock:
             if self.get(call_id)['state'] != call_store.ACTIVE:
                 raise call_store.CallStateError('call is not active')
+            if prev is not None and utterance is None:
+                raise call_store.CallStateError('prev needs a seq', 400)
             if utterance is not None:
-                self._utterances.setdefault(call_id, _Utterances()).begin(int(utterance), self._clock())
+                queue = self._utterances.setdefault(call_id, _Utterances())
+                queue.link(int(utterance), prev, self._clock())
+                queue.begin(int(utterance), self._clock())
         with self._changed:
             self._turns[call_id] = self._turns.get(call_id, 0) + 1
             self._changed.notify_all()

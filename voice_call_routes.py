@@ -34,6 +34,16 @@ def _utterance_arg():
     return int(raw)
 
 
+def _prev_arg():
+    """prev=<n>: the seq she started just before this one in this call (0 for the first)."""
+    raw = request.args.get('prev')
+    if raw is None:
+        return None
+    if not raw.isdigit() or not int(raw) < 10 ** 9:
+        raise CallStateError('prev must be a non-negative integer', 400)
+    return int(raw)
+
+
 def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREAM_WINDOW_S):
     bp = Blueprint('voice_call', __name__, url_prefix='/api/call')
     guard = owner_guard or require_owner
@@ -84,7 +94,7 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
 
     @bp.post('/<call_id>/interrupt')
     def interrupt(call_id):
-        service.interrupt(call_id, _utterance_arg())
+        service.interrupt(call_id, _utterance_arg(), _prev_arg())
         return jsonify({'ok': True})
 
     @bp.post('/<call_id>/say')
@@ -96,10 +106,12 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
     def hear(call_id):
         """Body: one utterance (audio/wav PCM16 from the shell).
 
-        Query: seq=<n> (with legacy utt=<n> accepted as an alias), lang=zho|eng,
-        discard=1 (the shell threw this utterance away: no body).
+        Query: seq=<n> (with legacy utt=<n> accepted as an alias), prev=<n> (see
+        CallService.hear), lang=zho|eng, discard=1 (the shell threw this utterance
+        away: no body).
         """
         utterance = _utterance_arg()
+        prev = _prev_arg()
         length = request.content_length
         if length is not None and length > MAX_CLIP_BYTES:
             return jsonify({'ok': False, 'error': 'clip too large'}), 413
@@ -107,7 +119,7 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
             discarded_body = request.stream.read(MAX_CLIP_BYTES + 1)
             if len(discarded_body) > MAX_CLIP_BYTES:
                 return jsonify({'ok': False, 'error': 'clip too large'}), 413
-            return jsonify({'ok': True, **service.hear(call_id, None, None, utterance=utterance)})
+            return jsonify({'ok': True, **service.hear(call_id, None, None, utterance=utterance, prev=prev)})
         mime = (request.mimetype or '').lower()
         if mime not in AUDIO_TYPES:
             return jsonify({'ok': False, 'error': 'unsupported audio type'}), 415
@@ -116,7 +128,7 @@ def create_voice_call_blueprint(service, owner_guard=None, stream_window_s=STREA
         if len(audio) > MAX_CLIP_BYTES:
             return jsonify({'ok': False, 'error': 'clip too large'}), 413
         try:
-            result = service.hear(call_id, audio, mime, request.args.get('lang'), utterance)
+            result = service.hear(call_id, audio, mime, request.args.get('lang'), utterance, prev)
         except STTError as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 502
         return jsonify({'ok': True, **result})

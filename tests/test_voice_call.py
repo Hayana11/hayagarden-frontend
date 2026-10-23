@@ -239,10 +239,10 @@ class UtteranceOrderTests(unittest.TestCase):
         os.unlink(self.path)
         self.tmp.cleanup()
 
-    def hear_async(self, clip, utterance):
+    def hear_async(self, clip, utterance, prev=None):
         def run():
             try:
-                self.results[clip] = self.service.hear(self.call_id, clip, 'audio/wav', None, utterance)
+                self.results[clip] = self.service.hear(self.call_id, clip, 'audio/wav', None, utterance, prev)
             except Exception as exc:  # noqa: BLE001 - recorded for the assertion
                 self.results[clip] = exc
         thread = threading.Thread(target=run)
@@ -397,6 +397,87 @@ class UtteranceOrderTests(unittest.TestCase):
         self.service.hear(self.call_id, b'B', 'audio/wav', None, 50002)
         self.assertEqual(self.her_lines(), ['我回来了', '接着说'])
         self.assertEqual(self.stt.calls, [b'A', b'B'])
+
+    # ── prev: the predecessor chain (the shell's seq is process-wide) ──
+    def say_clip(self, clip, text, utterance, prev):
+        self.stt.expect(clip, text)
+        self.stt.release(clip)
+        return self.service.hear(self.call_id, clip, 'audio/wav', None, utterance, prev)
+
+    def test_call_root_with_prev_zero_skips_the_history_gap_in_one_step(self):
+        result = self.say_clip(b'A', '我回来了', 50001, 0)
+        self.assertEqual(result['line']['text'], '我回来了')
+        queue = self.service._utterances[self.call_id]
+        self.assertEqual((queue.committed, queue.stale), (50001, set()))
+
+    def test_successor_arriving_first_cannot_skip_its_predecessor(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'B', '第二句', n + 1, n)['line'])
+        self.service.interrupt(self.call_id, utterance=n, prev=0)  # late speech_start(N)
+        self.say_clip(b'A', '第一句', n, 0)
+        self.assertEqual(self.her_lines(), ['第一句 第二句'])
+        self.assertEqual([text for text, _ in self.brain.calls], ['第一句 第二句'])
+        self.assertEqual(self.service._utterances[self.call_id].stale, set())
+
+    def test_three_deep_reversed_chain_keeps_spoken_order(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'C', '三', n + 2, n + 1)['line'])
+        self.assertIsNone(self.say_clip(b'B', '二', n + 1, n)['line'])
+        self.say_clip(b'A', '一', n, 0)
+        self.assertEqual(self.her_lines(), ['一 二 三'])
+        self.assertEqual(self.service._utterances[self.call_id].stale, set())
+
+    def test_lost_predecessor_is_released_by_the_stale_timer(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'B', '晚安', n + 1, n)['line'])
+        self.assertEqual([t.delay_s for t in self.scheduler.pending], [STALE_UTTERANCE_S])
+        self.clock.now += STALE_UTTERANCE_S
+        self.assertEqual(self.scheduler.run_due(), 1)
+        self.assertEqual(self.her_lines(), ['晚安'])
+        self.assertEqual(self.service._utterances[self.call_id].stale, {n}, 'only the lost one, no O(N) slots')
+
+    def test_predecessor_in_scribe_is_never_skipped(self):
+        n = 50000
+        self.stt.expect(b'A', '慢慢说')
+        first = self.hear_async(b'A', n, 0)
+        self.wait_started(n)
+        self.say_clip(b'B', '我在', n + 1, n)
+        self.clock.now += STALE_UTTERANCE_S * 2
+        self.scheduler.run_due()
+        self.assertEqual(self.her_lines(), [], 'N is in Scribe: N+1 keeps waiting for it')
+        self.stt.release(b'A')
+        first.join(5)
+        self.assertEqual(self.her_lines(), ['慢慢说 我在'])
+
+    def test_same_prev_replays_and_a_conflicting_prev_is_refused(self):
+        n = 50000
+        self.say_clip(b'A', '嗯', n, 0)
+        self.assertTrue(self.service.hear(self.call_id, b'A', 'audio/wav', None, n, 0)['duplicate'])
+        self.assertEqual(self.stt.calls, [b'A'])
+        for call in (lambda: self.service.hear(self.call_id, b'A', 'audio/wav', None, n, 7),
+                     lambda: self.service.interrupt(self.call_id, utterance=n, prev=3)):
+            with self.assertRaises(call_store.CallStateError) as ctx:
+                call()
+            self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.stt.calls, [b'A'])
+        self.assertEqual(self.her_lines(), ['嗯'])
+
+    def test_discard_closes_a_predecessor_slot(self):
+        n = 50000
+        self.assertIsNone(self.say_clip(b'B', '二', n + 1, n)['line'])
+        self.service.hear(self.call_id, None, None, utterance=n, prev=0)
+        self.assertEqual(self.her_lines(), ['二'])
+        self.assertEqual(self.stt.calls, [b'B'], 'a discarded utterance is never transcribed')
+
+    def test_prev_must_be_zero_or_an_earlier_seq(self):
+        for utterance, prev in ((5, 5), (5, 6), (5, -1), (None, 1)):
+            with self.assertRaises(call_store.CallStateError) as ctx:
+                self.service.hear(self.call_id, b'X', 'audio/wav', None, utterance, prev)
+            self.assertEqual(ctx.exception.status, 400)
+        with self.assertRaises(call_store.CallStateError) as ctx:
+            self.service.interrupt(self.call_id, prev=1)
+        self.assertEqual(ctx.exception.status, 400)
+        self.assertEqual(self.stt.calls, [])
 
     def test_repeated_utterance_numbers_replay_idempotently(self):
         self.stt.expect(b'A', '嗯')
@@ -1026,6 +1107,18 @@ class RouteTests(unittest.TestCase):
         self.assertEqual((body['utterance'], body['text'], body['line']), (1, '', None))
         self.assertEqual(self.stt.calls, [], 'a discarded utterance is never transcribed')
         self.assertEqual(self.hear(call_id, query='?utt=2').get_json()['line']['text'], '你在干嘛')
+
+    def test_hear_and_interrupt_carry_prev(self):
+        call_id = self.client.post('/api/call/ring').get_json()['call']['id']
+        self.client.post('/api/call/%s/answer' % call_id)
+        self.assertEqual(self.client.post('/api/call/%s/interrupt?seq=7&prev=x' % call_id).status_code, 400)
+        self.assertEqual(self.hear(call_id, query='?seq=7&prev=7').status_code, 400)
+        self.assertEqual(self.client.post('/api/call/%s/interrupt?seq=7&prev=0' % call_id).status_code, 200)
+        self.assertEqual(self.hear(call_id, query='?seq=7&prev=3').status_code, 409)
+        body = self.client.post('/api/call/%s/hear?seq=7&prev=0&discard=1' % call_id).get_json()
+        self.assertEqual((body['utterance'], body['line']), (7, None))
+        self.assertEqual(self.hear(call_id, query='?seq=9&prev=7').get_json()['line']['text'], '你在干嘛')
+        self.assertEqual(len(self.stt.calls), 1, 'the 409 and the discard never reach Scribe')
 
     def test_hear_requires_owner(self):
         self.allowed = False

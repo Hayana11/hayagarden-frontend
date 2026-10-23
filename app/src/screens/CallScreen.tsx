@@ -14,6 +14,9 @@ import {
   formatCallTimer,
   lastSeq,
   mergeLines,
+  newUtteranceChain,
+  startUtterance,
+  utterancePrev,
   voiceCall,
   type CallLine,
   type VoiceCall,
@@ -66,6 +69,7 @@ export function CallScreen() {
   const [speaking, setSpeaking] = useState(false);
 
   const callRef = useRef<VoiceCall | null>(null);
+  const utteranceChainRef = useRef(newUtteranceChain());
   const linesRef = useRef<CallLine[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const queueRef = useRef<number[]>([]);
@@ -232,18 +236,20 @@ export function CallScreen() {
         clearTimer(replyTimerRef);
         clearTimer(resumeTimerRef);
         if (current && current.state === 'active') {
-          void voiceCall.interrupt(current.id, event.seq).catch(() => undefined);
+          const prev = startUtterance(utteranceChainRef.current, current.id, event.seq);
+          void voiceCall.interrupt(current.id, event.seq, prev).catch(() => undefined);
         }
       } else if (event.type === 'utterance_ready' && event.seq !== undefined) {
         setHearing(false);
         const wav = nativeVoice.takeUtterance(event.seq);
         if (!current || current.state !== 'active') return;
+        const prev = utterancePrev(utteranceChainRef.current, current.id, event.seq);
         if (!wav) {
           setError('utterance_unavailable');
-          void voiceCall.discard(current.id, event.seq).catch(() => undefined);
+          void voiceCall.discard(current.id, event.seq, prev).catch(() => undefined);
           return;
         }
-        void voiceCall.hear(current.id, wav, event.seq, P2F_LANGUAGE).then((result) => {
+        void voiceCall.hear(current.id, wav, event.seq, P2F_LANGUAGE, prev).then((result) => {
           if (result.line && !result.stale) addLines([result.line], false);
         }).catch((err) => {
           // Scribe failure is recoverable; the native capture remains on for the next sentence.
@@ -252,7 +258,8 @@ export function CallScreen() {
       } else if (event.type === 'utterance_discarded' && event.seq !== undefined) {
         setHearing(false);
         if (current && current.state === 'active') {
-          void voiceCall.discard(current.id, event.seq).catch(() => undefined);
+          const prev = utterancePrev(utteranceChainRef.current, current.id, event.seq);
+          void voiceCall.discard(current.id, event.seq, prev).catch(() => undefined);
         }
       } else if (event.type === 'error') {
         setHearing(false);
@@ -471,6 +478,7 @@ export function CallScreen() {
   useEffect(() => {
     if (call && call.state === 'active') return;
     turnMicOff();
+    utteranceChainRef.current = newUtteranceChain();  // the native seq itself never resets
     awaitingReplyRef.current = false;
     clearTimer(replyTimerRef);
   }, [call && call.state, turnMicOff]); // eslint-disable-line react-hooks/exhaustive-deps

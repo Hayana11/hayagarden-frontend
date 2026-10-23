@@ -3,15 +3,31 @@ import { expect, test, type Page } from '@playwright/test';
 const CALL = { id: 'c1', state: 'active', created_at: 1, answered_at: 1, ended_at: null };
 const SILENT_WAV = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 
-async function installRoutes(page: Page) {
+/** Each interrupt/hear request as `path?seq=..&prev=..[&discard=1]`, in arrival order. */
+function utteranceQuery(url: string): string {
+  const parsed = new URL(url);
+  const keep = ['seq', 'prev', 'discard']
+    .filter((key) => parsed.searchParams.has(key))
+    .map((key) => `${key}=${parsed.searchParams.get(key)}`);
+  return `${parsed.pathname.split('/').pop()}?${keep.join('&')}`;
+}
+
+async function installRoutes(page: Page): Promise<string[]> {
   let streamed = false;
   let seq = 1;
+  const requests: string[] = [];
   await page.route('**/api/call/current', (route) => route.fulfill({ json: { call: CALL } }));
   await page.route('**/api/call/c1', (route) => route.fulfill({ json: { call: CALL, lines: [] } }));
-  await page.route('**/api/call/c1/interrupt**', (route) => route.fulfill({ json: { ok: true } }));
+  await page.route('**/api/call/c1/interrupt**', (route) => {
+    requests.push(utteranceQuery(route.request().url()));
+    return route.fulfill({ json: { ok: true } });
+  });
   await page.route('**/api/call/c1/hear**', async (route) => {
+    requests.push(utteranceQuery(route.request().url()));
+    if (route.request().url().indexOf('discard=1') !== -1) {
+      return route.fulfill({ json: { ok: true, utterance: 0, text: '', line: null } });
+    }
     const body = route.request().postDataBuffer();
-    expect(route.request().url()).toContain('seq=7');
     expect(route.request().headers()['content-type']).toBe('audio/wav');
     expect(body && body.length).toBeGreaterThanOrEqual(44);
     seq += 1;
@@ -29,6 +45,7 @@ async function installRoutes(page: Page) {
   });
   await page.route('**/api/call/c1/audio/**', (route) => route.fulfill({ status: 200, body: 'mp3' }));
   await page.route('**/api/call/c1/hangup', (route) => route.fulfill({ json: { call: { ...CALL, state: 'ended' }, record: '' } }));
+  return requests;
 }
 
 async function installFakeShell(page: Page) {
@@ -57,7 +74,7 @@ async function installFakeShell(page: Page) {
       cancel: () => voiceLog.push('cancel'),
       takeUtterance: (seq: number) => {
         voiceLog.push(`take:${seq}`);
-        return seq === 7 ? silent : '';
+        return seq === 7 || seq === 9 ? silent : '';
       },
     };
     const originalPlay = HTMLMediaElement.prototype.play;
@@ -76,7 +93,7 @@ async function installFakeShell(page: Page) {
 
 test.describe('P2F native voice bridge', () => {
   test('prefers ElpisVoice, barges in, uploads WAV with sequence, and keeps capture running', async ({ page }) => {
-    await installRoutes(page);
+    const requests = await installRoutes(page);
     await installFakeShell(page);
     await page.goto('/dash/call');
     await page.waitForFunction(() => !!(window as unknown as { __elpisVoice?: unknown }).__elpisVoice);
@@ -98,6 +115,35 @@ test.describe('P2F native voice bridge', () => {
     const log = await page.evaluate(() => (window as unknown as { __voiceLog: string[] }).__voiceLog);
     expect(log).toContain('take:7');
     expect(log).not.toContain('stop');
+    expect(requests).toEqual(['interrupt?seq=7&prev=0', 'hear?seq=7&prev=0']);
+    await page.evaluate(() => (window as unknown as { __restoreAudio: () => void }).__restoreAudio());
+  });
+
+  test('names each utterance\'s predecessor as fixed at speech_start', async ({ page }) => {
+    const requests = await installRoutes(page);
+    await installFakeShell(page);
+    await page.goto('/dash/call');
+    await page.waitForFunction(() => !!(window as unknown as { __elpisVoice?: unknown }).__elpisVoice);
+    await page.locator('.call-mic').click();
+    const emit = (event: object) => page.evaluate(
+      (e) => (window as unknown as { __emitVoice: (event: object) => void }).__emitVoice(e), event);
+
+    // The process-wide seq opens this call at 7; 9 begins before 7 is ready, 11 is thrown away.
+    await emit({ type: 'speech_start', seq: 7 });
+    await emit({ type: 'speech_start', seq: 9 });
+    await emit({ type: 'utterance_ready', seq: 9, duration_ms: 900, bytes: 52 });
+    await emit({ type: 'utterance_ready', seq: 7, duration_ms: 900, bytes: 52 });
+    await emit({ type: 'speech_start', seq: 11 });
+    await emit({ type: 'utterance_discarded', seq: 11, reason: 'too_short' });
+    await expect.poll(() => requests.length).toBe(6);
+    expect(requests).toEqual([
+      'interrupt?seq=7&prev=0',
+      'interrupt?seq=9&prev=7',
+      'hear?seq=9&prev=7',
+      'hear?seq=7&prev=0',
+      'interrupt?seq=11&prev=9',
+      'hear?seq=11&prev=9&discard=1',
+    ]);
     await page.evaluate(() => (window as unknown as { __restoreAudio: () => void }).__restoreAudio());
   });
 });
